@@ -152,6 +152,92 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     assert jnp.allclose(diagnostics_out["convection"].qc_conv, dqc_col[:, None] * dt)
 
 
+def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
+    """The zdqpbl closure supply profile is the SAME-STEP vdiff qv tendency.
+
+    Under the ECHAM physc term ordering (vdiff before convection) the
+    wrapper must hand ``vertical_diffusion.qv_tendency`` straight to the
+    scheme as ``moisture_tend_profile`` — no lagged q-snapshot arithmetic —
+    and the environment (T, q) must be the vdiff-advanced ``thermo_run``
+    view, not the raw step-start state. Without a vdiff diagnostic the
+    profile must be zeros (supply falls back to the surface-E floor).
+    """
+    nlev, ncols = 4, 2
+    dt = 60.0
+    shape = (nlev, ncols)
+
+    # The fake runs under jax.vmap, so probe values must flow OUT through
+    # the returned tendencies rather than Python side effects: the closure
+    # profile rides ``dqdt`` (zero dtedt keeps the heating cap inactive,
+    # cap_scale == 1) and the environment (T, q) inputs ride qc_conv/qi_conv,
+    # which the wrapper republishes untouched on the convection diagnostic.
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=zeros, dqdt=moisture_tend_profile, dudt=zeros, dvdt=zeros,
+            qc_conv=temperature, qi_conv=humidity, precip_conv=jnp.array(0.0),
+            dqc_dt=zeros, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    clouds = CloudData.zeros((ncols,), nlev).copy(
+        cloud_fraction=jnp.ones(shape) * 0.5,
+    )
+    qv_tend_vdiff = jnp.arange(nlev * ncols, dtype=float).reshape(shape) * 1e-8
+    thermo_run = {
+        "temperature": jnp.ones(shape) * 281.0,       # post-vdiff view
+        "specific_humidity": jnp.ones(shape) * 1.2e-3,
+    }
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": clouds,
+        "thermo_run": thermo_run,
+        "vertical_diffusion": SimpleNamespace(qv_tendency=qv_tend_vdiff),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+
+    # The closure profile handed to the scheme is the same-step vdiff
+    # qv tendency, and the environment is the vdiff-advanced thermo_run.
+    assert jnp.allclose(tendency.specific_humidity, qv_tend_vdiff)
+    conv = diagnostics_out["convection"]
+    assert jnp.allclose(conv.qc_conv, thermo_run["temperature"])
+    assert jnp.allclose(conv.qi_conv, thermo_run["specific_humidity"])
+
+    # Without a vdiff diagnostic (and without thermo_run): zeros profile and
+    # the raw state as environment.
+    diagnostics_no_vdiff = {
+        k: v for k, v in diagnostics.items()
+        if k not in ("vertical_diffusion", "thermo_run")
+    }
+    tendency2, diagnostics_out2 = TiedtkeConvection()(
+        state, diagnostics_no_vdiff, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(tendency2.specific_humidity, 0.0)
+    assert jnp.allclose(
+        diagnostics_out2["convection"].qc_conv, state.temperature,
+    )
+
+
 def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch):
     """The convection diagnostic exposes the *applied* (post-cap) T/q rates.
 

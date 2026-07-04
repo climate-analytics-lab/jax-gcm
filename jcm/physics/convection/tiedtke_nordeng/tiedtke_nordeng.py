@@ -469,15 +469,18 @@ def tiedtke_nordeng_convection(
 
     # ECHAM zdqpbl closure supply (mo_cumastr.f90:534-545): the moisture-
     # budget first guess integrates the PRE-CONVECTION moisture tendency
-    # pqte over the levels at/below cloud base — in convergence zones
-    # (ITCZ) this is 10-20 mm/day where surface evaporation alone is 1-2,
-    # and it is exactly the signal that lets convection organize. When the
-    # host provides ``moisture_tend_profile`` (the lagged total moisture
-    # tendency minus the previous convective moistening — the closest
-    # available analog of pqte under the convection-first term ordering),
-    # the supply becomes max(0, Σ_{k>=kcbot} pqte·ρ·Δz); the scalar
-    # ``moisture_supply`` (surface evaporation) remains the floor so a
-    # convergence-free column keeps the #529 continuous-convection anchor.
+    # pqte over the levels at/below cloud base. When the host provides
+    # ``moisture_tend_profile`` — the SAME-STEP vdiff moisture tendency,
+    # available because the term ordering runs vdiff before convection
+    # (ECHAM physc) — the supply becomes max(0, Σ_{k>=kcbot} pqte·ρ·Δz);
+    # the scalar ``moisture_supply`` (surface evaporation) remains the
+    # floor so a vdiff-free column keeps the #529 continuous-convection
+    # anchor. Same-step supply is self-limiting: convection consumes what
+    # vdiff delivered this step, so the closure cannot ramp across steps
+    # (the earlier one-step-lagged total-Δq form compounded through the
+    # convergence feedback and blew up — onset7 analysis). The advective
+    # part of ECHAM's pqte is deliberately absent here; see the wrapper
+    # for the reasoning and the follow-up note.
     if moisture_tend_profile is not None:
         below_base = jnp.arange(nlev) >= cloud_base
         zdqpbl = jnp.sum(
@@ -634,9 +637,10 @@ def tiedtke_nordeng_convection(
         # flux is steady. The bare-CAPE closure (``mass_flux_closure``) instead
         # tracks instantaneous CAPE and flips convection fully on/off each step —
         # the cloud-base flicker seen in single-column RCE. ``moisture_supply``
-        # is the previous step's surface evaporation (the surface term runs after
-        # convection, so only the carried value is available); when it is absent
-        # (E=0: cold start, or a stack with no surface term) we fall back to the
+        # is the SAME-STEP delivered surface evaporation (the vdiff/surface
+        # terms run before convection in the ECHAM physc ordering), possibly
+        # raised to the zdqpbl PBL-integral above; when it is absent (E=0:
+        # cold start, or a stack with no surface term) we fall back to the
         # CAPE closure so behaviour is unchanged there.
         qsat_cb = saturation_mixing_ratio(pressure[cloud_base], temperature[cloud_base])
         q_excess = qsat_cb - humidity[cloud_base]  # kg/kg, cloud-base saturation deficit
@@ -925,7 +929,12 @@ class TiedtkeConvection(PhysicsTerm):
     :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`
     (``pressure_full``, ``layer_thickness``, ``air_density``), the
     current cloud diagnostics from ``diagnostics["clouds"]``, and the
-    model timestep from ``diagnostics["_dt_seconds"]``. Writes the
+    model timestep from ``diagnostics["_dt_seconds"]``. The environment
+    (T, q) comes from the running ``thermo_run`` view (post-vdiff under
+    the ECHAM physc term ordering; falls back to the raw state when
+    absent), and the zdqpbl closure supply reads the same-step
+    ``vertical_diffusion.qv_tendency`` profile plus the delivered surface
+    evaporation from ``diagnostics["surface"]``. Writes the
     :class:`ConvectionData` sub-struct under the public ``"convection"``
     key and advances ``clouds.qc`` / ``clouds.qi`` for downstream
     microphysics in the same split step.
@@ -978,13 +987,30 @@ class TiedtkeConvection(PhysicsTerm):
         # ``zdnoprc`` precip-zone thresholds inside the updraft.
         land_fraction = terrain.fmask.reshape(ncols)
 
-        # Boundary-layer moisture supply for the deep mass-flux closure: the
-        # previous step's grid-box surface evaporation [kg/m²/s]. The surface
-        # term runs *after* convection, so the value carried in the diagnostics
-        # dict is one step old; that is fine — it is a slowly varying anchor and
-        # is exactly how the on/off cloud-base flicker is avoided. Absent (e.g. a
-        # radiative-convective stack with no surface term) it stays zero and the
-        # scheme falls back to the CAPE closure.
+        # Environment (T, q) for the parcel/closure calculations: the running
+        # ``thermo_run`` view, which vdiff advanced with its same-step
+        # tendencies (the term ordering follows ECHAM ``physc``: vdiff runs
+        # before ``cucall``). This mirrors ECHAM's provisional variables
+        # ``ztp1 = ptm1 + ptte·dt`` handed to ``cumastr`` — convection sees
+        # the post-vdiff column, so it can consume what vdiff supplied THIS
+        # step. Fall back to the raw state for stacks without the
+        # ``MoistAirColumnState`` seeding term (unit tests, custom stacks).
+        thermo_run = diagnostics.get("thermo_run")
+        if thermo_run is None:
+            temperature_env = state.temperature
+            humidity_env = state.specific_humidity
+        else:
+            temperature_env = thermo_run["temperature"]
+            humidity_env = thermo_run["specific_humidity"]
+
+        # Boundary-layer moisture supply floor for the deep mass-flux closure:
+        # the SAME-STEP grid-box surface evaporation [kg/m²/s]. The vdiff term
+        # (which owns the surface exchange as the bottom row of its implicit
+        # solve) and the ``EchamSurface`` term that republishes its delivered
+        # fluxes both run *before* convection now, so this is this step's
+        # actually-delivered flux, not a one-step-lagged carry. Absent (e.g. a
+        # radiative-convective stack with no surface term) it stays zero and
+        # the scheme falls back to the CAPE closure.
         #
         # Read ``effective_evaporation`` — the moisture the column actually
         # received. Since the surface exchange became the bottom boundary row
@@ -1005,23 +1031,31 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             moisture_supply = jnp.zeros(ncols)
 
-        # Lagged pqte analog for the zdqpbl closure supply: the total
-        # change of q over the previous step (dynamics advection + all
-        # physics) minus the previous CONVECTIVE moistening — ECHAM's
-        # pqte at cucall time contains advection+vdiff but not cumastr
-        # itself. First step (zero snapshot) falls back to the scalar
-        # evaporation supply.
-        prev_conv = diagnostics.get("convection")
-        if prev_conv is not None and hasattr(prev_conv, "q_snapshot"):
-            q_snap_prev = prev_conv.q_snapshot
-            have_snap = jnp.any(q_snap_prev != 0.0)
-            pqte_equiv = jnp.where(
-                have_snap,
-                (state.specific_humidity - q_snap_prev) / dt
-                - prev_conv.moistening_rate,
-                0.0,
-            )
-            moisture_tend_profile = pqte_equiv
+        # Same-step pqte analog for the zdqpbl closure supply: the moisture
+        # tendency the vdiff solve applied THIS step (interior mixing + the
+        # surface-evaporation boundary row), read from the same-step
+        # ``vertical_diffusion`` diagnostics. ECHAM's ``pqte`` at ``cucall``
+        # time contains advection + vdiff; the vdiff part is the dominant PBL
+        # moisture source and — crucially — is same-step, so convection
+        # consumes exactly what vdiff supplied within the step and the
+        # supply cannot compound across steps. The previous one-step-LAGGED
+        # total-Δq snapshot form did compound (convergence→convection→
+        # convergence ramped for days with heating pinned at the stability
+        # cap, then NaN — the onset7 T63L47 analysis), so it was removed.
+        #
+        # Follow-up (documented deviation): the large-scale ADVECTIVE part of
+        # ECHAM's pqte is still missing — the dycore applies advection after
+        # physics, so a same-step advective moisture tendency would need new
+        # host plumbing (exposing the dynamics tendency to the physics step).
+        # A lagged advection increment is NOT an acceptable substitute: the
+        # compounding feedback runs precisely through the lagged dynamics
+        # term. vdiff-only is a strict subset of ECHAM's supply (conservative
+        # closure; the max(E, zdqpbl) floor below keeps the #529 continuous-
+        # convection anchor).
+        vdiff_diag = diagnostics.get("vertical_diffusion")
+        qv_tend_vdiff = getattr(vdiff_diag, "qv_tendency", None)
+        if qv_tend_vdiff is not None:
+            moisture_tend_profile = qv_tend_vdiff
         else:
             moisture_tend_profile = jnp.zeros_like(state.specific_humidity)
 
@@ -1031,7 +1065,7 @@ class TiedtkeConvection(PhysicsTerm):
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
-            state.temperature, state.specific_humidity,
+            temperature_env, humidity_env,
             pressure_full, layer_thickness, air_density,
             state.u_wind, state.v_wind, qc, qi,
             dt, params, land_fraction, moisture_supply,
@@ -1111,7 +1145,6 @@ class TiedtkeConvection(PhysicsTerm):
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
             precip_conv=tendencies_all.precip_conv * cap_scale_col,
-            q_snapshot=state.specific_humidity,
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
             heating_rate=tendency.temperature,

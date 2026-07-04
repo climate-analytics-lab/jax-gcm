@@ -110,6 +110,28 @@ class TestEchamComposablePhysics(unittest.TestCase):
             categories.index("cloud_fraction"),
             categories.index("radiation"),
         )
+        # ECHAM physc ordering (radheat → vdiff → cucall → cloud): vertical
+        # diffusion and the surface term that republishes its delivered
+        # fluxes must precede convection, so the Tiedtke zdqpbl closure
+        # reads the SAME-STEP vdiff moisture tendency and evaporation. A
+        # convection-first ordering forces a one-step-lagged supply, which
+        # compounds the convergence→convection feedback (onset7 NaN).
+        self.assertLess(
+            categories.index("radiation"),
+            categories.index("vertical_diffusion"),
+        )
+        self.assertLess(
+            categories.index("vertical_diffusion"),
+            categories.index("surface"),
+        )
+        self.assertLess(
+            categories.index("surface"),
+            categories.index("convection"),
+        )
+        self.assertLess(
+            categories.index("convection"),
+            categories.index("clouds"),
+        )
 
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""

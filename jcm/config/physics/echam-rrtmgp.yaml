@@ -1,8 +1,8 @@
 # ECHAM with RRTMGP radiation in place of the grey two-stream default.
 #
 # Defines the full term list explicitly so the radiation slot lands in
-# the same position as the default ``echam.yaml`` (between chemistry
-# and convection). Inheriting from ``echam`` and nulling the grey term
+# the same position as the default ``echam.yaml`` (after the cloud-cover
+# term, before vdiff). Inheriting from ``echam`` and nulling the grey term
 # would leave the new RRTMGP entry at the end of the dict — Hydra/
 # OmegaConf merging preserves position only for existing keys — so the
 # clearest way to swap a term mid-list is to write out the full list.
@@ -27,14 +27,19 @@ terms:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
-  tiedtke_convection:
-    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
-  echam_1m_microphysics:
-    _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
+  # ECHAM physc ordering: vdiff (with the surface exchange in its
+  # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
+  # closure reads the SAME-STEP vdiff moisture tendency and delivered
+  # evaporation. echam_surface only republishes the vdiff-delivered
+  # fluxes, so it follows vdiff directly.
   tte_tke_vertical_diffusion:
     _target_: jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion
   echam_surface:
     _target_: jcm.physics.surface.echam.surface_physics.EchamSurface
+  tiedtke_convection:
+    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+  echam_1m_microphysics:
+    _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:

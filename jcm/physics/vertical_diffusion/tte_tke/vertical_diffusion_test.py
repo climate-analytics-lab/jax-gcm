@@ -293,7 +293,9 @@ class TestMatrixSolver:
         rho_s = state.pressure_half[:, -1] / (PHYS_CONST.rd * state.temperature[:, -1])
         k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
         k_sfc_h = dt * params.tpfac1 * rho_s * c_h / state.air_mass[:, -1]
-        k_sfc_q = dt * params.tpfac1 * rho_s * c_q / state.dry_air_mass[:, -1]
+        # Moisture row uses the same moist Δp/g mass as every other row
+        # (ECHAM's single zqdp measure).
+        k_sfc_q = dt * params.tpfac1 * rho_s * c_q / state.air_mass[:, -1]
 
         diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
         assert jnp.allclose(diag_delta[:, 0], k_sfc_m, rtol=1e-4)
@@ -645,11 +647,10 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     # Geopotential
     geopotential = PHYS_CONST.grav * height_full
     
-    # Air masses
+    # Air mass (moist Δp/g — the single mass measure for all matrix rows)
     dp = jnp.diff(pressure_half, axis=1)
     air_mass = dp / PHYS_CONST.grav
-    dry_air_mass = air_mass * (1.0 - qv)
-    
+
     # Surface properties
     surface_temperature = jnp.ones((ncol, nsfc_type)) * 290.0
     surface_fraction = jnp.ones((ncol, nsfc_type)) / nsfc_type
@@ -666,7 +667,7 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     return VDiffState(
         u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
         pressure_full=pressure_full, pressure_half=pressure_half,
-        geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
+        geopotential=geopotential, air_mass=air_mass,
         surface_temperature=surface_temperature, surface_fraction=surface_fraction,
         roughness_length=roughness_length,
         roughness_heat=0.1 * roughness_length,
@@ -724,7 +725,6 @@ class TestTKEStability:
         geopotential = PHYS_CONST.grav * height_full
         dp = jnp.diff(pressure_half, axis=1)
         air_mass = jnp.abs(dp) / PHYS_CONST.grav
-        dry_air_mass = air_mass
 
         surface_temperature = jnp.full((ncol, nsfc_type), surface_T)
         surface_fraction = jnp.ones((ncol, nsfc_type)) / nsfc_type
@@ -739,7 +739,7 @@ class TestTKEStability:
         state = VDiffState(
             u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
             pressure_full=pressure_full, pressure_half=pressure_half,
-            geopotential=geopotential, air_mass=air_mass, dry_air_mass=dry_air_mass,
+            geopotential=geopotential, air_mass=air_mass,
             surface_temperature=surface_temperature, surface_fraction=surface_fraction,
             roughness_length=roughness_length,
             roughness_heat=0.1 * roughness_length,
@@ -910,7 +910,6 @@ def _make_marine_bl_state(
         pressure_half=col(p_half),
         geopotential=col(z_full_sf) * grav,
         air_mass=air_mass,
-        dry_air_mass=air_mass * (1.0 - qv_tf),
         surface_temperature=jnp.tile(sst[:, None], (1, nsfc)),
         surface_fraction=jnp.zeros((ncol, nsfc)).at[:, 0].set(1.0),
         roughness_length=jnp.full((ncol, nsfc), 1e-4),
@@ -939,11 +938,17 @@ class TestSurfaceCoupledSolve:
     """
 
     def _column_integrals(self, state, tendencies):
-        """(Σ dm_dry·dq/dt, Σ dm·cp·dT/dt, Σ dm·du/dt) per column."""
+        """(Σ dm·dq/dt, Σ dm·cp·dT/dt, Σ dm·du/dt) per column.
+
+        All integrals use the moist Δp/g layer mass — the same single
+        measure the solver's matrix rows use (ECHAM zqdp) and the same
+        convention every other column budget in jcm integrates with, so
+        the delivered-flux identities hold in the model's own budget.
+        """
         import numpy as np
 
         col_q = np.sum(
-            np.asarray(state.dry_air_mass) * np.asarray(tendencies.qv_tendency),
+            np.asarray(state.air_mass) * np.asarray(tendencies.qv_tendency),
             axis=1,
         )
         col_t = float(PHYS_CONST.cpd) * np.sum(
@@ -1099,8 +1104,8 @@ class TestSurfaceCoupledSolve:
         qv_tend = np.asarray(
             tend_v.specific_humidity + tend_s.specific_humidity,
         ).reshape(nlev, ncols)
-        dm_dry = np.asarray(vstate.dry_air_mass)[0][:, None]  # (nlev, 1)
-        E_delivered = float(np.sum(dm_dry * qv_tend))
+        dm = np.asarray(vstate.air_mass)[0][:, None]  # (nlev, 1), moist Δp/g
+        E_delivered = float(np.sum(dm * qv_tend))
 
         surface_out = diag2["surface"]
         E_published = float(np.asarray(surface_out.evaporation)[0])

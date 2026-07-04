@@ -230,6 +230,23 @@ def echam_physics(
             "or 'jam'."
         )
 
+    # Term ordering follows ECHAM's ``physc`` process sequence:
+    # radheat -> vdiff -> (gwdrag) -> cucall -> cloud. In particular the
+    # TTE-TKE vertical diffusion (which carries the surface exchange as
+    # the bottom row of its implicit solve) runs BEFORE Tiedtke
+    # convection, so convection sees the SAME-STEP vdiff moisture
+    # tendency (ECHAM's ``pqte`` at cucall time) for the zdqpbl closure
+    # supply and the same-step delivered surface evaporation. Running
+    # convection first forced a one-step-lagged supply, which let the
+    # convergence->convection->convergence feedback compound (heating
+    # pinned at the stability cap, then NaN — onset7 analysis); ECHAM's
+    # same-step pqte self-limits because convection consumes exactly
+    # what converged this step. ``EchamSurface`` only republishes the
+    # vdiff-delivered fluxes, so it sits immediately after vdiff.
+    # Deviation from ECHAM: gravity-wave drag (Hines + SSO) stays after
+    # the moist physics rather than between vdiff and cucall — it feeds
+    # nothing that convection/cloud read same-step, and moving it is an
+    # independent change we keep out of this reordering.
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
@@ -238,11 +255,11 @@ def echam_physics(
             SimpleChemistry(),
             SundqvistCloudFraction(params=clouds_p),
             rad_term,
+            TteTkeVerticalDiffusion(params=vertical_diffusion_p),
+            EchamSurface(params=surface_p),
             TiedtkeConvection(params=convection_p),
             micro_term,
             *jam_post_cloud_terms,
-            TteTkeVerticalDiffusion(params=vertical_diffusion_p),
-            EchamSurface(params=surface_p),
             HinesGwd(params=hines_p),
             LottMillerSso(params=sso_p),
         ],

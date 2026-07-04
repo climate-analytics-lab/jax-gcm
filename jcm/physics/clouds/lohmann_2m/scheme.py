@@ -753,10 +753,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
     name: ClassVar[str] = "lohmann_2m_microphysics"
     category: ClassVar[str] = "clouds"
-    # ``vertical_diffusion`` is intentionally not in ``requires``: the
-    # vdiff term runs *after* microphysics in the default ECHAM ordering
-    # (convection → cloud → microphysics → vdiff), so the TKE this term
-    # reads comes from the previous step (or zeros on step 1).
+    # ``vertical_diffusion`` is intentionally not in ``requires``: in the
+    # default ECHAM physc ordering (vdiff → convection → microphysics) the
+    # vdiff term runs upstream, so the TKE read here is same-step — but the
+    # scheme must also compose in vdiff-free stacks (unit tests, minimal
+    # RCE), where the soft read falls back to the carried/zero value.
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",
@@ -810,11 +811,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         air_density = diagnostics["air_density"]
         layer_thickness = diagnostics["layer_thickness"]
 
-        # Post-convection thermodynamic state (sequential convection->cloud
-        # coupling): convection has already advanced ``thermo_run`` with its
-        # heating/moistening and forwarded its detrained condensate into
-        # ``clouds.qc/qi``. Doing the saturation balance + clear-sky evaporation
-        # on this post-convection (T, q) — instead of the step-start state — is
+        # Post-(vdiff+convection) thermodynamic state (sequential
+        # vdiff->convection->cloud coupling, ECHAM physc order): the upstream
+        # vdiff and convection terms have already advanced ``thermo_run`` with
+        # their tendencies and convection forwarded its detrained condensate
+        # into ``clouds.qc/qi``. Doing the saturation balance + clear-sky
+        # evaporation on this post-upstream (T, q) — instead of the step-start state — is
         # what makes the in-step moist-energy balance consistent and the
         # clear-sky evaporation stable (see
         # ``.claude/coupled_cloud_operator_design.md``). Tendencies are returned

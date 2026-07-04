@@ -1142,10 +1142,11 @@ class Echam1MMicrophysics(PhysicsTerm):
         layer_thickness = diagnostics["layer_thickness"]
         clouds = diagnostics["clouds"]
 
-        # Post-convection thermodynamic state (sequential convection→cloud
-        # coupling, same pattern as the 2M term / PR #539): convection has
-        # already advanced ``thermo_run`` with its heating/moistening and
-        # forwarded its detrained condensate into ``clouds.qc/qi``. The
+        # Post-(vdiff+convection) thermodynamic state (sequential
+        # vdiff→convection→cloud coupling, ECHAM physc order; same pattern
+        # as the 2M term / PR #539): the upstream vdiff and convection terms
+        # have already advanced ``thermo_run`` with their tendencies and
+        # convection forwarded its detrained condensate into ``clouds.qc/qi``. The
         # sweep's saturation balance and rain evaporation must see THAT
         # (T, q) — using the step-start state let the same supersaturation
         # be condensed by both convection and microphysics, and computed

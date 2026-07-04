@@ -201,10 +201,6 @@ class ConvectionData:
     # convention ([K/s]); ``moistening_rate`` is its specific-humidity analog.
     heating_rate: jnp.ndarray        # Convective heating rate [K/s] (nlev, ncols)
     moistening_rate: jnp.ndarray     # Convective moistening rate [kg/kg/s] (nlev, ncols)
-    # Start-of-step specific humidity snapshot [kg/kg] (nlev, ncols) —
-    # carried so next step's wrapper can form the lagged total moisture
-    # tendency (q_now − q_snapshot)/dt for the zdqpbl closure supply.
-    q_snapshot: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -221,5 +217,4 @@ class ConvectionData:
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
             heating_rate=jnp.zeros((nlev,) + nodal_shape),
             moistening_rate=jnp.zeros((nlev,) + nodal_shape),
-            q_snapshot=jnp.zeros((nlev,) + nodal_shape),
         )

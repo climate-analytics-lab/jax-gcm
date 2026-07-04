@@ -188,7 +188,7 @@ def _make_column(
         qv=col(flip(qv)), qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
         pressure_full=col(p_full_tf), pressure_half=col(p_half_tf),
         geopotential=col(z_full_tf) * G,
-        air_mass=air_mass, dry_air_mass=air_mass,
+        air_mass=air_mass,
         surface_temperature=surface_temperature,
         surface_fraction=surface_fraction,
         roughness_length=roughness_length,
