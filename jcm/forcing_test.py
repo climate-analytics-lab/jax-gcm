@@ -880,5 +880,172 @@ class TestForcingNonMonthlyTimeAxis(unittest.TestCase):
         self.assertEqual(forcing.alb0.shape, (nlon, nlat))
 
 
+class TestNaturalEmissionReaders(unittest.TestCase):
+    """Readers for the HAMMOZ-style DMS / dust / oxidant climatology files.
+
+    Synthetic tiny netCDF-shaped datasets (in-memory xarray, HAMMOZ layout:
+    ``(time, lat, lon)`` with *descending* latitude) pin the variable mapping,
+    the lat flip to the model's ascending orientation, the ``(time, lon, lat)``
+    transpose, the WRAP_YEAR wrapping, the nmol/L → kg/m³ DMS conversion and
+    the [0, 1] dust clip.
+    """
+
+    NLAT, NLON = 4, 6
+    # Descending (N→S) like the HAMMOZ files; model order is ascending.
+    LAT_DESC = np.array([60.0, 20.0, -20.0, -60.0])
+    LON = np.linspace(0.0, 360.0, NLON, endpoint=False)
+    TIME = np.array([f"2000-{m:02d}-15" for m in range(1, 13)],
+                    dtype="datetime64[ns]")
+
+    def _dataset(self, name, values, units=None, extra_dims=()):
+        import xarray as xr
+        dims = ("time", *extra_dims, "lat", "lon")
+        coords = {"time": self.TIME, "lat": self.LAT_DESC, "lon": self.LON}
+        attrs = {"units": units} if units is not None else {}
+        return xr.Dataset(
+            {name: (dims, values, attrs)}, coords=coords,
+        )
+
+    def test_dms_reader_units_orientation_and_wrap(self):
+        from jcm.forcing import WRAP_YEAR, read_dms_seawater
+        # Latitude-dependent pattern: value = |lat| in nmol/L, so the flip
+        # is observable; one NaN (decoded _FillValue) cell.
+        vals = np.broadcast_to(
+            np.abs(self.LAT_DESC)[None, :, None], (12, self.NLAT, self.NLON)
+        ).copy()
+        vals[0, 1, 2] = np.nan
+        ds = self._dataset("DMS_sea", vals, units="nanomol l-1")
+        ts = read_dms_seawater(
+            ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON
+        )
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        arr = np.asarray(ts.values)
+        # (time, lon, lat) with ascending latitude.
+        self.assertEqual(arr.shape, (12, self.NLON, self.NLAT))
+        # 1 nmol/L = 6.21324e-8 kg/m³; lat axis flipped, so lat index 0 is
+        # -60° (|lat| = 60).
+        np.testing.assert_allclose(
+            arr[3, 0, :], np.array([60.0, 20.0, 20.0, 60.0]) * 6.21324e-8,
+            rtol=1e-6,
+        )
+        # The NaN (missing/land) cell maps to zero, not NaN: file (lat=1 →
+        # 20°N → ascending index 2, lon=2).
+        self.assertEqual(arr[0, 2, 2], 0.0)
+        self.assertTrue(np.isfinite(arr).all())
+
+    def test_dms_reader_rejects_unknown_units(self):
+        from jcm.forcing import read_dms_seawater
+        ds = self._dataset(
+            "DMS_sea", np.ones((12, self.NLAT, self.NLON)), units="mol m-3"
+        )
+        with self.assertRaisesRegex(ValueError, "units"):
+            read_dms_seawater(ds)
+
+    def test_dms_reader_rejects_mismatched_latitudes(self):
+        from jcm.forcing import read_dms_seawater
+        ds = self._dataset(
+            "DMS_sea", np.ones((12, self.NLAT, self.NLON)),
+            units="nanomol l-1",
+        )
+        with self.assertRaisesRegex(ValueError, "latitudes"):
+            read_dms_seawater(ds, lat_deg=self.LAT_DESC + 5.0)
+
+    def test_dust_reader_clips_to_unit_interval(self):
+        from jcm.forcing import WRAP_YEAR, read_dust_source
+        vals = np.zeros((12, self.NLAT, self.NLON))
+        vals[:, 0, 0] = -1.0    # the file's missing marker
+        vals[:, 1, 1] = 1.5     # interpolation overshoot
+        vals[:, 2, 2] = 0.7
+        vals[0, 3, 3] = np.nan
+        ds = self._dataset("pot_source", vals, units="1.")
+        ts = read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        arr = np.asarray(ts.values)
+        self.assertEqual(arr.shape, (12, self.NLON, self.NLAT))
+        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
+        # -1 → 0; 1.5 → 1; 0.7 preserved (lat flipped: file lat idx i →
+        # ascending idx 3 - i).
+        self.assertEqual(arr[0, 0, 3], 0.0)
+        self.assertEqual(arr[0, 1, 2], 1.0)
+        self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
+        self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
+
+    def _oxidant_ds(self, nlev=5, hybm=None, drop=None):
+        import xarray as xr
+        shape = (12, nlev, self.NLAT, self.NLON)
+        data_vars = {}
+        for i, var in enumerate(
+            ["OH_VMR_avrg", "NO3_VMR_avrg", "O3_VMR_avrg", "H2O2_VMR_avrg"]
+        ):
+            if var == drop:
+                continue
+            # Level-dependent so the level axis position is pinned.
+            vals = np.broadcast_to(
+                (i + 1) * 1.0e-9 * (1.0 + np.arange(nlev))[None, :, None, None],
+                shape,
+            )
+            data_vars[var] = (("time", "mlev", "lat", "lon"), vals,
+                              {"units": "mole mole-1"})
+        hybm = np.linspace(0.0, 1.0, nlev) if hybm is None else hybm
+        data_vars["hybm"] = (("mlev",), hybm)
+        return xr.Dataset(
+            data_vars,
+            coords={"time": self.TIME, "mlev": np.arange(nlev),
+                    "lat": self.LAT_DESC, "lon": self.LON},
+        )
+
+    def test_oxidant_reader_maps_variables_and_orientation(self):
+        from jcm.forcing import WRAP_YEAR, read_oxidant_vmr
+        mapping = read_oxidant_vmr(
+            self._oxidant_ds(), nlev=5,
+            lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON,
+        )
+        self.assertEqual(sorted(mapping), ["h2o2", "no3", "o3", "oh"])
+        for key, ts in mapping.items():
+            self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+            self.assertEqual(
+                np.asarray(ts.values).shape, (12, 5, self.NLON, self.NLAT)
+            )
+        # o3 is the 3rd variable (i=2) → 3e-9 · (1 + level).
+        o3 = np.asarray(mapping["o3"].values)
+        np.testing.assert_allclose(o3[0, :, 0, 0], 3.0e-9 * (1 + np.arange(5)),
+                                   rtol=1e-6)
+
+    def test_oxidant_reader_asserts_level_count(self):
+        from jcm.forcing import read_oxidant_vmr
+        with self.assertRaisesRegex(ValueError, "levels"):
+            read_oxidant_vmr(self._oxidant_ds(nlev=5), nlev=8)
+
+    def test_oxidant_reader_requires_all_species(self):
+        from jcm.forcing import read_oxidant_vmr
+        with self.assertRaisesRegex(ValueError, "missing"):
+            read_oxidant_vmr(self._oxidant_ds(drop="H2O2_VMR_avrg"), nlev=5)
+
+    def test_oxidant_reader_rejects_bottom_up_levels(self):
+        from jcm.forcing import read_oxidant_vmr
+        ds = self._oxidant_ds(hybm=np.linspace(1.0, 0.0, 5))
+        with self.assertRaisesRegex(ValueError, "top→bottom|top->bottom"):
+            read_oxidant_vmr(ds, nlev=5)
+
+    def test_oxidant_vmr_rides_through_select(self):
+        """The dict-valued ``oxidant_vmr`` field slices like any TimeSeries."""
+        from jcm.date import DateData
+        import jax_datetime as jdt
+        from jcm.forcing import read_oxidant_vmr
+        mapping = read_oxidant_vmr(self._oxidant_ds(), nlev=5)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            oxidant_vmr=mapping
+        )
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime("2001-07-02")
+            ),
+        )
+        sliced = forcing.select(date, calendar="gregorian")
+        self.assertEqual(
+            sliced.oxidant_vmr["oh"].shape, (5, self.NLON, self.NLAT)
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
