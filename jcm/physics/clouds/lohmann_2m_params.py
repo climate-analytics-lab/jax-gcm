@@ -105,7 +105,14 @@ class CloudParams2M:
     n_aer_coarse: jnp.ndarray
 
     # Static code-path selectors (trace-time Python branches; NOT leaves).
-    nic_cirrus: int = struct.field(pytree_node=False, default=2)
+    # nic_cirrus=1: diagnostic ICNC from ice mass and mean crystal radius
+    # (ECHAM licnc-diagnostic configuration) — the working default.
+    # nic_cirrus=2 expects an EXTERNAL cirrus-nucleation source (ECHAM-HAM
+    # Kaercher-Lohmann pnicex) that jcm does not compute yet (issue #552):
+    # with it, sub-cthomi cells never nucleate ICNC, depositional growth
+    # stalls, and supersaturation grows unboundedly (RH 5-10 over the
+    # Antarctic winter surface killed the first coupled year runs).
+    nic_cirrus: int = struct.field(pytree_node=False, default=1)
     ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
@@ -154,7 +161,7 @@ class CloudParams2M:
         pow_PK: float = 2.475,
         cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
         n_aer_coarse: float = 0.5,
-        nic_cirrus: int = 2,
+        nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
     ) -> 'CloudParams2M':
         """Return default cloud parameters for the 2-moment scheme."""

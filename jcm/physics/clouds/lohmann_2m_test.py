@@ -1253,6 +1253,51 @@ class TestColumnWaterConservation2M:
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
 
+    def test_cold_supersaturation_is_consumed(self):
+        """Sub-cthomi supersaturation must deposit onto diagnosed ICNC.
+
+        Second year-run killer (after the warm-rain gate): with the
+        hollow nic_cirrus=2 default (#552 — expects an external
+        Kaercher-Lohmann pnicex source jcm never computes), cells below
+        cthomi with ice mass but ~no crystals never nucleate ICNC,
+        depositional growth stalls, and RH w.r.t. ice grows without
+        bound (5-10x over the Antarctic winter surface by day 85). The
+        nic_cirrus=1 diagnostic (ICNC from ice mass / crystal radius)
+        must consume the supersaturation; the hollow branch must not —
+        this pins BOTH the new default and the #552 gap.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 8
+        T = jnp.full(nlev, 226.0)             # below cthomi = 238.15
+        p = jnp.linspace(6.5e4, 7.6e4, nlev)  # Antarctic-plateau surface
+        rho = p / (287.0 * T)
+        qs = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 2.0 * qs                          # 200% RH
+        qi = jnp.full(nlev, 1.5e-4)
+        qni = jnp.zeros(nlev)                 # ice mass, no crystals
+        cf = jnp.full(nlev, 0.9)
+        dz = jnp.full(nlev, 300.0)
+
+        def run(nic):
+            params = CloudParams2M.default(nic_cirrus=nic)
+            tend, _, _ = cloud_microphysics_2m(
+                T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
+                jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+                jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+                jnp.zeros(nlev), jnp.zeros(nlev),
+                1800.0, params,
+            )
+            return float(jnp.sum(tend.dqdt * rho * dz))  # vapor sink
+
+        dq_diag = run(1)
+        assert dq_diag < -1e-6, (
+            f"nic_cirrus=1 did not deposit the cold supersaturation "
+            f"(column dq {dq_diag:.3e} kg/m2/s)"
+        )
+
     def test_supercooled_stratus_rains(self):
         """Warm-rain coalescence must drain supercooled liquid decks.
 
