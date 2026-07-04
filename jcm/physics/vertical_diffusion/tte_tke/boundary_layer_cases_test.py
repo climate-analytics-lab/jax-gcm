@@ -19,24 +19,27 @@ validation cases used by the ``jax_scm`` project
     is enhanced relative to neutral, and turbulence is sustained by buoyancy
     even without wind shear.
 
-Scope — what this term actually governs
----------------------------------------
+Scope — what these tests pin
+----------------------------
 The ``jax_scm`` validation runs are *full* single-column models: they solve
 the momentum equations with Coriolis + geostrophic forcing and apply
-Monin-Obukhov *surface fluxes*. The JCM ``TteTkeVerticalDiffusion`` term, by
-contrast, is the *interior* vertical-diffusion operator only. Its implicit
-solver uses zero-flux (insulating, free-slip) boundaries: it redistributes
-``u``, ``v``, ``T``, ``q`` and TKE in the vertical and conserves their
-column integrals, but applies **no surface drag and no surface heat flux**
-to the prognostic state (those come from the surface scheme + dynamics in the
-full model; the ``u*`` / surface-flux / PBL-height *diagnostics* it returns
-are computed but decoupled from the column evolution).
+Monin-Obukhov *surface fluxes*. The JCM ``TteTkeVerticalDiffusion`` term now
+carries the surface exchange as the bottom-row Robin boundary condition of
+its implicit solve (the ECHAM-faithful coupling): by default it applies real
+surface drag and surface heat/moisture fluxes to the prognostic state, and
+the delivered fluxes equal the column-integrated tendencies by construction
+(see ``vertical_diffusion_test.TestSurfaceCoupledSolve``).
 
-This file tests the term as an **isolated interior operator**. With zero-flux
-boundaries the *surface-coupled* signatures cannot appear, so these classes pin
-the *turbulence-closure* physics the term owns, flavoured by the three regimes
-above. That is exactly the part the canonical cases stress, and where the
-previous tests were weakest (mostly bounds / finiteness checks).
+This file, however, tests the *interior diffusion operator in isolation*:
+every run here passes ``couple_surface=False`` (via ``_vdc`` below), which
+zeroes the surface exchange input of the solve and restores the zero-flux
+(insulating, free-slip) boundaries. The boundary condition is now an INPUT
+of the solve — zeroed here on purpose — so these classes pin the
+*turbulence-closure* physics the term owns (mixing lengths, TKE budget,
+stability functions, down-gradient conservative mixing), flavoured by the
+three regimes above. That is exactly the part the canonical cases stress,
+and where the previous tests were weakest (mostly bounds / finiteness
+checks).
 
 The companion **surface-coupled** cases — the neutral Ekman spiral + jet
 (Andren), the nocturnal low-level jet + surface inversion (GABLS1), and the
@@ -74,6 +77,11 @@ G = float(c.grav)
 CPD = float(c.cpd)
 RD = float(c.rd)
 P0 = float(c.p0)
+
+
+def _vdc(state, params, dt):
+    """Interior-only vdiff column: surface Robin BC zeroed (see module doc)."""
+    return vertical_diffusion_column(state, params, dt, couple_surface=False)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +214,7 @@ def _integrate(state, params, dt, nsteps, evolve_winds=False, evolve_temp=False,
     u0, v0 = state.u, state.v
     s = state
     for _ in range(nsteps):
-        tend, _ = vertical_diffusion_column(s, params, dt)
+        tend, _ = _vdc(s, params, dt)
         updates = {"tke": jnp.maximum(s.tke + dt * tend.tke_tendency, 0.01)}
         if evolve_winds:
             updates["u"] = s.u + dt * tend.u_tendency
@@ -324,7 +332,7 @@ class TestNeutralBoundaryLayerAndren:
         """
         params = VDiffParameters.default()
         state = _neutral_column(jet=10.0, tke0=0.5)
-        _, diag = vertical_diffusion_column(state, params, DT)
+        _, diag = _vdc(state, params, DT)
 
         ml = np.asarray(diag.mixing_length[0])              # top-first
         z_above_sfc = float(state.height_full[0, -1] - state.height_half[0, -1])
@@ -345,7 +353,7 @@ class TestNeutralBoundaryLayerAndren:
         params = VDiffParameters.default()
         state = _integrate(_neutral_column(jet=12.0, tke0=0.01),
                            params, DT, 60, freeze_winds=True)
-        _, diag = vertical_diffusion_column(state, params, DT)
+        _, diag = _vdc(state, params, DT)
 
         km_sf = np.asarray(diag.exchange_coeff_momentum[0])[::-1]  # surface-first
         nlev = km_sf.size
@@ -599,7 +607,7 @@ class TestInteriorOperatorConservation:
         n = len(z) - 1
         state = _make_column(np.full(n, 290.0), np.full(n, 8.0), np.zeros(n),
                              z, tke0=0.5)
-        tend, _ = vertical_diffusion_column(state, params, DT)
+        tend, _ = _vdc(state, params, DT)
         assert float(jnp.max(jnp.abs(tend.u_tendency))) < 1e-6, (
             "A uniform wind should not be mixed (no interior gradient, no drag)"
         )

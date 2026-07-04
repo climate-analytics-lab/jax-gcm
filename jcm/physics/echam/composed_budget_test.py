@@ -25,15 +25,6 @@ import jcm.constants as c
 
 @pytest.mark.slow
 class TestComposedColumnWaterClosure(unittest.TestCase):
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Composed budget opens by ~P at every precipitating step "
-               "(closes to ~1% when P=0): the convection→cloud detrained-"
-               "condensate forwarding double-counts against the tracer "
-               "state — issue #553. The per-scheme ledgers each close "
-               "(#550, PR5); this test pins the composed target and flips "
-               "to passing with the coupling fix.",
-    )
     def test_full_echam_step_water_budget(self):
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
@@ -72,6 +63,15 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
             + np.asarray(ph["convection"].precip_conv).reshape(nsteps, -1)[:, 0]
         )
         E = np.asarray(ph["surface"].evaporation).reshape(nsteps, -1)[:, 0]
+
+        # Since the surface exchange became the bottom boundary row of the
+        # vdiff implicit solve, the published evaporation IS the delivered
+        # flux (the ECHAM ``pev_vdiff`` identity), so the raw-vs-damped
+        # distinction is gone: evaporation == effective_evaporation.
+        E_eff = np.asarray(
+            ph["surface"].effective_evaporation,
+        ).reshape(nsteps, -1)[:, 0]
+        np.testing.assert_allclose(E_eff, E)
 
         col = (dq + dqc + dqi) @ mass  # (nsteps,)
         residual = col + P - E

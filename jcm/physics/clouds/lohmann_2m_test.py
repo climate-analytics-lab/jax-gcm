@@ -1253,6 +1253,135 @@ class TestColumnWaterConservation2M:
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
 
+    def test_cold_supersaturation_is_consumed(self):
+        """Sub-cthomi supersaturation must deposit onto diagnosed ICNC.
+
+        Second year-run killer (after the warm-rain gate): with the
+        hollow nic_cirrus=2 default (#552 — expects an external
+        Kaercher-Lohmann pnicex source jcm never computes), cells below
+        cthomi with ice mass but ~no crystals never nucleate ICNC,
+        depositional growth stalls, and RH w.r.t. ice grows without
+        bound (5-10x over the Antarctic winter surface by day 85). The
+        nic_cirrus=1 diagnostic (ICNC from ice mass / crystal radius)
+        must consume the supersaturation; the hollow branch must not —
+        this pins BOTH the new default and the #552 gap.
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 8
+        T = jnp.full(nlev, 226.0)             # below cthomi = 238.15
+        p = jnp.linspace(6.5e4, 7.6e4, nlev)  # Antarctic-plateau surface
+        rho = p / (287.0 * T)
+        qs = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 2.0 * qs                          # 200% RH
+        qi = jnp.full(nlev, 1.5e-4)
+        qni = jnp.zeros(nlev)                 # ice mass, no crystals
+        cf = jnp.full(nlev, 0.9)
+        dz = jnp.full(nlev, 300.0)
+
+        def run(nic):
+            params = CloudParams2M.default(nic_cirrus=nic)
+            tend, _, _ = cloud_microphysics_2m(
+                T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
+                jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+                jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+                jnp.zeros(nlev), jnp.zeros(nlev),
+                1800.0, params,
+            )
+            return float(jnp.sum(tend.dqdt * rho * dz))  # vapor sink
+
+        dq_diag = run(1)
+        assert dq_diag < -1e-6, (
+            f"nic_cirrus=1 did not deposit the cold supersaturation "
+            f"(column dq {dq_diag:.3e} kg/m2/s)"
+        )
+
+    def test_koop_homogeneous_freezing_floor(self):
+        """Vapor above the Koop threshold cannot survive a step (#552 interim).
+
+        Third year-run killer: in the (cold-biased) winter stratosphere,
+        S_ice grew past 2 faster than ICNC-limited deposition consumed
+        it, ending in a latent-heat NaN near day 110. Homogeneous
+        nucleation physics forbids that state: above S_crit(T) =
+        2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
+        seconds. One microphysics step must bring S_ice at 190 K from
+        1.74 to at/below the threshold, with bounded latent heating.
+        """
+        import numpy as np
+        import jcm.constants as c
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        nlev = 4
+        T = jnp.full(nlev, 190.2)
+        p = jnp.linspace(3000.0, 4500.0, nlev)
+        rho = p / (287.0 * T)
+        esi = 610.78 * np.exp(21.875 * (190.2 - 273.15) / (190.2 - 7.66))
+        qsi = c.eps * esi / np.asarray(p)
+        q = jnp.asarray(1.74 * qsi)
+        qi = jnp.full(nlev, 1.5e-4)
+        tend, _, _ = cloud_microphysics_2m(
+            T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev), jnp.full(nlev, 0.287), rho,
+            jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev), 720.0, CloudParams2M.default(),
+        )
+        s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
+        scrit = 2.349 - 190.2 / 259.0
+        assert float(np.max(s_after)) <= scrit + 0.02, (
+            f"S_ice {s_after} not pulled to the Koop threshold {scrit:.3f}"
+        )
+        # Latent heating from the burst stays small (q is tiny at 190 K).
+        assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
+
+    def test_supercooled_stratus_rains(self):
+        """Warm-rain coalescence must drain supercooled liquid decks.
+
+        ECHAM ll_prcp_warm (mo_cloud_micro_2m.f90:1662) has NO
+        temperature condition — autoconversion/accretion act on any
+        cloud liquid. A (T > tmelt) gate left polar/storm-track
+        supercooled stratus (238-273 K) without a liquid sink: qc built
+        up ~50x over a month of coupled T63L47 integration and NaN'd
+        the run radiatively. This column is a -5 C stratus deck with
+        drizzle-ready qc; the scheme must produce surface rain (the
+        deck is warmer than the snow path's effective range, so rain is
+        the expected exit).
+        """
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 12
+        T = jnp.linspace(258.0, 269.0, nlev)   # all supercooled
+        p = jnp.linspace(6e4, 1.0e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[6:].set(8e-4)   # thick low liquid deck
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.9, 0.0)
+        dz = jnp.full(nlev, 400.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)       # 50/mg — modest CDNC
+        params = CloudParams2M.default()
+
+        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        total_precip = float(rain_sfc + snow_sfc)
+        assert total_precip > 1e-7, (
+            f"supercooled deck produced no precipitation "
+            f"(rain {float(rain_sfc):.3e}, snow {float(snow_sfc):.3e}) — "
+            f"the warm-rain mask is temperature-gated again"
+        )
+        # And the deck must actually lose liquid.
+        dqc_col = float(jnp.sum(tend.dqcdt * rho * dz))
+        assert dqc_col < 0.0
+
     def test_water_budget_closes_with_ice_reaching_the_surface(self):
         """Polar-cirrus column: sedimenting ice exits as surface snow.
 

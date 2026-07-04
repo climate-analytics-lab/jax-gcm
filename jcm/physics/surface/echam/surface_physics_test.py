@@ -352,5 +352,100 @@ class TestCombineSurfaceFluxes:
         assert jnp.allclose(combined_fluxes.sensible_heat_mean, expected_mean)
 
 
+class TestEchamSurfaceTerm:
+    """Term-level contract of ``EchamSurface`` after the vdiff coupling.
+
+    The surface exchange is now the bottom boundary row of the vdiff
+    implicit solve (`TteTkeVerticalDiffusion`), so the term must (a) return
+    ZERO u/v/T/qv tendencies — the old imp_* single-layer delivery block is
+    gone — and (b) republish the vdiff-delivered fluxes as the public
+    ``"surface"`` fields, with ``evaporation == effective_evaporation``.
+    """
+
+    def test_zero_tendencies_and_republished_vdiff_fluxes(self):
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 6, 1
+        z_half = jnp.linspace(6000.0, 0.0, nlev + 1)[:, None]
+        z_full = 0.5 * (z_half[:-1] + z_half[1:])
+        p_half = jnp.linspace(5.0e4, 1.0e5, nlev + 1)[:, None]
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 8.0),
+            v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 290.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * z_full,
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={},
+        )
+
+        # Seed the vdiff diagnostics with distinct delivered-flux values so
+        # republication is unambiguous.
+        vdiff = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            surface_evaporation=jnp.array([3.0e-5]),
+            surface_sensible_heat=jnp.array([12.0]),
+            surface_latent_heat=jnp.array([75.0]),
+            surface_stress_u=jnp.array([0.08]),
+            surface_stress_v=jnp.array([-0.02]),
+            surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+            surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+            surface_exchange_momentum=jnp.full((ncols, 3), 0.012),
+        )
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": p_full,
+            "pressure_half": p_half,
+            "height_full": z_full,
+            "height_half": z_half,
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([292.0]),
+                roughness_length=jnp.array([1e-4]),
+            ),
+            "vertical_diffusion": vdiff,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.full(ncols, 350.0),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 292.0),
+        )
+
+        term = EchamSurface()
+        tend, out = term(state, diagnostics, forcing, terrain)
+
+        # (a) Zero prognostic tendencies — delivery lives in the vdiff solve.
+        assert float(jnp.max(jnp.abs(tend.u_wind))) == 0.0
+        assert float(jnp.max(jnp.abs(tend.v_wind))) == 0.0
+        assert float(jnp.max(jnp.abs(tend.temperature))) == 0.0
+        assert float(jnp.max(jnp.abs(tend.specific_humidity))) == 0.0
+
+        # (b) Published fluxes are the vdiff-delivered values.
+        surface = out["surface"]
+        np.testing.assert_allclose(np.asarray(surface.evaporation), 3.0e-5)
+        np.testing.assert_allclose(
+            np.asarray(surface.effective_evaporation),
+            np.asarray(surface.evaporation),
+        )
+        np.testing.assert_allclose(np.asarray(surface.sensible_heat_flux), 12.0)
+        np.testing.assert_allclose(np.asarray(surface.latent_heat_flux), 75.0)
+        np.testing.assert_allclose(np.asarray(surface.momentum_flux_u), 0.08)
+        np.testing.assert_allclose(np.asarray(surface.momentum_flux_v), -0.02)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

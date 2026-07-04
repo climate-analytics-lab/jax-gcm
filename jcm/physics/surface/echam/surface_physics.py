@@ -353,7 +353,6 @@ from typing import ClassVar  # noqa: E402
 
 from flax import nnx  # noqa: E402
 
-from jcm import constants as _physical_constants  # noqa: E402
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
@@ -366,21 +365,26 @@ from jcm.terrain import TerrainData  # noqa: E402
 
 
 class EchamSurface(PhysicsTerm):
-    """ECHAM multi-tile (water/ice/land) surface flux term.
+    """ECHAM multi-tile (water/ice/land) surface energy-balance/diagnostics term.
 
-    Reads exchange coefficients per tile from the public
-    ``"vertical_diffusion"`` key (set upstream by
-    :class:`~jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion`),
-    surface SW / LW downward fluxes from ``"radiation"``, sea-ice / land
-    surface temp from forcing, ``fmask`` from terrain. Builds the 3-tile
-    surface state, runs :func:`surface_physics_step`, then converts the
-    explicit grid-box-mean fluxes into implicit surface tendencies via
-    the ``1 / (1 + K dt / dz)`` damping factor — which is what keeps the
-    surface-flux divergence stable when ``K dt / dz`` exceeds 2 (over
-    rough terrain, easily violated at ECHAM-tuned exchange coefficients).
+    The turbulent surface fluxes are DELIVERED by the vertical-diffusion
+    term: :class:`~jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion`
+    carries the surface exchange as the bottom-row Robin boundary condition
+    of its implicit column solve (the ECHAM ``vdiff``/``mo_surface`` scheme,
+    where one tridiagonal spans the column plus the surface exchange) and
+    diagnoses the fluxes from the implicit solution, so reported flux ==
+    flux received by the column, by construction. This term therefore
+    returns ZERO u/v/T/qv tendencies and republishes the vdiff-delivered
+    fluxes (read from ``diagnostics["vertical_diffusion"]``) as the public
+    ``"surface"`` fields — ``evaporation == effective_evaporation`` now.
 
-    Writes the per-grid-box surface fluxes into the public ``"surface"``
-    key.
+    It still reads exchange coefficients per tile from
+    ``"vertical_diffusion"``, surface SW / LW downward fluxes from
+    ``"radiation"``, sea-ice / land surface temp from forcing and ``fmask``
+    from terrain, and runs :func:`surface_physics_step` for the
+    albedo/radiative/tile bookkeeping; the explicit bulk fluxes that step
+    computes remain available as reference/tile diagnostics but are no
+    longer the delivery path.
     """
 
     name: ClassVar[str] = "echam_surface"
@@ -492,61 +496,24 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_momentum=exchange_coeff_momentum,
         )
 
-        fluxes, _tendencies, _surface_diag = surface_physics_step(
+        # Albedo/radiative/tile bookkeeping. The explicit bulk fluxes this
+        # step computes are reference/tile diagnostics only — the fluxes the
+        # column actually receives are delivered by the vdiff implicit solve
+        # and read back below.
+        _fluxes, _tendencies, _surface_diag = surface_physics_step(
             atm_forcing, surface_state, dt, params,
         )
 
-        sensible_heat = fluxes.sensible_heat_mean
-        latent_heat = fluxes.latent_heat_mean
-        tau_u = fluxes.momentum_u_mean
-        tau_v = fluxes.momentum_v_mean
-        evaporation = fluxes.evaporation_mean
-
-        # Air density and layer thickness at the surface (clamp dz to 50 m
-        # to avoid huge tendencies on thin uniform sigma layers).
-        rho_sfc = pressure_full[-1, :] / (
-            _physical_constants.rd * state.temperature[-1, :]
-        )
-        dp_sfc = pressure_full[-1, :] - pressure_full[-2, :]
-        dz_sfc = jnp.maximum(
-            dp_sfc / (rho_sfc * _physical_constants.grav), 50.0,
-        )
-
-        # Implicit-Euler damping for the surface flux divergence: an
-        # explicit step is unstable when ``K dt / dz_sfc > 2``. The
-        # area-weighted grid-box-mean exchange velocity goes into the
-        # damping factor.
-        ch_grid = jnp.sum(surface_fractions * exchange_coeff_heat, axis=1)
-        cm_grid = jnp.sum(
-            surface_fractions * exchange_coeff_momentum, axis=1,
-        )
-        ce_grid = jnp.sum(
-            surface_fractions * exchange_coeff_moisture, axis=1,
-        )
-        imp_heat = 1.0 / (1.0 + ch_grid * dt / dz_sfc)
-        imp_mom = 1.0 / (1.0 + cm_grid * dt / dz_sfc)
-        imp_moist = 1.0 / (1.0 + ce_grid * dt / dz_sfc)
-
-        temp_tend_sfc = (
-            imp_heat * sensible_heat
-            / (rho_sfc * _physical_constants.cpd * dz_sfc)
-        )
-        qv_tend_sfc = imp_moist * evaporation / (rho_sfc * dz_sfc)
-        u_tend_sfc = imp_mom * (-tau_u) / (rho_sfc * dz_sfc)
-        v_tend_sfc = imp_mom * (-tau_v) / (rho_sfc * dz_sfc)
-
-        temp_tend = jnp.zeros_like(state.temperature)
-        qv_tend = jnp.zeros_like(state.specific_humidity)
-        u_tend = jnp.zeros_like(state.u_wind)
-        v_tend = jnp.zeros_like(state.v_wind)
-        temp_tend = temp_tend.at[-1, :].set(temp_tend_sfc)
-        qv_tend = qv_tend.at[-1, :].set(qv_tend_sfc)
-        u_tend = u_tend.at[-1, :].set(u_tend_sfc)
-        v_tend = v_tend.at[-1, :].set(v_tend_sfc)
-
+        # No turbulent-flux tendencies here: the vdiff term's implicit solve
+        # already carried the surface exchange into the column (bottom-row
+        # Robin BC), replacing the old operator-split single-layer delivery
+        # (imp_* × bulk flux into the lowest level), which silently discarded
+        # ~half the flux at T63L47 (delivered = imp·bulk, imp ≈ 0.5).
         tendency = PhysicsTendency(
-            u_wind=u_tend, v_wind=v_tend,
-            temperature=temp_tend, specific_humidity=qv_tend,
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=jnp.zeros_like(state.temperature),
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers={},
         )
 
@@ -556,17 +523,20 @@ class EchamSurface(PhysicsTerm):
         prev_surface = diagnostics.get(
             "surface", SurfaceData.zeros((ncols,), nlev),
         )
+        # Publish the DELIVERED fluxes diagnosed from the vdiff implicit
+        # solution. By the ECHAM ``pev_vdiff`` identity these equal the
+        # column-integrated vdiff tendencies exactly, so ``evaporation ==
+        # effective_evaporation`` — the raw-vs-damped distinction (and the
+        # imp_moist factor) no longer exists. The field is kept for API
+        # stability (the Tiedtke moisture-budget closure reads it).
+        evaporation = vdiff.surface_evaporation.reshape(ncols)
         surface_out = prev_surface.copy(
-            sensible_heat_flux=sensible_heat,
-            latent_heat_flux=latent_heat,
-            momentum_flux_u=tau_u,
-            momentum_flux_v=tau_v,
+            sensible_heat_flux=vdiff.surface_sensible_heat.reshape(ncols),
+            latent_heat_flux=vdiff.surface_latent_heat.reshape(ncols),
+            momentum_flux_u=vdiff.surface_stress_u.reshape(ncols),
+            momentum_flux_v=vdiff.surface_stress_v.reshape(ncols),
             evaporation=evaporation,
-            # Moisture actually added to the lowest layer this step = raw flux
-            # times the implicit damping ``imp_moist`` (= qv_tend_sfc·ρ·Δz). This
-            # is the supply the Tiedtke moisture-budget closure anchors to, so it
-            # never exports more water than the surface delivered.
-            effective_evaporation=imp_moist * evaporation,
+            effective_evaporation=evaporation,
             ch=ch,
             cm=cm,
         )
