@@ -250,13 +250,19 @@ def calculate_updraft(
             entr_base = jnp.where(ktype == 1, entrpen,
                                   jnp.where(ktype == 2, entrscv, entrmid))
 
-            # Humidity-dependent turbulent entrainment: drier environment
-            # entrains more
-            qs_env = saturation_mixing_ratio(pressure, env_temp)
-            rh = jnp.clip(env_q / jnp.maximum(qs_env, 1e-10), 0.0, 1.0)
-            humidity_factor = 1.0 + 2.0 * (1.0 - rh) ** 2
-
-            entr_turb = jnp.clip(entr_base * humidity_factor, 0.0, 0.01)
+            # Turbulent entrainment is the PLAIN fractional rate. ECHAM's
+            # cuentr (mo_cuascent.f90:746) has NO humidity dependence:
+            # zentr = pentr*pmfu*zdprho*zrrho. The previous IFS-style
+            # (1 + 2*(1-RH)^2) enhancement tripled entrainment into dry
+            # environments, so plumes died before penetrating a dry free
+            # troposphere — locking coupled runs in a desiccated fixed
+            # point (dry FT -> no deep convection -> no upward moisture
+            # transport -> dry FT; TPW pinned at ~1.5 kg/m2). ECHAM's
+            # only entrainment ENHANCEMENT is the moisture-convergence
+            # term below the cloud-water minimum level (cuentr:758-760,
+            # zentest = MAX(pqte,0)/pqenh) — not yet ported (needs the
+            # accumulated moisture tendency); tracked as a follow-up.
+            entr_turb = jnp.clip(entr_base, 0.0, 0.01)
 
             # Nordeng (1994) organized entrainment for deep convection:
             # rate ∝ local buoyancy, suppressed by the running integral of
