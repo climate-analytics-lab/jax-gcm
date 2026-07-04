@@ -444,6 +444,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         total = precip + rain + snow
         self.assertGreater(float(total[-40 * spd:].mean()), 0.0)
         self.assertTrue(np.all(np.isfinite(precip)))
+        # STRICT pin restored on this branch: with the smoothed (sigmoid)
+        # trigger + unconditional Nordeng rescale, convection stays
+        # continuously active through the near-neutral equilibrium — the
+        # hard-trigger extinction that forced the fixes-PR to relax this
+        # assertion is cured here (see the fixes-PR comment above).
+        self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
 
         # The high-frequency convective flicker is bounded. History of this
         # pin: the bare-CAPE on/off closure gave ≈14 K/day per-level
