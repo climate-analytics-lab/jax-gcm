@@ -510,6 +510,9 @@ def flux_to_heating_rate(
 def load_weights_from_netcdf(filepath: str) -> tuple:
     """Load NN weights from a NetCDF file in the rte-rrtmgp-nn format.
 
+    User-facing utility (no internal callers): use it to load pretrained
+    rte-rrtmgp-nn weights when configuring :class:`NNEmulatorRadiation`.
+
     The NetCDF file contains weight matrices and bias vectors for each layer,
     along with activation function names and scaling coefficients.
 
@@ -639,7 +642,12 @@ def init_emulator_weights(
     units: int = 16,
     key: Optional[jax.Array] = None,
 ) -> EmulatorWeights:
-    """Initialize random weights for both SW and LW emulators."""
+    """Initialize random weights for both SW and LW emulators.
+
+    User-facing utility (no internal callers): the starting point for
+    training an emulator from scratch rather than loading pretrained
+    weights via :func:`load_weights_from_netcdf`.
+    """
     if key is None:
         key = jax.random.key(42)
     k1, k2 = jax.random.split(key)

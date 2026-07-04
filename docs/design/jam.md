@@ -185,6 +185,32 @@ python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
 flat term list, because the JAM chain's ordering (split around the cloud term) is
 encoded by `echam_physics()` — `build_physics` delegates to it.
 
+### Natural-emission and oxidant climatology hooks
+
+Three further forcing-file hooks feed the natural-emission and sulfur-chemistry
+terms, which are otherwise inert (DMS/dust fall back to zero; the oxidants fall
+back to the analytic interim proxies). All accept the raw HAMMOZ/ECHAM-layout
+files (`(time[, mlev], lat, lon)`, *descending* latitude — validated against the
+model grid and flipped to model order; a mismatched grid raises):
+
+- `forcing.dms_file` — seawater DMS monthly climatology (`DMS_sea`, nmol/L,
+  e.g. `emiss_fields_dms_sea_monthly_T63.nc`). Converted to kg-DMS/m³ at load
+  so `DmsEmissions`' `piston_velocity · dms_seawater` product is directly a
+  kg/m²/s flux; `_FillValue` land cells → 0.
+- `forcing.dust_file` — potential-dust-source map (`pot_source`, 0–1,
+  e.g. `dust_potential_sources_T63.nc`), clipped to `DustEmissions`' [0, 1]
+  erodibility contract (the file's `-1` missing marker → 0).
+- `forcing.oxidants_file` — monthly `OH/NO3/O3/H2O2_VMR_avrg` mole fractions on
+  ECHAM hybrid model levels (e.g. `ham_oxidants_monthly_T63L47_macc.nc` with
+  `grid=echam_t63_l47_hybrid`). Levels are mapped one-to-one onto the model
+  levels (level count asserted; `hyam`/`hybm` cross-checked against the model's
+  hybrid coefficients). The forcing carries **VMR** (`forcing.oxidant_vmr`);
+  `PrescribedOxidants` converts to molec cm⁻³ in-term, where the instantaneous
+  T and p live.
+
+All three load as monthly wrap-year `TimeSeries` leaves, so `select(date)`
+slices them per step like every other forcing field.
+
 See `.claude/aerosol_emissions_plan.md` for the full design, the data-source
 investigation (the raw 0.5° gridded CEDS is ESGF-only; a self-hosted compressed
 mirror is a tracked follow-up), and the CESM adapter's documented approximations.

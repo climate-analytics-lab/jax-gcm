@@ -295,7 +295,7 @@ Key processes:
 
 7. **Evaporation / sublimation** of precipitation in subsaturated layers
 
-The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the path wired into the default factory: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop. The legacy per-level :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics` remains available but is not wired into the factory.
+The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 
 **Configurable parameters** (:py:class:`jcm.physics.clouds.echam_1m.MicrophysicsParameters`):
 

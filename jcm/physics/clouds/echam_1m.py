@@ -1,20 +1,20 @@
-"""Cloud microphysics scheme for ECHAM physics
+"""ECHAM 1-moment cloud microphysics (flux-coupled column sweep).
 
-This module implements comprehensive cloud microphysics including:
-- Autoconversion of cloud water to rain (Khairoutdinov and Kogan, 2000)
+This module implements the single-moment bulk microphysics as a top-down
+column sweep (:func:`cloud_microphysics_column_sweep`, wrapped by the
+composable :class:`Echam1MMicrophysics` term):
+
+- Autoconversion of cloud water to rain (Beheng 1994 default, or
+  Khairoutdinov and Kogan 2000 via ``autoconversion_scheme``)
 - Accretion of cloud droplets by rain
-- Autoconversion of cloud ice to snow 
-- Aggregation of ice crystals and accretion by snow
-- Melting of snow and freezing of rain
-- Sedimentation of cloud ice and snow
-- Evaporation of rain and sublimation of snow
+- Autoconversion/aggregation of cloud ice to snow (Levkov et al., 1992)
+- Riming of cloud water by falling snow
+- Melting of snow and cloud ice above the freezing level
+- Sedimentation of cloud ice
+- Rotstayn (1997) rain evaporation below cloud
 
-Based on the ECHAM6/ICON microphysics as described in:
-- Lohmann and Roeckner (1996)
-- Levkov et al. (1992) for ice phase
-- Beheng (1994) for warm phase
-
-Date: 2025-01-10
+Based on the ECHAM6/ICON ``mo_cloud.f90`` single-moment branch
+(Lohmann and Roeckner, 1996).
 """
 
 import jax
@@ -31,6 +31,9 @@ class MicrophysicsParameters:
     
     # Autoconversion parameters
     ccraut: float        # Critical cloud water for autoconversion (kg/kg)
+    smooth_ccraut: float # Sigmoid width of the KK2000 qc threshold (kg/kg);
+                         # only read in KK2000 mode — Beheng uses ccraut as
+                         # a rate coefficient (already smooth)
     ccracl: float        # Accretion coefficient (cloud to rain)
     cauloc: float        # ECHAM ``zrac2`` local-rain accretion enhancement.
                          # 0.0 is the ECHAM6.3 default (zrac2 disabled); raise to
@@ -103,7 +106,8 @@ class MicrophysicsParameters:
     SCHEME_KK2000 = 1
 
     @classmethod
-    def default(cls, ccraut=15.0, ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
+    def default(cls, ccraut=15.0, smooth_ccraut=5e-5,
+                ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
                  cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
@@ -128,6 +132,7 @@ class MicrophysicsParameters:
 
         return cls(
             ccraut=jnp.array(ccraut),
+            smooth_ccraut=jnp.array(smooth_ccraut),
             ccracl=jnp.array(ccracl),
             cauloc=jnp.array(cauloc),
             clmin=jnp.array(clmin),
@@ -351,9 +356,21 @@ def autoconversion_kk2000(
     # previous code fed qc in g/m³ (×ρ×1000 ≈ ×1200) into the 2.47 power
     # and then applied a spurious g/m³→kg/kg back-conversion — a net
     # ~2.6e4× overestimate (review finding 1.5; non-default branch).
+    # Smooth threshold (maintainability review B.2.5): with the hard
+    # ``where(qc > ccraut, rate, 0)`` the threshold appears only in the
+    # inequality, so d(rate)/d(ccraut) is identically zero — ccraut was
+    # calibratable only in Beheng mode. The sigmoid ramp puts it in the
+    # value; width -> 0 recovers the hard gate. The qc power base is
+    # double-where-guarded so the ramp's sub-threshold tail cannot
+    # differentiate a negative/zero base (0**x cotangent class).
+    has_qc = qc_in_cloud > 0.0
+    qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
+    ramp = jax.nn.sigmoid(
+        (qc_in_cloud - config.ccraut) / config.smooth_ccraut
+    )
     autoconv_rate = jnp.where(
-        qc_in_cloud > config.ccraut,
-        1350.0 * qc_in_cloud ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79),
+        has_qc,
+        ramp * 1350.0 * qc_safe ** 2.47 * (nc_cm3 + config.epsilon) ** (-1.79),
         0.0,
     )
 
@@ -382,43 +399,6 @@ def autoconversion(
             cloud_water, cloud_fraction, air_density, droplet_number, dt, config,
         ),
     )
-
-
-def accretion_rain_cloud(
-    cloud_water: jnp.ndarray,
-    rain_water: jnp.ndarray,
-    cloud_fraction: jnp.ndarray,
-    air_density: jnp.ndarray,
-    config: MicrophysicsParameters
-) -> jnp.ndarray:
-    """Accretion of cloud droplets by rain
-    
-    Args:
-        cloud_water: Cloud water mixing ratio (kg/kg)
-        rain_water: Rain water mixing ratio (kg/kg)
-        cloud_fraction: Cloud fraction (0-1)
-        air_density: Air density (kg/m³)
-        config: Microphysics configuration
-        
-    Returns:
-        Accretion rate (kg/kg/s)
-
-    """
-    # In-cloud values
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
-        0.0
-    )
-    
-    # Accretion rate following Beheng (1994)
-    # Uses collection efficiency and geometric sweep-out
-    accretion_rate = config.ccracl * config.ccollec * qc_in_cloud * rain_water * air_density**0.5
-    
-    # Convert to grid-mean
-    accretion_rate = accretion_rate * cloud_fraction
-    
-    return accretion_rate
 
 
 def ice_autoconversion(
@@ -479,158 +459,6 @@ def ice_autoconversion(
     return cloud_fraction * zsaut / dt
 
 
-def snow_accretion(
-    target: jnp.ndarray,
-    snow: jnp.ndarray, 
-    temperature: jnp.ndarray,
-    air_density: jnp.ndarray,
-    is_liquid: bool,
-    config: MicrophysicsParameters
-) -> jnp.ndarray:
-    """Accretion of cloud water/ice by falling snow
-    
-    Args:
-        target: Target species mixing ratio (cloud water or ice) (kg/kg)
-        snow: Snow mixing ratio (kg/kg)
-        temperature: Temperature (K)
-        air_density: Air density (kg/m³)
-        is_liquid: True for riming (liquid), False for aggregation (ice)
-        config: Microphysics configuration
-        
-    Returns:
-        Accretion rate (kg/kg/s)
-
-    """
-    # Collection efficiency
-    efficiency = config.ccollec if is_liquid else config.ccollei
-    
-    # Temperature factor for aggregation (ice only)
-    if not is_liquid:
-        t_celsius = temperature - c.tmelt
-        temp_factor = jnp.exp(-0.03 * jnp.abs(t_celsius + 15.0))
-        efficiency = efficiency * temp_factor
-    
-    # Snow fall velocity. Double-where guard on the fractional power:
-    # ``snow_gm3**b`` (b < 1) has an infinite derivative at 0, and although
-    # the *rate* below is proportional to snow**(1+b) (mathematically slope
-    # 0 at snow = 0), autodiff evaluates the product rule as 0 × ∞ = NaN.
-    # A safe base of 1.0 where snow is absent leaves forward values
-    # unchanged (rate is where-masked to 0 there).
-    snow_gm3 = snow * air_density * 1000.0  # g/m³
-    snow_present = snow_gm3 > 0.0
-    vt_snow = config.vt_snow_a * jnp.where(snow_present, snow_gm3, 1.0)**config.vt_snow_b
-
-    # Accretion rate
-    accretion_rate = jnp.where(
-        snow_present,
-        efficiency * target * snow * vt_snow / (air_density**0.5),
-        0.0,
-    )
-
-    return accretion_rate
-
-
-def melting_freezing(
-    temperature: jnp.ndarray,
-    snow: jnp.ndarray,
-    rain: jnp.ndarray,
-    dt: float,
-    config: MicrophysicsParameters
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate melting of snow and freezing of rain
-    
-    Args:
-        temperature: Temperature (K)
-        snow: Snow mixing ratio (kg/kg)
-        rain: Rain mixing ratio (kg/kg)  
-        dt: Time step (s)
-        config: Microphysics configuration
-        
-    Returns:
-        Tuple of (melting_rate, freezing_rate) in kg/kg/s
-
-    """
-    # Temperature departure from freezing
-    dt_freeze = c.tmelt - temperature
-
-    # Melting rate (T > 0°C)
-    melt_rate = jnp.where(
-        temperature > c.tmelt,
-        snow * (temperature - c.tmelt) / (config.tau_melt * 10.0),  # Scaled by temp
-        0.0
-    )
-    melt_rate = jnp.minimum(melt_rate, snow / dt)
-    
-    # Freezing rate (T < 0°C)  
-    # Heterogeneous freezing increases rapidly below -5°C
-    freeze_efficiency = jnp.where(
-        dt_freeze > 5.0,
-        1.0 - jnp.exp(-0.5 * (dt_freeze - 5.0)),
-        0.0
-    )
-    
-    freeze_rate = freeze_efficiency * rain / config.tau_freeze
-    freeze_rate = jnp.minimum(freeze_rate, rain / dt)
-    
-    return melt_rate, freeze_rate
-
-
-def evaporation_sublimation(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    rain: jnp.ndarray,
-    snow: jnp.ndarray,
-    air_density: jnp.ndarray,
-    config: MicrophysicsParameters
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate evaporation of rain and sublimation of snow
-    
-    Args:
-        temperature: Temperature (K)
-        specific_humidity: Specific humidity (kg/kg)
-        pressure: Pressure (Pa)
-        rain: Rain mixing ratio (kg/kg)
-        snow: Snow mixing ratio (kg/kg)
-        air_density: Air density (kg/m³)
-        config: Microphysics configuration
-        
-    Returns:
-        Tuple of (rain_evap_rate, snow_sublim_rate) in kg/kg/s
-
-    """
-    from .sundqvist import saturation_specific_humidity
-    
-    # Saturation specific humidity
-    qs = saturation_specific_humidity(pressure, temperature)
-    
-    # Subsaturation
-    subsaturation = jnp.maximum(0.0, (qs - specific_humidity) / qs)
-    
-    # Rain evaporation. Double-where guard: sqrt has an infinite derivative
-    # at 0, so the base must be replaced by a safe value (1.0) in the
-    # where-masked region or the masked branch's 0 cotangent × ∞ derivative
-    # produces NaN gradients. Forward values are unchanged.
-    rain_gm3 = rain * air_density * 1000.0
-    rain_gm3_safe = jnp.where(rain > config.epsilon, rain_gm3, 1.0)
-    rain_evap = jnp.where(
-        rain > config.epsilon,
-        config.cevaprain * subsaturation * rain_gm3_safe**0.5 / air_density,
-        0.0
-    )
-
-    # Snow sublimation (same double-where guard as rain evaporation).
-    snow_gm3 = snow * air_density * 1000.0
-    snow_gm3_safe = jnp.where(snow > config.epsilon, snow_gm3, 1.0)
-    snow_sublim = jnp.where(
-        snow > config.epsilon,
-        config.cevapsnow * subsaturation * snow_gm3_safe**0.5 / air_density,
-        0.0
-    )
-    
-    return rain_evap, snow_sublim
-
-
 def sedimentation_flux(
     hydrometeor: jnp.ndarray,
     air_density: jnp.ndarray,
@@ -676,236 +504,6 @@ def sedimentation_flux(
     tendency = (flux_in - flux_out) / (dz * air_density)
     
     return flux, tendency
-
-
-def cloud_microphysics(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    cloud_water: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-    cloud_fraction: jnp.ndarray,
-    air_density: jnp.ndarray,
-    layer_thickness: jnp.ndarray,
-    droplet_number: jnp.ndarray,
-    dt: float,
-    config: Optional[MicrophysicsParameters] = None,
-    rain_water: Optional[jnp.ndarray] = None,
-    snow: Optional[jnp.ndarray] = None
-) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
-    """Run cloud microphysics scheme
-    
-    Computes tendencies from all microphysical processes including:
-    - Autoconversion and accretion
-    - Melting and freezing
-    - Evaporation and sublimation
-    - Sedimentation
-    
-    Args:
-        temperature: Temperature (K) [nlev]
-        specific_humidity: Specific humidity (kg/kg) [nlev]
-        pressure: Pressure (Pa) [nlev]
-        cloud_water: Cloud liquid water (kg/kg) [nlev]
-        cloud_ice: Cloud ice (kg/kg) [nlev]
-        cloud_fraction: Cloud fraction [nlev]
-        air_density: Air density (kg/m³) [nlev]
-        layer_thickness: Layer thickness (m) [nlev]
-        droplet_number: Droplet number concentration (1/kg) [nlev]
-        dt: Time step (s)
-        config: Microphysics configuration
-        rain_water: Rain water mixing ratio (kg/kg) [nlev]. If None, initialized to zeros.
-        snow: Snow mixing ratio (kg/kg) [nlev]. If None, initialized to zeros.
-        
-    Returns:
-        Tuple of (tendencies, state)
-
-    """
-    if config is None:
-        config = MicrophysicsParameters.default()
-    
-    # Ensure all inputs are arrays
-    temperature = jnp.atleast_1d(temperature)
-    nlev = temperature.shape[0]
-    
-    # Initialize tendencies
-    dtedt = jnp.zeros(nlev)
-    dqdt = jnp.zeros(nlev)
-    dqcdt = jnp.zeros(nlev)
-    dqidt = jnp.zeros(nlev)
-    dqrdt = jnp.zeros(nlev)
-    dqsdt = jnp.zeros(nlev)
-    
-    # Initialize precipitation if not provided
-    if rain_water is None:
-        rain_water = jnp.zeros(nlev)
-    if snow is None:
-        snow = jnp.zeros(nlev)
-    
-    # Calculate in-cloud values
-    qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
-        0.0
-    )
-    qi_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon,
-        cloud_ice / cloud_fraction,
-        0.0
-    )
-    
-    # 1. Autoconversion processes
-    qc_auto = autoconversion(
-        cloud_water, cloud_fraction, air_density, droplet_number, dt, config
-    )
-    qi_auto = ice_autoconversion(
-        cloud_ice, temperature, cloud_fraction, dt, config, air_density=air_density,
-    )
-    
-    # 2. Accretion processes
-    qc_accr = accretion_rain_cloud(
-        cloud_water, rain_water, cloud_fraction, air_density, config
-    )
-    qc_rime = snow_accretion(
-        cloud_water, snow, temperature, air_density, True, config
-    )
-    qi_aggr = snow_accretion(
-        cloud_ice, snow, temperature, air_density, False, config
-    )
-    
-    # 3. Melting and freezing
-    snow_melt, rain_freeze = melting_freezing(
-        temperature, snow, rain_water, dt, config
-    )
-    
-    # 4. Evaporation and sublimation
-    rain_evap, snow_sublim = evaporation_sublimation(
-        temperature, specific_humidity, pressure,
-        rain_water, snow, air_density, config
-    )
-    
-    # 5. Update tendencies from microphysical processes
-    # Cloud water: loses to autoconversion, accretion, riming
-    dqcdt = -(qc_auto + qc_accr + qc_rime)
-    
-    # Cloud ice: loses to autoconversion and aggregation
-    dqidt = -(qi_auto + qi_aggr)
-    
-    # Rain: gains from warm processes and melting, loses to evaporation and freezing
-    dqrdt = qc_auto + qc_accr + snow_melt - rain_evap - rain_freeze
-    
-    # Snow: gains from cold processes and freezing, loses to melting and sublimation
-    dqsdt = qi_auto + qi_aggr + qc_rime + rain_freeze - snow_melt - snow_sublim
-    
-    # Humidity: gains from evaporation/sublimation
-    dqdt = rain_evap + snow_sublim
-    
-    # Temperature: latent heat effects. ECHAM's thermodynamic tendency does
-    # not include rain/snow production from autoconversion or aggregation;
-    # those are phase-preserving condensate-to-precip conversions. Only
-    # evaporation/sublimation, melt/freeze, and liquid riming by snow change
-    # phase enthalpy here.
-    dtedt = (
-        - c.alhc / c.cpd * rain_evap
-        - c.alhs / c.cpd * snow_sublim
-        - c.alhf / c.cpd * snow_melt
-        + c.alhf / c.cpd * rain_freeze
-        + c.alhf / c.cpd * qc_rime
-    )
-    
-    # 6. Sedimentation (using simple approach for now)
-    # Calculate terminal velocities. Double-where guard on the fractional
-    # powers (see snow_accretion): ``x**b`` with b < 1 has an infinite
-    # derivative at x = 0 and the ``rain * vt_rain`` products below would
-    # backpropagate 0 × ∞ = NaN at precipitation-free points. Safe base 1.0
-    # where the hydrometeor is absent; the sedimentation rates are
-    # where-masked to 0 there, so forward values are unchanged.
-    rain_gm3 = rain_water * air_density * 1000.0
-    rain_present = rain_gm3 > 0.0
-    vt_rain = config.vt_rain_a * jnp.where(rain_present, rain_gm3, 1.0)**config.vt_rain_b * 1e-3  # m/s
-
-    snow_gm3 = snow * air_density * 1000.0
-    snow_present = snow_gm3 > 0.0
-    vt_snow = config.vt_snow_a * jnp.where(snow_present, snow_gm3, 1.0)**config.vt_snow_b * 1e-3  # m/s
-    
-    # Ice sedimentation: ECHAM mo_cloud.f90 lines 472-491 uses
-    # ``zxifall = cvtfall * (rho*xi)^0.16`` (Heymsfield-Donner content-
-    # dependent fall speed) PLUS an exponential-decay integral form
-    # ``zxised = xi*exp(-vt*dt/dz) + flux_in/(rho*vt)*(1-exp(...))`` so
-    # the per-timestep depletion is naturally bounded by ``1 - exp(-…)``,
-    # never the unbounded ``vt*dt/dz`` of the instantaneous form.
-    #
-    # The cloud harness flagged the prior implementation as ~3x too
-    # slow (fixed vt=0.1 m/s). After switching to the content-dependent
-    # vt but keeping the instantaneous rate formula, it became ~3x too
-    # fast (the linear rate overshoots for typical dt=1800s timesteps).
-    # Use the integral form for ice; keep the linear approximation for
-    # rain/snow which usually have shorter residence times than dt.
-    rho_qi = jnp.maximum(air_density * cloud_ice, config.epsilon)
-    vt_ice = config.cvtfall * rho_qi ** 0.16  # m/s, content-dependent
-
-    # Integral form: per-timestep depletion fraction = 1 - exp(-vt*dt/dz),
-    # converted back to a rate by dividing by dt.
-    zal1_ice = vt_ice * dt / jnp.maximum(layer_thickness, config.epsilon)
-    ice_sedi = cloud_ice * (1.0 - jnp.exp(-zal1_ice)) / jnp.maximum(dt, 1e-6)
-
-    rain_sedi = jnp.where(
-        rain_present,
-        rain_water * vt_rain / (layer_thickness + config.epsilon),
-        0.0,
-    )
-    snow_sedi = jnp.where(
-        snow_present,
-        snow * vt_snow / (layer_thickness + config.epsilon),
-        0.0,
-    )
-    
-    # Update tendencies
-    dqidt = dqidt - ice_sedi
-    dqrdt = dqrdt - rain_sedi
-    dqsdt = dqsdt - snow_sedi
-    
-    # Surface precipitation: column-integrated rain/snow production
-    # Following ECHAM mo_cloud.f90: zzdrr = zrpr * pmref / pdtime
-    # where pmref = air_density * layer_thickness (layer mass per unit area)
-    layer_mass = air_density * layer_thickness  # kg/m²
-
-    # Rain/snow production rates are already grid-mean kg/kg/s. The
-    # autoconversion/accretion helpers convert from in-cloud to grid-mean
-    # internally, and melt/freeze rates operate on grid-mean precip stores.
-    rain_prod = qc_auto + qc_accr + snow_melt
-    snow_prod = qi_auto + qi_aggr + qc_rime + rain_freeze
-
-    # Column-integrated surface flux (kg/m²/s)
-    precip_rain = jnp.sum(rain_prod * layer_mass)
-    precip_snow = jnp.sum(snow_prod * layer_mass)
-
-    rain_flux = rain_prod * layer_mass
-    snow_flux = snow_prod * layer_mass
-    
-    # Create output structures
-    tendencies = MicrophysicsTendencies(
-        dtedt=dtedt,
-        dqdt=dqdt,
-        dqcdt=dqcdt,
-        dqidt=dqidt,
-        dqrdt=dqrdt,
-        dqsdt=dqsdt
-    )
-    
-    state = MicrophysicsState(
-        rain_flux=rain_flux,
-        snow_flux=snow_flux,
-        qc_in_cloud=qc_in_cloud,
-        qi_in_cloud=qi_in_cloud,
-        autoconv_rate=qc_auto,
-        accretion_rate=qc_accr,
-        melting_rate=snow_melt,
-        freezing_rate=rain_freeze,
-        precip_rain=jnp.array(precip_rain),
-        precip_snow=jnp.array(precip_snow)
-    )
-
-    return tendencies, state
 
 
 def _saturation_adjustment_layer(
@@ -1101,7 +699,6 @@ def cloud_microphysics_column_sweep(
     * **Rain freezing** below ``cthomi`` and the **Bergeron-Findeisen**
       ice-from-supercooled-water process (covered by the 2M scheme).
 
-    Same signature as :func:`cloud_microphysics` so call sites can swap.
     """
     if config is None:
         config = MicrophysicsParameters.default()
@@ -1545,10 +1142,11 @@ class Echam1MMicrophysics(PhysicsTerm):
         layer_thickness = diagnostics["layer_thickness"]
         clouds = diagnostics["clouds"]
 
-        # Post-convection thermodynamic state (sequential convection→cloud
-        # coupling, same pattern as the 2M term / PR #539): convection has
-        # already advanced ``thermo_run`` with its heating/moistening and
-        # forwarded its detrained condensate into ``clouds.qc/qi``. The
+        # Post-(vdiff+convection) thermodynamic state (sequential
+        # vdiff→convection→cloud coupling, ECHAM physc order; same pattern
+        # as the 2M term / PR #539): the upstream vdiff and convection terms
+        # have already advanced ``thermo_run`` with their tendencies and
+        # convection forwarded its detrained condensate into ``clouds.qc/qi``. The
         # sweep's saturation balance and rain evaporation must see THAT
         # (T, q) — using the step-start state let the same supersaturation
         # be condensed by both convection and microphysics, and computed

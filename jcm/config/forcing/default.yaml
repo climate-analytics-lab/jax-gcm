@@ -14,3 +14,23 @@ ozone_file: null
 # path. Requires a JAM physics package with the emission term(s) enabled (e.g.
 # ``physics=echam-jam``). Null → no prescribed emissions.
 emissions_file: null
+
+# Optional seawater-DMS monthly climatology netCDF (HAMMOZ layout:
+# ``DMS_sea (time, lat, lon)`` in nmol/L, e.g.
+# ``emiss_fields_dms_sea_monthly_T63.nc``), already on the model horizontal
+# grid. Drives ``DmsEmissions`` (``physics=echam-jam``). Null → zero DMS
+# emission.
+dms_file: null
+
+# Optional dust-source/erodibility monthly climatology netCDF (HAMMOZ layout:
+# ``pot_source (time, lat, lon)`` in [0, 1], e.g.
+# ``dust_potential_sources_T63.nc``), already on the model horizontal grid.
+# Drives ``DustEmissions`` (``physics=echam-jam``). Null → zero dust emission.
+dust_file: null
+
+# Optional oxidant monthly climatology netCDF (HAMMOZ/MACC layout:
+# ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole on the model's
+# hybrid levels, e.g. ``ham_oxidants_monthly_T63L47_macc.nc`` with
+# ``grid=echam_t63_l47_hybrid``). Feeds ``PrescribedOxidants``
+# (``physics=echam-jam``); null → the analytic interim oxidant proxies.
+oxidants_file: null

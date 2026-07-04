@@ -36,25 +36,35 @@ def test_effective_radius_liquid():
     
 
 def test_effective_radius_ice():
-    """Test ice cloud effective radius calculation"""
-    nlev = 10
-    temperature = jnp.linspace(260.0, 200.0, nlev)
-    ice_water_content = jnp.ones(nlev) * 1e-4  # kg/m³
-    
-    r_eff = effective_radius_ice(temperature, ice_water_content)
-    
-    # Check shape
-    assert r_eff.shape == (nlev,)
-    
-    # Should be positive
-    assert jnp.all(r_eff > 0)
-    
-    # Should be reasonable values (10-100 microns)
-    assert jnp.all(r_eff > 5.0)
-    assert jnp.all(r_eff < 200.0)
-    
-    # Should have temperature dependence
-    assert not jnp.allclose(r_eff[0], r_eff[-1])
+    """Moss/Foot power law: r_eff = 83.8 * IWC^0.216 (in-cloud IWC, g/m3).
+
+    ECHAM mo_cloud_optics.f90:358 reference values.
+    """
+    # 0.01 g/m3 -> 83.8 * 0.01**0.216 ~ 31 um
+    r_mid = effective_radius_ice(jnp.array(0.01))
+    assert jnp.allclose(r_mid, 83.8 * 0.01**0.216, rtol=1e-6)
+    assert 30.0 < r_mid < 32.0
+
+    # Thin cirrus, 1e-4 g/m3 -> ~11.4 um (the fabricated T-ramp formula
+    # produced 40-160 um here, saturating the RRTMGP LUT edge).
+    r_thin = effective_radius_ice(jnp.array(1e-4))
+    assert jnp.allclose(r_thin, 83.8 * 1e-4**0.216, rtol=1e-6)
+    assert r_thin < 15.0
+
+    # Monotonically increasing with IWC, profile shape preserved
+    iwc = jnp.logspace(-5, 0, 10)
+    r_eff = effective_radius_ice(iwc)
+    assert r_eff.shape == (10,)
+    assert jnp.all(jnp.diff(r_eff) > 0)
+
+    # Zero-IWC guard: finite, positive value and a finite gradient
+    # (double-where around the x**0.216 singularity at x = 0).
+    import jax
+    r_zero, grad_zero = jax.value_and_grad(
+        lambda x: effective_radius_ice(x)
+    )(jnp.array(0.0))
+    assert jnp.isfinite(r_zero) and r_zero > 0
+    assert jnp.isfinite(grad_zero)
 
 
 def test_cloud_optics_integration():
@@ -71,12 +81,11 @@ def test_cloud_optics_integration():
     # Ice clouds in upper levels
     cloud_ice_path = cloud_ice_path.at[2:8].set(0.05)
     
-    temperature = jnp.linspace(288.0, 200.0, nlev)
-    
-    
+    layer_thickness = jnp.full(nlev, 500.0)  # m
+
     # Calculate cloud optics
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # Check output shapes - now using fixed bands
@@ -116,10 +125,10 @@ def test_cloud_optics_no_clouds():
     nlev = 10
     cloud_water_path = jnp.zeros(nlev)
     cloud_ice_path = jnp.zeros(nlev)
-    temperature = jnp.linspace(288.0, 220.0, nlev)
-    
+    layer_thickness = jnp.full(nlev, 500.0)
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # Should have zero optical depth everywhere
@@ -134,26 +143,26 @@ def test_cloud_optics_no_clouds():
 def test_cloud_optics_extreme_values():
     """Test cloud optics with extreme cloud water/ice paths"""
     nlev = 5
-    temperature = jnp.ones(nlev) * 260.0
-    
+    layer_thickness = jnp.full(nlev, 500.0)
+
     # Very small cloud water/ice
     cloud_water_path = jnp.ones(nlev) * 1e-8
     cloud_ice_path = jnp.ones(nlev) * 1e-8
-    
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
-    
+
     # Should handle small values without NaN
     assert not jnp.any(jnp.isnan(sw_optics.optical_depth))
     assert not jnp.any(jnp.isnan(lw_optics.optical_depth))
-    
+
     # Very large cloud water/ice
     cloud_water_path = jnp.ones(nlev) * 10.0  # Very thick clouds
     cloud_ice_path = jnp.ones(nlev) * 5.0
-    
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # Should handle large values
@@ -165,44 +174,46 @@ def test_cloud_optics_extreme_values():
     assert jnp.all(lw_optics.optical_depth[:, :3] > 0.1)
 
 
-def test_cloud_optics_temperature_dependence():
-    """Test temperature dependence of cloud properties"""
+def test_cloud_optics_iwc_dependence():
+    """Ice optics respond to in-cloud IWC via the Moss/Foot r_eff.
+
+    Same ice path spread over a thinner layer means higher in-cloud IWC,
+    hence larger crystals — the optical properties must differ.
+    """
     nlev = 10
-    cloud_water_path = jnp.ones(nlev) * 0.1
-    cloud_ice_path = jnp.zeros(nlev)
-    
-    # Warm temperatures
-    temp_warm = jnp.ones(nlev) * 290.0
-    sw_warm, lw_warm = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_warm, jnp.array(1.0)
+    cloud_water_path = jnp.zeros(nlev)
+    cloud_ice_path = jnp.ones(nlev) * 0.05
+
+    # Thick layers: low IWC, small crystals
+    sw_thick, lw_thick = cloud_optics(
+        cloud_water_path, cloud_ice_path, jnp.full(nlev, 2000.0),
+        jnp.array(1.0),
     )
-    
-    # Cold temperatures  
-    temp_cold = jnp.ones(nlev) * 230.0
-    sw_cold, lw_cold = cloud_optics(
-        cloud_water_path, cloud_ice_path, temp_cold, jnp.array(1.0)
+    # Thin layers: high IWC, large crystals
+    sw_thin, lw_thin = cloud_optics(
+        cloud_water_path, cloud_ice_path, jnp.full(nlev, 100.0),
+        jnp.array(1.0),
     )
-    
-    # Temperature should affect optical properties
-    # (Exact relationship depends on parameterization details)
-    assert sw_warm.optical_depth.shape == sw_cold.optical_depth.shape
-    assert lw_warm.optical_depth.shape == lw_cold.optical_depth.shape
-    
-    # Both should be valid
-    assert jnp.all(sw_warm.optical_depth >= 0)
-    assert jnp.all(sw_cold.optical_depth >= 0)
+
+    assert sw_thick.optical_depth.shape == sw_thin.optical_depth.shape
+    assert jnp.all(sw_thick.optical_depth >= 0)
+    assert jnp.all(sw_thin.optical_depth >= 0)
+    # The r_eff difference must actually reach the optics
+    assert not jnp.allclose(
+        sw_thick.optical_depth, sw_thin.optical_depth
+    )
 
 
 def test_cloud_optics_mixed_phase():
     """Test mixed-phase clouds (both water and ice)"""
-    temperature = jnp.array([288, 280, 270, 260, 250, 240, 230, 220])  # Mixed temp profile
-    
+    layer_thickness = jnp.full(8, 500.0)
+
     # Mixed phase: water and ice coexist
     cloud_water_path = jnp.array([0.0, 0.1, 0.2, 0.1, 0.05, 0.0, 0.0, 0.0])
     cloud_ice_path = jnp.array([0.0, 0.0, 0.05, 0.1, 0.15, 0.1, 0.05, 0.0])
-    
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # Total optical depth should be combination of water and ice
@@ -222,10 +233,10 @@ def test_cloud_optics_band_variations():
     nlev = 5
     cloud_water_path = jnp.ones(nlev) * 0.2
     cloud_ice_path = jnp.zeros(nlev)
-    temperature = jnp.ones(nlev) * 280.0
-    
+    layer_thickness = jnp.full(nlev, 500.0)
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # Should have variations across bands
@@ -252,10 +263,10 @@ def test_cloud_optics_scattering_properties():
     nlev = 5
     cloud_water_path = jnp.ones(nlev) * 0.2
     cloud_ice_path = jnp.ones(nlev) * 0.1
-    temperature = jnp.ones(nlev) * 260.0
-    
+    layer_thickness = jnp.full(nlev, 500.0)
+
     sw_optics, lw_optics = cloud_optics(
-        cloud_water_path, cloud_ice_path, temperature, jnp.array(1.0)
+        cloud_water_path, cloud_ice_path, layer_thickness, jnp.array(1.0)
     )
     
     # SW should have high single scattering albedo (clouds scatter well in visible) - only first 2 bands

@@ -251,8 +251,19 @@ class ForcingData:
     # thereof), read from the forcing file when present and ``None`` otherwise
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
     # dust emission is simply inert until the field is supplied.
-    dms_seawater: Any = None   # seawater DMS concentration (DmsEmissions)
+    dms_seawater: Any = None   # seawater DMS concentration kg/m³ (DmsEmissions)
     dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+
+    # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
+    # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
+    # mole-fraction fields on the **model levels**, each shaped
+    # ``(time, nlev, lon, lat)`` (see :func:`read_oxidant_vmr`).
+    # ``PrescribedOxidants`` converts VMR → molec cm⁻³ in-term, where the
+    # current T and p are available; kept as one dict-valued field (like
+    # ``anthropogenic_emissions``) so ``select(date)`` slices the per-species
+    # ``TimeSeries`` leaves like any other forcing leaf. ``None`` ⇒ the term
+    # keeps its analytic interim proxies.
+    oxidant_vmr: Any = None
 
     # Prescribed anthropogenic aerosol emissions (#498). A single mapping
     # ``{emis_<sector>_<species>: array | TimeSeries}`` of **bulk** per-super-
@@ -492,6 +503,7 @@ class ForcingData:
              nudging_target=_UNSET,
              dms_seawater=None,
              dust_source=None,
+             oxidant_vmr=None,
              anthropogenic_emissions=None,
              prescribed_aerosol_emissions=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
@@ -521,6 +533,7 @@ class ForcingData:
             ),
             dms_seawater=dms_seawater if dms_seawater is not None else self.dms_seawater,
             dust_source=dust_source if dust_source is not None else self.dust_source,
+            oxidant_vmr=oxidant_vmr if oxidant_vmr is not None else self.oxidant_vmr,
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
                 else self.anthropogenic_emissions
@@ -791,6 +804,233 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
             out[key] = make_time_series(arr, time_seconds, align_mode=mode)
         else:
             out[key] = jnp.asarray(da.values)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Natural-emission / oxidant climatology readers (HAMMOZ-style files)
+# ---------------------------------------------------------------------------
+
+# DMS molar mass [kg/mol] — same value as MAM4-JAX / the JAM gas registry
+# (``jcm.physics.aerosol.jam.gas_species.GAS_SPECIES['dms']``); duplicated here
+# as a plain constant so the core forcing module doesn't import physics.
+_DMS_MOLAR_MASS_KG = 0.0621324
+
+# nmol/L → kg/m³:  1 nmol/L = 1e-9 mol / 1e-3 m³ = 1e-6 mol/m³, × M_DMS.
+_NMOL_PER_L_TO_KG_M3 = 1.0e-6 * _DMS_MOLAR_MASS_KG
+
+# Unit strings accepted for the seawater DMS field. The Lana et al. (2011)
+# HAMMOZ file uses ``nanomol l-1``.
+_DMS_NMOL_UNITS = {"nanomol l-1", "nmol l-1", "nmol/l", "nanomol/l"}
+_DMS_KG_M3_UNITS = {"kg m-3", "kg/m3", "kg m^-3"}
+
+_LATLON_TOL_DEG = 1e-3
+
+
+def _orient_to_model_grid(da, lat_deg=None, lon_deg=None, name=""):
+    """Reorient a ``(..., lat, lon)`` DataArray to the model's ``(..., lon, lat)``.
+
+    The HAMMOZ/ECHAM climatology files store fields ``(time[, lev], lat, lon)``
+    with *descending* latitude (N→S), while the model's nodal layout is
+    ``(lon, lat)`` with dinosaur's *ascending* Gaussian latitudes (S→N). This
+    helper (a) validates the file's lat/lon values against the model's when
+    given (same N points but a flipped/shifted axis would otherwise wire the
+    field into the wrong columns silently — the same failure mode the ozone
+    loader guards against), flipping a descending latitude axis to match,
+    and (b) transposes so the trailing axes are ``(lon, lat)``, matching the
+    raveled-column order the physics terms use.
+
+    Returns a numpy array with dims ``(*others, lon, lat)`` where ``others``
+    preserves the file order of the remaining dims (e.g. ``time``, ``mlev``).
+    """
+    if "lat" not in da.dims or "lon" not in da.dims:
+        raise ValueError(
+            f"{name or da.name}: expected 'lat' and 'lon' dims, got {da.dims}."
+        )
+    file_lat = np.asarray(da["lat"].values, dtype=float)
+    if lat_deg is not None:
+        lat_deg = np.asarray(lat_deg, dtype=float)
+        if np.allclose(file_lat, lat_deg, atol=_LATLON_TOL_DEG):
+            pass
+        elif np.allclose(file_lat[::-1], lat_deg, atol=_LATLON_TOL_DEG):
+            # N→S file on a S→N model grid — flip to model orientation.
+            da = da.isel(lat=slice(None, None, -1))
+        else:
+            raise ValueError(
+                f"{name or da.name}: file latitudes "
+                f"[{file_lat[0]:.3f}..{file_lat[-1]:.3f}] match the model grid "
+                f"[{lat_deg[0]:.3f}..{lat_deg[-1]:.3f}] neither directly nor "
+                "flipped. Regrid the file onto the model Gaussian grid first."
+            )
+    elif file_lat.size > 1 and file_lat[0] > file_lat[-1]:
+        # No model grid to validate against (e.g. unit tests) — still
+        # normalise to ascending latitude, the model convention.
+        da = da.isel(lat=slice(None, None, -1))
+    if lon_deg is not None:
+        file_lon = np.mod(np.asarray(da["lon"].values, dtype=float), 360.0)
+        lon_deg = np.mod(np.asarray(lon_deg, dtype=float), 360.0)
+        if not np.allclose(file_lon, lon_deg, atol=_LATLON_TOL_DEG):
+            raise ValueError(
+                f"{name or da.name}: file longitudes "
+                f"[{file_lon[0]:.3f}..{file_lon[-1]:.3f}] don't match the "
+                f"model grid [{lon_deg[0]:.3f}..{lon_deg[-1]:.3f}]. Regrid "
+                "the file onto the model Gaussian grid first."
+            )
+    others = [d for d in da.dims if d not in ("lat", "lon")]
+    return np.asarray(da.transpose(*others, "lon", "lat").values)
+
+
+def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
+                      align_mode: str = "wrap_year"):
+    """Read a seawater-DMS climatology into a ``ForcingData.dms_seawater`` leaf.
+
+    Expects the HAMMOZ ``emiss_fields_dms_sea_monthly_T63.nc`` layout: a
+    ``DMS_sea (time, lat, lon)`` monthly climatology of the Lana et al. (2011)
+    surface-ocean DMS concentration in **nmol/L**. :class:`DmsEmissions`
+    multiplies the field directly by the piston velocity [m/s] and treats the
+    product as a mass flux [kg-DMS/m²/s], so the concentration is converted to
+    **kg-DMS/m³** here (1 nmol/L = 1e-6 mol/m³ × 0.0621324 kg/mol ≈
+    6.213e-8 kg/m³); a file already in ``kg m-3`` passes through. Any other
+    (or missing) ``units`` attribute raises rather than guessing — a wrong
+    unit would silently scale the global DMS source by ~1e7.
+
+    Returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries` shaped
+    ``(time, lon, lat)`` on the model orientation (see
+    :func:`_orient_to_model_grid`).
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"DMS file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}."
+        )
+    da = ds[var_name]
+    units = str(da.attrs.get("units", "")).strip().lower()
+    arr = _orient_to_model_grid(da, lat_deg, lon_deg, name=var_name)
+    # The HAMMOZ file marks land / no-data cells with ``_FillValue = 0``,
+    # which xarray decodes to NaN (~30% of cells). Missing seawater DMS means
+    # no emission, so map non-finite → 0 rather than let NaN reach the flux.
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    if units in _DMS_NMOL_UNITS:
+        arr = arr * _NMOL_PER_L_TO_KG_M3
+    elif units in _DMS_KG_M3_UNITS:
+        pass
+    else:
+        raise ValueError(
+            f"{var_name}: unrecognised units {units!r}; expected a seawater "
+            "concentration in 'nanomol l-1' (converted to kg/m³ here) or "
+            "'kg m-3'."
+        )
+    return make_time_series(
+        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+    )
+
+
+def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
+                     align_mode: str = "wrap_year"):
+    """Read a dust-source/erodibility climatology for ``ForcingData.dust_source``.
+
+    Expects the HAMMOZ ``dust_potential_sources_T63.nc`` layout: a
+    ``pot_source (time, lat, lon)`` monthly climatology of the Tegen (2002)
+    potential-dust-source fraction. :class:`DustEmissions`' contract is a
+    dimensionless erodibility in **[0, 1]**, so values are clipped — the file
+    encodes missing cells as ``-1`` (its ``missing`` attribute), which the
+    clip maps to zero (no source), and interpolation overshoot above 1 is
+    capped.
+
+    Returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries` shaped
+    ``(time, lon, lat)`` on the model orientation.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Dust-source file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}."
+        )
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    # Missing cells (NaN after decode, or the raw ``-1`` marker) mean "no dust
+    # source"; NaN would pass straight through ``clip``, so zero it first.
+    arr = np.clip(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    return make_time_series(
+        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+    )
+
+
+# Oxidant-file variable → ``ForcingData.oxidant_vmr`` key. The MACC/HAMMOZ
+# ``ham_oxidants_monthly_*.nc`` files also carry ``NO2_VMR_avrg``, which the
+# JAM sulfur chemistry doesn't consume — it is deliberately not read.
+_OXIDANT_VAR_MAP = {
+    "OH_VMR_avrg": "oh",
+    "NO3_VMR_avrg": "no3",
+    "O3_VMR_avrg": "o3",
+    "H2O2_VMR_avrg": "h2o2",
+}
+
+
+def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
+                     align_mode: str = "wrap_year"):
+    """Read a monthly oxidant climatology for ``ForcingData.oxidant_vmr``.
+
+    Expects the HAMMOZ/MACC ``ham_oxidants_monthly_T63L47_macc.nc`` layout:
+    ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole fractions
+    [mole/mole] on ECHAM hybrid model levels (``hyam``/``hybm``/``p0``
+    present), levels ordered **top→bottom** — the same ordering as the model
+    state (index ``-1`` = surface).
+
+    The fields are kept as **VMR** (not converted to molec cm⁻³): the number
+    density conversion needs the instantaneous T and p, which only the
+    :class:`~jcm.physics.aerosol.jam.chemistry.oxidants.PrescribedOxidants`
+    term has, so the conversion happens in-term. The vertical is mapped
+    **level-for-level** onto the model levels under the documented assumption
+    that the file is already on the model's hybrid grid (e.g. T63L47 with
+    ``grid=echam_t63_l47_hybrid``); ``nlev`` is asserted here, and
+    ``runners._attach_oxidants`` additionally cross-checks ``hyam``/``hybm``
+    against the model's hybrid coefficients. A bottom-up level axis
+    (decreasing ``hybm``) raises.
+
+    Returns ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` with values shaped
+    ``(time, nlev, lon, lat)`` on the model orientation, ``WRAP_YEAR`` by
+    default.
+    """
+    missing = [v for v in _OXIDANT_VAR_MAP if v not in ds.data_vars]
+    if missing:
+        raise ValueError(
+            f"Oxidant file is missing {missing}; expected all of "
+            f"{sorted(_OXIDANT_VAR_MAP)} (found "
+            f"{sorted(map(str, ds.data_vars))})."
+        )
+    # The level dim is whatever remains once time/lat/lon are accounted for
+    # (``mlev`` in the HAMMOZ files, ``lev`` elsewhere).
+    sample = ds[next(iter(_OXIDANT_VAR_MAP))]
+    lev_dims = [d for d in sample.dims if d not in ("time", "lat", "lon")]
+    if len(lev_dims) != 1:
+        raise ValueError(
+            f"Oxidant variables must be (time, lev, lat, lon); got dims "
+            f"{sample.dims}."
+        )
+    nlev_file = int(ds.sizes[lev_dims[0]])
+    if nlev_file != nlev:
+        raise ValueError(
+            f"Oxidant file has {nlev_file} levels but the model has {nlev}. "
+            "The file must already be on the model's hybrid levels (e.g. the "
+            "T63L47 file with grid=echam_t63_l47_hybrid) — no vertical "
+            "interpolation is done here."
+        )
+    if "hybm" in ds:
+        hybm = np.asarray(ds["hybm"].values, dtype=float)
+        if hybm.size > 1 and hybm[0] > hybm[-1]:
+            raise ValueError(
+                "Oxidant file levels are ordered bottom→top (hybm decreasing) "
+                "but the model expects top→bottom (surface last). Flip the "
+                "level axis of the file."
+            )
+    time_seconds = _time_axis_seconds_from_ds(ds)
+    mode = _resolve_align_mode(align_mode, ds)
+    out: dict[str, Any] = {}
+    for var, key in _OXIDANT_VAR_MAP.items():
+        arr = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        # Defensive: a fill-value cell decoded to NaN means "no data" — treat
+        # as zero oxidant rather than let NaN poison the sulfur chemistry.
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        out[key] = make_time_series(arr, time_seconds, align_mode=mode)
     return out
 
 

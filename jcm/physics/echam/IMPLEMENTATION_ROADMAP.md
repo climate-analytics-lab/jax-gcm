@@ -1,6 +1,6 @@
 # Composable Physics Refactor — Housekeeping
 
-Things to clean up *during or after* the scheme-named-terms refactor.
+Things to clean up *after* the scheme-named-terms refactor.
 Living tracker — checked off as commits land.
 
 ## What was here before
@@ -8,29 +8,23 @@ Living tracker — checked off as commits land.
 Replaced an out-of-date "ECHAM Physics Implementation Roadmap" (last
 updated 2025-12-09) that catalogued ICON-physics V1/V2/V3 release goals.
 Most items were either resolved, marked out-of-scope, or unrelated to
-the current composable refactor — see git history for the previous
-content.
+the composable refactor — see git history for the previous content.
 
-## In flight
+## Status
 
-The branch ``refactor/composable-physics-flatten`` is migrating each
-ECHAM ``apply_*`` wrapper into a scheme-named ``PhysicsTerm`` living
-next to its scheme. See
-[``docs/design/composable_physics.md``](../../../docs/design/composable_physics.md)
-for the design and migration phases. Bit-exact T31L8 + T21L8 regression
-must hold across every commit.
+The migration of every ECHAM ``apply_*`` wrapper into a scheme-named
+``PhysicsTerm`` is **complete** (Phases 0-7 below, landed 2026-05-07/08
+from ``refactor/composable-physics-flatten``). See
+[``docs/source/design/composable_physics.md``](../../../docs/source/design/composable_physics.md)
+for the design.
 
 ## Known follow-ups (not yet addressed)
 
 ### Docs and READMEs that still reference removed code
 
-- [ ] ``docs/source/echam_physics.rst`` mentions ``EchamHines``,
-      ``EchamSSO``, ``EchamSimpleGwd``. Rename to ``HinesGwd``,
-      ``LottMillerSso``, ``SimpleGwd``. Same file references the
-      legacy ``EchamRadiation`` / ``EchamRadiationRRTMGP`` /
-      ``EchamRadiationEmulated`` / ``EchamConvection`` /
-      ``EchamCloudsAndMicrophysics{,1M,2M}`` / ``EchamSurface`` /
-      ``EchamVerticalDiffusion`` etc. — sweep once Phase 3 is done.
+- [x] ``docs/source/echam_physics.rst`` legacy ``Echam*`` class names —
+      swept; the remaining ``Echam1MMicrophysics`` / ``EchamSurface``
+      references match real classes.
 
 - [ ] ``jcm/physics/aerosol/macv2_sp_README.md`` still shows the old
       ``get_simple_aerosol(state, physics_data, parameters, forcing,
@@ -40,17 +34,15 @@ must hold across every commit.
 - [ ] ``docs/echam_physics_perf_plan.md`` mentions
       ``apply_convection``, ``apply_clouds_and_microphysics``,
       ``apply_radiation`` and the apply_*-layer batching plan. Most of
-      its perf observations still apply but the function names will be
-      stale once their term migrations land — re-anchor the doc to the
-      scheme-named term classes after Phase 5.
+      its perf observations still apply but the function names are
+      stale — re-anchor the doc to the scheme-named term classes
+      (per-step status is annotated in the doc itself).
 
 - [x] ``REMAINING_ISSUES.md`` — deleted. All items it listed were already
       resolved in the tree except the TKE source-term question (VD-2),
       which is tracked by the FIXME in
       ``jcm/physics/vertical_diffusion/tte_tke/tke_budget.py`` (TKE
       source terms summed but transport handled by the matrix solver).
-
-### Smaller nits
 
 ## Done
 
@@ -90,28 +82,27 @@ must hold across every commit.
   any aggregator round-trip. Dead ``DiagnosticData`` and ``PhysicsData``
   structs gone with the file.
 
-## Tests skipped pending rewrite against new term classes
+## Test coverage deleted during the migration (rewrite candidates)
 
-- ``jcm/physics/echam/exchange_coupling_test.py`` — tested the
+These test artifacts were **deleted** with the code they exercised (they
+are not skipped — nothing references them any more). The behaviour is
+covered by the bit-exact regression tests; rewrite as per-term unit
+tests if finer-grained coverage is wanted:
+
+- ``jcm/physics/echam/exchange_coupling_test.py`` — the
   ``apply_vertical_diffusion`` ↔ ``apply_surface`` exchange-coefficient
-  flow. Now covered by the regression test; rewrite against
-  ``TteTkeVerticalDiffusion`` + ``EchamSurface`` for finer-grained
-  unit coverage.
-- ``jcm/physics/echam/surface_fraction_test.py`` — tested the
-  ``apply_surface`` tile-fraction logic. Logic now lives inline in
-  ``EchamSurface.__call__`` and is bit-exact-covered by the
-  regression test; rewrite as a per-term unit test.
+  flow; rewrite against ``TteTkeVerticalDiffusion`` + ``EchamSurface``.
+- ``jcm/physics/echam/surface_fraction_test.py`` — the ``apply_surface``
+  tile-fraction logic, now inline in ``EchamSurface.__call__``.
 - ``radiation/grey_two_stream/radiation_scheme_test.py::TestRadiationCaching``
-  — tested the removed ``_radiation_with_caching`` helper. The
-  replacement helpers (``radiation_should_compute`` /
-  ``cached_radiation_tendency``) are exercised through the
-  ``GreyTwoStreamRadiation`` / ``RRTMGPRadiation`` /
-  ``NNEmulatorRadiation`` term ``__call__`` paths.
-- ``clouds/sundqvist_test.py::TestAerosolPrecipitationCoupling`` —
-  tested the ``_cloud_and_microphysics_column`` helper, now folded
-  into ``Echam1MMicrophysics``.
+  — the removed ``_radiation_with_caching`` helper; the replacement
+  helpers (``radiation_should_compute`` / ``cached_radiation_tendency``)
+  are exercised through the radiation term ``__call__`` paths.
+- ``clouds/sundqvist_test.py::TestAerosolPrecipitationCoupling`` — the
+  ``_cloud_and_microphysics_column`` helper, now folded into
+  ``Echam1MMicrophysics``.
 - ``radiation/aerosol_radiation_test.py::test_aerosol_microphysics_droplet_coupling``
-  — tested ``apply_clouds_and_microphysics``; equivalent flow through
+  — ``apply_clouds_and_microphysics``; the equivalent flow through
   ``Macv2SpAerosol`` → ``Echam1MMicrophysics`` is regression-covered.
 
 ## Tests gated on a GPU

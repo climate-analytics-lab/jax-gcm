@@ -125,6 +125,33 @@ class JamOpticsTermTest(unittest.TestCase):
             self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
         self.assertTrue(np.all(np.isfinite(np.asarray(diag["aerosol_optical_depth"]))))
 
+    def test_empty_levels_carry_exactly_zero_tau(self):
+        """POSITIVE-side ringing: tiny +ve number with a garbage wet radius
+        must give EXACTLY zero tau where the mode has no mass. n*q_ext*
+        pi*r^2 was finite at empty levels, and the 1/dp amplification at
+        the 1 Pa model top produced 13,000 K/day of spurious SW
+        absorption — +90 K in 6 h and a global NaN by day 10 of the
+        first coupled JAM year. The mass gate (vol_tot > 1e-24 m3/kg)
+        pins tau to zero there.
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        aer = diagnostics["_jam_state"]
+        # Ringing-like state: tiny positive number, inflated wet radius,
+        # zero species mass everywhere.
+        diagnostics = {**diagnostics, "_jam_state": aer.copy(
+            number=jnp.full_like(aer.number, 1.0e-6),
+            r_wet=jnp.full_like(aer.r_wet, 5.0e-5),
+        )}
+        tracers = {k: (jnp.zeros_like(v) if k.startswith("m_") else v)
+                   for k, v in state.tracers.items()}
+        state = state.copy(tracers=tracers)
+
+        term = self._term(band)
+        _, diag = term(state, diagnostics, None, None)
+        a = diag["aerosol"]
+        self.assertEqual(float(jnp.max(jnp.abs(a.aod_sw_per_band))), 0.0)
+        self.assertEqual(float(jnp.max(jnp.abs(a.aod_lw_per_band))), 0.0)
+
     def test_more_aerosol_more_aod(self):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)

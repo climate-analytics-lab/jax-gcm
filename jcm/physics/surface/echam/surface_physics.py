@@ -345,56 +345,6 @@ def combine_surface_tendencies(
     )
 
 
-@jax.jit
-def update_surface_state(
-    surface_state: SurfaceState,
-    tendencies: SurfaceTendencies,
-    dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
-) -> SurfaceState:
-    """Update surface state using computed tendencies.
-    
-    Args:
-        surface_state: Current surface state
-        tendencies: Surface tendencies
-        dt: Time step [s]
-        params: Surface parameters
-        
-    Returns:
-        Updated surface state
-
-    """
-    # Update temperatures
-    new_surface_temp = surface_state.temperature + tendencies.surface_temp_tendency * dt
-    new_ocean_temp = surface_state.ocean_temp + tendencies.ocean_temp_tendency * dt
-    new_ice_temp = surface_state.ice_temp + tendencies.ice_temp_tendency * dt
-    new_soil_temp = surface_state.soil_temp + tendencies.soil_temp_tendency * dt
-    
-    # Update other prognostic variables
-    new_ice_thickness = surface_state.ice_thickness + tendencies.ice_thickness_tendency * dt
-    new_snow_depth = surface_state.snow_depth + tendencies.snow_depth_tendency * dt
-    new_soil_moisture = surface_state.soil_moisture + tendencies.soil_moisture_tendency * dt
-    
-    # Ensure physical bounds
-    new_ice_thickness = jnp.maximum(new_ice_thickness, 0.0)
-    new_snow_depth = jnp.maximum(new_snow_depth, 0.0)
-    new_soil_moisture = jnp.clip(new_soil_moisture, 0.0, 1.0)
-    
-    # Update radiative temperature
-    new_temp_rad = jnp.sum(surface_state.fraction * new_surface_temp, axis=1)
-    
-    return surface_state._replace(
-        temperature=new_surface_temp,
-        temperature_rad=new_temp_rad,
-        ocean_temp=new_ocean_temp,
-        ice_temp=new_ice_temp,
-        soil_temp=new_soil_temp,
-        ice_thickness=new_ice_thickness,
-        snow_depth=new_snow_depth,
-        soil_moisture=new_soil_moisture
-    )
-
-
 # ---------------------------------------------------------------------------
 # Composable physics term wrapper
 # ---------------------------------------------------------------------------

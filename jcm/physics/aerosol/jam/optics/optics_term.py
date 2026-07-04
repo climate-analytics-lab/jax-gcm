@@ -127,6 +127,7 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_n = vol_n + v * n_sp
                     vol_k = vol_k + v * k_sp
                     vol_tot = vol_tot + v
+                vol_dry = vol_tot
                 v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
                     r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
                 )
@@ -141,6 +142,22 @@ class JamOpticsTerm(PhysicsTerm):
                 x = 2.0 * math.pi * r_wet / lam_m
                 q_ext, ssa, g = interp_mie(self._lut, x, m_n, m_k)
                 aod_i = num_per_area[i] * q_ext * math.pi * r_wet ** 2
+                # Physical mass gate: tau is EXACTLY zero where the mode
+                # carries no material. The number floor above handles the
+                # NEGATIVE side of the cold-start Gibbs ringing, but the
+                # POSITIVE side pairs a tiny number with a garbage wet
+                # radius (r ~ (V/n)^(1/3) of two ringing fields), and
+                # n·q_ext·π·r² is then finite at EMPTY levels. At the
+                # 1 Pa model top the 1/Δp heating amplification turned
+                # that into 13,000 K/day of spurious SW absorption —
+                # +90 K in 6 h and a global NaN by day 10 of the first
+                # coupled JAM year. 1e-24 m³/kg (≈1e-21 kg/kg of aerosol)
+                # is radiatively nothing and far above ringing amplitudes.
+                # Gate on the DRY species volume: the hygroscopic water
+                # term n·(r_wet³−r_dry³) is itself ringing garbage when
+                # there is no dry aerosol to condense on, and it passes a
+                # total-volume gate on its own.
+                aod_i = jnp.where(vol_dry > 1.0e-24, aod_i, 0.0)
                 aod = aod + aod_i
                 scat = scat + ssa * aod_i
                 gscat = gscat + g * ssa * aod_i
