@@ -64,6 +64,15 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         )
         E = np.asarray(ph["surface"].evaporation).reshape(nsteps, -1)[:, 0]
 
+        # Since the surface exchange became the bottom boundary row of the
+        # vdiff implicit solve, the published evaporation IS the delivered
+        # flux (the ECHAM ``pev_vdiff`` identity), so the raw-vs-damped
+        # distinction is gone: evaporation == effective_evaporation.
+        E_eff = np.asarray(
+            ph["surface"].effective_evaporation,
+        ).reshape(nsteps, -1)[:, 0]
+        np.testing.assert_allclose(E_eff, E)
+
         col = (dq + dqc + dqi) @ mass  # (nsteps,)
         residual = col + P - E
         scale = np.maximum.reduce([np.abs(E), np.abs(P), np.abs(col), np.full_like(E, 1e-9)])

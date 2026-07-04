@@ -427,18 +427,20 @@ class TestConvectiveMixedLayerScm:
 
         The default surface-layer scheme is the faithful ECHAM-Louis form, whose
         unstable-regime heat exchange is more moderate (and more physical) than
-        the old Businger-Dyer ``(1-16Ri)^0.5`` enhancement: for this +8 K
-        air-sea contrast it produces ~28 W/m^2 of sensible heat flux (vs the
-        ~68 W/m^2 Businger-Dyer over-predicts), so the buoyantly-produced
-        convective TKE peaks around 0.024 m^2/s^2 rather than ~0.05. That is
-        still a clear convective signal — roughly 2x the 0.01 m^2/s^2 quiescent
-        floor — and the primary convective signatures asserted above (a
-        well-mixed deepening layer, an upward surface heat flux, near-surface
-        warming) all form. The threshold therefore distinguishes appreciable,
-        buoyancy-driven TKE from a collapse to the floor; it is deliberately not
-        pinned to the Businger-Dyer magnitude the earlier 0.05 value was tuned
-        to (that margin was only ~4%, and the dimensionally-correct surface
-        momentum coupling on this branch lowers even Businger-Dyer below 0.05).
+        the old Businger-Dyer ``(1-16Ri)^0.5`` enhancement. With the surface
+        exchange now solved as the bottom boundary row of the vdiff implicit
+        column solve (reported flux == delivered flux, no separate imp_heat
+        damping), this +8 K air-sea contrast delivers ~24 W/m^2 of sensible
+        heat flux (the pre-coupling *reported* value was ~28 W/m^2, but that
+        was the undamped bulk flux, of which only the imp_heat fraction ever
+        reached the column) and the buoyantly-produced convective TKE peaks
+        around 0.031 m^2/s^2. That is a clear convective signal — ~3x the
+        0.01 m^2/s^2 quiescent floor — and the primary convective signatures
+        asserted above (a well-mixed deepening layer, an upward surface heat
+        flux, near-surface warming) all form. The threshold distinguishes
+        appreciable, buoyancy-driven TKE from a collapse to the floor; it is
+        deliberately not pinned to the Businger-Dyer magnitude the earlier
+        0.05 value was tuned to.
         """
         r = _wangara_result()
         assert r["max_tke"] > 0.02, (

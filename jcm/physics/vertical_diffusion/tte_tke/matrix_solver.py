@@ -9,8 +9,14 @@ import jax.numpy as jnp
 
 import jcm.constants as c
 from .vertical_diffusion_types import (
-    VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies
+    VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies,
+    VDiffSurfaceFluxes,
 )
+
+
+def _surface_air_density(state: VDiffState) -> jnp.ndarray:
+    """ρ_s = p_half[K+1/2] / (Rd · T[K]) — surface air density (ncol,)."""
+    return state.pressure_half[:, -1] / (c.rd * state.temperature[:, -1])
 
 
 @jax.jit
@@ -21,7 +27,9 @@ def setup_matrix_system(
     exchange_coeff_heat: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
     dt: float,
-    tke_exchange_coeff: jnp.ndarray = None
+    tke_exchange_coeff: jnp.ndarray = None,
+    surface_exchange: tuple = None,
+    surface_target: tuple = None,
 ) -> VDiffMatrixSystem:
     """Set up the tridiagonal matrix system for vertical diffusion.
 
@@ -30,6 +38,26 @@ def setup_matrix_system(
     - where prefactor = rho / dz = p / (Tv * Rd * dz) at half levels
     - This gets divided by air_mass to give: K* / dm = dt * tpfac1 * K / dz²
 
+    Surface boundary condition (ECHAM-faithful Robin row)
+    -----------------------------------------------------
+    When ``surface_exchange``/``surface_target`` are given, the bulk surface
+    exchange enters the BOTTOM row of the momentum (u, v), heat (T) and
+    moisture (qv) matrices exactly as ECHAM's ``zcfh_sfc·zqdp`` does in the
+    Richtmyer–Morton bottom elimination (``mo_surface_ocean.f90:510-515``):
+
+        k_sfc = dt · tpfac1 · ρ_s · C_grid · recip_air_mass[:, K]
+        aa[:, K, diag, im] += k_sfc
+        rhs[:, K, ivar]    += tpfac2 · k_sfc · X_s_eff
+
+    with ``ρ_s = p_half[K+1/2]/(Rd·T_K)`` and ``C_grid`` the tile-collapsed
+    exchange *velocity* [m/s] (CH·|U| etc.). This is the same dimensionless
+    row entry as ECHAM's ``zcfh_sfc·zqdp = α·Δt·g·ρ_s·C/Δp_K``; the RHS
+    constant is divided by α because the solver works in ``bb = X̂/α`` units
+    (``X̂ = α·X_new + (1−α)·X_old``). The hydrometeor (qc/qi), TKE and
+    thv_var matrices get NO surface term — matching ECHAM's bottom
+    elimination 5.4, which handles only xl/xi with a zero surface
+    coefficient (``vdiff.f90:933-941``).
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
@@ -37,6 +65,14 @@ def setup_matrix_system(
         exchange_coeff_heat: Heat exchange coefficient [m²/s]
         exchange_coeff_moisture: Moisture exchange coefficient [m²/s]
         dt: Time step [s]
+        tke_exchange_coeff: TKE exchange coefficient [m²/s]
+        surface_exchange: Optional ``(C_m, C_h, C_q)`` grid-collapsed surface
+            exchange velocities [m/s], each (ncol,). ``None`` keeps the
+            legacy zero-flux (insulating, free-slip) bottom boundary.
+        surface_target: Optional ``(u_s, v_s, T_s_eff, q_s_eff)`` surface
+            target values, each (ncol,). ``T_s_eff`` must already include
+            the ``−φ_K/cpd`` dry-static-energy compensation (the solver
+            diffuses T, not s = cp·T + gz; see ``vertical_diffusion_column``).
 
     Returns:
         Matrix system ready for solution
@@ -124,6 +160,34 @@ def setup_matrix_system(
 
     # Setup right-hand side vectors
     rhs_vectors = setup_rhs_vectors(state, params)
+
+    # Surface Robin term on the bottom row (see docstring). Only u, v, T,
+    # qv couple to the surface; qc/qi/TKE/thv_var keep the zero-flux bottom.
+    if surface_exchange is not None:
+        c_mom, c_heat, c_moist = surface_exchange
+        u_s, v_s, t_s_eff, q_s_eff = surface_target
+
+        # k_sfc = dt·tpfac1·ρ_s·C_grid·recip_air_mass[K]; the moisture row
+        # uses the dry-air mass, matching its interior rows.
+        rho_s = _surface_air_density(state)
+        dt_tp1_rho = dt * params.tpfac1 * rho_s
+        k_sfc_mom = dt_tp1_rho * c_mom * recip_air_mass[:, -1]
+        k_sfc_heat = dt_tp1_rho * c_heat * recip_air_mass[:, -1]
+        k_sfc_moist = dt_tp1_rho * c_moist * recip_dry_air_mass[:, -1]
+
+        # Bottom diagonals: ECHAM's "+ zcfhw*zqdp" inside zdiscw
+        # (mo_surface_ocean.f90:510).
+        matrix_coeffs = matrix_coeffs.at[:, -1, 1, 0].add(k_sfc_mom)
+        matrix_coeffs = matrix_coeffs.at[:, -1, 1, 1].add(k_sfc_heat)
+        matrix_coeffs = matrix_coeffs.at[:, -1, 1, 2].add(k_sfc_moist)
+
+        # Bottom RHS: tpfac2·k_sfc·X_s — ECHAM's "+ zcfh_sfc·zqdp·X_s" term,
+        # divided by α because rhs is loaded in X_old/α (bb) units.
+        tpfac2 = params.tpfac2
+        rhs_vectors = rhs_vectors.at[:, -1, 0].add(tpfac2 * k_sfc_mom * u_s)
+        rhs_vectors = rhs_vectors.at[:, -1, 1].add(tpfac2 * k_sfc_mom * v_s)
+        rhs_vectors = rhs_vectors.at[:, -1, 2].add(tpfac2 * k_sfc_heat * t_s_eff)
+        rhs_vectors = rhs_vectors.at[:, -1, 3].add(tpfac2 * k_sfc_moist * q_s_eff)
 
     return VDiffMatrixSystem(
         matrix_coeffs=matrix_coeffs,
@@ -562,6 +626,64 @@ def compute_tendencies_from_solution(
 
 
 @jax.jit
+def diagnose_surface_fluxes(
+    solution: jnp.ndarray,
+    state: VDiffState,
+    params: VDiffParameters,
+    surface_exchange: tuple,
+    surface_target: tuple,
+) -> VDiffSurfaceFluxes:
+    """Diagnose the delivered surface fluxes from the implicit solution.
+
+    Port of ECHAM's post-solve flux diagnosis (``mo_surface_ocean.f90:
+    620-634``): the flux is evaluated at the α-weighted implicit bottom-level
+    value ``X̂_K = tpfac1·bb_K`` the solver itself used, so reported flux ==
+    delivered flux by construction:
+
+        E  = ρ_s·C_q·(q_s_eff − X̂_K)         [kg/m²/s, positive up]
+        SH = ρ_s·cpd·C_h·(T_s_eff − T̂_K)     [W/m²,   positive up]
+        LH = alhc·E
+        τ  = ρ_s·C_m·(Û_K − û_s)             [N/m², stress on the atmosphere]
+
+    Implementation note: the fluxes are written in the algebraically
+    equivalent form ``ρ_s·C·tpfac1·(tpfac2·X_s − bb_K)``. With ECHAM's exact
+    ``tpfac2 = 1/tpfac1`` this IS the formula above; with the port's rounded
+    defaults (0.667/0.333) this form is the one that keeps the ``pev_vdiff``
+    column-budget identity ``Σ_k dm_k·dX_k/dt == flux`` (``vdiff.f90:
+    1544-1551``) exact to round-off, because ``tpfac2·k_sfc·X_s`` is what the
+    bottom RHS actually carried into the solve.
+    """
+    c_mom, c_heat, c_moist = surface_exchange
+    u_s, v_s, t_s_eff, q_s_eff = surface_target
+
+    rho_s = _surface_air_density(state)
+    tp1 = params.tpfac1
+    tp2 = params.tpfac2
+
+    bb_u = solution[:, -1, 0]
+    bb_v = solution[:, -1, 1]
+    bb_t = solution[:, -1, 2]
+    bb_qv = solution[:, -1, 3]
+
+    evaporation = rho_s * c_moist * tp1 * (tp2 * q_s_eff - bb_qv)
+    sensible_heat = rho_s * c.cpd * c_heat * tp1 * (tp2 * t_s_eff - bb_t)
+    latent_heat = c.alhc * evaporation
+    # Stress the atmosphere exerts (positive with the wind); the delivered
+    # column momentum change is −τ (drag), matching the old surface-term
+    # convention of publishing τ = ρ·C_M·u and applying −τ/(ρ·dz).
+    stress_u = rho_s * c_mom * tp1 * (bb_u - tp2 * u_s)
+    stress_v = rho_s * c_mom * tp1 * (bb_v - tp2 * v_s)
+
+    return VDiffSurfaceFluxes(
+        evaporation=evaporation,
+        sensible_heat=sensible_heat,
+        latent_heat=latent_heat,
+        stress_u=stress_u,
+        stress_v=stress_v,
+    )
+
+
+@jax.jit
 def vertical_diffusion_step(
     state: VDiffState,
     params: VDiffParameters,
@@ -569,10 +691,12 @@ def vertical_diffusion_step(
     exchange_coeff_heat: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
     dt: float,
-    tke_exchange_coeff: jnp.ndarray = None
-) -> VDiffTendencies:
+    tke_exchange_coeff: jnp.ndarray = None,
+    surface_exchange: tuple = None,
+    surface_target: tuple = None,
+) -> tuple:
     """Perform one vertical diffusion time step.
-    
+
     Args:
         state: Atmospheric state
         params: Vertical diffusion parameters
@@ -580,31 +704,48 @@ def vertical_diffusion_step(
         exchange_coeff_heat: Heat exchange coefficient
         exchange_coeff_moisture: Moisture exchange coefficient
         dt: Time step [s]
-        
+        tke_exchange_coeff: TKE exchange coefficient
+        surface_exchange: Optional ``(C_m, C_h, C_q)`` surface exchange
+            velocities [m/s] — enables the ECHAM Robin bottom row (see
+            :func:`setup_matrix_system`). ``None`` keeps the legacy
+            zero-flux bottom boundary.
+        surface_target: Optional ``(u_s, v_s, T_s_eff, q_s_eff)`` targets.
+
     Returns:
-        Tendencies for all variables
+        ``(tendencies, surface_fluxes)`` — tendencies for all variables and
+        the delivered surface fluxes (zeros for the zero-flux boundary).
 
     """
     # Default TKE exchange coefficient if not provided
     if tke_exchange_coeff is None:
         tke_exchange_coeff = exchange_coeff_momentum
-    
+
     # Set up matrix system
     matrix_system = setup_matrix_system(
-        state, params, exchange_coeff_momentum, 
-        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
+        state, params, exchange_coeff_momentum,
+        exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff,
+        surface_exchange=surface_exchange, surface_target=surface_target,
     )
-    
+
     # Solve the system
     solution = solve_tridiagonal_system(
         matrix_system.matrix_coeffs,
         matrix_system.rhs_vectors,
         matrix_system.variable_to_matrix
     )
-    
+
     # Compute tendencies
     tendencies = compute_tendencies_from_solution(
         solution, state, params, dt
     )
-    
-    return tendencies
+
+    # Diagnose the delivered surface fluxes from the implicit solution
+    # (reported == delivered by construction; zero for the zero-flux BC).
+    if surface_exchange is not None:
+        surface_fluxes = diagnose_surface_fluxes(
+            solution, state, params, surface_exchange, surface_target,
+        )
+    else:
+        surface_fluxes = VDiffSurfaceFluxes.zeros(state.u.shape[0])
+
+    return tendencies, surface_fluxes

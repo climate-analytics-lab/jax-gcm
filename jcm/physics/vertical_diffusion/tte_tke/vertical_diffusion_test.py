@@ -236,51 +236,120 @@ class TestMatrixSolver:
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
-        
+
         # Create exchange coefficients
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         tke_exchange_coeff = jnp.ones((ncol, nlev)) * 5.0
         dt = 300.0
-        
+
         matrix_system = setup_matrix_system(
-            state, params, exchange_coeff_momentum, 
+            state, params, exchange_coeff_momentum,
             exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff
         )
-        
+
         # Check matrix dimensions
         nmatrix = 6
         nvar_total = 8  # u, v, T, qv, qc, qi, TKE, thv_var
         assert matrix_system.matrix_coeffs.shape == (ncol, nlev, 3, nmatrix)
         assert matrix_system.rhs_vectors.shape == (ncol, nlev, nvar_total)
         assert matrix_system.variable_to_matrix.shape == (nvar_total,)
-        
+
         # Check that diagonal elements are reasonable
         assert jnp.all(matrix_system.matrix_coeffs[:, :, 1, :] > 0)  # Diagonal > 0
-    
-    def test_vertical_diffusion_step_conservation(self):
-        """Test that vertical diffusion step conserves mass."""
+
+    def test_matrix_system_setup_surface_robin_row(self):
+        """The surface exchange enters the bottom row exactly as k_sfc.
+
+        With ``surface_exchange``/``surface_target`` given, the bottom
+        diagonal of the momentum/heat/moisture matrices must grow by
+        ``k_sfc = dt·tpfac1·ρ_s·C·recip_air_mass[K]`` and the bottom RHS by
+        ``tpfac2·k_sfc·X_s`` (ECHAM's ``zcfh_sfc·zqdp`` Robin row). The
+        hydrometeor/TKE/thv matrices must be untouched (no surface term,
+        matching ECHAM's bottom elimination 5.4 for xl/xi).
+        """
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
         params = VDiffParameters.default()
-        
+
+        k = jnp.ones((ncol, nlev)) * 8.0
+        dt = 300.0
+        c_m = jnp.array([0.02, 0.05])
+        c_h = jnp.array([0.03, 0.04])
+        c_q = jnp.array([0.01, 0.06])
+        u_s = jnp.zeros(ncol)
+        v_s = jnp.zeros(ncol)
+        t_s = jnp.array([290.0, 295.0])
+        q_s = jnp.array([0.012, 0.015])
+
+        base = setup_matrix_system(state, params, k, k, k, dt, k)
+        coupled = setup_matrix_system(
+            state, params, k, k, k, dt, k,
+            surface_exchange=(c_m, c_h, c_q),
+            surface_target=(u_s, v_s, t_s, q_s),
+        )
+
+        rho_s = state.pressure_half[:, -1] / (PHYS_CONST.rd * state.temperature[:, -1])
+        k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
+        k_sfc_h = dt * params.tpfac1 * rho_s * c_h / state.air_mass[:, -1]
+        k_sfc_q = dt * params.tpfac1 * rho_s * c_q / state.dry_air_mass[:, -1]
+
+        diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
+        assert jnp.allclose(diag_delta[:, 0], k_sfc_m, rtol=1e-4)
+        assert jnp.allclose(diag_delta[:, 1], k_sfc_h, rtol=1e-4)
+        assert jnp.allclose(diag_delta[:, 2], k_sfc_q, rtol=1e-4)
+        # No surface term for hydrometeors, TKE, thv_var.
+        assert jnp.allclose(diag_delta[:, 3:], 0.0)
+        # Only the bottom row changes.
+        assert jnp.allclose(
+            coupled.matrix_coeffs[:, :-1], base.matrix_coeffs[:, :-1],
+        )
+
+        rhs_delta = coupled.rhs_vectors[:, -1, :] - base.rhs_vectors[:, -1, :]
+        tp2 = params.tpfac2
+        assert jnp.allclose(rhs_delta[:, 0], tp2 * k_sfc_m * u_s, atol=1e-12)
+        assert jnp.allclose(rhs_delta[:, 1], tp2 * k_sfc_m * v_s, atol=1e-12)
+        assert jnp.allclose(rhs_delta[:, 2], tp2 * k_sfc_h * t_s, rtol=1e-4)
+        assert jnp.allclose(rhs_delta[:, 3], tp2 * k_sfc_q * q_s, rtol=1e-4)
+        assert jnp.allclose(rhs_delta[:, 4:], 0.0)
+
+    def test_vertical_diffusion_step_conservation(self):
+        """Test that vertical diffusion step conserves mass.
+
+        JUSTIFICATION (surface-coupling change): ``vertical_diffusion_step``
+        without ``surface_exchange``/``surface_target`` keeps the legacy
+        zero-flux bottom boundary, so the interior operator remains exactly
+        conservative — that invariant is what this test pins. With the
+        surface BC wired in (the default ``vertical_diffusion_column``
+        path), the correct invariant is instead ``Σ dm·dq/dt ==
+        E_delivered``, which is asserted by
+        ``TestSurfaceCoupledSolve.test_pev_vdiff_identity``.
+        """
+        ncol, nlev = 2, 5
+        state = create_test_atmospheric_state(ncol, nlev)
+        params = VDiffParameters.default()
+
         exchange_coeff_momentum = jnp.ones((ncol, nlev)) * 10.0
         exchange_coeff_heat = jnp.ones((ncol, nlev)) * 8.0
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         dt = 300.0
-        
-        tendencies = vertical_diffusion_step(
+
+        tendencies, surface_fluxes = vertical_diffusion_step(
             state, params, exchange_coeff_momentum,
             exchange_coeff_heat, exchange_coeff_moisture, dt
         )
-        
+
         # Check that tendencies are finite
         assert jnp.all(jnp.isfinite(tendencies.u_tendency))
         assert jnp.all(jnp.isfinite(tendencies.v_tendency))
         assert jnp.all(jnp.isfinite(tendencies.temperature_tendency))
         assert jnp.all(jnp.isfinite(tendencies.qv_tendency))
-        
+
+        # Zero-flux BC reports zero delivered surface fluxes.
+        assert jnp.allclose(surface_fluxes.evaporation, 0.0)
+        assert jnp.allclose(surface_fluxes.sensible_heat, 0.0)
+
         # Check mass conservation for moisture (integrated tendency should be ~0)
         # Note: In a simplified scheme without proper surface boundary conditions,
         # perfect conservation may not be achieved
@@ -776,6 +845,321 @@ class TestTKEStability:
             f"got ratio K(4·TKE)/K(TKE) = {ratio:.2f}. This is the "
             f"core of the TKE-runaway issue: without TKE feedback into "
             f"K, shear production grows as |S|³ instead of self-limiting."
+        )
+
+
+def _make_marine_bl_state(
+    ncol: int = 1,
+    nlev: int = 24,
+    sst_offset=8.0,
+    wind=40.0,
+    dz0: float = 55.0,
+    rh: float = 0.5,
+    tke0: float = 3.0,
+    bl_top: float = 1500.0,
+) -> VDiffState:
+    """Well-mixed marine boundary-layer column(s) for surface-coupling tests.
+
+    Geometrically stretched grid with a T63L47-like lowest layer (``dz0`` m),
+    neutral theta through the boundary layer (so the interior TTE mixing can
+    ventilate the lowest level), stable above, exponential moisture profile,
+    all-ocean tiles with the term's standard water roughness. ``sst_offset``
+    and ``wind`` may be scalars or per-column arrays of length ``ncol``.
+    """
+    import numpy as np
+
+    sst_offset = np.broadcast_to(np.asarray(sst_offset, float), (ncol,))
+    wind = np.broadcast_to(np.asarray(wind, float), (ncol,))
+
+    ratio = 1.18
+    dz = dz0 * ratio ** np.arange(nlev)
+    z_half_sf = np.concatenate([[0.0], np.cumsum(dz)])
+    z_full_sf = 0.5 * (z_half_sf[:-1] + z_half_sf[1:])
+    theta = np.where(
+        z_full_sf < bl_top, 295.0, 295.0 + 0.004 * (z_full_sf - bl_top),
+    )
+    grav = float(PHYS_CONST.grav)
+    rd = float(PHYS_CONST.rd)
+    cpd = float(PHYS_CONST.cpd)
+    p_half = np.zeros(nlev + 1)
+    p_half[0] = 1.0e5
+    for k in range(nlev):
+        t_k = theta[k] * (p_half[k] / 1e5) ** (rd / cpd)
+        rho = p_half[k] / (rd * t_k)
+        p_half[k + 1] = p_half[k] - rho * grav * (z_half_sf[k + 1] - z_half_sf[k])
+    p_full = 0.5 * (p_half[:-1] + p_half[1:])
+    t_full = theta * (p_full / 1e5) ** (rd / cpd)
+    qv = rh * np.exp(-z_full_sf / 3000.0) * 0.018
+
+    flip = lambda a: np.asarray(a)[::-1].copy()  # noqa: E731  surface-first -> top-first
+    col = lambda a: jnp.asarray(np.tile(flip(a), (ncol, 1)))  # noqa: E731
+
+    nsfc = 3
+    air_mass = jnp.abs(jnp.diff(col(p_half), axis=1)) / grav
+    qv_tf = col(qv)
+    sst = jnp.asarray(t_full[0] + sst_offset)
+
+    return VDiffState(
+        u=col(np.full(nlev, 1.0)) * jnp.asarray(wind)[:, None],
+        v=jnp.zeros((ncol, nlev)),
+        temperature=col(t_full),
+        qv=qv_tf,
+        qc=jnp.zeros((ncol, nlev)),
+        qi=jnp.zeros((ncol, nlev)),
+        pressure_full=col(p_full),
+        pressure_half=col(p_half),
+        geopotential=col(z_full_sf) * grav,
+        air_mass=air_mass,
+        dry_air_mass=air_mass * (1.0 - qv_tf),
+        surface_temperature=jnp.tile(sst[:, None], (1, nsfc)),
+        surface_fraction=jnp.zeros((ncol, nsfc)).at[:, 0].set(1.0),
+        roughness_length=jnp.full((ncol, nsfc), 1e-4),
+        roughness_heat=jnp.full((ncol, nsfc), 4.9e-5),
+        surface_wetness=jnp.ones((ncol, nsfc)),
+        height_full=col(z_full_sf),
+        height_half=col(z_half_sf),
+        tke=jnp.full((ncol, nlev), tke0),
+        thv_variance=jnp.zeros((ncol, nlev)),
+        ocean_u=jnp.zeros(ncol),
+        ocean_v=jnp.zeros(ncol),
+    )
+
+
+class TestSurfaceCoupledSolve:
+    """ECHAM-faithful surface coupling of the implicit column solve.
+
+    Pins the two contracts of the surface Robin boundary row:
+
+    1. The ``pev_vdiff`` identity (ECHAM ``vdiff.f90:1544-1551``): the
+       reported delivered flux equals the column-integrated vdiff tendency
+       exactly — reported == delivered by construction.
+    2. Fail-on-old: the delivered evaporation beats the old operator-split
+       single-layer path (``imp_moist × bulk``), which silently discarded
+       ~half the flux in strong-exchange conditions.
+    """
+
+    def _column_integrals(self, state, tendencies):
+        """(Σ dm_dry·dq/dt, Σ dm·cp·dT/dt, Σ dm·du/dt) per column."""
+        import numpy as np
+
+        col_q = np.sum(
+            np.asarray(state.dry_air_mass) * np.asarray(tendencies.qv_tendency),
+            axis=1,
+        )
+        col_t = float(PHYS_CONST.cpd) * np.sum(
+            np.asarray(state.air_mass)
+            * np.asarray(tendencies.temperature_tendency),
+            axis=1,
+        )
+        col_u = np.sum(
+            np.asarray(state.air_mass) * np.asarray(tendencies.u_tendency),
+            axis=1,
+        )
+        return col_q, col_t, col_u
+
+    def test_pev_vdiff_identity(self):
+        """Column integral of the vdiff qv tendency == E_delivered exactly.
+
+        This is ECHAM's ``pev_vdiff == pqhfla`` self-check: the delivered
+        flux is diagnosed from the same implicit bottom-level solution the
+        solver used, with the same ``tpfac2·k_sfc·X_s`` RHS constant, so the
+        column moisture budget closes to float32 round-off — no operator-
+        split loss factor exists anymore. Checked on a single column and on
+        a small batch with per-column wind/SST spread; the analogous heat
+        and momentum identities are asserted too (slightly looser: the
+        ``Σ dm·cp·dT`` sum carries more float32 cancellation).
+        """
+        import numpy as np
+
+        from .vertical_diffusion import vertical_diffusion_column
+
+        params = VDiffParameters.default()
+        dt = 900.0
+
+        # Single column.
+        state = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        tend, diag = vertical_diffusion_column(state, params, dt)
+        col_q, col_t, col_u = self._column_integrals(state, tend)
+        E = np.asarray(diag.surface_fluxes.evaporation)
+        SH = np.asarray(diag.surface_fluxes.sensible_heat)
+        tau = np.asarray(diag.surface_fluxes.stress_u)
+        assert E[0] > 1e-6, "vacuous test: no evaporation delivered"
+        np.testing.assert_allclose(col_q, E, rtol=1e-4)
+        np.testing.assert_allclose(col_t, SH, rtol=5e-3)
+        np.testing.assert_allclose(col_u, -tau, rtol=5e-3)
+
+        # Small batch, per-column conditions.
+        state_b = _make_marine_bl_state(
+            ncol=3,
+            sst_offset=np.array([2.0, 5.0, 8.0]),
+            wind=np.array([5.0, 12.0, 25.0]),
+        )
+        tend_b, diag_b = vertical_diffusion_column(state_b, params, dt)
+        col_qb, col_tb, col_ub = self._column_integrals(state_b, tend_b)
+        E_b = np.asarray(diag_b.surface_fluxes.evaporation)
+        assert np.all(E_b > 1e-7)
+        np.testing.assert_allclose(col_qb, E_b, rtol=1e-4)
+        np.testing.assert_allclose(
+            col_tb, np.asarray(diag_b.surface_fluxes.sensible_heat), rtol=5e-3,
+        )
+        np.testing.assert_allclose(
+            col_ub, -np.asarray(diag_b.surface_fluxes.stress_u), rtol=5e-3,
+        )
+
+    def test_delivered_evaporation_beats_old_single_layer_path(self):
+        """Fail-on-old: the coupled solve delivers what the old path halved.
+
+        A T63L47-like marine column (lowest layer ~55 m, hurricane-force
+        wind + unstable air-sea contrast so ``C_E ≈ 0.04 m/s``, dt = 1800 s,
+        so the old single-layer implicit factor ``1/(1+C·dt/dz) ≈ 0.44``)
+        run through the COMPOSED vdiff + surface term pair:
+
+        * delivered E (column-integrated qv tendency of the pair) must be
+          within 25% of the bulk flux ρ·C·(q_s − q̂) evaluated at the
+          IMPLICIT solution q̂ = q_old + tpfac1·dt·dq/dt|_K (it is equal by
+          construction — the tolerance only allows numerics and the tiny
+          tpfac2-rounding),
+        * and must exceed 1.6× what the old ``EchamSurface`` single-layer
+          delivery gave. The old expected value is hard-coded from its
+          formula — ``imp_moist·ρ·C_E·(q_sat(T_s) − q_old,K)`` with
+          ``imp_moist = 1/(1 + C_E·dt/max(dz_K, 50 m))`` (the deleted block
+          formerly at surface_physics.py:555-595) — NOT by re-running old
+          code. The gap is the desiccation bias: reported E used to be the
+          undamped bulk flux while the column only received imp_moist of it.
+        """
+        import numpy as np
+        from types import SimpleNamespace
+
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.forcing import ForcingData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        dt = 1800.0
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=8.0, wind=40.0)
+        nlev = vstate.u.shape[1]
+        ncols = 1
+
+        # (nlev, ncols) physics-state layout (level axis first, top first).
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u),
+            v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((ncols,)),
+            tracers={
+                "qc": jnp.zeros((nlev, ncols)),
+                "qi": jnp.zeros((nlev, ncols)),
+            },
+        )
+        sst = vstate.surface_temperature[:, 0]
+        surface_in = SurfaceData.zeros((ncols,), nlev).copy(
+            surface_temperature=sst,
+            roughness_length=jnp.full((ncols,), 1e-4),
+        )
+        vdiff_in = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            tke=jnp.full((nlev, ncols), 3.0),
+        )
+        diagnostics = {
+            "_dt_seconds": dt,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": surface_in,
+            "vertical_diffusion": vdiff_in,
+            "radiation": SimpleNamespace(
+                surface_sw_down=jnp.zeros(ncols),
+                surface_lw_down=jnp.zeros(ncols),
+            ),
+        }
+        terrain = TerrainData.single_column(fmask=0.0)  # all ocean
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.reshape(sst, (1, 1)),
+        )
+
+        vdiff_term = TteTkeVerticalDiffusion()
+        tend_v, diag1 = vdiff_term(state, diagnostics, forcing, terrain)
+        surface_term = EchamSurface()
+        tend_s, diag2 = surface_term(state, diag1, forcing, terrain)
+
+        # The surface term no longer injects tendencies — delivery is the
+        # vdiff solve alone.
+        assert float(jnp.max(jnp.abs(tend_s.specific_humidity))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.temperature))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.u_wind))) == 0.0
+        assert float(jnp.max(jnp.abs(tend_s.v_wind))) == 0.0
+
+        qv_tend = np.asarray(
+            tend_v.specific_humidity + tend_s.specific_humidity,
+        ).reshape(nlev, ncols)
+        dm_dry = np.asarray(vstate.dry_air_mass)[0][:, None]  # (nlev, 1)
+        E_delivered = float(np.sum(dm_dry * qv_tend))
+
+        surface_out = diag2["surface"]
+        E_published = float(np.asarray(surface_out.evaporation)[0])
+        # Published == delivered == effective (spec §4).
+        np.testing.assert_allclose(E_published, E_delivered, rtol=1e-4)
+        np.testing.assert_allclose(
+            np.asarray(surface_out.effective_evaporation),
+            np.asarray(surface_out.evaporation),
+        )
+
+        # Reconstruct the coupling inputs the solve used, from the published
+        # per-tile exchange velocities (all-ocean: wetness = 1).
+        vdiff_out = diag1["vertical_diffusion"]
+        frac = np.asarray(vstate.surface_fraction)
+        ce_t = np.asarray(vdiff_out.surface_exchange_moisture).reshape(
+            ncols, 3,
+        )
+        c_q = float(np.sum(frac * ce_t, axis=1)[0])
+        rho_s = float(
+            vstate.pressure_half[0, -1]
+            / (PHYS_CONST.rd * vstate.temperature[0, -1])
+        )
+        q_sat_s = float(saturation_specific_humidity(
+            vstate.pressure_half[0, -1], sst[0],
+        ))
+        q_old = float(vstate.qv[0, -1])
+
+        # C·dt/dz ≈ 1.3 here — the regime where the old path lost most.
+        dz_layer = float(vstate.air_mass[0, -1]) / rho_s
+        assert c_q * dt / dz_layer > 1.0, (
+            f"test column too weakly coupled: C·dt/dz = {c_q * dt / dz_layer:.2f}"
+        )
+
+        # (a) Delivered E within 25% of the bulk flux at the IMPLICIT
+        # solution q̂_K = q_old + tpfac1·dt·(dq/dt)_K.
+        tpfac1 = 1.5
+        q_hat = q_old + tpfac1 * dt * float(qv_tend[-1, 0])
+        bulk_at_implicit = rho_s * c_q * (q_sat_s - q_hat)
+        assert abs(E_delivered - bulk_at_implicit) <= 0.25 * abs(bulk_at_implicit), (
+            f"delivered E={E_delivered:.3e} vs bulk-at-implicit "
+            f"{bulk_at_implicit:.3e}"
+        )
+
+        # (b) Old single-layer delivery, from its formula (hard-coded, not
+        # re-run): imp_moist·ρ·C_E·(q_sat − q_old) with the 50 m dz clamp.
+        dz_sfc = max(dz_layer, 50.0)
+        imp_moist = 1.0 / (1.0 + c_q * dt / dz_sfc)
+        E_old_delivered = (
+            imp_moist * rho_s * c_q * (q_sat_s - q_old)
+            * min(dz_layer / dz_sfc, 1.0)
+        )
+        assert imp_moist < 0.55, (
+            f"column not in the strong-damping regime: imp={imp_moist:.2f}"
+        )
+        ratio = E_delivered / E_old_delivered
+        assert ratio > 1.6, (
+            f"coupled delivery must beat the old imp_moist path by >1.6x, "
+            f"got {ratio:.2f} (E={E_delivered:.3e}, old={E_old_delivered:.3e}, "
+            f"imp={imp_moist:.2f})"
         )
 
 
