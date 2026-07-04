@@ -378,7 +378,7 @@ def radiation_scheme(
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
         cloud_water_path=in_cloud_lwp,
         cloud_ice_path=in_cloud_ipath,
-        temperature=temperature,
+        layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
     )
     zero_optics_sw = OpticalProperties(

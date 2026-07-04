@@ -215,14 +215,35 @@ def prepare_rrtmgp_data(
     cdnc_factor: jnp.ndarray,
     surface_temperature: jnp.ndarray,
     land_fraction: float = 0.5,
+    r_eff_liq_um: Optional[jnp.ndarray] = None,
+    r_eff_ice_um: Optional[jnp.ndarray] = None,
 ) -> dict:
     """Convert ICON RadiationState to RRTMGP input dict.
 
     Handles vertical ordering, halo padding, stretched-grid mapping,
     water-variable conversions, and cloud effective radii.
+
+    Args:
+        icon_data: RadiationState with TOA-first profiles.
+        layer_thickness: geometric layer thickness (m), TOA-first.
+        cdnc_factor: aerosol CDNC scaling for the liquid r_eff fallback.
+        surface_temperature: scalar surface temperature (K).
+        land_fraction: land fraction for the liquid r_eff fallback.
+        r_eff_liq_um: optional microphysical liquid effective radius (um),
+            TOA-first (nlev,). Entries <= 0 mean "not provided" and fall
+            back to the diagnostic ``effective_radius_liquid``.
+        r_eff_ice_um: optional microphysical ice effective radius (um),
+            TOA-first (nlev,). Entries <= 0 fall back to the Moss/Foot
+            in-cloud-IWC formula (``effective_radius_ice``).
+
     """
     nlev = icon_data.temperature.shape[0]
     halo = 1
+
+    if r_eff_liq_um is None:
+        r_eff_liq_um = jnp.zeros((nlev,))
+    if r_eff_ice_um is None:
+        r_eff_ice_um = jnp.zeros((nlev,))
 
     to3d_nan = lambda a: _to_3d_with_nan_halo(a, nlev, halo)  # noqa: E731
     to3d_fill = lambda a: _to_3d_with_filled_halo(a, nlev, halo)  # noqa: E731
@@ -247,6 +268,8 @@ def prepare_rrtmgp_data(
     dp_top = interfaces_1d[-2] - interfaces_1d[-1]
     cwp_1d = lax.cond(needs_reversal, flip, identity, icon_data.cloud_water_path)
     cip_1d = lax.cond(needs_reversal, flip, identity, icon_data.cloud_ice_path)
+    r_eff_liq_um = lax.cond(needs_reversal, flip, identity, r_eff_liq_um)
+    r_eff_ice_um = lax.cond(needs_reversal, flip, identity, r_eff_ice_um)
 
     # Stretched-grid mapping for non-uniform vertical coordinates
     layer_thickness_3d = to3d_fill(layer_thickness)
@@ -265,22 +288,27 @@ def prepare_rrtmgp_data(
     h2o_mass_mixing = lax.cond(needs_reversal, flip, identity, h2o_mass_mixing)
     total_water = h2o_mass_mixing + total_condensate
 
-    # Cloud effective radii (ICON parameterisations, microns -> metres)
-    r_eff_liq = effective_radius_liquid(cdnc_factor, land_fraction)
-    r_eff_ice = effective_radius_ice(
-        temperature_1d,
-        cip_1d / jnp.maximum(1.0, cwp_1d + cip_1d),
+    # Cloud effective radii (microns -> metres). Microphysical values from
+    # the clouds carry (ECHAM preffl/preffi, written by the 2M scheme) take
+    # precedence where provided (> 0); otherwise fall back to the diagnostic
+    # parameterisations. The ice fallback is ECHAM's Moss/Foot power law on
+    # the IN-CLOUD ice water content in g/m3 — ``cip_1d`` is already the
+    # in-cloud ice water path per layer (kg/m2; the caller divides the
+    # grid-mean condensate by cloud fraction before building the state), so
+    # IWC = path / dz with a kg -> g conversion and NO further cf division.
+    # The jax-rrtmgp library clips both radii to its LUT bounds internally
+    # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
+    # here.
+    fallback_liq = jnp.broadcast_to(
+        jnp.asarray(effective_radius_liquid(cdnc_factor, land_fraction)),
+        (nlev,),
     )
-    if jnp.asarray(r_eff_liq).ndim == 0:
-        cloud_r_eff_liq = jnp.full((nlev,), r_eff_liq) * 1e-6
-    else:
-        r_liq_1d = jnp.asarray(r_eff_liq).reshape(-1)
-        cloud_r_eff_liq = (
-            jnp.full((nlev,), r_liq_1d[0])
-            if r_liq_1d.shape[0] != nlev
-            else r_liq_1d
-        ) * 1e-6
-    cloud_r_eff_ice = jnp.asarray(r_eff_ice).reshape(-1) * 1e-6
+    iwc_gm3 = cip_1d / jnp.maximum(layer_thickness, 1.0) * 1e3
+    fallback_ice = effective_radius_ice(iwc_gm3)
+    r_eff_liq = jnp.where(r_eff_liq_um > 0.0, r_eff_liq_um, fallback_liq)
+    r_eff_ice = jnp.where(r_eff_ice_um > 0.0, r_eff_ice_um, fallback_ice)
+    cloud_r_eff_liq = r_eff_liq * 1e-6
+    cloud_r_eff_ice = r_eff_ice * 1e-6
 
     return {
         "rho_xxc": to3d_fill(rho),
@@ -437,6 +465,8 @@ def radiation_scheme_rrtmgp(
     co2_vmr: Optional[jnp.ndarray] = None,
     ch4_vmr: Optional[jnp.ndarray] = None,
     n2o_vmr: Optional[jnp.ndarray] = None,
+    r_eff_liq_um: Optional[jnp.ndarray] = None,
+    r_eff_ice_um: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -466,6 +496,11 @@ def radiation_scheme_rrtmgp(
         compute_cre: if True, run an additional clear-sky RRTMGP call
             and populate ``toa_{sw,lw}_up_clear`` on the returned
             ``RadiationData``.
+        r_eff_liq_um / r_eff_ice_um: optional microphysical effective
+            radii (um, TOA-first (nlev,)) from the clouds carry (ECHAM
+            preffl/preffi written by the 2M scheme; lagged one step by the
+            carry). Levels <= 0 mean "not provided" and use the diagnostic
+            fallbacks in ``prepare_rrtmgp_data``.
 
     """
     # CDNC factor from aerosol data
@@ -599,6 +634,7 @@ def radiation_scheme_rrtmgp(
 
     rrtmgp_input = prepare_rrtmgp_data(
         icon_state, layer_thickness, cdnc_factor, surface_temperature,
+        r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
     )
     # The broadcast q_liq / q_ice are shadowed by the per-gpoint
     # arrays inside the g-point loop, so set them to zero. The clear-
@@ -903,6 +939,13 @@ class RRTMGPRadiation(PhysicsTerm):
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
         )
+        # Microphysical effective radii from the clouds carry (ECHAM
+        # preffl/preffi, written by the 2M microphysics; zero = not
+        # provided, e.g. 1M or cold start). Lagged one step by the carry,
+        # like the rest of the radiation's cloud inputs.
+        clouds_in = diagnostics["clouds"]
+        r_eff_liq_um = clouds_in.r_eff_liq.reshape(nlev, ncols)
+        r_eff_ice_um = clouds_in.r_eff_ice.reshape(nlev, ncols)
 
         # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):
         #   O3, CH4  <- the chemistry diagnostic (O3 analytic/climatology; CH4
@@ -987,6 +1030,8 @@ class RRTMGPRadiation(PhysicsTerm):
             co2_vmr=lev_to_col(jnp.broadcast_to(co2_vmr, (nlev, ncols))),
             ch4_vmr=lev_to_col(jnp.broadcast_to(ch4_vmr, (nlev, ncols))),
             n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
+            r_eff_liq_um=lev_to_col(r_eff_liq_um),
+            r_eff_ice_um=lev_to_col(r_eff_ice_um),
         )
 
         # We tried a day/night split here (solve the dark ~half LW-only, skip
@@ -1004,6 +1049,7 @@ class RRTMGPRadiation(PhysicsTerm):
                 None, 0,
                 0, None, None, None,  # col_index, model_step, base_seed, cre
                 0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
+                0, 0,                # r_eff_liq_um, r_eff_ice_um
             ),
             out_axes=(0, 0),
         )(
@@ -1017,6 +1063,7 @@ class RRTMGPRadiation(PhysicsTerm):
             params, cols["aerosol"], cols["column_indices"],
             model_step, base_seed, compute_cre,
             cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
+            cols["r_eff_liq_um"], cols["r_eff_ice_um"],
         )
 
         # Per-gpoint flux profiles are summed over g-points inside the

@@ -102,6 +102,112 @@ class TestRRTMGPTermCacheCoords:
         assert float(jnp.max(jnp.abs(lats))) <= 90.0 + 1e-3
 
 
+class TestRRTMGPEffectiveRadii:
+    """Effective-radius handling in the RRTMGP input prep (finding 2.36).
+
+    The ice fallback must be ECHAM's Moss/Foot power law on the in-cloud
+    IWC in g/m3 — thin cirrus gets small crystals — and microphysical
+    radii from the clouds carry (2M preffl/preffi) must override the
+    fallbacks where provided.
+    """
+
+    K_CIRRUS = 1  # TOA-first index of the cirrus layer
+
+    def _make_state(self, nlev=8, dz=5000.0, iwc_gm3=1e-4):
+        """In-cloud-condensate RadiationState with one thin cirrus layer."""
+        import jcm.constants as c
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+            prepare_radiation_state,
+        )
+
+        pressure_levels = jnp.linspace(10000.0, 90000.0, nlev)  # TOA-first
+        pressure_interfaces = jnp.linspace(5000.0, 95000.0, nlev + 1)
+        temperature = jnp.full(nlev, 250.0)
+        air_density = pressure_levels / (c.rd * temperature)
+        layer_thickness = jnp.full(nlev, dz)
+        # In-cloud mixing ratio giving exactly ``iwc_gm3`` of in-cloud ice
+        # (the rrtmgp caller hands prepare_radiation_state in-cloud values).
+        cloud_ice = jnp.zeros(nlev).at[self.K_CIRRUS].set(
+            iwc_gm3 * 1e-3 / air_density[self.K_CIRRUS]
+        )
+        state = prepare_radiation_state(
+            temperature=temperature,
+            specific_humidity=jnp.full(nlev, 1e-4),
+            pressure_levels=pressure_levels,
+            pressure_interfaces=pressure_interfaces,
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=jnp.zeros(nlev),
+            cloud_ice=cloud_ice,
+            cloud_fraction=jnp.zeros(nlev).at[self.K_CIRRUS].set(0.3),
+            cos_zenith=jnp.array(0.5),
+        )
+        return state, layer_thickness
+
+    @staticmethod
+    def _r_eff_um(rrtmgp_input, key, nlev):
+        """Interior r_eff profile (um), flipped back to TOA-first."""
+        interior = rrtmgp_input[key][0, 0, 1:-1]
+        assert interior.shape == (nlev,)
+        return interior[::-1] * 1e6
+
+    def test_thin_cirrus_gets_small_crystals(self):
+        """IWC = 1e-4 g/m3 must give r_eff_ice ~ 11.4 um through the prep.
+
+        The previous fabricated formula (T-ramp x clip(path-ratio*1e4))
+        yielded ~40-160 um here, saturating the LUT edge for thin cirrus.
+        """
+        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
+
+        nlev = 8
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+        )
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        expected = 83.8 * 1e-4 ** 0.216  # ~11.46 um (ECHAM Moss/Foot)
+        assert float(r_ice[self.K_CIRRUS]) < 15.0
+        assert np.isclose(float(r_ice[self.K_CIRRUS]), expected, rtol=1e-4)
+
+        # Denser cirrus: 0.01 g/m3 -> ~31 um
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-2)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+        )
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        assert np.isclose(
+            float(r_ice[self.K_CIRRUS]), 83.8 * 1e-2 ** 0.216, rtol=1e-4,
+        )
+
+    def test_provided_microphysical_radii_override_fallback(self):
+        """Clouds-carry radii (> 0) win; zeros keep the diagnostic fallback."""
+        from jcm.physics.radiation.cloud_optics import (
+            effective_radius_liquid,
+        )
+        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
+
+        nlev = 8
+        k = self.K_CIRRUS
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
+        r_eff_liq_um = jnp.zeros(nlev).at[k + 2].set(9.5)
+        r_eff_ice_um = jnp.zeros(nlev).at[k].set(25.0)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
+        )
+        r_liq = self._r_eff_um(out, "cloud_r_eff_liq", nlev)
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        # Provided values pass through (um)
+        assert np.isclose(float(r_ice[k]), 25.0, rtol=1e-5)
+        assert np.isclose(float(r_liq[k + 2]), 9.5, rtol=1e-5)
+        # Unprovided levels fall back to the diagnostics
+        fallback_liq = float(effective_radius_liquid(jnp.array(1.0), 0.5))
+        assert np.isclose(float(r_liq[k]), fallback_liq, rtol=1e-5)
+        assert np.isclose(
+            float(r_ice[k + 1]), 83.8, rtol=1e-4,
+        )  # zero-IWC guard value
+
+
 class TestRRTMGPScheme:
     """Test the RRTMGP radiation scheme produces valid outputs."""
 
