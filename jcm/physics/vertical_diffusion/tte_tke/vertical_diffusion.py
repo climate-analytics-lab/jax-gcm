@@ -600,7 +600,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # for ice (saline freezing point, ECHAM iniphy.f90:71), stl_am
         # for land.
         surface_in = diagnostics["surface"]
-        sst_col = surface_in.surface_temperature.reshape(ncols)
+        # Water-tile temperature straight from the SST FORCING, not the
+        # blended ``surface.surface_temperature`` (which is snapped to
+        # one-or-the-other in mixed coastal cells — with fmask > 0.5 the
+        # residual ocean fraction would exchange with the LAND
+        # temperature through the new Robin delivery row, corrupting
+        # coastal fluxes; Codex review on #555). Same per-tile sources
+        # as EchamSurface's rebuild.
+        sst_col = forcing.sea_surface_temperature.reshape(ncols)
         land_temp_col = forcing.stl_am.reshape(ncols)
         ctfreez = 271.38
         ice_temp_col = jnp.where(
