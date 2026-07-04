@@ -92,7 +92,11 @@ def initialize_convection(temperature: jnp.ndarray,
     mfd = jnp.zeros_like(temperature)
     
     # Initialize convection diagnostics
-    ktype = jnp.array(0)  # No convection initially
+    # int32 EXPLICITLY: under jax x64 (the JAM configuration) a bare
+    # jnp.array(0) is int64, and the activation lax.cond then sees
+    # int64 (inactive state) vs int32 (active branch) ktype — a
+    # trace-time branch-type mismatch.
+    ktype = jnp.array(0, dtype=jnp.int32)  # No convection initially
     kbase = jnp.array(nlev - 1)  # Surface level
     ktop = jnp.array(0)   # Top level
     
@@ -873,7 +877,8 @@ def tiedtke_nordeng_convection(
             td=downdraft_state.td, qd=downdraft_state.qd,
             ud=u_wind, vd=v_wind,  # Simplified
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
-            ktype=jnp.array(conv_type), kbase=jnp.array(cloud_base),
+            ktype=jnp.asarray(conv_type, dtype=jnp.int32),
+            kbase=jnp.array(cloud_base),
             ktop=actual_ktop, prate=enhanced_tendencies.precip_conv,
         )
         
