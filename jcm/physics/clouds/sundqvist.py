@@ -675,8 +675,14 @@ class SundqvistCloudFraction(PhysicsTerm):
 
         pressure_full = diagnostics["pressure_full"]
         surface_pressure = diagnostics["surface_pressure"]
-        qc = state.tracers.get("qc", jnp.zeros_like(state.temperature))
-        qi = state.tracers.get("qi", jnp.zeros_like(state.temperature))
+        # Post-vdiff condensate from the sequential thermo_run view when
+        # available (the ECHAM ordering runs vertical diffusion first);
+        # step-start tracers as the fallback.
+        tr = diagnostics.get("thermo_run") or {}
+        qc = tr.get("qc", state.tracers.get(
+            "qc", jnp.zeros_like(state.temperature)))
+        qi = tr.get("qi", state.tracers.get(
+            "qi", jnp.zeros_like(state.temperature)))
 
         # Cloud fraction is purely diagnostic: ``cc = 1 - sqrt(1 - b0)``
         # with ``b0 = (RH - RH_crit) / (1 - RH_crit)``. Vmap over columns

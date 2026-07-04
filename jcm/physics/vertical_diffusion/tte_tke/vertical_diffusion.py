@@ -751,6 +751,10 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             dt,
             d_temperature=temp_tend,
             d_specific_humidity=qv_tend,
+            # Condensate view too: downstream cloud terms must see the
+            # DIFFUSED qc/qi, not the step-start tracers (Codex review).
+            d_qc=qc_tend,
+            d_qi=qi_tend,
         )
 
         return tendency, {**diagnostics, "vertical_diffusion": vdiff_out}
