@@ -929,16 +929,21 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
                      align_mode: str = "wrap_year"):
     """Read a dust-source/erodibility climatology for ``ForcingData.dust_source``.
 
-    Expects the HAMMOZ ``dust_potential_sources_T63.nc`` layout: a
-    ``pot_source (time, lat, lon)`` monthly climatology of the Tegen (2002)
-    potential-dust-source fraction. :class:`DustEmissions`' contract is a
-    dimensionless erodibility in **[0, 1]**, so values are clipped — the file
-    encodes missing cells as ``-1`` (its ``missing`` attribute), which the
-    clip maps to zero (no source), and interpolation overshoot above 1 is
-    capped.
+    Handles both layouts :class:`DustEmissions` accepts:
 
-    Returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries` shaped
-    ``(time, lon, lat)`` on the model orientation.
+    * The HAMMOZ ``dust_potential_sources_T63.nc`` monthly climatology,
+      ``pot_source (time, lat, lon)`` (Tegen 2002 potential-dust-source
+      fraction) — returned as a monthly ``WRAP_YEAR`` :class:`TimeSeries`
+      shaped ``(time, lon, lat)``.
+    * A **static** potential-source / erodibility map with no time axis,
+      ``pot_source (lat, lon)`` — returned as a bare ``(lon, lat)`` array.
+      ``ForcingData.select`` passes non-``TimeSeries`` leaves through
+      untouched, so the same field reaches ``DustEmissions`` every step.
+
+    :class:`DustEmissions`' contract is a dimensionless erodibility in
+    **[0, 1]**, so values are clipped — the file encodes missing cells as
+    ``-1`` (its ``missing`` attribute), which the clip maps to zero (no
+    source), and interpolation overshoot above 1 is capped.
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -949,6 +954,11 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     # Missing cells (NaN after decode, or the raw ``-1`` marker) mean "no dust
     # source"; NaN would pass straight through ``clip``, so zero it first.
     arr = np.clip(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    if "time" not in ds[var_name].dims:
+        # Static (lat, lon) map → bare (lon, lat) array. No time axis to
+        # build a TimeSeries from, and DustEmissions reads a 2-D field
+        # directly.
+        return jnp.asarray(arr)
     return make_time_series(
         arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )

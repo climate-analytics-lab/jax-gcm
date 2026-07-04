@@ -970,6 +970,36 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
+    def test_dust_reader_accepts_static_lat_lon_map(self):
+        # A time-invariant potential-source / erodibility map has no `time`
+        # axis. DustEmissions reads a bare 2-D field, so the reader must
+        # return a static (lon, lat) array rather than demanding a monthly
+        # axis (which raised KeyError: 'time' on such maps).
+        import xarray as xr
+        from jcm.forcing import TimeSeries, read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, 0] = -1.0    # missing marker → 0
+        vals[1, 1] = 1.5     # overshoot → 1
+        vals[2, 2] = 0.7
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals, {"units": "1."})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        out = read_dust_source(
+            ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON
+        )
+        # Static field: a bare array, NOT a TimeSeries (select() would then
+        # pass it through unchanged every step).
+        self.assertNotIsInstance(out, TimeSeries)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
+        # Same clip semantics as the monthly path (lat flips: file idx i →
+        # ascending idx 3 - i).
+        self.assertEqual(arr[0, 3], 0.0)
+        self.assertEqual(arr[1, 2], 1.0)
+        self.assertAlmostEqual(float(arr[2, 1]), 0.7)
+
     def _oxidant_ds(self, nlev=5, hybm=None, drop=None):
         import xarray as xr
         shape = (12, nlev, self.NLAT, self.NLON)
