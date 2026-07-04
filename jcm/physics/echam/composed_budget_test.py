@@ -25,15 +25,6 @@ import jcm.constants as c
 
 @pytest.mark.slow
 class TestComposedColumnWaterClosure(unittest.TestCase):
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Composed budget opens by ~P at every precipitating step "
-               "(closes to ~1% when P=0): the convection→cloud detrained-"
-               "condensate forwarding double-counts against the tracer "
-               "state — issue #553. The per-scheme ledgers each close "
-               "(#550, PR5); this test pins the composed target and flips "
-               "to passing with the coupling fix.",
-    )
     def test_full_echam_step_water_budget(self):
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
