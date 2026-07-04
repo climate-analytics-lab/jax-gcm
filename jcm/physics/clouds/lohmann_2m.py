@@ -1009,6 +1009,27 @@ def mixed_phase_deposition_and_corrections(
     deposition_rate = deposition_rate + dep_increment
 
     # -------------------------------------------------------------------------
+    # 12b. Koop homogeneous-freezing floor (interim toward #552).
+    # Below cthomi, vapor above the Koop et al. (2000) homogeneous
+    # nucleation threshold S_crit(T) = 2.349 − T/259 CANNOT persist —
+    # solution droplets freeze explosively on a timescale of seconds.
+    # The full Kaercher-Lohmann scheme (#552) resolves the competition
+    # for that vapor; until it lands, the excess above S_crit deposits
+    # within the step. Without this floor, cells in the (~20 K too cold)
+    # winter stratosphere accumulate S_ice well beyond 2 faster than
+    # ICNC-limited depositional growth can consume it, and the latent-
+    # heat spike when the state finally collapses NaN'd the coupled
+    # T63L47 runs three times (days 30/90/110). Rides the deposition
+    # ledger, so water/enthalpy bookkeeping is exact by construction.
+    scrit_koop = 2.349 - temperature_tmp / 259.0
+    koop_excess = jnp.where(
+        jnp.logical_and(lo2, temperature_tmp < params.cthomi),
+        jnp.maximum(specific_humidity_tmp - scrit_koop * qsat_tmp, 0.0),
+        0.0,
+    )
+    deposition_rate = deposition_rate + koop_excess
+
+    # -------------------------------------------------------------------------
     # 13. Condensation increment (liquid cloud cases, lo2=False)
     # -------------------------------------------------------------------------
     ll6_liq = jnp.logical_and(~lo2, ll2)

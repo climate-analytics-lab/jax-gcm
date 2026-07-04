@@ -1298,6 +1298,44 @@ class TestColumnWaterConservation2M:
             f"(column dq {dq_diag:.3e} kg/m2/s)"
         )
 
+    def test_koop_homogeneous_freezing_floor(self):
+        """Vapor above the Koop threshold cannot survive a step (#552 interim).
+
+        Third year-run killer: in the (cold-biased) winter stratosphere,
+        S_ice grew past 2 faster than ICNC-limited deposition consumed
+        it, ending in a latent-heat NaN near day 110. Homogeneous
+        nucleation physics forbids that state: above S_crit(T) =
+        2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
+        seconds. One microphysics step must bring S_ice at 190 K from
+        1.74 to at/below the threshold, with bounded latent heating.
+        """
+        import numpy as np
+        import jcm.constants as c
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        nlev = 4
+        T = jnp.full(nlev, 190.2)
+        p = jnp.linspace(3000.0, 4500.0, nlev)
+        rho = p / (287.0 * T)
+        esi = 610.78 * np.exp(21.875 * (190.2 - 273.15) / (190.2 - 7.66))
+        qsi = c.eps * esi / np.asarray(p)
+        q = jnp.asarray(1.74 * qsi)
+        qi = jnp.full(nlev, 1.5e-4)
+        tend, _, _ = cloud_microphysics_2m(
+            T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev), jnp.full(nlev, 0.287), rho,
+            jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev), 720.0, CloudParams2M.default(),
+        )
+        s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
+        scrit = 2.349 - 190.2 / 259.0
+        assert float(np.max(s_after)) <= scrit + 0.02, (
+            f"S_ice {s_after} not pulled to the Koop threshold {scrit:.3f}"
+        )
+        # Latent heating from the burst stays small (q is tiny at 190 K).
+        assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
+
     def test_supercooled_stratus_rains(self):
         """Warm-rain coalescence must drain supercooled liquid decks.
 
