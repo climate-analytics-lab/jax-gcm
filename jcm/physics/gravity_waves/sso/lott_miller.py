@@ -99,6 +99,32 @@ _MIN_BV_FREQ = 1.0e-4       # security floor on B-V frequency (gssec)
 _MIN_ANISOTROPY = 1.0e-5    # security floor on anisotropy / stress (gtsec)
 _MIN_LOW_LEVEL_WIND = 0.10  # security floor on low-level wind (gvsec)
 
+# Security floor on the sub-grid orography standard deviation [m]. The whole
+# SSO computation divides by orography statistics (``pstd``, and ``zoro`` /
+# ``pdmod`` derived from them), which are exactly zero over flat terrain
+# (ocean, aquaplanet). The drag there is legitimately zero, but ``x / 0``
+# still produces an ``inf`` cotangent in reverse mode that a downstream mask
+# cannot clean (``0·inf = nan``) — the multi-step reverse-mode NaN of issue
+# #558. Flooring these denominators leaves the forward drag unchanged
+# (numerator orography factors are also zero there) while keeping every VJP
+# finite.
+_MIN_OROG_STD = 1.0e-6      # [m]
+
+
+def _safe_denom(x, floor):
+    """Floor ``|x|`` at ``floor`` (sign-preserving) for use as a divisor.
+
+    Keeps ``x / _safe_denom(x, ...)`` finite in both the forward and — the
+    point here — the reverse pass, where an unfloored ``1/x`` at ``x → 0``
+    gives a NaN cotangent (issue #558). Inert wherever ``|x|`` already
+    exceeds ``floor``.
+    """
+    return jnp.where(
+        jnp.abs(x) < floor,
+        jnp.where(x < 0.0, -floor, floor),
+        x,
+    )
+
 
 @tree_math.struct
 class SSOParameters:
@@ -348,7 +374,7 @@ def _orosetup(
     pstab = pstab.at[nlev].set(pstab_sfc)
     prho = prho.at[nlev].set(prho_sfc)
 
-    znorm = jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2), _MIN_LOW_LEVEL_WIND)
+    znorm = jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2, _MIN_LOW_LEVEL_WIND ** 2))
     pvph_sfc = znorm
 
     # ----- Anisotropy & wave-stress orientation (lines 802-819) -------------
@@ -360,7 +386,7 @@ def _orosetup(
     zc = 0.48 * pgam_safe + 0.30 * pgam_safe ** 2
     pd1 = zb - (zb - zc) * jnp.sin(psi_sfc) ** 2
     pd2 = (zb - zc) * jnp.sin(psi_sfc) * jnp.cos(psi_sfc)
-    pdmod = jnp.sqrt(pd1 ** 2 + pd2 ** 2)
+    pdmod = jnp.sqrt(jnp.maximum(pd1 ** 2 + pd2 ** 2, 1.0e-30))
 
     # ----- Project flow into wave-stress plane (lines 824-837) --------------
     zvt1 = pulow * pum1 + pvlow * pvm1     # (nlev,)
@@ -413,9 +439,9 @@ def _orosetup(
         pnu_prev, kkenvh = carry
         active = k >= kknu
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _MIN_LOW_LEVEL_WIND))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
+                                               _MIN_LOW_LEVEL_WIND ** 2)))
+        zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
         zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
         zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
@@ -437,9 +463,9 @@ def _orosetup(
     def cum_kkcrith_step(carry, k):
         znup_prev, kkcrith = carry
         zwind_dotted = ((pulow * pum1[k] + pvlow * pvm1[k])
-                        / jnp.maximum(jnp.sqrt(pulow ** 2 + pvlow ** 2),
-                                      _MIN_LOW_LEVEL_WIND))
-        zwind = jnp.maximum(jnp.sqrt(zwind_dotted ** 2), _MIN_LOW_LEVEL_WIND)
+                        / jnp.sqrt(jnp.maximum(pulow ** 2 + pvlow ** 2,
+                                               _MIN_LOW_LEVEL_WIND ** 2)))
+        zwind = jnp.sqrt(jnp.maximum(zwind_dotted ** 2, _MIN_LOW_LEVEL_WIND ** 2))
         zstabm = jnp.sqrt(jnp.maximum(pstab[k], _MIN_BV_FREQ))
         zstabp = jnp.sqrt(jnp.maximum(pstab[k + 1], _MIN_BV_FREQ))
         zrhom = prho[k]
@@ -475,7 +501,7 @@ def _orosetup(
     # initial 0.
     kkenvh_safe = jnp.maximum(kkenvh, 1)
     denom = phgeo[kkenvh_safe] - phgeo[nlev - 1]
-    pzdep_raw = (phgeo[kkenvh_safe - 1] - phgeo) / denom
+    pzdep_raw = (phgeo[kkenvh_safe - 1] - phgeo) / _safe_denom(denom, 1.0)
     levmask_dep = ((jnp.arange(nlev) >= kkenvh)
                    & (kkenvh != nlev - 1)
                    & (jnp.arange(nlev) >= ilevh_idx))
@@ -500,15 +526,16 @@ def _gwstress(pstd, psig, ppic, pval, prho_sfc, pstab_sfc, pvph_sfc,
               pdmod, kkenvh, gkdrag, nlev):
     """Compute the surface gravity-wave stress (lines 1042-1063)."""
     # Effective mountain height above blocked flow.
+    pstab_sfc_safe = jnp.maximum(pstab_sfc, _MIN_BV_FREQ)
     zeff_full = ppic - pval
     zeff_blocked = jnp.minimum(
-        _CRITICAL_FROUDE * pvph_sfc / jnp.sqrt(pstab_sfc),
+        _CRITICAL_FROUDE * pvph_sfc / jnp.sqrt(pstab_sfc_safe),
         zeff_full,
     )
     zeff = jnp.where(kkenvh < nlev - 1, zeff_blocked, zeff_full)
     ptau0 = (gkdrag * prho_sfc
-             * psig * pdmod / 4.0 / pstd
-             * pvph_sfc * jnp.sqrt(pstab_sfc)
+             * psig * pdmod / 4.0 / _safe_denom(pstd, _MIN_OROG_STD)
+             * pvph_sfc * jnp.sqrt(pstab_sfc_safe)
              * zeff ** 2)
     return ptau0
 
@@ -524,7 +551,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     Returns ``ptau`` of length ``nlev+1``.
     """
     # zoro per column (line 1141)
-    zoro = psig * pdmod / 4.0 / pstd
+    zoro = psig * pdmod / 4.0 / _safe_denom(pstd, _MIN_OROG_STD)
 
     # Initial ztau (line 1142-1143): ztau[nlev] = ptau0; ztau[kkcrith] = grahilo*ptau0.
     # Then loop 430 fills ptau for jk = klev+1..2 (1-based, descending) =
@@ -536,6 +563,21 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     paphm1_sfc = paphm1[nlev]
     paphm1_kc = paphm1[kkcrith]
     zdelpt = paphm1_kc - paphm1_sfc
+    # Floor the interpolation-depth denominator (sign-preserving). When the
+    # critical level coincides with the surface — ``kkcrith == nlev``, the
+    # normal case over flat terrain where the base flux ``ptau0`` is zero —
+    # ``zdelpt`` is exactly 0. The ``where`` below then discards ``interp`` (no
+    # half-level satisfies ``h > kkcrith``), so the forward stays finite, but
+    # ``x / 0 = inf`` inside ``interp`` still produces a NaN cotangent in
+    # reverse mode that the masking ``where`` cannot clean (``0·inf = nan``) —
+    # NaN-ing gradients through the whole model past the first step (issue
+    # #558). Real interpolation depths are ≫ 1 Pa, so this is inert wherever
+    # the branch is actually taken.
+    zdelpt = jnp.where(
+        jnp.abs(zdelpt) < 1.0,
+        jnp.where(zdelpt < 0.0, -1.0, 1.0),
+        zdelpt,
+    )
     h = jnp.arange(nlev + 1)
     interp = (ptau0
               + (paphm1 - paphm1_sfc) / zdelpt * (_TRAPPED_WAVE_FRAC * ptau0 - ptau0))
@@ -559,8 +601,9 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     def sat_step(carry, h):
         ptau = carry
         # h goes nlev, nlev-1, ..., 1
-        znorm = prho[h] * jnp.sqrt(pstab[h]) * pvph[h]
-        zdz2 = ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ) / zoro
+        znorm = prho[h] * jnp.sqrt(jnp.maximum(pstab[h], _MIN_BV_FREQ)) * pvph[h]
+        zdz2 = (ptau[h] / jnp.maximum(znorm, _MIN_BV_FREQ)
+                / _safe_denom(zoro, _MIN_ANISOTROPY))
 
         # Saturation only for h < kkcrith
         active = h < kkcrith
@@ -568,7 +611,8 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
         zero_branch = (ptau[h + 1] < _MIN_ANISOTROPY) | (h <= kcrit)
         # Else: compute zriw and possibly cap ptau.
         zsqr = jnp.sqrt(jnp.maximum(pri[h], 1e-30))
-        zalfa = jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0)) / pvph[h]
+        zalfa = (jnp.sqrt(jnp.maximum(pstab[h] * zdz2, 0.0))
+                 / _safe_denom(pvph[h], _MIN_LOW_LEVEL_WIND))
         zriw = pri[h] * (1.0 - zalfa) / (1.0 + zalfa * zsqr) ** 2
         zdel = 4.0 / zsqr / _CRITICAL_RICHARDSON + 1.0 / _CRITICAL_RICHARDSON ** 2 + 4.0 / _CRITICAL_RICHARDSON
         zb = 1.0 / _CRITICAL_RICHARDSON + 2.0 / zsqr
@@ -597,7 +641,7 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
     ztau_top = ptau_after_sat[ntop - 1]   # ntop-1 = 0-based equivalent
     ztau_sfc = ptau_after_sat[nlev]
     interp2 = (ztau_sfc
-               + (paphm1 - paphm1[nlev]) / (paphm1[kkcrith] - paphm1[nlev])
+               + (paphm1 - paphm1[nlev]) / _safe_denom(paphm1[kkcrith] - paphm1[nlev], 1.0)
                * (ztau_kc - ztau_sfc))
     full_idx = jnp.arange(nlev + 1)
     ptau_final = jnp.where(
@@ -643,12 +687,17 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     # Wave-drag tendencies (lines 401-436)
     # ztemp[jk] = -(ptau[jk+1]-ptau[jk]) / (pvph_sfc * pmair[jk]) per FULL level jk
     # In 0-based full-level indexing: jk=0..nlev-1 reads ptau[jk] and ptau[jk+1]
-    ztemp = -(ptau[1:] - ptau[:-1]) / (pvph_sfc * pmair)
-    zdudt_wave = (pulow * pd1 - pvlow * pd2) * ztemp / pdmod
-    zdvdt_wave = (pvlow * pd1 + pulow * pd2) * ztemp / pdmod
-    # Overshoot guard (line 423-429)
-    zforc = jnp.sqrt(zdudt_wave ** 2 + zdvdt_wave ** 2)
-    ztend = jnp.sqrt(pum1 ** 2 + pvm1 ** 2) / pdtime
+    ztemp = -(ptau[1:] - ptau[:-1]) / (
+        _safe_denom(pvph_sfc, _MIN_LOW_LEVEL_WIND) * pmair)
+    pdmod_safe = _safe_denom(pdmod, _MIN_ANISOTROPY)
+    zdudt_wave = (pulow * pd1 - pvlow * pd2) * ztemp / pdmod_safe
+    zdvdt_wave = (pvlow * pd1 + pulow * pd2) * ztemp / pdmod_safe
+    # Overshoot guard (line 423-429). Floor the sum-of-squares INSIDE the
+    # sqrt: at the (common) zero-wind / zero-drag state ``sqrt(0)`` has an
+    # infinite derivative, so ``sqrt(u²+v²)`` — even where a downstream
+    # ``maximum`` or ``where`` masks it — leaves a NaN cotangent (issue #558).
+    zforc = jnp.sqrt(jnp.maximum(zdudt_wave ** 2 + zdvdt_wave ** 2, 1.0e-30))
+    ztend = jnp.sqrt(jnp.maximum(pum1 ** 2 + pvm1 ** 2, 1.0e-30)) / pdtime
     rover = 0.25
     factor = jnp.where(zforc >= rover * ztend,
                        rover * ztend / jnp.maximum(zforc, 1e-30),
@@ -664,8 +713,8 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     # Blocked-flow drag (lines 442-477) — replaces zdudt/zdvdt where active
     zb = 1.0 - 0.18 * pgam_safe - 0.04 * pgam_safe ** 2
     zc = 0.48 * pgam_safe + 0.30 * pgam_safe ** 2
-    zconb = 2.0 * pdtime * gkwake * psig / (4.0 * pstd)
-    zabsv = jnp.sqrt(pum1 ** 2 + pvm1 ** 2) / 2.0
+    zconb = 2.0 * pdtime * gkwake * psig / (4.0 * _safe_denom(pstd, _MIN_OROG_STD))
+    zabsv = jnp.sqrt(jnp.maximum(pum1 ** 2 + pvm1 ** 2, 1.0e-30)) / 2.0
     cos_psi = jnp.cos(ppsi_full)
     sin_psi = jnp.sin(ppsi_full)
     zzd1 = zb * cos_psi ** 2 + zc * sin_psi ** 2
@@ -685,7 +734,7 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     zdis_pre = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust ** 2 - zvst ** 2)
     # If zdis < 0: rescale tendencies so KE conserved.
     safe_denom = jnp.maximum(zust ** 2 + zvst ** 2, 1e-30)
-    zred = jnp.sqrt((pum1 ** 2 + pvm1 ** 2) / safe_denom)
+    zred = jnp.sqrt(jnp.maximum((pum1 ** 2 + pvm1 ** 2) / safe_denom, 1.0e-30))
     zust_corr = zust * zred
     zvst_corr = zvst * zred
     new_du = (zust_corr - pum1) / pdtime

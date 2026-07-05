@@ -398,8 +398,14 @@ def compute_friction_velocity(
         Friction velocity [m/s] (ncol,)
 
     """
-    momentum_flux_magnitude = jnp.sqrt(momentum_flux_u**2 + momentum_flux_v**2)
-    friction_velocity = jnp.sqrt(momentum_flux_magnitude / air_density)
+    # Floor the sum-of-squares inside the sqrt: at a zero-wind / zero-flux
+    # state (e.g. the balanced isothermal start) ``sqrt(0)`` has an infinite
+    # derivative, which poisons the reverse pass with a NaN cotangent even
+    # though a downstream ``maximum`` masks the forward value (issue #558).
+    momentum_flux_magnitude = jnp.sqrt(
+        jnp.maximum(momentum_flux_u**2 + momentum_flux_v**2, 1.0e-30))
+    friction_velocity = jnp.sqrt(
+        jnp.maximum(momentum_flux_magnitude / air_density, 1.0e-30))
     
     return jnp.maximum(friction_velocity, 0.01)  # Minimum value
 
@@ -446,7 +452,8 @@ def compute_turbulence_diagnostics(
     # JIT, hence cond rather than a Python ``if``.
     from .surface_layer import compute_surface_exchange_coefficients_echam_louis
 
-    wind_speed_surface = jnp.sqrt(state.u[:, -1]**2 + state.v[:, -1]**2)
+    wind_speed_surface = jnp.sqrt(
+        jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
     surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum = (
         jax.lax.cond(
             params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,

@@ -317,7 +317,7 @@ def calculate_updraft(
             org_profile = jnp.maximum(jnp.tan(tan_arg), 0.0)
             # Normalize: peak value of tan(pi/2 * 0.75 - pi/4) is bounded
             # Scale strength with cloud depth
-            detr_strength = 0.003 * jnp.sqrt(cloud_depth / 10.0)
+            detr_strength = 0.003 * jnp.sqrt(jnp.maximum(cloud_depth / 10.0, 1.0e-30))
             detr_org = w_deep_in * detr_strength * org_profile
 
             detr = detr_turb + detr_org
