@@ -35,9 +35,23 @@ from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.runners import inject_balanced_isothermal_profile
 from jcm.utils import get_coords
 
-# x64 is required to reproduce the issue-#558 configuration (and for a
-# meaningful FD comparison). Set at import time, before any array is built.
-jax.config.update("jax_enable_x64", True)
+
+@pytest.fixture(autouse=True)
+def _enable_x64():
+    """Enable float64 for the duration of each test, then restore.
+
+    x64 is required to reproduce the issue-#558 configuration and for a
+    meaningful FD comparison, but ``jax_enable_x64`` is a *process-global*
+    flag. Flipping it at import time leaks into sibling tests (pytest imports
+    this module during collection even under ``-m "not slow"``), corrupting
+    their float32 dtype assertions. Scope it here and restore the prior value.
+    """
+    previous = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", previous)
 
 _STEPS = 2
 _S0 = 1361.0
