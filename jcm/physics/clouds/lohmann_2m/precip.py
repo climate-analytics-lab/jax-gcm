@@ -587,7 +587,7 @@ def precip_formation_cold(
     # planar snowflake max dimension (constant)
     zdplanar = 447.0e-6
 
-    zusnow = 2.34 * (100.0 * zdplanar) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
+    zusnow = 2.34 * jnp.maximum(100.0 * zdplanar, 1.0e-30) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
 
     zstokes = 2.0 * c.rgrav * (zusnow - zudrop) * zudrop / zdplanar
     zstokes = jnp.maximum(zstokes, params.cqtmin)
@@ -606,7 +606,7 @@ def precip_formation_cold(
     zcsacl = 0.2 * (jnp.log10(zstokes) - jnp.log10(zstcrit) - 2.236) ** 2
     zcsacl = jnp.minimum(zcsacl, 1.0 - params.cqtmin)
     zcsacl = jnp.maximum(zcsacl, 0.0)
-    zcsacl = jnp.sqrt(1.0 - zcsacl)
+    zcsacl = jnp.sqrt(jnp.maximum(1.0 - zcsacl, 1.0e-30))
 
     ll6 = jnp.logical_and(ll5, zstokes <= 0.06)
     ll7 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.06, zstokes <= 0.25))
