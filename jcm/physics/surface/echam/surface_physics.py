@@ -147,7 +147,7 @@ def surface_physics_step(
     
     # Compute bulk Richardson number
     surface_humidity = jnp.full_like(surface_state.temperature, 0.01)  # Simplified
-    wind_speed = jnp.sqrt(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2)
+    wind_speed = jnp.sqrt(jnp.maximum(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
     
     ri_bulk = compute_bulk_richardson_number(
         atmospheric_state.temperature, surface_state.temperature,

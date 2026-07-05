@@ -280,7 +280,7 @@ def autoconversion_beheng(
     """
     qc_in_cloud = jnp.where(
         cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
+        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
         0.0,
     )
 
@@ -345,7 +345,7 @@ def autoconversion_kk2000(
     """
     qc_in_cloud = jnp.where(
         cloud_fraction > config.epsilon,
-        cloud_water / cloud_fraction,
+        cloud_water / jnp.maximum(cloud_fraction, config.epsilon),
         0.0,
     )
 
@@ -734,7 +734,16 @@ def cloud_microphysics_column_sweep(
         # never precipitated (review finding 2.9).
         zdp = mref * c.grav  # layer Δp [Pa]
         zxip1 = jnp.maximum(qi0, 0.0)
-        zxifall = config.cvtfall * jnp.maximum(rho * zxip1, 0.0) ** 0.16
+        # Double-where guard: ``x ** 0.16`` at ``x == 0`` (an ice-free layer,
+        # the common case) has an infinite derivative, so the reverse pass
+        # NaNs even though the forward is 0. Flooring the base inside a
+        # ``where`` keeps the forward exactly 0 where there is no ice while
+        # differentiating the power at a strictly positive point (issue #558).
+        zxifall = config.cvtfall * jnp.where(
+            rho * zxip1 > 0.0,
+            jnp.maximum(rho * zxip1, config.epsilon) ** 0.16,
+            0.0,
+        )
         zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))
         zal2 = zxiflux / jnp.maximum(rho * zxifall, config.epsilon)
         zxised = jnp.maximum(0.0, zxip1 * zal1 + zal2 * (1.0 - zal1))
@@ -1054,10 +1063,12 @@ def cloud_microphysics_column_sweep(
     # diagnostic signature; the within-step post-condensation values are
     # local to the scan and not exposed.
     qc_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon, cloud_water / cloud_fraction, 0.0,
+        cloud_fraction > config.epsilon,
+        cloud_water / jnp.maximum(cloud_fraction, config.epsilon), 0.0,
     )
     qi_in_cloud = jnp.where(
-        cloud_fraction > config.epsilon, cloud_ice / cloud_fraction, 0.0,
+        cloud_fraction > config.epsilon,
+        cloud_ice / jnp.maximum(cloud_fraction, config.epsilon), 0.0,
     )
     state = MicrophysicsState(
         rain_flux=rain_flux, snow_flux=snow_flux,

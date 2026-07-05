@@ -217,7 +217,7 @@ def compute_surface_resistances(
     ncol, nsfc_type = surface_state.temperature.shape
     
     # Wind speed
-    wind_speed = jnp.sqrt(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2)
+    wind_speed = jnp.sqrt(jnp.maximum(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
     wind_speed = jnp.maximum(wind_speed, params.min_wind_speed)
     
     # Stability functions
@@ -301,16 +301,16 @@ def compute_surface_diagnostics(
     dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
     
     # 10m wind (use atmospheric wind as approximation)
-    wind_speed_10m = jnp.sqrt(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2)
+    wind_speed_10m = jnp.sqrt(jnp.maximum(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
     u_wind_10m = atmospheric_state.u_wind
     v_wind_10m = atmospheric_state.v_wind
     
     # Friction velocity
-    momentum_flux_magnitude = jnp.sqrt(
-        surface_fluxes.momentum_u_mean**2 + surface_fluxes.momentum_v_mean**2
-    )
+    momentum_flux_magnitude = jnp.sqrt(jnp.maximum(
+        surface_fluxes.momentum_u_mean**2 + surface_fluxes.momentum_v_mean**2, 1.0e-30
+    ))
     air_density = atmospheric_state.pressure / (c.rd * atmospheric_state.temperature)
-    friction_velocity = jnp.sqrt(momentum_flux_magnitude / air_density)
+    friction_velocity = jnp.sqrt(jnp.maximum(momentum_flux_magnitude / air_density, 1.0e-30))
     
     # Richardson number (grid-box mean)
     ri_mean = jnp.sum(surface_state.fraction * compute_bulk_richardson_number(

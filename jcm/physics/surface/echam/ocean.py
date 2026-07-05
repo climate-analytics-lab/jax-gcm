@@ -137,7 +137,7 @@ def compute_ocean_surface_fluxes(
     # Wind relative to ocean surface
     wind_rel_u = atmospheric_state.u_wind - ocean_u
     wind_rel_v = atmospheric_state.v_wind - ocean_v
-    wind_rel_speed = jnp.sqrt(wind_rel_u**2 + wind_rel_v**2)
+    wind_rel_speed = jnp.sqrt(jnp.maximum(wind_rel_u**2 + wind_rel_v**2, 1.0e-30))
 
     # Sensible heat flux [W/m²]
     sensible_heat = air_density * c.cpd * exchange_coeff_heat * delta_temp

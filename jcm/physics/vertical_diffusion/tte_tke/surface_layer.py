@@ -182,8 +182,8 @@ def compute_surface_exchange_coefficients_echam_louis(
         cdn = (karman * karman) / (log_zm * log_zm)             # neutral drag
         chn = (karman * karman) / (log_zm * log_zh)             # neutral CHN
 
-        cfn_m = jnp.sqrt(zdu2) * cdn        # κ²·U/log²
-        cfn_h = jnp.sqrt(zdu2) * chn
+        cfn_m = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * cdn        # κ²·U/log²
+        cfn_h = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * chn
 
         # Stable branch (Ri > 0): ECHAM Mauritsen-2007 stable form
         # f_tau/f_tau0   = 0.25 + 0.75/(1+4Ri)
@@ -198,11 +198,11 @@ def compute_surface_exchange_coefficients_echam_louis(
         z3b = 3.0 * cb              # ``3·cb``
         z3bc = 3.0 * cb * cc        # ``3·cb·cc``
         ri_neg = jnp.minimum(ri, 0.0)
-        zucfm = jnp.sqrt(-ri_neg * (1.0 + z_ref / z0))
+        zucfm = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0), 1.0e-30))
         zucfm = 1.0 / (1.0 + z3bc * cdn * zucfm)
         unstable_cfm = cfn_m * (1.0 - z2b * ri_neg * zucfm)
 
-        zucfh = jnp.sqrt(-ri_neg * (1.0 + z_ref / z0h))
+        zucfh = jnp.sqrt(jnp.maximum(-ri_neg * (1.0 + z_ref / z0h), 1.0e-30))
         zucfh = 1.0 / (1.0 + z3bc * chn * zucfh)
         unstable_cfh = cfn_h * (1.0 - z3b * ri_neg * zucfh)
 

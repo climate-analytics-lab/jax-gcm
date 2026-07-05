@@ -154,7 +154,7 @@ class SeaSaltEmissions(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         nlev, ncols = state.temperature.shape
 
-        u10 = jnp.sqrt(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2)
+        u10 = jnp.sqrt(jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30))
         seafrac = self._open_water_fraction(forcing, terrain, ncols)
         wind = p.scale * u10 ** p.wind_exponent * seafrac   # (ncols,)
 
