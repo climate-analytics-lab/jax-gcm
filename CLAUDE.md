@@ -14,6 +14,30 @@ Always document these decisions in the comments, and if appropriate in the docum
 
 Comments should always reference the current state of the code, and explain *why* it is doing what it is doing, not how it is different to some previous version of the code (Which can get out of date and confusing)
 
+## Inspecting model output — use the labelled xarray Dataset, never blind indexing
+When analysing a run's netCDF output, **always** work through the xarray
+``Dataset`` with its coordinates attached, and select by coordinate *value* —
+never by a bare positional index whose meaning you have assumed.
+
+ - **Select levels by their coordinate/pressure, not by index.** Use
+   ``ds.sel(level=..., method="nearest")`` or first read ``ds.pressure_full`` to
+   identify which index is the surface. Do **not** write ``.isel(level=-1)`` (or
+   ``[-1]``/``[0]``) to mean "surface" — that bakes in a vertical-ordering
+   assumption. The model's saved output is **surface-first** (level index 0 is
+   the surface: ``level`` coordinate ≈ 0.996, ``pressure_full`` ≈ surface
+   pressure at index 0; the top is the *last* index, ``level`` ≈ 1e-5, 1 Pa).
+   This differs from the physics-**internal** frame (top-first: the radiation
+   code's ``needs_reversal``) and from the HAMMOZ/ECHAM input **files**
+   (top-first: ``hybm[0]=0``). All three conventions coexist, so never carry a
+   "surface = index −1" habit between them — confirm from ``pressure_full``.
+ - Within a single output file every level-dimensioned variable shares the
+   **same** ``level`` coordinate and ordering (verified: temperature, pressure,
+   tracers, oxidants all peak at index 0 = surface together). The Dataset is
+   self-consistent; the risk is not a mixed-ordering file but *your* blind
+   indexing of it. A 2026-07-05 "oxidant flip" investigation was a wasted effort
+   caused entirely by reading ``.isel(level=-1)`` as the surface when it was the
+   model top.
+
 ## Finish the Job — No Half Implementations
 When asked to fix or implement something, deliver the **complete, faithful** solution by
 default — do not ship a partial fix, a band-aid, or a "good enough for now" workaround and
