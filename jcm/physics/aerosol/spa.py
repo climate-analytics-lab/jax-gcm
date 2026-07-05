@@ -58,7 +58,14 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
     # result is then already in m^-3 (no further unit conversion).
     nccn_m3 = jnp.maximum(Nccn, 0.0) * _CM3_TO_M3
     arg = jnp.maximum(nccn_m3 * cloud_fraction, 0.0)
-    nc_min_m3 = prefactor * arg ** exponent
+    # Double-where guard: ``arg`` is 0 in a clear cell (cloud_fraction == 0,
+    # the common case) and the fractional ``arg ** exponent`` has an infinite
+    # derivative at 0, poisoning the reverse pass while the forward is 0
+    # (issue #558). Keep the forward exactly 0 there; differentiate the power
+    # only on a strictly-positive floored argument.
+    nc_min_m3 = prefactor * jnp.where(
+        arg > 0.0, jnp.maximum(arg, 1.0e-30) ** exponent, 0.0,
+    )
     # Physical bound: the (grid-mean) droplet floor cannot exceed the cloudy CCN
     # that actually entered the activation fit — i.e. ``arg = Nccn·cloud_fraction``,
     # NOT the full-column ``Nccn``. The power-law only overshoots at very low

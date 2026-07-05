@@ -29,9 +29,17 @@ def eff_ice_crystal_radius(
 
     """
     eps = params.eps
-    return 0.5e4 * (
-        pxice / jnp.maximum(params.fact_PK * jnp.maximum(picnc, eps), eps)
-    ) ** (1.0 / params.pow_PK)
+    # Double-where guard: the base is 0 in an ice-free cell (pxice == 0, the
+    # common case) and ``0 ** (1/pow_PK)`` (a fractional power) has an infinite
+    # derivative, poisoning the reverse pass while the forward is 0 (issue
+    # #558). Keep the forward exactly 0 where there is no ice; differentiate
+    # the power only on the strictly-positive floored base.
+    base = pxice / jnp.maximum(params.fact_PK * jnp.maximum(picnc, eps), eps)
+    return 0.5e4 * jnp.where(
+        pxice > 0.0,
+        jnp.maximum(base, eps) ** (1.0 / params.pow_PK),
+        0.0,
+    )
 
 def minimum_CDNC(pxwat, params: CloudParams2M):
     """Set the minimum cloud droplet number concentration, either statically or dynamically.

@@ -159,7 +159,7 @@ def convective_precip_fluxes(
         zrnew = (
             jnp.maximum(
                 0.0,
-                jnp.sqrt(jnp.maximum(zrfl, 0.0) / zcucov)
+                jnp.sqrt(jnp.maximum(jnp.maximum(zrfl, 0.0) / zcucov, 1.0e-30))
                 - cevap_k * dp_k * jnp.maximum(qs_k - q_k, 0.0),
             ) ** 2
         ) * zcucov

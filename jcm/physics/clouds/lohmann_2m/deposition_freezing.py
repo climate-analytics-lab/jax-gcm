@@ -190,7 +190,7 @@ def mixed_phase_deposition_and_corrections(
     # Schumann et al. (2011) parameterisation: r_vol from r_eff
     # zrih = -2261 + sqrt(5113188 + 2809*zrieff^3); zrice = 1e-6 * zrih^(1/3)
     zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
-    zrice = 1.0e-6 * jnp.maximum(zrih, 0.0) ** (1.0 / 3.0)
+    zrice = 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
 
     # -------------------------------------------------------------------------
     # 4. Bergeron-Findeisen threshold vertical velocity
@@ -689,7 +689,7 @@ def het_mxphase_freezing(
 
     freezing_rate_immersion = -(
         (immersion_freezing_dust + immersion_freezing_bc) * air_density / c.rhow
-        * jnp.exp(c.tmelt - temperature) * jnp.minimum(vertical_velocity - params.fact_tke * jnp.sqrt(tke) * air_density * c.grav, 0.0)
+        * jnp.exp(c.tmelt - temperature) * jnp.minimum(vertical_velocity - params.fact_tke * jnp.sqrt(jnp.maximum(tke, 1.0e-30)) * air_density * c.grav, 0.0)
     )
 
     freezing_rate_contact = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_contact / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
