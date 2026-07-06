@@ -8,8 +8,8 @@ fractional ``p``, and ``a/0`` — sitting in ``where``-masked branches. The
 forward masks the bad value, but the masked branch's derivative is ``inf`` and
 ``0 * inf = nan`` poisons the gradient once a second step chains through it.
 
-These are triggered by degenerate states that are entirely normal in practice:
-an aquaplanet (zero sub-grid orography → every SSO orography denominator is 0)
+These are triggered by states that are entirely normal in practice: an
+aquaplanet (zero sub-grid orography → every SSO orography denominator is 0)
 and a balanced isothermal start (zero wind → every ``sqrt(u**2 + v**2)`` has an
 infinite derivative), plus clear/ice-free cells (cloud fraction / condensate 0
 under a fractional power).
@@ -17,8 +17,12 @@ under a fractional power).
 The tests below differentiate ``mean(temperature)`` after two model steps with
 respect to the solar constant, for the 1M and 2M cloud schemes with and without
 the JAM prognostic-aerosol chain — the four configurations calibration work
-relies on. All must be finite; the headline config is additionally checked
-against a central finite difference.
+relies on. The ``0 * inf = nan`` poison is dtype-agnostic, so these run under
+the session's default precision (no process-global ``jax_enable_x64`` toggle,
+which would corrupt sibling tests' compilation caches under xdist); the
+gradient is checked both for finiteness and against its known-correct value
+(cross-checked against a central finite difference in float64, 5.2105e-6, when
+this fix was validated — see PR #559 / issue #558).
 """
 
 import dataclasses
@@ -35,26 +39,12 @@ from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.runners import inject_balanced_isothermal_profile
 from jcm.utils import get_coords
 
-
-@pytest.fixture(autouse=True)
-def _enable_x64():
-    """Enable float64 for the duration of each test, then restore.
-
-    x64 is required to reproduce the issue-#558 configuration and for a
-    meaningful FD comparison, but ``jax_enable_x64`` is a *process-global*
-    flag. Flipping it at import time leaks into sibling tests (pytest imports
-    this module during collection even under ``-m "not slow"``), corrupting
-    their float32 dtype assertions. Scope it here and restore the prior value.
-    """
-    previous = jax.config.read("jax_enable_x64")
-    jax.config.update("jax_enable_x64", True)
-    try:
-        yield
-    finally:
-        jax.config.update("jax_enable_x64", previous)
-
 _STEPS = 2
 _S0 = 1361.0
+# d(meanT)/d(solar_constant) after two steps from the balanced isothermal
+# aquaplanet start. Radiation-dominated, so identical across cloud/aerosol
+# configs. Validated against a float64 central FD (5.2105e-6) in PR #559.
+_EXPECTED_GRAD = 5.21e-6
 
 
 def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_module):
@@ -96,42 +86,28 @@ _CONFIGS = [
 
 @pytest.mark.slow
 @pytest.mark.parametrize("cloud_scheme,aerosol_module", _CONFIGS)
-def test_two_step_gradient_is_finite(cloud_scheme, aerosol_module):
-    """Reverse-mode d(meanT)/d(solar_constant) is finite for every config."""
+def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
+    """Reverse-mode d(meanT)/d(solar_constant) is finite and correct.
+
+    Finiteness is the #558 guard (a re-introduced degenerate-state poison
+    NaNs the cotangent); the value check additionally catches a guard that
+    silently changes the physics.
+    """
     grad = jax.grad(
         lambda s: _mean_temperature_after_two_steps(
             s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
         )
     )(jnp.asarray(_S0))
+
     assert jnp.isfinite(grad), (
         f"{cloud_scheme}/{aerosol_module}: reverse-mode gradient is "
         f"{grad} — a degenerate-state cotangent poison has been "
         "re-introduced (issue #558)."
     )
-
-
-@pytest.mark.slow
-def test_two_step_gradient_matches_finite_difference():
-    """AD gradient matches a central finite difference (headline config).
-
-    Uses 2M + JAM — the most comprehensive stack (2-moment microphysics plus
-    the full prognostic-aerosol chain) — so the check exercises the largest
-    set of guarded terms.
-    """
-    cfg = dict(cloud_scheme="2m", aerosol_module="jam")
-    ad = jax.grad(
-        lambda s: _mean_temperature_after_two_steps(s, **cfg)
-    )(jnp.asarray(_S0))
-
-    eps = 5.0
-    fd = (
-        _mean_temperature_after_two_steps(jnp.asarray(_S0 + eps), **cfg)
-        - _mean_temperature_after_two_steps(jnp.asarray(_S0 - eps), **cfg)
-    ) / (2.0 * eps)
-
-    assert jnp.isfinite(ad)
-    # Loose tolerance: the gradient is ~5e-6 and the FD carries O(eps**2)
-    # truncation error; we only need to confirm AD is right, not exact.
-    assert abs(float(ad) - float(fd)) <= 1e-8, (
-        f"AD {float(ad):.6e} disagrees with central FD {float(fd):.6e}"
+    # 2% tolerance absorbs float32-vs-float64 differences; the poison-vs-clean
+    # signal is NaN-vs-finite, and a wrong-but-finite guard would miss by far
+    # more than 2%.
+    assert float(grad) == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
+        f"{cloud_scheme}/{aerosol_module}: gradient {float(grad):.4e} is far "
+        f"from the validated {_EXPECTED_GRAD:.4e}."
     )
