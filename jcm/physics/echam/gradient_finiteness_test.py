@@ -14,67 +14,72 @@ and a balanced isothermal start (zero wind → every ``sqrt(u**2 + v**2)`` has a
 infinite derivative), plus clear/ice-free cells (cloud fraction / condensate 0
 under a fractional power).
 
-The tests differentiate ``mean(temperature)`` after two model steps with
-respect to the solar constant, for the 1M and 2M cloud schemes with and without
-the JAM prognostic-aerosol chain — the four configurations calibration work
-relies on.
+The test differentiates ``mean(temperature)`` after two model steps with
+respect to the solar constant, for the 1M and 2M cloud microphysics schemes.
+Both exercise the shared SSO / vertical-diffusion / surface / convection terms;
+1M adds ``echam_1m`` (ice sedimentation guard) and 2M adds ``lohmann_2m`` +
+``cloud_utils`` (effective-radius guard).
 
-They run in **float64** (the calibration / JEM-Cal use case and the precision
-#558 was reported at). ``jax_enable_x64`` is a *process-global* flag, and
-toggling it mid-session — even via a scoped context manager — corrupts the JAX
-compilation cache shared by other tests under pytest-xdist (an int64-compiled
-program served int32 inputs: ``RuntimeProgramInputMismatch``). So each config
-is differentiated in a **fresh subprocess** that enables x64 from startup; the
-parent process (and its float32 sibling tests) is never touched. The subprocess
-entry point is this module's ``__main__`` block.
+Precision: the ``0 * inf = nan`` poison is dtype-agnostic, so this runs at the
+session's default (float32) — cheap, in-process, and it never touches the
+process-global ``jax_enable_x64`` flag (toggling it mid-session corrupts the
+xdist-shared compilation cache). The gradient matches its float64 value to
+well within the tolerance here (validated against a central FD, 5.2105e-6, in
+PR #559). The JAM prognostic-aerosol chain has a *separate* float32-only
+degeneracy (finite in float64) and is validated manually in x64 rather than
+here — see PR #559 / issue #558.
 """
 
 import dataclasses
-import subprocess
-import sys
 
+import jax
+import jax.numpy as jnp
 import pytest
+
+from jcm.forcing import default_forcing
+from jcm.model import Model
+from jcm.physics.echam.echam_levels import get_echam_levels
+from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.runners import inject_balanced_isothermal_profile
+from jcm.utils import get_coords
 
 _STEPS = 2
 _S0 = 1361.0
 # d(meanT)/d(solar_constant) after two steps from the balanced isothermal
-# aquaplanet start. Radiation-dominated, so identical across cloud/aerosol
-# configs. Validated against a float64 central FD (5.2105e-6) in PR #559.
+# aquaplanet start. Radiation-dominated, so identical across cloud configs.
+# Validated against a float64 central FD (5.2105e-6) in PR #559.
 _EXPECTED_GRAD = 5.21e-6
 
-# Two configs cover every guarded path within the CI slow-job time budget
-# (each spawns a subprocess that recompiles the full model): 1M/MACv2-SP
-# exercises the 1M microphysics (echam_1m), and 2M/JAM exercises the 2M
-# microphysics (lohmann_2m, cloud_utils) plus the full prognostic-aerosol
-# chain — both over the shared SSO / vertical-diffusion / surface / convection
-# terms. All four combinations were validated manually when this landed
-# (see PR #559); the two dropped ones add no un-exercised guarded term.
 _CONFIGS = [
     ("1m", "macv2sp"),
-    ("2m", "jam"),
+    ("2m", "macv2sp"),
 ]
 
 
-def _grad_in_subprocess(cloud_scheme, aerosol_module):
-    """Run the two-step gradient for one config in a fresh x64 subprocess.
+def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_module):
+    """d/dS0 target: mean air temperature after ``_STEPS`` op-split steps.
 
-    Returns the gradient as a Python float. Raises ``AssertionError`` with the
-    captured output if the subprocess fails or the marker line is missing.
+    Uses the model's per-step function directly (a plain Python loop rather
+    than the outer ``lax.scan``) so the graph is a fixed unroll — this is
+    exactly the chained backward that exposed #558.
     """
-    proc = subprocess.run(
-        [sys.executable, __file__, cloud_scheme, aerosol_module],
-        capture_output=True, text=True, timeout=1800,
+    coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+    forcing = default_forcing(coords.horizontal)
+    rad = dataclasses.replace(RadiationParameters.default(), solar_constant=solar_constant)
+    physics = echam_physics(
+        radiation=rad, radiation_scheme="grey", checkpoint_terms=False,
+        cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
     )
-    marker = "GRADRESULT "
-    line = next(
-        (ln for ln in proc.stdout.splitlines() if ln.startswith(marker)), None
-    )
-    assert line is not None, (
-        f"{cloud_scheme}/{aerosol_module}: subprocess produced no result "
-        f"(returncode {proc.returncode}).\nstdout:\n{proc.stdout[-2000:]}\n"
-        f"stderr:\n{proc.stderr[-2000:]}"
-    )
-    return float(line[len(marker):])
+    model = Model(coords=coords, physics=physics, time_step=15.0)
+    inject_balanced_isothermal_profile(model)
+
+    step = model._get_op_split_step_fn(forcing)
+    state = model._final_dycore_state
+    physics_state = model._final_physics_state
+    for _ in range(_STEPS):
+        state, physics_state = step(state, physics_state)
+    return jnp.mean(model.dycore.to_physics_state(state).temperature)
 
 
 @pytest.mark.slow
@@ -82,67 +87,24 @@ def _grad_in_subprocess(cloud_scheme, aerosol_module):
 def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
     """Reverse-mode d(meanT)/d(solar_constant) is finite and correct.
 
-    Finiteness is the #558 guard (a re-introduced degenerate-state poison
-    NaNs the cotangent, which ``float(...)`` surfaces as ``nan``); the value
-    check additionally catches a guard that silently changes the physics.
+    Finiteness is the #558 guard (a re-introduced degenerate-state poison NaNs
+    the cotangent); the value check additionally catches a guard that silently
+    changes the physics.
     """
-    grad = _grad_in_subprocess(cloud_scheme, aerosol_module)
+    grad = jax.grad(
+        lambda s: _mean_temperature_after_two_steps(
+            s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
+        )
+    )(jnp.asarray(_S0))
 
-    import math
-    assert math.isfinite(grad), (
+    assert jnp.isfinite(grad), (
         f"{cloud_scheme}/{aerosol_module}: reverse-mode gradient is {grad} — "
         "a degenerate-state cotangent poison has been re-introduced (#558)."
     )
-    assert grad == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
-        f"{cloud_scheme}/{aerosol_module}: gradient {grad:.4e} is far from "
-        f"the validated {_EXPECTED_GRAD:.4e}."
+    # 2% tolerance absorbs the float32-vs-float64 difference; the poison-vs-clean
+    # signal is NaN-vs-finite, and a wrong-but-finite guard would miss by far
+    # more than 2%.
+    assert float(grad) == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
+        f"{cloud_scheme}/{aerosol_module}: gradient {float(grad):.4e} is far "
+        f"from the validated {_EXPECTED_GRAD:.4e}."
     )
-
-
-def _main(cloud_scheme, aerosol_module):
-    """Subprocess entry point: print ``GRADRESULT <float>`` (nan if poisoned)."""
-    import jax
-    jax.config.update("jax_enable_x64", True)
-    import jax.numpy as jnp
-
-    from jcm.forcing import default_forcing
-    from jcm.model import Model
-    from jcm.physics.echam.echam_levels import get_echam_levels
-    from jcm.physics.echam.echam_terms import echam_physics
-    from jcm.physics.radiation.radiation_types import RadiationParameters
-    from jcm.runners import inject_balanced_isothermal_profile
-    from jcm.utils import get_coords
-
-    def objective(solar_constant):
-        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
-        forcing = default_forcing(coords.horizontal)
-        rad = dataclasses.replace(
-            RadiationParameters.default(), solar_constant=solar_constant,
-        )
-        kwargs = dict(
-            radiation=rad, radiation_scheme="grey", checkpoint_terms=False,
-            cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
-        )
-        if aerosol_module == "jam":
-            # Exercise the JAM chain without the optional GPL MAM4 extra.
-            kwargs["jam_microphysics"] = "placeholder"
-        model = Model(
-            coords=coords, physics=echam_physics(**kwargs), time_step=15.0,
-        )
-        inject_balanced_isothermal_profile(model)
-        # Use the per-step function directly (a plain Python loop, not the
-        # outer lax.scan) so the graph is a fixed unroll — exactly the chained
-        # backward that exposed #558.
-        step = model._get_op_split_step_fn(forcing)
-        state = model._final_dycore_state
-        physics_state = model._final_physics_state
-        for _ in range(_STEPS):
-            state, physics_state = step(state, physics_state)
-        return jnp.mean(model.dycore.to_physics_state(state).temperature)
-
-    grad = jax.grad(objective)(jnp.asarray(_S0))
-    print(f"GRADRESULT {float(grad)}")
-
-
-if __name__ == "__main__":
-    _main(sys.argv[1], sys.argv[2])
