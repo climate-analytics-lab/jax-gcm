@@ -88,8 +88,19 @@ class MicrophysicsParameters:
     t_mix_min: float
     t_mix_max: float
 
-    # Numerical parameters
+    # Numerical parameters. Two distinct floors, do NOT mix them:
+    #  - ``epsilon`` (~1e-12): a PHYSICAL/numerical floor. Bounds a denominator
+    #    or a quantity away from a value it should never realistically reach
+    #    (e.g. a cloud fraction that gates whether a cell is cloudy). It changes
+    #    the forward result and is chosen to be physically negligible there.
+    #  - ``d_epsilon`` (~1e-30): a DIFFERENTIABILITY floor. Used only to keep
+    #    the *masked/dead* branch of a ``where`` strictly positive so a
+    #    ``sqrt``/fractional-power there has a finite derivative (issue #558).
+    #    It must be FAR below any real value so it never changes the forward —
+    #    using ``epsilon`` here silently perturbs the physics (it inflated the
+    #    ice fall speed and opened the water budget ~22%).
     epsilon: float       # Small number for numerical stability
+    d_epsilon: float     # Absolute floor for differentiability guards only
     dt_sedi: float       # Sub-timestep for sedimentation (s)
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
@@ -115,7 +126,7 @@ class MicrophysicsParameters:
                  cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
                  vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
-                 epsilon=1.0e-12, dt_sedi=10.0,
+                 epsilon=1.0e-12, d_epsilon=1.0e-30, dt_sedi=10.0,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
@@ -161,6 +172,7 @@ class MicrophysicsParameters:
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
             epsilon=jnp.array(epsilon),
+            d_epsilon=jnp.array(d_epsilon),
             dt_sedi=jnp.array(dt_sedi),
             autoconversion_scheme=int(autoconversion_scheme),
         )
@@ -738,15 +750,14 @@ def cloud_microphysics_column_sweep(
         # the common case) has an infinite derivative, so the reverse pass
         # NaNs even though the forward is 0. The ``where`` keeps the forward
         # exactly 0 where there is no ice; the inner floor only has to make the
-        # base strictly positive for the differentiated branch. It must be
-        # NEGLIGIBLE (far below any real ice mass), not ``config.epsilon`` —
-        # a 1e-12 floor inflates the fall speed of tiny-but-nonzero ice by
-        # orders of magnitude ((1e-12)**0.16 ≈ 0.016 vs the true value), which
-        # opens the column water budget ~20% over an equilibrated integration
-        # (issue #558).
+        # base strictly positive for the differentiated branch — hence the
+        # negligible ``d_epsilon`` (NOT ``epsilon``: a 1e-12 floor would
+        # inflate the fall speed of tiny-but-nonzero ice by orders of
+        # magnitude, opening the water budget; see the ``epsilon`` /
+        # ``d_epsilon`` note on MicrophysicsParameters). Issue #558.
         zxifall = config.cvtfall * jnp.where(
             rho * zxip1 > 0.0,
-            jnp.maximum(rho * zxip1, 1.0e-30) ** 0.16,
+            jnp.maximum(rho * zxip1, config.d_epsilon) ** 0.16,
             0.0,
         )
         zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))

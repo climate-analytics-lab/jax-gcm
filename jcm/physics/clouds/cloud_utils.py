@@ -36,12 +36,13 @@ def eff_ice_crystal_radius(
     # the power only on the strictly-positive floored base.
     base = pxice / jnp.maximum(params.fact_PK * jnp.maximum(picnc, eps), eps)
     # The ``where`` already returns 0 for ice-free cells; the base floor only
-    # needs to keep the differentiated branch strictly positive, so it must be
-    # NEGLIGIBLE (not ``params.eps`` ≈ 1e-7, which would inflate the effective
-    # radius of small-but-nonzero ice and perturb the physics).
+    # needs to keep the differentiated branch strictly positive, so it uses the
+    # negligible ``d_epsilon`` (NOT ``eps`` ≈ 1e-7, which would inflate the
+    # effective radius of small-but-nonzero ice — see the ``eps``/``d_epsilon``
+    # note on CloudParams2M). Issue #558.
     return 0.5e4 * jnp.where(
         pxice > 0.0,
-        jnp.maximum(base, 1.0e-30) ** (1.0 / params.pow_PK),
+        jnp.maximum(base, params.d_epsilon) ** (1.0 / params.pow_PK),
         0.0,
     )
 

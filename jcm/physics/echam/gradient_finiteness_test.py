@@ -42,10 +42,15 @@ _S0 = 1361.0
 # configs. Validated against a float64 central FD (5.2105e-6) in PR #559.
 _EXPECTED_GRAD = 5.21e-6
 
+# Two configs cover every guarded path within the CI slow-job time budget
+# (each spawns a subprocess that recompiles the full model): 1M/MACv2-SP
+# exercises the 1M microphysics (echam_1m), and 2M/JAM exercises the 2M
+# microphysics (lohmann_2m, cloud_utils) plus the full prognostic-aerosol
+# chain — both over the shared SSO / vertical-diffusion / surface / convection
+# terms. All four combinations were validated manually when this landed
+# (see PR #559); the two dropped ones add no un-exercised guarded term.
 _CONFIGS = [
     ("1m", "macv2sp"),
-    ("2m", "macv2sp"),
-    ("1m", "jam"),
     ("2m", "jam"),
 ]
 
