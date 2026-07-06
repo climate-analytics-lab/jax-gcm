@@ -736,12 +736,17 @@ def cloud_microphysics_column_sweep(
         zxip1 = jnp.maximum(qi0, 0.0)
         # Double-where guard: ``x ** 0.16`` at ``x == 0`` (an ice-free layer,
         # the common case) has an infinite derivative, so the reverse pass
-        # NaNs even though the forward is 0. Flooring the base inside a
-        # ``where`` keeps the forward exactly 0 where there is no ice while
-        # differentiating the power at a strictly positive point (issue #558).
+        # NaNs even though the forward is 0. The ``where`` keeps the forward
+        # exactly 0 where there is no ice; the inner floor only has to make the
+        # base strictly positive for the differentiated branch. It must be
+        # NEGLIGIBLE (far below any real ice mass), not ``config.epsilon`` —
+        # a 1e-12 floor inflates the fall speed of tiny-but-nonzero ice by
+        # orders of magnitude ((1e-12)**0.16 ≈ 0.016 vs the true value), which
+        # opens the column water budget ~20% over an equilibrated integration
+        # (issue #558).
         zxifall = config.cvtfall * jnp.where(
             rho * zxip1 > 0.0,
-            jnp.maximum(rho * zxip1, config.epsilon) ** 0.16,
+            jnp.maximum(rho * zxip1, 1.0e-30) ** 0.16,
             0.0,
         )
         zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))
