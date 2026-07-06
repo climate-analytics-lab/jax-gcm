@@ -47,8 +47,9 @@ from jcm.utils import get_coords
 _STEPS = 2
 _S0 = 1361.0
 # d(meanT)/d(solar_constant) after two steps from the balanced isothermal
-# aquaplanet start. Radiation-dominated, so identical across cloud configs.
-# Validated against a float64 central FD (5.2105e-6) in PR #559.
+# aquaplanet start with the production-seeded physics carry. Radiation-dominated,
+# so identical across cloud configs (1M and 2M both give 5.2104e-6). Matches a
+# float64 central FD (5.2105e-6); validated in PR #559.
 _EXPECTED_GRAD = 5.21e-6
 
 _CONFIGS = [
@@ -73,6 +74,18 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_m
     )
     model = Model(coords=coords, physics=physics, time_step=15.0)
     inject_balanced_isothermal_profile(model)
+    # Seed the cross-step physics carry exactly as the production rollout /
+    # resume path does (Model.run and Model.resume both build it when None —
+    # model.py). ``inject_*`` only populates ``_final_dycore_state``, leaving
+    # ``_final_physics_state`` at its ``None`` construction default; stepping
+    # with ``None`` synthesises a *zero* carry, so e.g. the TTE-TKE term would
+    # start from TKE=0 instead of its seeded ECHAM 0.01 floor. That is a state
+    # production never produces, so we must seed here to differentiate the same
+    # trajectory the model actually runs. (The #558 poison triggers — SSO
+    # zero-orography denominators, the zero-wind ``sqrt(u**2+v**2)``, and
+    # clear/ice-free fractional powers — are all independent of this carry and
+    # remain exercised.)
+    model._final_physics_state = model._build_initial_physics_carry()
 
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state
