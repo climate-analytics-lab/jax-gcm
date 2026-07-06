@@ -10,6 +10,7 @@ as the full ECHAM6 sequence is wired into the orchestrator — see #341.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from math import pi
 
 from .cloud_utils import (
@@ -17,6 +18,7 @@ from .cloud_utils import (
     minimum_CDNC,
 )
 from .lohmann_2m import (
+    diagnostics,
     precip_formation_warm,
     precip_formation_cold,
     demott2010_inp,
@@ -1039,6 +1041,200 @@ class TestUpdateInCloudWater_2M:
         assert jnp.all(jnp.isfinite(icnc_o))
 
 
+class TestUpdateInCloudWaterCirrusBranches_2M:
+    """ICNC update under the alternative ``nic_cirrus`` selectors.
+
+    The default parameter set uses ``nic_cirrus=1`` (diagnostic ICNC from
+    ice mass / mean radius); these tests pin the ``nic_cirrus=2``
+    (external nucleation source, capped by pressure) and the fall-through
+    (leave-unchanged) branches.
+    """
+
+    def _inputs_with_ice(self, n=3):
+        base = TestUpdateInCloudWater_2M()._base_inputs(n)
+        base["cloud_flag"] = jnp.array([True, True, True])
+        base["cloud_fraction"] = _full(n, 0.4)
+        base["cloud_ice_in_cloud"] = _full(n, 2e-4)   # > cqtmin
+        # icnc <= icemin so the candidate-update branch (ll2_ic) fires.
+        base["ice_crystal_number"] = _zeros(n)
+        return base
+
+    def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        inputs["params"] = _P.replace(nic_cirrus=2)
+        # One column below the pressure cap, one above it (cap = pap*1e6).
+        cap = float(inputs["pressure"][0]) * 1e6
+        inputs["newly_formed_ice"] = jnp.array(
+            [5e4, cap * 10.0, 0.0], dtype=jnp.float32
+        )
+        _, icnc_o, *_ = update_in_cloud_water(**inputs)
+        # Below cap: candidate passes through (already >= icemin).
+        assert jnp.isclose(icnc_o[0], 5e4)
+        # Above cap: clipped to pressure * 1e6.
+        assert jnp.isclose(icnc_o[1], cap, rtol=1e-6)
+        # Zero source: enforced up to the icemin floor.
+        assert jnp.isclose(icnc_o[2], _P.icemin)
+
+    def test_nic_cirrus_other_leaves_icnc_at_minimum_floor(self):
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        inputs["params"] = _P.replace(nic_cirrus=0)
+        inputs["newly_formed_ice"] = _full(n, 1e8)
+        _, icnc_o, *_ = update_in_cloud_water(**inputs)
+        # Fall-through branch: the candidate is the existing ICNC (0),
+        # so only the icemin floor applies where cloud ice is present.
+        assert jnp.all(icnc_o == _P.icemin)
+
+
+class TestDiagnostics2M:
+    """Accumulator updates in ``assembly.diagnostics``.
+
+    The function mirrors ECHAM's cloud-diagnostics bookkeeping: every
+    accumulator only advances under its own flag mask (liquid cloud,
+    ice cloud, cloud-top, TOVS-selected cirrus), while the effective-
+    radius and cloud-fraction accumulators advance unconditionally.
+    """
+
+    N = 4
+    DT = 100.0
+    LEVEL_INDEX = 5
+
+    def _base_inputs(self):
+        n = self.N
+        zeros = _zeros(n)
+        return dict(
+            cdnc=_full(n, 1e8),
+            icnc=_full(n, 5e4),
+            cloud_fraction=_full(n, 0.5),
+            dp_over_g=_full(n, 1000.0),
+            layer_thickness=_full(n, 500.0),
+            freezing_number_rate=_full(n, 3.0),
+            air_density=_full(n, 1.2),
+            rain_number_formation=_full(n, 2.0),
+            snow_number_accretion=_full(n, 1.0),
+            incloud_ice=_full(n, 3e-5),
+            incloud_liquid=_full(n, 1e-4),
+            temp_tmp=jnp.array([280.0, 280.0, 230.0, 280.0], dtype=jnp.float32),
+            eff_radius_liq=jnp.array([10.0, 2.0, 0.0, 0.0], dtype=jnp.float32),
+            eff_radius_ice=_full(n, 20.0),
+            liquid_cloud_flag=jnp.array([True, True, False, False]),
+            ice_cloud_flag=jnp.array([False, True, True, False]),
+            cdnc_ave=zeros, cdnc_ave_acc=zeros, cdnc_ave_burd=zeros,
+            cdnc_ct=zeros, cld_ice_time=zeros, cld_liq_time=zeros,
+            icnc_ave=zeros, icnc_ave_acc=zeros, icnc_ave_burd=zeros,
+            ice_water_content_acc=zeros, iwp_tovs=zeros,
+            liq_water_content_acc=zeros, cdnc_accretion=zeros,
+            cdnc_autoconv=zeros, cdnc_freezing=zeros,
+            eff_radius_ice_acc=zeros, eff_radius_ice_time=zeros,
+            eff_radius_ice_tovs=zeros, eff_radius_liq_acc=zeros,
+            eff_radius_liq_ct=zeros, eff_radius_liq_time=zeros,
+            cdnc_burden=zeros, icnc_burden=zeros, tau1i=zeros,
+            eff_radius_ct_m=zeros, cloud_fraction_acc=zeros,
+            ktop=jnp.array([5, 5, 5, 0], dtype=jnp.int32),
+            level_index=self.LEVEL_INDEX,
+            dt=jnp.array(self.DT, dtype=jnp.float32),
+            params=_P,
+        )
+
+    def test_number_process_sinks_are_time_integrated(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        cdnc_accretion, cdnc_autoconv, cdnc_freezing = out[12], out[13], out[14]
+        # Sinks subtract dt * rate everywhere (no flag gating in ECHAM).
+        assert jnp.allclose(cdnc_autoconv, -self.DT * 2.0)
+        assert jnp.allclose(cdnc_freezing, -self.DT * 3.0)
+        assert jnp.allclose(cdnc_accretion, -self.DT * 1.0)
+
+    def test_liquid_accumulators_gated_by_liquid_flag(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        cdnc_ave, cdnc_ave_acc = out[0], out[1]
+        cld_liq_time, cdnc_burden = out[5], out[21]
+        liq_mask = np.asarray(inp["liquid_cloud_flag"])
+
+        # Where the liquid flag is set the accumulators advance by the
+        # exact ECHAM increments; elsewhere they stay zero.
+        assert jnp.allclose(cdnc_ave_acc[liq_mask], self.DT * 1e8)
+        assert jnp.all(cdnc_ave_acc[~liq_mask] == 0.0)
+        assert jnp.allclose(cdnc_ave[liq_mask], self.DT * 1e8 * 0.5)
+        assert jnp.all(cdnc_ave[~liq_mask] == 0.0)
+        assert jnp.allclose(cld_liq_time[liq_mask], self.DT)
+        assert jnp.all(cld_liq_time[~liq_mask] == 0.0)
+        assert jnp.allclose(cdnc_burden[liq_mask], 1e8 * 500.0)
+        assert jnp.all(cdnc_burden[~liq_mask] == 0.0)
+
+    def test_cloud_top_liquid_diagnostics(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        cdnc_ct, eff_radius_liq_ct = out[3], out[19]
+        eff_radius_liq_time, eff_radius_ct_m = out[20], out[24]
+
+        # Only column 0 satisfies the full cloud-top mask: liquid flag,
+        # ktop == level_index, T > tmelt, prior ct radius < 4 um and a
+        # current radius >= 4 um. Column 1 fails on radius (2 um < 4).
+        assert float(eff_radius_ct_m[0]) == 10.0
+        assert jnp.all(eff_radius_ct_m[1:] == 0.0)
+        assert jnp.isclose(eff_radius_liq_ct[0], self.DT * 10.0)
+        assert jnp.all(eff_radius_liq_ct[1:] == 0.0)
+        assert jnp.isclose(cdnc_ct[0], self.DT * 1e8 * 0.5)
+        assert jnp.all(cdnc_ct[1:] == 0.0)
+        assert jnp.isclose(eff_radius_liq_time[0], self.DT)
+        assert jnp.all(eff_radius_liq_time[1:] == 0.0)
+
+    def test_ice_accumulators_and_tovs_selection(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        cld_ice_time = out[4]
+        icnc_ave, icnc_ave_acc = out[6], out[7]
+        ice_water_content_acc, iwp_tovs = out[9], out[10]
+        eff_radius_ice_time, eff_radius_ice_tovs = out[16], out[17]
+        tau1i = out[23]
+        ice_mask = np.asarray(inp["ice_cloud_flag"])
+
+        assert jnp.allclose(icnc_ave_acc[ice_mask], self.DT * 5e4)
+        assert jnp.all(icnc_ave_acc[~ice_mask] == 0.0)
+        assert jnp.allclose(icnc_ave[ice_mask], self.DT * 5e4 * 0.5)
+        assert jnp.allclose(cld_ice_time[ice_mask], self.DT)
+        assert jnp.allclose(
+            ice_water_content_acc[ice_mask], self.DT * 3e-5 * 1.2,
+        )
+
+        # TOVS semi-transparent cirrus: IWP = 1000*xib*cf*dpg = 15 g/m2,
+        # tau = 1.9787 * 15 * 20^-1.0365 ~ 1.33, inside (0.7, 3.8), so
+        # the ice-flagged, non-cloud-top columns 1 and 2 are sampled.
+        expected_tau = 1.9787 * 15.0 * 20.0 ** (-1.0365)
+        assert 0.7 < expected_tau < 3.8
+        assert jnp.allclose(tau1i[ice_mask], expected_tau, rtol=1e-5)
+        assert jnp.all(tau1i[~ice_mask] == 0.0)
+        assert jnp.allclose(eff_radius_ice_tovs[ice_mask], self.DT * 20.0)
+        assert jnp.all(eff_radius_ice_tovs[~ice_mask] == 0.0)
+        assert jnp.allclose(eff_radius_ice_time[ice_mask], self.DT)
+        assert jnp.allclose(iwp_tovs[ice_mask], self.DT * 15.0)
+
+    def test_unconditional_accumulators(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        eff_radius_ice_acc, eff_radius_liq_acc = out[15], out[18]
+        cloud_fraction_acc = out[25]
+
+        # Effective-radius and cloud-fraction accumulators advance in
+        # every column regardless of the cloud flags (ECHAM behaviour).
+        assert jnp.allclose(eff_radius_ice_acc, self.DT * 20.0)
+        assert jnp.allclose(
+            eff_radius_liq_acc, self.DT * np.asarray(inp["eff_radius_liq"]),
+        )
+        assert jnp.allclose(cloud_fraction_acc, self.DT * 0.5)
+
+    def test_output_arity_and_shapes(self):
+        inp = self._base_inputs()
+        out = diagnostics(**inp)
+        assert len(out) == 26
+        for arr in out:
+            assert arr.shape == (self.N,)
+            assert jnp.all(jnp.isfinite(arr))
+
+
 class TestUpdateTendencies_2M:
     def test_tracer_tendencies_and_shapes(self):
         n = 4
@@ -1235,7 +1431,7 @@ class TestColumnWaterConservation2M:
         qni = jnp.where(qi > 0, 1e4, 0.0)
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, qnc, qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1283,7 +1479,7 @@ class TestColumnWaterConservation2M:
 
         def run(nic):
             params = CloudParams2M.default(nic_cirrus=nic)
-            tend, _, _ = cloud_microphysics_2m(
+            tend, _, _, *_ = cloud_microphysics_2m(
                 T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
                 jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
                 jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1322,7 +1518,7 @@ class TestColumnWaterConservation2M:
         qsi = c.eps * esi / np.asarray(p)
         q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
-        tend, _, _ = cloud_microphysics_2m(
+        tend, _, _, *_ = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), jnp.full(nlev, 0.287), rho,
             jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1365,7 +1561,7 @@ class TestColumnWaterConservation2M:
         qnc = jnp.where(qc > 0, 5e7, 0.0)       # 50/mg — modest CDNC
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, qnc, jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1413,7 +1609,7 @@ class TestColumnWaterConservation2M:
         qni = jnp.where(qi > 0, 2e3, 0.0)
         params = CloudParams2M.default()
 
-        tend, rain_sfc, snow_sfc = cloud_microphysics_2m(
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
             T, q, p, qc, qi, jnp.zeros(nlev), qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),

@@ -127,9 +127,6 @@ def prepare_vertical_diffusion_state(
     dp = jnp.diff(pressure_half, axis=1)  # This gives p[k+1] - p[k], which is positive
     air_mass = dp / c.grav
 
-    # Approximate dry air mass (could be more sophisticated)
-    dry_air_mass = air_mass * (1.0 - qv)
-
     if roughness_heat is None:
         roughness_heat = 0.1 * roughness_length
     if surface_wetness is None:
@@ -146,7 +143,6 @@ def prepare_vertical_diffusion_state(
         pressure_half=pressure_half,
         geopotential=geopotential,
         air_mass=air_mass,
-        dry_air_mass=dry_air_mass,
         surface_temperature=surface_temperature,
         surface_fraction=surface_fraction,
         roughness_length=roughness_length,
@@ -472,6 +468,7 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (  # noqa: E402
     VerticalDiffusionData,
 )
@@ -726,6 +723,10 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             tke=new_tke,
             km=km,
             kh=kh,
+            # Same-step moisture-tendency profile for the Tiedtke zdqpbl
+            # closure (ECHAM's pqte at cucall time; convection runs after
+            # this term in the ECHAM physc ordering).
+            qv_tendency=qv_tend,
             surface_exchange_heat=surface_exchange_heat,
             surface_exchange_moisture=surface_exchange_moisture,
             surface_exchange_momentum=surface_exchange_momentum,
@@ -736,6 +737,24 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_latent_heat=sfc_fluxes.latent_heat,
             surface_stress_u=sfc_fluxes.stress_u,
             surface_stress_v=sfc_fluxes.stress_v,
+        )
+
+        # Advance the running thermodynamic view so downstream terms
+        # (Tiedtke convection, then the cloud microphysics) see the
+        # post-vdiff (T, q) — ECHAM's ``physc`` runs vdiff before
+        # ``cucall``/``cloud`` and each sees the accumulated provisional
+        # state (ztp1 = ptm1 + ptte·dt). Same pattern as the convection
+        # wrapper; see ``advance_thermo_run`` for the operator-split
+        # tendency-ownership rules (nothing is zeroed here).
+        diagnostics = advance_thermo_run(
+            diagnostics,
+            dt,
+            d_temperature=temp_tend,
+            d_specific_humidity=qv_tend,
+            # Condensate view too: downstream cloud terms must see the
+            # DIFFUSED qc/qi, not the step-start tracers (Codex review).
+            d_qc=qc_tend,
+            d_qi=qi_tend,
         )
 
         return tendency, {**diagnostics, "vertical_diffusion": vdiff_out}

@@ -156,7 +156,22 @@ def _check_or_regenerate(name: str, actual_arrays: dict) -> None:
 
 
 class TestEchamReferenceTrajectory(unittest.TestCase):
-    """T21L16 aquaplanet 1-day ECHAM reference trajectory (stretched grid)."""
+    """T21L16 aquaplanet 1-day ECHAM reference trajectory (stretched grid).
+
+    Reference lineage: regenerated 2026-07-04 for (a) the ECHAM ``physc``
+    term reordering (radiation → vdiff → surface → convection → cloud):
+    moving vdiff/surface before convection lets the Tiedtke zdqpbl closure
+    read the SAME-STEP vdiff moisture tendency and delivered evaporation
+    instead of a one-step-lagged supply (the lag compounded the
+    convergence→convection feedback and NaN'd coupled T63L47 runs — onset7
+    analysis), and the cloud schemes now see the post-vdiff ``thermo_run``;
+    and (b) the vdiff moisture/hydrometeor matrix rows switching from the
+    ICON-style dry-air mass to the moist Δp/g measure (ECHAM's ``zqdp``) so
+    the delivered-E identity holds in the model's own dp/g budget
+    convention (the dry-mass rows opened the composed column water budget
+    by up to ~15 % of E in post-burst profiles). Both legitimately shift
+    the 1-day integration, so the old fingerprint no longer applies.
+    """
 
     @pytest.mark.slow
     def test_echam_default_reference(self):

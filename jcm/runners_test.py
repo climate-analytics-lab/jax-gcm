@@ -532,6 +532,22 @@ class TestEndToEnd(unittest.TestCase):
         predictions = run(cfg)
         self.assertEqual(predictions.dynamics.u_wind.shape[0], 2)
 
+    def test_run_held_suarez_jw_and_balanced_inits(self):
+        # The non-chunked ``init.kind`` dispatch: jw and balanced_isothermal
+        # must go through inject + ``Model.resume`` (not ``Model.run``).
+        for init in ("jw", "balanced_isothermal"):
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                f"init={init}" if init == "jw" else "init=balanced_isothermal",
+                "run.time_step=180",
+                "run.total_time=1",
+                "run.save_interval=1",
+            ])
+            predictions = run(cfg)
+            T = np.asarray(predictions.dynamics.temperature)
+            self.assertTrue(np.isfinite(T).all(), f"init={init} produced NaNs")
+
 
 class TestModeDispatch(unittest.TestCase):
     """Cover the ``run.mode = chunked / prescribed / scm`` dispatch paths."""
@@ -754,6 +770,350 @@ class TestConfigureHostDeviceCount(unittest.TestCase):
             with self.assertLogs("jcm.runners", level="WARNING") as cm:
                 configure_host_device_count(8)
         self.assertTrue(any("already initialised" in m for m in cm.output))
+
+
+class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
+    """Config-validation and selector branches of the ``build_*`` helpers.
+
+    All of these are config-only paths (no dycore construction, no
+    integration), so they stay cheap in the fast sweep.
+    """
+
+    def test_build_coords_hybrid_unsupported_layers_raises(self):
+        cfg = _compose(["grid=echam_t63_l47_hybrid"])
+        cfg.grid.layers = 13  # no pre-tuned hybrid table for 13 levels
+        with self.assertRaisesRegex(ValueError, "not pre-configured"):
+            build_coords(cfg)
+
+    def test_build_coords_hybrid_l47(self):
+        cfg = _compose(["grid=echam_t63_l47_hybrid"])
+        # Shrink the horizontal so the test stays cheap; the point is the
+        # hybrid-vertical branch.
+        cfg.grid.spectral_truncation = 21
+        coords = build_coords(cfg)
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+        self.assertIsInstance(coords.vertical, HybridCoordinates)
+        self.assertEqual(coords.nodal_shape[0], 47)
+
+    def test_build_coords_unknown_vertical_raises(self):
+        cfg = _compose()
+        cfg.grid.vertical = "isentropic"
+        with self.assertRaisesRegex(ValueError, "Unknown grid.vertical"):
+            build_coords(cfg)
+
+    def test_build_terrain_unknown_kind_raises(self):
+        cfg = _compose()
+        cfg.terrain.kind = "flat_earth"
+        with self.assertRaisesRegex(ValueError, "Unknown terrain.kind"):
+            build_terrain(cfg, coords=None)
+
+    def test_build_forcing_unknown_kind_raises(self):
+        from jcm.runners import build_forcing
+        cfg = _compose()
+        cfg.forcing.kind = "bogus"
+        with self.assertRaisesRegex(ValueError, "Unknown forcing.kind"):
+            build_forcing(cfg, coords=None)
+
+    def test_build_forcing_without_forcing_block_is_none(self):
+        # A config with no ``forcing`` group at all must fall through every
+        # attach helper untouched and return None (Model then defaults to
+        # the aquaplanet forcing).
+        from omegaconf import OmegaConf
+        from jcm.runners import build_forcing
+        self.assertIsNone(build_forcing(OmegaConf.create({}), coords=None))
+
+    def test_build_physics_requires_terms_or_builder(self):
+        from omegaconf import OmegaConf
+        cfg = OmegaConf.create({"physics": {"terms": None}})
+        with self.assertRaisesRegex(ValueError, "physics.terms is required"):
+            build_physics(cfg)
+
+    def test_build_physics_null_term_entry_is_skipped(self):
+        # Hydra's `~`-removal / explicit null idiom disables a term.
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        baseline_n = len(build_physics(cfg).terms)
+        cfg.physics.terms["held_suarez"] = None
+        self.assertEqual(len(build_physics(cfg).terms), baseline_n - 1)
+
+    def test_build_term_without_target_raises(self):
+        from jcm.runners import _build_term
+        with self.assertRaisesRegex(ValueError, "_target_"):
+            _build_term("broken_term", {"params": {}})
+
+    def test_build_diffusion_pinned_echam_kinds(self):
+        from omegaconf import OmegaConf
+        from jcm.diffusion import DiffusionFilter
+
+        for kind, factory in (
+            ("echam_t63_l47", DiffusionFilter.echam_t63_l47),
+            ("echam_t85_l47", DiffusionFilter.echam_t85_l47),
+        ):
+            cfg = OmegaConf.create({"diffusion": {"kind": kind}})
+            diffusion = build_diffusion(cfg)
+            expected = factory()
+            self.assertEqual(
+                float(diffusion.temp_timescale), float(expected.temp_timescale),
+                f"kind={kind} did not pin the matching factory",
+            )
+            # The lmidatm profiles are level-dependent (del2 at top),
+            # unlike the uniform SPEEDY default.
+            self.assertIsNotNone(diffusion.level_orders_temp)
+
+    def test_build_diffusion_auto_picks_lmidatm_for_l47_hybrid(self):
+        from omegaconf import OmegaConf
+        from jcm.diffusion import DiffusionFilter
+
+        for truncation, factory in (
+            (63, DiffusionFilter.echam_t63_l47),
+            (85, DiffusionFilter.echam_t85_l47),
+            # An untuned truncation on the L47 grid falls back to default.
+            (42, DiffusionFilter.default),
+        ):
+            cfg = OmegaConf.create({
+                "diffusion": {"kind": "auto"},
+                "grid": {"vertical": "hybrid", "layers": 47,
+                         "spectral_truncation": truncation},
+            })
+            diffusion = build_diffusion(cfg)
+            expected = factory()
+            self.assertEqual(
+                float(diffusion.temp_timescale), float(expected.temp_timescale),
+                f"T{truncation}L47 selected the wrong diffusion profile",
+            )
+
+    def test_build_diffusion_unknown_kind_raises(self):
+        from omegaconf import OmegaConf
+        cfg = OmegaConf.create({"diffusion": {"kind": "del99"}})
+        with self.assertRaisesRegex(ValueError, "Unknown diffusion.kind"):
+            build_diffusion(cfg)
+
+    def test_maybe_add_sponge_appends_upper_sponge_term(self):
+        from jcm.physics.dissipation import UpperSponge
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.runners import maybe_add_sponge
+
+        # run=longrun carries the production sponge block (10 levels).
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8",
+                        "run=longrun"])
+        physics = held_suarez_physics()
+        n_before = len(physics.terms)
+        with_sponge = maybe_add_sponge(physics, cfg)
+        self.assertEqual(len(with_sponge.terms), n_before + 1)
+        sponge_term = with_sponge.terms[-1]
+        self.assertIsInstance(sponge_term, UpperSponge)
+
+        # Default config has sponge disabled -> pass-through, same object.
+        cfg_off = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        self.assertIs(maybe_add_sponge(physics, cfg_off), physics)
+
+
+class TestRunDispatchErrorPaths(unittest.TestCase):
+    def test_run_unknown_mode_raises(self):
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        cfg.run.mode = "teleport"
+        with self.assertRaisesRegex(ValueError, "Unknown run.mode"):
+            run(cfg)
+
+    def test_run_applies_constants_overrides_before_dispatch(self):
+        # The constants block must be applied (set_constants path) before
+        # the mode dispatch — use the current value so the process-global
+        # singleton is unchanged, and the unknown mode aborts before any
+        # model construction.
+        import jcm.constants as c
+        grav_before = float(c.grav)
+        cfg = _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            f"+constants.grav={grav_before}",
+        ])
+        cfg.run.mode = "teleport"
+        with self.assertRaisesRegex(ValueError, "Unknown run.mode"):
+            run(cfg)
+        self.assertEqual(float(c.grav), grav_before)
+
+    def test_run_full_unknown_init_kind_raises(self):
+        import types as _types
+        from jcm.runners import _run_full
+
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        cfg.init.kind = "from_mars"
+        # A stub model shortcuts build_model: _run_full only touches
+        # ``model.coords`` (for the forcing) before the init dispatch.
+        stub = _types.SimpleNamespace(coords=build_coords(cfg))
+        with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
+            _run_full(cfg, model=stub)
+
+    def test_prescribed_mode_requires_state_file(self):
+        from jcm.runners import _load_states_from_cfg
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        cfg.run.mode = "prescribed"
+        with self.assertRaisesRegex(ValueError, "state_file"):
+            _load_states_from_cfg(cfg)
+
+    def test_scm_mode_requires_column(self):
+        from jcm.runners import _run_scm
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        cfg.run.mode = "scm"
+        # The default config carries a (nulled-out) column block; drop it
+        # to exercise the guard for configs that never define one.
+        cfg.run.column = None
+        with self.assertRaisesRegex(ValueError, "run.column"):
+            _run_scm(cfg)
+
+
+class TestOutputPathAndSave(unittest.TestCase):
+    def test_resolve_output_path_relative_run_and_multirun(self):
+        import tempfile
+        import types as _types
+        from jcm.runners import resolve_output_path
+
+        cfg = _compose(["run.output=state.nc"])
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                os.chdir(tmpdir)
+                hydra_single = _types.SimpleNamespace(
+                    run=_types.SimpleNamespace(dir="outputs/2026-01-01/x"),
+                    mode="RunMode.RUN",
+                    job=_types.SimpleNamespace(num=0),
+                )
+                p = resolve_output_path(cfg, hydra_single)
+                self.assertEqual(
+                    p, Path("outputs/2026-01-01/x/state.nc"),
+                )
+                self.assertTrue(p.parent.is_dir())
+
+                hydra_multi = _types.SimpleNamespace(
+                    run=_types.SimpleNamespace(dir="outputs/2026-01-01/x"),
+                    mode="RunMode.MULTIRUN",
+                    job=_types.SimpleNamespace(num=3),
+                )
+                p_multi = resolve_output_path(cfg, hydra_multi)
+                self.assertEqual(
+                    p_multi,
+                    Path("outputs/2026-01-01/x/multirun/3/state.nc"),
+                )
+            finally:
+                os.chdir(cwd)
+
+    def test_save_predictions_skips_chunked_report_lists(self):
+        import tempfile
+        from jcm.runners import save_predictions
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "out.nc"
+            # run_chunked returns a list of health reports — nothing to dump.
+            save_predictions([{"ok": True}], out)
+            self.assertFalse(out.exists())
+
+
+class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
+    """Orography-rebalance and hybrid-vertical branches of the inits.
+
+    The aquaplanet-based tests elsewhere never hit the ``orog > 1`` ps
+    rebalance; real T30 terrain exercises it. The JW init additionally
+    has a hybrid-coordinate branch for the sigma-center lookup.
+    """
+
+    def _real_terrain_model(self):
+        from importlib import resources
+
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+        terrain = TerrainData.from_file(
+            data_dir / 'terrain.nc', coords=coords,  # real orography
+        )
+        model = Model(coords=coords, terrain=terrain,
+                      physics=held_suarez_physics(), time_step=180)
+        model.bootstrap_state()
+        return model, terrain
+
+    def _nodal_ps(self, model):
+        log_ps_nodal = model.coords.horizontal.to_nodal(
+            model._final_dycore_state.log_surface_pressure
+        )[0]
+        from dinosaur.scales import units
+        scale = float(
+            model.dycore.physics_specs.dimensionalize(1.0, units.pascal).m
+        )
+        return np.exp(np.asarray(log_ps_nodal)) * scale
+
+    def test_balanced_isothermal_rebalances_ps_over_orography(self):
+        from jcm.runners import inject_balanced_isothermal_profile
+
+        model, terrain = self._real_terrain_model()
+        inject_balanced_isothermal_profile(model)
+        ps = self._nodal_ps(model)
+        orog = np.asarray(terrain.orog)
+
+        # Surface pressure must drop hydrostatically over high terrain.
+        # (Pointwise bounds are softened by the spectral round-trip of
+        # log_ps, so assert on the >2 km population mean + correlation.)
+        high = orog > 2000.0
+        self.assertTrue(high.any(), "terrain data has no >2 km orography")
+        sea_level = ps[orog < 1.0].mean()
+        self.assertAlmostEqual(sea_level / 101325.0, 1.0, places=1)
+        self.assertLess(ps[high].mean(), 0.8 * sea_level)
+        self.assertLess(np.corrcoef(orog.ravel(), ps.ravel())[0, 1], -0.95)
+        # And the p(z) relation should be monotone: the highest point has
+        # the lowest surface pressure.
+        self.assertEqual(np.argmin(ps), np.argmax(orog))
+
+    def test_jw_profile_rebalances_ps_and_injects_humidity(self):
+        from jcm.runners import inject_jw_profile
+
+        model, terrain = self._real_terrain_model()
+        inject_jw_profile(model, rh=0.6)
+        ps = self._nodal_ps(model)
+        orog = np.asarray(terrain.orog)
+        self.assertLess(
+            ps[orog > 2000.0].mean(), 0.8 * ps[orog < 1.0].mean(),
+        )
+
+        physics_state = model.dycore.to_physics_state(
+            model._final_dycore_state
+        )
+        q = np.asarray(physics_state.specific_humidity)
+        # Moist near the surface, dry above the 200 hPa cap (level 0 is
+        # the model top in the physics state layout).
+        self.assertGreater(q[-1].mean(), 1e-4)
+        self.assertLess(q[0].max(), 1e-6)
+
+    def test_jw_profile_on_hybrid_l47_grid(self):
+        from jcm.model import Model
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.runners import inject_jw_profile
+        from jcm.utils import get_coords
+
+        coords = get_coords(
+            vertical_coords=get_echam_levels(47), spectral_truncation=21,
+        )
+        model = Model(coords=coords, physics=held_suarez_physics(),
+                      time_step=180)
+        model.bootstrap_state()
+        inject_jw_profile(model, rh=0.5)
+
+        physics_state = model.dycore.to_physics_state(
+            model._final_dycore_state
+        )
+        T = np.asarray(physics_state.temperature)
+        # Lapse-rate profile bounded by the JW floor and surface values.
+        self.assertGreaterEqual(T.min(), 240.0)
+        self.assertLessEqual(T.max(), 290.0)
+        # Warm at the bottom, at the 250 K floor near the top.
+        self.assertGreater(T[-1].mean(), 280.0)
+        self.assertLess(T[0].mean(), 255.0)
 
 
 # ---------------------------------------------------------------------------

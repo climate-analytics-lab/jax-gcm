@@ -104,9 +104,18 @@ def setup_matrix_system(
         5      # thv_var -> thv_var matrix
     ])
 
-    # Reciprocal air mass for matrix coefficients
+    # Reciprocal air mass for matrix coefficients. ALL rows — including
+    # moisture and hydrometeors — use the moist layer mass Δp/g, exactly
+    # like ECHAM's single ``zqdp = 1/(paphm1(k+1)−paphm1(k))`` in
+    # ``vdiff.f90``. jcm's specific humidity is per MOIST mass and every
+    # column-budget in the model (convection, microphysics, the composed
+    # water-closure test, the dycore itself) integrates with dp/g, so the
+    # qv row must conserve the same measure: with a dry-air mass here the
+    # solve conserved Σ dm_dry·dq instead, and the composed column budget
+    # opened by O(internal transport × qv) — up to ~15 % of E in the
+    # sharp post-convective-burst profiles (ICON uses dry mass because its
+    # tracers are per dry mass; jcm's are not).
     recip_air_mass = 1.0 / state.air_mass
-    recip_dry_air_mass = 1.0 / state.dry_air_mass
 
     # Compute layer thickness dz at half levels (needed for prefactor)
     # dz_half[k] = height_full[k] - height_full[k+1] (distance between full levels)
@@ -140,12 +149,12 @@ def setup_matrix_system(
 
     # Setup moisture matrix (qv)
     matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_moisture, recip_dry_air_mass, scaled_prefactor, 2
+        matrix_coeffs, exchange_coeff_moisture, recip_air_mass, scaled_prefactor, 2
     )
 
     # Setup hydrometeor matrix (qc, qi, tracers)
     matrix_coeffs = setup_momentum_matrix_with_prefactor(
-        matrix_coeffs, exchange_coeff_heat, recip_dry_air_mass, scaled_prefactor, 3
+        matrix_coeffs, exchange_coeff_heat, recip_air_mass, scaled_prefactor, 3
     )
 
     # Setup TKE matrix (use TKE exchange coefficient)
@@ -167,13 +176,15 @@ def setup_matrix_system(
         c_mom, c_heat, c_moist = surface_exchange
         u_s, v_s, t_s_eff, q_s_eff = surface_target
 
-        # k_sfc = dt·tpfac1·ρ_s·C_grid·recip_air_mass[K]; the moisture row
-        # uses the dry-air mass, matching its interior rows.
+        # k_sfc = dt·tpfac1·ρ_s·C_grid·recip_air_mass[K] for every row —
+        # the same moist Δp/g measure as the interior rows (ECHAM zqdp),
+        # so the delivered-E identity Σ (dp/g)·dq/dt == E is exact in the
+        # model's own budget convention.
         rho_s = _surface_air_density(state)
         dt_tp1_rho = dt * params.tpfac1 * rho_s
         k_sfc_mom = dt_tp1_rho * c_mom * recip_air_mass[:, -1]
         k_sfc_heat = dt_tp1_rho * c_heat * recip_air_mass[:, -1]
-        k_sfc_moist = dt_tp1_rho * c_moist * recip_dry_air_mass[:, -1]
+        k_sfc_moist = dt_tp1_rho * c_moist * recip_air_mass[:, -1]
 
         # Bottom diagonals: ECHAM's "+ zcfhw*zqdp" inside zdiscw
         # (mo_surface_ocean.f90:510).
@@ -339,13 +350,13 @@ def setup_heat_matrix(
 def setup_moisture_matrix(
     matrix_coeffs: jnp.ndarray,
     exchange_coeff: jnp.ndarray,
-    recip_dry_air_mass: jnp.ndarray,
+    recip_air_mass: jnp.ndarray,
     dt_factor: float,
     matrix_idx: int
 ) -> jnp.ndarray:
-    """Set up tridiagonal matrix for moisture equation."""
+    """Set up tridiagonal matrix for moisture equation (moist Δp/g mass)."""
     return setup_momentum_matrix(
-        matrix_coeffs, exchange_coeff, recip_dry_air_mass, dt_factor, matrix_idx
+        matrix_coeffs, exchange_coeff, recip_air_mass, dt_factor, matrix_idx
     )
 
 
@@ -353,14 +364,13 @@ def setup_moisture_matrix(
 def setup_hydrometeor_matrix(
     matrix_coeffs: jnp.ndarray,
     exchange_coeff: jnp.ndarray,
-    recip_dry_air_mass: jnp.ndarray,
+    recip_air_mass: jnp.ndarray,
     dt_factor: float,
     matrix_idx: int
 ) -> jnp.ndarray:
-    """Set up tridiagonal matrix for hydrometeor equations."""
-    # Hydrometeors have no surface flux, so bottom boundary condition is different; however, surface flux is handled separately
+    """Set up tridiagonal matrix for hydrometeor equations (zero-flux bottom)."""
     return setup_momentum_matrix(
-        matrix_coeffs, exchange_coeff, recip_dry_air_mass, dt_factor, matrix_idx
+        matrix_coeffs, exchange_coeff, recip_air_mass, dt_factor, matrix_idx
     )
 
 

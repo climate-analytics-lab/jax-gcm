@@ -1,5 +1,16 @@
 # ECHAM physics performance plan
 
+> **Status (2026-07):**
+> - **Step 1 — landed** (PR #517).
+> - **Step 2 — in progress** (vmap-over-columns hoisted to the host via
+>   `ComposablePhysics(vectorize_columns=True)`; per-term cleanup ongoing).
+> - **Step 3 — not implemented.**
+>
+> Function names below predate the composable-terms refactor: the
+> `apply_*` wrappers are gone; each scheme is now a `PhysicsTerm` class
+> (e.g. `TteTkeVerticalDiffusion`, `RRTMGPRadiation`). The perf
+> observations still apply to the corresponding terms.
+
 This is a staged plan to close the ~10x performance gap between ECHAM physics
 and SPEEDY physics for the same grid. Profiling on T21 × 10 levels (2048
 columns), CPU:

@@ -264,31 +264,35 @@ def effective_radius_liquid(
     
 
 @jax.jit
-def effective_radius_ice(
-    temperature: jnp.ndarray,
-    ice_water_content: jnp.ndarray
-) -> jnp.ndarray:
-    """Calculate effective radius for ice crystals.
-    
-    Based on temperature and ice water content.
-    
+def effective_radius_ice(iwc_gm3: jnp.ndarray) -> jnp.ndarray:
+    """Ice-crystal effective radius from the Moss/Foot IWC power law.
+
+    ECHAM's parameterisation (mo_cloud_optics.f90:358, ``nic_cirrus == 0``
+    branch)::
+
+        zrieff = 83.8 * ziwc**0.216    ! ziwc: in-cloud IWC [g/m3]
+
+    so thin cirrus gets *small* crystals (IWC = 1e-4 g/m3 -> ~11.4 um,
+    0.01 g/m3 -> ~31 um) rather than the LUT-edge sizes the previous
+    temperature-ramp formula produced. ECHAM clamps the result to its
+    optics-table range (reimin/reimax) at the interpolation site; here the
+    consumers own their bounds (the jax-rrtmgp library clips to its LUT
+    limits internally), so the raw formula is returned.
+
     Args:
-        temperature: Temperature (K)
-        ice_water_content: Ice water content (kg/m³)
-        
+        iwc_gm3: IN-CLOUD ice water content (g/m3). Grid-mean IWC must be
+            divided by cloud fraction before calling.
+
     Returns:
-        Effective radius (microns)
+        Effective radius (microns).
 
     """
-    # Base radius depends on temperature
-    # Colder = smaller crystals
-    t_celsius = temperature - 273.15
-    r_base = 20.0 + 1.5 * jnp.clip(t_celsius + 40.0, 0.0, 40.0)
-    
-    # Adjust for ice content (higher content = larger crystals)
-    iwc_factor = jnp.clip(ice_water_content * 1e4, 0.5, 2.0)
-    
-    return r_base * iwc_factor
+    # Double-where guard: d/dx x**0.216 is infinite at x = 0, so evaluate
+    # the power on a safe base and select afterwards. The zero-IWC value is
+    # inert downstream (zero ice path -> zero ice optical depth); 83.8 um
+    # (the formula at 1 g/m3) simply keeps it finite and positive.
+    safe_iwc = jnp.where(iwc_gm3 > 0.0, iwc_gm3, 1.0)
+    return jnp.where(iwc_gm3 > 0.0, 83.8 * safe_iwc**0.216, 83.8)
 
 
 @jax.jit
@@ -551,31 +555,31 @@ def ice_cloud_optics_lw(
 def cloud_optics(
     cloud_water_path: jnp.ndarray,
     cloud_ice_path: jnp.ndarray,
-    temperature: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
     land_fraction: float = 0.5
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """Calculate complete cloud optical properties.
-    
+
     Args:
-        cloud_water_path: Cloud water path (kg/m²) [nlev]
-        cloud_ice_path: Cloud ice path (kg/m²) [nlev]
-        temperature: Temperature (K) [nlev]
+        cloud_water_path: In-cloud water path per layer (kg/m²) [nlev]
+        cloud_ice_path: In-cloud ice path per layer (kg/m²) [nlev]
+        layer_thickness: Geometric layer thickness (m) [nlev]
         land_fraction: Land fraction for droplet size
         cdnc_factor: Cloud droplet number concentration factor from aerosols
-        
+
     Returns:
         Tuple of (sw_optics, lw_optics)
 
     """
-    nlev = temperature.shape[0]
-    
-    # Calculate effective radii
+    nlev = cloud_water_path.shape[0]
+
+    # Calculate effective radii. The Moss/Foot ice formula wants the
+    # IN-CLOUD ice water content in g/m3; the caller hands in-cloud paths
+    # per layer (kg/m2), so IWC = path / dz, converted kg -> g.
     r_eff_liq = effective_radius_liquid(cdnc_factor, land_fraction)
-    r_eff_ice = effective_radius_ice(
-        temperature,
-        cloud_ice_path / jnp.maximum(1.0, cloud_water_path + cloud_ice_path)
-    )
+    iwc_gm3 = cloud_ice_path / jnp.maximum(layer_thickness, 1.0) * 1e3
+    r_eff_ice = effective_radius_ice(iwc_gm3)
     
     # Calculate SW properties for all bands
     def calculate_sw_band(band):

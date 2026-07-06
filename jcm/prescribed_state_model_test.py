@@ -48,6 +48,116 @@ class TestPrescribedStateModel(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape[0], 3)
         self.assertEqual(predictions.times.shape[0], 3)
 
+    def test_run_accepts_stacked_state_and_explicit_times(self):
+        # A single PhysicsState whose leading axis is time must behave the
+        # same as the list-of-states form, and user-provided ``times`` must
+        # be passed through untouched.
+        from jax.tree_util import tree_map
+
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+            dt_seconds=900.0,
+        )
+        stacked = tree_map(lambda a: jnp.stack([a, a], axis=0), self.state)
+        times = jnp.array([0.0, 0.5])  # days
+        predictions = model.run(stacked, times=times)
+        self.assertEqual(predictions.tendencies.temperature.shape[0], 2)
+        self.assertTrue(jnp.allclose(predictions.times, times))
+        # Identical prescribed states must yield identical tendencies —
+        # there is no carry between steps in prescribed mode.
+        t_tend = predictions.tendencies.temperature
+        self.assertTrue(jnp.allclose(t_tend[0], t_tend[1]))
+
+    def test_default_times_use_dt_seconds(self):
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+            dt_seconds=43200.0,  # half a day per step
+        )
+        predictions = model.run([self.state] * 3)
+        self.assertTrue(
+            jnp.allclose(predictions.times, jnp.array([0.0, 0.5, 1.0]))
+        )
+
+    def test_to_xarray_layout_and_diagnostics(self):
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+        )
+        predictions = model.run([self.state] * 2)
+        ds = predictions.to_xarray()
+
+        nlev = self.coords.nodal_shape[0]
+        nlon, nlat = self.coords.horizontal.nodal_shape
+        # Column state variables use the prescribed-mode vmap layout.
+        self.assertEqual(
+            ds["state.temperature"].dims, ("time", "level", "lon", "lat")
+        )
+        self.assertEqual(
+            ds["state.temperature"].shape, (2, nlev, nlon, nlat)
+        )
+        # Surface variables drop the level axis.
+        self.assertEqual(
+            ds["state.normalized_surface_pressure"].dims,
+            ("time", "lon", "lat"),
+        )
+        # Tendencies serialised alongside the states.
+        self.assertIn("tend.temperature", ds)
+        # The prescribed states round-trip bit-exact into the dataset.
+        import numpy as np
+        np.testing.assert_array_equal(
+            ds["state.u_wind"].values[0],
+            np.asarray(self.state.u_wind),
+        )
+        self.assertEqual(ds.sizes["time"], 2)
+
+    def test_to_xarray_physics_data_dict_handling(self):
+        # Private ("_"-prefixed) diagnostics are dropped; struct-valued
+        # entries expand via asdict; plain arrays serialise directly.
+        import numpy as np
+        from jax.tree_util import tree_map
+
+        nlev = self.coords.nodal_shape[0]
+        base_state = _make_test_state(self.coords)
+        # Give the struct a tracer so the nested-dict expansion runs too.
+        base_state = PhysicsState(
+            **{**base_state.asdict(),
+               "tracers": {"qc": jnp.zeros_like(base_state.temperature)}},
+        )
+        stacked = tree_map(lambda a: jnp.stack([a, a], axis=0), base_state)
+        preds = PrescribedStatePredictions(
+            states=stacked,
+            tendencies=stacked,
+            physics_data={
+                "_private": jnp.zeros((2,)),
+                "scalar_series": jnp.arange(2.0),
+                # Struct-valued diagnostics expand field-by-field.
+                "blob": stacked,
+                # (time, level) columns and rank>4 fall back gracefully.
+                "column_series": jnp.zeros((2, nlev)),
+                "rank5": jnp.zeros((2, 1, 1, 1, 1)),
+            },
+            times=jnp.array([0.0, 1.0]),
+        )
+        ds = preds.to_xarray()
+        self.assertNotIn("diag._private", ds)
+        self.assertIn("diag.scalar_series", ds)
+        np.testing.assert_allclose(
+            ds["diag.scalar_series"].values, [0.0, 1.0]
+        )
+        self.assertIn("diag.blob.temperature", ds)
+        self.assertEqual(
+            ds["diag.blob.temperature"].dims,
+            ("time", "level", "lon", "lat"),
+        )
+        # Nested tracer dict flattens with a dotted name.
+        self.assertIn("diag.blob.tracers.qc", ds)
+        self.assertEqual(
+            ds["diag.column_series"].dims, ("time", "level"),
+        )
+        self.assertEqual(
+            ds["diag.rank5"].dims,
+            ("dim_0", "dim_1", "dim_2", "dim_3", "dim_4"),
+        )
+
 
 # Slow-marked companion — see jcm/runners_test.py for rationale.
 

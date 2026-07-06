@@ -240,19 +240,20 @@ class TestCloudOptics:
         """Set up test cloud data"""
         self.nlev = 10
         self.temperature = jnp.linspace(250, 290, self.nlev)
+        self.layer_thickness = jnp.full(self.nlev, 500.0)  # m
         self.cwp = jnp.where(self.temperature > 273, 0.1, 0.0)
         self.cip = jnp.where(self.temperature <= 273, 0.05, 0.0)
-    
+
     def test_effective_radius(self):
         """Test cloud particle effective radius"""
         # Liquid
         r_liq = effective_radius_liquid(1.0, land_fraction=0.5)
         assert 5 < r_liq < 20  # Reasonable range in microns
-        
-        # Ice
-        iwc = 1e-4  # kg/m^3
-        r_ice = effective_radius_ice(self.temperature[0], iwc)
-        assert 10 < r_ice < 100  # Reasonable range
+
+        # Ice: Moss/Foot r = 83.8 * IWC^0.216 (in-cloud IWC in g/m3)
+        r_ice = effective_radius_ice(jnp.array(0.01))
+        assert jnp.allclose(r_ice, 83.8 * 0.01**0.216, rtol=1e-6)
+        assert 10 < r_ice < 100  # ~31 um
     
     def test_liquid_cloud_optics(self):
         """Test liquid cloud optical properties"""
@@ -282,7 +283,7 @@ class TestCloudOptics:
     def test_combined_cloud_optics(self):
         """Test combined cloud optics calculation"""
         sw_optics, lw_optics = cloud_optics(
-            self.cwp, self.cip, self.temperature, jnp.array(1.0)
+            self.cwp, self.cip, self.layer_thickness, jnp.array(1.0)
         )
         
         # Check shapes

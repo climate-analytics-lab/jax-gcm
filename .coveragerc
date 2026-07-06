@@ -6,3 +6,12 @@ omit =
     # lands the full ECHAM6 sequence (see issue #341).
     jcm/physics/clouds/icon/cloud_microphysics_2m.py
     jcm/physics/clouds/icon/cloud_utils.py
+    # Dead duplicate of the lohmann_2m/ package: the monolith was split into
+    # the package in 3857e22 (which deleted this file), then resurrected by
+    # the merge of the pre-split fixes branch. The package shadows it on
+    # import (``jcm.physics.clouds.lohmann_2m`` resolves to the package
+    # __init__), so this module is unreachable — every post-split fix has
+    # been re-applied to the package (55d3091, b5d6a7a) and the package is
+    # strictly ahead (5e55b17 is package-only). Delete the file (and this
+    # entry) once the structure-split PR lands.
+    jcm/physics/clouds/lohmann_2m.py

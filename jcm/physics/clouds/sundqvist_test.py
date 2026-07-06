@@ -1,15 +1,11 @@
-"""Unit tests for shallow cloud scheme
-
-Date: 2025-01-10
-"""
+"""Unit tests for the Sundqvist cloud fraction and condensation helpers."""
 
 import jax.numpy as jnp
 import jax
 from .sundqvist import (
     CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
     saturation_specific_humidity, calculate_cloud_fraction,
-    partition_cloud_phase, condensation_evaporation,
-    shallow_cloud_scheme, critical_relative_humidity, _qs_and_dqs_dt,
+    condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
 )
 from jcm.constants import tmelt, eps, alhc, cpd
 
@@ -332,31 +328,6 @@ class TestCloudFraction:
         )
         assert jnp.any(cf_off[above] > 0.5)
 
-    def test_standalone_scheme_gates_condensation_above_cutoff(self):
-        """``shallow_cloud_scheme`` produces no condensate above the cutoff.
-
-        ``condensation_evaporation`` ignores cloud fraction, so zeroing the
-        diagnostic fraction alone would still let the standalone scheme condense
-        vapour into qc/qi (and emit T/q tendencies) in the masked stratosphere.
-        The scheme must gate those tendencies to zero there.
-        """
-        config = CloudParameters.default()  # cutoff at 100 hPa
-        pressure = jnp.array([90000.0, 50000.0, 8000.0, 4000.0])
-        temperature = jnp.array([285.0, 250.0, 195.0, 188.0])
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        q = 1.3 * qs  # supersaturated at every level
-        z = jnp.zeros_like(pressure)
-        tend, state = shallow_cloud_scheme(
-            temperature, q, pressure, z, z, 100000.0, 1800.0, config
-        )
-        above = pressure < config.cloud_top_pressure_pa
-        for field in (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt):
-            assert jnp.all(field[above] == 0.0), "no condensation above cutoff"
-        assert jnp.all(state.cloud_water[above] == 0.0)
-        assert jnp.all(state.cloud_ice[above] == 0.0)
-        # Troposphere still condenses.
-        assert jnp.any(jnp.abs(tend.dqcdt[~above]) + jnp.abs(tend.dqidt[~above]) > 0.0)
-
     def test_cloud_fraction_profile(self):
         """Test that critical RH varies with height"""
         config = CloudParameters.default()
@@ -378,61 +349,6 @@ class TestCloudFraction:
         # Cloud fraction should increase with height at same RH
         # (because critical RH decreases with height)
         assert cf[0] < cf[-1]  # More clouds at top than bottom
-
-
-class TestCloudPhase:
-    """Test cloud phase partitioning"""
-    
-    def test_partition_all_liquid(self):
-        """Test all liquid phase above freezing"""
-        config = CloudParameters.default()
-        
-        temperature = jnp.array(280.0)  # Above freezing
-        total_water = jnp.array(0.001)   # 1 g/kg
-        
-        ql, qi = partition_cloud_phase(temperature, total_water, config)
-        
-        assert jnp.allclose(ql, total_water)
-        assert jnp.allclose(qi, 0.0)
-    
-    def test_partition_all_ice(self):
-        """Test all ice phase below threshold"""
-        config = CloudParameters.default()
-        
-        temperature = jnp.array(230.0)  # Well below freezing
-        total_water = jnp.array(0.001)   # 1 g/kg
-        
-        ql, qi = partition_cloud_phase(temperature, total_water, config)
-        
-        assert jnp.allclose(ql, 0.0)
-        assert jnp.allclose(qi, total_water)
-    
-    def test_partition_mixed_phase(self):
-        """Test mixed phase region"""
-        config = CloudParameters.default()
-        
-        # Middle of mixed phase region
-        temperature = jnp.array(255.0)
-        total_water = jnp.array(0.001)
-        
-        ql, qi = partition_cloud_phase(temperature, total_water, config)
-        
-        # Should have both phases
-        assert ql > 0.0
-        assert qi > 0.0
-        assert jnp.allclose(ql + qi, total_water)
-        
-        # Test temperature dependence
-        temps = jnp.linspace(238, 273, 10)
-        total = jnp.ones(10) * 0.001
-        ql_arr, qi_arr = jax.vmap(partition_cloud_phase, in_axes=(0, 0, None))(
-            temps, total, config
-        )
-        
-        # Liquid should increase with temperature
-        assert jnp.all(jnp.diff(ql_arr) >= 0)
-        # Ice should decrease with temperature
-        assert jnp.all(jnp.diff(qi_arr) <= 0)
 
 
 class TestCondensationEvaporation:
@@ -492,146 +408,48 @@ class TestCondensationEvaporation:
         assert dqcdt >= -cloud_water / dt
 
 
-class TestShallowCloudScheme:
-    """Test the full shallow cloud scheme"""
-    
-    def test_stable_conditions(self):
-        """Test scheme in stable, dry conditions"""
-        config = CloudParameters.default()
-        
-        # Create stable profile
-        nlev = 20
-        pressure = jnp.linspace(100000, 20000, nlev)
-        temperature = jnp.linspace(288, 220, nlev)
-        
-        # Use 20% relative humidity profile - truly dry conditions
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = 0.2 * qs  # 20% RH everywhere
-        cloud_water = jnp.zeros(nlev)
-        cloud_ice = jnp.zeros(nlev)
-        surface_pressure = 100000.0
-        dt = 1800.0
-        
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
-        )
-        
-        # Should have minimal tendencies  
-        # Allow for some small tendencies due to numerical precision
-        # Temperature tendencies can be larger at upper levels due to ice processes
-        assert jnp.max(jnp.abs(tendencies.dtedt)) < 2e-3  # < ~200 K/day max
-        assert jnp.all(jnp.abs(tendencies.dqdt) < 1e-6)   # < ~0.1 g/kg/day
-        assert jnp.all(state.cloud_fraction < 0.1)
-    
-    def test_cloudy_conditions(self):
-        """Test scheme with existing clouds"""
-        config = CloudParameters.default()
-        
-        # Create profile with clouds
-        nlev = 20
-        pressure = jnp.linspace(100000, 20000, nlev)
-        temperature = jnp.linspace(288, 220, nlev)
-        
-        # High humidity in mid-levels
-        qs = _qs_for_cover(pressure, temperature)
-        specific_humidity = qs * 0.5  # Start at 50% RH (cover qs)
-        specific_humidity = specific_humidity.at[8:12].set(qs[8:12] * 0.95)  # 95% RH in mid-levels
-        
-        cloud_water = jnp.zeros(nlev)
-        cloud_water = cloud_water.at[8:12].set(0.0005)  # Some cloud water
-        cloud_ice = jnp.zeros(nlev)
-        
-        surface_pressure = 100000.0
-        dt = 1800.0
-        
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
-        )
-        
-        # Should have clouds in humid layers
-        assert jnp.any(state.cloud_fraction > 0.3)
-        assert state.total_cloud_cover > 0.3
-        
-        # Check that tendencies are reasonable
-        assert jnp.all(jnp.abs(tendencies.dtedt) < 1e-3)  # < ~100 K/day
-        assert jnp.all(jnp.abs(tendencies.dqdt) < 1e-5)   # < ~1 g/kg/day
-    
-    def test_condensation_updates_cloud_water(self):
-        """Test that condensation updates cloud water within the call.
+class TestJaxTransformations:
+    """JIT/grad coverage for the live helpers the physics term composes."""
 
-        Precipitation is now handled by microphysics (called after clouds),
-        but the cloud scheme must produce updated cloud_water for microphysics.
-        """
+    def test_jit_and_grad_through_live_path(self):
+        """JIT and grad work through cloud fraction + condensation."""
         config = CloudParameters.default()
 
-        # Supersaturated single-level profile
-        temperature = jnp.array(280.0)
-        pressure = jnp.array(90000.0)
-        qs = saturation_specific_humidity(pressure, temperature)
-        specific_humidity = jnp.array(float(1.05 * qs))  # 105% RH
-        cloud_water = jnp.array(0.0)
-        cloud_ice = jnp.array(0.0)
-        surface_pressure = 100000.0
-        dt = 1800.0
+        pressure = jnp.linspace(100000, 20000, 10)
+        temperature = jnp.linspace(288, 220, 10)
+        specific_humidity = jnp.ones(10) * 0.005
+        cloud_water = jnp.zeros(10)
+        cloud_ice = jnp.zeros(10)
 
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, surface_pressure, dt, config
-        )
+        def live_path(t):
+            cf, _ = calculate_cloud_fraction(
+                t, specific_humidity, pressure, 100000.0, config
+            )
+            dtedt, dqdt, dqcdt, dqidt = condensation_evaporation(
+                t, specific_humidity, cloud_water, cloud_ice,
+                cf, pressure, 1800.0, config
+            )
+            return cf, dtedt
 
-        # Cloud water should be updated with condensation
-        assert state.cloud_water[0] > 0.0, \
-            "Cloud water should increase from condensation"
-    
-    def test_jax_transformations(self):
-        """Test JAX transformations work correctly"""
-        config = CloudParameters.default()
-        
-        # Create test data
-        def create_profile():
-            pressure = jnp.linspace(100000, 20000, 10)
-            temperature = jnp.linspace(288, 220, 10)
-            specific_humidity = jnp.ones(10) * 0.005
-            cloud_water = jnp.zeros(10)
-            cloud_ice = jnp.zeros(10)
-            return temperature, specific_humidity, pressure, cloud_water, cloud_ice
-        
-        # Test JIT compilation
-        jitted_scheme = jax.jit(shallow_cloud_scheme)
-        
-        t, q, p, qc, qi = create_profile()
-        tendencies, state = jitted_scheme(t, q, p, qc, qi, 100000.0, 1800.0, config)
+        cf, dtedt = jax.jit(live_path)(temperature)
+        assert cf.shape == temperature.shape
+        assert dtedt.shape == temperature.shape
 
-        # Should produce valid output
-        assert tendencies.dtedt.shape == t.shape
-        assert state.cloud_fraction.shape == t.shape
-
-        # Test gradient computation
-        def loss_fn(temperature):
-            t, q, p, qc, qi = create_profile()
-            tend, _ = shallow_cloud_scheme(temperature, q, p, qc, qi, 100000.0, 1800.0, config)
-            return jnp.sum(tend.dtedt ** 2)
-        
-        grad_fn = jax.grad(loss_fn)
-        grad = grad_fn(t)
-        
-        # Should produce valid gradients
-        assert grad.shape == t.shape
+        grad = jax.grad(lambda t: jnp.sum(live_path(t)[1] ** 2))(temperature)
+        assert grad.shape == temperature.shape
         assert jnp.all(jnp.isfinite(grad))
 
 
 class TestCondensationToCloudWater:
-    """Tests for within-timestep condensation updating cloud water.
+    """Tests for within-timestep condensation producing cloud condensate.
 
-    The cloud scheme must produce non-zero cloud water from supersaturation
-    even when initial qc/qi are zero, so that microphysics (called next)
-    can convert it to precipitation.
+    ``condensation_evaporation`` must emit positive qc/qi tendencies from
+    supersaturation even when initial qc/qi are zero, so that microphysics
+    (called next in the term chain) can convert condensate to precipitation.
     """
 
     def test_supersaturated_column_produces_cloud_water(self):
-        """A supersaturated column must produce non-zero cloud water.
+        """A supersaturated column must produce a positive qc tendency.
 
         This is the key regression test: with cloud_water=0 but RH > 100%,
         the scheme must condense moisture into cloud water within the call.
@@ -647,17 +465,16 @@ class TestCondensationToCloudWater:
         cloud_water = jnp.zeros(nlev)
         cloud_ice = jnp.zeros(nlev)
 
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 100000.0, 1800.0, config
+        _, _, dqcdt, _ = condensation_evaporation(
+            temperature, specific_humidity, cloud_water, cloud_ice,
+            jnp.zeros(nlev), pressure, 1800.0, config
         )
 
-        # Cloud water should be updated with condensation
-        assert jnp.max(state.cloud_water) > 0.0, \
-            f"Cloud water should be > 0 for supersaturated column, got {float(jnp.max(state.cloud_water)):.6e}"
+        assert jnp.max(dqcdt) > 0.0, \
+            f"dqc/dt should be > 0 for supersaturated column, got {float(jnp.max(dqcdt)):.6e}"
 
     def test_subsaturated_column_no_cloud_water(self):
-        """A dry subsaturated column with no initial cloud water stays dry."""
+        """A dry subsaturated column with no initial condensate stays dry."""
         config = CloudParameters.default()
         nlev = 20
         pressure = jnp.linspace(100000, 20000, nlev)
@@ -669,18 +486,18 @@ class TestCondensationToCloudWater:
         cloud_water = jnp.zeros(nlev)
         cloud_ice = jnp.zeros(nlev)
 
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 100000.0, 1800.0, config
+        _, _, dqcdt, dqidt = condensation_evaporation(
+            temperature, specific_humidity, cloud_water, cloud_ice,
+            jnp.zeros(nlev), pressure, 1800.0, config
         )
 
-        assert jnp.allclose(state.cloud_water, 0.0), \
-            "Cloud water should remain 0 for dry column"
-        assert jnp.allclose(state.cloud_ice, 0.0), \
-            "Cloud ice should remain 0 for dry column"
+        assert jnp.allclose(dqcdt, 0.0), \
+            "dqc/dt should remain 0 for dry column"
+        assert jnp.allclose(dqidt, 0.0), \
+            "dqi/dt should remain 0 for dry column"
 
     def test_cold_supersaturated_column_produces_cloud_ice(self):
-        """A cold supersaturated column should produce cloud ice."""
+        """A cold supersaturated column should produce a cloud-ice tendency."""
         config = CloudParameters.default()
         nlev = 10
         pressure = jnp.linspace(50000, 20000, nlev)
@@ -692,10 +509,10 @@ class TestCondensationToCloudWater:
         cloud_water = jnp.zeros(nlev)
         cloud_ice = jnp.zeros(nlev)
 
-        tendencies, state = shallow_cloud_scheme(
-            temperature, specific_humidity, pressure,
-            cloud_water, cloud_ice, 50000.0, 1800.0, config
+        _, _, _, dqidt = condensation_evaporation(
+            temperature, specific_humidity, cloud_water, cloud_ice,
+            jnp.zeros(nlev), pressure, 1800.0, config
         )
 
-        assert jnp.max(state.cloud_ice) > 0.0, \
-            f"Cloud ice should be > 0 for cold supersaturated column, got {float(jnp.max(state.cloud_ice)):.6e}"
+        assert jnp.max(dqidt) > 0.0, \
+            f"dqi/dt should be > 0 for cold supersaturated column, got {float(jnp.max(dqidt)):.6e}"

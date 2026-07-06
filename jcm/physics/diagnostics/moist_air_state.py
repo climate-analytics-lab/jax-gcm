@@ -63,6 +63,8 @@ def advance_thermo_run(
     dt,
     d_temperature=None,
     d_specific_humidity=None,
+    d_qc=None,
+    d_qi=None,
 ) -> dict:
     """Advance the running ``thermo_run`` state by a term's tendency.
 
@@ -102,13 +104,21 @@ def advance_thermo_run(
         temperature = temperature + d_temperature * dt
     if d_specific_humidity is not None:
         specific_humidity = specific_humidity + d_specific_humidity * dt
-    return {
-        **diagnostics,
-        "thermo_run": {
-            "temperature": temperature,
-            "specific_humidity": specific_humidity,
-        },
+    qc = tr.get("qc")
+    qi = tr.get("qi")
+    if d_qc is not None and qc is not None:
+        qc = jnp.maximum(qc + d_qc * dt, 0.0)
+    if d_qi is not None and qi is not None:
+        qi = jnp.maximum(qi + d_qi * dt, 0.0)
+    out = {
+        "temperature": temperature,
+        "specific_humidity": specific_humidity,
     }
+    if qc is not None:
+        out["qc"] = qc
+    if qi is not None:
+        out["qi"] = qi
+    return {**diagnostics, "thermo_run": out}
 
 
 class MoistAirColumnState(PhysicsTerm):
@@ -229,6 +239,13 @@ class MoistAirColumnState(PhysicsTerm):
         thermo_run = {
             "temperature": state.temperature,
             "specific_humidity": state.specific_humidity,
+            # Condensate view: after the ECHAM reorder, vertical diffusion
+            # mixes qc/qi BEFORE the cloud chain runs; downstream terms
+            # (Sundqvist seeding, microphysics) must see the post-vdiff
+            # condensate, not the step-start tracers (Codex review on the
+            # smoothing PR).
+            "qc": state.tracers.get("qc", jnp.zeros_like(state.temperature)),
+            "qi": state.tracers.get("qi", jnp.zeros_like(state.temperature)),
         }
 
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)

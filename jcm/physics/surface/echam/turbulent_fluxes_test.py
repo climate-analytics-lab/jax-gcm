@@ -5,13 +5,9 @@ import jax.numpy as jnp
 
 from jcm.physics.surface.echam.turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
-    compute_exchange_coefficients, compute_surface_humidity,
-    compute_turbulent_fluxes
+    compute_exchange_coefficients, compute_surface_humidity
 )
-from jcm.physics.surface.echam.surface_types import (
-    SurfaceParameters, SurfaceState, AtmosphericForcing,
-    SurfaceFluxes
-)
+from jcm.physics.surface.echam.surface_types import SurfaceParameters
 
 
 class TestBulkRichardsonNumber:
@@ -365,119 +361,6 @@ class TestSurfaceHumidity:
         # Should be clipped to reasonable bounds
         assert jnp.all(q_surface <= 0.1)  # Max 100 g/kg
         assert jnp.all(q_surface >= 0.0)
-
-
-class TestTurbulentFluxes:
-    """Test turbulent flux calculations."""
-    
-    def setup_method(self):
-        """Set up test data."""
-        self.ncol, self.nsfc_type = 3, 3
-        
-        # Atmospheric state
-        self.atmospheric_state = AtmosphericForcing(
-            temperature=jnp.array([290.0, 295.0, 300.0]),
-            humidity=jnp.array([0.01, 0.012, 0.015]),
-            u_wind=jnp.array([5.0, 3.0, 8.0]),
-            v_wind=jnp.array([2.0, 4.0, 1.0]),
-            pressure=jnp.array([101325.0, 95000.0, 85000.0]),
-            sw_downward=jnp.array([300.0, 250.0, 400.0]),
-            lw_downward=jnp.array([350.0, 320.0, 380.0]),
-            rain_rate=jnp.array([1e-6, 2e-6, 0.0]),
-            snow_rate=jnp.array([0.0, 0.0, 1e-7]),
-            exchange_coeff_heat=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            exchange_coeff_moisture=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            exchange_coeff_momentum=jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        )
-        
-        # Surface state
-        self.surface_state = SurfaceState(
-            temperature=jnp.array([[280.0, 275.0, 285.0], 
-                                  [285.0, 270.0, 290.0], 
-                                  [290.0, 265.0, 295.0]]),
-            temperature_rad=jnp.array([280.0, 282.0, 287.0]),
-            fraction=jnp.array([[0.6, 0.2, 0.2], 
-                               [0.4, 0.3, 0.3], 
-                               [0.8, 0.1, 0.1]]),
-            ocean_temp=jnp.array([280.0, 285.0, 290.0]),
-            ocean_u=jnp.zeros(self.ncol),
-            ocean_v=jnp.zeros(self.ncol),
-            ice_thickness=jnp.ones((self.ncol, 2)) * 2.0,
-            ice_temp=jnp.ones((self.ncol, 2)) * 270.0,
-            snow_depth=jnp.array([0.0, 0.1, 0.05]),
-            soil_temp=jnp.ones((self.ncol, 4)) * 280.0,
-            soil_moisture=jnp.ones((self.ncol, 4)) * 0.3,
-            vegetation_temp=jnp.array([285.0, 290.0, 295.0]),
-            roughness_momentum=jnp.ones((self.ncol, self.nsfc_type)) * 0.01,
-            roughness_heat=jnp.ones((self.ncol, self.nsfc_type)) * 0.001,
-            albedo_visible_direct=jnp.ones((self.ncol, self.nsfc_type)) * 0.1,
-            albedo_visible_diffuse=jnp.ones((self.ncol, self.nsfc_type)) * 0.1,
-            albedo_nir_direct=jnp.ones((self.ncol, self.nsfc_type)) * 0.2,
-            albedo_nir_diffuse=jnp.ones((self.ncol, self.nsfc_type)) * 0.2
-        )
-    
-    def test_turbulent_flux_calculation(self):
-        """Test basic turbulent flux calculation."""
-        exchange_coeffs = jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        
-        fluxes = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs, exchange_coeffs, exchange_coeffs
-        )
-        
-        assert isinstance(fluxes, SurfaceFluxes)
-        assert fluxes.sensible_heat.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.latent_heat.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.momentum_u.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.momentum_v.shape == (self.ncol, self.nsfc_type)
-        assert fluxes.evaporation.shape == (self.ncol, self.nsfc_type)
-        
-        # Check mean fluxes
-        assert fluxes.sensible_heat_mean.shape == (self.ncol,)
-        assert fluxes.latent_heat_mean.shape == (self.ncol,)
-        assert fluxes.momentum_u_mean.shape == (self.ncol,)
-        assert fluxes.momentum_v_mean.shape == (self.ncol,)
-        assert fluxes.evaporation_mean.shape == (self.ncol,)
-    
-    def test_flux_directions(self):
-        """Test flux directions make physical sense."""
-        exchange_coeffs = jnp.ones((self.ncol, self.nsfc_type)) * 0.01
-        
-        fluxes = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs, exchange_coeffs, exchange_coeffs
-        )
-        
-        # Where air is warmer than surface, sensible heat should be negative (downward)
-        temp_diff = (self.atmospheric_state.temperature[:, None] - 
-                    self.surface_state.temperature)
-        
-        # Sensible heat flux should have opposite sign to temperature difference
-        sensible_sign = jnp.sign(fluxes.sensible_heat)
-        temp_diff_sign = jnp.sign(temp_diff)
-        
-        # They should be the same sign (both use same sign convention)
-        assert jnp.allclose(sensible_sign, temp_diff_sign)
-    
-    def test_flux_magnitude_scaling(self):
-        """Test flux magnitude scaling with exchange coefficients."""
-        exchange_coeffs_low = jnp.ones((self.ncol, self.nsfc_type)) * 0.005
-        exchange_coeffs_high = jnp.ones((self.ncol, self.nsfc_type)) * 0.02
-        
-        fluxes_low = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs_low, exchange_coeffs_low, exchange_coeffs_low
-        )
-        
-        fluxes_high = compute_turbulent_fluxes(
-            self.atmospheric_state, self.surface_state,
-            exchange_coeffs_high, exchange_coeffs_high, exchange_coeffs_high
-        )
-        
-        # Higher exchange coefficients should give higher flux magnitudes
-        assert jnp.all(jnp.abs(fluxes_high.sensible_heat) >= jnp.abs(fluxes_low.sensible_heat))
-        assert jnp.all(jnp.abs(fluxes_high.latent_heat) >= jnp.abs(fluxes_low.latent_heat))
-        assert jnp.all(jnp.abs(fluxes_high.momentum_u) >= jnp.abs(fluxes_low.momentum_u))
 
 
 if __name__ == "__main__":

@@ -51,16 +51,19 @@ markers = [
     "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
 ]
 
-[tool.ruff]
-extend-select = ["D"]
-
 [tool.ruff.lint]
+extend-select = ["D"]
 ignore = [
     "D100", # missing public module docstrings
     "D101", # missing public class docstrings
     "D102", # missing public method docstrings
     "D103", # missing public function docstrings
     "D104", # missing public package docstrings
+    # One of each mutually-incompatible docstring pair (ruff would
+    # otherwise silently drop one): keep D211 (no blank line before
+    # docstring) and D212 (summary on first line).
+    "D203", # incompatible with D211
+    "D213", # incompatible with D212
     "D205", # missing blank lines between summary line and description
     "D400", # first lines missing period
     "D415", # docstrings missing closing punctuation

@@ -102,6 +102,112 @@ class TestRRTMGPTermCacheCoords:
         assert float(jnp.max(jnp.abs(lats))) <= 90.0 + 1e-3
 
 
+class TestRRTMGPEffectiveRadii:
+    """Effective-radius handling in the RRTMGP input prep (finding 2.36).
+
+    The ice fallback must be ECHAM's Moss/Foot power law on the in-cloud
+    IWC in g/m3 — thin cirrus gets small crystals — and microphysical
+    radii from the clouds carry (2M preffl/preffi) must override the
+    fallbacks where provided.
+    """
+
+    K_CIRRUS = 1  # TOA-first index of the cirrus layer
+
+    def _make_state(self, nlev=8, dz=5000.0, iwc_gm3=1e-4):
+        """In-cloud-condensate RadiationState with one thin cirrus layer."""
+        import jcm.constants as c
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+            prepare_radiation_state,
+        )
+
+        pressure_levels = jnp.linspace(10000.0, 90000.0, nlev)  # TOA-first
+        pressure_interfaces = jnp.linspace(5000.0, 95000.0, nlev + 1)
+        temperature = jnp.full(nlev, 250.0)
+        air_density = pressure_levels / (c.rd * temperature)
+        layer_thickness = jnp.full(nlev, dz)
+        # In-cloud mixing ratio giving exactly ``iwc_gm3`` of in-cloud ice
+        # (the rrtmgp caller hands prepare_radiation_state in-cloud values).
+        cloud_ice = jnp.zeros(nlev).at[self.K_CIRRUS].set(
+            iwc_gm3 * 1e-3 / air_density[self.K_CIRRUS]
+        )
+        state = prepare_radiation_state(
+            temperature=temperature,
+            specific_humidity=jnp.full(nlev, 1e-4),
+            pressure_levels=pressure_levels,
+            pressure_interfaces=pressure_interfaces,
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=jnp.zeros(nlev),
+            cloud_ice=cloud_ice,
+            cloud_fraction=jnp.zeros(nlev).at[self.K_CIRRUS].set(0.3),
+            cos_zenith=jnp.array(0.5),
+        )
+        return state, layer_thickness
+
+    @staticmethod
+    def _r_eff_um(rrtmgp_input, key, nlev):
+        """Interior r_eff profile (um), flipped back to TOA-first."""
+        interior = rrtmgp_input[key][0, 0, 1:-1]
+        assert interior.shape == (nlev,)
+        return interior[::-1] * 1e6
+
+    def test_thin_cirrus_gets_small_crystals(self):
+        """IWC = 1e-4 g/m3 must give r_eff_ice ~ 11.4 um through the prep.
+
+        The previous fabricated formula (T-ramp x clip(path-ratio*1e4))
+        yielded ~40-160 um here, saturating the LUT edge for thin cirrus.
+        """
+        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
+
+        nlev = 8
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+        )
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        expected = 83.8 * 1e-4 ** 0.216  # ~11.46 um (ECHAM Moss/Foot)
+        assert float(r_ice[self.K_CIRRUS]) < 15.0
+        assert np.isclose(float(r_ice[self.K_CIRRUS]), expected, rtol=1e-4)
+
+        # Denser cirrus: 0.01 g/m3 -> ~31 um
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-2)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+        )
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        assert np.isclose(
+            float(r_ice[self.K_CIRRUS]), 83.8 * 1e-2 ** 0.216, rtol=1e-4,
+        )
+
+    def test_provided_microphysical_radii_override_fallback(self):
+        """Clouds-carry radii (> 0) win; zeros keep the diagnostic fallback."""
+        from jcm.physics.radiation.cloud_optics import (
+            effective_radius_liquid,
+        )
+        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
+
+        nlev = 8
+        k = self.K_CIRRUS
+        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
+        r_eff_liq_um = jnp.zeros(nlev).at[k + 2].set(9.5)
+        r_eff_ice_um = jnp.zeros(nlev).at[k].set(25.0)
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
+        )
+        r_liq = self._r_eff_um(out, "cloud_r_eff_liq", nlev)
+        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
+        # Provided values pass through (um)
+        assert np.isclose(float(r_ice[k]), 25.0, rtol=1e-5)
+        assert np.isclose(float(r_liq[k + 2]), 9.5, rtol=1e-5)
+        # Unprovided levels fall back to the diagnostics
+        fallback_liq = float(effective_radius_liquid(jnp.array(1.0), 0.5))
+        assert np.isclose(float(r_liq[k]), fallback_liq, rtol=1e-5)
+        assert np.isclose(
+            float(r_ice[k + 1]), 83.8, rtol=1e-4,
+        )  # zero-IWC guard value
+
+
 class TestRRTMGPScheme:
     """Test the RRTMGP radiation scheme produces valid outputs."""
 
@@ -126,6 +232,177 @@ class TestRRTMGPScheme:
         assert jnp.isfinite(diag.toa_lw_up)
         assert diag.surface_lw_down >= 0.0
         assert diag.toa_lw_up >= 0.0
+
+
+class TestRRTMGPGreenhouseGases:
+    """Prescribed GHG profiles must reach the gas optics and warm the column.
+
+    Covers the ``vmr_fields`` plumbing for O3 / CH4 / N2O (CO2 rides along
+    in every test via ``_make_inputs``) and the scalar ``cdnc_factor``
+    normalisation branch.
+    """
+
+    def test_added_ghgs_reduce_olr(self):
+        nlev = 10
+        base = _make_inputs(nlev=nlev)
+        base["compute_cre"] = False
+        # Scalar (ndim == 0) cdnc factor exercises the normalisation branch.
+        base["aerosol_data"] = base["aerosol_data"].copy(
+            cdnc_factor=jnp.float32(1.0),
+        )
+        _, diag_base = radiation_scheme_rrtmgp(**base)
+
+        enhanced = dict(base)
+        # 4x CO2 + realistic CH4 / N2O + a stratosphere-weighted O3 profile.
+        enhanced["co2_vmr"] = 1600e-6
+        enhanced["ch4_vmr"] = jnp.array(1.8e-6)
+        enhanced["n2o_vmr"] = jnp.array(320e-9)
+        enhanced["ozone_vmr"] = jnp.geomspace(8e-6, 3e-8, nlev)  # TOA-first
+        _, diag_ghg = radiation_scheme_rrtmgp(**enhanced)
+
+        olr_base = float(diag_base.toa_lw_up)
+        olr_ghg = float(diag_ghg.toa_lw_up)
+        assert np.isfinite(olr_base) and np.isfinite(olr_ghg)
+        # Greenhouse effect: more absorbers -> less outgoing longwave.
+        assert olr_ghg < olr_base, (
+            f"adding 4xCO2+CH4+N2O+O3 must reduce OLR "
+            f"(base {olr_base:.2f}, ghg {olr_ghg:.2f} W/m2)"
+        )
+        # The reduction should be a few W/m2, not a rounding artefact.
+        assert olr_base - olr_ghg > 1.0
+
+
+class TestColumnVectorHelper:
+    def test_column_vector_reshapes_vmapped_scalars(self):
+        from jcm.physics.radiation.rrtmgp import _column_vector_rrtmgp
+
+        vals = jnp.arange(6.0).reshape(6, 1)
+        out = _column_vector_rrtmgp(vals, 6)
+        assert out.shape == (6,)
+        assert jnp.allclose(out, jnp.arange(6.0))
+
+
+class TestRRTMGPTermComputeAndCache:
+    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+
+    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
+    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
+    with ``radiation_interval = 2 x dt``, so the first call must run the
+    full scheme and the second call must replay the cached heating rates
+    (while still bumping the radiation step counter).
+    """
+
+    NLEV = 8
+    NCOLS = 2
+    DT = 1800.0
+
+    def _term_and_inputs(self):
+        import jcm.constants as c
+        from flax import nnx
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.chemistry.simple_chemistry import ChemistryData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.radiation.radiation_types import RadiationData
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+
+        # Recompute every 2nd step: interval = 2 x dt.
+        params = RadiationParameters.default(radiation_interval=2 * self.DT)
+        term = RRTMGPRadiation(params=params, compute_cre=False)
+        # Per-column lat/lon normally cached from the model coords; two
+        # columns (equator, mid-latitude) are enough here.
+        term._lats = nnx.Variable(jnp.array([0.0, 45.0]))
+        term._lons = nnx.Variable(jnp.array([0.0, 90.0]))
+
+        # A plausible TOA-first clear-sky column, broadcast to 2 columns.
+        col = lambda profile: jnp.broadcast_to(  # noqa: E731
+            jnp.asarray(profile)[:, None], (len(profile), ncols),
+        )
+        p_full = jnp.linspace(2e3, 9.5e4, nlev)
+        p_half = jnp.linspace(1e3, 1.0e5, nlev + 1)
+        T = jnp.linspace(220.0, 288.0, nlev)
+        rho = p_full / (c.rd * T)
+        dz = (p_half[1:] - p_half[:-1]) / (rho * c.grav)
+
+        state = PhysicsState.zeros(
+            (nlev, ncols),
+            temperature=col(T),
+            specific_humidity=col(jnp.geomspace(1e-6, 8e-3, nlev)),
+            normalized_surface_pressure=jnp.ones((ncols,)),
+        )
+        diagnostics = {
+            "_dt_seconds": self.DT,
+            "pressure_full": col(p_full),
+            "pressure_half": col(p_half),
+            "layer_thickness": col(dz),
+            "air_density": col(rho),
+            "radiation": RadiationData.zeros((ncols,), nlev).copy(
+                surface_albedo_vis=jnp.full((ncols,), 0.07),
+                surface_albedo_nir=jnp.full((ncols,), 0.07),
+                surface_emissivity=jnp.full((ncols,), 0.98),
+            ),
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.full((ncols,), 288.0),
+            ),
+            "chemistry": ChemistryData.zeros((ncols,), nlev),
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "clouds": CloudData.zeros((ncols,), nlev),
+        }
+        forcing = ForcingData.zeros((ncols,))
+        return term, state, diagnostics, forcing
+
+    def test_compute_then_cache_cycle(self):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+
+        # --- Step 0: radiation step counter 0 -> full compute.
+        tend1, diag1 = term(state, diagnostics, forcing, None)
+        rad1 = diag1["radiation"]
+        assert int(rad1.step) == 1, "step counter must advance on compute"
+        assert tend1.temperature.shape == (self.NLEV, self.NCOLS)
+        assert bool(jnp.all(jnp.isfinite(tend1.temperature)))
+        # Clear-sky OLR from a 288 K surface must be physically sized.
+        olr = np.asarray(rad1.toa_lw_up)
+        assert olr.shape == (self.NCOLS,)
+        assert np.all(olr > 100.0) and np.all(olr < 400.0), f"OLR {olr}"
+        # The tendency the term reports is the total heating rate.
+        np.testing.assert_allclose(
+            np.asarray(tend1.temperature),
+            np.asarray(rad1.sw_heating_rate + rad1.lw_heating_rate),
+            rtol=1e-5, atol=1e-10,
+        )
+        # CRE mirror onto the clouds carry.
+        np.testing.assert_array_equal(
+            np.asarray(diag1["clouds"].toa_lw_up_all),
+            np.asarray(rad1.toa_lw_up),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(diag1["clouds"].toa_sw_up_all),
+            np.asarray(rad1.toa_sw_up),
+        )
+
+        # --- Step 1: interval = 2 steps -> cached replay. Perturb the
+        # atmosphere to prove the output comes from the cache, not a
+        # recompute.
+        hot_state = state.copy(temperature=state.temperature + 10.0)
+        tend2, diag2 = term(hot_state, diag1, forcing, None)
+        rad2 = diag2["radiation"]
+        assert int(rad2.step) == 2, "step counter must advance on cached steps"
+        np.testing.assert_array_equal(
+            np.asarray(rad2.toa_lw_up), np.asarray(rad1.toa_lw_up),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rad2.lw_heating_rate),
+            np.asarray(rad1.lw_heating_rate),
+        )
+        np.testing.assert_allclose(
+            np.asarray(tend2.temperature),
+            np.asarray(rad1.sw_heating_rate + rad1.lw_heating_rate),
+            rtol=1e-5, atol=1e-10,
+        )
 
 
 class TestGreyVsRRTMGP:
@@ -479,4 +756,89 @@ class TestRRTMGPRadiationQuickWins:
         )
         assert float(diag_cloudy.toa_sw_up_clear) == pytest.approx(
             float(diag_clear.toa_sw_up_clear), rel=1e-4
+        )
+
+
+class TestRRTMGPVerticalOrientation:
+    """Per-level inputs must reach the solver in the library's frame.
+
+    jcm physics columns are TOA-first while the jax-rrtmgp library is
+    surface-first; temperature/pressure/clouds flip in
+    ``prepare_rrtmgp_data`` but the per-band aerosol and the gas-VMR
+    profiles previously skipped the flip. The signature failure was
+    surface-concentrated aerosol tau acting at the model top: spurious
+    top-level LW cooling from JAM's dust/BC LW bands grew a two-grid
+    oscillation at 1 Pa that NaN'd coupled JAM runs by day ~10, and
+    MACv2-SP's SW tau heated the top of every RRTMGP run. These tests
+    pin locality (aerosol acts at the levels that carry it) and the
+    ozone profile's orientation.
+    """
+
+    def _lw_heating(self, inputs):
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        return np.asarray(diag.lw_heating_rate)
+
+    def test_low_level_lw_aerosol_acts_low_not_at_top(self):
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+
+        clean = AerosolData.zeros((), nlev, n_bnd_sw=14, n_bnd_lw=16)
+        # Dust-like LW aerosol confined to the three SURFACE layers
+        # (TOA-first indices -3:). With the historical orientation bug
+        # these landed at the library top and cooled the TOA layer ~100x.
+        tau = jnp.zeros((16, nlev)).at[:, -3:].set(0.05)
+        ssa = jnp.zeros((16, nlev)).at[:, -3:].set(0.5)
+        asy = jnp.zeros((16, nlev)).at[:, -3:].set(0.3)
+        dusty = clean.copy(
+            aod_lw_per_band=tau, ssa_lw_per_band=ssa, asy_lw_per_band=asy,
+        )
+
+        base = self._lw_heating({**inputs, "aerosol_data": clean})
+        pert = self._lw_heating({**inputs, "aerosol_data": dusty})
+        diff = pert - base
+
+        top_change = abs(diff[0])
+        low_change = np.abs(diff[-3:]).max()
+        # The aerosol must act where it is: significant response in the
+        # loaded surface layers, and the TOA layer essentially untouched
+        # (it holds no aerosol and only sees the tiny OLR perturbation).
+        assert low_change > 1e-7, f"no low-level LW response ({low_change})"
+        assert top_change < 0.1 * low_change, (
+            f"top-layer LW heating changed by {top_change} vs low-level "
+            f"{low_change} — surface aerosol is acting at the model top "
+            "(vertical orientation regression)"
+        )
+
+    def test_ozone_profile_orientation_reaches_gas_optics(self):
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+
+        pf = np.asarray(inputs["pressure_levels"])
+        # Stratospheric ozone: 8 ppm bump centred at 20 hPa (upper part
+        # of this TOA-first column), near-zero in the troposphere.
+        o3 = jnp.asarray(8.0e-6 * np.exp(
+            -((np.log(pf) - np.log(2000.0)) / 1.0) ** 2
+        ))
+
+        _, d_correct = radiation_scheme_rrtmgp(**{**inputs, "ozone_vmr": o3})
+        _, d_flipped = radiation_scheme_rrtmgp(
+            **{**inputs, "ozone_vmr": o3[::-1]}
+        )
+        sw_c = np.asarray(d_correct.sw_heating_rate)
+        sw_f = np.asarray(d_flipped.sw_heating_rate)
+        assert sw_c.max() > 1e-7, "daytime column expected (noon equator)"
+        # Orientation must matter at all (guards against the profile being
+        # silently discarded)...
+        assert np.abs(sw_c - sw_f).max() > 1e-7
+        # ...and the physically-oriented profile must put the ozone SW
+        # heating in the upper half of the column (TOA-first indices).
+        upper = sw_c[: nlev // 2].max()
+        lower = sw_c[nlev // 2:].max()
+        assert upper > lower, (
+            f"SW heating peak below mid-column (upper {upper}, lower "
+            f"{lower}) — ozone profile entering gas optics upside down"
         )

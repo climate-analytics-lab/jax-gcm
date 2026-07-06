@@ -2,9 +2,10 @@
 
 These are sanity tests that run as part of the regular ``pytest`` suite.
 The bit-exact-against-Fortran validation lives in
-``fortran_harness/compare_gw_hines.py`` and is run manually during
-development; it depends on a local Fortran build that is intentionally
-NOT shipped with the repository.
+``fortran_harness/compare_gw_hines.py`` (on the
+``origin/fortran-harness-vdiff`` branch, not in this tree) and is run
+manually during development; it depends on a local Fortran build that
+is intentionally NOT shipped with the repository.
 """
 import os
 

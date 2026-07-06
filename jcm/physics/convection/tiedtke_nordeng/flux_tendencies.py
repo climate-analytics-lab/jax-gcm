@@ -531,12 +531,56 @@ def mass_flux_closure(
     def mid_closure():
         # Combination of CAPE and moisture
         return 0.5 * (deep_closure() + shallow_closure())
-    
+
     # Select closure based on convection type using clipped index
     # Ensure index is in valid range [0, 2] for switch
     switch_index = jnp.clip(ktype - 1, 0, 2)
-    
+
     return lax.switch(
         switch_index,
         [deep_closure, shallow_closure, mid_closure],
     )
+
+
+def mass_flux_closure_blend(
+    cape: jnp.ndarray,
+    cin: jnp.ndarray,
+    moisture_conv: jnp.ndarray,
+    type_weights: jnp.ndarray,
+    config: ConvectionParameters,
+) -> jnp.ndarray:
+    """Type-weighted cloud-base mass-flux closure.
+
+    Smooth counterpart of :func:`mass_flux_closure`: instead of a hard
+    ``lax.switch`` on the discrete convection type (which makes ``tau``
+    and the type thresholds unlearnable — the maintainability review's
+    B.1 BLOCKER), all three per-type closures are evaluated and combined
+    with the differentiable ``type_weights`` from the softmax type
+    selection. With one weight at 1 and the others at 0 this reproduces
+    :func:`mass_flux_closure` exactly.
+
+    Args:
+        cape: CAPE (J/kg).
+        cin: CIN (J/kg) — unused by the current closures, kept for parity.
+        moisture_conv: Low-level moisture convergence (kg/m2/s).
+        type_weights: ``(3,)`` weights for (deep, shallow, mid), summing
+            to 1 for an active column.
+        config: Convection configuration.
+
+    Returns:
+        Cloud base mass flux (kg/m2/s).
+
+    """
+    del cin
+    tau = config.tau
+    mf_deep = jnp.clip(cape / (c.grav * tau), config.cmfcmin, config.cmfcmax)
+    cape_flux = cape / (c.grav * tau * 10.0)
+    moisture_flux = moisture_conv * 0.1
+    mf_shallow = jnp.clip(
+        jnp.maximum(cape_flux, moisture_flux),
+        config.cmfcmin * 10.0, config.cmfcmax * 0.3,
+    )
+    mf_mid = 0.5 * (mf_deep + mf_shallow)
+    return (type_weights[0] * mf_deep
+            + type_weights[1] * mf_shallow
+            + type_weights[2] * mf_mid)

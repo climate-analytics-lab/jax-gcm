@@ -111,9 +111,9 @@ class VDiffState(NamedTuple):
     pressure_half: jnp.ndarray      # Half level pressure [Pa] (ncol, nlev+1)
     geopotential: jnp.ndarray       # Geopotential [m²/s²] (ncol, nlev)
     
-    # Air mass
+    # Air mass (moist Δp/g — the single mass measure for every matrix row,
+    # matching ECHAM's zqdp; jcm humidity/tracers are per moist mass).
     air_mass: jnp.ndarray          # Moist air mass [kg/m²] (ncol, nlev)
-    dry_air_mass: jnp.ndarray      # Dry air mass [kg/m²] (ncol, nlev)
     
     # Surface properties
     surface_temperature: jnp.ndarray  # Surface temperature [K] (ncol, nsfc_type)
@@ -288,6 +288,14 @@ class VerticalDiffusionData:
     # Turbulent kinetic energy
     tke: jnp.ndarray                 # TKE [m²/s²] (nlev, ncols)
 
+    # Moisture tendency profile applied by this step's vdiff solve
+    # (interior mixing + the surface-evaporation bottom boundary row).
+    # This is the same-step ECHAM ``pqte``-at-``cucall``-time analog that
+    # the Tiedtke zdqpbl closure integrates over the sub-cloud layer —
+    # available because the term ordering now runs vdiff BEFORE
+    # convection, matching ECHAM ``physc``.
+    qv_tendency: jnp.ndarray         # dqv/dt [kg/kg/s] (nlev, ncols)
+
     # Boundary layer diagnostics
     pbl_height: jnp.ndarray          # PBL height [m] (ncols,)
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
@@ -314,6 +322,7 @@ class VerticalDiffusionData:
             surface_exchange_moisture=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_exchange_momentum=jnp.zeros(nodal_shape + (nsfc_type,)),
             tke=jnp.zeros((nlev,) + nodal_shape),
+            qv_tendency=jnp.zeros((nlev,) + nodal_shape),
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
@@ -332,6 +341,7 @@ class VerticalDiffusionData:
             'surface_exchange_moisture': self.surface_exchange_moisture,
             'surface_exchange_momentum': self.surface_exchange_momentum,
             'tke': self.tke,
+            'qv_tendency': self.qv_tendency,
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
