@@ -48,10 +48,18 @@ class CloudParams2M:
     cqtmin: jnp.ndarray      # total water minimum for cloud presence
     cvtfall: jnp.ndarray     # snow fall-speed factor
 
-    # Utility guards
+    # Utility guards. ``epsec``/``eps`` are PHYSICAL/numerical floors (~1e-12,
+    # ~1e-7) that bound denominators/quantities away from zero and *do* change
+    # the forward there. ``d_epsilon`` (~1e-30) is a DIFFERENTIABILITY floor:
+    # it keeps the masked/dead branch of a ``where`` strictly positive so a
+    # ``sqrt``/fractional-power there has a finite derivative (issue #558), and
+    # must be far below any real value so it never perturbs the physics. Do NOT
+    # substitute ``eps`` for it — a 1e-7 floor on e.g. the ice-radius base
+    # inflates the effective radius of small ice.
     epsec: jnp.ndarray       # small number to avoid division by zero
     xsec: jnp.ndarray        # 1 - epsec
     eps: jnp.ndarray         # float32 machine epsilon
+    d_epsilon: jnp.ndarray   # absolute floor for differentiability guards only
 
     # Ice-crystal mass / fall-speed relation
     mi: jnp.ndarray          # ice crystal mass at volume-mean radius cri [kg]
@@ -202,6 +210,7 @@ class CloudParams2M:
             epsec=jnp.array(epsec),
             xsec=jnp.array(xsec),
             eps=jnp.array(eps_val),
+            d_epsilon=jnp.array(1.0e-30),
             mi=jnp.array(mi_val),
             ri_vol_mean_1=jnp.array(ri_vol_mean_1),
             ri_vol_mean_2=jnp.array(ri_vol_mean_2),
