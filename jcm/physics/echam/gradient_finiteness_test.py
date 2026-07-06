@@ -17,12 +17,13 @@ under a fractional power).
 The tests below differentiate ``mean(temperature)`` after two model steps with
 respect to the solar constant, for the 1M and 2M cloud schemes with and without
 the JAM prognostic-aerosol chain — the four configurations calibration work
-relies on. The ``0 * inf = nan`` poison is dtype-agnostic, so these run under
-the session's default precision (no process-global ``jax_enable_x64`` toggle,
-which would corrupt sibling tests' compilation caches under xdist); the
-gradient is checked both for finiteness and against its known-correct value
-(cross-checked against a central finite difference in float64, 5.2105e-6, when
-this fix was validated — see PR #559 / issue #558).
+relies on. They run in **float64** (the calibration / JEM-Cal use case and the
+precision #558 was reported at) via the scoped ``jax.enable_x64()`` context
+manager — NOT the process-global ``jax.config.update``, which would leak into
+and corrupt the compilation cache of sibling float32 tests under xdist. The
+gradient is checked for finiteness and against its known-correct value
+(cross-checked against a central finite difference, 5.2105e-6, when this fix
+was validated — see PR #559 / issue #558).
 """
 
 import dataclasses
@@ -93,21 +94,25 @@ def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
     NaNs the cotangent); the value check additionally catches a guard that
     silently changes the physics.
     """
-    grad = jax.grad(
-        lambda s: _mean_temperature_after_two_steps(
-            s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
-        )
-    )(jnp.asarray(_S0))
+    # Run in float64 — the calibration / JEM-Cal use case and the precision
+    # #558 was reported at. ``jax.enable_x64()`` is a scoped context manager
+    # (NOT the process-global ``jax.config.update``), so it cannot leak into
+    # or corrupt the compilation cache of sibling tests that assume float32.
+    with jax.enable_x64():
+        grad = jax.grad(
+            lambda s: _mean_temperature_after_two_steps(
+                s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
+            )
+        )(jnp.asarray(_S0))
+        is_finite = bool(jnp.isfinite(grad))
+        value = float(grad)
 
-    assert jnp.isfinite(grad), (
+    assert is_finite, (
         f"{cloud_scheme}/{aerosol_module}: reverse-mode gradient is "
-        f"{grad} — a degenerate-state cotangent poison has been "
+        f"{value} — a degenerate-state cotangent poison has been "
         "re-introduced (issue #558)."
     )
-    # 2% tolerance absorbs float32-vs-float64 differences; the poison-vs-clean
-    # signal is NaN-vs-finite, and a wrong-but-finite guard would miss by far
-    # more than 2%.
-    assert float(grad) == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
-        f"{cloud_scheme}/{aerosol_module}: gradient {float(grad):.4e} is far "
+    assert value == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
+        f"{cloud_scheme}/{aerosol_module}: gradient {value:.4e} is far "
         f"from the validated {_EXPECTED_GRAD:.4e}."
     )
