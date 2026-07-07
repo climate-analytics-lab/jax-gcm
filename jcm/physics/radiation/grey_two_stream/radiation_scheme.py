@@ -77,19 +77,31 @@ def combine_optical_properties(
     aerosol_scattering = aerosol_optical_depth * aerosol_ssa
     total_scattering = cloud_scattering + aerosol_scattering
     
-    combined_ssa = jnp.where(
-        total_tau_with_aerosol > 0,
-        total_scattering / total_tau_with_aerosol,
-        0.0
-    )
-    
+    # Safe-denominator double-``where``: a bare ``where(tau>0, scat/tau, 0)``
+    # still evaluates ``scat/tau`` in the masked (tau==0) cells — a clear,
+    # aerosol-free layer — so its reverse-mode derivative is ``∝ 1/tau = inf``
+    # and ``where``'s VJP forms ``0 (mask) * inf = nan``, poisoning the gradient
+    # of any upstream cloud/aerosol parameter even though the forward is finite
+    # (issue #558). Feeding the division a floored-to-1 denominator in exactly
+    # those cells keeps the differentiated branch finite; the outer ``where``
+    # still selects 0 there, so the forward is unchanged.
+    safe_tau = total_tau_with_aerosol > 0
+    denom_tau = jnp.where(safe_tau, total_tau_with_aerosol, 1.0)
+    combined_ssa = jnp.where(safe_tau, total_scattering / denom_tau, 0.0)
+
     # Combine asymmetry factor (weighted by scattering optical depth)
     cloud_g_weighted = cloud_scattering * cloud_optics.asymmetry_factor
     aerosol_g_weighted = aerosol_scattering * aerosol_asymmetry
-    
+
+    # Same safe-denominator guard: ``total_scattering`` is 0 in every
+    # cloud-free, aerosol-free layer (the common case), so the unguarded
+    # divide poisoned the gradient at long rollout as columns evolved into
+    # clear states. Issue #558.
+    safe_scat = total_scattering > 0
+    denom_scat = jnp.where(safe_scat, total_scattering, 1.0)
     combined_g = jnp.where(
-        total_scattering > 0,
-        (cloud_g_weighted + aerosol_g_weighted) / total_scattering,
+        safe_scat,
+        (cloud_g_weighted + aerosol_g_weighted) / denom_scat,
         0.0
     )
     
