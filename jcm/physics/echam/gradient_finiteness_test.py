@@ -123,102 +123,91 @@ def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
     )
 
 
-# --- Cloud-parameter gradient through a long rollout (#558 residual) ----------
+# --- Radiation optical-property combination: divide-by-condition poison (#558)
 #
 # A distinct #558 poison surfaced only when differentiating a *cloud* parameter
 # (not the solar constant) through a longer rollout: finite at <=8 steps, NaN at
-# >=12. Root cause: ``combine_optical_properties`` (grey radiation) and
-# ``cloud_sw_optics`` (cloud_optics) combined single-scatter-albedo / asymmetry
-# with a bare ``jnp.where(tau>0, scattering/tau, 0)`` — the true branch divides
-# by the *same* quantity the mask tests, so a clear/aerosol-free layer computes
-# ``x/0`` whose derivative is ``inf`` and ``where``'s VJP forms ``0*inf = nan``.
-# Backward-only (forward finite), cloud-parameter-driven (crt -> cloud fraction
-# -> whether a layer's tau hits 0), rollout-dependent (a layer crosses into
-# clear ~10 steps in). Fixed with the safe-denominator double-``where`` in both
-# functions. See jcm/physics/radiation/{grey_two_stream/radiation_scheme.py,
-# cloud_optics.py}.
+# >=12, forward finite at every step. Root cause: two grey-radiation optical
+# combinations weighted single-scatter albedo / asymmetry with a bare
+# ``jnp.where(tau > 0, scattering / tau, 0)`` — the true branch divides by the
+# *same* quantity the mask tests, so a clear (and aerosol-free) layer, where that
+# denominator is 0, computes ``x/0``: finite-masked in the forward, but its
+# derivative is ``inf`` and ``where``'s VJP forms ``0 (mask) * inf = nan``. That
+# poisons the gradient of any upstream cloud parameter and only accumulates
+# enough sensitivity to surface past ~10 rollout steps. Fixed (safe-denominator
+# double-``where``) in ``combine_optical_properties`` and ``cloud_optics``.
 #
-# This gradient is genuinely tiny (~1e-81: a cloud parameter barely moves mean-T
-# over a near-clear aquaplanet), so the meaningful signal is finite-vs-NaN, not
-# a value. It also has no float32 representation — intermediate cotangents
-# overflow float32's ~3.4e38 ceiling and NaN regardless of the (fixed) poison —
-# so unlike the solar-constant test above it must run in float64. Toggling the
-# process-global ``jax_enable_x64`` in the shared pytest process would corrupt
-# the xdist-shared compilation cache and leak float64 into sibling tests, so the
-# rollout runs in an isolated subprocess (below). A ``lax.scan`` (not a Python
-# unroll) keeps the compiled graph a single step body: a 12-step unroll of the
-# full ECHAM column exhausts the LLVM section-memory / mmap map-count on CI.
-_CLOUD_ROLLOUT_STEPS = 12
+# These guards test the two functions directly with a deliberately clear layer
+# (zero denominator) in the differentiated cell — the exact poison, without the
+# expense of a multi-step model rollout. The end-to-end x64 rollout gradient is
+# ~1e-81 and float32-unrepresentable, so it lives in the JEM-Cal calibration
+# suite; here we pin the mechanism cheaply and deterministically.
 
 
-def _run_cloud_gradient_subprocess() -> None:
-    """Entry point executed in the isolated float64 subprocess.
+def test_combine_optical_properties_gradient_finite_in_clear_layer():
+    """``combine_optical_properties`` backward is finite where total tau/scat = 0.
 
-    Differentiates ``mean(temperature)`` after ``_CLOUD_ROLLOUT_STEPS`` op-split
-    steps w.r.t. the Sundqvist ``crt`` critical-relative-humidity parameter and
-    prints ``FINITE``/``NONFINITE`` for the parent test to assert on.
+    A clear, aerosol-free layer drives ``total_tau_with_aerosol`` and
+    ``total_scattering`` to 0; a re-introduced ``where(x>0, .../x, 0)`` there
+    NaNs the reverse pass while the forward stays finite (#558).
     """
-    import jax
-    jax.config.update("jax_enable_x64", True)
-    import jax.numpy as jnp
-    from jcm.physics.clouds.sundqvist import CloudParameters
+    from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+        combine_optical_properties,
+    )
+    from jcm.physics.radiation.radiation_types import OpticalProperties
 
-    cld0 = CloudParameters.default()
+    nlev, nbands = 6, 8
+    # Layer 0 has zero gas optical depth too, so total tau (not just scattering)
+    # vanishes there — exercises both guarded divisions.
+    gas_tau = jnp.zeros((nlev, nbands)).at[1:].set(0.01)
+    clear_cloud = OpticalProperties(
+        optical_depth=jnp.zeros((nlev, nbands)),
+        single_scatter_albedo=jnp.zeros((nlev, nbands)),
+        asymmetry_factor=jnp.zeros((nlev, nbands)),
+    )
+    zeros = jnp.zeros((nlev, nbands))
 
-    def mean_temperature(crt):
-        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
-        forcing = default_forcing(coords.horizontal)
-        physics = echam_physics(
-            clouds=dataclasses.replace(cld0, crt=crt),
-            radiation_scheme="grey", checkpoint_terms=False,
+    def summed(aerosol_optical_depth):
+        combined = combine_optical_properties(
+            gas_tau, clear_cloud, aerosol_optical_depth, zeros, zeros,
         )
-        model = Model(coords=coords, physics=physics, time_step=15.0)
-        inject_balanced_isothermal_profile(model)
-        model._final_physics_state = model._build_initial_physics_carry()
-        step = model._get_op_split_step_fn(forcing)
-        carry0 = (model._final_dycore_state, model._final_physics_state)
-
-        def body(carry, _):
-            return step(*carry), None
-
-        (state, _), _ = jax.lax.scan(
-            body, carry0, xs=None, length=_CLOUD_ROLLOUT_STEPS,
+        return jnp.sum(
+            combined.single_scatter_albedo + combined.asymmetry_factor
         )
-        return jnp.mean(model.dycore.to_physics_state(state).temperature)
 
-    grad = jax.grad(mean_temperature)(jnp.asarray(float(cld0.crt)))
-    print(f"grad={float(grad):.6e}")
-    print("FINITE" if bool(jnp.isfinite(grad)) else "NONFINITE")
+    grad = jax.grad(summed)(zeros)
+    assert jnp.all(jnp.isfinite(grad)), (
+        "combine_optical_properties gradient is non-finite in a clear layer — a "
+        "divide-by-the-where-condition cotangent poison is back (#558)."
+    )
 
 
-@pytest.mark.slow
-def test_cloud_parameter_gradient_finite_through_long_rollout():
-    """d(meanT)/d(cloud crt) through a 12-step rollout stays finite (#558).
+def test_cloud_optics_gradient_finite_in_clear_layer():
+    """``cloud_optics`` SW backward is finite where a layer is cloud-free.
 
-    Guards the optical-property combination fix: a re-introduced
-    divide-by-the-``where``-condition in radiation_scheme / cloud_optics NaNs
-    this backward while the forward and the shorter solar-constant gradient
-    above both stay finite. Runs float64 in an isolated subprocess (see the
-    module note) so it never perturbs the in-process float32 tests.
+    A layer with zero liquid *and* ice path has ``tau_total == 0``, so the
+    tau-weighted ssa / asymmetry combination divides by 0; the guard keeps the
+    differentiated branch finite while the outer ``where`` returns clear-sky
+    values (#558).
     """
-    import subprocess
-    import sys
+    from jcm.physics.radiation.cloud_optics import cloud_optics
 
-    result = subprocess.run(
-        [sys.executable, __file__, "__cloud_gradient__"],
-        capture_output=True, text=True, timeout=900,
-    )
-    assert result.returncode == 0, (
-        f"cloud-gradient subprocess failed:\n{result.stdout}\n{result.stderr}"
-    )
-    assert "FINITE" in result.stdout.splitlines(), (
-        "cloud-parameter gradient through a 12-step rollout is not finite — a "
-        "divide-by-condition cotangent poison has been re-introduced (#558).\n"
-        f"{result.stdout}"
-    )
+    # Interleave cloudy and cloud-free (cw == ci == 0) layers.
+    cloud_water_path = jnp.array([0.0, 1e-3, 0.0, 2e-3, 0.0, 0.0])
+    cloud_ice_path = jnp.array([0.0, 0.0, 1e-3, 0.0, 0.0, 0.0])
+    layer_thickness = jnp.full((6,), 500.0)
+    cdnc_factor = jnp.array(1.0)
 
+    def summed(cwp):
+        sw_optics, _ = cloud_optics(
+            cwp, cloud_ice_path, layer_thickness, cdnc_factor, 0.5,
+        )
+        return jnp.sum(
+            sw_optics.single_scatter_albedo + sw_optics.asymmetry_factor
+        )
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "__cloud_gradient__":
-        _run_cloud_gradient_subprocess()
+    grad = jax.grad(summed)(cloud_water_path)
+    assert jnp.all(jnp.isfinite(grad)), (
+        "cloud_optics SW gradient is non-finite in a cloud-free layer — a "
+        "divide-by-the-where-condition cotangent poison is back (#558)."
+    )
