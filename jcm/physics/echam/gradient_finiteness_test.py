@@ -121,3 +121,104 @@ def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
         f"{cloud_scheme}/{aerosol_module}: gradient {float(grad):.4e} is far "
         f"from the validated {_EXPECTED_GRAD:.4e}."
     )
+
+
+# --- Cloud-parameter gradient through a long rollout (#558 residual) ----------
+#
+# A distinct #558 poison surfaced only when differentiating a *cloud* parameter
+# (not the solar constant) through a longer rollout: finite at <=8 steps, NaN at
+# >=12. Root cause: ``combine_optical_properties`` (grey radiation) and
+# ``cloud_sw_optics`` (cloud_optics) combined single-scatter-albedo / asymmetry
+# with a bare ``jnp.where(tau>0, scattering/tau, 0)`` — the true branch divides
+# by the *same* quantity the mask tests, so a clear/aerosol-free layer computes
+# ``x/0`` whose derivative is ``inf`` and ``where``'s VJP forms ``0*inf = nan``.
+# Backward-only (forward finite), cloud-parameter-driven (crt -> cloud fraction
+# -> whether a layer's tau hits 0), rollout-dependent (a layer crosses into
+# clear ~10 steps in). Fixed with the safe-denominator double-``where`` in both
+# functions. See jcm/physics/radiation/{grey_two_stream/radiation_scheme.py,
+# cloud_optics.py}.
+#
+# This gradient is genuinely tiny (~1e-81: a cloud parameter barely moves mean-T
+# over a near-clear aquaplanet), so the meaningful signal is finite-vs-NaN, not
+# a value. It also has no float32 representation — intermediate cotangents
+# overflow float32's ~3.4e38 ceiling and NaN regardless of the (fixed) poison —
+# so unlike the solar-constant test above it must run in float64. Toggling the
+# process-global ``jax_enable_x64`` in the shared pytest process would corrupt
+# the xdist-shared compilation cache and leak float64 into sibling tests, so the
+# rollout runs in an isolated subprocess (below). A ``lax.scan`` (not a Python
+# unroll) keeps the compiled graph a single step body: a 12-step unroll of the
+# full ECHAM column exhausts the LLVM section-memory / mmap map-count on CI.
+_CLOUD_ROLLOUT_STEPS = 12
+
+
+def _run_cloud_gradient_subprocess() -> None:
+    """Entry point executed in the isolated float64 subprocess.
+
+    Differentiates ``mean(temperature)`` after ``_CLOUD_ROLLOUT_STEPS`` op-split
+    steps w.r.t. the Sundqvist ``crt`` critical-relative-humidity parameter and
+    prints ``FINITE``/``NONFINITE`` for the parent test to assert on.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from jcm.physics.clouds.sundqvist import CloudParameters
+
+    cld0 = CloudParameters.default()
+
+    def mean_temperature(crt):
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        forcing = default_forcing(coords.horizontal)
+        physics = echam_physics(
+            clouds=dataclasses.replace(cld0, crt=crt),
+            radiation_scheme="grey", checkpoint_terms=False,
+        )
+        model = Model(coords=coords, physics=physics, time_step=15.0)
+        inject_balanced_isothermal_profile(model)
+        model._final_physics_state = model._build_initial_physics_carry()
+        step = model._get_op_split_step_fn(forcing)
+        carry0 = (model._final_dycore_state, model._final_physics_state)
+
+        def body(carry, _):
+            return step(*carry), None
+
+        (state, _), _ = jax.lax.scan(
+            body, carry0, xs=None, length=_CLOUD_ROLLOUT_STEPS,
+        )
+        return jnp.mean(model.dycore.to_physics_state(state).temperature)
+
+    grad = jax.grad(mean_temperature)(jnp.asarray(float(cld0.crt)))
+    print(f"grad={float(grad):.6e}")
+    print("FINITE" if bool(jnp.isfinite(grad)) else "NONFINITE")
+
+
+@pytest.mark.slow
+def test_cloud_parameter_gradient_finite_through_long_rollout():
+    """d(meanT)/d(cloud crt) through a 12-step rollout stays finite (#558).
+
+    Guards the optical-property combination fix: a re-introduced
+    divide-by-the-``where``-condition in radiation_scheme / cloud_optics NaNs
+    this backward while the forward and the shorter solar-constant gradient
+    above both stay finite. Runs float64 in an isolated subprocess (see the
+    module note) so it never perturbs the in-process float32 tests.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, __file__, "__cloud_gradient__"],
+        capture_output=True, text=True, timeout=900,
+    )
+    assert result.returncode == 0, (
+        f"cloud-gradient subprocess failed:\n{result.stdout}\n{result.stderr}"
+    )
+    assert "FINITE" in result.stdout.splitlines(), (
+        "cloud-parameter gradient through a 12-step rollout is not finite — a "
+        "divide-by-condition cotangent poison has been re-introduced (#558).\n"
+        f"{result.stdout}"
+    )
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "__cloud_gradient__":
+        _run_cloud_gradient_subprocess()

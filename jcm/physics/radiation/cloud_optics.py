@@ -596,18 +596,29 @@ def cloud_optics(
         # Combine (additive optical depth)
         tau_total = tau_liq + tau_ice
         
-        # Combined single scattering albedo (weighted by tau)
+        # Combined single scattering albedo (weighted by tau). Safe-denominator
+        # double-``where``: a cloud-free layer has ``tau_total == 0``, and a bare
+        # ``.../tau_total`` there differentiates to ``inf`` so ``where``'s VJP
+        # forms ``0 * inf = nan`` — a backward-only cloud-parameter gradient
+        # poison that surfaces once a column evolves clear over a long rollout
+        # (issue #558). Floor the denominator to 1 in the masked cells; the outer
+        # ``where`` still returns the clear-sky value, so the forward is unchanged.
+        has_tau = tau_total > 0
+        denom_tau = jnp.where(has_tau, tau_total, 1.0)
         ssa_combined = jnp.where(
-            tau_total > 0,
-            (tau_liq * ssa_liq + tau_ice * ssa_ice) / tau_total,
+            has_tau,
+            (tau_liq * ssa_liq + tau_ice * ssa_ice) / denom_tau,
             1.0
         )
-        
-        # Combined asymmetry factor (weighted by tau*ssa)
+
+        # Combined asymmetry factor (weighted by tau*ssa). Same guard: the
+        # scattering-weight denominator vanishes in any non-scattering layer.
+        scat_weight = tau_total * ssa_combined
+        has_scat = scat_weight > 0
+        denom_scat = jnp.where(has_scat, scat_weight, 1.0)
         g_combined = jnp.where(
-            tau_total * ssa_combined > 0,
-            (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / 
-            (tau_total * ssa_combined),
+            has_scat,
+            (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / denom_scat,
             0.0
         )
         
