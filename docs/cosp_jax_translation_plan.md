@@ -71,7 +71,7 @@ for *f*<sub>warm</sub> is the CloudSat/radar branch:
 
 | COSP component | File (v2.0) | bytes | ~lines | Needed for warm rain? |
 | --- | --- | ---: | ---: | --- |
-| Subcolumn cloud overlap (SCOPS) | `subsample_and_optics_example/subcol/scops.F90` | 11,168 | ~370 | **Yes** |
+| Subcolumn cloud overlap (SCOPS) | `subsample_and_optics_example/subcol/scops.F90` | 11,168 | ~370 | **Reuse `mcica.py`** (§4a) |
 | Precip subcolumns (PREC_SCOPS) | `.../subcol/prec_scops.F90` | 9,734 | ~320 | **Yes** |
 | Radar reflectivity core | `src/simulator/quickbeam/quickbeam.F90` | 30,081 | ~1000 | **Yes** |
 | Hydrometeor → radar optics | `.../quickbeam_optics/quickbeam_optics.F90` | 65,887 | ~2200 | **Yes** |
@@ -89,10 +89,11 @@ for *f*<sub>warm</sub> is the CloudSat/radar branch:
 
 Line counts are byte-derived (≈30 bytes/line for free-form F90) and
 **approximate**. Of the ~9,700 lines above, a large fraction is replaceable by
-JAX built-ins (`mrgrnk`, `array_lib`, much of `math_lib`) or collapses into
-lookup tables (`optics_lib` Mie). The **irreducible physics to translate and
-validate** for warm rain is roughly **SCOPS + PREC_SCOPS + Quickbeam +
-Quickbeam-optics ≈ 4,000–5,000 lines**.
+JAX built-ins (`mrgrnk`, `array_lib`, much of `math_lib`), collapses into
+lookup tables (`optics_lib` Mie), or **already exists in `jcm`** — SCOPS is
+subsumed by the McICA generator we already ship (§4a). The **irreducible new
+physics to translate and validate** for warm rain is roughly **PREC_SCOPS +
+Quickbeam + Quickbeam-optics ≈ 3,500–4,500 lines**.
 
 Everything else in COSP (CALIPSO lidar, ISCCP, MODIS, MISR, PARASOL, RTTOV,
 joint histograms) is **not** on the warm-rain critical path and is deferred to
@@ -184,6 +185,57 @@ Design principles, all consistent with `CLAUDE.md` and the existing
    test for each phase.
 
 ---
+
+### 4a. Reuse the existing McICA subcolumn generator (do not port SCOPS)
+
+**Why subcolumns exist at all.** A GCM grid box is ~10²–10⁴ km² and only
+*fractionally* cloudy, carrying a per-level cloud fraction + grid-mean
+condensate. A satellite radar observes a ~1.4 km pencil beam, and the warm/cold
+classification is a **nonlinear threshold** (0 / −15 dBZ) applied to that pencil
+beam. Applying the threshold to grid-*mean* reflectivity is wrong — reflectivity
+is nonlinear in condensate and the box is partly clear. COSP therefore
+reconstructs an ensemble of plausible **subcolumns** that (a) reproduce the
+per-level cloud fraction and (b) obey a vertical **overlap** assumption, runs the
+radar on each, and averages the *classification*. The randomness is how the
+overlap assumption gets realized (which layers' clouds line up); it is Monte-Carlo
+integration over the unknown sub-grid arrangement, not physics in itself. (This is
+exactly why an analytic expected-value formulation — §5.1 option C — is possible
+in principle.)
+
+**JCM already does this — for radiation.** `jcm/physics/radiation/mcica.py`
+implements the Räisänen et al. (2004) generalized exponential-random overlap
+generator: `generate_subcolumns(cloud_fraction, layer_thickness, n_subcols,
+overlap, decorrelation_km, key)` returns `[n_subcols, nlev]` binary cloud masks,
+with `in_cloud_path()` for the grid-mean→in-cloud condensate conversion and
+`column_key(base, model_step, column_index)` for reproducible seeding. `rrtmgp.py`
+calls it every step (one subcolumn per g-point, overlap from
+`RadiationParameters.cloud_overlap`, decorrelation from `cloud_decorrelation_km`).
+
+**Consequence for this plan:** we **do not port SCOPS**. COSP's cloud-subcolumn
+step becomes a call into the same `mcica.generate_subcolumns` — already JAX-native,
+tested, and vmap/jit-friendly — invoked with a COSP-specific `n_subcols` (≈100)
+and its own key. This removes ~370 lines of Fortran translation from Phase 1 and,
+more importantly, makes the sub-grid cloud field the satellite simulator "sees"
+**consistent by construction** with what radiation sees: same overlap rule, same
+decorrelation length, same generator. Sharing the cloud generator between McICA
+and COSP is recognized best practice, and it means calibrating cloud overlap moves
+radiation and the satellite diagnostic together — physically correct.
+
+**What this does *not* remove:**
+- **PREC_SCOPS is still needed.** McICA generates *cloud* subcolumns only. Placing
+  precipitation into subcolumns consistently with the cloud field (precip below
+  cloudy subcolumns, with a precip fraction) is a separate ~320-line step to port.
+- **Reuse the generator, not radiation's g-point-tied masks.** McICA draws
+  `n_subcols = n_gpt`, tied to spectral g-points and sized for spectral-integral
+  noise averaging. COSP needs ≈100 subcolumns for radar *statistics*. So COSP calls
+  the same function with its own `n_subcols` and key (optionally folded off the same
+  `column_key` for reproducibility), rather than consuming the exact masks radiation
+  built. A small refactor can expose a shared `SubgridCloudSampler` so both paths —
+  and, later, all COSP instruments — draw from one place.
+- **Differentiability is unchanged, but now shared.** The `(r < cloud_fraction)`
+  threshold inside the generator is non-differentiable in the same way for COSP as
+  it already is for radiation (§5.1). Reuse means whatever relaxation we adopt
+  (option B/C) applies uniformly to both — a strength, not a new problem.
 
 ## 5. The hard problems (and how we handle them)
 
@@ -302,15 +354,15 @@ ranges reflect the §5.1 differentiability decision and Mie-LUT vs direct.
 | Phase | Scope | Deliverable | Effort |
 | --- | --- | --- | ---: |
 | **0** | Foundations: package skeleton, `cosp_kinds/constants/config` subset, host→COSP input mapping (`inputs.py`, §5.3), KGO single-column test rig | Config + input mapping + CI harness | **2–3 wk** |
-| **1** | **SCOPS + PREC_SCOPS** subcolumn generators; PRNG; static n=100; forward stochastic (option A) + relaxed variant spike (option B) | Differentiable-forward subcolumn sampler, validated on subcolumn statistics | **2–4 wk** |
+| **1** | Subcolumns: **reuse `mcica.generate_subcolumns`** for cloud (§4a) via a shared `SubgridCloudSampler`; **port PREC_SCOPS** for precip; static n≈100; option-A forward + option-B relaxed spike | Precip-aware subcolumn sampler consistent with radiation, validated on subcolumn statistics | **1.5–3 wk** |
 | **2** | **Radar path**: Mie→LUT generator, `quickbeam_optics`, `quickbeam`, `cosp_cloudsat_interface`; `math/array/mrgrnk`→`jnp` | Per-subcolumn Ze profiles validated vs KGO | **5–8 wk** |
 | **3** | **Warm/cold classification + JCM wiring** (§6); smooth-threshold variant; obs comparison to 2015 climatology; calibration loss | **Warm-rain-fraction calibration target** (MVP COSP complete) | **2–3 wk** |
-| — | *Subtotal to warm-rain MVP* | | **11–18 wk (~3–4.5 mo)** |
+| — | *Subtotal to warm-rain MVP* | | **10.5–17 wk (~2.5–4 mo)** |
 | **4** | CALIPSO/ATLID lidar simulator (+GOCCP-style phase, complements radar) | Lidar backscatter/SR + lidar cloud/phase diagnostics | **4–6 wk** |
 | **5** | Passive simulators: MODIS (re, τ — ACI-relevant), ISCCP, MISR, PARASOL + interfaces | Passive-instrument diagnostics | **6–10 wk** |
 | **6** | `cosp_stats`: CFADs, joint histograms, cloud-type/phase classification, lean JAX driver replacing `cosp.F90` orchestration | Full COSP diagnostic suite | **3–5 wk** |
 | **7** | Full KGO regression suite, performance (sub-cycling, sharding, `lax.map`), gradient tests, docs | Validated, documented, performant COSP-in-JAX | **3–5 wk** |
-| — | **Full COSP (excl. RTTOV)** | | **27–44 wk (~7–11 mo)** |
+| — | **Full COSP (excl. RTTOV)** | | **26.5–43 wk (~6.5–11 mo)** |
 
 Notes:
 - Phases 0–3 are the committed critical path for the ACI constraint; 4–7 grow
@@ -362,9 +414,14 @@ Notes:
 3. **Land the interim flux-based proxy (§6) in the first week** to unblock the
    JCM plumbing and give an early — explicitly non-authoritative —
    *f*<sub>warm</sub> map.
-4. **Treat Phases 4–7 as a follow-on program** to turn the radar slice into a
+4. **Reuse the McICA generator; do not port SCOPS (§4a).** Factor
+   `mcica.generate_subcolumns` + overlap params into a shared
+   `SubgridCloudSampler` consumed by both radiation and COSP, so the sub-grid
+   cloud field is consistent between the model's fluxes and its simulated
+   observations. Only PREC_SCOPS is genuinely new subcolumn code.
+5. **Treat Phases 4–7 as a follow-on program** to turn the radar slice into a
    general COSP-in-JAX capability (lidar, MODIS, ISCCP, MISR, PARASOL, joint
-   diagnostics), ~7–11 months total, RTTOV excluded.
+   diagnostics), ~6.5–11 months total, RTTOV excluded.
 
 ---
 
