@@ -29,6 +29,18 @@ class CloudData:
     precip_rain: jnp.ndarray         # Rain precipitation [kg/m²/s] (ncols,)
     precip_snow: jnp.ndarray         # Snow precipitation [kg/m²/s] (ncols,)
 
+    # Large-scale precipitation flux profiles for satellite-simulator
+    # diagnostics (COSP/CloudSat): the grid-mean flux leaving each layer
+    # (i.e. crossing its lower boundary) as the microphysics column sweep
+    # propagates precipitation downward within the step. Level index 0 is
+    # the physics-internal model top, so the bottom level equals the
+    # ``precip_rain`` / ``precip_snow`` surface diagnostics by
+    # construction. ``snow_flux`` is the total frozen flux: snow plus the
+    # sedimenting-ice flux that the schemes fold into surface snow at the
+    # bottom level.
+    rain_flux: jnp.ndarray           # LS rain flux [kg/m²/s] (nlev, ncols)
+    snow_flux: jnp.ndarray           # LS snow(+ice) flux [kg/m²/s] (nlev, ncols)
+
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
@@ -68,6 +80,8 @@ class CloudData:
             qi=jnp.zeros((nlev,) + nodal_shape),
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
+            rain_flux=jnp.zeros((nlev,) + nodal_shape),
+            snow_flux=jnp.zeros((nlev,) + nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
@@ -86,6 +100,8 @@ class CloudData:
             'qi': self.qi,
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
+            'rain_flux': self.rain_flux,
+            'snow_flux': self.snow_flux,
             'droplet_number': self.droplet_number,
             'r_eff_liq': self.r_eff_liq,
             'r_eff_ice': self.r_eff_ice,

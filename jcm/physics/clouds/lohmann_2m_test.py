@@ -1634,3 +1634,87 @@ class TestColumnWaterConservation2M:
             "no below-cloud-base qi gain from the sedimenting flux — the "
             "scan's net ice change is not entering the pxite ledger"
         )
+
+
+class TestPrecipFluxProfiles2M:
+    """COSP-hook invariants for the per-level rain / snow flux profiles.
+
+    ``cloud_microphysics_2m`` now returns the flux LEAVING each layer
+    (stacked from the flux-coupled scan's ys), so the bottom level must
+    equal the surface flux diagnostics EXACTLY — they are literally the
+    same carry values. The frozen profile is snow plus the sedimenting
+    cloud-ice flux (folded into snow at the bottom level, matching how
+    ``surface_snow_flux`` is composed).
+    """
+
+    @staticmethod
+    def _mixed_phase_column(nlev=20):
+        """Ice cloud aloft + warm liquid deck below, near-saturated."""
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(225.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[12:17].set(1e-3)
+        qi = jnp.zeros(nlev).at[4:8].set(3e-4)
+        cf = jnp.where((qc + qi) > 0, 0.8, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)
+        qni = jnp.where(qi > 0, 2e3, 0.0)  # few, large crystals → fallout
+        return T, q, p, qc, qi, qnc, qni, cf, rho, dz
+
+    @classmethod
+    def _run(cls, column):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz = column
+        nlev = T.shape[0]
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, CloudParams2M.default(),
+        )
+
+    def test_bottom_row_equals_surface_fluxes(self):
+        (_, rain_sfc, snow_sfc, _, _,
+         rain_prof, snow_prof) = self._run(self._mixed_phase_column())
+        assert float(rain_sfc + snow_sfc) > 0.0, "column must precipitate"
+        # Same carry values → exact equality (not just allclose).
+        assert float(jnp.abs(rain_prof[-1] - rain_sfc)) < 1e-12
+        assert float(jnp.abs(snow_prof[-1] - snow_sfc)) < 1e-12
+        # Non-negative everywhere; zero at the model top (level 0 in the
+        # physics-internal TOA-first frame: no condensate up there, so
+        # nothing can be falling out of the top layer).
+        assert jnp.all(rain_prof >= 0.0)
+        assert jnp.all(snow_prof >= 0.0)
+        assert float(rain_prof[0]) == 0.0
+        assert float(snow_prof[0]) == 0.0
+        # The frozen profile includes the sedimenting cloud-ice flux, so
+        # it is already positive immediately below the ice cloud.
+        assert float(snow_prof[8]) > 0.0
+
+    def test_column_and_vmap_agree(self):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        column = self._mixed_phase_column()
+        (_, _, _, _, _, rain_1, snow_1) = self._run(column)
+
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz = column
+        nlev = T.shape[0]
+        extras = (
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+        )
+        args = (T, q, p, qc, qi, qnc, qni) + extras
+        batched = tuple(jnp.stack([a] * 3, axis=0) for a in args)
+        (_, _, _, _, _, rain_b, snow_b) = jax.vmap(
+            cloud_microphysics_2m,
+            in_axes=(0,) * 16 + (None, None),
+        )(*batched, 1800.0, CloudParams2M.default())
+        assert rain_b.shape == (3, nlev)
+        for i in range(3):
+            assert jnp.allclose(rain_b[i], rain_1, atol=1e-12)
+            assert jnp.allclose(snow_b[i], snow_1, atol=1e-12)
