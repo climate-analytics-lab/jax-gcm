@@ -114,7 +114,19 @@ class CloudsatCosp(PhysicsTerm):
 
         clouds = diagnostics["clouds"]
         conv = diagnostics["convection"]
-        nlev, ncols = state.temperature.shape
+        # Use the running thermodynamic state (advanced by radiation, vdiff
+        # and convection — the state the cloud microphysics actually saw) so
+        # the simulated radar is thermodynamically consistent with the cloud
+        # and flux fields; fall back to the step-start state when no
+        # upstream term seeded it (Codex review on PR #562).
+        thermo_run = diagnostics.get("thermo_run")
+        if thermo_run is None:
+            temperature = state.temperature
+            specific_humidity = state.specific_humidity
+        else:
+            temperature = thermo_run["temperature"]
+            specific_humidity = thermo_run["specific_humidity"]
+        nlev, ncols = temperature.shape
 
         # Convective surface precip spread below the convective condensate
         # top (stopgap; see module docstring). The mask is 1 from the first
@@ -124,21 +136,21 @@ class CloudsatCosp(PhysicsTerm):
         below_top = jnp.cumsum((conv_cond > 0.0).astype(state.temperature.dtype),
                                axis=0) > 0.0
         conv_flux = conv.precip_conv[None, :] * below_top
-        frozen = state.temperature < c.tmelt
+        frozen = temperature < c.tmelt
         fl_ccrain = jnp.where(frozen, 0.0, conv_flux)
         fl_ccsnow = jnp.where(frozen, conv_flux, 0.0)
 
         # Cloud effective radii (um -> m); zero means "PSD defaults" and the
         # remaining hydrometeor slots always use the PSD defaults.
         reff = jnp.zeros((nlev, ncols, jconfig.N_HYDRO),
-                         dtype=state.temperature.dtype)
+                         dtype=temperature.dtype)
         reff = reff.at[..., jconfig.I_LSCLIQ].set(clouds.r_eff_liq * 1e-6)
         reff = reff.at[..., jconfig.I_LSCICE].set(clouds.r_eff_ice * 1e-6)
 
         inputs = CloudsatInputs(
             pressure=diagnostics["pressure_full"],
-            temperature=state.temperature,
-            specific_humidity=state.specific_humidity,
+            temperature=temperature,
+            specific_humidity=specific_humidity,
             zfull=diagnostics["height_full"],
             # jcosp wants each layer's bottom interface; height_half holds
             # the nlev+1 interfaces top-first.
@@ -158,7 +170,7 @@ class CloudsatCosp(PhysicsTerm):
             surfelev=jnp.reshape(terrain.orog, (-1,)),
             # Near-surface air temperature proxy (no 2-m diagnostic in the
             # physics state); only steers the land-point precip-flag path.
-            t2m=state.temperature[-1],
+            t2m=temperature[-1],
             reff=reff,
         )
 
