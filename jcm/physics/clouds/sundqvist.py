@@ -564,11 +564,21 @@ def condensation_evaporation(
     # in a safe double-where pattern so jax.grad through the unused
     # branch doesn't pick up a 0/eps NaN when cloud_water = cloud_ice = 0
     # (the common case at the start of the simulation).
-    safe_total = jnp.where(total_cloud > 0, total_cloud, 1.0)
-    qc_frac = jnp.where(total_cloud > 0, cloud_water / safe_total, 0.0)
-    qi_frac = jnp.where(total_cloud > 0, cloud_ice / safe_total, 0.0)
+    #
+    # The guard threshold is 1e-30, NOT ``> 0``: the division VJP on the
+    # SELECTED branch computes ``-g * x / (safe_total * safe_total)``, and
+    # for 0 < total_cloud < ~1e-154 (spectral-ringing condensate tails reach
+    # 1e-287 in real columns) the squared denominator underflows to 0, giving
+    # 0/0 = NaN in the reverse pass while the forward is finite. Same fix as
+    # the column-sweep's ``_saturation_adjustment_layer`` (which uses
+    # ``config.d_epsilon``; ``CloudParameters`` has no such field, hence the
+    # literal).
+    has_cloud = total_cloud > 1.0e-30
+    safe_total = jnp.where(has_cloud, total_cloud, 1.0)
+    qc_frac = jnp.where(has_cloud, cloud_water / safe_total, 0.0)
+    qi_frac = jnp.where(has_cloud, cloud_ice / safe_total, 0.0)
     L_evap = jnp.where(
-        total_cloud > 0,
+        has_cloud,
         (cloud_water * c.alhc + cloud_ice * c.alhs) / safe_total,
         L_eff,                                    # fallback (unused)
     )

@@ -595,11 +595,21 @@ def _saturation_adjustment_layer(
     cond_total = cond1 + cond2
 
     # ---- Partition between liquid / ice ----
-    safe_total = jnp.where(total_cloud > 0, total_cloud, 1.0)
-    qc_frac = jnp.where(total_cloud > 0, qc / safe_total, 0.0)
-    qi_frac = jnp.where(total_cloud > 0, qi / safe_total, 0.0)
+    # The guard threshold is ``d_epsilon``, NOT ``> 0``. The double-where
+    # protects the unselected branch, but the division VJP on the SELECTED
+    # branch computes ``-g * qc / (safe_total * safe_total)``, and for
+    # 0 < total_cloud < ~1e-154 (spectral-ringing condensate tails reach
+    # 1e-287 in real JW columns) the squared denominator underflows to 0,
+    # giving 0/0 = NaN in the reverse pass while the forward is perfectly
+    # finite. Any total below ``d_epsilon`` is physically no cloud at all,
+    # and treating it as the cloud-free branch changes the increments by
+    # at most O(total_cloud) ~ 1e-30 kg/kg.
+    has_cloud = total_cloud > config.d_epsilon
+    safe_total = jnp.where(has_cloud, total_cloud, 1.0)
+    qc_frac = jnp.where(has_cloud, qc / safe_total, 0.0)
+    qi_frac = jnp.where(has_cloud, qi / safe_total, 0.0)
     L_evap = jnp.where(
-        total_cloud > 0,
+        has_cloud,
         (qc * c.alhc + qi * c.alhs) / safe_total,
         L_eff,
     )
