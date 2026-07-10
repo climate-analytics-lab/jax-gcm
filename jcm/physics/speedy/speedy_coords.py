@@ -56,6 +56,37 @@ def ozone_sigma_weight(fsg: jnp.ndarray) -> jnp.ndarray:
     """
     return 50.0 * jnp.maximum(0.0, 0.2 - fsg)
 
+
+# SPEEDY's physics schemes were developed and tuned on the 8-level sigma grid,
+# where particular *levels* stand in for particular *physical depths*: the
+# second-lowest layer (centre sigma = 0.835) is "the top of the sub-cloud /
+# boundary layer" in the convection trigger, the surface-flux lapse-rate
+# estimate, and the stratiform-cloud stability gradient. A level index is only
+# a valid proxy for such a depth on the grid it was tuned for — with more
+# levels, index-relative references (kx-2 etc.) migrate toward the surface and
+# the schemes' answers drift with the vertical resolution. Schemes therefore
+# evaluate these diagnostics AT a fixed sigma (via :func:`interp_to_sigma`)
+# so they are independent of the vertical grid; on the 8-level reference grid
+# the fixed sigma coincides with the original level, reproducing the validated
+# behaviour exactly.
+PBL_TOP_SIGMA = 0.835
+
+
+def interp_to_sigma(field: jnp.ndarray, fsg: jnp.ndarray, sig_t: float) -> jnp.ndarray:
+    """Linearly interpolate ``field`` along the level axis to sigma ``sig_t``.
+
+    ``field`` has shape ``(kx, ...)`` and ``fsg`` is the ascending full-level
+    sigma profile ``(kx,)``. ``fsg`` and ``sig_t`` are static, so the gather
+    indices and weights are compile-time constants under ``jit`` and the
+    operation is a fixed linear combination of two adjacent levels — fully
+    differentiable. A ``sig_t`` outside ``[fsg[0], fsg[-1]]`` is clamped to the
+    nearest level pair (linear extrapolation).
+    """
+    idx = jnp.clip(jnp.searchsorted(fsg, sig_t), 1, fsg.shape[0] - 1)
+    w = (sig_t - fsg[idx - 1]) / (fsg[idx] - fsg[idx - 1])
+    return field[idx - 1] * (1.0 - w) + field[idx] * w
+
+
 def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     """Create a CoordinateSystem with SPEEDY's standard sigma layers.
 

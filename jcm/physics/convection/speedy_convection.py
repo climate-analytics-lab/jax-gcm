@@ -9,7 +9,9 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.speedy_coords import stratosphere_mask
+from jcm.physics.speedy.speedy_coords import (
+    PBL_TOP_SIGMA, interp_to_sigma, stratosphere_mask,
+)
 import jcm.constants as c
 # alhc is the SPEEDY latent heat in J/g (consistent with q in g/kg); it is a
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
@@ -55,12 +57,23 @@ def diagnose_convection(
 
     rlhc = 1.0 / alhc
 
-    # Minimum of moist static energy in the lowest two levels
+    # Minimum of moist static energy between the surface layer and the PBL top
     # Mask for psa > psmin
     mask_psa = psa > parameters.convection.psmin
 
+    # The trigger compares the surface layer against the top of the sub-cloud
+    # layer. That "PBL-top" reference is a *physical* depth (~150 hPa above the
+    # surface), so it is evaluated at a fixed sigma rather than at an
+    # index-relative level, keeping the trigger independent of the vertical
+    # grid. On the 8-level reference grid the fixed sigma is the second-lowest
+    # layer centre, so the validated behaviour is reproduced exactly there.
+    fsg = physics_data.speedy_coords.fsg
+    se_sc = interp_to_sigma(se, fsg, PBL_TOP_SIGMA)
+    qa_sc = interp_to_sigma(qa, fsg, PBL_TOP_SIGMA)
+    qsat_sc = interp_to_sigma(qsat, fsg, PBL_TOP_SIGMA)
+
     mse0 = se[kx-1] + alhc * qa[kx-1]
-    mse1 = se[kx-2] + alhc * qa[kx-2]
+    mse1 = se_sc + alhc * qa_sc
     mse1 = jnp.minimum(mse0, mse1)
 
     # Saturation (or super-saturated) moist static energy in PBL
@@ -95,10 +108,10 @@ def diagnose_convection(
     ktop2 = get_cloud_top((mse1 > mss2[1:kx-3]) & not_strat_cand)
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
-    # Check 3: RH > RH_c at both k=kx and k=kx-1
+    # Check 3: RH > RH_c at both the surface layer and the PBL top
     qthr0 = parameters.convection.rhbl * qsat[kx-1]
-    qthr1 = parameters.convection.rhbl * qsat[kx-2]
-    lqthr = (qa[kx-1] > qthr0) & (qa[kx-2] > qthr1)
+    qthr1 = parameters.convection.rhbl * qsat_sc
+    lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
 
     case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
     case_2 = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr
