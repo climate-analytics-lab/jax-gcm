@@ -595,3 +595,78 @@ class TestShortWaveRadiation(unittest.TestCase):
                                 atol=None, rtol=1, eps=0.00001)
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.000001)
+
+class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
+    """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma
+    surfaces, so on smooth analytic profiles they must agree across vertical
+    grids (up to the linear-interpolation error of representing the profile on
+    each grid). This is the property that keeps the stratocumulus SW feedback
+    from drifting with the number of levels.
+    """
+
+    @staticmethod
+    def _cloud_diagnostics(kx, ix=64, il=32):
+        """Run get_clouds on analytic sigma-profiles discretized to kx levels."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.physics_data import (
+            SurfaceFluxData, HumidityData, ConvectionData, CondensationData,
+            SWRadiationData, PhysicsData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.radiation.speedy_shortwave import get_clouds
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        # Smooth analytic profiles of sigma with a free-troposphere RH maximum
+        # and a moist boundary layer, modulated horizontally so columns differ.
+        xmod = 0.8 + 0.4 * jnp.arange(ix)[:, jnp.newaxis] / ix
+        rh = xmod * (0.15 + 0.55 * jnp.exp(-((sig - 0.55) / 0.3) ** 2)
+                     + 0.25 * sig ** 6)
+        qsat = 25.0 * sig ** 3 + 1e-3            # [g/kg], smooth in sigma
+        qa = rh * qsat
+        phig = 70000.0 * (1.0 - sig) ** 1.2       # [J/kg], monotone in height
+        se = 300000.0 + 0.4 * phig                # stable static-energy profile
+        se, qa, qsat, rh, phig = (jnp.broadcast_to(f, (kx, ix, il))
+                                  for f in (se, qa, qsat, rh, phig))
+
+        xy = (ix, il)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(
+            xy, kx, iptop=jnp.full(xy, kx, dtype=int),
+            precnv=jnp.zeros(xy), se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=jnp.zeros(xy))
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=True)
+        physics_data = PhysicsData.zeros(
+            xy, kx, surface_flux=SurfaceFluxData.zeros(xy),
+            humidity=humidity, convection=convection,
+            condensation=condensation, shortwave_rad=sw_data,
+            speedy_coords=speedy_coords)
+        state = PhysicsState.zeros(
+            (kx, ix, il), specific_humidity=qa, geopotential=phig,
+            normalized_surface_pressure=jnp.ones(xy))
+
+        _, data_out = get_clouds(state, physics_data, parameters,
+                                 ForcingData.zeros(xy), terrain)
+        return data_out.shortwave_rad
+
+    def test_gse_cloudc_clstr_agree_across_level_counts(self):
+        ref = self._cloud_diagnostics(kx=8)
+        for kx in (16, 24):
+            sw = self._cloud_diagnostics(kx=kx)
+            # gse: static-energy gradient over a fixed sigma interval. se and
+            # phig are linear in each other here, so gse is grid-independent.
+            np.testing.assert_allclose(sw.gse, ref.gse, rtol=1e-4,
+                                       err_msg=f"gse drifted at nlev={kx}")
+            # cloudc/cloudstr: fixed-sigma RH sampling; agreement is limited
+            # only by linear interpolation of the smooth RH profile.
+            np.testing.assert_allclose(sw.cloudc, ref.cloudc, atol=0.05,
+                                       err_msg=f"cloudc drifted at nlev={kx}")
+            np.testing.assert_allclose(sw.cloudstr, ref.cloudstr, atol=0.05,
+                                       err_msg=f"cloudstr drifted at nlev={kx}")

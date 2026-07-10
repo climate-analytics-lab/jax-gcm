@@ -5,7 +5,9 @@ physics-scheme migration to a σ-threshold stratosphere (§4) are both complete.
 **The §4 migration changes the 7/8-level results** (intentionally — see §4).
 §6 adds a resolution-aware time step that keeps high-`nlev` / high-truncation
 runs numerically stable; verified by **365-day** spin-ups at T21 nlev=8/16/24/32
-and T31 nlev=8/16/24 (all finite — see §6).
+and T31 nlev=8/16/24 (all finite — see §6). §7 removes the fixed-level-index
+proxies from the physics diagnostics (evaluating them at fixed sigma instead)
+so the schemes *converge* with `nlev` rather than merely running.
 
 ## 1. Goal and summary
 
@@ -233,7 +235,8 @@ gated by `σ>0.5`, and surface fluxes act on the lowest layer (`kx-1`) — all
 correct for any nlev. SpeedyWeather uses a bulk-Richardson-number PBL top
 (`surface_fluxes/boundary_layer.jl`, critical Ri≈10) and zeroes diffusion above
 it; that is a *different closure*, not a generalization of SPEEDY's, so it was
-not adopted.
+not adopted. (The surface-flux *lapse-rate reference*, which did hide a fixed
+level index, is handled in §7.)
 
 ### 4.5 Convection cloud base/top — `convection/speedy_convection.py`
 
@@ -387,55 +390,51 @@ All seven configurations — including the three that previously NaN'd (T21
 nlev=32, T31 nlev=16, T31 nlev=24) — now complete 365 days finite and
 physically plausible.
 
-## 6. Numerical stability at high nlev (auto time step)
-
-### Symptom
-With the σ-migration above, short runs are fine, but **long (365-day) realistic
-spinups go non-finite** at high level counts / high truncation: T21 nlev=32,
-T31 nlev=16, T31 nlev=24 all blow up within a few timesteps, while T21 nlev≤24
-are stable.
-
-### Diagnosed cause — explicit surface drag in the thin bottom layer (NOT CFL)
-The dry dynamical core alone is stable at dt=30 min even at nlev=32, so this is
-**not** a dynamics CFL problem. The instability is the **explicit (forward-Euler)
-surface-drag tendency in the thinnest *bottom* sigma layer**:
-
-```
-du/dt|_sfc = ustr · rps · grdsig[-1],   grdsig[-1] = g / (dσ_bot · p0)
-ustr = -C_drag · |V| · u            (jcm/physics/surface/speedy_surface_flux.py)
-```
-
-The Frierson stretch thins the bottom layer (dσ_bot ≈ 0.10 at nlev=8 → ≈ 0.008 at
-nlev=32), so `grdsig[-1]` grows ~12× and the explicit damping factor
-`dt · C_drag·|V| · grdsig[-1]` crosses the forward-Euler stability limit.
-**The unstable layer is at the surface (σ→1), not the model top** — so capping
-tiny *upper* σ would not fix it, and flooring the *bottom* layer would throw away
-exactly the near-surface resolution this effort is meant to add.
-
-### Fix — `stable_time_step_minutes(nlev, trunc)` (auto, opt-out)
-`jcm/physics/speedy/physical_constants.py` defines a stability index
-`S = (trunc+1)^1.3 / dσ_bot`, normalised to the canonical-stable T21/nlev=8
-baseline. Empirically every config stable at 30 min sits below `S_norm ≈ 9.4` and
-every unstable one above it. `Model.__init__` calls `_auto_time_step_minutes`
-when `time_step is None` (the default): it keeps **dt = 30 min on the stable
-plateau** (so all 7/8-level runs and every currently-stable config are
-**bit-for-bit unchanged**) and shrinks dt ~ 1/S above it, snapped to integer
-divisors of a 1440-min day (so save_interval/dt stays integer), with a safety
-margin. Pass an explicit `time_step` to override.
-
-Selected steps: T21 L8 → 30 min (unchanged), T21 L32 → 18, T31 L16 → 24,
-T31 L24 → 15.
-
-### Verification
-60-day realistic spinups (frozen-mean BCs) are finite for T21 {8,32} and
-T31 {16,24} with the auto dt (previously blew up within a few steps); 365-day
-spinups for the most-stressed configs (T21 L32, T31 L16/L24) confirm finiteness
-with physical temperature ranges. All previously-stable configs keep dt=30 min,
-so their results are unchanged.
-
 ### Deferred alternative (backup)
 The most compute-efficient fix would be an **implicit surface drag** in the thin
 bottom layer (unconditionally stable → keep dt=30 min *and* the thin near-surface
 layers). It was deferred as too invasive for this pass; it is the preferred
 optimisation if the reduced dt makes high-nlev / T31 integrations too slow
 (e.g. the 14-month GFMIP finite-difference runs).
+
+## 7. Fixed-sigma physics diagnostics (resolution *convergence*)
+
+§2–§6 make the model *run* at any `nlev`. This section makes the physics
+*converge* with `nlev`: several SPEEDY schemes used a **fixed level index** (or
+a max over a resolution-dependent set of levels) as a proxy for a **physical
+depth**, so their answers drifted systematically as levels were added even
+though every individual formula was index-generic. The observable casualty is
+the marine stratocumulus shortwave feedback, which collapses as `nlev` grows.
+
+The shared remedy: evaluate each such diagnostic **at a fixed sigma surface**
+(via `interp_to_sigma` in `speedy_coords.py`) instead of at an index-relative
+level. The reference sigmas are the layer centres of the validated 8-level
+grid, so on the 8-level grid every fixed-sigma evaluation lands exactly on the
+original level and the validated behaviour is reproduced (bit-for-bit up to
+float32 rounding), while on any other grid the diagnostic no longer moves.
+`PBL_TOP_SIGMA = 0.835` (the 8-level grid's second-lowest layer centre, the
+"top of the sub-cloud layer") is shared by three of the four fixes.
+
+| Diagnostic | File | Index-proxy problem | Fixed-sigma evaluation |
+|---|---|---|---|
+| Convective trigger sub-cloud reference (`mse1`, `qthr1`) | `convection/speedy_convection.py` | `[kx-2]` migrates toward the surface as nlev grows; the trigger destabilizes and convective precip inflates | `se`, `qa`, `qsat` at σ=0.835 |
+| Surface-flux lapse-rate reference (`dt1`) | `surface/speedy_surface_flux.py` | lapse rate measured across `[kx-1]−[kx-2]`, a shrinking physical separation; the stable/unstable branch flips | `ta` at σ=0.835 against the same σ=0.99 surface target (reproduces `wvi[kx-1,1]` at nlev=8) |
+| Stratocumulus stability gradient `gse` | `radiation/speedy_shortwave.py` | DSE gradient over the two lowest levels; at nlev≥24 both sit inside the near-neutral surface mixed layer and `gse` collapses → Sc SW feedback lost | `se`, `phig` at σ=0.835 and 0.95 |
+| Total-cloud RH maximum `cloudc` | `radiation/speedy_shortwave.py` | max over model levels samples the RH profile more finely as nlev grows, so `cloudc` inflates (E-Pac Sc deck: 0.53 at L8 → 0.73 at L16) and, via `clsmax − clfact·cloudc`, suppresses the Sc deck | RH max over the 8-level free-troposphere centres (0.34, 0.51, 0.685) + PBL top (0.835); `icltop` keeps the actual-level argmax (radiation needs a real level index) |
+
+Notes:
+
+* The first three fixes are **exact** on the 8-level grid (the fixed sigmas are
+  grid points). The `cloudc` fix is *near*-exact at nlev=8: it drops the
+  σ=0.20 level and the `q > qacl` gate from the max (both are retained for the
+  `icltop` search). The 1-day T21-L8 snapshot in
+  `composable_physics_regression_test.py` was regenerated accordingly.
+* The GFMIP SST-patch validation of this configuration (T21-L16, aquaplanet FD
+  Green's functions vs the GFMIP multi-model mean) matches the unfixed baseline
+  at the resolution both were tuned for (pattern r = 0.72 vs 0.74 at L16) while
+  removing the level-count dependence of the diagnostics that drive the
+  low-cloud feedback.
+* Diagnostics that are *already* physical are untouched: cloud base = lowest
+  layer, surface fluxes act on the lowest layer, cloud/convective tops are
+  argmax/instability searches over real levels (bounded by the σ<0.2
+  stratosphere mask of §4).

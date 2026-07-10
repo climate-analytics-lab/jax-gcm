@@ -8,7 +8,28 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.speedy_coords import SpeedyCoords, stratosphere_mask, ozone_sigma_weight
+from jcm.physics.speedy.speedy_coords import (
+    PBL_TOP_SIGMA, SpeedyCoords, interp_to_sigma, ozone_sigma_weight,
+    stratosphere_mask,
+)
+
+# Reference sigma surfaces for the cloud diagnostics in :func:`clouds`. Both
+# diagnostics are tuned to sample the atmosphere at particular *physical*
+# depths, so they are evaluated at fixed sigmas (the 8-level reference grid's
+# layer centres, where the scheme was validated) rather than at index-relative
+# model levels, keeping them independent of the vertical grid:
+#   * the stratocumulus stability gradient ``gse`` measures lower-tropospheric
+#     stability across the interval spanning the marine boundary-layer
+#     inversion (sigma ~0.835-0.95). Measured over the two lowest *levels* it
+#     collapses at high nlev, where both levels sit inside the near-neutral
+#     surface mixed layer, and the stratocumulus SW feedback is lost.
+#   * the total-cloud RH maximum ``cloudc`` samples free-troposphere RH. A max
+#     over all model levels samples the profile more finely as nlev grows, so
+#     cloudc inflates with resolution — and, through the
+#     ``clsmax - clfact*cloudc`` competition below, spuriously suppresses the
+#     stratocumulus deck.
+_GSE_SIGMA_TOP, _GSE_SIGMA_BOT = PBL_TOP_SIGMA, 0.95
+_CLOUDC_REF_SIGMAS = (0.34, 0.51, 0.685)  # free-troposphere layer centres
 
 @jit
 def get_shortwave_rad_fluxes(
@@ -379,12 +400,21 @@ def clouds(operand):
     """
     state, physics_data, parameters, forcing, terrain, tendencies = operand
 
-    # Compute gradient of static energy: logic from physics.f90:147
+    # Stratocumulus stability gradient: dry static energy gradient across the
+    # fixed sigma interval spanning the boundary-layer inversion (see the
+    # module-level note on reference sigmas). On the 8-level reference grid the
+    # interval endpoints are the two lowest layer centres, reproducing the
+    # validated behaviour exactly.
     se = physics_data.convection.se
     phig = state.geopotential
+    fsg = physics_data.speedy_coords.fsg
+    se_top = interp_to_sigma(se, fsg, _GSE_SIGMA_TOP)
+    se_bot = interp_to_sigma(se, fsg, _GSE_SIGMA_BOT)
+    ph_top = interp_to_sigma(phig, fsg, _GSE_SIGMA_TOP)
+    ph_bot = interp_to_sigma(phig, fsg, _GSE_SIGMA_BOT)
     # Safety check to prevent division by zero (can happen during initialization)
-    dphi = phig[-2] - phig[-1]
-    gse = jnp.where(jnp.abs(dphi) > 1e-10, (se[-2] - se[-1])/dphi, 0.0)
+    dphi = ph_top - ph_bot
+    gse = jnp.where(jnp.abs(dphi) > 1e-10, (se_top - se_bot)/dphi, 0.0)
 
     humidity = physics_data.humidity
     conv = physics_data.convection
@@ -434,7 +464,18 @@ def clouds(operand):
 
     valid_column = jnp.any(search_mask, axis=0) # Ensures that max_drh is from a valid layer
     icltop = jnp.where(valid_column & (max_drh > cloudc), max_valid_rh_layer + 1, icltop)
-    cloudc = jnp.where(valid_column & (max_drh > cloudc), max_drh, cloudc)
+
+    # The cloud-cover *magnitude* takes the RH maximum on a fixed reference
+    # sigma grid (the 8-level free-troposphere layer centres plus the PBL top)
+    # rather than over the model levels searched above, so it is independent of
+    # the vertical grid (see the module-level note on reference sigmas). The
+    # cloud-top level ``icltop`` keeps the actual-level argmax from the search
+    # above, since the radiation needs a real level index for the cloud top.
+    rh = humidity.rh
+    rhcl1 = parameters.shortwave_radiation.rhcl1
+    cloudc = jnp.maximum(0.0, interp_to_sigma(rh, fsg, PBL_TOP_SIGMA) - rhcl1)
+    for sig_ref in _CLOUDC_REF_SIGMAS:
+        cloudc = jnp.maximum(cloudc, interp_to_sigma(rh, fsg, sig_ref) - rhcl1)
 
     # Third for loop (two levels)
     # Perform the calculations (Two Loops)
