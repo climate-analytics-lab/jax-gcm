@@ -381,7 +381,7 @@ class TestJAXCompatibility:
                 'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
                 'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
                 'ftr_weight', 'background_aod', 'spa_prefactor',
-                'spa_exponent')}, 'aod_spmx': aod_spmx})
+                'spa_exponent', 'spa_cap_smoothing')}, 'aod_spmx': aod_spmx})
             out = get_simple_aerosol(height, dz, oro, lats, lons, data, p,
                                      f, jnp.asarray([550.0]))
             return jnp.sum(out.aod_total)
@@ -413,7 +413,7 @@ class TestJAXCompatibility:
                 'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
                 'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
                 'ftr_weight', 'background_aod', 'spa_prefactor',
-                'spa_exponent')}, 'aod_spmx': aod_spmx})
+                'spa_exponent', 'spa_cap_smoothing')}, 'aod_spmx': aod_spmx})
             out = get_simple_aerosol(height, dz, oro, lats, lons, data, p,
                                      f, jnp.asarray([550.0]))
             # Sum the fields whose divisions had the NaN-gradient risk.

@@ -739,6 +739,17 @@ def cloud_microphysics_2m(
         dqrdt=dqrdt,
         dqsdt=dqsdt,
     )
+    # Column-integrated rain sources [kg/m^2/s], split by pathway: the
+    # warm chain (KK2000 autoconversion + accretion, ``qr_gain_warm``) and
+    # snow melt (``psmlt_per_level``). Their ratio is the model's
+    # warm-rain fraction, the CloudSat-style observable that constrains
+    # the warm-rain parameters (ccraut, and the SPA activation fit through
+    # CDNC). Both are per-step grid-mean mixing-ratio increments, so the
+    # column flux is sum(dq * rho * dz) / dt.
+    air_mass = air_density * layer_thickness  # [kg/m^2] per level
+    rain_formation_warm = jnp.sum(qr_gain_warm * air_mass) / dt
+    rain_from_melt = jnp.sum(psmlt_per_level * air_mass) / dt
+
     # Microphysical effective radii (ECHAM preffl/preffi, um) — consumed
     # by the radiation term via the clouds carry (finding 2.36: the
     # radiation-side fabricated r_eff(T)*clip(IWC) saturated at the LUT
@@ -748,7 +759,7 @@ def cloud_microphysics_2m(
     # *_`` call sites keep working; their bottom row equals the surface
     # fluxes by construction (same carry values).
     return tendencies, surface_rain_flux, surface_snow_flux, \
-        liq_eff_radius, ice_eff_radius, \
+        liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -803,11 +814,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # custom compositions).
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
+        self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
 
-    def configure_spa(self, prefactor: float, exponent: float) -> None:
-        """Set the SPA-activation prefactor / exponent (called by factory)."""
+    def configure_spa(self, prefactor: float, exponent: float,
+                      cap_smoothing: float = 0.0) -> None:
+        """Set the SPA prefactor / exponent / cap-smoothing (factory hook)."""
         self._spa_prefactor = nnx.Param(jnp.asarray(prefactor))
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
+        self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -888,6 +902,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_fraction=cloud_fraction,
             prefactor=self._spa_prefactor.get_value(),
             exponent=self._spa_exponent.get_value(),
+            cap_smoothing=self._spa_cap_smoothing.get_value(),
         )
         arg_cdnc = diagnostics.get("activated_cdnc")
         if arg_cdnc is None:
@@ -905,11 +920,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         )
 
         (tend_all, surface_rain_flux, surface_snow_flux,
-         r_eff_liq_all, r_eff_ice_all,
+         r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -970,5 +985,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # same lag as every cross-term diagnostic).
             r_eff_liq=r_eff_liq_all.T,
             r_eff_ice=r_eff_ice_all.T,
+            # Rain-source split [kg/m^2/s]: warm-chain formation vs snow
+            # melt. Their ratio is the warm-rain fraction, the CloudSat-
+            # style observable for the warm-rain calibration.
+            rain_formation_warm=rain_formation_warm,
+            rain_from_melt=rain_from_melt,
         )
         return tendency, {**diagnostics, "clouds": clouds_next}

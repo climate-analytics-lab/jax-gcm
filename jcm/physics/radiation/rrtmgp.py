@@ -841,12 +841,74 @@ def _column_vector_rrtmgp(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
 
 
 
+def _maybe_chunked_vmap(fn, in_axes):
+    """``jax.vmap`` over columns, optionally in rematerialized column blocks.
+
+    The forward's per-column working set is small, so a single vmap over every
+    column is both fastest and well within memory. The *backward* is a different
+    matter: the reverse pass holds the per-g-point profiles of every column live
+    at once (arrays of ``(ncols, n_gpt, nlev+2)``), so its peak grows linearly
+    with the column count and reaches ~309 GiB at T63L47 -- far past a single 80
+    GiB device -- while T21L47 needs only ~19 GiB.
+
+    Setting ``JCM_RRTMGP_COL_CHUNKS=n`` splits the columns into ``n`` blocks and
+    maps a ``jax.checkpoint``-ed vmap over them, so the backward materializes
+    one block's intermediates at a time and recomputes the rest. Peak falls
+    roughly like ``1/n`` at the cost of one extra forward evaluation of
+    radiation. Unset (the default) reproduces the original single vmap exactly.
+    """
+    import os
+
+    n_chunks = int(os.environ.get("JCM_RRTMGP_COL_CHUNKS", "0"))
+    vmapped = jax.vmap(fn, in_axes=in_axes, out_axes=(0, 0))
+    if n_chunks <= 1:
+        return vmapped
+
+    def run(*args):
+        # Mapped arguments may be pytrees (the aerosol struct), so split with
+        # tree_map rather than assuming an array.
+        first = next(a for a, ax in zip(args, in_axes) if ax == 0)
+        ncols = jax.tree_util.tree_leaves(first)[0].shape[0]
+        if ncols % n_chunks:
+            raise ValueError(f"{ncols} columns is not divisible by {n_chunks} chunks")
+        size = ncols // n_chunks
+
+        split = lambda x: x.reshape(n_chunks, size, *x.shape[1:])  # noqa: E731
+        mapped = [
+            jax.tree_util.tree_map(split, a) for a, ax in zip(args, in_axes) if ax == 0
+        ]
+        static = [a for a, ax in zip(args, in_axes) if ax is None]
+
+        def body(block):
+            block = list(block)
+            rebuilt, statics = [], list(static)
+            for ax in in_axes:
+                rebuilt.append(block.pop(0) if ax == 0 else statics.pop(0))
+            return vmapped(*rebuilt)
+
+        tend, diag = lax.map(jax.checkpoint(body), tuple(mapped))
+        merge = lambda x: x.reshape(ncols, *x.shape[2:])  # noqa: E731
+        return jax.tree_util.tree_map(merge, (tend, diag))
+
+    return run
+
+
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
     A single ``jax.vmap`` over all columns (like the rest of the physics):
     the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
-    set tiny (~1.5 GB at T63L47), so no chunking is needed.
+    set tiny (~1.5 GB at T63L47), so the *forward* needs no chunking.
+
+    The **reverse pass** is different: it holds per-g-point profiles of every
+    column live at once, so its peak memory grows linearly with the column
+    count (measured with ``jax.grad`` over a 2-step rollout: ~19 GiB at
+    T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
+    rematerialization pass cannot reduce it. For gradient-based calibration at
+    T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
+    to ``8``, bringing the peak under 25 GiB); see ``_maybe_chunked_vmap``.
+    Unset, the code path is exactly this single vmap and forward-only runs are
+    unaffected.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
@@ -1074,19 +1136,18 @@ class RRTMGPRadiation(PhysicsTerm):
         # after the gas-optics gather fix the SW solve is no longer the
         # bottleneck and the gather/scatter outweighs the skipped work. A plain
         # single vmap over all columns is fastest.
-        tendencies_vmapped, diagnostics_vmapped = jax.vmap(
-            radiation_scheme_rrtmgp,
-            in_axes=(
-                0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-                0, 0, 0, 0,
-                None, 0, 0,
-                None, 0,
-                0, None, None, None,  # col_index, model_step, base_seed, cre
-                0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
-                0, 0,                # r_eff_liq_um, r_eff_ice_um
-            ),
-            out_axes=(0, 0),
+        _in_axes = (
+            0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            None, 0, 0,
+            None, 0,
+            0, None, None, None,  # col_index, model_step, base_seed, cre
+            0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
+            0, 0,                # r_eff_liq_um, r_eff_ice_um
+        )
+        tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
+            radiation_scheme_rrtmgp, _in_axes,
         )(
             cols["temperature"], cols["specific_humidity"],
             cols["pressure_full"], cols["pressure_half"],

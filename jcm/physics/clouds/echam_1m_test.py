@@ -572,9 +572,12 @@ class TestColumnSweepMicrophysics:
         assert float(state.rain_flux[0]) == 0.0
         assert float(state.snow_flux[0]) == 0.0
         # The frozen profile includes the sedimenting cloud-ice flux, so
-        # it must be positive immediately below the ice cloud (level 4)
-        # even before snow aggregation has produced much snow.
-        assert float(state.snow_flux[5]) > 0.0
+        # it must be positive at the ice-cloud level itself (flux leaving
+        # level 4). How far below the source it survives depends on the
+        # sedimentation numerics (the expm1-stable influx form absorbs it
+        # within the next layer for this column), so only the source level
+        # is asserted.
+        assert float(state.snow_flux[4]) > 0.0
 
     def test_flux_profiles_column_and_vmap_agree(self):
         """A vmapped batch must reproduce the single-column flux profiles."""
@@ -632,15 +635,25 @@ class TestColumnSweepParameterGradients:
     def _mixed_column(nlev=20):
         """Mixed-phase column (ice cloud aloft, liquid cloud below) so the
         snow path — and with it ``cvtfall`` — is exercised.
+
+        The deck must be CONTIGUOUS (cf > 0 from the ice layers down through
+        the liquid layers): with a clear gap between them, the precipitating
+        cloud cover ``zclcpre`` collapses in the gap, ``snow_present`` is
+        False where the liquid sits, and the snow-riming path through
+        ``zxsp1`` (the one that carries ``cvtfall``) is never active. The
+        previous disjoint fixture only passed because the epsilon-floored
+        sedimentation VJP manufactured a spurious ``cvtfall`` sensitivity;
+        with the stable expm1 form the true gradient there is ~1e-24, i.e.
+        the path the test names was not exercised at all.
         """
         from jcm.physics.clouds.sundqvist import saturation_specific_humidity
         T = jnp.linspace(230.0, 295.0, nlev)
         p = jnp.linspace(20000.0, 100000.0, nlev)
         qsw = jax.vmap(saturation_specific_humidity)(p, T)
         q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[8].set(2e-3)
-        qi = jnp.zeros(nlev).at[4].set(5e-4)
-        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        qc = jnp.zeros(nlev).at[6].set(1e-3).at[7].set(2e-3).at[8].set(2e-3)
+        qi = jnp.zeros(nlev).at[4].set(5e-4).at[5].set(3e-4)
+        cf = jnp.zeros(nlev).at[4:9].set(0.7)
         rho = p / (287.0 * T)
         dz = jnp.full(nlev, 500.0)
         ndrop = jnp.full(nlev, 1e8)
@@ -679,12 +692,24 @@ class TestColumnSweepParameterGradients:
         )
 
     def test_cvtfall_gradient_finite_with_snow_active(self):
-        # cvtfall only enters through the falling-snow concentration zxsp1;
-        # a mixed-phase column makes its gradient nonzero (and previously
-        # NaN via the unguarded x**(1/1.16)).
+        # cvtfall enters through the falling-snow concentration zxsp1 (and
+        # the ice sedimentation fall speed); a contiguous mixed-phase deck
+        # makes its gradient genuinely nonzero (previously NaN via the
+        # unguarded x**(1/1.16)).
         column = self._mixed_column()
         d_cvtfall = jax.grad(self._total_precip, argnums=1)(
             15.0, 3.29, column,
         )
         assert jnp.isfinite(d_cvtfall), f"d(precip)/d(cvtfall) = {d_cvtfall}"
         assert float(d_cvtfall) != 0.0
+        # Cross-check against central finite differences so a spurious
+        # gradient (e.g. one manufactured by an ill-conditioned VJP, as the
+        # epsilon-floored sedimentation used to) cannot pass as "nonzero".
+        h = 1e-3
+        fd = (
+            float(self._total_precip(15.0, 3.29 + h, column))
+            - float(self._total_precip(15.0, 3.29 - h, column))
+        ) / (2.0 * h)
+        assert jnp.isclose(d_cvtfall, fd, rtol=0.05), (
+            f"AD {float(d_cvtfall)} vs FD {fd}"
+        )

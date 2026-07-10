@@ -59,10 +59,21 @@ class AerosolParameters:
     # differentiable through `jax.grad` for sensitivity / calibration.
     spa_prefactor: jnp.ndarray    # default 2000.0 (Lin 2025, fit to E3SMv3)
     spa_exponent: jnp.ndarray     # default 0.55  (sublinear; observational band 0.3–0.8)
+    # Half-width [m^-3] of the smooth transition that replaces the hard
+    # ``min(Nc_min, arg)`` physical cap in ``spa_activated_cdnc``. The hard min
+    # makes the loss piecewise in ``spa_prefactor`` (the cap boundary sits in
+    # the middle of the cloudy-cell distribution, so cells flip branches as the
+    # prefactor moves and the exact local gradient can even have the wrong sign
+    # relative to the large-scale response — measured through a 2-step T21L47
+    # rollout). Default 1e6 m^-3 (1 cm^-3), a few percent of typical activated
+    # CDNC, so the forward changes by at most half that at the cap corner.
+    # Set to 0.0 to recover the hard cap exactly.
+    spa_cap_smoothing: jnp.ndarray
 
     @classmethod
     def default(cls, background_aod=0.02,
-                spa_prefactor=2000.0, spa_exponent=0.55) -> 'AerosolParameters':
+                spa_prefactor=2000.0, spa_exponent=0.55,
+                spa_cap_smoothing=1.0e6) -> 'AerosolParameters':
         """Create the MACv2-SP v1 reference parameters.
 
         Static plume geometry/optics transcribed verbatim from
@@ -163,11 +174,13 @@ class AerosolParameters:
             background_aod=jnp.array(background_aod),
             spa_prefactor=jnp.array(spa_prefactor),
             spa_exponent=jnp.array(spa_exponent),
+            spa_cap_smoothing=jnp.array(spa_cap_smoothing),
         )
 
     @classmethod
     def from_dataset(cls, ds, background_aod=0.02,
-                     spa_prefactor=2000.0, spa_exponent=0.55) -> 'AerosolParameters':
+                     spa_prefactor=2000.0, spa_exponent=0.55,
+                     spa_cap_smoothing=1.0e6) -> 'AerosolParameters':
         """Build parameters from an opened ``MACv2.0-SP_v1.nc`` dataset.
 
         Owns the (plume, feature) -> (feature, plume) transposes and the
@@ -200,6 +213,7 @@ class AerosolParameters:
             background_aod=jnp.array(background_aod),
             spa_prefactor=jnp.array(spa_prefactor),
             spa_exponent=jnp.array(spa_exponent),
+            spa_cap_smoothing=jnp.array(spa_cap_smoothing),
         )
 
     def isnan(self):

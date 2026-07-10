@@ -1678,7 +1678,7 @@ class TestPrecipFluxProfiles2M:
         )
 
     def test_bottom_row_equals_surface_fluxes(self):
-        (_, rain_sfc, snow_sfc, _, _,
+        (_, rain_sfc, snow_sfc, _, _, _, _,
          rain_prof, snow_prof) = self._run(self._mixed_phase_column())
         assert float(rain_sfc + snow_sfc) > 0.0, "column must precipitate"
         # Same carry values → exact equality (not just allclose).
@@ -1699,7 +1699,7 @@ class TestPrecipFluxProfiles2M:
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
         column = self._mixed_phase_column()
-        (_, _, _, _, _, rain_1, snow_1) = self._run(column)
+        (*_, rain_1, snow_1) = self._run(column)
 
         T, q, p, qc, qi, qnc, qni, cf, rho, dz = column
         nlev = T.shape[0]
@@ -1710,7 +1710,7 @@ class TestPrecipFluxProfiles2M:
         )
         args = (T, q, p, qc, qi, qnc, qni) + extras
         batched = tuple(jnp.stack([a] * 3, axis=0) for a in args)
-        (_, _, _, _, _, rain_b, snow_b) = jax.vmap(
+        (*_, rain_b, snow_b) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(0,) * 16 + (None, None),
         )(*batched, 1800.0, CloudParams2M.default())

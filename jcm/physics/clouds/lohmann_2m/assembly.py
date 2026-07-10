@@ -233,16 +233,24 @@ def update_tendencies_and_important_vars(
     # breadth_factor returns dimensionless breadth parameter (Fortran breadth_factor)
     breadth = breadth_factor(cdnc)
     # convert to effective radius (um): 1e6 * breadth * ((3/(4*pi*rhoh2o)) * pxlb * prho / pcdnc)^(1/3)
-    # Double-where guard on the cube root (infinite derivative when
-    # cloud_liquid_in_cloud == 0; the result is where-masked, so the safe
-    # base only changes the masked region).
+    # Double-where guard on the cube root, whose derivative is infinite when the
+    # base is 0. The mask must be "there is liquid to speak of", NOT
+    # ``liquid_cloud_flag``: that flag is ``temperature > tmelt`` (scheme.py), so
+    # it is True in every warm cell, including the cloud-free majority where
+    # ``cloud_liquid_in_cloud == 0`` puts a 0 on the *differentiated* branch.
+    # The forward is unchanged either way (the radius is masked to 0 there), but
+    # the reverse pass multiplies that infinite local derivative by the incoming
+    # cotangent, and a zero cotangent gives 0 * inf = NaN. That NaN reaches the
+    # gradient only once radiation consumes these radii from the cloud carry,
+    # i.e. from the second step of a rollout onwards.
+    has_liquid = jnp.logical_and(liquid_cloud_flag, cloud_liquid_in_cloud > 0.0)
     liq_radius_base = jnp.where(
-        liquid_cloud_flag,
+        has_liquid,
         (3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, params.eps),
         1.0,
     )
     liq_eff_radius = 1.0e6 * breadth * liq_radius_base ** (1.0 / 3.0)
-    liq_eff_radius = jnp.where(liquid_cloud_flag, liq_eff_radius, 0.0)
+    liq_eff_radius = jnp.where(has_liquid, liq_eff_radius, 0.0)
 
     # --- 7) ice crystal effective radius [um] (preffi)
     # convert in-cloud ice kg/kg -> g/m^3: 1000 * pxib * prho
@@ -397,8 +405,25 @@ def update_in_cloud_water(
     ll1 = jnp.logical_and(cloud_flag, cloud_liquid_in_cloud > params.cqtmin)
     ll2 = jnp.logical_and(ll1, jnp.logical_and(droplet_number <= pcdnc_min, temp_prev > params.cthomi))
 
-    # desired additional droplets
-    delta_cdnc = jnp.maximum(activated_cdnc - droplet_number, 0.0)
+    # desired additional droplets. A smooth (hyperbolic) maximum when
+    # ``params.activation_smoothing > 0``: ``0.5*(d + sqrt(d^2 + w^2))``
+    # overshoots ``max(d, 0)`` by at most ``w/2`` at the corner and is exact
+    # away from it. The hard max makes the loss piecewise in the aerosol
+    # activation parameters (the SPA prefactor/exponent enter only through
+    # ``activated_cdnc``): a cell whose carried CDNC crosses the floor flips
+    # branches and the exact local gradient stops tracking the large-scale
+    # Twomey response. Double-where on the width so ``0`` recovers the hard
+    # max exactly without the unselected branch differentiating ``sqrt`` at
+    # zero (its derivative there is infinite).
+    act_gap = activated_cdnc - droplet_number
+    act_smoothing_on = params.activation_smoothing > 0.0
+    act_w_safe = jnp.where(act_smoothing_on, params.activation_smoothing, 1.0)
+    delta_cdnc_smooth = 0.5 * (
+        act_gap + jnp.sqrt(act_gap * act_gap + act_w_safe * act_w_safe)
+    )
+    delta_cdnc = jnp.where(
+        act_smoothing_on, delta_cdnc_smooth, jnp.maximum(act_gap, 0.0)
+    )
 
     # only count activation where ll2
     delta_cdnc_applied = jnp.where(ll2, delta_cdnc, 0.0)

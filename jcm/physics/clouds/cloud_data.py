@@ -40,6 +40,14 @@ class CloudData:
     # bottom level.
     rain_flux: jnp.ndarray           # LS rain flux [kg/m²/s] (nlev, ncols)
     snow_flux: jnp.ndarray           # LS snow(+ice) flux [kg/m²/s] (nlev, ncols)
+    # Column-integrated rain-source split [kg/m²/s], written by the 2M
+    # scheme (zero under 1M, which does not separate the pathways): rain
+    # formed by the warm chain (autoconversion + accretion of liquid) and
+    # rain formed by melting snow. warm / (warm + melt) is the model's
+    # warm-rain fraction, the CloudSat-style observable used to constrain
+    # the warm-rain and aerosol-activation parameters.
+    rain_formation_warm: jnp.ndarray  # (ncols,)
+    rain_from_melt: jnp.ndarray       # (ncols,)
 
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
@@ -82,6 +90,8 @@ class CloudData:
             precip_snow=jnp.zeros(nodal_shape),
             rain_flux=jnp.zeros((nlev,) + nodal_shape),
             snow_flux=jnp.zeros((nlev,) + nodal_shape),
+            rain_formation_warm=jnp.zeros(nodal_shape),
+            rain_from_melt=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
@@ -102,6 +112,8 @@ class CloudData:
             'precip_snow': self.precip_snow,
             'rain_flux': self.rain_flux,
             'snow_flux': self.snow_flux,
+            'rain_formation_warm': self.rain_formation_warm,
+            'rain_from_melt': self.rain_from_melt,
             'droplet_number': self.droplet_number,
             'r_eff_liq': self.r_eff_liq,
             'r_eff_ice': self.r_eff_ice,
