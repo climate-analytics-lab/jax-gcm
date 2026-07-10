@@ -48,7 +48,7 @@ terms:
   # default wherever it is positive).
   cloudsat_cosp:
     _target_: jcm.physics.diagnostics.cosp_cloudsat.CloudsatCosp
-    ncolumns: 20
+    ncolumns: 20  # trial value; Muelmenstaedt et al. (2020) production used 100
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:
