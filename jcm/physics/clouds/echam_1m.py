@@ -771,8 +771,29 @@ def cloud_microphysics_column_sweep(
             0.0,
         )
         zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))
-        zal2 = zxiflux / jnp.maximum(rho * zxifall, config.epsilon)
-        zxised = jnp.maximum(0.0, zxip1 * zal1 + zal2 * (1.0 - zal1))
+        # Influx contribution ``zal2 * (1 - zal1)`` with
+        # ``zal2 = zxiflux / (rho * v)``: analytically this has a REMOVABLE
+        # 0/0 limit as the fall speed v -> 0 (it tends to
+        # ``zxiflux * k / rho`` with ``k = g * rho * dt / dp``), but the
+        # factored form with an epsilon floor destroys the cancellation in
+        # reverse mode: d(zal2)/d(zxiflux) = 1/max(rho*v, eps) is up to 1e12
+        # per level, and ``zxiflux`` is the scan carry, so these factors
+        # COMPOUND across levels and overflow the backward pass to inf (the
+        # first saturated min/max VJP then turns the inf into NaN — the
+        # convection-parameter NaN gradients). Rewrite via the stable
+        # phi(x) = (1 - exp(-x))/x with its series limit at small x, so both
+        # the value and every partial derivative stay O(1).
+        sed_x = zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon)
+        sed_x_safe = jnp.maximum(sed_x, 1.0e-8)
+        sed_phi = jnp.where(
+            sed_x > 1.0e-8,
+            -jnp.expm1(-sed_x_safe) / sed_x_safe,
+            1.0 - 0.5 * sed_x,
+        )
+        influx_gain = (
+            zxiflux * c.grav * dt / jnp.maximum(zdp, config.epsilon) * sed_phi
+        )
+        zxised = jnp.maximum(0.0, zxip1 * zal1 + influx_gain)
         zqsed = zxised - zxip1
         zcons2_lev = 1.0 / (dt * c.grav)
         zxibot = jnp.maximum(0.0, zxiflux - zqsed * zcons2_lev * zdp)
