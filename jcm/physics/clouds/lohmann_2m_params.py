@@ -77,6 +77,16 @@ class CloudParams2M:
     cdnc_min_lower: jnp.ndarray  # [1/m^3]
     rcd_vol_max: jnp.ndarray     # [m] max mean-volume droplet radius
     cdnc_min_fixed: jnp.ndarray  # [cm^-3] fixed floor when not dynamic
+    # Half-width [1/m^3] of the smooth replacement for the hard
+    # ``max(activated_cdnc - cdnc, 0)`` nucleation increment in
+    # ``update_in_cloud_water``. The hard max makes the loss piecewise in the
+    # aerosol activation parameters (SPA prefactor/exponent): a cell whose
+    # carried CDNC crosses the activation floor flips branches and the exact
+    # local gradient stops tracking the large-scale Twomey response. The
+    # smooth form overshoots by at most half this width at the corner.
+    # Default 1e6 m^-3 (1 cm^-3), a few percent of typical activated CDNC;
+    # 0.0 recovers the hard max exactly.
+    activation_smoothing: jnp.ndarray  # [1/m^3]
 
     # Ice crystal number concentration bounds
     icemin: jnp.ndarray      # [1/m^3]
@@ -168,6 +178,7 @@ class CloudParams2M:
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
         cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
+        activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
         n_aer_coarse: float = 0.5,
         nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
@@ -224,6 +235,7 @@ class CloudParams2M:
             cdnc_min_lower=jnp.array(cdnc_min_lower),
             rcd_vol_max=jnp.array(rcd_vol_max),
             cdnc_min_fixed=jnp.array(cdnc_min_fixed),
+            activation_smoothing=jnp.array(activation_smoothing),
             icemin=jnp.array(icemin),
             icemax=jnp.array(icemax),
             mi0_rcp=jnp.array(1.0 / mi0),

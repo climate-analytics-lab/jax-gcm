@@ -333,7 +333,14 @@ def precip_formation_warm(
     # -------------------------------------------------------------------------
 
     # Here, `droplet_number` is pcdnc and `cloud_water` is pxlb.
-    ztmp1 = params.ccraut * 1350.0 * (1e-6 * droplet_number) ** (-1.79)
+    # Floor the KK2000 CDNC base at 1 cm^-3 (same guard as the 1M Beheng
+    # rate): the -1.79 power blows up for the near-zero droplet numbers
+    # that warm-masked cells can carry before activation, and although the
+    # forward survives (the huge rate saturates the depletion factor to 1),
+    # its VJP amplifies parameter cotangents by ~1e40 and swamps the true
+    # gradient. KK2000 is not valid below ~1 cm^-3 anyway.
+    nc_cm3_safe = jnp.maximum(1e-6 * droplet_number, 1.0)
+    ztmp1 = params.ccraut * 1350.0 * nc_cm3_safe ** (-1.79)
 
     # The expression below is a time-integrated sink form used in the Fortran.
     # It is constructed so that zraut is bounded by cloud_water (after MIN).

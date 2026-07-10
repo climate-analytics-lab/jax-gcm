@@ -185,6 +185,7 @@ def echam_physics(
         micro_term.configure_spa(
             aerosol_p.spa_prefactor,
             aerosol_p.spa_exponent,
+            aerosol_p.spa_cap_smoothing,
         )
     else:
         raise ValueError(
