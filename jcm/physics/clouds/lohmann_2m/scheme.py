@@ -784,8 +784,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:
-        """Set the SPA-activation prefactor / exponent / cap-smoothing width
-        (called by factory)."""
+        """Set the SPA prefactor / exponent / cap-smoothing (factory hook)."""
         self._spa_prefactor = nnx.Param(jnp.asarray(prefactor))
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
