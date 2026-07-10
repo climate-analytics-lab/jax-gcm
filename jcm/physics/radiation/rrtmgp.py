@@ -898,7 +898,17 @@ class RRTMGPRadiation(PhysicsTerm):
 
     A single ``jax.vmap`` over all columns (like the rest of the physics):
     the jax-rrtmgp shared-table fix keeps the per-column gas-optics working
-    set tiny (~1.5 GB at T63L47), so no chunking is needed.
+    set tiny (~1.5 GB at T63L47), so the *forward* needs no chunking.
+
+    The **reverse pass** is different: it holds per-g-point profiles of every
+    column live at once, so its peak memory grows linearly with the column
+    count (measured with ``jax.grad`` over a 2-step rollout: ~19 GiB at
+    T21L47, ~77 GiB at T31L47, ~171 GiB at T63L47), and XLA's own
+    rematerialization pass cannot reduce it. For gradient-based calibration at
+    T63L47 set the environment variable ``JCM_RRTMGP_COL_CHUNKS`` (for example
+    to ``8``, bringing the peak under 25 GiB); see ``_maybe_chunked_vmap``.
+    Unset, the code path is exactly this single vmap and forward-only runs are
+    unaffected.
 
     Reads pressure / height / density from the moist-air diagnostics
     dict, cloud fraction from ``diagnostics["clouds"]`` and
