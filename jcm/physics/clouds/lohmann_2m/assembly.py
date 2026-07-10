@@ -405,8 +405,25 @@ def update_in_cloud_water(
     ll1 = jnp.logical_and(cloud_flag, cloud_liquid_in_cloud > params.cqtmin)
     ll2 = jnp.logical_and(ll1, jnp.logical_and(droplet_number <= pcdnc_min, temp_prev > params.cthomi))
 
-    # desired additional droplets
-    delta_cdnc = jnp.maximum(activated_cdnc - droplet_number, 0.0)
+    # desired additional droplets. A smooth (hyperbolic) maximum when
+    # ``params.activation_smoothing > 0``: ``0.5*(d + sqrt(d^2 + w^2))``
+    # overshoots ``max(d, 0)`` by at most ``w/2`` at the corner and is exact
+    # away from it. The hard max makes the loss piecewise in the aerosol
+    # activation parameters (the SPA prefactor/exponent enter only through
+    # ``activated_cdnc``): a cell whose carried CDNC crosses the floor flips
+    # branches and the exact local gradient stops tracking the large-scale
+    # Twomey response. Double-where on the width so ``0`` recovers the hard
+    # max exactly without the unselected branch differentiating ``sqrt`` at
+    # zero (its derivative there is infinite).
+    act_gap = activated_cdnc - droplet_number
+    act_smoothing_on = params.activation_smoothing > 0.0
+    act_w_safe = jnp.where(act_smoothing_on, params.activation_smoothing, 1.0)
+    delta_cdnc_smooth = 0.5 * (
+        act_gap + jnp.sqrt(act_gap * act_gap + act_w_safe * act_w_safe)
+    )
+    delta_cdnc = jnp.where(
+        act_smoothing_on, delta_cdnc_smooth, jnp.maximum(act_gap, 0.0)
+    )
 
     # only count activation where ll2
     delta_cdnc_applied = jnp.where(ll2, delta_cdnc, 0.0)

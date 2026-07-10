@@ -30,7 +30,8 @@ _CM3_TO_M3: float = 1.0e6
 
 
 def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
-                       prefactor: jnp.ndarray, exponent: jnp.ndarray) -> jnp.ndarray:
+                       prefactor: jnp.ndarray, exponent: jnp.ndarray,
+                       cap_smoothing: jnp.ndarray | float = 0.0) -> jnp.ndarray:
     """Per-cell SPA-style cloud-droplet floor `Nc_min`, in m^-3.
 
     Args:
@@ -45,6 +46,14 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
             is differentiable.
         exponent: SPA fit exponent. Lin (2025) gives 0.55 — typically
             sourced from ``AerosolParameters.spa_exponent``.
+        cap_smoothing: Half-width [m^-3] of the smooth replacement for the
+            hard ``min(Nc_min, arg)`` physical cap; 0 (the default) keeps
+            the hard cap. Typically sourced from
+            ``AerosolParameters.spa_cap_smoothing``. See the note on that
+            field: the hard cap makes the loss piecewise in ``prefactor``
+            and the exact local gradient unrepresentative of the
+            large-scale response, which is what blocks gradient
+            calibration of the SPA fit.
 
     Returns:
         `Nc_min` in m^-3, ready to be passed as `activated_cdnc` to
@@ -72,4 +81,21 @@ def spa_activated_cdnc(Nccn: jnp.ndarray, cloud_fraction: jnp.ndarray,
     # aerosol; capping at ``arg`` keeps partial-cloud clean cells from
     # activating more droplets than the CCN in their cloudy area (Cf<1). With
     # Cf=1 this reduces to the previous ``min(·, Nccn)``.
-    return jnp.minimum(nc_min_m3, arg)
+    #
+    # The cap is a smooth (hyperbolic) minimum when ``cap_smoothing > 0``:
+    # ``0.5*(a + b - sqrt((a-b)^2 + w^2))`` undershoots ``min(a, b)`` by at
+    # most ``w/2`` at the corner and is exact away from it. The cap boundary
+    # (``prefactor = arg**(1-exponent)``) crosses the middle of the cloudy-cell
+    # distribution, so with the hard min every prefactor perturbation flips
+    # cells between branches and the exact local gradient is a poor (even
+    # wrong-signed) estimate of the response; the smooth cap makes
+    # d/d(prefactor) reflect the trend at the width scale. Double-where on the
+    # width so ``cap_smoothing == 0`` recovers the hard min exactly without the
+    # unselected branch differentiating ``sqrt`` at zero. The final clamp keeps
+    # clear cells (both operands 0, smooth min -w/2) at exactly zero.
+    smoothing_on = cap_smoothing > 0.0
+    w_safe = jnp.where(smoothing_on, cap_smoothing, 1.0)
+    gap = nc_min_m3 - arg
+    smooth_cap = 0.5 * (nc_min_m3 + arg - jnp.sqrt(gap * gap + w_safe * w_safe))
+    capped = jnp.where(smoothing_on, smooth_cap, jnp.minimum(nc_min_m3, arg))
+    return jnp.maximum(capped, 0.0)

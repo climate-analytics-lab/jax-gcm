@@ -780,11 +780,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # custom compositions).
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
+        self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
 
-    def configure_spa(self, prefactor: float, exponent: float) -> None:
-        """Set the SPA-activation prefactor / exponent (called by factory)."""
+    def configure_spa(self, prefactor: float, exponent: float,
+                      cap_smoothing: float = 0.0) -> None:
+        """Set the SPA-activation prefactor / exponent / cap-smoothing width
+        (called by factory)."""
         self._spa_prefactor = nnx.Param(jnp.asarray(prefactor))
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
+        self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -865,6 +869,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_fraction=cloud_fraction,
             prefactor=self._spa_prefactor.get_value(),
             exponent=self._spa_exponent.get_value(),
+            cap_smoothing=self._spa_cap_smoothing.get_value(),
         )
         arg_cdnc = diagnostics.get("activated_cdnc")
         if arg_cdnc is None:
