@@ -42,6 +42,14 @@ mam4 = [
     "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@v0.2.0-beta.1",
 ]
 
+# pySES CAM-SE spectral-element dynamical core (jcm/dycore/pyses). Pre-release
+# pin: 0.1.3a2 is the first build that ships the pg2 physics-grid coupling
+# machinery (pyses.dynamical_cores.finite_volume_grid) this backend uses.
+# Install with `pip install jcm[pyses]`.
+pyses = [
+    "pyses>=0.1.3a2",
+]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
