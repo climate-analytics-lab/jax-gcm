@@ -67,7 +67,8 @@ Model integration
 so the Model's date/forcing bookkeeping agrees with the step the dycore
 actually takes.
 
-One documented caveat: construct with ``physics_dtype=jnp.float64`` when
+Historical caveat (fixed): earlier revisions required ``physics_dtype=
+jnp.float64`` when
 driving the shipped ECHAM physics (through ``Model`` *or* a caller-owned
 loop). Two independent reasons, both external to this backend:
 
@@ -212,6 +213,10 @@ class PysesCamSEDycore(DynamicalCore):
         self.model = models.cam_se
         self.nx, self.npt = int(nx), int(npt)
         self.n_sponge, self.nu_top = int(n_sponge), float(nu_top)
+        # Public: Model reads this to cast its physics carry template so
+        # the lax.scan carry matches the per-step compute dtype (float32
+        # physics under the float64/x64 dynamics this backend enables).
+        self.physics_dtype = physics_dtype
         self._physics_dtype = physics_dtype
 
         # Element-local bilinear metric: the supported quasi-uniform

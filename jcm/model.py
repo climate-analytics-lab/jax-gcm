@@ -399,12 +399,29 @@ class Model:
         template = self.physics.get_empty_data(self.coords)
         initial_carry = self.physics.initial_carry_state(self.coords)
         if isinstance(initial_carry, dict) and isinstance(template, dict):
-            return {**template, **initial_carry}
-        # Explicit ``is None`` check: ``initial_carry or template`` would
-        # trigger ``bool(carry)`` and raise an ambiguous-truth ``ValueError``
-        # if a ``Physics`` subclass returns a JAX array (or any object with
-        # non-scalar truth semantics).
-        return template if initial_carry is None else initial_carry
+            carry = {**template, **initial_carry}
+        else:
+            # Explicit ``is None`` check: ``initial_carry or template`` would
+            # trigger ``bool(carry)`` and raise an ambiguous-truth
+            # ``ValueError`` if a ``Physics`` subclass returns a JAX array
+            # (or any object with non-scalar truth semantics).
+            carry = template if initial_carry is None else initial_carry
+        # Dycores that run their dynamics at a different precision than the
+        # physics (the pySES CAM-SE backend: float64 dynamics under
+        # jax_enable_x64, float32 physics) expose ``physics_dtype``; the
+        # scan carry must match the dtype the per-step compute produces, or
+        # iteration 1 fails to type-check. The template above was built at
+        # the process default, so cast its float leaves down here. Backends
+        # without the attribute (dinosaur) are untouched.
+        physics_dtype = getattr(self.dycore, "physics_dtype", None)
+        if physics_dtype is not None:
+            carry = jax.tree.map(
+                lambda x: x.astype(physics_dtype)
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                else x,
+                carry,
+            )
+        return carry
 
     def _get_op_split_integrate_fn(
         self,

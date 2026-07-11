@@ -7,6 +7,8 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
+
+from jcm.physics.coords_util import column_lat_lon
 from typing import Tuple, Optional
 
 from ..radiation_types import (
@@ -640,11 +642,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
-        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
-        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
-        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
-        self._lats = nnx.Variable(lat_2d.reshape(-1))
-        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
     def __call__(
@@ -660,12 +660,27 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         radiation = diagnostics["radiation"]
 
         def _compute():
-            return self._compute_full(state, diagnostics, forcing, params)
+            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            # Pin the compute branch to the carry's leaf dtypes: under
+            # jax_enable_x64 (e.g. driving this scheme from a float64
+            # dycore with float32 physics state) some strong table
+            # constants promote a subset of the freshly-computed leaves
+            # to float64, and the two lax.cond branches would fail to
+            # type-check against the uniform-dtype cached carry.
+            rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, rad
 
         def _use_cached():
-            return cached_radiation_tendency(
+            tend = cached_radiation_tendency(
                 radiation, state.temperature.shape,
-            ), radiation
+            )
+            # Same dtype pin as _compute: under x64 the cached heating ->
+            # tendency arithmetic can promote through float64 scalars.
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, radiation
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),

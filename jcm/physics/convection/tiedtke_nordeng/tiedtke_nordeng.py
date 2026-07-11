@@ -897,11 +897,28 @@ def tiedtke_nordeng_convection(
         )
         return tendencies, state
     
-    # Apply convection if active
+    # Apply convection if active. Both branches are pinned to the input
+    # temperature dtype: under jax_enable_x64 (float64 dycore, float32
+    # physics) a few float64 constants inside the full-convection branch
+    # promote dudt/dvdt/dqc_dt/dqi_dt, and lax.cond requires the branch
+    # output types to match exactly.
+    def _pin(fn):
+        def wrapped():
+            tend, st = fn()
+            tend = jax.tree.map(lambda x: x.astype(temperature.dtype), tend)
+            st = jax.tree.map(
+                lambda x: x.astype(temperature.dtype)
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                else x,
+                st,
+            )
+            return tend, st
+        return wrapped
+
     tendencies, updated_state = lax.cond(
         conv_type > 0,
-        apply_full_convection,
-        no_convection
+        _pin(apply_full_convection),
+        _pin(no_convection)
     )
 
     return tendencies, updated_state

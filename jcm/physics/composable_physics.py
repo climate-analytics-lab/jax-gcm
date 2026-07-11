@@ -186,6 +186,22 @@ class ComposablePhysics(nnx.Module, Physics):
             k: v for k, v in diagnostics.items()
             if k not in self._INTERNAL_DIAGNOSTIC_KEYS
         }
+        # Invariant: everything compute_tendencies returns is at the physics
+        # working dtype (the state's). Under jax_enable_x64 with a float32
+        # physics state (float64-dynamics dycores like pySES CAM-SE), float64
+        # table constants inside individual terms would otherwise promote a
+        # scattered subset of diagnostic leaves, and the cross-step lax.scan
+        # carry then fails to type-check against its uniform-dtype template.
+        # A no-op for the standard all-f32 (x64 disabled) and all-f64 runs.
+        working = state.temperature.dtype
+
+        def _pin(x):
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating):
+                return x.astype(working)
+            return x
+
+        tendencies = jax.tree.map(_pin, tendencies)
+        diagnostics = jax.tree.map(_pin, diagnostics)
         return tendencies, diagnostics
 
     def _compute_tendencies_3d(

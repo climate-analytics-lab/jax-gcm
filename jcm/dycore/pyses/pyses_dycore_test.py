@@ -320,6 +320,35 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         # Moisture spun up from the dry start (evaporation active).
         self.assertGreater(float(np.asarray(ps_end.specific_humidity).max()), 0.0)
 
+    def test_model_drives_float32_physics(self):
+        """The production split: float32 physics carry on the float64 core.
+
+        Exercises the two fixes that unlocked it: radiation lax.cond
+        branches pinned to the carry dtype, and Model casting its carry
+        template to ``dycore.physics_dtype``.
+        """
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        dycore = PysesCamSEDycore(
+            nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
+            physics_dtype=jnp.float32,
+        )
+        model = Model(
+            dycore=dycore,
+            time_step=dycore.dt_seconds / 60.0,
+            physics=echam_physics(radiation_scheme="grey"),
+        )
+        forcing = build_forcing(T63_FORCING, dycore)
+        dt_days = dycore.dt_seconds / 86400.0
+        model.run(forcing=forcing, save_interval=dt_days, total_time=2 * dt_days)
+        ps_end = dycore.to_physics_state(model._final_dycore_state)
+        self.assertEqual(ps_end.temperature.dtype, jnp.float32)
+        T = np.asarray(ps_end.temperature)
+        self.assertTrue(np.isfinite(T).all())
+        self.assertGreater(T.min(), 140.0)
+        self.assertLess(T.max(), 360.0)
+
     def test_direct_drive_loop_without_model(self):
         """Caller-owned production loop: to_physics_state → physics → step.
 
