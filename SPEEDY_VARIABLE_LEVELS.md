@@ -438,3 +438,24 @@ Notes:
   layer, surface fluxes act on the lowest layer, cloud/convective tops are
   argmax/instability searches over real levels (bounded by the σ<0.2
   stratosphere mask of §4).
+
+### 7.1 Stratiform cloud cover must be capped at 1 (high-nlev stability)
+
+360-day seasonal integrations at nlev ≥ 24 (any physics — the margin is worst
+with the §7 diagnostics) exposed a latent SPEEDY bug: the land branch of the
+stratiform cloud diagnosis, ``clstr_land = max(clstr, clsminl) · rh[surface]``,
+is **unbounded** when the lowest model layer supersaturates. Thin high-nlev
+surface layers supersaturate routinely over wintertime Antarctica, producing
+cloud "cover" up to ~5–7. The shortwave scheme applies the cover as a
+reflectivity ``albcls·clstr`` whose layer transmission ``1 − albcls·clstr``
+turns **negative** for ``clstr > 1/albcls = 2``, flipping the sign of the
+downward flux — the integration NaNs within hours. Empirically the threshold
+is sharp: stable runs peak just above 2 in monthly means; every crashed run
+exceeded ~2.5.
+
+Fix: ``clstr = min(clstr, 1)`` (cloud cover is a fraction). On the 8-level
+grid ``clstr`` never exceeds ``clsmax = 0.6``, so the validated climate is
+untouched (confirmed: clamped vs unclamped 360-day L8/L16 climates agree to
+weather noise). With the cap, 360-day seasonal runs are finite at T21 for
+nlev ∈ {8, 12, 16, 24 (3 seeds), 32, 48} — previously nlev ≥ 24 crashed in
+months 9–11 for most seeds.

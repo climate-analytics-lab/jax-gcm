@@ -670,3 +670,62 @@ class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
                                        err_msg=f"cloudc drifted at nlev={kx}")
             np.testing.assert_allclose(sw.cloudstr, ref.cloudstr, atol=0.05,
                                        err_msg=f"cloudstr drifted at nlev={kx}")
+
+
+class TestStratiformCloudCoverBounded(unittest.TestCase):
+    """The land-branch stratiform amplification clstrl = max(clstr, clsminl) *
+    rh[surface] is unbounded when the lowest layer supersaturates; the cover
+    must nevertheless remain a fraction (the SW scheme's layer transmission
+    1 - albcls*clstr goes negative — numerically explosive — for clstr > 2).
+    """
+
+    def test_clstr_capped_under_supersaturated_land_surface(self):
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.physics_data import (
+            SurfaceFluxData, HumidityData, ConvectionData, CondensationData,
+            SWRadiationData, PhysicsData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.radiation.speedy_shortwave import get_clouds
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+
+        kx, ix, il = 8, 64, 32
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        terrain = terrain.copy(fmask=jnp.ones((ix, il)))   # all land
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        # Strongly stable BL (large gse -> fstab = 1) and a 5x supersaturated
+        # surface layer, the wintertime-Antarctica configuration that produced
+        # clstr ~ 5-7 at high nlev.
+        rh = jnp.broadcast_to(jnp.where(sig > 0.9, 5.0, 0.05), (kx, ix, il))
+        qsat = jnp.broadcast_to(25.0 * sig ** 3 + 1e-3, (kx, ix, il))
+        qa = rh * qsat
+        phig = 70000.0 * (1.0 - sig) ** 1.2
+        se = jnp.broadcast_to(300000.0 + 5.0 * phig, (kx, ix, il))
+        se, phig = (jnp.broadcast_to(f, (kx, ix, il)) for f in (se, phig))
+
+        xy = (ix, il)
+        physics_data = PhysicsData.zeros(
+            xy, kx, surface_flux=SurfaceFluxData.zeros(xy),
+            humidity=HumidityData.zeros(xy, kx, rh=rh, qsat=qsat),
+            convection=ConvectionData.zeros(
+                xy, kx, iptop=jnp.full(xy, kx, dtype=int),
+                precnv=jnp.zeros(xy), se=se),
+            condensation=CondensationData.zeros(xy, kx, precls=jnp.zeros(xy)),
+            shortwave_rad=SWRadiationData.zeros(xy, kx, compute_shortwave=True),
+            speedy_coords=speedy_coords)
+        state = PhysicsState.zeros(
+            (kx, ix, il), specific_humidity=qa, geopotential=phig,
+            normalized_surface_pressure=jnp.ones(xy))
+
+        _, data_out = get_clouds(state, physics_data, parameters,
+                                 ForcingData.zeros(xy), terrain)
+        clstr = data_out.shortwave_rad.cloudstr
+        self.assertTrue(bool((clstr <= 1.0 + 1e-6).all()),
+                        msg=f'clstr max {float(clstr.max())} exceeds 1')
+        self.assertTrue(bool((clstr >= 0.0).all()))

@@ -499,6 +499,17 @@ def clouds(operand):
     # Stratocumulus clouds over land
     clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
     clstr = clstr + terrain.fmask * (clstrl - clstr)
+    # Cloud cover is a fraction: cap at 1. The land-branch RH amplification
+    # above is unbounded when the lowest layer supersaturates (rh > 1), which
+    # the thin surface layers of high-nlev grids do routinely over cold land
+    # (clstr up to ~5-7 over wintertime Antarctica at nlev >= 24). The
+    # shortwave scheme applies this cover as a reflectivity albcls*clstr whose
+    # layer transmission (1 - albcls*clstr) turns negative for
+    # clstr > 1/albcls = 2 — numerically explosive (it flips the sign of the
+    # downward flux and NaNs the integration within hours). On the validated
+    # 8-level grid clstr never exceeds clsmax = 0.6, so this cap is a no-op
+    # there.
+    clstr = jnp.minimum(clstr, 1.0)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)
