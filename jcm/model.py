@@ -125,7 +125,9 @@ def _op_split_trajectory(
     inner_steps: int,
     post_process_fn: Callable[[Any, Any], Any] = lambda x, ps: x,
     output_averages: bool = False,
-) -> Callable[[Any], tuple[Any, Any, Any]]:
+    observe_fn: Callable[[Any, Any], Any] | None = None,
+    observer_xs: Any = None,
+) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
     The op-split ``step_fn`` has signature ``(state, physics_state) ->
@@ -159,11 +161,21 @@ def _op_split_trajectory(
             to the running mean (averaged mode).
         output_averages: When True, the saved frame is the running mean of
             ``post_process_fn(state)`` over the inner steps.
+        observe_fn: Optional per-``dt`` virtual-observation sampler
+            ``(physics_state_next, xs_slice) -> samples`` (see
+            :mod:`jcm.observers`). Its output is emitted as inner-scan ``ys``
+            every timestep — the only channel that survives at ``dt``
+            resolution rather than being decimated to ``save_interval``.
+        observer_xs: Pytree of per-step sampling tables whose leaves have a
+            leading axis of ``outer_steps * inner_steps``; sliced per ``dt``
+            and fed to ``observe_fn``. Required when ``observe_fn`` is set.
 
     Returns:
         A function ``initial_state -> (final_state, final_physics_state,
-        saved_trajectory)`` where ``saved_trajectory`` has a leading axis of
-        length ``outer_steps``. ``final_physics_state`` is the cross-step carry
+        saved_trajectory, observations)`` where ``saved_trajectory`` has a
+        leading axis of length ``outer_steps`` and ``observations`` (``None``
+        without ``observe_fn``) has leaves with a leading axis of
+        ``outer_steps * inner_steps``. ``final_physics_state`` is the cross-step carry
         coming out of the last ``dt`` — exposing it lets callers (e.g.
         ``Model.resume``) thread a continuous carry across API boundaries so
         a 5d + resume(5d) integration matches a single 10d integration. In
@@ -176,9 +188,22 @@ def _op_split_trajectory(
     # ``lax.scan`` over ``(state, physics_state)`` and the
     # ``(x_final, ps_final, preds)`` return are identical, so define them
     # once.
+    have_observers = observe_fn is not None
+
+    # The saved-trajectory physics payload must not carry the per-step
+    # ``_sampler_state`` snapshot (state fields the StateSampler term
+    # publishes for the observers) — that would duplicate the dynamics
+    # fields in every saved frame. It stays in the *carry* (the scan needs a
+    # structure-stable pytree and the observers read it every ``dt``) but is
+    # stripped from what gets saved.
+    def _strip_sampler(diag):
+        if isinstance(diag, dict) and "_sampler_state" in diag:
+            return {k: v for k, v in diag.items() if k != "_sampler_state"}
+        return diag
+
     def _averaged_outer_step():
         @jax.checkpoint
-        def inner_step(carry, _):
+        def inner_step(carry, obs_x):
             x, physics_state, x_sum, diag_sum = carry
             x_next, physics_state_next = step_fn(x, physics_state)
             # Sum POST-step states so that mean(state_1..state_N) matches the
@@ -192,31 +217,33 @@ def _op_split_trajectory(
                 lambda acc, new: acc + new / inner_steps,
                 diag_sum, physics_state_next,
             )
-            return (x_next, physics_state_next, x_sum, diag_sum), None
+            obs = observe_fn(physics_state_next, obs_x) if have_observers else None
+            return (x_next, physics_state_next, x_sum, diag_sum), obs
 
-        def outer_step(carry, _, empty_sum, empty_diag_sum):
+        def outer_step(carry, obs_x_frame, empty_sum, empty_diag_sum):
             x, physics_state = carry
             init = (x, physics_state, empty_sum, empty_diag_sum)
-            (x_next, ps_next, x_sum, diag_sum), _ = jax.lax.scan(
-                inner_step, init, None, length=inner_steps,
+            (x_next, ps_next, x_sum, diag_sum), obs = jax.lax.scan(
+                inner_step, init, obs_x_frame, length=inner_steps,
             )
             averaged_state = tree_map(lambda s: s / inner_steps, x_sum)
             preds = post_process_fn(averaged_state, ps_next)
-            preds = preds.replace(physics=diag_sum)
-            return (x_next, ps_next), preds
+            preds = preds.replace(physics=_strip_sampler(diag_sum))
+            return (x_next, ps_next), (preds, obs)
 
         return outer_step
 
     def _snapshot_outer_step():
         @jax.checkpoint
-        def inner_step(carry, _):
+        def inner_step(carry, obs_x):
             x, physics_state = carry
             x_next, physics_state_next = step_fn(x, physics_state)
-            return (x_next, physics_state_next), None
+            obs = observe_fn(physics_state_next, obs_x) if have_observers else None
+            return (x_next, physics_state_next), obs
 
-        def outer_step(carry, _):
-            (x_final, ps_final), _ = jax.lax.scan(
-                inner_step, carry, None, length=inner_steps,
+        def outer_step(carry, obs_x_frame):
+            (x_final, ps_final), obs = jax.lax.scan(
+                inner_step, carry, obs_x_frame, length=inner_steps,
             )
             # Save the carried physics state alongside the dynamics state.
             # Calling ``post_process_fn`` with ``ps_final`` lets snapshot
@@ -225,7 +252,7 @@ def _op_split_trajectory(
             # save time with a freshly-seeded carry would zero out radiation
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
-            return (x_final, ps_final), post_process_fn(x_final, ps_final)
+            return (x_final, ps_final), (post_process_fn(x_final, ps_final), obs)
 
         return outer_step
 
@@ -243,18 +270,34 @@ def _op_split_trajectory(
                 empty_diagnostics,
             )
             outer_step_fn = _averaged_outer_step()
-            outer_step = lambda c, _: outer_step_fn(
-                c, _, empty_sum, empty_diag_sum,
+            outer_step = lambda c, xs: outer_step_fn(
+                c, xs, empty_sum, empty_diag_sum,
             )
         else:
             outer_step = _snapshot_outer_step()
 
-        (x_final, ps_final), preds = jax.lax.scan(
+        # Observer sampling tables enter the scans as ``xs``: the leading
+        # per-``dt`` axis is folded to (outer, inner, ...) so the outer scan
+        # slices whole frames and the inner scan slices single steps.
+        scan_xs = None
+        if have_observers:
+            scan_xs = tree_map(
+                lambda a: a.reshape(
+                    (outer_steps, inner_steps) + a.shape[1:]),
+                observer_xs,
+            )
+
+        (x_final, ps_final), (preds, observations) = jax.lax.scan(
             outer_step,
             (x_initial, initial_physics_state),
-            None, length=outer_steps,
+            scan_xs, length=outer_steps,
         )
-        return x_final, ps_final, preds
+        if have_observers:
+            # (outer, inner, ...) -> (n_steps, ...) for the per-dt channel.
+            observations = tree_map(
+                lambda a: a.reshape((-1,) + a.shape[2:]), observations,
+            )
+        return x_final, ps_final, preds, observations
 
     return integrate
 
@@ -277,6 +320,7 @@ class Model:
                  physics: Physics = None,
                  start_date: jdt.Datetime | None = None,
                  calendar: str = "365_day",
+                 observers=(),
                  log_level=logging.CRITICAL) -> None:
         """Initialise the model.
 
@@ -324,6 +368,16 @@ class Model:
                 forcing-driven and date-aware terms can read it).
             calendar: Calendar string (``"365_day"`` or ``"gregorian"``) for
                 the same date conversion.
+            observers: Sequence of :class:`jcm.observers.Observer` — virtual
+                observation operators sampled every ``dt`` (stations, moving
+                platforms, solar-time swaths). Fixed at construction, like
+                ``physics`` (``_run_from_state`` treats the Model as a static
+                jit argument, so mutating them later would not retrace).
+                When present, a :class:`~jcm.physics.diagnostics.
+                state_sampler.StateSampler` term is appended to the physics
+                automatically so state fields are sampleable. Results ride
+                on :class:`~jcm.predictions.ModelPredictions` — see
+                :meth:`~jcm.predictions.ModelPredictions.observation_datasets`.
             log_level: Logging verbosity level.
 
         """
@@ -342,6 +396,24 @@ class Model:
         self.physics = physics if physics is not None else speedy_physics()
         time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
         self.dt_si = (time_step * units.minute).to(units.second)
+
+        self.observers = tuple(observers)
+        if len({obs.name for obs in self.observers}) != len(self.observers):
+            raise ValueError("Observer names must be unique.")
+        if self.observers:
+            # Observers sample state fields / vertical coordinates through
+            # the diagnostics dict; the StateSampler term publishes them.
+            from jcm.physics.diagnostics.state_sampler import StateSampler
+            has_sampler = any(
+                getattr(t, "name", "") == StateSampler.name
+                for t in getattr(self.physics, "terms", ())
+            )
+            if not has_sampler:
+                if not hasattr(self.physics, "terms"):
+                    raise ValueError(
+                        "observers require a composable physics package (the "
+                        "StateSampler term is appended to physics.terms).")
+                self.physics = self.physics + StateSampler()
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         if dycore is None:
@@ -386,6 +458,9 @@ class Model:
                 "DinosaurDycore(compute_frontogenesis=True)) or add a "
                 "physics-side provider term upstream."
             )
+
+        for observer in self.observers:
+            observer.cache_grid(self.coords)
 
         self.physics.cache_coords(self.coords)
         if _ambient_explicit_axis() is not None:
@@ -609,6 +684,13 @@ class Model:
             lambda t: logger.info("Post processing: %s simulated seconds", t),
             self.dycore.sim_time(state),
         )
+        if isinstance(physics_state, dict) and "_sampler_state" in physics_state:
+            # The StateSampler's per-step state snapshot exists only for the
+            # per-dt observer channel; saving it would duplicate the dynamics
+            # fields in every frame.
+            physics_state = {
+                k: v for k, v in physics_state.items() if k != "_sampler_state"
+            }
         return Predictions(
             dynamics=verify_state(self.dycore.to_physics_state(state)),
             physics=physics_state if not output_averages else None,
@@ -659,6 +741,7 @@ class Model:
         inner_steps,
         post_process_fn,
         output_averages,
+        observer_xs=(),
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -669,6 +752,16 @@ class Model:
         the pytree structure the scan carries.
         """
         template = self.physics.get_empty_data(self.coords)
+
+        observe_fn = None
+        if self.observers:
+            observers = self.observers
+
+            def observe_fn(physics_state_next, obs_x):
+                return tuple(
+                    obs.sample(physics_state_next, x)
+                    for obs, x in zip(observers, obs_x)
+                )
 
         def _integrate_fn(state, initial_physics_state):
             axis = _ambient_explicit_axis()
@@ -691,6 +784,8 @@ class Model:
                 inner_steps=inner_steps,
                 post_process_fn=post_process_fn,
                 output_averages=output_averages,
+                observe_fn=observe_fn,
+                observer_xs=observer_xs if self.observers else None,
             )
             return trajectory(state)
 
@@ -704,6 +799,7 @@ class Model:
                         save_interval=10.0,
                         total_time=120.0,
                         output_averages=False,
+                        observer_xs=(),
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -735,12 +831,14 @@ class Model:
                 state, physics_state, output_averages,
             ),
             output_averages=output_averages,
+            observer_xs=observer_xs,
         )
-        final_dycore_state, final_physics_state, predictions = integrate(
-            initial_state, initial_physics_state,
+        final_dycore_state, final_physics_state, predictions, observations = (
+            integrate(initial_state, initial_physics_state)
         )
 
-        return final_dycore_state, final_physics_state, predictions.replace(times=times)
+        return (final_dycore_state, final_physics_state,
+                predictions.replace(times=times), observations)
 
     def run_from_state(self,
                        initial_state,
@@ -797,16 +895,47 @@ class Model:
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
         if initial_physics_state is None:
             initial_physics_state = self._build_initial_physics_carry()
-        final_dycore_state, final_physics_state, predictions = self._run_from_state(
-            initial_state, initial_physics_state, forcing,
-            save_interval_days, total_time_days,
-            output_averages,
+
+        # Build the observers' per-step sampling tables for this window
+        # (offline numpy; horizontal weights are resolved here once and only
+        # the vertical interpolation remains state-dependent in the scan).
+        # Absolute start time in days since 1970 — the same axis the
+        # trajectory ``times`` use — so chunked run/resume sequences slice
+        # the observation tracks consistently.
+        observer_xs = ()
+        obs_t0_days = None
+        if self.observers:
+            dt_days = self.dt_si.to(units.day).m
+            n_steps = (int(total_time_days / save_interval_days)
+                       * int(save_interval_days / dt_days))
+            obs_t0_days = float(
+                self.start_date.delta.days
+                + float(jax.device_get(self.dycore.sim_time(initial_state)))
+                / 86400.0
+            )
+            observer_xs = tuple(
+                obs.prepare(obs_t0_days, float(self.dt_si.m), n_steps)
+                for obs in self.observers
+            )
+
+        final_dycore_state, final_physics_state, predictions, observations = (
+            self._run_from_state(
+                initial_state, initial_physics_state, forcing,
+                save_interval_days, total_time_days,
+                output_averages, observer_xs,
+            )
         )
         return (
             final_dycore_state,
             final_physics_state,
-            ModelPredictions(predictions, self.coords, self.physics,
-                             dycore=self.dycore),
+            ModelPredictions(
+                predictions, self.coords, self.physics,
+                dycore=self.dycore,
+                observations=observations,
+                observers=self.observers,
+                obs_t0_days=obs_t0_days,
+                obs_dt_seconds=float(self.dt_si.m),
+            ),
         )
 
     def resume(self,
