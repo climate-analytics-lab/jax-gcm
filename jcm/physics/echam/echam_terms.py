@@ -76,6 +76,8 @@ def echam_physics(
     jam_ice_scheme: str = "niemand",
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
+    enable_cosp: bool = False,
+    cosp_ncolumns: int = 40,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -133,6 +135,15 @@ def echam_physics(
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
         validated default order, configured for column vectorisation.
+
+            enable_cosp: Attach the CloudSat satellite-simulator
+            diagnostic (``CloudsatCosp``; requires the optional
+            jax-cosp dependency, ``pip install jcm[cosp]``). Runs
+            after the cloud microphysics and writes the
+            ``cosp_*`` warm-rain / precip-cover diagnostics.
+        cosp_ncolumns: Stochastic subcolumns per gridbox for the
+            radar simulator (COSP canonical value is 100; fewer
+            is cheaper and averages out in climatologies).
 
     """
     convection_p = convection or ConvectionParameters.default()
@@ -248,6 +259,11 @@ def echam_physics(
     # the moist physics rather than between vdiff and cucall — it feeds
     # nothing that convection/cloud read same-step, and moving it is an
     # independent change we keep out of this reordering.
+    cosp_terms: list[PhysicsTerm] = []
+    if enable_cosp:
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        cosp_terms = [CloudsatCosp(ncolumns=cosp_ncolumns)]
+
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
@@ -260,6 +276,7 @@ def echam_physics(
             EchamSurface(params=surface_p),
             TiedtkeConvection(params=convection_p),
             micro_term,
+            *cosp_terms,
             *jam_post_cloud_terms,
             HinesGwd(params=hines_p),
             LottMillerSso(params=sso_p),

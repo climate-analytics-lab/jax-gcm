@@ -70,7 +70,12 @@ def cloud_microphysics_2m(
     ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP → cirrus nucleation
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
-) -> tuple[MicrophysicsTendencies_2M, jnp.ndarray, jnp.ndarray]:
+) -> tuple[
+    MicrophysicsTendencies_2M,      # per-level tendencies
+    jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
+    jnp.ndarray, jnp.ndarray,       # liq / ice effective radius [um] (nlev,)
+    jnp.ndarray, jnp.ndarray,       # rain / snow(+ice) flux leaving each layer [kg/m^2/s] (nlev,)
+]:
     """Column-sweep orchestrator for the two-moment microphysics scheme.
 
     Processes (in ECHAM6 order):
@@ -573,9 +578,21 @@ def cloud_microphysics_2m(
 
         carry_out = (rain_flux, snow_flux, ice_flux, ice_flux_n,
                      falling_ice_frac, precip_cover)
+        # Per-level flux profiles for downstream (COSP/CloudSat)
+        # diagnostics: the grid-mean rain / frozen fluxes LEAVING this
+        # layer (the carry values after update_precip_fluxes). The frozen
+        # profile adds the sedimenting cloud-ice flux at interior levels
+        # so it is the total falling frozen water; at the bottom level
+        # ``update_precip_fluxes`` has already folded ``ice_flux`` into
+        # ``snow_flux`` (ECHAM ``kk == klev`` gate), so adding it again
+        # there would double-count — hence the ``is_bottom_k`` guard,
+        # which also makes the bottom row equal ``surface_snow_flux``
+        # exactly.
+        frozen_flux_k = snow_flux + jnp.where(is_bottom_k, 0.0, ice_flux)
         level_out = (qi_post_sedi, icnc_post_melt, cdnc_post_melt,
                      ice_sublim_k, snow_sublim_k, rain_evap_k,
-                     psmlt_level, pimlt_k, pximlt_k)
+                     psmlt_level, pimlt_k, pximlt_k,
+                     rain_flux, frozen_flux_k)
         return carry_out, level_out
 
     # Stack per-level inputs: shape (nlev,) each → scanned along axis 0.
@@ -600,7 +617,8 @@ def cloud_microphysics_2m(
     )
     (qi_after_scan, icnc_after_scan, cdnc_after_scan,
      ice_sublim, snow_sublim, rain_evap,
-     psmlt_per_level, pimlt_per_level, pximlt_per_level) = scan_outs
+     psmlt_per_level, pimlt_per_level, pximlt_per_level,
+     rain_flux_profile, snow_flux_profile) = scan_outs
 
     # Extract carry state at the bottom of the column. The first two
     # elements are the surface rain and snow flux (kg/m^2/s) — these are
@@ -736,8 +754,13 @@ def cloud_microphysics_2m(
     # by the radiation term via the clouds carry (finding 2.36: the
     # radiation-side fabricated r_eff(T)*clip(IWC) saturated at the LUT
     # edge for thin cirrus, mis-forcing the TTL).
+    # The (nlev,) rain / frozen flux profiles (flux leaving each layer,
+    # stacked from the scan ys) go last so existing ``tend, rain, snow,
+    # *_`` call sites keep working; their bottom row equals the surface
+    # fluxes by construction (same carry values).
     return tendencies, surface_rain_flux, surface_snow_flux, \
-        liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt
+        liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
+        rain_flux_profile, snow_flux_profile
 
 
 # ---------------------------------------------------------------------------
@@ -897,11 +920,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         )
 
         (tend_all, surface_rain_flux, surface_snow_flux,
-         r_eff_liq_all, r_eff_ice_all,
-         rain_formation_warm, rain_from_melt) = jax.vmap(
+         r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
+         rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -951,6 +974,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             qnc_prev=qnc, qni_prev=qni,
             precip_rain=surface_rain_flux,
             precip_snow=surface_snow_flux,
+            # Per-level precipitation flux profiles for satellite-simulator
+            # diagnostics (COSP/CloudSat). The vmap over columns puts the
+            # column axis first — transpose back to the (nlev, ncols)
+            # CloudData layout, same as the effective radii below.
+            rain_flux=rain_flux_all.T,
+            snow_flux=snow_flux_all.T,
             # Microphysical effective radii (um) for the radiation term
             # (ECHAM preffl/preffi; consumed next step via the carry —
             # same lag as every cross-term diagnostic).
