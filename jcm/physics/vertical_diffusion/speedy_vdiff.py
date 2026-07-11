@@ -8,7 +8,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg) — a SPEEDY-specific value.
 # cpd is shared and read as a module attribute from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import smooth_gate
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -88,7 +88,11 @@ def get_vertical_diffusion_tend(
     # active; the deep-convection index is discrete and stays hard.
     fcnv = jnp.where(icnv > 0, parameters.vertical_diffusion.redshc, 1.0)
 
-    fluxse = g_mse * fcnv * fshcse * dmse
+    # The dry static energy flux has no complementary branch below the
+    # threshold, so it takes a one-sided softplus hinge rather than the
+    # crossfade gate: gate * dmse would turn negative (a reversed heat
+    # flux) in stable columns (Codex review, PR #567).
+    fluxse = fcnv * fshcse * smooth_pos(dmse, w_mse)
     ttenvd = ttenvd.at[nl1 - 1].set(fluxse * rsig[nl1 - 1])
     ttenvd = ttenvd.at[kx - 1].set(-fluxse * rsig[kx - 1])
 
