@@ -54,6 +54,33 @@ def build(args):
         terrain_file=str(bc_dir / "terrain.nc"),
     )
     physics = echam_physics(**kwargs)
+
+    # Upper-atmosphere temperature relaxation: the ~1 Pa finite lid sits far
+    # outside the radiation schemes' validity and refrigerates without it
+    # (the Laplacian nu_top sponge only damps horizontal structure — the
+    # first ne30 attempt cooled the lid mean 187 K -> 117 K in 20 days).
+    # Reference profile = USSA-1976 at the level reference mid-pressures.
+    from jcm.physics.dissipation.upper_temperature_relaxation import (
+        UpperTemperatureRelaxation,
+    )
+    from jcm.dycore.pyses.initial_states import (
+        ussa_pressure, ussa_temperature,
+    )
+    hybrid = dycore.coords.vertical
+    a = np.asarray(hybrid.a_boundaries, dtype=float)
+    b = np.asarray(hybrid.b_boundaries, dtype=float)
+    p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * 101325.0
+    zs = np.linspace(0.0, 84000.0, 4000)
+    ps = np.asarray(ussa_pressure(zs))
+    z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
+    t_ref = np.asarray(ussa_temperature(z_of_p))
+    physics = physics + UpperTemperatureRelaxation(
+        t_ref, n_levels=args.t_sponge_levels,
+        timescale_s=args.t_sponge_hours * 3600.0)
+    print(f"[sponge] upper-T relaxation: top {args.t_sponge_levels} levels, "
+          f"tau {args.t_sponge_hours:g} h at lid (x2.5/level), "
+          f"T_ref lid {t_ref[0]:.1f} K")
+
     model = Model(
         dycore=dycore,
         time_step=dycore.dt_seconds / 60.0,  # minutes
@@ -107,6 +134,8 @@ def main():
     ap.add_argument("--physics-dt", type=float, default=1800.0)
     ap.add_argument("--nu-top", type=float, default=2.5e4)
     ap.add_argument("--n-sponge", type=int, default=8)
+    ap.add_argument("--t-sponge-levels", type=int, default=8)
+    ap.add_argument("--t-sponge-hours", type=float, default=6.0)
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="restore from <prefix>.ckpt and continue")
