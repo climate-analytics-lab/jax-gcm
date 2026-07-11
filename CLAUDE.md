@@ -195,6 +195,11 @@ Test files use the `*_test.py` naming convention and are co-located with their s
 ruff check .
 ```
 
+**Always run `ruff check .` locally and get it clean BEFORE every push.**
+A push with lint errors burns a full CI cycle on a failure ruff reports in
+seconds locally. Treat it like the test suite: part of the definition of
+done for any commit that will be pushed.
+
 Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
 
 ## Key Coding Conventions

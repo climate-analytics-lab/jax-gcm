@@ -59,6 +59,7 @@ class UpperTemperatureRelaxation(PhysicsTerm):
             n_levels: How many top levels are relaxed.
             timescale_s: Relaxation timescale at the model top (s).
             ramp: Multiplicative timescale increase per level downward.
+
         """
         t_ref = np.asarray(t_ref_profile, dtype=np.float32)
         nlev = t_ref.shape[0]

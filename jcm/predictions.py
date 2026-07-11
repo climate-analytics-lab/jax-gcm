@@ -35,8 +35,8 @@ class ModelPredictions:
 
     """
 
-    def __init__(self, predictions: Predictions, coords, physics: Physics,
-                 dycore=None):  # noqa: D107
+    def __init__(self, predictions: Predictions, coords,  # noqa: D107
+                 physics: Physics, dycore=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
