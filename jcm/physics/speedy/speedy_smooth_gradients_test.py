@@ -200,6 +200,64 @@ class TestVdiffGateSmoothing:
         assert jnp.isfinite(smooth_grad) and smooth_grad != 0.0
 
 
+class TestVdiffSeFluxOneSided:
+    def test_stable_column_gets_no_reversed_heat_flux(self):
+        """The smoothed shallow-convection SE flux must stay one-sided.
+
+        gate * dmse would go negative below the threshold (a reversed
+        heat flux in stable columns); the softplus hinge keeps it >= 0
+        (Codex review, PR #567).
+        """
+        import dataclasses
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import (
+            ConvectionData, HumidityData, PhysicsData,
+        )
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.vertical_diffusion.speedy_vdiff import (
+            get_vertical_diffusion_tend,
+        )
+        from jcm.terrain import TerrainData
+
+        kx, ix, il = 8, 1, 1
+        coords = SpeedyCoords.single_column_coords(num_levels=kx)
+        parameters = Parameters.default()
+        parameters = dataclasses.replace(
+            parameters,
+            vertical_diffusion=dataclasses.replace(
+                parameters.vertical_diffusion,
+                mse_gate_smoothing=jnp.array(2000.0),
+            ),
+        )
+        # Stable PBL: dmse ~ -4 kJ/kg, within a few widths of threshold.
+        se = jnp.linspace(340e3, 310e3, kx)[:, None, None] * jnp.ones((kx, ix, il))
+        qsat = jnp.full((kx, ix, il), 10.0)
+        rh = jnp.full((kx, ix, il), 0.5)
+        qa = rh * qsat
+        qa = qa.at[-1].set(qsat[-1] - 1.5)  # dmse = -4286 + 2501*(8.5-10) < 0
+        phi = jnp.linspace(150e3, 0.0, kx)[:, None, None] * jnp.ones((kx, ix, il))
+        humidity = HumidityData.zeros((ix, il), kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(
+            (ix, il), kx, iptop=jnp.full((ix, il), kx + 1, dtype=int), se=se
+        )
+        physics_data = PhysicsData.zeros(
+            (ix, il), kx, humidity=humidity, convection=convection,
+            speedy_coords=coords,
+        )
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=qa, geopotential=phi)
+        tend, _ = get_vertical_diffusion_tend(
+            state, physics_data, parameters, ForcingData.ones((ix, il)),
+            TerrainData.single_column(),
+        )
+        # The shallow-convection SE flux warms level kx-2 and cools the
+        # surface layer; with the hinge it must not reverse.
+        assert float(tend.temperature[-2, 0, 0]) >= 0.0
+        assert float(tend.temperature[-1, 0, 0]) <= 0.0
+
+
 class TestLscCapSmoothing:
     def _heating(self, cap_smoothing, rhlsc):
         from jcm.forcing import ForcingData
@@ -329,3 +387,82 @@ class TestCoverSmoothing:
         assert np.isfinite(hard)
         assert abs(near - hard) < 1e-3
         assert abs(nearer - hard) < abs(near - hard)
+
+
+class TestSurfaceEvapSmoothing:
+    def _dry_land_evap(self, evap_smoothing):
+        """Land evaporation on a column whose evap hinge is firmly closed."""
+        import dataclasses
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import (
+            ConvectionData, HumidityData, LWRadiationData, PhysicsData,
+            SurfaceFluxData, SWRadiationData,
+        )
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+        from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
+        from jcm.terrain import TerrainData
+
+        kx, ix, il = 8, 64, 32
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        xy, zxy = (ix, il), (kx, ix, il)
+        parameters = Parameters.default()
+        parameters = dataclasses.replace(
+            parameters,
+            surface_flux=dataclasses.replace(
+                parameters.surface_flux,
+                evap_smoothing=jnp.array(evap_smoothing),
+            ),
+        )
+        # Mildly dry land: soilw*qsat(tskin) - q1 sits a few tenths of a
+        # g/kg below the hinge across the grid (tskin varies with
+        # latitude), so the hard hinge gives exactly zero evaporation
+        # while the softplus tail is small but ALIVE. That is the regime
+        # where an inconsistent hard evap > 0 mask in the energy balance
+        # hands the dry tail the full latent sensitivity; columns far
+        # below the hinge cannot discriminate because the tail
+        # underflows to zero and the mask never engages.
+        qa = jnp.full(zxy, 10.5)
+        state = PhysicsState.zeros(
+            zxy, jnp.ones(zxy), jnp.ones(zxy), jnp.full(zxy, 300.0), qa,
+            jnp.ones(zxy) * (jnp.arange(kx))[::-1][:, None, None], jnp.ones(xy),
+        )
+        terrain = TerrainData.from_coords(
+            coords, orography=jnp.zeros(xy), fmask=jnp.ones(xy), lfluxland=True
+        )
+        terrain, speedy_c = convert_to_speedy_latitudes(terrain, speedy_coords)
+        physics_data = PhysicsData.zeros(
+            xy, kx,
+            convection=ConvectionData.zeros(xy, kx),
+            humidity=HumidityData.zeros(xy, kx, rh=jnp.full(zxy, 0.9)),
+            surface_flux=SurfaceFluxData.zeros(xy, rlds=jnp.full(xy, 400.0)),
+            shortwave_rad=SWRadiationData.zeros(xy, kx, rsds=jnp.full(xy, 400.0)),
+            longwave_rad=LWRadiationData.zeros(xy, kx),
+            speedy_coords=speedy_c,
+        )
+        forcing = ForcingData.ones(
+            xy,
+            sea_surface_temperature=jnp.full(xy, 292.0),
+            soilw_am=jnp.full(xy, 0.7),
+            stl_am=jnp.full(xy, 288.0),
+        )
+        _, pd = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
+        return float(jnp.max(jnp.abs(pd.surface_flux.evap[:, :, 0])))
+
+    def test_dry_column_energy_balance_uses_the_smoothed_gate(self):
+        # The skin-temperature energy balance must weight d(Evap)/d(Tskin)
+        # by the hinge derivative: with the hard evap > 0 mask a smoothed
+        # dry column inherits the full latent sensitivity and the balance
+        # adds a spurious O(0.01) evaporation correction (Codex review,
+        # PR #567).
+        hard = self._dry_land_evap(0.0)
+        smooth = self._dry_land_evap(0.1)
+        assert hard == 0.0, "hinge not closed: test is vacuous"
+        assert smooth < 1e-3, (
+            f"dry-column evap {smooth:.3e} with smoothing on: the energy "
+            "balance is applying the hard-mask latent sensitivity"
+        )

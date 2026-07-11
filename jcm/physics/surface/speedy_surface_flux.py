@@ -8,7 +8,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.smoothing import smooth_pos
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
@@ -212,14 +212,23 @@ def get_surface_fluxes(
             hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
             dtskin = tskin + 1.0
 
-            # Compute d(Evap) for a 1-degree increment of Tskin
+            # Compute d(Evap) for a 1-degree increment of Tskin. The
+            # activity weight must be the DERIVATIVE of the (possibly
+            # smoothed) evaporation hinge, not the hard evap > 0 mask:
+            # with evap_smoothing on, the softplus tail makes evap
+            # positive in dry columns, and the hard mask would hand them
+            # the full latent sensitivity, over-damping the skin update
+            # (Codex review, PR #567). smooth_gate is exactly the
+            # softplus derivative, and reproduces the hard mask at
+            # width 0 (evap > 0 iff the hinge argument is > 0).
+            evap_gate = smooth_gate(
+                forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
+                0.0,
+                parameters.surface_flux.evap_smoothing,
+            )
             qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
             qsat0 = qsat0.at[:, :, 1].set(
-                    jnp.where(
-                        evap[:, :, 0] > 0.0,
-                        forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
-                        0.0
-                    )
+                    evap_gate * forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0])
                 )
 
             # Redefine skin temperature to balance the heat budget
