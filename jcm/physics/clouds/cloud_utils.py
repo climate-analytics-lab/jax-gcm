@@ -111,12 +111,19 @@ def gridbox_frac_falling_hydrometeor(
     total_precip_flux = precip_flux_from_above + precip_flux_from_level
 
     # Determine where total flux is greater than the minimum threshold
-    ll1 = total_precip_flux > params.cqtmin
+    # The guard threshold is a PHYSICAL minimum flux (1e-9 kg/m2/s is well
+    # under a mm per year), not cqtmin = 1e-12: the division VJP forms
+    # -g*x/(flux*flux), and for fluxes between 1e-12 and ~1e-6 the selected
+    # branch's derivative reaches 1e12-1e24 per call. Those cotangent spikes
+    # compound through the precip-fraction carry and are one of the
+    # ice-regime adjoint amplifiers that break long-window reverse mode.
+    _min_flux = 1.0e-9
+    ll1 = total_precip_flux > _min_flux
 
     # Compute weighted average fraction
     weighted_precip_frac = (
         (precip_frac_from_level * precip_flux_from_level + updated_precip_frac_from_above * precip_flux_from_above)
-        / jnp.maximum(total_precip_flux, params.cqtmin)
+        / jnp.maximum(total_precip_flux, _min_flux)
     )
     weighted_precip_frac = jnp.clip(weighted_precip_frac, 0.0, 1.0)
 
