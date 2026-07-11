@@ -564,7 +564,8 @@ class Model:
         return (
             final_dycore_state,
             final_physics_state,
-            ModelPredictions(predictions, self.coords, self.physics),
+            ModelPredictions(predictions, self.coords, self.physics,
+                             dycore=self.dycore),
         )
 
     def resume(self,

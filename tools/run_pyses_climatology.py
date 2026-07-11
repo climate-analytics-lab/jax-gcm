@@ -60,6 +60,11 @@ def build(args):
         physics=physics,
     )
     forcing = build_forcing(str(bc_dir / "forcing.nc"), dycore)
+    # TEMPORARY boundary conditions: bilinearly downscaled from the bundled
+    # T63 (192x96) climatology onto the ne{nx} columns at build time. Swap
+    # for native-resolution files when available.
+    print(f"[bc] terrain+forcing: bilinear downscale from T63 files in "
+          f"{bc_dir} (temporary until native ne{args.nx} boundary data)")
     return dycore, model, forcing
 
 
@@ -107,7 +112,7 @@ def main():
                     help="restore from <prefix>.ckpt and continue")
     args = ap.parse_args()
 
-    from flax import serialization
+    import jax
 
     prefix = Path(args.prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -123,11 +128,13 @@ def main():
     model.bootstrap_state(None)
     day_done = 0.0
     if args.resume and ckpt_path.exists():
-        template = (model._final_dycore_state, model._final_physics_state)
         with open(ckpt_path, "rb") as f:
             payload = pickle.load(f)
-        restored = serialization.from_bytes(template, payload["state_bytes"])
-        model._final_dycore_state, model._final_physics_state = restored
+        # Plain pickle of the device-fetched pytrees (numpy leaves +
+        # dataclass containers); flax/msgpack can't serialize the
+        # tree_math structs in the physics carry.
+        model._final_dycore_state = payload["dycore_state"]
+        model._final_physics_state = payload["physics_state"]
         day_done = payload["day_done"]
         print(f"[resume] restored checkpoint at day {day_done:.1f}")
 
@@ -155,8 +162,8 @@ def main():
         with open(ckpt_path, "wb") as f:
             pickle.dump({
                 "day_done": day_done,
-                "state_bytes": serialization.to_bytes(
-                    (model._final_dycore_state, model._final_physics_state)),
+                "dycore_state": jax.device_get(model._final_dycore_state),
+                "physics_state": jax.device_get(model._final_physics_state),
             }, f)
         print(f"Saved checkpoint to {ckpt_path}")
         rate = chunk / (wall / 3600.0)
