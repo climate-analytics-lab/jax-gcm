@@ -1,6 +1,8 @@
 """Date: 1/25/2024.
 For storing variables used by multiple physics schemes.
 """
+import dataclasses
+
 import tree_math
 import jax.numpy as jnp
 from jax import tree_util
@@ -13,16 +15,24 @@ class ConvectionParameters:
     rhbl: jnp.ndarray # Relative humidity threshold in the boundary layer
     entmax: jnp.ndarray # Maximum entrainment as a fraction of cloud-base mass flux
     smf: jnp.ndarray # Ratio between secondary and primary mass flux at cloud-base
+    # Smooth-branch half-widths; 0 = the original hard branches (see
+    # jcm.physics.speedy.smoothing). trigger_smoothing is an RH fraction
+    # smearing the boundary-layer humidity trigger; precnv_smoothing is a
+    # flux [g/(m^2 s)] smearing the convective-precipitation onset hinge.
+    trigger_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    precnv_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls):
+    def default(cls, trigger_smoothing=0.0, precnv_smoothing=0.0):
         return cls(
             psmin = jnp.array(0.8),
             trcnv = jnp.array(6.0),
             rhil = jnp.array(0.7),
             rhbl = jnp.array(0.9),
             entmax = jnp.array(0.5),
-            smf = jnp.array(0.8)
+            smf = jnp.array(0.8),
+            trigger_smoothing = jnp.array(trigger_smoothing),
+            precnv_smoothing = jnp.array(precnv_smoothing)
         )
 
     def isnan(self):
@@ -35,14 +45,18 @@ class CondensationParameters:
     rhlsc: jnp.ndarray  # Maximum relative humidity threshold (at sigma=1)
     drhlsc: jnp.ndarray  # Vertical range of relative humidity threshold
     rhblsc: jnp.ndarray # Relative humidity threshold for boundary layer
+    # Half-width (as a fraction of the cap) of the smooth heating-rate cap;
+    # 0 = the original hard minimum (see jcm.physics.speedy.smoothing).
+    cap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls):
+    def default(cls, cap_smoothing=0.0):
         return cls(
             trlsc = jnp.array(4.0),
             rhlsc = jnp.array(0.9),
             drhlsc = jnp.array(0.1),
-            rhblsc = jnp.array(0.95)
+            rhblsc = jnp.array(0.95),
+            cap_smoothing = jnp.array(cap_smoothing)
         )
 
     def isnan(self):
@@ -80,9 +94,15 @@ class ShortwaveRadiationParameters:
     clsminl: jnp.ndarray  # Minimum stratiform cloud cover over land (for RH = 1)
     gse_s0: jnp.ndarray # Gradient of dry static energy corresponding to stratiform cloud cover = 0
     gse_s1: jnp.ndarray  # Gradient of dry static energy corresponding to stratiform cloud cover = 1
+    # Half-width (in cover/RH-fraction units) of the smooth replacements for
+    # the cloud-cover hinges and clips in the diagnosis (RH hinge at rhcl1,
+    # cover saturation at 1, the fstab clip, the stratiform hinges, the
+    # sqrt(precip) corner); 0 = the original hard branches (see
+    # jcm.physics.speedy.smoothing).
+    cover_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls):
+    def default(cls, cover_smoothing=0.0):
         return cls(
             albcl = jnp.array(0.43),
             albcls = jnp.array(0.50),
@@ -105,7 +125,8 @@ class ShortwaveRadiationParameters:
             clsmax = jnp.array(0.60),
             clsminl = jnp.array(0.15),
             gse_s0 = jnp.array(0.25),
-            gse_s1 = jnp.array(0.40)
+            gse_s1 = jnp.array(0.40),
+            cover_smoothing = jnp.array(cover_smoothing)
         )
 
     def isnan(self):
@@ -164,9 +185,13 @@ class SurfaceFluxParameters:
     lskineb: jnp.bool   # true : redefine skin temp. from energy balance
 
     hdrag: jnp.ndarray # Height scale for orographic correction
+    # Half-width [g/kg] of the smooth soil-moisture-limited evaporation
+    # onset hinge; 0 = the original hard maximum (see
+    # jcm.physics.speedy.smoothing).
+    evap_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls):
+    def default(cls, evap_smoothing=0.0):
         return cls(
             fwind0 = jnp.array(0.95),
             ftemp0 = jnp.array(1.0),
@@ -183,7 +208,8 @@ class SurfaceFluxParameters:
             clambsn = jnp.array(7.0),
             lscasym = True,
             lskineb = True,
-            hdrag = jnp.array(2000.0)
+            hdrag = jnp.array(2000.0),
+            evap_smoothing = jnp.array(evap_smoothing)
         )
 
     def isnan(self):
@@ -199,16 +225,26 @@ class VerticalDiffusionParameters:
     redshc: jnp.ndarray  # Reduction factor of shallow convection in areas of deep convection
     rhgrad: jnp.ndarray  # Maximum gradient of relative humidity (d_RH/d_sigma)
     segrad: jnp.ndarray  # Minimum gradient of dry static energy (d_DSE/d_phi)
+    # Smooth-gate half-widths; 0 = the original hard branches (see
+    # jcm.physics.speedy.smoothing). mse_gate_smoothing [J/kg] smears the
+    # dmse >= 0 shallow-convection / dry-diffusion crossfade (the moisture
+    # flux is proportional to drh, not drh - 0, so the hard gate is a value
+    # jump); rh_gate_smoothing [RH fraction] smears the drh > drh0 onset of
+    # the moisture-diffusion fluxes, a jump for the same reason.
+    mse_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
+    rh_gate_smoothing: jnp.ndarray = dataclasses.field(default_factory=lambda: jnp.array(0.0))
 
     @classmethod
-    def default(cls):
+    def default(cls, mse_gate_smoothing=0.0, rh_gate_smoothing=0.0):
         return cls(
             trshc = jnp.array(6.0),
             trvdi = jnp.array(24.0),
             trvds = jnp.array(6.0),
             redshc = jnp.array(0.5),
             rhgrad = jnp.array(0.5),
-            segrad = jnp.array(0.1)
+            segrad = jnp.array(0.1),
+            mse_gate_smoothing = jnp.array(mse_gate_smoothing),
+            rh_gate_smoothing = jnp.array(rh_gate_smoothing)
         )
 
     def isnan(self):
