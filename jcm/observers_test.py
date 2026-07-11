@@ -371,6 +371,47 @@ class ModelIntegrationTest(unittest.TestCase):
         np.testing.assert_allclose(results[False], results[True],
                                    rtol=1e-6)
 
+    def test_tracer_carrying_physics_scan_structure(self):
+        # Regression (codex P1 on #566): the scan-carry template from
+        # ``get_empty_data`` probed with an EMPTY state.tracers dict, while
+        # real steps publish ``_sampler_state["tracers"]`` with the declared
+        # tracer keys — a lax.scan pytree-structure mismatch for any
+        # tracer-carrying physics (ECHAM clouds, JAM). The probe now seeds
+        # the declared tracers; tracers must also be sampleable by name.
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        class _DeclaresTracer(PhysicsTerm):
+            name = "declares_tracer"
+            category = "test"
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc", initial_value=1e-6),)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return (PhysicsTendency.zeros(state.temperature.shape),
+                        diagnostics)
+
+        coords = _t21_coords()
+        lat, lon = _grid_lat_lon_deg(coords)
+        station = TrackObserver.stations(
+            [lat[6]], [lon[9]], variables=("qc", "temperature"),
+            vertical="profile")
+        physics = ComposablePhysics(terms=[_DeclaresTracer()],
+                                    vectorize_columns=True)
+        model, _ = self._model([station], coords=coords, physics=physics)
+        dt_days = 30.0 / (60.0 * 24.0)
+        preds = model.run(save_interval=2 * dt_days, total_time=2 * dt_days)
+        qc = np.asarray(jax.device_get(preds.observations[0]["qc"]))
+        self.assertEqual(qc.shape, (2, coords.vertical.layers, 1))
+        # The run completing at all is the regression (the scan used to
+        # abort on the carry-structure mismatch); the samples must be finite
+        # (tracer resolved by name, not NaN-masked). Value fidelity of
+        # tracer sampling is covered by the synthetic so4 test above.
+        self.assertTrue(np.all(np.isfinite(qc)))
+
     def test_sampler_state_not_in_saved_output(self):
         coords = _t21_coords()
         lat, lon = _grid_lat_lon_deg(coords)
