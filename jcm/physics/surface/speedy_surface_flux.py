@@ -8,6 +8,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.smoothing import smooth_pos
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
@@ -185,8 +186,14 @@ def get_surface_fluxes(
 
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
+        # The soil-moisture-limited evaporation onset is a hinge that
+        # zeroes every gradient through dry land columns (and gates the
+        # d(Evap)/d(Tskin) term in the energy balance below on the same
+        # hard condition). evap_smoothing > 0 [g/kg] rounds it with a
+        # softplus; 0 keeps the hard maximum.
         evap = evap.at[:, :, 0].set(parameters.surface_flux.chl * denvvs[:, :, 1] *\
-                    jnp.maximum(0.0, forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
+                    smooth_pos(forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
+                               parameters.surface_flux.evap_smoothing))
 
         # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
         # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface

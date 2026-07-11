@@ -12,6 +12,9 @@ from jcm.physics.speedy.speedy_coords import (
     PBL_TOP_SIGMA, SpeedyCoords, interp_to_sigma, ozone_sigma_weight,
     stratosphere_mask,
 )
+from jcm.physics.speedy.smoothing import (
+    smooth_clip01, smooth_min, smooth_max, smooth_pos,
+)
 
 # Reference sigma surfaces for the cloud diagnostics in :func:`clouds`. Both
 # diagnostics are tuned to sample the atmosphere at particular *physical*
@@ -471,16 +474,41 @@ def clouds(operand):
     # the vertical grid (see the module-level note on reference sigmas). The
     # cloud-top level ``icltop`` keeps the actual-level argmax from the search
     # above, since the radiation needs a real level index for the cloud top.
+    # cover_smoothing > 0 (an RH/cover fraction) rounds every hinge and
+    # clip in the cover diagnosis below; 0 keeps the original hard
+    # branches. The RH hinge at rhcl1 and the max over reference levels
+    # zero d(cover)/d(rhcl1) and the state gradient wherever a level is
+    # sub-critical or non-dominant; the smooth forms keep exponentially
+    # decaying tails instead.
+    w_cov = parameters.shortwave_radiation.cover_smoothing
     rh = humidity.rh
     rhcl1 = parameters.shortwave_radiation.rhcl1
-    cloudc = jnp.maximum(0.0, interp_to_sigma(rh, fsg, PBL_TOP_SIGMA) - rhcl1)
+    cloudc = smooth_pos(interp_to_sigma(rh, fsg, PBL_TOP_SIGMA) - rhcl1, w_cov)
     for sig_ref in _CLOUDC_REF_SIGMAS:
-        cloudc = jnp.maximum(cloudc, interp_to_sigma(rh, fsg, sig_ref) - rhcl1)
+        cloudc = smooth_max(cloudc, interp_to_sigma(rh, fsg, sig_ref) - rhcl1, w_cov)
 
     # Third for loop (two levels)
     # Perform the calculations (Two Loops)
-    pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
-    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    # The precipitation term has three sharp sites: the pmaxcl cap, the
+    # sqrt corner at zero precipitation (slope 1/(2*sqrt(eps)) ~ 1.6e4
+    # with the hard epsilon floor), and the saturation of the total cover
+    # at 1. With cover_smoothing on, the cap and saturation become
+    # hyperbolic minima and the sqrt is regularized as sqrt(pr1 + delta)
+    # with delta = (w*pmaxcl)^2, bounding the corner slope at
+    # 1/(2*w*pmaxcl).
+    pmaxcl = parameters.shortwave_radiation.pmaxcl
+    pr1 = smooth_min(pmaxcl, 86.4 * (conv.precnv + condensation.precls), w_cov * pmaxcl)
+    sqrt_arg = jnp.where(
+        w_cov > 0.0,
+        smooth_pos(pr1, w_cov) + (w_cov * pmaxcl) ** 2,
+        jnp.maximum(epsilon, pr1),
+    )
+    cloudc = smooth_min(
+        1.0,
+        parameters.shortwave_radiation.wpcl * jnp.sqrt(sqrt_arg)
+        + smooth_min(1.0, cloudc * rrcl, w_cov)**2.0,
+        w_cov,
+    )
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(conv.iptop, icltop)
 
@@ -493,11 +521,11 @@ def clouds(operand):
 
     # Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (gse - parameters.shortwave_radiation.gse_s0), 0.0, 1.0)
+    fstab = smooth_clip01(rgse * (gse - parameters.shortwave_radiation.gse_s0), w_cov)
     # Stratocumulus clouds over sea
-    clstr = fstab * jnp.maximum(parameters.shortwave_radiation.clsmax - clfact * cloudc, 0.0)
+    clstr = fstab * smooth_pos(parameters.shortwave_radiation.clsmax - clfact * cloudc, w_cov)
     # Stratocumulus clouds over land
-    clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
+    clstrl = smooth_max(clstr, parameters.shortwave_radiation.clsminl, w_cov) * humidity.rh[kx - 1]
     clstr = clstr + terrain.fmask * (clstrl - clstr)
     # Cloud cover is a fraction: cap at 1. The land-branch RH amplification
     # above is unbounded when the lowest layer supersaturates (rh > 1), which
@@ -509,7 +537,7 @@ def clouds(operand):
     # downward flux and NaNs the integration within hours). On the validated
     # 8-level grid clstr never exceeds clsmax = 0.6, so this cap is a no-op
     # there.
-    clstr = jnp.minimum(clstr, 1.0)
+    clstr = smooth_min(clstr, 1.0, w_cov)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

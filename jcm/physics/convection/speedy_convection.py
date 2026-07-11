@@ -17,6 +17,7 @@ import jcm.constants as c
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
 # grav) are read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
 
 @jit
 def diagnose_convection(
@@ -111,14 +112,38 @@ def diagnose_convection(
     # Check 3: RH > RH_c at both the surface layer and the PBL top
     qthr0 = parameters.convection.rhbl * qsat[kx-1]
     qthr1 = parameters.convection.rhbl * qsat_sc
-    lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
 
     case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
-    case_2 = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr
 
-    iptop = jnp.where(case_1 | case_2, ktop1, iptop)
+    # The humidity trigger is a value jump: when the PBL-top RH condition
+    # flips, qdif switches between 0 and the finite surface-layer excess.
+    # With trigger_smoothing > 0 (an RH fraction) the case-2 excess is
+    # instead scaled by sigmoid gates on both RH criteria, ramping
+    # convection in over ~2 widths of relative humidity. The iptop
+    # assignment keeps a hard mask (a level index has no smooth
+    # counterpart) but widens its humidity condition by 6 widths so the
+    # discrete activation happens out on the gate's skirt, where the gated
+    # mass flux is at most sigmoid(-6) ~ 2.5e-3 of the excess: the value
+    # jump survives only at that negligible amplitude. Width 0 reproduces
+    # the hard trigger exactly.
+    w_rh = parameters.convection.trigger_smoothing
+    trigger_gate = (
+        smooth_gate(qa[kx-1], qthr0, w_rh * qsat[kx-1])
+        * smooth_gate(qa_sc, qthr1, w_rh * qsat_sc)
+    )
+    lqthr_wide = (
+        (qa[kx-1] > qthr0 - 6.0 * w_rh * qsat[kx-1])
+        & (qa_sc > qthr1 - 6.0 * w_rh * qsat_sc)
+    )
+    case_2_soft = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr_wide
+
+    iptop = jnp.where(case_1 | case_2_soft, ktop1, iptop)
     qdif = jnp.where(case_1, jnp.maximum(qa[kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
-    qdif = jnp.where(case_2, qa[kx-1] - qthr0, qdif)
+    qdif = jnp.where(
+        case_2_soft,
+        trigger_gate * jnp.maximum(qa[kx-1] - qthr0, 0.0),
+        qdif,
+    )
     return iptop, qdif
 
 @jit
@@ -234,9 +259,12 @@ def get_convection_tendencies(
     # 3.3 Top layer (condensation and detrainment)
     k = iptop - 1
 
-    # Flux of convective precipitation
+    # Flux of convective precipitation. The onset hinge (moisture flux
+    # crossing cloud-top saturation) zeroes the gradient of every
+    # parameter through non-precipitating columns; precnv_smoothing > 0
+    # [g/(m^2 s)] replaces it with a softplus of that half-width.
     qsatb = index_array(pad_array(interpolate(qsat)), k)
-    precnv = jnp.maximum(fuq - fmass * qsatb, 0.0)
+    precnv = smooth_pos(fuq - fmass * qsatb, parameters.convection.precnv_smoothing)
 
     # Net flux of dry static energy and moisture
     i, j = jnp.meshgrid(jnp.arange(ix), jnp.arange(il), indexing="ij")
