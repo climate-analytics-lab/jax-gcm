@@ -120,17 +120,35 @@ def compute_speedy_vertical_coords(kx: int):
         """Compute SPEEDY vertical coordinate transformations.
 
         The sigma half-level boundaries come from
-        :func:`compute_sigma_boundaries`, so any ``kx >= 2`` is supported (7/8
-        reproduce the original SPEEDY tables exactly). Everything below is
-        derived generically from those boundaries.
+        :func:`compute_sigma_boundaries` (7/8 reproduce the original SPEEDY
+        tables exactly); everything below is derived generically from those
+        boundaries. SPEEDY *physics* additionally needs ``kx >= 5``: the
+        convective cloud-top search runs over interior levels
+        ``1 .. kx-4`` and is empty below that (``jnp.argmax`` over an empty
+        axis fails at trace time with an opaque error, so reject early and
+        clearly here — this function is only reached when SPEEDY physics is
+        being wired up; bare coordinate construction via
+        :func:`compute_sigma_boundaries` still supports any ``nlev >= 2``).
 
         Args:
-            kx: Number of vertical levels (>= 2)
+            kx: Number of vertical levels (>= 5)
 
         Returns:
             Tuple of (hsg, fsg, dhs, sigl, grdsig, grdscp, wvi)
 
+        Raises:
+            ValueError: If ``kx < 5`` (too few levels for SPEEDY physics).
+
         """
+        if kx < 5:
+            raise ValueError(
+                f"SPEEDY physics requires at least 5 vertical levels, got "
+                f"kx={kx}: the convective cloud-top search over interior "
+                "levels (indices 1..kx-4) would be empty. Coordinate "
+                "construction alone (compute_sigma_boundaries / "
+                "get_speedy_coords) supports any nlev >= 2 for use with "
+                "other physics packages."
+            )
         # Layer boundaries and midpoints
         hsg = compute_sigma_boundaries(kx)
         fsg = (hsg[1:] + hsg[:-1]) / 2.

@@ -334,9 +334,24 @@ baseline; every unstable one sits above it).
 We reduce the model time step when the configuration is severe, rather than
 rewriting the thin-layer surface tendency to be implicit (a large, invasive
 change to the op-split coupling). `Model(time_step=...)` now defaults to `None`,
-in which case the step is auto-selected from the resolution by
-`stable_time_step_minutes(nlev, spectral_truncation)`
-(`physics/speedy/physical_constants.py`):
+in which case the step is resolved from a **single source of truth**:
+
+* With an **explicit dycore**, the Model adopts the dycore's own `dt_seconds`
+  (whoever constructs the dycore owns the step; an explicit `time_step=` that
+  disagrees with it raises rather than silently desynchronising physics from
+  dynamics).
+* On the **coords path** (Model builds its own dycore) the Model asks the
+  active physics for its stability limit via
+  `Physics.stable_time_step_minutes(coords)`. The constraint here is a
+  property of the SPEEDY *scheme* — the explicit surface drag — so it lives on
+  the `SpeedySurfaceFlux` term, which evaluates
+  `stable_time_step_from_geometry(dsigma_bottom, spectral_truncation)`
+  (`physics/speedy/physical_constants.py`) using the **actual** bottom-layer
+  thickness read off the live coordinate system. Physics packages without the
+  term (ECHAM, Held–Suarez, …) impose no limit and keep the historical
+  30-minute default.
+
+The severity criterion itself:
 
 * **Plateau.** For `S_norm ≤ 9.4` return the validated **30-minute** reference
   step. This covers every configuration that is already stable at 30 min — in

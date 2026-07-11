@@ -80,6 +80,18 @@ class InterpToSigmaTest(unittest.TestCase):
             float(sigl[-1]) - np.log(PBL_TOP_SIGMA))
         np.testing.assert_allclose(fac, float(wvi[-1, 1]), rtol=1e-5)
 
+    def test_too_few_levels_for_speedy_physics_raises(self):
+        # SPEEDY physics needs kx >= 5 (the convective cloud-top search over
+        # interior levels 1..kx-4 is empty below that, and jnp.argmax over an
+        # empty axis fails at trace time with an opaque error). The physics-
+        # side coordinate builder must reject small kx early and clearly.
+        for kx in (2, 3, 4):
+            with self.assertRaisesRegex(ValueError, "at least 5"):
+                compute_speedy_vertical_coords(kx)
+        # kx = 5 is the smallest wired-up count and must construct fine.
+        hsg, *_ = compute_speedy_vertical_coords(5)
+        self.assertEqual(hsg.shape, (6,))
+
 
 if __name__ == "__main__":
     unittest.main()

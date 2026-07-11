@@ -166,19 +166,21 @@ def _bottom_layer_thickness(nlev: int) -> float:
 _S_REFERENCE = (21 + 1) ** _DT_SEVERITY_EXPONENT / _bottom_layer_thickness(8)
 
 
-def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
-    """Numerically-stable model time step (minutes) for a SPEEDY configuration.
+def stable_time_step_from_geometry(
+    dsigma_bottom: float, spectral_truncation: int,
+) -> float:
+    """Numerically-stable model time step (minutes) from the grid geometry.
 
     Returns a time step that keeps a realistic SPEEDY spin-up finite over long
     integrations. The binding constraint at high vertical resolution is the
     *explicit surface-drag* tendency in the thin bottom sigma layer (see the
     module-level note above), whose forward-Euler stability limit is crossed as
-    ``dsigma_bot`` shrinks (high ``nlev``) and as the resolved near-surface wind
-    grows (high ``spectral_truncation``).
+    ``dsigma_bottom`` shrinks and as the resolved near-surface wind grows
+    (high ``spectral_truncation``).
 
     The criterion is a CFL-like rule on the dimensionless severity
 
-        S = (spectral_truncation + 1) ** 1.3 / dsigma_bot
+        S = (spectral_truncation + 1) ** 1.3 / dsigma_bottom
 
     normalised to the validated T21/nlev=8 baseline. On the stable plateau
     (``S_norm <= 9.4``) the reference 30-minute step is returned unchanged, so
@@ -187,8 +189,14 @@ def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
     plateau the step is reduced as ``dt ~ 1/S`` with a 0.85 safety factor for
     margin below the empirically measured blow-up boundary.
 
+    This is the geometry-level core so callers can pass the *actual* bottom
+    sigma-layer thickness of whatever vertical grid is in use (see
+    ``SpeedySurfaceFlux.stable_time_step_minutes``, which reads it off the
+    live ``CoordinateSystem``); :func:`stable_time_step_minutes` is the
+    convenience wrapper for grids built from :func:`compute_sigma_boundaries`.
+
     Args:
-        nlev: Number of vertical levels.
+        dsigma_bottom: Thickness (in sigma) of the lowest model layer.
         spectral_truncation: Triangular spectral truncation (e.g. 21 for T21).
 
     Returns:
@@ -197,7 +205,7 @@ def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
     """
     s_norm = (
         (spectral_truncation + 1) ** _DT_SEVERITY_EXPONENT
-        / _bottom_layer_thickness(nlev)
+        / float(dsigma_bottom)
     ) / _S_REFERENCE
     if s_norm <= _DT_SEVERITY_PLATEAU:
         raw = _DT_REFERENCE_MINUTES
@@ -212,3 +220,23 @@ def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
         if candidate <= raw:
             return candidate
     return _DT_DAY_DIVISORS_MINUTES[-1]
+
+
+def stable_time_step_minutes(nlev: int, spectral_truncation: int) -> float:
+    """Stable time step (minutes) for a standard SPEEDY vertical grid.
+
+    Convenience wrapper around :func:`stable_time_step_from_geometry` for
+    grids whose sigma boundaries come from :func:`compute_sigma_boundaries`
+    (the 7/8-level SPEEDY tables or the Frierson stretch).
+
+    Args:
+        nlev: Number of vertical levels.
+        spectral_truncation: Triangular spectral truncation (e.g. 21 for T21).
+
+    Returns:
+        Time step in minutes.
+
+    """
+    return stable_time_step_from_geometry(
+        _bottom_layer_thickness(nlev), spectral_truncation,
+    )

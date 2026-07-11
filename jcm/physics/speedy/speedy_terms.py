@@ -409,6 +409,32 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             mod_radcon_params or ModRadConParameters.default()
         )
 
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Forward-Euler stability limit of the explicit surface drag.
+
+        This term applies the surface stress as an explicit tendency
+        ``du/dt = ustr * g / (dsigma_bot * p0)`` in the lowest layer, so its
+        stability limit shrinks with the bottom sigma-layer thickness (and
+        with truncation, through the resolved near-surface wind) — see
+        :func:`jcm.physics.speedy.physical_constants.stable_time_step_from_geometry`
+        and SPEEDY_VARIABLE_LEVELS.md. The thickness is read off the *actual*
+        coordinate system, so custom sigma spacings are handled, not just the
+        standard tables. Returns ``None`` (no constraint) when the grid does
+        not expose sigma boundaries / a spectral truncation.
+        """
+        from jcm.physics.speedy.physical_constants import (
+            stable_time_step_from_geometry,
+        )
+        try:
+            boundaries = coords.vertical.boundaries
+            truncation = int(coords.horizontal.longitude_wavenumbers) - 1
+        except AttributeError:
+            return None
+        dsigma_bottom = float(boundaries[-1]) - float(boundaries[-2])
+        if dsigma_bottom <= 0.0:
+            return None
+        return stable_time_step_from_geometry(dsigma_bottom, truncation)
+
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
         params = _params_with(
