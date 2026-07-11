@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax import jit
+from jcm.physics.speedy.speedy_coords import stratosphere_mask
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
@@ -99,9 +100,20 @@ def get_vertical_diffusion_tend(
         jnp.where((dmse < 0.0) & (drh > drh0), -fluxq_condition2 * rsig[kx - 1], qtenvd[kx - 1])
     )
     
-    # Step 3: Vertical diffusion of moisture above the PBL
-    k_range = jnp.arange(2, kx - 2)
-    condition = physics_data.speedy_coords.hsg[k_range + 1] > 0.5
+    # Step 3: Vertical diffusion of moisture above the PBL.
+    #
+    # Diffusion acts across each interface between layer k and k+1. SPEEDY
+    # restricted this to k=2..kx-3 (skipping the top-two stratosphere at the top
+    # and the two shallow-convection/PBL layers handled in Step 2 at the bottom).
+    # We replace the upper (stratosphere) bound with the sigma<0.2 mask so it
+    # scales with nlev, keep the lower bound (interfaces above the bottom two
+    # layers), and keep the original sigma>0.5 gate. The stratosphere mask is
+    # static (fsg-derived) so the per-interface gate is a compile-time constant.
+    k_range = jnp.arange(1, kx - 2)
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
+    # Skip an interface whose upper layer k is in the stratosphere.
+    not_strat = ~strat_mask[k_range]
+    condition = (physics_data.speedy_coords.hsg[k_range + 1] > 0.5) & not_strat
 
     # Vectorized calculation of drh0 and fvdiq2 for all selected k values
     drh0 = parameters.vertical_diffusion.rhgrad * (physics_data.speedy_coords.fsg[k_range + 1] - physics_data.speedy_coords.fsg[k_range])  # Shape: (len(k_range),)

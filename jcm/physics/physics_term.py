@@ -148,6 +148,24 @@ class PhysicsTerm(nnx.Module):
         Override in subclasses that need precomputed coordinate data.
         """
 
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Return this term's largest numerically-stable model step (minutes).
+
+        A term whose explicit (forward-Euler) tendency imposes a grid-
+        dependent timestep stability limit — e.g. SPEEDY's explicit surface
+        drag in a thin bottom sigma layer — overrides this so
+        :class:`~jcm.model.Model` can pick a stable default ``dt`` when the
+        user does not specify one. ``ComposablePhysics`` takes the minimum
+        over all terms; an explicit ``Model(time_step=...)`` always wins.
+
+        Default ``None``: no constraint from this term.
+
+        Args:
+            coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
+
+        """
+        return None
+
     def cache_band_config(self, band_config) -> None:
         """Capture the active radiation band config (in-place).
 

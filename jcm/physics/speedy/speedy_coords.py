@@ -2,17 +2,103 @@ import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem
 import jcm.constants as c
-from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
+
+# Single source of truth for "where is the stratosphere" in SPEEDY physics.
+#
+# Original Fortran SPEEDY hardcodes the top two model levels (indices 0, 1) as
+# the stratosphere. At its native 7/8 levels those two levels sit at sigma<~0.2,
+# but a fixed *count* does not scale: at nlev=30 only 2 of 30 levels would be
+# stratospheric, giving a physically far-too-thin stratosphere. Following
+# SpeedyWeather.jl (which distributes shortwave ozone with the weight
+# 50*max(0, 1/5 - sigma), i.e. ozone where sigma<0.2), we identify the
+# stratosphere by the *physical* sigma threshold below instead of by index, so
+# the stratospheric level range scales with the grid.
+#
+# fsg (sigma layer midpoints) is fixed at coords-build time, so every mask
+# derived from this threshold is a STATIC boolean array -> fully differentiable
+# (no traced predicate, no jnp.where on state needed).
+STRATOSPHERE_SIGMA_THRESHOLD = 0.2
+
+# A layer midpoint that lands mathematically exactly on the threshold (e.g. the
+# SPEEDY 8-level table puts a midpoint at sigma=0.2 exactly: (0.14+0.26)/2) is
+# the TOP of the troposphere, not the stratosphere, under SpeedyWeather's strict
+# "sigma < 0.2". In float32 that midpoint stores as 0.19999998, which would
+# spuriously satisfy "< 0.2" and pull an extra (tropospheric) layer into the
+# stratosphere. We subtract a small tolerance so exact-0.2 midpoints stay
+# tropospheric, keeping the nlev=8 stratosphere at the intended top two layers.
+_STRAT_EPS = 1e-5
+
+
+def stratosphere_mask(fsg: jnp.ndarray) -> jnp.ndarray:
+    """Boolean mask (shape ``(kx,)``) selecting stratospheric layers.
+
+    A layer is stratospheric when its sigma midpoint is below
+    :data:`STRATOSPHERE_SIGMA_THRESHOLD` (0.2), with a tiny tolerance so a
+    midpoint sitting exactly on 0.2 (the troposphere top) is excluded despite
+    float32 rounding. Because ``fsg`` is static this mask is a compile-time
+    constant and fully differentiable.
+    """
+    return fsg < (STRATOSPHERE_SIGMA_THRESHOLD - _STRAT_EPS)
+
+
+def ozone_sigma_weight(fsg: jnp.ndarray) -> jnp.ndarray:
+    """SpeedyWeather.jl ozone distribution weight per layer (shape ``(kx,)``).
+
+    Returns ``50 * max(0, 1/5 - sigma)`` evaluated at the sigma midpoints
+    ``fsg``. This is the ozone vertical distribution used by SpeedyWeather's
+    shortwave scheme: it is non-zero only where ``sigma < 0.2`` (the
+    stratosphere) and increases toward the model top. It is multiplied by the
+    layer thickness ``dhs`` when applied so the total absorbed ozone flux is
+    the column integral of weight*dsigma. ``fsg`` is static, so this weight is a
+    compile-time constant.
+    """
+    return 50.0 * jnp.maximum(0.0, 0.2 - fsg)
+
+
+# SPEEDY's physics schemes were developed and tuned on the 8-level sigma grid,
+# where particular *levels* stand in for particular *physical depths*: the
+# second-lowest layer (centre sigma = 0.835) is "the top of the sub-cloud /
+# boundary layer" in the convection trigger, the surface-flux lapse-rate
+# estimate, and the stratiform-cloud stability gradient. A level index is only
+# a valid proxy for such a depth on the grid it was tuned for — with more
+# levels, index-relative references (kx-2 etc.) migrate toward the surface and
+# the schemes' answers drift with the vertical resolution. Schemes therefore
+# evaluate these diagnostics AT a fixed sigma (via :func:`interp_to_sigma`)
+# so they are independent of the vertical grid; on the 8-level reference grid
+# the fixed sigma coincides with the original level, reproducing the validated
+# behaviour exactly.
+PBL_TOP_SIGMA = 0.835
+
+
+def interp_to_sigma(field: jnp.ndarray, fsg: jnp.ndarray, sig_t: float) -> jnp.ndarray:
+    """Linearly interpolate ``field`` along the level axis to sigma ``sig_t``.
+
+    ``field`` has shape ``(kx, ...)`` and ``fsg`` is the ascending full-level
+    sigma profile ``(kx,)``. ``fsg`` and ``sig_t`` are static, so the gather
+    indices and weights are compile-time constants under ``jit`` and the
+    operation is a fixed linear combination of two adjacent levels — fully
+    differentiable. A ``sig_t`` outside ``[fsg[0], fsg[-1]]`` is clamped to the
+    nearest level pair (linear extrapolation).
+    """
+    idx = jnp.clip(jnp.searchsorted(fsg, sig_t), 1, fsg.shape[0] - 1)
+    w = (sig_t - fsg[idx - 1]) / (fsg[idx] - fsg[idx - 1])
+    return field[idx - 1] * (1.0 - w) + field[idx] * w
+
 
 def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_mesh=None) -> CoordinateSystem:
     """Create a CoordinateSystem with SPEEDY's standard sigma layers.
 
     This is a convenience wrapper around jcm.utils.get_coords() that uses
-    SPEEDY's standard sigma layer boundaries.
+    SPEEDY's sigma layer boundaries. The boundaries come from
+    :func:`compute_sigma_boundaries`, which returns the hand-tuned SPEEDY tables
+    for ``layers`` in {7, 8} and an analytic Frierson (2006) stretch for any
+    other count, so an arbitrary number of vertical levels is supported.
 
     Args:
-        layers: Number of vertical levels (7 or 8)
+        layers: Number of vertical levels (any int >= 2; 7/8 use the exact
+            SPEEDY tables, other counts use the Frierson (2006) stretch).
         spectral_truncation: Spectral truncation number (default 31)
         nodal_shape: Optional nodal shape (ix, il) to infer spectral_truncation
         spmd_mesh: Optional ``(x, y, z)`` tuple giving the SPMD device mesh over
@@ -23,11 +109,8 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
         CoordinateSystem object with SPEEDY sigma levels
 
     """
-    if layers not in SIGMA_LAYER_BOUNDARIES:
-        raise ValueError(f"SPEEDY physics supports {list(SIGMA_LAYER_BOUNDARIES.keys())} layers, got {layers}")
-
     return get_coords(
-        vertical_coords=SIGMA_LAYER_BOUNDARIES[layers],
+        vertical_coords=compute_sigma_boundaries(layers),
         spectral_truncation=spectral_truncation,
         nodal_shape=nodal_shape,
         spmd_mesh=spmd_mesh
@@ -36,21 +119,38 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
 def compute_speedy_vertical_coords(kx: int):
         """Compute SPEEDY vertical coordinate transformations.
 
+        The sigma half-level boundaries come from
+        :func:`compute_sigma_boundaries` (7/8 reproduce the original SPEEDY
+        tables exactly); everything below is derived generically from those
+        boundaries. SPEEDY *physics* additionally needs ``kx >= 5``: the
+        convective cloud-top search runs over interior levels
+        ``1 .. kx-4`` and is empty below that (``jnp.argmax`` over an empty
+        axis fails at trace time with an opaque error, so reject early and
+        clearly here — this function is only reached when SPEEDY physics is
+        being wired up; bare coordinate construction via
+        :func:`compute_sigma_boundaries` still supports any ``nlev >= 2``).
+
         Args:
-            kx: Number of vertical levels
+            kx: Number of vertical levels (>= 5)
 
         Returns:
             Tuple of (hsg, fsg, dhs, sigl, grdsig, grdscp, wvi)
 
         Raises:
-            ValueError: If kx is not a supported number of vertical levels
+            ValueError: If ``kx < 5`` (too few levels for SPEEDY physics).
 
         """
-        if kx not in SIGMA_LAYER_BOUNDARIES:
-            raise ValueError(f"Invalid number of vertical levels: {kx}. Must be one of: {tuple(SIGMA_LAYER_BOUNDARIES.keys())}")
-
+        if kx < 5:
+            raise ValueError(
+                f"SPEEDY physics requires at least 5 vertical levels, got "
+                f"kx={kx}: the convective cloud-top search over interior "
+                "levels (indices 1..kx-4) would be empty. Coordinate "
+                "construction alone (compute_sigma_boundaries / "
+                "get_speedy_coords) supports any nlev >= 2 for use with "
+                "other physics packages."
+            )
         # Layer boundaries and midpoints
-        hsg = SIGMA_LAYER_BOUNDARIES[kx]
+        hsg = compute_sigma_boundaries(kx)
         fsg = (hsg[1:] + hsg[:-1]) / 2.
         dhs = jnp.diff(hsg)
         sigl = jnp.log(fsg)

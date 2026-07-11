@@ -144,6 +144,21 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Most restrictive per-term stable time step (minutes), or ``None``.
+
+        The minimum over every term's
+        :meth:`PhysicsTerm.stable_time_step_minutes`; terms without a
+        constraint return ``None`` and are ignored. ``None`` overall means no
+        term imposes a limit.
+        """
+        limits = [
+            limit for limit in (
+                term.stable_time_step_minutes(coords) for term in self.terms
+            ) if limit is not None
+        ]
+        return min(limits) if limits else None
+
     def compute_tendencies(
         self,
         state: PhysicsState,

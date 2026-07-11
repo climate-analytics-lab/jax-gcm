@@ -9,6 +9,9 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.speedy_coords import (
+    PBL_TOP_SIGMA, interp_to_sigma, stratosphere_mask,
+)
 import jcm.constants as c
 # alhc is the SPEEDY latent heat in J/g (consistent with q in g/kg); it is a
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
@@ -54,12 +57,23 @@ def diagnose_convection(
 
     rlhc = 1.0 / alhc
 
-    # Minimum of moist static energy in the lowest two levels
+    # Minimum of moist static energy between the surface layer and the PBL top
     # Mask for psa > psmin
     mask_psa = psa > parameters.convection.psmin
 
+    # The trigger compares the surface layer against the top of the sub-cloud
+    # layer. That "PBL-top" reference is a *physical* depth (~150 hPa above the
+    # surface), so it is evaluated at a fixed sigma rather than at an
+    # index-relative level, keeping the trigger independent of the vertical
+    # grid. On the 8-level reference grid the fixed sigma is the second-lowest
+    # layer centre, so the validated behaviour is reproduced exactly there.
+    fsg = physics_data.speedy_coords.fsg
+    se_sc = interp_to_sigma(se, fsg, PBL_TOP_SIGMA)
+    qa_sc = interp_to_sigma(qa, fsg, PBL_TOP_SIGMA)
+    qsat_sc = interp_to_sigma(qsat, fsg, PBL_TOP_SIGMA)
+
     mse0 = se[kx-1] + alhc * qa[kx-1]
-    mse1 = se[kx-2] + alhc * qa[kx-2]
+    mse1 = se_sc + alhc * qa_sc
     mse1 = jnp.minimum(mse0, mse1)
 
     # Saturation (or super-saturated) moist static energy in PBL
@@ -70,10 +84,17 @@ def diagnose_convection(
         ((0, 1), (0, 0), (0, 0)), mode='constant', constant_values=0 # adding a 'surface' mss2 of 0 to capture ktop2 = kx case
     )
 
-    # If there is any instability, cloud top is the first unstable level (from top down)
-    # Otherwise kx (surface)
-    # Note ktop1 and ktop2 are 1-indexed to match iptop convention
-    possible_cltop_levels = jnp.arange(2, kx-3)
+    # Cloud top is the highest (least-sigma) unstable level. SPEEDY searched
+    # k=3..kx-3 (1-indexed), i.e. indices 2..kx-4 here, which hardcodes "the top
+    # two levels are stratosphere and cannot hold a cloud top". We replace that
+    # upper bound with the sigma<0.2 stratosphere mask so the search range scales
+    # with nlev: candidate levels run from the first interface below the very top
+    # down to kx-4, and any candidate falling in the stratosphere is masked out
+    # of the instability test so it is never chosen. The cloud *base* is the PBL
+    # (lowest layer), which is already physical. strat_mask is static (fsg).
+    possible_cltop_levels = jnp.arange(1, kx-3)
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
+    not_strat_cand = (~strat_mask[possible_cltop_levels])[:, jnp.newaxis, jnp.newaxis]
     get_cloud_top = lambda instability_mask: jnp.where(
         jnp.any(instability_mask, axis=0),
         (possible_cltop_levels+1)[jnp.argmax(instability_mask, axis=0)],
@@ -81,16 +102,16 @@ def diagnose_convection(
     )
 
     # Check 1: conditional instability (MSS in PBL > MSS at top level)
-    ktop1 = get_cloud_top(mss0 > mss2[2:kx-3])
+    ktop1 = get_cloud_top((mss0 > mss2[1:kx-3]) & not_strat_cand)
 
     # Check 2: gradient of actual moist static energy between lower and upper troposphere
-    ktop2 = get_cloud_top(mse1 > mss2[2:kx-3])
+    ktop2 = get_cloud_top((mse1 > mss2[1:kx-3]) & not_strat_cand)
     msthr = jnp.squeeze(jnp.take_along_axis(mss2, ktop2[jnp.newaxis] - 1, axis=0), axis=0)
 
-    # Check 3: RH > RH_c at both k=kx and k=kx-1
+    # Check 3: RH > RH_c at both the surface layer and the PBL top
     qthr0 = parameters.convection.rhbl * qsat[kx-1]
-    qthr1 = parameters.convection.rhbl * qsat[kx-2]
-    lqthr = (qa[kx-1] > qthr0) & (qa[kx-2] > qthr1)
+    qthr1 = parameters.convection.rhbl * qsat_sc
+    lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
 
     case_1 = mask_psa & (ktop1 < kx) & (ktop2 < kx)
     case_2 = mask_psa & (ktop1 < kx) & ~(ktop2 < kx) & lqthr

@@ -1,4 +1,5 @@
 import unittest
+import numpy as np
 import jax.numpy as jnp
 import jax
 import functools
@@ -319,3 +320,56 @@ class TestConvectionUnit(unittest.TestCase):
 
 
     
+
+class TestConvectionTriggerResolutionInvariance(unittest.TestCase):
+    """The convective trigger compares the surface layer against a sub-cloud
+    reference evaluated at a fixed sigma, so on smooth analytic profiles the
+    *decision* (convecting or not) must not depend on the number of vertical
+    levels. Regimes are chosen well away from the trigger thresholds so the
+    test is insensitive to interpolation-level differences between grids.
+    """
+
+    @staticmethod
+    def _active_mask(kx, ix=64, il=32):
+        from jcm.forcing import ForcingData
+        from jcm.physics.speedy.params import Parameters
+        from jcm.terrain import TerrainData
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+        from jcm.physics.speedy.physics_data import PhysicsData
+        from jcm.physics.convection.speedy_convection import diagnose_convection
+        from jcm.physics.clouds.speedy_humidity import get_qsat
+        from jcm.constants import cpd, rd
+
+        parameters = Parameters.default()
+        coords = get_speedy_coords(layers=kx, nodal_shape=(ix, il))
+        terrain = TerrainData.aquaplanet(coords)
+        speedy_coords = SpeedyCoords.from_coordinate_system(coords)
+        sig = speedy_coords.fsg[:, jnp.newaxis, jnp.newaxis]
+
+        ps = jnp.ones((ix, il))
+        # Conditionally unstable temperature profile (steep enough that the
+        # saturated PBL wins the moist-static-energy comparison aloft).
+        ta = jnp.broadcast_to(300.0 * sig ** 0.2, (kx, ix, il))
+        phi = -rd * 300.0 * jnp.log(sig) * jnp.ones((1, ix, il))
+        se = cpd * ta + phi
+        qsat = get_qsat(ta, ps, sig)
+        # Two clearly separated moisture regimes: a near-saturated boundary
+        # layer (deep unstable columns) in one half of the domain, a dry one
+        # (no convection) in the other.
+        bl_rh = jnp.where(jnp.arange(ix)[:, jnp.newaxis] < ix // 2, 1.4, 0.1)
+        qa = bl_rh * qsat * jnp.exp(-((sig - 1.0) / 0.35) ** 2)
+
+        physics_data = PhysicsData.zeros((ix, il), kx, speedy_coords=speedy_coords)
+        iptop, _ = diagnose_convection(ps, se, qa, qsat, parameters,
+                                       physics_data, ForcingData.zeros((ix, il)),
+                                       terrain)
+        return iptop < kx + 1   # kx + 1 marks "no convection"
+
+    def test_trigger_decision_matches_across_level_counts(self):
+        ref = self._active_mask(kx=8)
+        self.assertTrue(ref.any() and not ref.all())  # both regimes exercised
+        for kx in (16, 24):
+            mask = self._active_mask(kx=kx)
+            np.testing.assert_array_equal(
+                mask, ref,
+                err_msg=f"convective trigger decision drifted at nlev={kx}")

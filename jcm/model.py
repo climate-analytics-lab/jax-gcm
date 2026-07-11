@@ -191,7 +191,7 @@ class Model:
                  dycore: DynamicalCore | None = None,
                  *,
                  coords=None,
-                 time_step: float = 30.0,
+                 time_step: float | None = None,
                  terrain: TerrainData = None,
                  physics: Physics = None,
                  start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
@@ -209,7 +209,29 @@ class Model:
             coords: CoordinateSystem. Required when ``dycore`` is ``None``.
                 To enable SPMD parallelization, pass ``spmd_mesh`` to the
                 coords helper (e.g. :func:`get_speedy_coords`).
-            time_step: Model time step in minutes.
+            time_step: Model time step in minutes. When ``None`` (the default)
+                it is resolved from a single source of truth:
+
+                * with an explicit ``dycore``, the dycore's own
+                  ``dt_seconds`` is adopted — whoever constructs the dycore
+                  owns the timestep, and physics/dates/saves follow it, so
+                  the two can never silently disagree;
+                * when the Model builds its own dycore from ``coords``, the
+                  active physics is consulted via
+                  :meth:`Physics.stable_time_step_minutes` (aggregated over
+                  terms by ``ComposablePhysics``), so grid-dependent
+                  explicit-tendency stability limits — e.g. SPEEDY's surface
+                  drag in the thin bottom sigma layer of high-``nlev`` grids,
+                  see docs/source/design/speedy_variable_levels.md — shrink the default below
+                  the historical 30 minutes only where needed. Physics
+                  without such a limit (ECHAM, Held-Suarez, ...) keeps
+                  30 minutes; SPEEDY's standard 7/8-level runs sit on the
+                  stable plateau and keep 30 minutes exactly.
+
+                Pass an explicit value to override; with an explicit dycore
+                the value must match ``dycore.dt_seconds`` (a mismatch
+                raises, since dynamics would otherwise advance by a
+                different step than physics/dates/saves assume).
             terrain: :class:`TerrainData` (orography, land-sea mask, etc.).
                 Defaults to an aquaplanet when building the default dycore.
             physics: :class:`Physics` describing the model physics. Defaults
@@ -228,8 +250,9 @@ class Model:
         self.calendar = calendar
         self.start_date = start_date
 
-        self.dt_si = (time_step * units.minute).to(units.second)
         self.physics = physics if physics is not None else speedy_physics()
+        time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
+        self.dt_si = (time_step * units.minute).to(units.second)
 
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         if dycore is None:
@@ -277,6 +300,59 @@ class Model:
         # ``bootstrap_state`` so that ``run() + resume()`` matches a single
         # ``run()`` of the combined duration.
         self._final_physics_state = None
+
+    # Historical default model time step; also the ceiling for physics-
+    # suggested stable steps (a physics limit can only shrink the default,
+    # never silently enlarge it).
+    _DEFAULT_TIME_STEP_MINUTES = 30.0
+
+    def _resolve_time_step_minutes(self, time_step, dycore, coords) -> float:
+        """Resolve the model time step (minutes) from a single source of truth.
+
+        The timestep is needed by both the dycore (dynamics integrator) and
+        the Model (physics cadence, dates, save intervals), but the two are
+        supplied independently — this method is the one place their
+        consistency is enforced:
+
+        * Explicit ``time_step``: used as given. If an explicit ``dycore``
+          was also supplied, the two must agree (the dycore bakes its step
+          into its integrator at construction, so a silent mismatch would
+          advance dynamics by a different ``dt`` than physics/dates assume —
+          raise instead).
+        * ``time_step is None`` with an explicit ``dycore``: adopt the
+          dycore's ``dt_seconds``. Whoever constructed the dycore owns the
+          step.
+        * ``time_step is None`` on the ``coords`` path (Model builds the
+          dycore itself): consult the active physics'
+          :meth:`Physics.stable_time_step_minutes` — the numerically binding
+          constraint is a property of the physics scheme (e.g. SPEEDY's
+          explicit surface drag in a thin bottom sigma layer), so the scheme
+          that imposes it owns the limit. The default is the historical
+          30 minutes, shrunk to the physics limit where one applies.
+        """
+        dycore_dt_seconds = (
+            getattr(dycore, "dt_seconds", None) if dycore is not None else None
+        )
+        if time_step is not None:
+            if (dycore_dt_seconds is not None
+                    and abs(time_step * 60.0 - float(dycore_dt_seconds)) > 1e-6):
+                raise ValueError(
+                    f"time_step={time_step} min conflicts with the explicit "
+                    f"dycore's dt_seconds={float(dycore_dt_seconds)} "
+                    f"({float(dycore_dt_seconds) / 60.0} min). The dycore "
+                    "bakes its step into its integrator at construction; "
+                    "either drop time_step= (the Model adopts the dycore's "
+                    "step) or rebuild the dycore with the intended dt_seconds."
+                )
+            return float(time_step)
+        if dycore is not None:
+            if dycore_dt_seconds is not None:
+                return float(dycore_dt_seconds) / 60.0
+            return self._DEFAULT_TIME_STEP_MINUTES
+        limit = self.physics.stable_time_step_minutes(coords)
+        if limit is None:
+            return self._DEFAULT_TIME_STEP_MINUTES
+        return min(self._DEFAULT_TIME_STEP_MINUTES, float(limit))
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         # Stop gradient: date/calendar computations use non-differentiable ops
