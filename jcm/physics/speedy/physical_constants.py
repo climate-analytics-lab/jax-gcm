@@ -113,7 +113,7 @@ def compute_sigma_boundaries(nlev: int) -> jnp.ndarray:
 
 # --- Numerical-stability time step at high vertical resolution ---------------
 #
-# Background (see SPEEDY_VARIABLE_LEVELS.md "Numerical stability at high nlev"):
+# Background (see docs/source/design/speedy_variable_levels.md "Numerical stability at high nlev"):
 # the model goes non-finite within a few timesteps at high nlev / high
 # truncation. The diagnosed cause is an *explicit (forward-Euler) surface-drag*
 # instability in the thinnest bottom sigma layer, NOT a dynamics CFL problem

@@ -222,7 +222,7 @@ class Model:
                   terms by ``ComposablePhysics``), so grid-dependent
                   explicit-tendency stability limits — e.g. SPEEDY's surface
                   drag in the thin bottom sigma layer of high-``nlev`` grids,
-                  see SPEEDY_VARIABLE_LEVELS.md — shrink the default below
+                  see docs/source/design/speedy_variable_levels.md — shrink the default below
                   the historical 30 minutes only where needed. Physics
                   without such a limit (ECHAM, Held-Suarez, ...) keeps
                   30 minutes; SPEEDY's standard 7/8-level runs sit on the

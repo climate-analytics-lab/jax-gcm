@@ -417,7 +417,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         stability limit shrinks with the bottom sigma-layer thickness (and
         with truncation, through the resolved near-surface wind) — see
         :func:`jcm.physics.speedy.physical_constants.stable_time_step_from_geometry`
-        and SPEEDY_VARIABLE_LEVELS.md. The thickness is read off the *actual*
+        and docs/source/design/speedy_variable_levels.md. The thickness is read off the *actual*
         coordinate system, so custom sigma spacings are handled, not just the
         standard tables. Returns ``None`` (no constraint) when the grid does
         not expose sigma boundaries / a spectral truncation.

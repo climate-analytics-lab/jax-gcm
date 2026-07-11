@@ -1,5 +1,7 @@
 # Generalizing SPEEDY physics to an arbitrary number of vertical levels
 
+*Design record for [PR #563](https://github.com/climate-analytics-lab/jax-gcm/pull/563).*
+
 Status: implemented and verified. The σ-table generalization (§2–§3) and the
 physics-scheme migration to a σ-threshold stratosphere (§4) are both complete.
 **The §4 migration changes the 7/8-level results** (intentionally — see §4).

@@ -55,6 +55,20 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
 
+## Documentation lives with the change — no doc debt
+Documentation updates are part of the change, not a follow-up. A PR that alters
+user-facing behaviour is incomplete until the docs say so:
+
+ - **Where things go.** General design decisions and analyses belong in
+   ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
+   implementation-specific details and gotchas belong in the PR description.
+   Do **not** create ad-hoc top-level ``*.md`` files in the repo root.
+ - **User-facing behaviour changes** (new/changed defaults, new mechanisms like
+   timestep resolution, new CLI/config knobs) must be reflected in
+   ``README.md`` and/or ``docs/source/getting_started.rst`` in the same PR.
+ - Keep code cross-references (docstrings/comments pointing at design docs)
+   updated when a doc moves.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.

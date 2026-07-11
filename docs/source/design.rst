@@ -11,6 +11,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/operator_split_physics
    design/writing_a_physics_scheme
    design/parallelization
+   design/speedy_variable_levels
 
 Core Architecture
 -----------------
@@ -78,10 +79,13 @@ automatically. Expert callers can construct and pass a backend explicitly:
    model = Model(dycore=dycore, time_step=30.0)
 
 The v2.0 Hydra CLI currently constructs the Dinosaur backend explicitly;
-selecting a different registered backend is a Python-API workflow. When
-constructing a backend explicitly, its ``dt_seconds`` and
-``Model(time_step=...)`` (minutes) must represent the same duration after unit
-conversion.
+selecting a different registered backend is a Python-API workflow. An
+explicitly-constructed backend owns the time step: ``Model`` adopts its
+``dt_seconds`` when ``time_step`` is omitted, and raises on a conflicting
+explicit ``time_step``. On the ``coords`` path the Model builds the backend
+itself and, when ``time_step`` is omitted, consults the active physics'
+``stable_time_step_minutes`` for grid-dependent stability limits (see
+:doc:`design/speedy_variable_levels`).
 
 The Physics Interface
 ^^^^^^^^^^^^^^^^^^^^^^

@@ -65,7 +65,10 @@ from jcm.physics.speedy.speedy_coords import get_speedy_coords
 # Build coords (pass spmd_mesh=(x, y, z) here to enable multi-device sharding)
 coords = get_speedy_coords(layers=8, spectral_truncation=31)
 
-# Create a model with default configuration
+# Create a model with default configuration. time_step (minutes) is
+# optional: when omitted, the Model resolves a numerically stable default
+# from the active physics and resolution (30 min for the standard
+# configurations; see "Choosing the time step" in the getting-started docs).
 model = Model(
     coords=coords,
     time_step=30.0,  # minutes

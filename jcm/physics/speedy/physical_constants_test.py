@@ -1,7 +1,7 @@
 """Tests for the resolution-aware stability time step (physical_constants.py).
 
 These lock in the §6 "Numerical stability at high nlev" contract from
-SPEEDY_VARIABLE_LEVELS.md: SPEEDY's standard 7/8-level configurations keep the
+docs/source/design/speedy_variable_levels.md: SPEEDY's standard 7/8-level configurations keep the
 historical 30-minute step (so their validated results are unchanged), while the
 high-nlev / high-truncation configurations that previously went non-finite get a
 reduced, day-aligned step.
