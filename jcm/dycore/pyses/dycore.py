@@ -191,6 +191,8 @@ class PysesCamSEDycore(DynamicalCore):
         terrain_file: str | None = None,
         tracer_specs: Mapping[str, Any] | None = None,
         physics_dtype=jnp.float32,
+        tracer_substeps: int = -1,
+        dyn_substeps_per_tracer: int = -1,
     ):
         """Build the SE grid, vertical grid, configs and boundary data."""
         self._be = require_pyses()
@@ -266,11 +268,24 @@ class PysesCamSEDycore(DynamicalCore):
             self.h_grid, self.v_grid, self.dims, self.physics_config,
             nu_top=self.nu_top, n_sponge=self.n_sponge,
         )
+        # pySES sizes its subcycle counts from CFL estimates that assume a
+        # 120 m/s max wind (eval_cfl_3d's advective bound for RK2 tracer
+        # advection). A winter stratospheric polar-night jet on this
+        # finite-top L47 grid exceeds that instantaneously (the ne30
+        # climatology campaign lost a run to exactly this at day ~127:
+        # 5-day-MEAN |u| reached 102 m/s at ~37 hPa before the blow-up), so
+        # expose the floor arguments: ``tracer_substeps`` raises the tracer
+        # subcycle count per coupling interval (9 at ne30/dt=1800 gives
+        # dt_tracer = 200 s ≈ 216 m/s headroom at the same margin), and
+        # ``dyn_substeps_per_tracer`` the dynamics subcycles per tracer step.
+        # ``-1`` keeps pySES's CFL-derived counts.
         self.timestep_config = init_timestep_config(
             base_tc["physics_dt"], self.h_grid, self.physics_config,
             self.diffusion_config, self.dims, self.model,
             dynamics_tstep_type=time_step_options.RK3_5STAGE,
             physics_dynamics_coupling=coupling_types.lump_all,
+            tracer_steps_per_coupling_interval=int(tracer_substeps),
+            dyn_steps_per_tracer=int(dyn_substeps_per_tracer),
         )
         self.dt_seconds = float(self.timestep_config["physics_dt"])
         self._gravity = float(self.physics_config["gravity"])

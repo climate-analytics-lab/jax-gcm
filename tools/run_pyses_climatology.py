@@ -52,6 +52,7 @@ def build(args):
         nu_top=args.nu_top, n_sponge=args.n_sponge,
         physics_dtype=jnp.float32,
         terrain_file=str(bc_dir / "terrain.nc"),
+        tracer_substeps=args.tracer_split,
     )
     physics = echam_physics(**kwargs)
 
@@ -134,6 +135,13 @@ def main():
     ap.add_argument("--physics-dt", type=float, default=1800.0)
     ap.add_argument("--nu-top", type=float, default=2.5e4)
     ap.add_argument("--n-sponge", type=int, default=8)
+    ap.add_argument("--tracer-split", type=int, default=9,
+                    help="floor on pySES tracer subcycles per coupling "
+                         "interval; pySES's own CFL sizing assumes 120 m/s "
+                         "winds, which the winter polar-night jet exceeds "
+                         "(day-127 blow-up of the first ne30 1m run). The "
+                         "default 9 gives ~216 m/s headroom at ne30/dt=1800; "
+                         "-1 restores pySES's CFL-derived count")
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
     ap.add_argument("--prefix", required=True)
@@ -152,6 +160,7 @@ def main():
     print(f"[setup] config={args.config} ne{args.nx} L{dycore.nlev} "
           f"ncols={dycore.coords.horizontal.nodal_shape[1]} "
           f"dt={dycore.dt_seconds:.0f}s nu_top={args.nu_top:g} "
+          f"tracer_split={args.tracer_split} "
           f"({time.time() - t0:.1f}s)")
 
     model.bootstrap_state(None)
@@ -188,6 +197,19 @@ def main():
         nan_vars = health_report(ds)
         print(f"Saved {out_nc}")
 
+        # NaN gate BEFORE the checkpoint write: the first ne30 campaign's 1m
+        # run aborted at day 130 AFTER overwriting the only checkpoint with
+        # the NaN state, losing the restartable day-120 state (outputs are
+        # 5-day means, so netCDFs can't reconstruct one). Keep the previous
+        # checkpoint as .prev anyway, as a second line of defence.
+        if nan_vars > 0:
+            print(f"[ABORT] {nan_vars} NaN variables at day {day_done:.1f} — "
+                  "checkpoint NOT overwritten; restart from "
+                  f"{ckpt_path} (last clean chunk).")
+            raise SystemExit(2)
+
+        if ckpt_path.exists():
+            ckpt_path.replace(f"{ckpt_path}.prev")
         with open(ckpt_path, "wb") as f:
             pickle.dump({
                 "day_done": day_done,
@@ -199,11 +221,6 @@ def main():
         print(f"Wall: {wall:.1f}s this chunk, {total_wall:.0f}s total "
               f"({rate:.1f} sim days/hr)")
         print(gpu_memory_line(), flush=True)
-
-        if nan_vars > 0:
-            print(f"[ABORT] {nan_vars} NaN variables at day {day_done:.1f} — "
-                  "stopping so the previous checkpoint stays clean.")
-            raise SystemExit(2)
 
     print(f"[done] {args.days:.0f} days in {total_wall / 3600.0:.2f} h "
           f"({args.days / (total_wall / 3600.0):.1f} sim days/hr overall)")
