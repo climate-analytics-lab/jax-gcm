@@ -88,6 +88,23 @@ class CloudParams2M:
     # 0.0 recovers the hard max exactly.
     activation_smoothing: jnp.ndarray  # [1/m^3]
 
+    # Temperature half-width [K] of the smooth gates on the two hard-mask
+    # glaciation branches (homogeneous freezing below cthomi, and the
+    # mixed-phase WBF window edges at cthomi and tmelt). The hard masks
+    # glaciate a cell's entire liquid in one step when a temperature
+    # threshold is crossed, so the exact linearization carries a cliff of
+    # amplitude (all liquid)/dt through both the condensate and the latent
+    # heating. With a positive width the transfer fraction ramps over
+    # ~2 sigma_T instead, which is also physically defensible: subgrid
+    # temperature variability of order 1 K means a gridbox never glaciates
+    # discontinuously at the mean temperature. 0.0 recovers the hard masks
+    # exactly (bit-identical forward).
+    ice_gate_temp_width: jnp.ndarray  # [K]
+
+    # Half-width [m/s] of the smooth gate on the WBF weak-updraft criterion
+    # 0.01*w < zvervmax (Korolev-Mazin). 0.0 recovers the hard comparison.
+    wbf_updraft_width: jnp.ndarray  # [m/s]
+
     # Ice crystal number concentration bounds
     icemin: jnp.ndarray      # [1/m^3]
     icemax: jnp.ndarray      # [1/m^3]
@@ -179,6 +196,8 @@ class CloudParams2M:
         pow_PK: float = 2.475,
         cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
         activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
+        ice_gate_temp_width: float = 0.0,  # [K] smooth-gate half-width for the glaciation masks; 0 = hard
+        wbf_updraft_width: float = 0.0,  # [m/s] smooth-gate half-width for the WBF updraft criterion; 0 = hard
         n_aer_coarse: float = 0.5,
         nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
@@ -236,6 +255,8 @@ class CloudParams2M:
             rcd_vol_max=jnp.array(rcd_vol_max),
             cdnc_min_fixed=jnp.array(cdnc_min_fixed),
             activation_smoothing=jnp.array(activation_smoothing),
+            ice_gate_temp_width=jnp.array(ice_gate_temp_width),
+            wbf_updraft_width=jnp.array(wbf_updraft_width),
             icemin=jnp.array(icemin),
             icemax=jnp.array(icemax),
             mi0_rcp=jnp.array(1.0 / mi0),

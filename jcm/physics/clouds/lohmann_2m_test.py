@@ -122,6 +122,19 @@ class TestFreezingBelow238K:
         assert jnp.all(cloud_ice[~inputs["freezing_condition"]] == inputs["cloud_ice"][~inputs["freezing_condition"]])
         assert jnp.all(droplet_number[~inputs["freezing_condition"]] == inputs["droplet_number"][~inputs["freezing_condition"]])
 
+    def test_fractional_gate_interpolates_and_conserves(self):
+        """A float gate in (0, 1) glaciates that fraction of the liquid."""
+        inputs = self._base_inputs()
+        inputs["freezing_condition"] = jnp.full((4,), 0.5)
+        icnc, _, cdnc, _, ice, liq = freezing_below_238K(**inputs)
+        assert jnp.allclose(liq, 0.5 * inputs["cloud_liquid"])
+        assert jnp.allclose(ice + liq, inputs["cloud_ice"] + inputs["cloud_liquid"])
+        assert jnp.allclose(
+            cdnc, 0.5 * (inputs["min_liquid_threshold"] + inputs["droplet_number"])
+        )
+        excess = jnp.maximum(inputs["droplet_number"] - inputs["min_cdnc"], 0.0)
+        assert jnp.allclose(icnc, inputs["ice_crystal_number"] + 0.5 * excess)
+
     def test_no_freezing_when_condition_false(self):
         """Test that no freezing occurs when the freezing condition is False everywhere."""
         inputs = self._base_inputs()
@@ -881,6 +894,28 @@ class TestWBFProcess:
         assert jnp.all(cdnc_o[mask] == _P.cqtmin)
         assert jnp.all(cdnc_o[~mask] == inputs["cdnc"][~mask])
 
+    def test_wbf_fractional_gate_interpolates_and_conserves(self):
+        """A float gate in (0, 1) converts that fraction of the liquid."""
+        inputs = self._base_inputs()
+        inputs["wbf_mask"] = jnp.full((4,), 0.5, dtype=jnp.float32)
+        cdnc_o, ql_o, qi_o, qlt_o, qit_o, t_o = WBF_process(**inputs)
+        assert jnp.allclose(ql_o, 0.5 * inputs["cloud_liquid_in_cloud"])
+        assert jnp.allclose(
+            ql_o + qi_o,
+            inputs["cloud_liquid_in_cloud"] + inputs["cloud_ice_in_cloud"],
+        )
+        assert jnp.allclose(cdnc_o, 0.5 * (_P.cqtmin + inputs["cdnc"]))
+        # tendency pair stays antisymmetric (mass-conserving transfer)
+        assert jnp.allclose(
+            (qlt_o - inputs["cloud_liquid_tendency"])
+            + (qit_o - inputs["cloud_ice_tendency"]),
+            0.0, atol=1e-12,
+        )
+        # latent heating scales with the same gated transfer
+        ztmp1 = 0.5 * inputs["cloud_liquid_in_cloud"] * inputs["cloud_fraction"] / inputs["dt"]
+        delta = (inputs["lsdcp"] - inputs["lvdcp"]) * ztmp1
+        assert jnp.allclose(t_o, inputs["temp_tendency"] + delta, rtol=1e-5)
+
     def test_wbf_noop_when_mask_false_everywhere(self):
         inputs = self._base_inputs()
         inputs["wbf_mask"] = jnp.full((4,), False)
@@ -1634,3 +1669,92 @@ class TestColumnWaterConservation2M:
             "no below-cloud-base qi gain from the sedimenting flux — the "
             "scan's net ice change is not entering the pxite ledger"
         )
+
+
+class TestIceGateSmoothing:
+    """Smooth glaciation gates (ice_gate_temp_width / wbf_updraft_width).
+
+    The hard masks glaciate a cell's whole liquid in one step at the
+    cthomi and WBF criteria; positive widths ramp the transferred
+    fraction instead. These tests pin the three properties the knobs
+    must keep: near-zero widths reproduce the hard-mask column, wide
+    gates still close the water budget, and the loss surface they feed
+    is differentiable through the gate temperatures.
+    """
+
+    def _column(self):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(228.0, 300.0, nlev)  # spans cthomi and tmelt
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.95 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[2:16].set(5e-4)  # liquid through the mixed window
+        qi = jnp.zeros(nlev).at[2:10].set(1e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)
+        qni = jnp.where(qi > 0, 1e4, 0.0)
+        return T, q, p, qc, qi, qnc, qni, cf, rho, dz
+
+    def _run(self, T, q, p, qc, qi, qnc, qni, cf, rho, dz, **widths):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        nlev = T.shape[0]
+        params = CloudParams2M.default(**widths)
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+
+    def test_narrow_gates_recover_the_hard_masks(self):
+        col = self._column()
+        hard, *_ = self._run(*col)
+        narrow, *_ = self._run(
+            *col, ice_gate_temp_width=1e-4, wbf_updraft_width=1e-9,
+        )
+        # No level of this column sits within a fraction of a kelvin of
+        # cthomi or tmelt, so 1e-4 K gates saturate to exactly 0/1.
+        for field in ("dtedt", "dqdt", "dqcdt", "dqidt"):
+            assert jnp.allclose(
+                getattr(hard, field), getattr(narrow, field),
+                rtol=1e-6, atol=1e-18,
+            ), f"narrow smooth gate diverged from hard mask in {field}"
+
+    def test_wide_gates_conserve_water(self):
+        import numpy as np
+
+        col = self._column()
+        _, _, _, rho, dz = col[0], col[1], col[2], col[8], col[9]
+        tend, rain_sfc, snow_sfc, *_ = self._run(
+            *col, ice_gate_temp_width=1.0, wbf_updraft_width=0.01,
+        )
+        for field in ("dtedt", "dqdt", "dqcdt", "dqidt"):
+            assert jnp.all(jnp.isfinite(getattr(tend, field)))
+        mref = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        gross = float(np.sum(np.abs(dw) * mref)) + abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert gross > 0.0, "column did nothing — test is vacuous"
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"smooth-gate water budget open by {residual:.3e} kg/m2/s"
+        )
+
+    def test_smooth_gates_give_finite_temperature_gradient(self):
+        col = self._column()
+        T0, rest = col[0], col[1:]
+
+        def surface_precip(T):
+            _, rain_sfc, snow_sfc, *_ = self._run(
+                T, *rest, ice_gate_temp_width=1.0, wbf_updraft_width=0.01,
+            )
+            return rain_sfc + snow_sfc
+
+        g = jax.grad(surface_precip)(T0)
+        assert jnp.all(jnp.isfinite(g)), "NaN in dP/dT through the smooth gates"

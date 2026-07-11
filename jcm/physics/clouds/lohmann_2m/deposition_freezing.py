@@ -502,41 +502,35 @@ def freezing_below_238K(
     freezing_rate, cloud_ice, and cloud_liquid.
 
     """
+    # ``freezing_condition`` may be the original boolean mask or a smooth
+    # gate in [0, 1] (see ``ice_gate_temp_width``); a fraction ``gate`` of
+    # the liquid glaciates. All updates are written arithmetically in the
+    # gate, which is bit-identical to the original MERGE forms at 0 and 1.
+    gate = jnp.asarray(freezing_condition, dtype=cloud_liquid.dtype)
+
     # -------------------------------------------------------------------------
     # 1. Update freezing rate by adding contributions from cloud liquid water
     # -------------------------------------------------------------------------
-    temp_freezing_rate = freezing_rate + cloud_liquid * cloud_cover
-    freezing_rate = jnp.where(freezing_condition, temp_freezing_rate, freezing_rate)
+    freezing_rate = freezing_rate + gate * cloud_liquid * cloud_cover
 
     # -------------------------------------------------------------------------
-    # 2. Transfer cloud liquid water to cloud ice where freezing occurs
+    # 2./3. Transfer the gated fraction of cloud liquid water to cloud ice
     # -------------------------------------------------------------------------
-    temp_cloud_ice = cloud_ice + cloud_liquid
-    cloud_ice = jnp.where(freezing_condition, temp_cloud_ice, cloud_ice)
-
-    # -------------------------------------------------------------------------
-    # 3. Reduce cloud liquid water to zero in freezing regions
-    # -------------------------------------------------------------------------
-    cloud_liquid = jnp.where(freezing_condition, 0.0, cloud_liquid)
+    cloud_ice = cloud_ice + gate * cloud_liquid
+    cloud_liquid = (1.0 - gate) * cloud_liquid
 
     # -------------------------------------------------------------------------
     # 4. Update droplet freezing rate and ice crystal number concentration
     # -------------------------------------------------------------------------
     # Excess droplet number above the minimum threshold
     excess_droplets = jnp.maximum(droplet_number - min_cdnc, 0.0)
-
-    # Update droplet freezing rate
-    updated_freezing_rate = droplet_freezing_rate - timestep * excess_droplets
-    droplet_freezing_rate = jnp.where(freezing_condition, updated_freezing_rate, droplet_freezing_rate)
-
-    # Update ice crystal number concentration
-    updated_ice_crystal_number = ice_crystal_number + excess_droplets
-    ice_crystal_number = jnp.where(freezing_condition, updated_ice_crystal_number, ice_crystal_number)
+    droplet_freezing_rate = droplet_freezing_rate - timestep * gate * excess_droplets
+    ice_crystal_number = ice_crystal_number + gate * excess_droplets
 
     # -------------------------------------------------------------------------
-    # 5. Ensure cloud droplet number concentration does not fall below minimum
+    # 5. Relax the cloud droplet number toward the minimum where freezing acts
     # -------------------------------------------------------------------------
-    droplet_number = jnp.where(freezing_condition, min_liquid_threshold, droplet_number)
+    droplet_number = gate * min_liquid_threshold + (1.0 - gate) * droplet_number
 
     return ice_crystal_number, droplet_freezing_rate, droplet_number, freezing_rate, cloud_ice, cloud_liquid
 
@@ -825,26 +819,27 @@ def WBF_process(
     # get reciprocal timestep constant (ztmst_rcp = 1 / ztmst)
     _, ztmst_rcp, *_ = microphysics_dt_constants(dt, params)
 
-    # ztmp1 = ztmst_rcp * pxlb * paclc  (evap / WBF proxy)
-    ztmp1 = ztmst_rcp * cloud_liquid_in_cloud * cloud_fraction
+    # ``wbf_mask`` may be the original boolean mask or a smooth gate in
+    # [0, 1] (see ``ice_gate_temp_width`` / ``wbf_updraft_width``); a
+    # fraction ``gate`` of the liquid converts. The arithmetic forms are
+    # bit-identical to the original MERGEs at gate values 0 and 1.
+    gate = jnp.asarray(wbf_mask, dtype=cloud_liquid_in_cloud.dtype)
 
-    # cloud liquid tendency: pxlte <- MERGE(pxlte - ztmp1, pxlte, ld_WBF)
-    cloud_liquid_tendency = jnp.where(wbf_mask, cloud_liquid_tendency - ztmp1, cloud_liquid_tendency)
+    # ztmp1 = ztmst_rcp * pxlb * paclc * gate  (gated WBF transfer rate)
+    ztmp1 = ztmst_rcp * cloud_liquid_in_cloud * cloud_fraction * gate
 
-    # cloud ice tendency: pxite <- MERGE(pxite + ztmp1, pxite, ld_WBF)
-    cloud_ice_tendency = jnp.where(wbf_mask, cloud_ice_tendency + ztmp1, cloud_ice_tendency)
+    cloud_liquid_tendency = cloud_liquid_tendency - ztmp1
+    cloud_ice_tendency = cloud_ice_tendency + ztmp1
 
-    # temperature tendency: ptte <- MERGE(ptte + (plsdcp - plvdcp)*ztmp1, ptte, ld_WBF)
-    temp_tendency = jnp.where(wbf_mask, temp_tendency + (lsdcp - lvdcp) * ztmp1, temp_tendency)
+    # latent heat of freezing released by the transfer
+    temp_tendency = temp_tendency + (lsdcp - lvdcp) * ztmp1
 
-    # cdnc <- MERGE(cqtmin, pcdnc, ld_WBF)  (set to minimum where WBF occurs)
-    cdnc = jnp.where(wbf_mask, params.cqtmin, cdnc)
+    # cdnc relaxes to the minimum where WBF acts (droplets consumed)
+    cdnc = gate * params.cqtmin + (1.0 - gate) * cdnc
 
-    # pxib <- MERGE(pxib + pxlb, pxib, ld_WBF)  (transfer liquid mass to ice)
-    cloud_ice_in_cloud = jnp.where(wbf_mask, cloud_ice_in_cloud + cloud_liquid_in_cloud, cloud_ice_in_cloud)
-
-    # pxlb <- MERGE(0.0, pxlb, ld_WBF)  (zero liquid where WBF occurs)
-    cloud_liquid_in_cloud = jnp.where(wbf_mask, 0.0, cloud_liquid_in_cloud)
+    # transfer the gated fraction of liquid mass to ice
+    cloud_ice_in_cloud = cloud_ice_in_cloud + gate * cloud_liquid_in_cloud
+    cloud_liquid_in_cloud = (1.0 - gate) * cloud_liquid_in_cloud
 
     return (
         cdnc,

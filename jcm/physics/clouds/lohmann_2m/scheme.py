@@ -295,7 +295,18 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # Freezing below 238 K (homogeneous freezing, level-independent)
     # ------------------------------------------------------------------
-    freezing_condition = temperature < params.cthomi
+    # With ice_gate_temp_width > 0 the hard threshold becomes a sigmoid
+    # ramp of that half-width and the gated fraction of the liquid
+    # glaciates (see CloudParams2M.ice_gate_temp_width); 0 keeps the
+    # boolean mask. Double-where so the width-0 branch cannot leak a
+    # division-by-zero cotangent.
+    gate_on = params.ice_gate_temp_width > 0.0
+    inv_w_T = 1.0 / jnp.where(gate_on, params.ice_gate_temp_width, 1.0)
+    freezing_condition = jnp.where(
+        gate_on,
+        jax.nn.sigmoid((params.cthomi - temperature) * inv_w_T),
+        (temperature < params.cthomi).astype(temperature.dtype),
+    )
     (
         icnc_frz, _droplet_freezing_rate, cdnc_frz,
         _freezing_rate, in_cloud_ice_frz, in_cloud_liquid_frz,
@@ -362,13 +373,41 @@ def cloud_microphysics_2m(
     # survived (review finding 2.19). zvervmax comes from the deposition
     # block (ECHAM recomputes it from post-freezing zxib — a second-order
     # refinement over reusing the deposition-stage value).
-    wbf_mask = (
-        (temperature < params.tmelt)
-        & (temperature > params.cthomi)
-        & (in_cloud_liquid_het > params.epsec)
+    # Presence/sign criteria stay hard at any smoothing width: the cliffs
+    # they carry vanish with the transferred liquid itself (amplitude
+    # ~epsec), unlike the temperature and updraft criteria, which can
+    # switch a cell holding substantial liquid.
+    wbf_presence = (
+        (in_cloud_liquid_het > params.epsec)
         & (in_cloud_ice_het > params.epsec)
         & (deposition_rate > 0.0)
+    )
+    wbf_hard = (
+        wbf_presence
+        & (temperature < params.tmelt)
+        & (temperature > params.cthomi)
         & (0.01 * updraft_velocity < zvervmax_wbf)
+    )
+    # Smooth gates on the mixed-phase window edges (shared width with the
+    # homogeneous-freezing gate above) and on the Korolev-Mazin updraft
+    # criterion; each falls back to its hard comparison at width 0.
+    wbf_temp_gate = jnp.where(
+        gate_on,
+        jax.nn.sigmoid((params.tmelt - temperature) * inv_w_T)
+        * jax.nn.sigmoid((temperature - params.cthomi) * inv_w_T),
+        ((temperature < params.tmelt) & (temperature > params.cthomi)).astype(temperature.dtype),
+    )
+    vel_gate_on = params.wbf_updraft_width > 0.0
+    inv_w_v = 1.0 / jnp.where(vel_gate_on, params.wbf_updraft_width, 1.0)
+    wbf_vel_gate = jnp.where(
+        vel_gate_on,
+        jax.nn.sigmoid((zvervmax_wbf - 0.01 * updraft_velocity) * inv_w_v),
+        (0.01 * updraft_velocity < zvervmax_wbf).astype(temperature.dtype),
+    )
+    wbf_mask = jnp.where(
+        gate_on | vel_gate_on,
+        wbf_presence.astype(temperature.dtype) * wbf_temp_gate * wbf_vel_gate,
+        wbf_hard.astype(temperature.dtype),
     )
     (
         cdnc_wbf, in_cloud_liquid_wbf, in_cloud_ice_wbf,
