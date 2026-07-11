@@ -75,12 +75,16 @@ def build(args):
     ps = np.asarray(ussa_pressure(zs))
     z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
     t_ref = np.asarray(ussa_temperature(z_of_p))
+    uv_tau = (args.uv_sponge_hours * 3600.0
+              if args.uv_sponge_hours > 0 else None)
     physics = physics + UpperTemperatureRelaxation(
         t_ref, n_levels=args.t_sponge_levels,
-        timescale_s=args.t_sponge_hours * 3600.0)
+        timescale_s=args.t_sponge_hours * 3600.0,
+        wind_timescale_s=uv_tau)
     print(f"[sponge] upper-T relaxation: top {args.t_sponge_levels} levels, "
           f"tau {args.t_sponge_hours:g} h at lid (x2.5/level), "
-          f"T_ref lid {t_ref[0]:.1f} K")
+          f"T_ref lid {t_ref[0]:.1f} K, "
+          f"uv Rayleigh tau {args.uv_sponge_hours:g} h at lid")
 
     model = Model(
         dycore=dycore,
@@ -144,6 +148,12 @@ def main():
                          "-1 restores pySES's CFL-derived count")
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
+    ap.add_argument("--uv-sponge-hours", type=float, default=12.0,
+                    help="Rayleigh wind-damping timescale at the lid (h), "
+                         "ramped x2.5/level over the same t-sponge levels; "
+                         "<= 0 disables. Nothing else damps the MEAN wind at "
+                         "the 1 Pa lid, and undamped lid jets (~100 m/s "
+                         "5-day means) preceded both ne30 blow-ups")
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="restore from <prefix>.ckpt and continue")

@@ -49,7 +49,8 @@ class UpperTemperatureRelaxation(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("upper_t_relaxation",)
 
     def __init__(self, t_ref_profile, n_levels: int = 8,
-                 timescale_s: float = 6.0 * 3600.0, ramp: float = 2.5):
+                 timescale_s: float = 6.0 * 3600.0, ramp: float = 2.5,
+                 wind_timescale_s: float | None = None):
         """Configure the relaxation.
 
         Args:
@@ -59,15 +60,32 @@ class UpperTemperatureRelaxation(PhysicsTerm):
             n_levels: How many top levels are relaxed.
             timescale_s: Relaxation timescale at the model top (s).
             ramp: Multiplicative timescale increase per level downward.
+            wind_timescale_s: Optional Rayleigh-friction timescale for the
+                winds at the model top (s), ramped downward with the same
+                ``ramp``; ``None`` (default) leaves winds untouched. This is
+                the WACCM-style momentum counterpart of the temperature
+                relaxation: nothing else damps the *mean* wind at a finite
+                mesospheric lid (``nu_top`` is a Laplacian on horizontal
+                structure), and without it lid jets grow unopposed — both
+                day-127 (1m) and day-150 (2m) ne30 blow-ups showed ~100 m/s
+                5-day-mean winds in the 1-10 Pa levels immediately before
+                going non-finite.
 
         """
         t_ref = np.asarray(t_ref_profile, dtype=np.float32)
         nlev = t_ref.shape[0]
         inv_tau = np.zeros(nlev, dtype=np.float32)
+        inv_tau_wind = np.zeros(nlev, dtype=np.float32)
         for i in range(min(int(n_levels), nlev)):
             inv_tau[i] = 1.0 / (float(timescale_s) * float(ramp) ** i)
+            if wind_timescale_s is not None:
+                inv_tau_wind[i] = 1.0 / (
+                    float(wind_timescale_s) * float(ramp) ** i
+                )
         self._t_ref = nnx.Variable(jnp.asarray(t_ref))
         self._inv_tau = nnx.Variable(jnp.asarray(inv_tau))
+        self._inv_tau_wind = nnx.Variable(jnp.asarray(inv_tau_wind))
+        self.damps_wind = wind_timescale_s is not None
         self.n_levels = int(n_levels)
 
     def __call__(
@@ -85,5 +103,14 @@ class UpperTemperatureRelaxation(PhysicsTerm):
 
         tend = PhysicsTendency.zeros(state.temperature.shape,
                                      temperature=dtdt)
+        if self.damps_wind:
+            # Rayleigh friction toward rest: the lid winds are unphysical
+            # anyway (no non-LTE radiation or resolved GW breaking there),
+            # and undamped they grow until they break the dycore's vertical
+            # numerics in the thin top layers.
+            inv_tau_w = self._inv_tau_wind.get_value().astype(
+                state.temperature.dtype).reshape(shape)
+            tend = tend.copy(u_wind=-state.u_wind * inv_tau_w,
+                             v_wind=-state.v_wind * inv_tau_w)
         # Diagnose the applied heating so the effect is visible in output.
         return tend, {**diagnostics, "upper_t_relaxation": dtdt}
