@@ -60,7 +60,7 @@ def build(args):
     )
     if abs(args.hines_rms - 1.0) > 1e-12:
         from jcm.physics.gravity_waves.hines import HinesParameters
-        kwargs.update(hines=HinesParameters(
+        kwargs.update(hines=HinesParameters.default().replace(
             rms_launch_wind=args.hines_rms))
     physics = echam_physics(**kwargs)
 
