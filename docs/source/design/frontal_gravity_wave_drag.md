@@ -134,3 +134,33 @@ All numeric parameters are differentiable leaves of the
 `flax.struct.dataclass` `FrontalGWParameters` (held in an `nnx.Param`);
 `ngwv`, the spectrum shape, the level-selection pressures and the static
 flags are `pytree_node=False` aux data.
+
+
+## The frontogenesis-provider contract (dycore physics-fields hook)
+
+The trigger field is a horizontal-gradient quantity, so it belongs to
+whoever owns the horizontal discretization — exactly CAM's architecture,
+where the SE dycore computes `frontgf` and hands it to physics through
+the physics buffer. jcm mirrors this with a `DynamicalCore` hook:
+
+- `DynamicalCore.physics_field_names()` declares the fields a backend
+  supplies; `physics_fields(state, physics_state)` computes them each
+  step (it receives the already-projected gridpoint state so backends
+  need not redo the native->gridpoint conversion).
+- `Model` injects the dict into the physics diagnostics under
+  `"_dycore_fields"` every step. The key is in
+  `ComposablePhysics._INTERNAL_DIAGNOSTIC_KEYS`, so it is stripped from
+  the cross-step scan carry and from saved output (structure-stable
+  carry; no output bloat).
+- Terms declare `requires_dycore_fields`; `Model.__init__` validates the
+  requirement against the backend's declared names (or an upstream
+  term's `provides`) and fails at construction, not at trace time.
+- `DinosaurDycore(compute_frontogenesis=True)` enables the lat-lon
+  provider (theta from the core's own hybrid/sigma coefficients, then
+  `frontogenesis_function`; spectral-gradient upgrade possible).
+  The pySES/pg2 provider (weak-form GLL gradients + DSS + gll_to_fv,
+  i.e. CAM-SE's own compute_frontogenesis) is a follow-up.
+- `echam_physics(gw_scheme="hines" | "frontal" | "none")` selects the
+  non-orographic GW scheme; the two schemes are exclusive alternatives
+  (same physical role — running both would double-count mid-atmosphere
+  drag unless retuned together).

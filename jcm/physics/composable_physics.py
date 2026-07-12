@@ -144,6 +144,20 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def required_dycore_fields(self) -> tuple[str, ...]:
+        """Union of per-term ``requires_dycore_fields``, minus any field an
+        upstream term already ``provides`` (a physics-side provider term
+        satisfies the requirement just as well as the dycore).
+        """
+        available: set[str] = set()
+        needed: list[str] = []
+        for term in self.terms:
+            for field in term.requires_dycore_fields:
+                if field not in available and field not in needed:
+                    needed.append(field)
+            available.update(term.provides)
+        return tuple(needed)
+
     def stable_time_step_minutes(self, coords) -> float | None:
         """Most restrictive per-term stable time step (minutes), or ``None``.
 
@@ -378,6 +392,7 @@ class ComposablePhysics(nnx.Module, Physics):
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_dt_seconds",
         "_band_config",
+        "_dycore_fields",
         "_forcing_2d",
         "_echam_params",
         "_echam_coords",

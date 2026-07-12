@@ -214,6 +214,15 @@ class Physics:
         """
         return None
 
+    def required_dycore_fields(self):
+        """Names of dycore-supplied fields this physics needs each step.
+
+        See :meth:`jcm.dycore.base.DynamicalCore.physics_fields`.
+        Default is empty; ``ComposablePhysics`` aggregates per-term
+        declarations (``PhysicsTerm.requires_dycore_fields``).
+        """
+        return ()
+
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 

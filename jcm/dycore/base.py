@@ -165,6 +165,42 @@ class DynamicalCore(abc.ABC):
         """
 
     # ------------------------------------------------------------------
+    # Dycore-supplied physics fields (CAM "pbuf" pattern)
+    # ------------------------------------------------------------------
+
+    def physics_field_names(self) -> tuple[str, ...]:
+        """Names of the per-step diagnostic fields this backend supplies.
+
+        Some parameterizations are triggered by quantities that only the
+        dycore can compute faithfully — horizontal-gradient diagnostics
+        like the frontogenesis function that drives the spectral frontal
+        gravity-wave source (CAM computes it inside the SE dycore and
+        hands it to physics through the physics buffer). Backends that
+        implement :meth:`physics_fields` declare the keys here so
+        :class:`~jcm.model.Model` can validate at construction time that
+        every field the composed physics requires
+        (:meth:`~jcm.physics_interface.Physics.required_dycore_fields`)
+        will actually be supplied. Default: none.
+        """
+        return ()
+
+    def physics_fields(self, state: DycoreState,
+                       physics_state: "PhysicsState") -> dict:
+        """Compute the declared per-step diagnostic fields.
+
+        Called once per ``dt`` right after :meth:`to_physics_state`; the
+        already-projected gridpoint ``physics_state`` is passed so backends
+        can derive fields from it without re-doing the native→gridpoint
+        conversion. Returned arrays must be gridpoint-shaped
+        (``(nlev, *horizontal_shape)`` or ``(*horizontal_shape,)``) and use
+        the same working dtype as ``physics_state``. The Model injects the
+        dict into the physics diagnostics under ``"_dycore_fields"`` —
+        re-supplied every step and stripped from the cross-step carry and
+        saved output, like ``"_dt_seconds"``.
+        """
+        return {}
+
+    # ------------------------------------------------------------------
     # Time stepping
     # ------------------------------------------------------------------
 

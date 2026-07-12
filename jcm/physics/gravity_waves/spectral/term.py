@@ -91,6 +91,11 @@ class FrontalGravityWaveDrag(PhysicsTerm):
     category: ClassVar[str] = "gravity_waves"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # Composing this term into a Model requires a frontogenesis source:
+    # either the dycore provider (DinosaurDycore(compute_frontogenesis=
+    # True)) or an upstream term that ``provides`` the field. Model
+    # validates this at construction (fail-loud beats silently-inert).
+    requires_dycore_fields: ClassVar[tuple[str, ...]] = ("frontogenesis",)
 
     def __init__(self, params: FrontalGWParameters | None = None) -> None:
         """Initialize with a :class:`FrontalGWParameters` configuration."""
@@ -165,9 +170,16 @@ class FrontalGravityWaveDrag(PhysicsTerm):
         else:
             src_tau = flat_spectrum(band, params.taubgnd)
 
-        # Frontogenesis trigger: provider diagnostic if present, else the
-        # constant fallback (default 0 -> inert; see module docstring).
-        frontgf = diagnostics.get("frontogenesis")
+        # Frontogenesis trigger, in precedence order: the dycore-supplied
+        # per-step field (Model injects DynamicalCore.physics_fields under
+        # "_dycore_fields"), a physics-side provider's top-level
+        # "frontogenesis" diagnostic, else the constant fallback
+        # (default 0 -> inert; see module docstring).
+        dycore_fields = diagnostics.get("_dycore_fields")
+        frontgf = (dycore_fields.get("frontogenesis")
+                   if isinstance(dycore_fields, dict) else None)
+        if frontgf is None:
+            frontgf = diagnostics.get("frontogenesis")
         if frontgf is None:
             frontgf_src = jnp.full(ps.shape, params.fallback_frontogenesis)
         else:

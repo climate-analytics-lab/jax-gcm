@@ -280,6 +280,24 @@ class Model:
         self.coords = dycore.coords
         self.terrain = dycore.terrain
 
+        # Validate the dycore-field contract at construction: every field a
+        # term declares in ``requires_dycore_fields`` must be supplied by the
+        # backend (physics_field_names) or an upstream term's ``provides`` —
+        # fail here, not deep inside the first traced step.
+        self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        required = tuple(getattr(self.physics, "required_dycore_fields",
+                                 lambda: ())())
+        missing = [f for f in required if f not in self._dycore_field_names]
+        if missing:
+            raise ValueError(
+                f"The composed physics requires dycore-supplied fields "
+                f"{missing}, but this backend provides "
+                f"{list(self._dycore_field_names) or 'none'}. Construct the "
+                "dycore with the relevant provider enabled (e.g. "
+                "DinosaurDycore(compute_frontogenesis=True)) or add a "
+                "physics-side provider term upstream."
+            )
+
         self.physics.cache_coords(self.coords)
         # Hand the model's timestep to the physics. ``ComposablePhysics``
         # injects it into the diagnostics dict every step under
@@ -416,6 +434,15 @@ class Model:
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             physics_state_grid = self.dycore.to_physics_state(state)
+            if self._dycore_field_names:
+                # Dycore-supplied diagnostic fields (frontogenesis, ...):
+                # re-injected every step under a plumbing key that
+                # ComposablePhysics strips from its output, so the scan
+                # carry's pytree structure is unaffected (the codex-P1
+                # lesson from the observers work: anything that rides the
+                # carry must exist in the construction-time template).
+                extra = self.dycore.physics_fields(state, physics_state_grid)
+                physics_state = {**physics_state, "_dycore_fields": extra}
             physics_tendency, new_physics_state = compute_physics_step_gridpoint(
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,

@@ -66,6 +66,7 @@ def echam_physics(
     aerosol: AerosolParameters | None = None,
     hines: HinesParameters | None = None,
     sso: SSOParameters | None = None,
+    gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
@@ -103,6 +104,15 @@ def echam_physics(
             when ``cloud_scheme="2m"``.
         hines: Override for non-orographic GW ``HinesParameters``.
         sso: Override for sub-grid-scale orography ``SSOParameters``.
+        gw_scheme: Non-orographic gravity-wave scheme: ``"hines"`` (ECHAM's
+            Doppler-spread scheme, the default), ``"frontal"`` (CAM's
+            frontogenesis-triggered spectral scheme — requires a
+            frontogenesis provider, e.g.
+            ``DinosaurDycore(compute_frontogenesis=True)``), or ``"none"``.
+            The two schemes fill the same role (mid-atmosphere momentum
+            deposition from non-orographic waves), so they are exclusive
+            alternatives — running both would double-count the drag
+            unless ``taubgnd``/Hines source strength are retuned together.
         checkpoint_terms: Whether to checkpoint each term's compute
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
@@ -259,6 +269,19 @@ def echam_physics(
     # the moist physics rather than between vdiff and cucall — it feeds
     # nothing that convection/cloud read same-step, and moving it is an
     # independent change we keep out of this reordering.
+    if gw_scheme == "hines":
+        nonoro_gw_terms: list[PhysicsTerm] = [HinesGwd(params=hines_p)]
+    elif gw_scheme == "frontal":
+        from jcm.physics.gravity_waves.spectral.term import (
+            FrontalGravityWaveDrag,
+        )
+        nonoro_gw_terms = [FrontalGravityWaveDrag()]
+    elif gw_scheme == "none":
+        nonoro_gw_terms = []
+    else:
+        raise ValueError(
+            f"gw_scheme={gw_scheme!r} not in ('hines', 'frontal', 'none')")
+
     cosp_terms: list[PhysicsTerm] = []
     if enable_cosp:
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
@@ -278,7 +301,7 @@ def echam_physics(
             micro_term,
             *cosp_terms,
             *jam_post_cloud_terms,
-            HinesGwd(params=hines_p),
+            *nonoro_gw_terms,
             LottMillerSso(params=sso_p),
         ],
         checkpoint_terms=checkpoint_terms,

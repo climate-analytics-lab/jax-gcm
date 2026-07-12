@@ -76,6 +76,13 @@ class PhysicsTerm(nnx.Module):
     category: ClassVar[str] = ""
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # Diagnostic fields this term needs the DYCORE (or an upstream term)
+    # to supply each step — e.g. the frontogenesis function, a
+    # horizontal-gradient quantity only the dynamical core can compute
+    # faithfully. Model validates at construction that each named field
+    # is covered by DynamicalCore.physics_field_names() or an upstream
+    # term's ``provides``.
+    requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
     # Declarative carry slots. Each entry maps a public ``physics_state``
     # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``
