@@ -193,6 +193,10 @@ class PysesCamSEDycore(DynamicalCore):
         physics_dtype=jnp.float32,
         tracer_substeps: int = -1,
         dyn_substeps_per_tracer: int = -1,
+        hypervis_scale: float = 0.5,
+        coupling: str = "lump_all",
+        hypervis: str = "tensor",
+        nu_div_factor: float = 2.5,
     ):
         """Build the SE grid, vertical grid, configs and boundary data."""
         self._be = require_pyses()
@@ -204,7 +208,6 @@ class PysesCamSEDycore(DynamicalCore):
         )
         from pyses.dynamical_cores.model_info import models
         from pyses.dynamical_cores.physics_config import init_physics_config
-        from pyses.dynamical_cores.physics_dynamics_coupling import coupling_types
         from pyses.dynamical_cores.time_step import time_step_options
         from pyses.dynamical_cores.time_stepping import init_timestep_config
         from pyses.mesh_generation.element_local_metric import (
@@ -264,10 +267,36 @@ class PysesCamSEDycore(DynamicalCore):
         # Rebuild the diffusion config so the nu_top sponge covers the
         # deeper set of thin top levels (init_default_config hard-codes
         # n_sponge=5, tuned for a reduced-top grid).
-        self.diffusion_config = init_hypervis_config_tensor(
-            self.h_grid, self.v_grid, self.dims, self.physics_config,
-            nu_top=self.nu_top, n_sponge=self.n_sponge,
-        )
+        # Two hyperviscosity families (see docs: CAM review 2026-07-12):
+        #
+        # * ``"tensor"`` — pySES's variable-resolution tensor config
+        #   (``ad_hoc_scale`` = ``hypervis_scale``, library default 0.5).
+        #   All nu's equal: NO enhanced divergence damping.
+        # * ``"quasi_uniform"`` — pySES's constant-coefficient config for
+        #   quasi-uniform grids (which this backend's grid is), matching
+        #   CAM-SE's production dissipation: the *divergent* wind component
+        #   is damped ``nu_div_factor`` (default 2.5, CAM's ne30 value)
+        #   harder than the rotational part. Frontal collapse — the ne30
+        #   winter-vortex crash mechanism — is divergence-rich, which is
+        #   why CAM damps it preferentially.
+        if hypervis == "quasi_uniform":
+            from pyses.dynamical_cores.hyperviscosity import (
+                init_hypervis_config_const,
+            )
+            self.diffusion_config = init_hypervis_config_const(
+                self.nx, self.physics_config, self.v_grid,
+                nu_top=self.nu_top, n_sponge=self.n_sponge,
+                nu_div_factor=float(nu_div_factor),
+            )
+        elif hypervis == "tensor":
+            self.diffusion_config = init_hypervis_config_tensor(
+                self.h_grid, self.v_grid, self.dims, self.physics_config,
+                nu_top=self.nu_top, n_sponge=self.n_sponge,
+                ad_hoc_scale=float(hypervis_scale),
+            )
+        else:
+            raise ValueError(
+                f"hypervis={hypervis!r} not in ('tensor', 'quasi_uniform')")
         # pySES sizes its subcycle counts from CFL estimates that assume a
         # 120 m/s max wind (eval_cfl_3d's advective bound for RK2 tracer
         # advection). A winter stratospheric polar-night jet on this
@@ -283,7 +312,7 @@ class PysesCamSEDycore(DynamicalCore):
             base_tc["physics_dt"], self.h_grid, self.physics_config,
             self.diffusion_config, self.dims, self.model,
             dynamics_tstep_type=time_step_options.RK3_5STAGE,
-            physics_dynamics_coupling=coupling_types.lump_all,
+            physics_dynamics_coupling=self._coupling_type(coupling),
             tracer_steps_per_coupling_interval=int(tracer_substeps),
             dyn_steps_per_tracer=int(dyn_substeps_per_tracer),
         )
@@ -305,6 +334,32 @@ class PysesCamSEDycore(DynamicalCore):
     # ------------------------------------------------------------------
     # Terrain
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coupling_type(coupling: str):
+        """Map the coupling name to pySES's ``coupling_types``.
+
+        ``"lump_all"`` applies the full ``dt x physics tendency`` as one
+        forward-Euler kick before the dynamics substeps — CAM-SE's
+        ``se_ftype=1``, and the destabilizer behind the ne30 winter-vortex
+        blow-ups (halving dt halved the kick and cleared the intensification
+        wall). ``"dribble_all"`` (ftype 0) spreads all forcings across the
+        dynamics substeps; ``"hybrid"`` (ftype 2, CAM-SE's production
+        pattern) lumps tracers (mass/shape preservation) while dribbling
+        u/v/T.
+        """
+        from pyses.dynamical_cores.physics_dynamics_coupling import (
+            coupling_types,
+        )
+        table = {
+            "lump_all": coupling_types.lump_all,
+            "dribble_all": coupling_types.dribble_all,
+            "hybrid": coupling_types.lump_tracers_dribble_dynamics,
+        }
+        if coupling not in table:
+            raise ValueError(
+                f"coupling={coupling!r} not in {sorted(table)}")
+        return table[coupling]
 
     def build_terrain(self, *, source_file: str | None = None, **kwargs) -> TerrainData:
         """Build :class:`TerrainData` on the physics columns (and cache GLL orography).

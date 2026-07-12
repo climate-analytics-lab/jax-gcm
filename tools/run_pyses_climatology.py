@@ -53,6 +53,10 @@ def build(args):
         physics_dtype=jnp.float32,
         terrain_file=str(bc_dir / "terrain.nc"),
         tracer_substeps=args.tracer_split,
+        dyn_substeps_per_tracer=args.dyn_split,
+        hypervis_scale=args.hypervis_scale,
+        coupling=args.coupling,
+        hypervis=args.hypervis,
     )
     physics = echam_physics(**kwargs)
 
@@ -148,6 +152,31 @@ def main():
                          "-1 restores pySES's CFL-derived count")
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
+    ap.add_argument("--coupling", default="lump_all",
+                    choices=["lump_all", "dribble_all", "hybrid"],
+                    help="physics-dynamics coupling: lump_all = one "
+                         "forward-Euler kick (pySES prototype default; the "
+                         "proven ne30 winter-vortex destabilizer), "
+                         "dribble_all / hybrid = CAM-SE se_ftype 0 / 2 "
+                         "(hybrid lumps tracers, dribbles u/v/T)")
+    ap.add_argument("--hypervis", default="tensor",
+                    choices=["tensor", "quasi_uniform"],
+                    help="hyperviscosity family: quasi_uniform matches "
+                         "CAM-SE production (divergence damped "
+                         "nu_div_factor=2.5x harder - the front-killer); "
+                         "tensor is the variable-resolution config with "
+                         "no divergence enhancement")
+    ap.add_argument("--hypervis-scale", type=float, default=0.5,
+                    help="pySES ad_hoc_scale on the interior tensor "
+                         "hyperviscosity (library default 0.5); raise for "
+                         "under-dissipated vortex-edge fronts")
+    ap.add_argument("--dyn-split", type=int, default=-1,
+                    help="floor on pySES dynamics subcycles per tracer step; "
+                         "-1 keeps the CFL-derived count (sized for 342 m/s "
+                         "gravity waves + ~120 m/s advection). The ne30 "
+                         "winter stratospheric jet (~29 hPa, 6-h means >100 "
+                         "m/s) broke that margin at dt_dyn=100 s (day-146 "
+                         "blow-up); 3 gives dt_dyn ~67 s")
     ap.add_argument("--uv-sponge-hours", type=float, default=12.0,
                     help="Rayleigh wind-damping timescale at the lid (h), "
                          "ramped x2.5/level over the same t-sponge levels; "
@@ -170,7 +199,8 @@ def main():
     print(f"[setup] config={args.config} ne{args.nx} L{dycore.nlev} "
           f"ncols={dycore.coords.horizontal.nodal_shape[1]} "
           f"dt={dycore.dt_seconds:.0f}s nu_top={args.nu_top:g} "
-          f"tracer_split={args.tracer_split} "
+          f"tracer_split={args.tracer_split} dyn_split={args.dyn_split} "
+          f"coupling={args.coupling} hypervis={args.hypervis} "
           f"({time.time() - t0:.1f}s)")
 
     model.bootstrap_state(None)

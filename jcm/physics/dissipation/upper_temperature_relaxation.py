@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
+import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -50,7 +51,9 @@ class UpperTemperatureRelaxation(PhysicsTerm):
 
     def __init__(self, t_ref_profile, n_levels: int = 8,
                  timescale_s: float = 6.0 * 3600.0, ramp: float = 2.5,
-                 wind_timescale_s: float | None = None):
+                 wind_timescale_s: float | None = None,
+                 wind_center_level: float = 3.0,
+                 wind_range_levels: float = 2.0):
         """Configure the relaxation.
 
         Args:
@@ -59,29 +62,50 @@ class UpperTemperatureRelaxation(PhysicsTerm):
                 used).
             n_levels: How many top levels are relaxed.
             timescale_s: Relaxation timescale at the model top (s).
-            ramp: Multiplicative timescale increase per level downward.
+            ramp: Multiplicative timescale increase per level downward
+                (temperature branch).
             wind_timescale_s: Optional Rayleigh-friction timescale for the
-                winds at the model top (s), ramped downward with the same
-                ``ramp``; ``None`` (default) leaves winds untouched. This is
-                the WACCM-style momentum counterpart of the temperature
-                relaxation: nothing else damps the *mean* wind at a finite
-                mesospheric lid (``nu_top`` is a Laplacian on horizontal
-                structure), and without it lid jets grow unopposed — both
-                day-127 (1m) and day-150 (2m) ne30 blow-ups showed ~100 m/s
-                5-day-mean winds in the 1-10 Pa levels immediately before
-                going non-finite.
+                winds at the model top (s); ``None`` (default) leaves winds
+                untouched. This is the WACCM-style momentum counterpart of
+                the temperature relaxation: nothing else damps the *mean*
+                wind at a finite mesospheric lid (``nu_top`` is a Laplacian
+                on horizontal structure), and without it lid jets grow
+                unopposed — both day-127 (1m) and day-150 (2m) ne30
+                blow-ups showed ~100 m/s 5-day-mean winds in the 1-10 Pa
+                levels immediately before going non-finite. The coefficient
+                follows CAM's ``rayleigh_friction.F90`` tanh profile in
+                level index (smooth in height — the original ×``ramp``
+                staircase concentrated differential drag between adjacent
+                thin lid layers and shear-shocked a 100 m/s jet at
+                tau = 12 h) and is applied Euler-backward (implicit), which
+                is unconditionally stable at any strength, with the
+                dissipated kinetic energy returned as heat (also per CAM).
+            wind_center_level: Level index (from the top, 0-based) where the
+                wind-damping tanh profile crosses half strength (CAM
+                ``rayk0``).
+            wind_range_levels: e-folding half-width of the tanh in level
+                index (CAM ``raykrange``).
 
         """
         t_ref = np.asarray(t_ref_profile, dtype=np.float32)
         nlev = t_ref.shape[0]
         inv_tau = np.zeros(nlev, dtype=np.float32)
-        inv_tau_wind = np.zeros(nlev, dtype=np.float32)
         for i in range(min(int(n_levels), nlev)):
             inv_tau[i] = 1.0 / (float(timescale_s) * float(ramp) ** i)
-            if wind_timescale_s is not None:
-                inv_tau_wind[i] = 1.0 / (
-                    float(wind_timescale_s) * float(ramp) ** i
-                )
+        # CAM-style smooth profile: otau(k) = (1/tau0) * (1 + tanh((k0-k)/kr))/2.
+        # Full strength at the lid, half at k0, smoothly to ~0 below — no
+        # staircase in adjacent-layer drag. Computed over ALL levels (the
+        # tanh itself localises it near the top).
+        k_idx = np.arange(nlev, dtype=np.float32)
+        if wind_timescale_s is not None:
+            inv_tau_wind = (
+                (1.0 / float(wind_timescale_s))
+                * 0.5 * (1.0 + np.tanh(
+                    (float(wind_center_level) - k_idx)
+                    / float(wind_range_levels)))
+            ).astype(np.float32)
+        else:
+            inv_tau_wind = np.zeros(nlev, dtype=np.float32)
         self._t_ref = nnx.Variable(jnp.asarray(t_ref))
         self._inv_tau = nnx.Variable(jnp.asarray(inv_tau))
         self._inv_tau_wind = nnx.Variable(jnp.asarray(inv_tau_wind))
@@ -107,10 +131,24 @@ class UpperTemperatureRelaxation(PhysicsTerm):
             # Rayleigh friction toward rest: the lid winds are unphysical
             # anyway (no non-LTE radiation or resolved GW breaking there),
             # and undamped they grow until they break the dycore's vertical
-            # numerics in the thin top layers.
-            inv_tau_w = self._inv_tau_wind.get_value().astype(
+            # numerics in the thin top layers. Euler-backward form per CAM
+            # rayleigh_friction.F90: du/dt = -k u / (1 + k dt) — the update
+            # u' = c2 u with c2 = 1/(1 + k dt) is unconditionally stable at
+            # any strength, unlike the explicit -k u (which shear-shocked
+            # the lid at tau = 12 h).
+            dt = diagnostics.get("_dt_seconds", 1800.0)
+            k = self._inv_tau_wind.get_value().astype(
                 state.temperature.dtype).reshape(shape)
-            tend = tend.copy(u_wind=-state.u_wind * inv_tau_w,
-                             v_wind=-state.v_wind * inv_tau_w)
+            c2 = 1.0 / (1.0 + k * dt)
+            tend = tend.copy(u_wind=-k * c2 * state.u_wind,
+                             v_wind=-k * c2 * state.v_wind)
+            # Return the dissipated kinetic energy as heat (CAM: the
+            # discrete-exact KE loss of the implicit update, added to dry
+            # static energy): dT = 0.5 (1 - c2^2)(u^2 + v^2) / cp.
+            ke_heating = (0.5 * (1.0 - c2 * c2)
+                          * (state.u_wind ** 2 + state.v_wind ** 2)
+                          / (c.cpd * dt))
+            dtdt = dtdt + ke_heating
+            tend = tend.copy(temperature=dtdt)
         # Diagnose the applied heating so the effect is visible in output.
         return tend, {**diagnostics, "upper_t_relaxation": dtdt}
