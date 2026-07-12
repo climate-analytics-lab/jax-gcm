@@ -58,6 +58,10 @@ def build(args):
         coupling=args.coupling,
         hypervis=args.hypervis,
     )
+    if abs(args.hines_rms - 1.0) > 1e-12:
+        from jcm.physics.gravity_waves.hines import HinesParameters
+        kwargs.update(hines=HinesParameters(
+            rms_launch_wind=args.hines_rms))
     physics = echam_physics(**kwargs)
 
     # Upper-atmosphere temperature relaxation: the ~1 Pa finite lid sits far
@@ -152,6 +156,13 @@ def main():
                          "-1 restores pySES's CFL-derived count")
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
+    ap.add_argument("--hines-rms", type=float, default=1.0,
+                    help="Hines rms_launch_wind (m/s; documented typical "
+                         "range 0.5-2, ECHAM default 1.0). The T63-tuned "
+                         "default under-decelerates the ne30 winter vortex "
+                         "(breakdown-season blow-ups); raising it is the "
+                         "physics-side interim until the CAM frontal GW "
+                         "scheme has a pySES frontogenesis provider")
     ap.add_argument("--coupling", default="lump_all",
                     choices=["lump_all", "dribble_all", "hybrid"],
                     help="physics-dynamics coupling: lump_all = one "
