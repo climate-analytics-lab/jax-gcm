@@ -206,6 +206,13 @@ def main():
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="restore from <prefix>.ckpt and continue")
+    ap.add_argument("--archive-ckpt-every", type=float, default=60.0,
+                    help="in addition to the rolling ckpt/.prev pair, keep "
+                         "a permanent copy of the checkpoint at each "
+                         "multiple of this many days (<=0 disables). The "
+                         "first ne30 campaign had no pre-winter restart "
+                         "point left when the breakdown-season experiments "
+                         "needed one")
     ap.add_argument("--fresh-physics-carry", action="store_true",
                     help="on resume, restore only the dycore state and "
                          "rebuild the physics carry fresh — REQUIRED when "
@@ -288,6 +295,12 @@ def main():
                 "physics_state": jax.device_get(model._final_physics_state),
             }, f)
         print(f"Saved checkpoint to {ckpt_path}")
+        if (args.archive_ckpt_every > 0
+                and abs(day_done % args.archive_ckpt_every) < 1e-6):
+            archive = Path(f"{prefix}_day{int(round(day_done))}.ckpt")
+            import shutil
+            shutil.copyfile(ckpt_path, archive)
+            print(f"Archived checkpoint {archive}")
         rate = chunk / (wall / 3600.0)
         print(f"Wall: {wall:.1f}s this chunk, {total_wall:.0f}s total "
               f"({rate:.1f} sim days/hr)")
