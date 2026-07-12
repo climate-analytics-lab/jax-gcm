@@ -148,15 +148,37 @@ You can customize various aspects of the model:
    from jcm.terrain import TerrainData
    from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-   # Higher resolution: T85 (256x128 grid)
+   # Higher resolution: T85 (256x128 grid). time_step is omitted, so the
+   # Model picks a numerically stable step for this resolution (see
+   # "Choosing the time step" below).
    coords = get_speedy_coords(spectral_truncation=85)
    terrain = TerrainData.aquaplanet(coords=coords)
 
    model = Model(
       coords=coords,
-      time_step=20.0,  # smaller timestep for stability
       terrain=terrain
    )
+
+**Choosing the time step**: ``time_step`` (minutes) is optional and is
+resolved from a single source of truth:
+
+* An explicit ``time_step=...`` always wins. If you also pass an
+  explicitly-constructed dycore, the two must agree — a mismatch raises,
+  because the dycore bakes its step into its integrator at construction
+  and physics/dates/saves would otherwise silently advance by a different
+  ``dt`` than the dynamics.
+* With an explicit ``dycore=...`` and no ``time_step``, the Model adopts
+  the dycore's ``dt_seconds`` — whoever constructs the dycore owns the
+  step.
+* With ``coords=...`` and no ``time_step`` (the Model builds the dycore
+  itself), the active physics is consulted via
+  :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`.
+  Physics without a grid-dependent stability limit (ECHAM, Held–Suarez,
+  ...) keep the historical 30-minute default; SPEEDY shortens the step
+  only for high-vertical-level / high-truncation grids where its explicit
+  surface drag would otherwise be unstable (standard 7/8-level SPEEDY
+  runs stay at exactly 30 minutes). See
+  :doc:`design/speedy_variable_levels` for the stability analysis.
 
 **Physics**: Use different physics packages or configurations
 
@@ -182,8 +204,9 @@ You can customize various aspects of the model:
 configuration. ``Model(coords=...)`` remains the shorthand for constructing
 the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
 uses Dinosaur; explicit backend selection is currently a Python-API workflow.
-The backend's ``dt_seconds`` and ``Model(time_step=...)`` (minutes) must
-represent the same duration after unit conversion.
+An explicitly-constructed backend owns the time step: the Model adopts its
+``dt_seconds``, and passing a conflicting ``Model(time_step=...)`` raises
+(see "Choosing the time step" above).
 
 .. code-block:: python
 
@@ -200,7 +223,7 @@ represent the same duration after unit conversion.
        dt_seconds=1800.0,
        diffusion=DiffusionFilter.default(),
    )
-   model = Model(dycore=dycore, time_step=30.0)
+   model = Model(dycore=dycore)  # adopts the dycore's 30-minute step
 
 **Initial Conditions**: Start from a specific state
 

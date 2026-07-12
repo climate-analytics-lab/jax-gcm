@@ -597,10 +597,17 @@ def precip_formation_cold(
     zusnow = 2.34 * jnp.maximum(100.0 * zdplanar, 1.0e-30) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
 
     zstokes = 2.0 * c.rgrav * (zusnow - zudrop) * zudrop / zdplanar
-    zstokes = jnp.maximum(zstokes, params.cqtmin)
+    # Floors are PHYSICAL minima, not cqtmin = 1e-12: the collection-
+    # efficiency curves below take log10(zstokes) and zrey**(-1.12), whose
+    # derivatives at a 1e-12 floor reach ~1e12 inside the selected branch
+    # (real cells with small droplets land there) and compound through the
+    # adjoint. A Stokes number below 1e-3 or a snow Reynolds number below
+    # 1e-2 means no collection on any physical fit's domain, so the floors
+    # only bound slopes the fits were never valid for.
+    zstokes = jnp.maximum(zstokes, 1.0e-3)
 
     zrey = air_density * zdplanar * zusnow / jnp.maximum(dynamic_viscosity, params.eps)
-    zrey = jnp.maximum(zrey, params.cqtmin)
+    zrey = jnp.maximum(zrey, 1.0e-2)
 
     ll3 = zrey <= 5.0
     ll4 = jnp.logical_and(zrey > 5.0, zrey < 40.0)
@@ -613,7 +620,10 @@ def precip_formation_cold(
     zcsacl = 0.2 * (jnp.log10(zstokes) - jnp.log10(zstcrit) - 2.236) ** 2
     zcsacl = jnp.minimum(zcsacl, 1.0 - params.cqtmin)
     zcsacl = jnp.maximum(zcsacl, 0.0)
-    zcsacl = jnp.sqrt(jnp.maximum(1.0 - zcsacl, 1.0e-30))
+    # 1e-4 floor (efficiency capped at ~0.995), not 1e-30: sqrt at the old
+    # floor has slope 5e14 on the SELECTED branch when the fit saturates,
+    # another per-call adjoint amplifier for no physical content.
+    zcsacl = jnp.sqrt(jnp.maximum(1.0 - zcsacl, 1.0e-4))
 
     ll6 = jnp.logical_and(ll5, zstokes <= 0.06)
     ll7 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.06, zstokes <= 0.25))
@@ -843,17 +853,27 @@ def update_precip_fluxes(
 
     # 4) In-cloud Rain/Snow Fluxes and Area-integrated Evaporation/Sublimation
     # in-cloud (area-averaged) rain/snow fluxes before evaporation/sublimation
-    ll1 = precip_cover > params.epsec
+    #
+    # The cover floor is a PHYSICAL minimum precip fraction (1e-4), not
+    # epsec = 1e-12. Two reasons. Forward: flux / max(cover, 1e-12) reports
+    # absurd in-cloud fluxes (x1e12) in nearly-uncovered cells, which the
+    # downstream evaporation then acts on. Reverse: the division VJP forms
+    # -g*x/(cover*cover), up to 1e24 per call for covers just above the old
+    # floor -- one of the ice-regime adjoint amplifiers that break
+    # long-window reverse mode. A precip fraction below 1e-4 is treated as
+    # no precip cover at all.
+    _min_cover = 1.0e-4
+    ll1 = precip_cover > _min_cover
 
-    ztmp1 = (rain_flux + zzdrr) / jnp.maximum(precip_cover, params.epsec)
-    ztmp2 = (snow_flux + zzdrs) / jnp.maximum(precip_cover, params.epsec)
+    ztmp1 = (rain_flux + zzdrr) / jnp.maximum(precip_cover, _min_cover)
+    ztmp2 = (snow_flux + zzdrs) / jnp.maximum(precip_cover, _min_cover)
 
     pfrain = jnp.where(ll1, ztmp1, 0.0)
     pfsnow = jnp.where(ll1, ztmp2, 0.0)
 
     # evaporation / sublimation area-integrated (kg/m2/s)
-    ztmp3 = (zcons2 * pressure_thickness * rain_evap_mmr) / jnp.maximum(precip_cover, params.epsec)
-    ztmp4 = (zcons2 * pressure_thickness * snow_sublimation_mmr) / jnp.maximum(precip_cover, params.epsec)
+    ztmp3 = (zcons2 * pressure_thickness * rain_evap_mmr) / jnp.maximum(precip_cover, _min_cover)
+    ztmp4 = (zcons2 * pressure_thickness * snow_sublimation_mmr) / jnp.maximum(precip_cover, _min_cover)
 
     pfevapr = jnp.where(ll1, ztmp3, 0.0)
     pfsubls = jnp.where(ll1, ztmp4, 0.0)

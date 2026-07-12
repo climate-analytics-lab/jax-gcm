@@ -8,7 +8,31 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.speedy_coords import SpeedyCoords
+from jcm.physics.speedy.speedy_coords import (
+    PBL_TOP_SIGMA, SpeedyCoords, interp_to_sigma, ozone_sigma_weight,
+    stratosphere_mask,
+)
+from jcm.physics.speedy.smoothing import (
+    smooth_clip01, smooth_min, smooth_max, smooth_pos,
+)
+
+# Reference sigma surfaces for the cloud diagnostics in :func:`clouds`. Both
+# diagnostics are tuned to sample the atmosphere at particular *physical*
+# depths, so they are evaluated at fixed sigmas (the 8-level reference grid's
+# layer centres, where the scheme was validated) rather than at index-relative
+# model levels, keeping them independent of the vertical grid:
+#   * the stratocumulus stability gradient ``gse`` measures lower-tropospheric
+#     stability across the interval spanning the marine boundary-layer
+#     inversion (sigma ~0.835-0.95). Measured over the two lowest *levels* it
+#     collapses at high nlev, where both levels sit inside the near-neutral
+#     surface mixed layer, and the stratocumulus SW feedback is lost.
+#   * the total-cloud RH maximum ``cloudc`` samples free-troposphere RH. A max
+#     over all model levels samples the profile more finely as nlev grows, so
+#     cloudc inflates with resolution — and, through the
+#     ``clsmax - clfact*cloudc`` competition below, spuriously suppresses the
+#     stratocumulus deck.
+_GSE_SIGMA_TOP, _GSE_SIGMA_BOT = PBL_TOP_SIGMA, 0.95
+_CLOUDC_REF_SIGMAS = (0.34, 0.51, 0.685)  # free-troposphere layer centres
 
 @jit
 def get_shortwave_rad_fluxes(
@@ -110,35 +134,52 @@ def shortwave_rad_fluxes(operand):
     flux_1 = flux_1.at[0].set(physics_data.shortwave_rad.fsol*fband1)
     flux_2 = flux_2.at[0].set(physics_data.shortwave_rad.fsol*fband2)
 
-    # 3.2 Ozone and dry-air absorption in the stratosphere
-    k = 0
-    dfabs = dfabs.at[k].set(flux_1[k])
-    flux_1 = flux_1.at[k].set(tau2[k, :, :, 0] * (flux_1[k] - physics_data.shortwave_rad.ozupp * psa))
-    dfabs = dfabs.at[k].add(- flux_1[k])
+    # 3.2 Ozone absorption in the stratosphere, distributed by sigma.
+    #
+    # Original SPEEDY hardcodes ozone absorption to the top two levels: the
+    # `ozupp` field at k=0 and the `ozone` field at k=1. To scale with nlev we
+    # instead spread the *total* stratospheric ozone absorption
+    # (ozupp + ozone) over every layer with sigma < 0.2, weighted by
+    # SpeedyWeather.jl's ozone distribution 50*max(0, 1/5 - sigma) times the
+    # layer thickness dhs. The weights are normalised to sum to 1 over the
+    # column so the column-integrated ozone absorption is preserved and equals
+    # ozupp + ozone exactly (matching SPEEDY's total at nlev=8, where the top
+    # two levels are the only ones with sigma<0.2). oz_lev is a (kx,ix,il)
+    # per-layer ozone absorption field; fsg/dhs are static so the weights are
+    # compile-time constants.
+    oz_weight = ozone_sigma_weight(fsg) * dhs                      # (kx,)
+    oz_weight = oz_weight / jnp.maximum(jnp.sum(oz_weight), epsilon)
+    oz_total = physics_data.shortwave_rad.ozupp + physics_data.shortwave_rad.ozone  # (ix,il)
+    oz_lev = oz_weight[:, jnp.newaxis, jnp.newaxis] * oz_total[jnp.newaxis] * psa    # (kx,ix,il)
 
-    k = 1
-    flux_1 = flux_1.at[k].set(flux_1[k - 1])
-    dfabs = dfabs.at[k].set(flux_1[k])
-    flux_1 = flux_1.at[k].set(tau2[k, :, :, 0] * (flux_1[k] - physics_data.shortwave_rad.ozone * psa))
-    dfabs = dfabs.at[k].add(- flux_1[k])
-    
-    # 3.3 Absorption and reflection in the troposphere
-    # here's the function that will compute the flux
-    propagate_flux_1 = lambda flux, tau: flux * tau[:,:,0] * (1 - tau[:,:,2])
-    
-    # scan over k = 2:kx
-    _, flux_1_scan = lax.scan(
-        jax.checkpoint(lambda carry, i: (propagate_flux_1(carry, i),)*2),
-        flux_1[1], #initial value
-        tau2[2:kx] #pass tau2 directly rather than indexing
+    # 3.3 Single downward-flux pass over the whole column.
+    #
+    # At each level the beam loses ozone absorption (non-zero only in the
+    # stratosphere) and is then attenuated by the layer transmissivity and
+    # cloud reflection (cloud reflection tau2[...,2] is non-zero only in the
+    # troposphere). The unified propagator therefore reduces to SPEEDY's
+    # stratosphere update tau*(flux - oz) where there is no cloud, and to its
+    # troposphere update flux*tau*(1-cloud) where there is no ozone.
+    propagate_flux_1 = lambda flux, tau, oz: tau[:, :, 0] * (flux - oz) * (1 - tau[:, :, 2])
+
+    # The per-layer outputs are the flux leaving the bottom of each layer. Flux
+    # entering layer k equals fsol*fband1 for k=0 and the flux leaving layer k-1
+    # otherwise.
+    _, flux_out = lax.scan(
+        jax.checkpoint(lambda carry, xs: (propagate_flux_1(carry, xs[0], xs[1]),) * 2),
+        flux_1[0],
+        (tau2[:, :, :, :], oz_lev),
     )
-    
-    # put results in flux_1
-    flux_1 = flux_1.at[2:kx].set(flux_1_scan)
+    flux_in = jnp.concatenate([flux_1[:1], flux_out[:-1]], axis=0)
+    flux_1 = flux_out
 
-    # at each k, dfabs and tau2 only depend on the updated value of flux_1 and the non-updated value of tau2
-    dfabs = dfabs.at[2:kx].set(flux_1[1:kx-1] * (1 - tau2[2:kx, :, :, 2]) * (1 - tau2[2:kx, :, :, 0]))
-    tau2 = tau2.at[2:kx, :, :, 2].multiply(flux_1[1:kx-1])
+    # Absorbed flux per layer = (incoming - outgoing) minus the cloud-reflected
+    # fraction (flux_in - oz)*tau_cloud. In the stratosphere tau_cloud=0 so all
+    # attenuation (including ozone) is absorbed; in the troposphere oz=0 and the
+    # reflected fraction is excluded from absorption.
+    reflected = (flux_in - oz_lev) * tau2[:, :, :, 2]
+    dfabs = dfabs.at[:].set((flux_in - flux_1) - reflected)
+    tau2 = tau2.at[:, :, :, 2].multiply(flux_in - oz_lev)
 
     flux_2 = flux_2.at[1].set(flux_2[0])
     propagate_flux_2 = lambda flux, tau: flux * tau[:, :, 1]
@@ -186,24 +227,46 @@ def shortwave_rad_fluxes(operand):
         parameters.shortwave_radiation.ablwv2 * qa
     ], axis=-1)
 
-    # Upper stratosphere (k = 0): no water vapor
-    absorptivity = absorptivity.at[0, :, :, 2:].set(0)
+    # Topmost stratospheric layer: no water-vapour longwave absorption.
+    # SPEEDY zeroed the water-vapour bands at k=0 only; we zero them for every
+    # layer with sigma<0.2 (the stratosphere). qa is already ~0 there so this is
+    # mostly a clean-up, but it keeps the "stratosphere has no water vapour"
+    # statement nlev-independent. strat_mask is static.
+    strat_mask = stratosphere_mask(fsg)
+    absorptivity = absorptivity.at[:, :, :, 2:].set(
+        jnp.where(strat_mask[:, jnp.newaxis, jnp.newaxis, jnp.newaxis], 0.0, absorptivity[:, :, :, 2:])
+    )
 
-    # Cloud-free layers: lower stratosphere (k = 1) and PBL (k = kx - 1)
-    # Leave absorptivity unchanged
-    
-    # Cloudy layers: free troposphere (2 <= k <= kx - 2)
+    # Cloud absorptivity is added only in the free troposphere: below the
+    # stratosphere (sigma>=0.2) and above the PBL (the lowest layer, which SPEEDY
+    # leaves cloud-free). SPEEDY hardcoded this range as k=2..kx-2; we replace
+    # the top boundary with the stratosphere sigma mask so it scales with nlev,
+    # and keep the single-layer PBL exclusion at the bottom.
+    trop_cloud_mask = (~strat_mask)[:, jnp.newaxis, jnp.newaxis]
+    trop_cloud_mask = trop_cloud_mask.at[kx - 1].set(False)  # PBL: cloud-free
     acloud = cloudc * parameters.shortwave_radiation.ablcl2
     acloud1 = jnp.where(jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis] + 1 < icltop, acloud, cloudc * parameters.shortwave_radiation.ablcl1)
-    absorptivity = absorptivity.at[2:nl1,:,:,0].add(acloud1[2:nl1])
-    absorptivity = absorptivity.at[2:nl1,:,:,2:].set(jnp.maximum(absorptivity[2:nl1,:,:,2:], acloud[:,:,jnp.newaxis]))
+    absorptivity = absorptivity.at[:, :, :, 0].add(jnp.where(trop_cloud_mask, acloud1, 0.0))
+    absorptivity = absorptivity.at[:, :, :, 2:].set(
+        jnp.where(
+            trop_cloud_mask[:, :, :, jnp.newaxis],
+            jnp.maximum(absorptivity[:, :, :, 2:], acloud[:, :, jnp.newaxis]),
+            absorptivity[:, :, :, 2:],
+        )
+    )
 
     # Now compute tau2
     deltap = psa*dhs[:,jnp.newaxis,jnp.newaxis]
     tau2 = jnp.exp(-deltap[:,:,:,jnp.newaxis] * absorptivity)
         
     # 5.2  Stratospheric correction terms
-    eps1 = parameters.mod_radcon.epslw/(dhs[0] + dhs[1])
+    # eps1 spreads the longwave stratospheric-cooling correction over the mass
+    # of the stratosphere. SPEEDY used dhs[0]+dhs[1] (the top two layers); we use
+    # the total thickness of all layers with sigma<0.2 so the correction scales
+    # with the (now nlev-dependent) stratosphere depth. strat_mask/dhs are static.
+    strat_mask = stratosphere_mask(fsg)
+    strat_dsig = jnp.sum(jnp.where(strat_mask, dhs, 0.0))
+    eps1 = parameters.mod_radcon.epslw / jnp.maximum(strat_dsig, epsilon)
     stratc = jnp.zeros((ix, il, 2))
     stratc = stratc.at[:,:,0].set(physics_data.shortwave_rad.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
@@ -340,12 +403,21 @@ def clouds(operand):
     """
     state, physics_data, parameters, forcing, terrain, tendencies = operand
 
-    # Compute gradient of static energy: logic from physics.f90:147
+    # Stratocumulus stability gradient: dry static energy gradient across the
+    # fixed sigma interval spanning the boundary-layer inversion (see the
+    # module-level note on reference sigmas). On the 8-level reference grid the
+    # interval endpoints are the two lowest layer centres, reproducing the
+    # validated behaviour exactly.
     se = physics_data.convection.se
     phig = state.geopotential
+    fsg = physics_data.speedy_coords.fsg
+    se_top = interp_to_sigma(se, fsg, _GSE_SIGMA_TOP)
+    se_bot = interp_to_sigma(se, fsg, _GSE_SIGMA_BOT)
+    ph_top = interp_to_sigma(phig, fsg, _GSE_SIGMA_TOP)
+    ph_bot = interp_to_sigma(phig, fsg, _GSE_SIGMA_BOT)
     # Safety check to prevent division by zero (can happen during initialization)
-    dphi = phig[-2] - phig[-1]
-    gse = jnp.where(jnp.abs(dphi) > 1e-10, (se[-2] - se[-1])/dphi, 0.0)
+    dphi = ph_top - ph_bot
+    gse = jnp.where(jnp.abs(dphi) > 1e-10, (se_top - se_bot)/dphi, 0.0)
 
     humidity = physics_data.humidity
     conv = physics_data.convection
@@ -371,22 +443,72 @@ def clouds(operand):
     cloudc = jnp.where(mask, humidity.rh[nl1] - parameters.shortwave_radiation.rhcl1, 0.0)  # Compute cloudc values where the mask is true
     icltop = jnp.where(mask, nl1+1, nlp+1) # Assign icltop values based on the mask
 
-    # Vectorized implementation of the second for loop
+    # Vectorized implementation of the second for loop.
+    #
+    # Search the free troposphere for the level of maximum relative humidity.
+    # SPEEDY restricted this to k=2..kx-3 (skipping the top-two stratosphere and
+    # the two PBL layers). We replace the upper (stratosphere) bound with the
+    # sigma<0.2 mask so it scales with nlev, and keep the lower PBL exclusion
+    # (the two lowest layers, handled by the "first for loop" above). The search
+    # is done over the whole column with invalid layers masked out, so no
+    # fixed-index slice survives. fsg-derived masks are static.
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
     drh = humidity.rh - parameters.shortwave_radiation.rhcl1
-    mask = state.specific_humidity > parameters.shortwave_radiation.qacl
+    level = jnp.arange(kx)[:, jnp.newaxis, jnp.newaxis]
+    search_mask = (
+        (state.specific_humidity > parameters.shortwave_radiation.qacl)
+        & (~strat_mask)[:, jnp.newaxis, jnp.newaxis]
+        & (level < kx - 2)
+    )
 
     # Set invalid entries to -1 so they are not chosen by argmax
-    max_valid_rh_layer = 2 + jnp.argmax(jnp.where(mask[2:kx-2],humidity.rh[2:kx-2],-1), axis=0)
+    max_valid_rh_layer = jnp.argmax(jnp.where(search_mask, humidity.rh, -1), axis=0)
     max_drh = jnp.squeeze(jnp.take_along_axis(drh, max_valid_rh_layer[jnp.newaxis], axis=0), axis=0)
-    
-    valid_column = jnp.any(mask[2:kx-2], axis=0) # Ensures that max_drh is from a valid layer
+
+    valid_column = jnp.any(search_mask, axis=0) # Ensures that max_drh is from a valid layer
     icltop = jnp.where(valid_column & (max_drh > cloudc), max_valid_rh_layer + 1, icltop)
-    cloudc = jnp.where(valid_column & (max_drh > cloudc), max_drh, cloudc)
+
+    # The cloud-cover *magnitude* takes the RH maximum on a fixed reference
+    # sigma grid (the 8-level free-troposphere layer centres plus the PBL top)
+    # rather than over the model levels searched above, so it is independent of
+    # the vertical grid (see the module-level note on reference sigmas). The
+    # cloud-top level ``icltop`` keeps the actual-level argmax from the search
+    # above, since the radiation needs a real level index for the cloud top.
+    # cover_smoothing > 0 (an RH/cover fraction) rounds every hinge and
+    # clip in the cover diagnosis below; 0 keeps the original hard
+    # branches. The RH hinge at rhcl1 and the max over reference levels
+    # zero d(cover)/d(rhcl1) and the state gradient wherever a level is
+    # sub-critical or non-dominant; the smooth forms keep exponentially
+    # decaying tails instead.
+    w_cov = parameters.shortwave_radiation.cover_smoothing
+    rh = humidity.rh
+    rhcl1 = parameters.shortwave_radiation.rhcl1
+    cloudc = smooth_pos(interp_to_sigma(rh, fsg, PBL_TOP_SIGMA) - rhcl1, w_cov)
+    for sig_ref in _CLOUDC_REF_SIGMAS:
+        cloudc = smooth_max(cloudc, interp_to_sigma(rh, fsg, sig_ref) - rhcl1, w_cov)
 
     # Third for loop (two levels)
     # Perform the calculations (Two Loops)
-    pr1 = jnp.minimum(parameters.shortwave_radiation.pmaxcl, 86.4 * (conv.precnv + condensation.precls))
-    cloudc = jnp.minimum(1.0, parameters.shortwave_radiation.wpcl * jnp.sqrt(jnp.maximum(epsilon, pr1)) + jnp.minimum(1.0, cloudc * rrcl)**2.0)
+    # The precipitation term has three sharp sites: the pmaxcl cap, the
+    # sqrt corner at zero precipitation (slope 1/(2*sqrt(eps)) ~ 1.6e4
+    # with the hard epsilon floor), and the saturation of the total cover
+    # at 1. With cover_smoothing on, the cap and saturation become
+    # hyperbolic minima and the sqrt is regularized as sqrt(pr1 + delta)
+    # with delta = (w*pmaxcl)^2, bounding the corner slope at
+    # 1/(2*w*pmaxcl).
+    pmaxcl = parameters.shortwave_radiation.pmaxcl
+    pr1 = smooth_min(pmaxcl, 86.4 * (conv.precnv + condensation.precls), w_cov * pmaxcl)
+    sqrt_arg = jnp.where(
+        w_cov > 0.0,
+        smooth_pos(pr1, w_cov) + (w_cov * pmaxcl) ** 2,
+        jnp.maximum(epsilon, pr1),
+    )
+    cloudc = smooth_min(
+        1.0,
+        parameters.shortwave_radiation.wpcl * jnp.sqrt(sqrt_arg)
+        + smooth_min(1.0, cloudc * rrcl, w_cov)**2.0,
+        w_cov,
+    )
     cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
     icltop = jnp.minimum(conv.iptop, icltop)
 
@@ -399,12 +521,23 @@ def clouds(operand):
 
     # Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = jnp.clip(rgse * (gse - parameters.shortwave_radiation.gse_s0), 0.0, 1.0)
+    fstab = smooth_clip01(rgse * (gse - parameters.shortwave_radiation.gse_s0), w_cov)
     # Stratocumulus clouds over sea
-    clstr = fstab * jnp.maximum(parameters.shortwave_radiation.clsmax - clfact * cloudc, 0.0)
+    clstr = fstab * smooth_pos(parameters.shortwave_radiation.clsmax - clfact * cloudc, w_cov)
     # Stratocumulus clouds over land
-    clstrl = jnp.maximum(clstr, parameters.shortwave_radiation.clsminl) * humidity.rh[kx - 1]
+    clstrl = smooth_max(clstr, parameters.shortwave_radiation.clsminl, w_cov) * humidity.rh[kx - 1]
     clstr = clstr + terrain.fmask * (clstrl - clstr)
+    # Cloud cover is a fraction: cap at 1. The land-branch RH amplification
+    # above is unbounded when the lowest layer supersaturates (rh > 1), which
+    # the thin surface layers of high-nlev grids do routinely over cold land
+    # (clstr up to ~5-7 over wintertime Antarctica at nlev >= 24). The
+    # shortwave scheme applies this cover as a reflectivity albcls*clstr whose
+    # layer transmission (1 - albcls*clstr) turns negative for
+    # clstr > 1/albcls = 2 — numerically explosive (it flips the sign of the
+    # downward flux and NaNs the integration within hours). On the validated
+    # 8-level grid clstr never exceeds clsmax = 0.6, so this cap is a no-op
+    # there.
+    clstr = smooth_min(clstr, 1.0, w_cov)
 
     swrad_out = physics_data.shortwave_rad.copy(gse=gse, icltop=icltop, cloudc=cloudc, cloudstr=clstr, qcloud=qcloud)
     physics_data = physics_data.copy(shortwave_rad=swrad_out)

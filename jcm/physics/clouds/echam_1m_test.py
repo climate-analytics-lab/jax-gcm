@@ -381,7 +381,7 @@ class TestColumnSweepMicrophysics:
         _, state = cloud_microphysics_column_sweep(
             T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
         )
-        rain_source_total = float(jnp.sum(state.rain_flux))
+        rain_source_total = float(jnp.sum(state.rain_source))
         # surface precip should be strictly LESS than the local rain
         # source when rain evap is active in subsaturated air below cloud.
         assert rain_source_total > 0.0, "autoconv didn't fire — adjust q profile"
@@ -483,7 +483,7 @@ class TestColumnSweepMicrophysics:
             T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
         )
         assert jnp.allclose(
-            state.precip_rain, jnp.sum(state.rain_flux), rtol=1e-5,
+            state.precip_rain, jnp.sum(state.rain_source), rtol=1e-5,
         )
 
     def test_column_water_budget_closes(self):
@@ -528,6 +528,75 @@ class TestColumnSweepMicrophysics:
             f"column water budget residual {residual:.3e} kg/m²/s, "
             f"surface precip {float(surface_precip):.3e} kg/m²/s"
         )
+
+
+    @staticmethod
+    def _mixed_phase_column(nlev=20):
+        """Ice cloud aloft + liquid cloud below in a near-saturated column.
+
+        Exercises both the rain and the snow/falling-ice flux paths; the
+        top layers carry no condensate so nothing can fall out of level 0.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(230.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.95 * qsw
+        qc = jnp.zeros(nlev).at[8].set(2e-3)
+        qi = jnp.zeros(nlev).at[4].set(5e-4)
+        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        return T, q, p, qc, qi, cf, rho, dz, ndrop
+
+    def test_flux_profiles_bottom_row_equals_surface_diagnostics(self):
+        """COSP hook invariants: rain_flux/snow_flux are per-level fluxes.
+
+        The profiles are the scan's through-layer fluxes, so the bottom
+        level must equal the surface ``precip_rain`` / ``precip_snow``
+        EXACTLY (same carry values), be non-negative everywhere, and be
+        zero at the model top (level 0 in the physics-internal TOA-first
+        frame — no condensate there, nothing can fall out of it).
+        """
+        cfg = MicrophysicsParameters.default()
+        column = self._mixed_phase_column()
+        _, state = cloud_microphysics_column_sweep(
+            *column, dt=1800.0, config=cfg,
+        )
+        assert float(state.precip_rain) > 0.0, "column must actually rain"
+        assert float(jnp.abs(state.rain_flux[-1] - state.precip_rain)) < 1e-12
+        assert float(jnp.abs(state.snow_flux[-1] - state.precip_snow)) < 1e-12
+        assert jnp.all(state.rain_flux >= 0.0)
+        assert jnp.all(state.snow_flux >= 0.0)
+        assert float(state.rain_flux[0]) == 0.0
+        assert float(state.snow_flux[0]) == 0.0
+        # The frozen profile includes the sedimenting cloud-ice flux, so
+        # it must be positive at the ice-cloud level itself (flux leaving
+        # level 4). How far below the source it survives depends on the
+        # sedimentation numerics (the expm1-stable influx form absorbs it
+        # within the next layer for this column), so only the source level
+        # is asserted.
+        assert float(state.snow_flux[4]) > 0.0
+
+    def test_flux_profiles_column_and_vmap_agree(self):
+        """A vmapped batch must reproduce the single-column flux profiles."""
+        cfg = MicrophysicsParameters.default()
+        column = self._mixed_phase_column()
+        _, state_1 = cloud_microphysics_column_sweep(
+            *column, dt=1800.0, config=cfg,
+        )
+        batched = tuple(jnp.stack([arr] * 3, axis=0) for arr in column)
+        _, state_b = jax.vmap(
+            cloud_microphysics_column_sweep,
+            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
+        )(*batched, 1800.0, cfg)
+        assert state_b.rain_flux.shape == (3, column[0].shape[0])
+        for i in range(3):
+            assert jnp.allclose(state_b.rain_flux[i], state_1.rain_flux,
+                                atol=1e-12)
+            assert jnp.allclose(state_b.snow_flux[i], state_1.snow_flux,
+                                atol=1e-12)
 
 
 class TestColumnSweepParameterGradients:

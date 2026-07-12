@@ -76,6 +76,13 @@ class PhysicsTerm(nnx.Module):
     category: ClassVar[str] = ""
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # Diagnostic fields this term needs the DYCORE (or an upstream term)
+    # to supply each step — e.g. the frontogenesis function, a
+    # horizontal-gradient quantity only the dynamical core can compute
+    # faithfully. Model validates at construction that each named field
+    # is covered by DynamicalCore.physics_field_names() or an upstream
+    # term's ``provides``.
+    requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
     # Declarative carry slots. Each entry maps a public ``physics_state``
     # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``
@@ -147,6 +154,24 @@ class PhysicsTerm(nnx.Module):
         Called once at Model construction time, outside any jitted region.
         Override in subclasses that need precomputed coordinate data.
         """
+
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Return this term's largest numerically-stable model step (minutes).
+
+        A term whose explicit (forward-Euler) tendency imposes a grid-
+        dependent timestep stability limit — e.g. SPEEDY's explicit surface
+        drag in a thin bottom sigma layer — overrides this so
+        :class:`~jcm.model.Model` can pick a stable default ``dt`` when the
+        user does not specify one. ``ComposablePhysics`` takes the minimum
+        over all terms; an explicit ``Model(time_step=...)`` always wins.
+
+        Default ``None``: no constraint from this term.
+
+        Args:
+            coords: model :class:`dinosaur.coordinate_systems.CoordinateSystem`.
+
+        """
+        return None
 
     def cache_band_config(self, band_config) -> None:
         """Capture the active radiation band config (in-place).

@@ -8,8 +8,10 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
+from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
 from jcm.physics.clouds.speedy_humidity import get_qsat, rel_hum_to_spec_hum
 from jcm.utils import pass_fn
 
@@ -108,14 +110,22 @@ def get_surface_fluxes(
 
     # 1.1 Wind components
     rcp = 1.0/c.cpd
-    nl1 = kx-1
     gtemp0 = 1.0 - parameters.surface_flux.ftemp0
 
-    # substituting the for loop at line 109
-    # Temperature difference between lowest level and sfc
-    # line 112
-    dt1 = physics_data.speedy_coords.wvi[kx-1, 1, jnp.newaxis, jnp.newaxis]*(ta[kx-1] - ta[nl1-1])
-    
+    # Temperature difference between the lowest level and the surface,
+    # extrapolated from the near-surface lapse rate. The lapse rate is measured
+    # between the lowest layer and a fixed sigma (the top of the sub-cloud
+    # layer): that reference is a *physical* depth, so anchoring it in sigma
+    # keeps the diagnosed lapse rate — and the stable/unstable branch selected
+    # below — independent of the vertical grid. The extrapolation target is
+    # SPEEDY's near-surface sigma=0.99. On the 8-level reference grid the fixed
+    # sigma is the second-lowest layer centre and this reproduces the validated
+    # behaviour (the original wvi[kx-1, 1] interpolation weight) exactly.
+    sigl = physics_data.speedy_coords.sigl
+    ta_ref = interp_to_sigma(ta, physics_data.speedy_coords.fsg, PBL_TOP_SIGMA)
+    dt1_fac = (jnp.log(0.99) - sigl[kx-1]) / (sigl[kx-1] - jnp.log(PBL_TOP_SIGMA))
+    dt1 = dt1_fac * (ta[kx-1] - ta_ref)
+
     # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
     # line 115 - 116
     t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
@@ -127,7 +137,7 @@ def get_surface_fluxes(
     t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
 
     # lines 124 - 137
-    t1 = jnp.where((ta[kx-1] > ta[nl1-1])[:, :, jnp.newaxis],
+    t1 = jnp.where((ta[kx-1] > ta_ref)[:, :, jnp.newaxis],
                 parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
                 ta[kx-1][:, :, jnp.newaxis])
     
@@ -176,8 +186,14 @@ def get_surface_fluxes(
 
         qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
 
+        # The soil-moisture-limited evaporation onset is a hinge that
+        # zeroes every gradient through dry land columns (and gates the
+        # d(Evap)/d(Tskin) term in the energy balance below on the same
+        # hard condition). evap_smoothing > 0 [g/kg] rounds it with a
+        # softplus; 0 keeps the hard maximum.
         evap = evap.at[:, :, 0].set(parameters.surface_flux.chl * denvvs[:, :, 1] *\
-                    jnp.maximum(0.0, forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0]))
+                    smooth_pos(forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
+                               parameters.surface_flux.evap_smoothing))
 
         # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
         # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
@@ -196,14 +212,23 @@ def get_surface_fluxes(
             hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
             dtskin = tskin + 1.0
 
-            # Compute d(Evap) for a 1-degree increment of Tskin
+            # Compute d(Evap) for a 1-degree increment of Tskin. The
+            # activity weight must be the DERIVATIVE of the (possibly
+            # smoothed) evaporation hinge, not the hard evap > 0 mask:
+            # with evap_smoothing on, the softplus tail makes evap
+            # positive in dry columns, and the hard mask would hand them
+            # the full latent sensitivity, over-damping the skin update
+            # (Codex review, PR #567). smooth_gate is exactly the
+            # softplus derivative, and reproduces the hard mask at
+            # width 0 (evap > 0 iff the hinge argument is > 0).
+            evap_gate = smooth_gate(
+                forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
+                0.0,
+                parameters.surface_flux.evap_smoothing,
+            )
             qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
             qsat0 = qsat0.at[:, :, 1].set(
-                    jnp.where(
-                        evap[:, :, 0] > 0.0,
-                        forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0]),
-                        0.0
-                    )
+                    evap_gate * forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0])
                 )
 
             # Redefine skin temperature to balance the heat budget

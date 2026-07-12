@@ -9,6 +9,7 @@ import jcm.constants as c
 # from jcm.constants.
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics.speedy.speedy_coords import stratosphere_mask
 
 nband = 4
 
@@ -47,27 +48,63 @@ def get_downward_longwave_rad_fluxes(
     # assuming a linear dependence of T on log_sigma.
     # Above the first (top) level, the atmosphere is assumed isothermal.
     
+    # Identify the stratosphere by sigma threshold (sigma<0.2) instead of by the
+    # original hardcoded top-two-levels. fsg is static so strat_mask is a
+    # compile-time-constant boolean array -> fully differentiable, no jnp.where
+    # on traced state needed.
+    #
+    # We use a STATIC sigma threshold (not SpeedyWeather's UniformCooling
+    # T<207.5 K state-dependent threshold) because SPEEDY's stratosphere
+    # treatment here is structural — it always treats the top of the column as
+    # isothermal/blackbody by grid position, independent of the actual
+    # temperature. The sigma mask is the faithful nlev-scaling of that intent and
+    # keeps the blackbody construction differentiable. (See speedy_coords for the
+    # shared threshold.) This deviates from SpeedyWeather, which replaces this
+    # whole scheme with a T-relaxation; the deviation is intentional.
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)  # (kx,)
+    strat3 = strat_mask[:, jnp.newaxis, jnp.newaxis]
+    # The topmost stratospheric layer (k=0) is treated isothermal above TOA;
+    # all other stratospheric layers are interior (boundaries above and below).
+    is_top = jnp.zeros((kx,), dtype=bool).at[0].set(True)
+
     # Temperature at level boundaries
     st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+physics_data.speedy_coords.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
-    
-    # Mean temperature in stratospheric layers
-    st4a = st4a.at[0,:,:,1].set(0.75 * ta[0] + 0.25 * st4a[0,:,:,0])
-    st4a = st4a.at[1,:,:,1].set(0.50 * ta[1] + 0.25 * (st4a[0,:,:,0] + st4a[1,:,:,0]))
 
-    # Temperature gradient in tropospheric layers
+    # Mean temperature in stratospheric layers.
+    # Topmost layer: isothermal above, mean T = 0.75*T + 0.25*T_boundary_below.
+    # Interior stratospheric layer: mean T = 0.50*T + 0.25*(T_bound_above +
+    # T_bound_below). T_bound_above is the boundary temperature of the layer
+    # above (st4a[k-1,...,0]); for k=0 there is none. These reduce exactly to
+    # SPEEDY's original k=0 and k=1 formulas at nlev=8.
+    tbound_above = jnp.concatenate([st4a[:1, :, :, 0], st4a[:-1, :, :, 0]], axis=0)
+    tmean_top = 0.75 * ta + 0.25 * st4a[:, :, :, 0]
+    tmean_interior = 0.50 * ta + 0.25 * (tbound_above + st4a[:, :, :, 0])
+    strat_tmean = jnp.where(is_top[:, jnp.newaxis, jnp.newaxis], tmean_top, tmean_interior)
+    st4a = st4a.at[:, :, :, 1].set(jnp.where(strat3, strat_tmean, st4a[:, :, :, 1]))
+
+    # Temperature gradient in tropospheric layers (sigma>=0.2). The lowest layer
+    # (PBL) uses the full-level temperature against the boundary above it; other
+    # tropospheric layers use the boundary difference. SPEEDY hardcoded these as
+    # k=2..kx-2 and k=kx-1; we select them with ~strat_mask and the PBL index.
     anis = 1
-    
-    st4a = st4a.at[2:nl1,:,:,1].set(0.5 * anis * jnp.maximum(st4a[2:nl1, :, :, 0] - st4a[1:nl1-1, :, :, 0], 0.0))
-    st4a = st4a.at[kx-1,:,:,1].set(anis * jnp.maximum(ta[kx-1] - st4a[nl1-1,:,:,0], 0.0))
-    
-    # Blackbody emission in the stratosphere
-    st4a = st4a.at[:2,:,:,0].set(c.sbc * st4a[:2, :, :, 1]**4.0)
-    st4a = st4a.at[:2,:,:,1].set(0.0)
+    trop_grad = 0.5 * anis * jnp.maximum(st4a[:, :, :, 0] - tbound_above, 0.0)
+    pbl_grad = anis * jnp.maximum(ta - tbound_above, 0.0)
+    is_pbl = jnp.zeros((kx,), dtype=bool).at[kx - 1].set(True)
+    trop_mask = (~strat_mask) & (~is_pbl)
+    st4a = st4a.at[:, :, :, 1].set(jnp.where(trop_mask[:, jnp.newaxis, jnp.newaxis], trop_grad, st4a[:, :, :, 1]))
+    st4a = st4a.at[:, :, :, 1].set(jnp.where(is_pbl[:, jnp.newaxis, jnp.newaxis], pbl_grad, st4a[:, :, :, 1]))
 
-    # Blackbody emission in the troposphere
-    st3a = c.sbc * ta[2:kx]**3.0
-    st4a = st4a.at[2:kx,:,:,0].set(st3a * ta[2:kx])
-    st4a =  st4a.at[2:kx,:,:,1].set(4.0 * st3a * st4a[2:kx,:,:,1])
+    # Blackbody emission in the stratosphere: emit at the mean temperature, and
+    # zero the gradient-correction term there.
+    strat_bb = c.sbc * st4a[:, :, :, 1] ** 4.0
+    st4a = st4a.at[:, :, :, 0].set(jnp.where(strat3, strat_bb, st4a[:, :, :, 0]))
+    st4a = st4a.at[:, :, :, 1].set(jnp.where(strat3, 0.0, st4a[:, :, :, 1]))
+
+    # Blackbody emission in the troposphere (sigma>=0.2).
+    trop3 = (~strat_mask)[:, jnp.newaxis, jnp.newaxis]
+    st3a = c.sbc * ta ** 3.0
+    st4a = st4a.at[:, :, :, 0].set(jnp.where(trop3, st3a * ta, st4a[:, :, :, 0]))
+    st4a = st4a.at[:, :, :, 1].set(jnp.where(trop3, 4.0 * st3a * st4a[:, :, :, 1], st4a[:, :, :, 1]))
 
     # 2. Initialization of fluxes
     rlds = jnp.zeros((ix, il))
@@ -182,11 +219,21 @@ def get_upward_longwave_rad_fluxes(
     flux = flux.at[:,:,:2].set((tau2[0] * flux + emis_brad[0])[:,:,:2])
     dfabs = dfabs.at[0].add(jnp.sum((_flux_3d[0] - flux)[:,:,:2], axis=-1))
 
-    corlw1 = physics_data.speedy_coords.dhs[0] * stratc[:,:,1] * st4a[0,:,:,0] + stratc[:,:,0]
-    corlw2 = physics_data.speedy_coords.dhs[1] * stratc[:,:,1] * st4a[1,:,:,0]
-    dfabs = dfabs.at[0].add(-corlw1)
-    dfabs = dfabs.at[1].add(-corlw2)
-    ftop = corlw1 + corlw2
+    # Stratospheric cooling correction. SPEEDY applied this to exactly the top
+    # two layers (corlw1 at k=0, corlw2 at k=1), with the polar-night term
+    # stratc[:,:,0] only at k=0. We apply the per-layer eps1-based cooling
+    # dhs[k]*stratc[:,:,1]*st4a[k,0] to every stratospheric layer (sigma<0.2)
+    # and keep the polar-night term on the single topmost layer. stratc[:,:,1]
+    # already carries eps1 = epslw/sum(dhs over strat) (set in the shortwave
+    # routine), so the column-integrated cooling is preserved. strat_mask/dhs
+    # are static; ftop is the column sum of the corrections (TOA outgoing).
+    strat_mask = stratosphere_mask(physics_data.speedy_coords.fsg)
+    dhs = physics_data.speedy_coords.dhs
+    corlw = dhs[:, jnp.newaxis, jnp.newaxis] * stratc[:, :, 1][jnp.newaxis] * st4a[:, :, :, 0]
+    corlw = jnp.where(strat_mask[:, jnp.newaxis, jnp.newaxis], corlw, 0.0)
+    corlw = corlw.at[0].add(stratc[:, :, 0])  # polar-night cooling at the top layer
+    dfabs = dfabs - corlw
+    ftop = jnp.sum(corlw, axis=0)
 
     ftop += jnp.sum(flux, axis = -1)
 

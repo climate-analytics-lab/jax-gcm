@@ -132,10 +132,15 @@ def melting_snow_and_ice(
     # ------------------------------------------------------------
     ice_melt_flux = jnp.minimum(params.xsec * ice_flux, melt_capacity)
 
-    has_ice_flux = ice_flux > params.epsec
+    # Guarded at a physical minimum flux (1e-9 kg/m2/s), not epsec = 1e-12:
+    # the ratio's VJP forms -g*x/(flux*flux), up to 1e24 per call for fluxes
+    # just above the old floor (an ice-regime adjoint amplifier). Melting a
+    # number flux out of a sub-1e-9 mass flux is physically nothing.
+    _min_flux = 1.0e-9
+    has_ice_flux = ice_flux > _min_flux
     ice_melt_flux_n = jnp.where(
         has_ice_flux,
-        ice_flux_n * ice_melt_flux / jnp.maximum(ice_flux, params.epsec),
+        ice_flux_n * ice_melt_flux / jnp.maximum(ice_flux, _min_flux),
         0.0,
     )
 

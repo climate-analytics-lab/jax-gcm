@@ -12,6 +12,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg). cpd, p0, grav are shared
 # and read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
+from jcm.physics.speedy.smoothing import smooth_min
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -71,7 +72,17 @@ def get_large_scale_condensation_tendencies(
     # Calculate dqlsc and dtlsc where dqa < 0
     negative_dqa_mask = dqa < 0
     dqlsc = dqlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], dqa[1:] * rtlsc, 0.0))
-    dtlsc = dtlsc.at[1:].set(jnp.where(negative_dqa_mask[1:], tfact * jnp.minimum(-dqlsc[1:], dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2), 0.))
+    # The grid-point-storm heating cap is a hard minimum: once a column
+    # saturates it, every parameter's gradient through the heating is
+    # exactly zero. cap_smoothing > 0 (a fraction of the cap) rounds the
+    # corner with the hyperbolic smooth minimum so a residual gradient
+    # survives saturation; 0 keeps the hard cap.
+    cap = dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2
+    dtlsc = dtlsc.at[1:].set(jnp.where(
+        negative_dqa_mask[1:],
+        tfact * smooth_min(-dqlsc[1:], cap, parameters.condensation.cap_smoothing * cap),
+        0.,
+    ))
 
     # Update iptop to first level with condensation (dqa < 0), or keep conv.iptop if no condensation
     condensation_mask = dqa[1:] < 0

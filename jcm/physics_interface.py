@@ -202,6 +202,27 @@ class Physics:
         """
         return ()
 
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Largest numerically-stable model time step (minutes), or ``None``.
+
+        ``Model`` consults this when the user does not pass ``time_step`` and
+        the Model is building its own dycore, so grid-dependent explicit-
+        tendency stability limits (e.g. SPEEDY's surface drag in a thin
+        bottom sigma layer) yield a stable default automatically. ``None``
+        means "no physics-imposed limit" (the historical 30-minute default
+        applies). ``ComposablePhysics`` aggregates per-term limits.
+        """
+        return None
+
+    def required_dycore_fields(self):
+        """Names of dycore-supplied fields this physics needs each step.
+
+        See :meth:`jcm.dycore.base.DynamicalCore.physics_fields`.
+        Default is empty; ``ComposablePhysics`` aggregates per-term
+        declarations (``PhysicsTerm.requires_dycore_fields``).
+        """
+        return ()
+
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.
 

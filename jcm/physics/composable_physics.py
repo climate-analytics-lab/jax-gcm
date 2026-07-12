@@ -144,6 +144,35 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def required_dycore_fields(self) -> tuple[str, ...]:
+        """Union of per-term ``requires_dycore_fields``, minus any field an
+        upstream term already ``provides`` (a physics-side provider term
+        satisfies the requirement just as well as the dycore).
+        """
+        available: set[str] = set()
+        needed: list[str] = []
+        for term in self.terms:
+            for field in term.requires_dycore_fields:
+                if field not in available and field not in needed:
+                    needed.append(field)
+            available.update(term.provides)
+        return tuple(needed)
+
+    def stable_time_step_minutes(self, coords) -> float | None:
+        """Most restrictive per-term stable time step (minutes), or ``None``.
+
+        The minimum over every term's
+        :meth:`PhysicsTerm.stable_time_step_minutes`; terms without a
+        constraint return ``None`` and are ignored. ``None`` overall means no
+        term imposes a limit.
+        """
+        limits = [
+            limit for limit in (
+                term.stable_time_step_minutes(coords) for term in self.terms
+            ) if limit is not None
+        ]
+        return min(limits) if limits else None
+
     def compute_tendencies(
         self,
         state: PhysicsState,
@@ -250,6 +279,20 @@ class ComposablePhysics(nnx.Module, Physics):
         diagnostics: dict = {}
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
+
+        # Dycore-supplied fields arrive grid-shaped (…, nlon, nlat) from
+        # Model; terms on this path see the flattened (…, ncols) layout, so
+        # reshape them the same lon-major way the state was reshaped —
+        # otherwise a term mixes a (nlon, nlat) trigger with (ncols,) winds
+        # (wrong rank or silent mis-broadcast).
+        if "_dycore_fields" in diagnostics:
+            def _to_cols(x):
+                if (hasattr(x, "ndim") and x.ndim >= 2
+                        and x.shape[-2:] == (nlon, nlat)):
+                    return x.reshape(x.shape[:-2] + (ncols,))
+                return x
+            diagnostics["_dycore_fields"] = jax.tree_util.tree_map(
+                _to_cols, diagnostics["_dycore_fields"])
 
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
@@ -379,6 +422,7 @@ class ComposablePhysics(nnx.Module, Physics):
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_dt_seconds",
         "_band_config",
+        "_dycore_fields",
         "_forcing_2d",
         "_echam_params",
         "_echam_coords",

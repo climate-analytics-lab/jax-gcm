@@ -181,10 +181,20 @@ class MicrophysicsParameters:
 class MicrophysicsState(NamedTuple):
     """Microphysics state variables and diagnostics"""
     
-    # Precipitation fluxes (kg/m²/s)
-    rain_flux: jnp.ndarray      # Rain flux at each level
-    snow_flux: jnp.ndarray      # Snow flux at each level
-    
+    # Precipitation fluxes (kg/m²/s). ``rain_flux`` / ``snow_flux`` are
+    # the grid-mean fluxes LEAVING each layer (crossing its lower
+    # boundary) as the column sweep propagates precipitation downward:
+    # the bottom level equals the surface ``precip_rain`` /
+    # ``precip_snow`` by construction. ``snow_flux`` is the total frozen
+    # flux — snow plus the sedimenting cloud-ice flux (``zxiflux``) that
+    # ECHAM folds into surface snow at the bottom level. The per-layer
+    # PRODUCTION (before evaporation depletes the falling flux) is kept
+    # separately in ``rain_source`` / ``snow_source``.
+    rain_flux: jnp.ndarray      # Rain flux leaving each level
+    snow_flux: jnp.ndarray      # Snow(+falling-ice) flux leaving each level
+    rain_source: jnp.ndarray    # Per-layer rain production (kg/m²/s)
+    snow_source: jnp.ndarray    # Per-layer snow production (kg/m²/s)
+
     # In-cloud values
     qc_in_cloud: jnp.ndarray    # In-cloud liquid water (kg/kg)
     qi_in_cloud: jnp.ndarray    # In-cloud ice (kg/kg)
@@ -1084,7 +1094,17 @@ def cloud_microphysics_column_sweep(
         # (kg/kg over dt). Convert to a grid-mean rate (kg/kg/s) for
         # the public ``autoconv_rate`` diagnostic.
         autoconv_rate_diag = cf * zraut / dt
-        out = (dTdt, dqdt, dqcdt, dqidt, rain_source, snow_source, autoconv_rate_diag)
+        # Per-level flux profiles for downstream (COSP/CloudSat)
+        # diagnostics: the rain / frozen fluxes LEAVING this layer. The
+        # frozen flux adds the sedimenting cloud-ice carry ``zxiflux_out``
+        # so the profile is the total falling frozen water; at the bottom
+        # level ``zxiflux_out`` is 0 (the residual was already folded into
+        # ``zsfl`` above), so the bottom row equals the surface snow flux
+        # exactly.
+        out = (
+            dTdt, dqdt, dqcdt, dqidt, rain_source, snow_source,
+            autoconv_rate_diag, zrfl_out, zsfl_out + zxiflux_out,
+        )
         return (zrfl_out, zsfl_out, zclcpre_out, zxiflux_out), out
 
     is_bottom_level = jnp.arange(nlev) == (nlev - 1)
@@ -1099,7 +1119,8 @@ def cloud_microphysics_column_sweep(
         (jnp.array(0.0), jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
         level_inputs,
     )
-    dtedt, dqdt, dqcdt, dqidt, rain_flux, snow_flux, autoconv_rate = per_level_out
+    (dtedt, dqdt, dqcdt, dqidt, rain_source, snow_source, autoconv_rate,
+     rain_flux, snow_flux) = per_level_out
 
     tendencies = MicrophysicsTendencies(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
@@ -1119,6 +1140,7 @@ def cloud_microphysics_column_sweep(
     )
     state = MicrophysicsState(
         rain_flux=rain_flux, snow_flux=snow_flux,
+        rain_source=rain_source, snow_source=snow_source,
         qc_in_cloud=qc_in_cloud, qi_in_cloud=qi_in_cloud,
         autoconv_rate=autoconv_rate, accretion_rate=jnp.zeros(nlev),
         melting_rate=jnp.zeros(nlev), freezing_rate=jnp.zeros(nlev),
@@ -1268,6 +1290,12 @@ class Echam1MMicrophysics(PhysicsTerm):
         clouds = clouds.copy(
             precip_rain=micro_state.precip_rain,
             precip_snow=micro_state.precip_snow,
+            # Per-level precipitation flux profiles for satellite-simulator
+            # diagnostics (COSP/CloudSat). The vmap over columns puts the
+            # column axis first — transpose back to the (nlev, ncols)
+            # CloudData layout, same as the tendency fields above.
+            rain_flux=micro_state.rain_flux.T,
+            snow_flux=micro_state.snow_flux.T,
             droplet_number=cdnc_m3,
         )
 
