@@ -264,6 +264,20 @@ class ComposablePhysics(nnx.Module, Physics):
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
 
+        # Dycore-supplied fields arrive grid-shaped (…, nlon, nlat) from
+        # Model; terms on this path see the flattened (…, ncols) layout, so
+        # reshape them the same lon-major way the state was reshaped —
+        # otherwise a term mixes a (nlon, nlat) trigger with (ncols,) winds
+        # (wrong rank or silent mis-broadcast).
+        if "_dycore_fields" in diagnostics:
+            def _to_cols(x):
+                if (hasattr(x, "ndim") and x.ndim >= 2
+                        and x.shape[-2:] == (nlon, nlat)):
+                    return x.reshape(x.shape[:-2] + (ncols,))
+                return x
+            diagnostics["_dycore_fields"] = jax.tree_util.tree_map(
+                _to_cols, diagnostics["_dycore_fields"])
+
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
 

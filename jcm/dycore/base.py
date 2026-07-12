@@ -196,7 +196,10 @@ class DynamicalCore(abc.ABC):
         the same working dtype as ``physics_state``. The Model injects the
         dict into the physics diagnostics under ``"_dycore_fields"`` —
         re-supplied every step and stripped from the cross-step carry and
-        saved output, like ``"_dt_seconds"``.
+        saved output, like ``"_dt_seconds"``. Consumers must tolerate the
+        key's ABSENCE: ``Physics.get_empty_data``'s construction-time
+        structural probe runs the terms without injection (read via
+        ``diagnostics.get("_dycore_fields")`` and fall back).
         """
         return {}
 

@@ -153,6 +153,43 @@ class InjectionTest(unittest.TestCase):
             # The plumbing key itself must not leak into saved output.
             self.assertNotIn("_dycore_fields", preds.physics)
 
+    def test_column_vectorized_fields_are_flattened(self):
+        # Codex P1 on #568: with vectorize_columns=True the state terms see
+        # is (nlev, ncols) while the injected dycore fields arrived
+        # grid-shaped; ComposablePhysics must reshape them consistently.
+        # The checker term adds frontgf's source level to the (ncols,)
+        # surface pressure — a shape mismatch fails loudly at trace.
+        class _ShapeChecker(PhysicsTerm):
+            name: ClassVar[str] = "shape_checker"
+            category: ClassVar[str] = "test"
+            provides: ClassVar[tuple[str, ...]] = ("frontgf_plus_ps",)
+            requires_dycore_fields: ClassVar[tuple[str, ...]] = (
+                "frontogenesis",)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                # ``.get`` fallback: get_empty_data's construction-time
+                # probe runs terms WITHOUT dycore-field injection (part of
+                # the contract — consumers must tolerate absence).
+                fields = diagnostics.get("_dycore_fields", {})
+                frontgf = fields.get("frontogenesis",
+                                     jnp.zeros_like(state.temperature))
+                combined = frontgf[0] + state.normalized_surface_pressure
+                tend = PhysicsTendency.zeros(state.temperature.shape)
+                return tend, {**diagnostics, "frontgf_plus_ps": combined}
+
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0,
+                                compute_frontogenesis=True)
+        physics = ComposablePhysics(terms=[_ShapeChecker()],
+                                    vectorize_columns=True)
+        model = Model(dycore=dycore, physics=physics)
+        dt_days = 30.0 / (60.0 * 24.0)
+        preds = model.run(save_interval=2 * dt_days, total_time=2 * dt_days)
+        out = np.asarray(preds.physics["frontgf_plus_ps"])
+        self.assertTrue(np.isfinite(out).all())
+
     def test_frontal_gw_term_runs_end_to_end(self):
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
