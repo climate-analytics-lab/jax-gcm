@@ -206,6 +206,14 @@ def main():
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--resume", action="store_true",
                     help="restore from <prefix>.ckpt and continue")
+    ap.add_argument("--fresh-physics-carry", action="store_true",
+                    help="on resume, restore only the dycore state and "
+                         "rebuild the physics carry fresh — REQUIRED when "
+                         "the physics term list changed since the "
+                         "checkpoint (e.g. switching --gw-scheme), since "
+                         "the pickled carry's pytree structure no longer "
+                         "matches. Costs one radiation-interval respin of "
+                         "the sub-cycled caches")
     args = ap.parse_args()
 
     import jax
@@ -232,7 +240,10 @@ def main():
         # dataclass containers); flax/msgpack can't serialize the
         # tree_math structs in the physics carry.
         model._final_dycore_state = payload["dycore_state"]
-        model._final_physics_state = payload["physics_state"]
+        if args.fresh_physics_carry:
+            print("[resume] physics carry rebuilt fresh (term list changed)")
+        else:
+            model._final_physics_state = payload["physics_state"]
         day_done = payload["day_done"]
         print(f"[resume] restored checkpoint at day {day_done:.1f}")
 
