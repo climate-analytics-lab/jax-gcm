@@ -194,7 +194,7 @@ class Model:
                  time_step: float | None = None,
                  terrain: TerrainData = None,
                  physics: Physics = None,
-                 start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
+                 start_date: jdt.Datetime | None = None,
                  calendar: str = "365_day",
                  log_level=logging.CRITICAL) -> None:
         """Initialise the model.
@@ -248,7 +248,15 @@ class Model:
         """
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
-        self.start_date = start_date
+        # Default built HERE, not as a def-time default: a def-time
+        # ``jdt.to_datetime(...)`` freezes its array dtypes at import time,
+        # and a backend that enables jax_enable_x64 later (pySES does,
+        # process-wide) then mixes 32-bit datetime internals with 64-bit
+        # arithmetic inside the checkpointed scan — an MLIR verifier error
+        # under JAX >= 0.8 (ordering-dependent: only bites when jcm.model
+        # is imported before the x64 flag flips).
+        self.start_date = (start_date if start_date is not None
+                           else jdt.to_datetime('2000-01-01'))
 
         self.physics = physics if physics is not None else speedy_physics()
         time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
