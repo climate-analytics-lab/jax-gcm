@@ -57,7 +57,9 @@ def build(args):
         hypervis_scale=args.hypervis_scale,
         coupling=args.coupling,
         hypervis=args.hypervis,
+        compute_frontogenesis=(args.gw_scheme == "frontal"),
     )
+    kwargs.update(gw_scheme=args.gw_scheme)
     if abs(args.hines_rms - 1.0) > 1e-12:
         from jcm.physics.gravity_waves.hines import HinesParameters
         kwargs.update(hines=HinesParameters.default().replace(
@@ -156,6 +158,13 @@ def main():
                          "-1 restores pySES's CFL-derived count")
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
+    ap.add_argument("--gw-scheme", default="hines",
+                    choices=["hines", "frontal", "none"],
+                    help="non-orographic GW scheme: frontal = CAM's "
+                         "frontogenesis-triggered spectral drag (enables "
+                         "the dycore-side frontogenesis provider); the "
+                         "missing winter-stratosphere momentum sink behind "
+                         "the ne30 vortex blow-ups")
     ap.add_argument("--hines-rms", type=float, default=1.0,
                     help="Hines rms_launch_wind (m/s; documented typical "
                          "range 0.5-2, ECHAM default 1.0). The T63-tuned "

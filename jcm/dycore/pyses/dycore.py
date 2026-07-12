@@ -197,6 +197,7 @@ class PysesCamSEDycore(DynamicalCore):
         coupling: str = "lump_all",
         hypervis: str = "tensor",
         nu_div_factor: float = 2.5,
+        compute_frontogenesis: bool = False,
     ):
         """Build the SE grid, vertical grid, configs and boundary data."""
         self._be = require_pyses()
@@ -246,6 +247,15 @@ class PysesCamSEDycore(DynamicalCore):
         # truth shared with the physics), not pyses's own defaults — the
         # same bridge DinosaurDycore makes via physics_specs_from_constants.
         # epsilon = Rd/Rv is the molecular-weight ratio pyses expects.
+        # Frontogenesis provider (CAM pbuf pattern; see DynamicalCore
+        # .physics_fields). Off by default — it costs per-level GLL
+        # gradients + a DSS each step, which only the frontal GW term
+        # consumes. kappa/radius are frozen here from the same live
+        # constants snapshot the dynamics uses.
+        self.compute_frontogenesis = bool(compute_frontogenesis)
+        self._akap = float(constants.akap)
+        self._rearth = float(constants.rearth)
+
         self.physics_config = init_physics_config(
             self.model,
             Rgas=float(constants.rd),
@@ -360,6 +370,82 @@ class PysesCamSEDycore(DynamicalCore):
             raise ValueError(
                 f"coupling={coupling!r} not in {sorted(table)}")
         return table[coupling]
+
+    def physics_field_names(self) -> tuple[str, ...]:
+        """Declare the frontogenesis field when the provider is enabled."""
+        return ("frontogenesis",) if self.compute_frontogenesis else ()
+
+    def physics_fields(self, state, physics_state) -> dict:
+        """CAM-SE-faithful frontogenesis on the GLL grid, averaged to pg2.
+
+        Mirrors CAM's ``gravity_waves_sources.F90::compute_frontogenesis``:
+        per-level spherical gradients of (theta, u, v) with pySES's own
+        element-local ``horizontal_gradient``, the quadratic form
+        ``F = -grad(theta) . (grad(u_vec) grad(theta))``, a DSS to restore
+        C0 continuity (CAM applies its mass-matrix boundary exchange, which
+        doubles as the smoothing the ``frontgfc`` threshold was tuned
+        against), then the same GLL -> pg2 cell average the state takes.
+        Native float64 in, ``physics_dtype`` out (the physics seam
+        contract).
+        """
+        if not self.compute_frontogenesis:
+            return {}
+        from pyses.dynamical_cores.cam_se.thermodynamics import (
+            eval_sum_species,
+        )
+        from pyses.dynamical_cores.mass_coordinate import (
+            d_mass_to_surface_mass,
+        )
+
+        ms = state["model_state"]
+        dyn = ms["dynamics"]
+        u = dyn["horizontal_wind"][..., 0]          # (E, npt, npt, nlev)
+        v = dyn["horizontal_wind"][..., 1]
+
+        # theta at GLL from the dynamics' own moist column mass (same
+        # construction as ``to_physics_state``, pre-gather).
+        d_pressure = (eval_sum_species(ms["tracers"]["moisture_species"])
+                      * dyn["d_mass"])
+        ps = d_mass_to_surface_mass(d_pressure, self.v_grid)  # (E, npt, npt)
+        a_full = 0.5 * (self._a_boundaries_pa[:-1] + self._a_boundaries_pa[1:])
+        b_full = 0.5 * (self._b_boundaries[:-1] + self._b_boundaries[1:])
+        p_mid = a_full + b_full * ps[..., None]
+        theta = dyn["T"] * (self.p0 / p_mid) ** self._akap
+
+        frontgf = self._frontogenesis_from_gll(u, v, theta)
+        return {"frontogenesis": frontgf.astype(self._physics_dtype)}
+
+    def _frontogenesis_from_gll(self, u, v, theta):
+        """F = -grad(theta) . (grad(u_vec) grad(theta)) on GLL, to pg2.
+
+        Inputs are GLL-shaped ``(E, npt, npt, nlev)``; the return is the
+        physics-gridpoint field ``(nlev, 1, ncol)`` (native float64 —
+        callers cast). Factored out so tests can drive it with analytic
+        (u, v, theta) directly.
+        """
+        import jax
+
+        from pyses.operations_2d.operators import horizontal_gradient
+
+        def level_gradients(field):
+            # (E, npt, npt, nlev) -> (nlev, E, npt, npt, 2); component
+            # order (zonal, meridional), pySES's lon_lat vector convention.
+            per_level = jnp.moveaxis(field, -1, 0)
+            return jax.vmap(
+                lambda f: horizontal_gradient(f, self.h_grid, a=self._rearth)
+            )(per_level)
+
+        gt = level_gradients(theta)
+        gu = level_gradients(u)
+        gv = level_gradients(v)
+        tx, ty = gt[..., 0], gt[..., 1]
+        frontgf = -(tx * tx * gu[..., 0]
+                    + ty * ty * gv[..., 1]
+                    + tx * ty * (gu[..., 1] + gv[..., 0]))
+
+        frontgf = jnp.moveaxis(frontgf, 0, -1)       # (E, npt, npt, nlev)
+        frontgf = self.colmap.dss(frontgf)
+        return self.colmap.gather_3d(frontgf)
 
     def build_terrain(self, *, source_file: str | None = None, **kwargs) -> TerrainData:
         """Build :class:`TerrainData` on the physics columns (and cache GLL orography).
