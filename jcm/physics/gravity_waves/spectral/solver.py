@@ -56,6 +56,16 @@ Deviations from the Fortran (each is deliberate; see also
    with ``jnp.where`` using *safe operands inside* the ``where`` so that
    reverse-mode gradients cannot see a 0·inf. Callers must supply finite
    ``piln`` (floor the top interface pressure before taking the log).
+6. ``limit_tendency_sum`` (default True): the tndmax stability limiter
+   caps ``sum_l |gwut_l|`` rather than CAM's net ``|sum_l gwut_l|``, so
+   the frictional heating ``dttke`` is bounded by
+   ``max|u - c| * tndmax`` too. Identical to CAM whenever the per-wave
+   tendencies share one sign; pass ``False`` for the exact CAM limiter.
+   Rationale: on grids whose lid layer is only a few Pa thick (ECHAM
+   L47, p_top = 0) Lindzen saturation forces *every* wave to break in
+   the top layer, the two signs cancel in the net, and CAM's limiter
+   leaves the heating unbounded (123 K/day observed) — CAM never runs
+   this scheme with such a lid and has no heating bound of its own.
 """
 
 from __future__ import annotations
@@ -317,6 +327,7 @@ def gw_drag_prof(
     umcfac=0.5,
     satfac=2.0,
     tau_0_ubc: bool = False,
+    limit_tendency_sum: bool = True,
 ) -> GWDragResult:
     """Solve for the drag profile (gw_common ``gw_drag_prof``).
 
@@ -363,6 +374,24 @@ def gw_drag_prof(
         satfac: Saturation factor (CAM default 2).
         tau_0_ubc: Force tau = 0 at the top interface (static flag; CAM6
             non-WACCM default is False).
+        limit_tendency_sum: Static flag (default True). CAM's stability
+            limiter caps only the **net** tendency ``|sum_l gwut_l|`` at
+            ``tndmax``, so when waves on both sides of ``ubm`` break in
+            the same layer (guaranteed at a lid where ``rho -> 0`` drives
+            ``tausat -> 0`` for every wave), ``sum_l |gwut_l|`` — and with
+            it the frictional heating ``dttke = sum_l |u-c||gwut_l|`` —
+            is unbounded even though the wind tendency is capped (123
+            K/day observed in 2-Pa-thick top layers of the ECHAM L47
+            grid; CAM never runs this scheme with a lid layer thinner
+            than O(100 Pa) and CESM2.2 has no heating bound at all).
+            With this flag the same limiter instead caps
+            ``sum_l |gwut_l|`` at ``tndmax``, which (a) is identical to
+            CAM whenever the per-wave tendencies share one sign (the
+            common single-critical-level case, where the sum equals the
+            net), (b) still caps the net (``|sum| <= sum |.|``), and (c)
+            bounds the heating by ``max_l |u - c| * tndmax`` — the
+            tndmax-consistent heating bound. Set False for the exact CAM
+            behaviour (documented deviation 13).
 
     Returns:
         :class:`GWDragResult`.
@@ -467,11 +496,18 @@ def gw_drag_prof(
         gwut_l = jnp.where(active, jnp.abs(ubtl) * sgn, 0.0)
         ubt = jnp.sum(gwut_l, axis=0)                          # (*h)
 
-        # Second limiter: |sum over waves| <= tndmax. The safe operand
-        # (1.0) sits inside the where so the masked division can't emit
-        # inf into the gradient.
-        over = jnp.abs(ubt) > tndmax
-        ratio = jnp.where(over, tndmax / jnp.where(over, jnp.abs(ubt), 1.0), 1.0)
+        # Second limiter (CAM: |sum over waves| <= tndmax). With
+        # limit_tendency_sum the cap applies to sum_l |gwut_l| instead,
+        # bounding the frictional heating as well (see the docstring) —
+        # the two are identical whenever the per-wave tendencies share a
+        # sign. The safe operand (1.0) sits inside the where so the
+        # masked division can't emit inf into the gradient.
+        if limit_tendency_sum:  # static flag — Python branch is trace-safe
+            lim = jnp.sum(jnp.abs(gwut_l), axis=0)             # >= |ubt|
+        else:
+            lim = jnp.abs(ubt)
+        over = lim > tndmax
+        ratio = jnp.where(over, tndmax / jnp.where(over, lim, 1.0), 1.0)
         ubt = ratio * ubt
         gwut_l = ratio * gwut_l
         # Protection on SMALL gwut to prevent floating point issues.

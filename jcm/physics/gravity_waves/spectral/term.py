@@ -90,7 +90,9 @@ class FrontalGravityWaveDrag(PhysicsTerm):
     name: ClassVar[str] = "frontal_gravity_wave_drag"
     category: ClassVar[str] = "gravity_waves"
     requires: ClassVar[tuple[str, ...]] = ()
-    provides: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = (
+        "gw_frontal_dudt", "gw_frontal_dvdt", "gw_frontal_dtdt",
+    )
     # Composing this term into a Model requires a frontogenesis source:
     # either the dycore provider (DinosaurDycore(compute_frontogenesis=
     # True)) or an upstream term that ``provides`` the field. Model
@@ -199,6 +201,7 @@ class FrontalGravityWaveDrag(PhysicsTerm):
             umcfac=params.umcfac,
             satfac=params.satfac,
             tau_0_ubc=params.tau_0_ubc,
+            limit_tendency_sum=params.limit_tendency_sum,
         )
         utgw, vtgw, ttgw = result.utgw, result.vtgw, result.ttgw
 
@@ -214,12 +217,22 @@ class FrontalGravityWaveDrag(PhysicsTerm):
                                utgw, vtgw, ttgw)
             ttgw = energy_fixer(ksrc, p_half, de, ttgw)
 
+        dtdt = ttgw / c.cpd
         tendency = PhysicsTendency(
             u_wind=utgw,
             v_wind=vtgw,
             # ttgw is a dry-static-energy tendency [J/kg/s]; CAM converts
             # with 1/cpair for output, and our prognostic is temperature.
-            temperature=ttgw / c.cpd,
+            temperature=dtdt,
             specific_humidity=jnp.zeros_like(state.specific_humidity),
         )
+        # Publish the applied tendencies as user-facing diagnostics
+        # (CAM's UTGW_CM / VTGW_CM / TTGW history fields) so runs can see
+        # the frontal drag in the output stream.
+        diagnostics = {
+            **diagnostics,
+            "gw_frontal_dudt": utgw,     # m/s^2
+            "gw_frontal_dvdt": vtgw,     # m/s^2
+            "gw_frontal_dtdt": dtdt,     # K/s
+        }
         return tendency, diagnostics

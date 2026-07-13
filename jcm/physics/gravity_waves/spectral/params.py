@@ -79,6 +79,14 @@ class FrontalGWParameters:
             (static; CAM: 600 hPa).
         tau_0_ubc: Enforce tau = 0 at the model-top interface (static;
             CAM6 non-WACCM default False).
+        limit_tendency_sum: Cap ``sum_l |gwut_l|`` (not just the net) at
+            ``tndmax`` so the frictional heating is bounded by
+            ``max|u - c| * tndmax`` (static; default True). Identical to
+            CAM's limiter whenever the per-wave tendencies share one
+            sign; False restores the exact CAM limiter, which leaves the
+            heating unbounded when every wave breaks inside a
+            few-Pa-thick lid layer (123 K/day observed on the ECHAM L47
+            grid). See solver module deviation 6.
         apply_fixers: Apply the momentum and energy fixers below the
             source level (static; CAM's ``use_gw_front`` driver always
             does — disable only for solver-level debugging).
@@ -112,6 +120,7 @@ class FrontalGWParameters:
     source_pressure: float = struct.field(pytree_node=False, default=50000.0)
     front_pressure: float = struct.field(pytree_node=False, default=60000.0)
     tau_0_ubc: bool = struct.field(pytree_node=False, default=False)
+    limit_tendency_sum: bool = struct.field(pytree_node=False, default=True)
     apply_fixers: bool = struct.field(pytree_node=False, default=True)
     fallback_frontogenesis: float = struct.field(
         pytree_node=False, default=0.0)
