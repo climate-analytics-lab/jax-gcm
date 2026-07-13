@@ -276,11 +276,26 @@ def echam_physics(
             FrontalGravityWaveDrag,
         )
         nonoro_gw_terms = [FrontalGravityWaveDrag()]
+    elif gw_scheme == "both":
+        # Hines carries the broad-spectrum background (the role CAM fills
+        # with its convective + ridge sources, which are not ported);
+        # frontal adds the storm-track/vortex-edge deposition. Replacing
+        # Hines with frontal-only under-drags the subtropical jet (+15-25
+        # m/s by day 60 in the v4 ne30 year, blowing up at the NH spring
+        # transition) — the frontal source only launches where fronts
+        # exceed frontgfc. Some overlap double-counting near strong fronts
+        # is accepted; retune taubgnd/rms_launch_wind jointly if it shows.
+        from jcm.physics.gravity_waves.spectral.term import (
+            FrontalGravityWaveDrag,
+        )
+        nonoro_gw_terms = [HinesGwd(params=hines_p),
+                           FrontalGravityWaveDrag()]
     elif gw_scheme == "none":
         nonoro_gw_terms = []
     else:
         raise ValueError(
-            f"gw_scheme={gw_scheme!r} not in ('hines', 'frontal', 'none')")
+            f"gw_scheme={gw_scheme!r} not in "
+            "('hines', 'frontal', 'both', 'none')")
 
     cosp_terms: list[PhysicsTerm] = []
     if enable_cosp:

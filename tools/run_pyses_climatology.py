@@ -159,7 +159,7 @@ def main():
     ap.add_argument("--t-sponge-levels", type=int, default=8)
     ap.add_argument("--t-sponge-hours", type=float, default=6.0)
     ap.add_argument("--gw-scheme", default="hines",
-                    choices=["hines", "frontal", "none"],
+                    choices=["hines", "frontal", "both", "none"],
                     help="non-orographic GW scheme: frontal = CAM's "
                          "frontogenesis-triggered spectral drag (enables "
                          "the dycore-side frontogenesis provider); the "
