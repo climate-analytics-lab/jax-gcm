@@ -158,5 +158,111 @@ class ActiveWithProviderTest(unittest.TestCase):
         self.assertLess(np.abs(de).max(), 1e-3 * max(scale, 1e-30) + 1e-8)
 
 
+class Ne30HeatingRegressionTest(unittest.TestCase):
+    """Real winter-jet columns that blew the ne30 v5 run up (123 K/day).
+
+    Fixture ``jcm/data/test/gw_frontal_repro_cols.npz`` holds the eight
+    worst heating columns (ECHAM L47 hybrid grid, forced launch) from the
+    run's last clean state. On that grid the lid layer is ~2 Pa thick and
+    ``rho -> 0`` makes every wave saturate there; waves on both sides of
+    ``ubm`` cancel in the net, so CAM's net-only tndmax limiter left the
+    frictional heating unbounded (dttke up to 123 K/day) while |du/dt|
+    sat exactly at tndmax. The production default
+    ``limit_tendency_sum=True`` (solver deviation 6) must bound the
+    heating; ``False`` must reproduce the blowup (guarding the exact-CAM
+    path's documented behaviour).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib import resources
+        from types import SimpleNamespace
+
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
+        path = resources.files("jcm.data.test") / "gw_frontal_repro_cols.npz"
+        with resources.as_file(path) as f:
+            d = np.load(f)
+            cls.u, cls.v = d["u"], d["v"]
+            cls.T, cls.q, cls.ps = d["T"], d["q"], d["ps"]
+        cls.coords = SimpleNamespace(vertical=get_echam_levels(47))
+
+    def _run(self, params=None):
+        term = FrontalGravityWaveDrag(params)
+        term.cache_coords(self.coords)
+        ncols = self.ps.shape[0]
+        state = PhysicsState.zeros(
+            self.T.shape,
+            u_wind=jnp.asarray(self.u), v_wind=jnp.asarray(self.v),
+            temperature=jnp.asarray(self.T),
+            specific_humidity=jnp.asarray(self.q),
+            normalized_surface_pressure=jnp.asarray(self.ps) / c.p0,
+        )
+        diags = {"_dt_seconds": 900.0,
+                 "frontogenesis": jnp.full(self.T.shape, 1.0e-12)}
+        return term(state, diags, ForcingData.zeros((ncols,)), None)
+
+    def test_heating_bounded_with_default_params(self):
+        tend, _ = self._run(FrontalGWParameters())
+        dT_day = np.abs(np.asarray(tend.temperature)) * 86400.0
+        du_day = np.hypot(np.asarray(tend.u_wind),
+                          np.asarray(tend.v_wind)) * 86400.0
+        self.assertTrue(np.all(np.isfinite(dT_day)))
+        self.assertTrue(np.all(np.isfinite(du_day)))
+        # tndmax-consistent heating bound (was 123 K/day before the fix).
+        self.assertLess(dT_day.max(), 30.0)
+        # Momentum limiter untouched (fixer adds a tiny uniform increment
+        # below the source, hence the small headroom).
+        self.assertLessEqual(du_day.max(), 400.0 * (1.0 + 1e-3))
+
+    def test_exact_cam_limiter_reproduces_blowup(self):
+        # The exact-CAM path (limit_tendency_sum=False) is kept available
+        # and must still show the unbounded-heating behaviour this
+        # fixture was built from — if this starts passing the 30 K/day
+        # bound, the fixture no longer exercises the cancellation regime.
+        tend, _ = self._run(FrontalGWParameters(limit_tendency_sum=False))
+        dT_day = np.abs(np.asarray(tend.temperature)) * 86400.0
+        self.assertGreater(dT_day.max(), 80.0)
+
+    def test_publishes_tendency_diagnostics(self):
+        tend, diag = self._run(FrontalGWParameters())
+        for key in ("gw_frontal_dudt", "gw_frontal_dvdt", "gw_frontal_dtdt"):
+            self.assertIn(key, diag)
+        np.testing.assert_array_equal(np.asarray(diag["gw_frontal_dudt"]),
+                                      np.asarray(tend.u_wind))
+        np.testing.assert_array_equal(np.asarray(diag["gw_frontal_dvdt"]),
+                                      np.asarray(tend.v_wind))
+        np.testing.assert_array_equal(np.asarray(diag["gw_frontal_dtdt"]),
+                                      np.asarray(tend.temperature))
+
+    def test_gradient_finite_on_real_columns(self):
+        term = FrontalGravityWaveDrag()
+        term.cache_coords(self.coords)
+        state = PhysicsState.zeros(
+            self.T.shape,
+            u_wind=jnp.asarray(self.u), v_wind=jnp.asarray(self.v),
+            temperature=jnp.asarray(self.T),
+            specific_humidity=jnp.asarray(self.q),
+            normalized_surface_pressure=jnp.asarray(self.ps) / c.p0,
+        )
+        diags = {"_dt_seconds": 900.0,
+                 "frontogenesis": jnp.full(self.T.shape, 1.0e-12)}
+        forcing = ForcingData.zeros((self.ps.shape[0],))
+
+        def loss(taubgnd):
+            t = FrontalGravityWaveDrag(FrontalGWParameters(taubgnd=taubgnd))
+            t._a_half = term._a_half
+            t._b_half = term._b_half
+            t._ksrc = term._ksrc
+            t._kfront = term._kfront
+            t._alpha = term._alpha
+            tend, _ = t(state, diags, forcing, None)
+            return (jnp.sum(tend.temperature**2)
+                    + jnp.sum(tend.u_wind**2)) * 1e8
+
+        g = jax.grad(loss)(jnp.asarray(1.25e-3))
+        self.assertTrue(bool(jnp.isfinite(g)))
+
+
 if __name__ == "__main__":
     unittest.main()

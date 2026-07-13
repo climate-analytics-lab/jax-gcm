@@ -77,6 +77,27 @@ Solver (`gw_common.F90`):
 5. `kvtt` (molecular thermal diffusivity) defaults to zero, CAM's value
    whenever WACCM's `do_molec_diff` is off; the `dback = 0.05` background
    diffusivity is retained.
+5b. **Heating-bounded stability limiter** (`limit_tendency_sum`, default
+   True). CAM's tndmax limiter caps only the **net** per-level tendency
+   `|Σ_l gwut_l|`; the frictional heating `dttke = Σ_l |u−c||gwut_l|`
+   has **no bound anywhere in CESM2.2** (`vramp`/`gw_top_taper` only
+   activates above 0.6 Pa, i.e. WACCM-X grids, and is off by default).
+   On grids whose lid layer is a few Pa thick with p_top = 0 (ECHAM
+   L47), `rho → 0` drives `tausat → 0` for *every* wave, the whole
+   surviving flux deposits in the lid layer, the two spectrum halves
+   cancel in the net (observed: net 353 vs Σ|gwut| 4136 m/s/day), and
+   the heating reached 123 K/day in real ne30 winter-jet columns —
+   blowing up the run while |du/dt| sat innocently at tndmax. CAM never
+   operates this scheme with a lid layer thinner than O(100 Pa). The
+   port's default therefore applies the *same* limiter to
+   `Σ_l |gwut_l|` instead: identical to CAM whenever deposition is
+   one-signed (the usual single-critical-level case), still caps the
+   net, and bounds the heating by `max|u−c|·tndmax` (~tens of K/day
+   worst case; 22 K/day on the offending columns). The stress
+   re-adjustment machinery is untouched, so the momentum/flux
+   bookkeeping stays exactly conservative. `limit_tendency_sum=False`
+   restores the exact CAM limiter (validated against the NumPy
+   reference in both modes).
 6. Degenerate-state gradient guards: every masked division/sqrt keeps its
    safe operand *inside* `jnp.where` (no 0·inf in reverse mode). Callers
    must pass finite `piln`; the term floors the top interface pressure at
@@ -96,7 +117,11 @@ Term wiring (`gw_drag.F90`):
 9. No polar taper (`gw_polar_taper`; off for the SE dycore this port
    follows) — `effgw` is a spatially uniform differentiable scalar.
 10. The frontogenesis *angle* field (`FRONTGA`) and the history/diagnostic
-    output plumbing (`gw_spec_outflds` etc.) are not ported.
+    output plumbing (`gw_spec_outflds` etc.) are not ported. Instead the
+    term publishes its applied tendencies as user-facing diagnostics —
+    `gw_frontal_dudt` / `gw_frontal_dvdt` [m/s²] and `gw_frontal_dtdt`
+    [K/s] (the analogue of CAM's `UTGW_CM`/`VTGW_CM`/`TTGW` history
+    fields) — so runs can see the frontal drag in the output stream.
 11. CAM adds `qtgw`/`egwdffi` into the host model's diffusion; with (2)
     there is nothing to add. The energy fixer receives `de` computed from
     this term's own tendencies only (CAM passes the accumulated `ptend`,

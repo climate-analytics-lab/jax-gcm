@@ -60,12 +60,15 @@ def ref_gw_prof(t, p_ifc, p_mid):
 
 def ref_gw_drag_prof(ngwv, kwv, effkwv, ksrc, dt, t, p_ifc, piln, rhoi, ni,
                      ubm, ubi, xv, yv, effgw, cc, tau_src, alpha,
-                     tndmax, umcfac, satfac):
+                     tndmax, umcfac, satfac, limit_sum=False):
     """Loop transliteration of gw_common.F90::gw_drag_prof (single column).
 
     lapply_effgw=.true. path, no vertical diffusion, kvtt=0,
     tend_level == src_level. Returns the pre-down-scan stress profile too
-    (for the saturation-monotonicity check).
+    (for the saturation-monotonicity check). ``limit_sum=False`` is the
+    exact CAM limiter (cap the net tendency); ``limit_sum=True`` is the
+    port's production default (cap the absolute sum, which also bounds
+    the frictional heating — solver deviation 6).
     """
     nlev = t.size
     nspec = 2 * ngwv + 1
@@ -109,8 +112,9 @@ def ref_gw_drag_prof(ngwv, kwv, effkwv, ksrc, dt, t, p_ifc, piln, rhoi, ni,
             # sign(ubtl, c - ubm)
             gwut[k, l_] = abs(ubtl) if cc[l_] - ubm[k] >= 0.0 else -abs(ubtl)
             ubt += gwut[k, l_]
-        if abs(ubt) > tndmax:
-            ratio = tndmax / abs(ubt)
+        lim = max(abs(ubt), np.abs(gwut[k]).sum()) if limit_sum else abs(ubt)
+        if lim > tndmax:
+            ratio = tndmax / lim
             ubt *= ratio
         else:
             ratio = 1.0
@@ -205,41 +209,47 @@ class GwDragProfReferenceTest(unittest.TestCase):
                 cc = DC * np.arange(-NGWV, NGWV + 1) + mag
 
                 rhoi_r, nm_r, ni_r = ref_gw_prof(t, p_ifc, p_mid)
-                utgw_r, vtgw_r, dttke_r, gwut_r, tau_r, tau_up_r = (
-                    ref_gw_drag_prof(
-                        NGWV, kwv, effkwv, KSRC, DT, t, p_ifc, piln,
-                        rhoi_r, ni_r, ubm, ubi, xv, yv, effgw, cc,
-                        src_tau, alpha, TNDMAX, UMCFAC, SATFAC,
-                    )
-                )
-
                 rhoi_j, nm_j, ni_j = gw_prof(
                     jnp.asarray(t), jnp.asarray(p_ifc), jnp.asarray(p_mid))
                 np.testing.assert_allclose(rhoi_j, rhoi_r, rtol=1e-10)
                 np.testing.assert_allclose(nm_j, nm_r, rtol=1e-10)
                 np.testing.assert_allclose(ni_j, ni_r, rtol=1e-10)
 
-                result = gw_drag_prof(
-                    band, KSRC, DT,
-                    jnp.asarray(t), jnp.asarray(p_ifc), jnp.asarray(piln),
-                    rhoi_j, ni_j,
-                    jnp.asarray(ubm), jnp.asarray(ubi),
-                    jnp.asarray(xv), jnp.asarray(yv),
-                    effgw, jnp.asarray(cc), jnp.asarray(src_tau),
-                    jnp.asarray(alpha),
-                    tndmax=TNDMAX, umcfac=UMCFAC, satfac=SATFAC,
-                )
-                msg = f"column {col}"
-                np.testing.assert_allclose(
-                    result.utgw, utgw_r, rtol=1e-5, atol=1e-14, err_msg=msg)
-                np.testing.assert_allclose(
-                    result.vtgw, vtgw_r, rtol=1e-5, atol=1e-14, err_msg=msg)
-                np.testing.assert_allclose(
-                    result.ttgw, dttke_r, rtol=1e-5, atol=1e-14, err_msg=msg)
-                np.testing.assert_allclose(
-                    result.gwut, gwut_r, rtol=1e-5, atol=1e-14, err_msg=msg)
-                np.testing.assert_allclose(
-                    result.tau, tau_r, rtol=1e-5, atol=1e-14, err_msg=msg)
+                # Validate both limiter modes: exact CAM (net cap,
+                # limit_sum=False) and the production heating-bounded
+                # variant (absolute-sum cap, limit_sum=True).
+                for limit_sum in (False, True):
+                    utgw_r, vtgw_r, dttke_r, gwut_r, tau_r, tau_up_r = (
+                        ref_gw_drag_prof(
+                            NGWV, kwv, effkwv, KSRC, DT, t, p_ifc, piln,
+                            rhoi_r, ni_r, ubm, ubi, xv, yv, effgw, cc,
+                            src_tau, alpha, TNDMAX, UMCFAC, SATFAC,
+                            limit_sum=limit_sum,
+                        )
+                    )
+
+                    result = gw_drag_prof(
+                        band, KSRC, DT,
+                        jnp.asarray(t), jnp.asarray(p_ifc), jnp.asarray(piln),
+                        rhoi_j, ni_j,
+                        jnp.asarray(ubm), jnp.asarray(ubi),
+                        jnp.asarray(xv), jnp.asarray(yv),
+                        effgw, jnp.asarray(cc), jnp.asarray(src_tau),
+                        jnp.asarray(alpha),
+                        tndmax=TNDMAX, umcfac=UMCFAC, satfac=SATFAC,
+                        limit_tendency_sum=limit_sum,
+                    )
+                    msg = f"column {col}, limit_sum={limit_sum}"
+                    np.testing.assert_allclose(
+                        result.utgw, utgw_r, rtol=1e-5, atol=1e-14, err_msg=msg)
+                    np.testing.assert_allclose(
+                        result.vtgw, vtgw_r, rtol=1e-5, atol=1e-14, err_msg=msg)
+                    np.testing.assert_allclose(
+                        result.ttgw, dttke_r, rtol=1e-5, atol=1e-14, err_msg=msg)
+                    np.testing.assert_allclose(
+                        result.gwut, gwut_r, rtol=1e-5, atol=1e-14, err_msg=msg)
+                    np.testing.assert_allclose(
+                        result.tau, tau_r, rtol=1e-5, atol=1e-14, err_msg=msg)
 
                 # Saturation monotonicity of the pre-adjustment stress:
                 # above the source, tau[k] = min(damped tau[k+1], tausat)
