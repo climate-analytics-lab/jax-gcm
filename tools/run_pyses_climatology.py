@@ -57,7 +57,7 @@ def build(args):
         hypervis_scale=args.hypervis_scale,
         coupling=args.coupling,
         hypervis=args.hypervis,
-        compute_frontogenesis=(args.gw_scheme == "frontal"),
+        compute_frontogenesis=(args.gw_scheme in ("frontal", "both")),
     )
     kwargs.update(gw_scheme=args.gw_scheme)
     if abs(args.hines_rms - 1.0) > 1e-12:
