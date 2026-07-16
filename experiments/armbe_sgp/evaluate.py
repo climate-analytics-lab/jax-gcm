@@ -19,26 +19,36 @@ Units and indexing, both taken from the model rather than assumed:
   against sigma*T^4 = 452.9 for the model's own 298.95 K surface, i.e. an
   emissivity of 0.98.
 
-READ THIS ABOUT PRECIPITATION
------------------------------
-Precip is reported below but is **not a fair score in diagnostic mode**, and the
-number will look terrible. This is structural, not a bug.
+OPEN QUESTION: PRECIPITATION
+----------------------------
+Treat the precip row below as unexplained, not as a score. On the synthetic
+fixture the model rains ~12 mm/hr continuously against observations that are wet
+4% of the time. Facts, as measured:
 
-We re-impose the observed profile at every step, which discards the stabilizing
-tendency convection just produced. The column's CAPE is restored every hour, so
-the convection scheme fires at full strength indefinitely instead of raining
-itself out and shutting off. Measured on the synthetic fixture: convection fired
-on 168 of 168 steps (100%), essentially pinned at ~12.8 mm/hr, against
-observations that were wet 4% of the time.
+* Convection fired on 168 of 168 steps (100%).
+* The rate barely moved: 10.3-12.8 mm/hr, std 0.73.
+* The fixture's own convective instability (surface theta_e minus saturated
+  theta_e at 500 hPa) varied a lot over the same period: -1.3 to +26.9 K,
+  unstable in 94% of hours.
 
-Radiation and the surface fluxes are much less exposed to this — they are close
-to instantaneous functions of the prescribed state. Precip is the field that
-diagnostic mode structurally breaks.
+A rate that is flat while instability swings by ~20x is not the scheme simply
+tracking CAPE. Candidate explanations, none of them verified: the mass-flux
+closure saturating against the fixture's very moist surface layer (~19 g/kg at
+all times); the static surface forcing (see run_scm.py); diagnostic mode
+discarding convection's stabilizing tendency each step so CAPE is never consumed;
+or the fixture itself being unphysical. Note the fixture is unstable in 94% of
+hours by construction, which real ARMBE soundings will not be — so some of this
+gap is certainly an artifact of the fixture and not of the method.
 
-To score precip properly, run the column prognostically with nudging:
+Do not resolve this on synthetic data; it cannot settle it. Revisit when real
+ARMBE profiles are in hand, and check whether precip becomes intermittent and
+whether the rate starts tracking instability.
+
+If precip does need the convective feedback to be scored fairly, the SCM supports
+running the column prognostically with nudging:
 ``SingleColumnModel(..., relaxation_timescales={"temperature": tau,
-"specific_humidity": tau})`` lets convection actually stabilize the column while
-staying tied to the observations.
+"specific_humidity": tau})`` — the column evolves under its own physics (so
+convection can stabilize it) while staying tied to the observations.
 """
 
 from __future__ import annotations
@@ -141,14 +151,15 @@ def main(argv=None) -> int:
     print("-" * len(hdr))
     for label, s in rows:
         corr = f"{s['corr']:8.2f}" if np.isfinite(s["corr"]) else f"{'n/a':>8s}"
-        flag = "  <- not a fair score, see docstring" if "precip" in label else ""
+        flag = "  <- unexplained, see docstring" if "precip" in label else ""
         print(f"{label:24s}{s['obs_mean']:10.3f}{s['mod_mean']:10.3f}"
               f"{s['bias']:10.3f}{s['rmse']:10.3f}{corr}{flag}")
 
-    print("\nnote: precip is expected to be badly overestimated here — diagnostic "
-          "mode\n      re-imposes the profile each step, so convection never "
-          "stabilizes the\n      column and never shuts off. Use "
-          "relaxation_timescales to score precip.")
+    print("\nnote: the model rains continuously here and the cause is not yet "
+          "established.\n      Partly the fixture (unstable 94% of hours by "
+          "construction), but the rate is\n      also flat while instability "
+          "swings ~20x, which that alone doesn't explain.\n      See the module "
+          "docstring. Synthetic data can't settle it — recheck on real ARMBE.")
 
     if args.plot:
         import matplotlib
