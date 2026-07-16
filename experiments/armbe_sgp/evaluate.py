@@ -11,13 +11,25 @@ hourly irradiance would be comparing a flat line to a day/night swing. Daily
 means are the honest resolution for this model. (ECHAM's radiation uses a real
 cos(zenith) and would support an hourly comparison.)
 
-Units and indexing, both taken from the model rather than assumed:
+Units and indexing:
 * ``jcm/physics/speedy/units_table.csv`` gives precip and evaporation in g/m²/s
   and the radiative/heat fluxes in W/m².
-* Surface-flux fields carry a trailing tile axis of length 3. At a land point
-  (``fmask=1``) only **tile 1** is non-zero — verified: ``rlus[1]`` = 443.8 W/m²
-  against sigma*T^4 = 452.9 for the model's own 298.95 K surface, i.e. an
-  emissivity of 0.98.
+* Surface-flux fields carry a trailing tile axis of length 3. **Tile 0 is land,
+  tile 1 is sea** — from ``speedy_surface_flux.py:264``, which blends them as
+  ``var[:,:,1] + fmask*(var[:,:,0] - var[:,:,1])``, so ``fmask`` is the *land*
+  fraction and selects tile 0 as fmask -> 1.
+
+  Getting this wrong is quiet and expensive. I originally read tile 1 as land and
+  "confirmed" it because ``rlus[1]`` = 443.8 matched sigma*T^4 for the surface
+  temperature. That check proves nothing — Stefan-Boltzmann holds for *any*
+  surface, so it can't distinguish tiles. The real tell is that tile 1 was frozen
+  (std 1e-4) while the land tile tracks the surface temperature (std 18).
+
+  Related trap in ``run_scm.py``: ``TerrainData.single_column`` defaults to
+  ``lfluxland=False``, and the whole land-flux branch sits behind
+  ``jax.lax.cond(lfluxland, land_fluxes, pass_fn)`` (line 228). With
+  ``fmask=1`` and ``lfluxland=False`` you select the land tile *and* never
+  compute it — the atmosphere silently sees zero surface fluxes.
 
 OPEN QUESTION: PRECIPITATION
 ----------------------------
@@ -58,7 +70,7 @@ from pathlib import Path
 
 import numpy as np
 
-LAND_TILE = 1           # see module docstring
+LAND_TILE = 0           # speedy_surface_flux.py:264 -- index 0 is land, 1 is sea
 LATENT_HEAT_VAPORIZATION = 2.5e6      # J/kg
 G_PER_M2_PER_S_TO_MM_PER_HR = 3.6     # 1 g/m²/s = 1e-3 kg/m²/s = 1e-3 mm/s
 

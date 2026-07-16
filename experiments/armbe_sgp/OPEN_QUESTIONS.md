@@ -1,11 +1,41 @@
 # Open questions — ARMBE single-column experiment
 
-Things I found but couldn't settle. Written 2026-07-16, before any real ARM data
-existed, so read every number below as "measured on a synthetic fixture I made
-up." That's a big caveat and it applies to all of it.
+Things I found. Written 2026-07-16, before any real ARM data existed.
 
 Related: `../../SCM_FORCING_PATCH_NOTE.md` at the repo root covers the patch I
 made to `jcm/single_column_model.py` and what's still unfinished there.
+
+## Triage — read this first
+
+Mitchell asked the right question: is any of this real, or is it all just the
+synthetic fixture? Answer: mostly fixture, but two things survive. Sorted by
+whether they depend on the data at all.
+
+**Real, provable from code — nothing to do with the fixture:**
+
+- The season bug, already fixed. `forcing.select` was never called so `tyear`
+  stayed 0 and every run used January insolation. See the patch note.
+- SPEEDY has no diurnal cycle. `speedy_shortwave.py:256` reads `tyear` only.
+- **Two setup bugs in `run_scm.py`, now fixed** (item 3): `lfluxland` defaulted
+  to False so land fluxes were never computed while `fmask=1` selected exactly
+  that tile — the atmosphere saw zero surface fluxes, silently. And I had the
+  tile index backwards: land is tile **0**, not 1.
+- **`rlds` is nearly insensitive to water vapour** — item 2. Demonstrated by a
+  humidity sweep, no fixture involved. **This is the only unexplained model
+  finding still standing**, and the surface-flux fixes above didn't move it
+  (still 195.8).
+- Variable names are still guesses (item 5). Patch has no tests yet.
+
+**Fixture artifacts — don't chase these:**
+
+- Constant rain (item 1). The fixture is convectively unstable in 94% of hours
+  *by construction*. Real soundings won't be.
+- Flat lines day to day (item 3b). Every hourly profile comes from the same
+  formula with only a diurnal temperature cycle and small noise, so day to day
+  the atmosphere barely changes. A flat model response is arithmetic, not a
+  finding. I over-read this one.
+- Every bias/RMSE number (item 4). The obs are generated independently of the
+  profiles.
 
 ---
 
@@ -53,39 +83,98 @@ staying tied to the obs.
 
 ---
 
-## 2. Downward longwave at the surface looks low
+## 2. REAL: downward longwave barely responds to water vapour
 
-`rlds` = 196 W/m². For a column with a 299 K surface and ~19 g/kg of water vapour
-in the boundary layer I'd expect something like 350–400.
+This is the one genuine model finding in this doc. It does not involve the
+fixture.
 
-Cross-check: net LW at the surface comes out at 443.8 − 195.8 = 248 W/m². Real
-net LW is more like 50–100. So it's not just that I'm misreading the field —
-the number really is out of range.
+**The test.** Hand-built columns, surface air at 300 K, sweeping surface specific
+humidity across a 30x range:
 
-Could be the fixture (my profile is very cold aloft — I capped it at 215 K).
-Could be SPEEDY's longwave being simplified — it's a 4-band scheme. Could be
-radiation sub-stepping: the SW term carries `compute_shortwave` and `step` slots,
-so radiation may not run every step, and `single_column_model.py` references
-issue #470 about that carry's step counter being off by one under `nstrad > 1`.
-Haven't checked any of these.
+| q_sfc | rlds |
+|---|---|
+| 1 g/kg (desert) | 190.0 W/m² |
+| 5 | 191.9 |
+| 10 | 194.2 |
+| 19 | 200.8 |
+| 30 g/kg (tropical) | 211.5 |
 
-Checkable against SPEEDY's radiation code without real data, if it's worth the
-time.
+**Why that's wrong.** Downward LW at the surface is dominated by emission from
+near-surface water vapour. Going desert -> tropical should swing it roughly
+250 -> 450 W/m². Here 30x the vapour buys 11%. The absolute value is also low:
+~196 for a warm moist column where ~400 is expected. Net LW at the surface comes
+out at 443.8 − 195.8 = 248 W/m² against a realistic 50–100.
+
+**Ruled out:**
+
+- Not the fixture — the humidities above were chosen directly.
+- Not spin-up or radiation sub-stepping — the 168-step run gives 195.8 and a
+  3-step run gives ~200. Consistent regardless of length.
+
+**Still open.** Either SPEEDY's longwave is genuinely this crude (it's a 4-band
+scheme, and it *is* an intermediate-complexity model — but 11% for 30x vapour
+seems too crude even so), or something in the SCM's LW path isn't wired up. Note
+`_longwave_rad` only ever exposes `dfabs` and `ftop` in physics_data, which is a
+much thinner set than the SW term carries. Worth a look at
+`jcm/physics/radiation/speedy_longwave.py` next.
+
+If it's the former, it just bounds what this experiment can claim about LW. If
+it's the latter, it's a bug worth reporting.
 
 ---
 
-## 3. Sensible heat flux is small and negative
+## 3. FIXED: two real setup bugs, and a chain of wrong conclusions
 
-`shf` on the land tile = −2.59 W/m² mean, range −21 to +16. For June afternoons
-at SGP I'd expect daily-mean sensible heat well positive, order 50 W/m².
+Chasing `shf ~ 0` turned up two genuine bugs in `run_scm.py`. Both are fixed.
+Worth reading how wrong I got this on the way, because the failure mode is quiet.
 
-Latent heat is fine, which makes this stranger: `evap` = 0.0585 g/m²/s → 146
-W/m², which is about right for daily-mean June. So the surface scheme isn't
-broken across the board — just this field.
+**Bug A — land fluxes were never computed.**
+`TerrainData.single_column` defaults to `lfluxland=False`, and I didn't set it.
+The entire land-flux branch is behind
+`jax.lax.cond(lfluxland, land_fluxes, pass_fn)` (`speedy_surface_flux.py:228`),
+so the land tile stayed zeros. Meanwhile `fmask=1` *selects* the land tile
+(line 264). Net effect: **the atmosphere saw zero surface fluxes, silently.**
+Nothing errors. Fix: `lfluxland=True`.
 
-Prime suspect is the static forcing. Surface temperature is pinned at the record
-mean (298.9 K), so the land-air temperature difference that drives sensible heat
-never develops a diurnal swing. Untested.
+**Bug B — I had the tile index backwards.**
+`speedy_surface_flux.py:264` blends `var[:,:,1] + fmask*(var[:,:,0] - var[:,:,1])`.
+So tile 0 is **land**, tile 1 is **sea**, and `fmask` is the land fraction. I'd
+been reading tile 1 — the sea tile — and calling it land.
+
+**How I fooled myself.** I "verified" tile 1 was land because `rlus[1]` = 443.8
+matched sigma*T^4 = 452.9 (emissivity 0.98). That check is worthless for the
+question I asked it: Stefan-Boltzmann holds for *any* surface, so it cannot
+distinguish tiles. It felt like confirmation and wasn't.
+
+Then I "proved" the land scheme responds to land temperature by sweeping
+`stl_am` and watching shf move −25.6 -> +21.1. But that sweep set `stl_am` *and*
+`sea_surface_temperature` to the same value, so I was watching the **sea** scheme
+respond to **SST**. Two confident conclusions, both wrong, from one bug.
+
+**What actually caught it.** Making `stl_am` a `TimeSeries` changed `tsfc`
+(std 0 -> 4.2) but left `shf` *byte-identical* (`np.array_equal` -> True). A
+13 K surface swing that moves the flux by exactly zero isn't a subtle
+discrepancy — it's proof the flux never looked at that number. Identical output
+is a much better alarm than an implausible one.
+
+**After both fixes:**
+
+| field | tile 0 (land) | tile 1 (sea) |
+|---|---|---|
+| `rlus` | 432.1, std 18.2, range 404–461 | 443.8, std 0.0001 (frozen) |
+| `shf` | −5.3, std 3.9 | −2.6, std 11.6 |
+
+Land `rlus` now tracks the surface temperature, as it should.
+
+**What's left is the fixture.** `shf` is still ~0 because I drive `stl_am` from
+the fixture's `temp_sfc`, which is labelled *surface **air** temperature*. So
+land temperature == air temperature -> zero gradient -> zero flux. That's my
+synthetic data, not the model.
+
+Real ARMBE has a distinct skin temperature, and if there's no explicit variable,
+derive it from ARMBECLDRAD's upwelling longwave: `T_skin = (LWup / (eps*sigma))**0.25`.
+That's the right fix when data lands — don't feed air temperature in as ground
+temperature.
 
 ---
 
