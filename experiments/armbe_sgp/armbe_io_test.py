@@ -10,7 +10,8 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).parent))
 
 from armbe_io import geopotential_on_sigma, to_obs_targets, to_state_series
-from run_scm import start_date_from_timestamp, validate_cadence
+from jcm.date import DateData
+from run_scm import build_forcing, start_date_from_timestamp, validate_cadence
 
 
 def _dataset():
@@ -49,9 +50,21 @@ def test_dropped_profile_keeps_matching_times_and_targets():
     )
 
 
-def test_subdaily_start_timestamp_is_preserved():
-    date = start_date_from_timestamp(np.datetime64("2018-06-01T06:00:00"))
-    assert int(date.delta.seconds) == 6 * 3600
+def test_subdaily_start_timestamp_selects_matching_forcing_step():
+    times = np.array(["2018-06-01T00", "2018-06-01T06"], dtype="datetime64[h]")
+    ds = xr.Dataset(
+        {"temp_sfc": (("time",), np.array([290.0, 300.0]), {"units": "K"})},
+        coords={"time": times},
+    )
+    forcing, _ = build_forcing(ds, times)
+    date = DateData.set_date(
+        model_time=start_date_from_timestamp(times[1]),
+        model_step=0,
+        dt_seconds=3600.0,
+        calendar="gregorian",
+    )
+    selected = forcing.select(date, calendar="gregorian")
+    np.testing.assert_allclose(selected.stl_am, [[300.0]])
 
 
 def test_irregular_retained_cadence_is_rejected():
