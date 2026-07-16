@@ -14,6 +14,9 @@ experiment. It intentionally does not retain resolved implementation history.
   uses surface-flux tile 0, the land tile.
 - Land surface temperature (`stl_am`) follows the retained input record through
   a date-aligned `TimeSeries`. Soil moisture and albedo remain fixed.
+- ARMBE humidity is normalized to kg/kg while it is read, then converted to the
+  g/kg unit used by the SPEEDY physics-facing state. The adapter has regression
+  coverage for both kg/kg and g/kg source-unit handling.
 - The synthetic fixture is only a plumbing fixture. Its profiles and evaluation
   targets are generated independently, so its skill metrics are not scientific
   results.
@@ -67,23 +70,7 @@ feedback needed for the experiment, test prognostic relaxation with
 `relaxation_timescales` for those fields. That is an experiment design choice,
 not a correction to synthetic-fixture metrics.
 
-## 4. Assess SPEEDY downward longwave sensitivity
-
-Exploratory column sweeps suggested that SPEEDY surface downward longwave
-(`rlds`) changes weakly over a large water-vapour range and is lower than an
-expected warm, moist-column value. This is not yet a validated bug report.
-
-Before drawing a conclusion:
-
-- Reproduce the sweep in a checked-in regression test or analysis script.
-- Trace `jcm/physics/radiation/speedy_longwave.py` to distinguish expected
-  SPEEDY scheme limitations from an SCM wiring or diagnostic issue.
-- Compare with real ARMBE downwelling longwave using daily means.
-
-If this is intrinsic to the SPEEDY radiation scheme, document it as a limit on
-the experiment rather than treating it as an ARMBE adapter problem.
-
-## 5. Decide how much time-varying surface forcing is required
+## 4. Decide how much time-varying surface forcing is required
 
 Only land surface temperature varies with the record today. Soil moisture,
 albedo, snow, sea ice, and greenhouse gases are fixed. For SGP land columns,
@@ -95,7 +82,7 @@ and share the retained timestamp axis. The runner deliberately rejects gaps and
 irregular cadence because the SCM currently advances with a single fixed
 `dt_seconds`.
 
-## 6. Choose the model and comparison resolution deliberately
+## 5. Choose the model and comparison resolution deliberately
 
 SPEEDY shortwave uses fraction-of-year and produces daily-mean,
 zonally-averaged insolation. It has no diurnal cycle, so `evaluate.py` compares

@@ -1,0 +1,186 @@
+
+
+Include this token in the url after your ARM userName, separated by a colon.
+
+Use the ARM Live Data Web Service to download data. You can query and automate machine-to-machine downloads of ARM data with this application.
+
+Use a REST URL to enter:
+
+    Parameters as a service type (saveData or query)
+    ARM user ID and access token
+    Datastream name
+    Start date
+    End date
+
+Data files matching the criteria will be returned to the user. If a valid REST URL is entered, a page containing download links will be returned. You may also request that data file names be returned as an array in a JSON object in plain text by appending the wt=json parameter at the end of the URL.
+
+To eliminate the manual step of following a link in an email to download data, use the ARM Live Data Web Service to set up cron jobs and automatically download data from /data/archive into your work space. All other data files not available in real-time on the server will have to go through the regular ordering process.
+
+See script examples on how to bulk download ARM data.
+Understanding the REST URL
+
+Users may access ARM data via a REST URL. The format for the URL depends on the service type. Users may choose a service type of either query or saveData. If query is used, the REST URL may be entered in a browser, and a collection of data download links will be returned. If saveData is used, the REST URL may be used with either Wget or cURL to download individual data files.
+
+The tables below describe the parameters that must be used with both varieties of REST URLs. The capitolized words are placeholders for the values to be filled.
+Service Types
+/query
+Format: https://adc.arm.gov/armlive/query?user=USER_ID:ACCESS_TOKEN&ds=DATASTREAM&start=START_DATE&end=END_DATE
+user 	
+
+    The user's ARM ID and access token, separated by a colon.
+    Must be the first parameter.
+
+ds 	
+
+    Name of the datastream.
+    The query service type requires a ds (datastream) parameter of the following form:
+    [site][timeIntegration][inst][facility].[dataLvl]
+    For example:
+    sgpmetE11.b1
+    For more information about data file naming conventions, click here.
+
+start 	
+
+    Start date for the datastream.
+    Format: YYYY-MM-DD OR YYYY-MM-DDThh:mm:sssZ
+    Default: yesterday's date.
+    Optional.
+
+end 	
+
+    End date for the datastream.
+    Format: YYYY-MM-DD OR YYYY-MM-DDThh:mm:sssZ
+    Default: the current date.
+    Optional.
+
+wt=json 	
+
+    The user may append the wt=json paramater to the REST URL to retrieve a JSON object in plain text.
+    Without wt=json, the request will return a page containing download links to individual data files.
+    Optional.
+
+/saveData
+Format: https://adc.arm.gov/armlive/saveData?user=USER_ID:ACCESS_TOKEN&file=DATA_FILE
+user 	
+
+    The user's ARM ID and access token, separated by a colon.
+    Must be the first parameter.
+
+file 	
+
+    Name of the file.
+
+    The saveData service type requires a file parameter of the following form:
+    [site][timeIntegration][inst][facility].[dataLvl].[YYYYMMDD].[HHMMSS].[fileType]
+    For example:
+    sgpmetE11.b1.20180101.000000.cdf
+    For more information about data file naming conventions, click here.
+
+/mod
+Format: https://adc.arm.gov/armlive/mod?user=USER_ID:ACCESS_TOKEN&wt=cdf
+
+Request Body:
+[ "sgpqcrad1longE13.c2.20230101.000000.cdf", "sgpqcrad1longE13.c2.20230102.000000.cdf" ]
+Summary: 	The new mod API provides the following services:
+
+    Concatenate files for download (default with no additional parameters given)
+        Files are read from the request body.
+    Variable extraction via variables param
+    ASCII/CSV conversion via wt param
+
+When more than one file is given in the request body, the resulting download will be concatenated into a single file.
+Parameters: 	
+
+    variables (comma separated)
+    wt [cdf, csv]
+
+body 	
+
+    Required
+    A list of filenames in JSON format
+    Example:
+    [ "sgpqcrad1longE13.c2.20230101.000000.cdf", "sgpqcrad1longE13.c2.20230102.000000.cdf" ]
+
+user 	
+
+    Required
+    The user's ARM ID and access token, separated by a colon.
+
+wt 	
+
+    Convert the requested files to the given format.
+    Current supported formats:
+        cdf (default)
+        csv
+    Example:
+    wt=csv
+
+variables 	
+
+    A comma separated list of variables to extract from the requested files.
+    Example:
+    variables=zenith,sun_earth_distance
+
+Examples using cURL with /mod:
+Concatenate multiple files: 	curl -X GET -H 'Content-Type:application/json' -J -O 'https://adc.arm.gov/armlive/mod?user=example:abcd1234' -d '[ "sgpqcrad1longE13.c2.20230101.000000.cdf", "sgpqcrad1longE13.c2.20230102.000000.cdf" ]'
+
+(The optional `-J` and `-O` flags used together will download the combined file with a unique name based on the request.)
+Extract a subset of variables: 	curl -X GET -H 'Content-Type:application/json' -J -O 'https://adc.arm.gov/armlive/mod?user=example:abcd1234&variables=zenith,sun_earth_distance' -d '["sgpqcrad1longE13.c2.20230101.000000.cdf"]'
+Extract a subset of variables from multiple files, combine, and convert to CSV: 	curl -X GET -H 'Content-Type:application/json' -J -O 'https://adc.arm.gov/armlive/mod?user=example:abcd1234&variables=zenith,sun_earth_distance&wt=csv' -d '[ "sgpqcrad1longE13.c2.20230101.000000.cdf", "sgpqcrad1longE13.c2.20230102.000000.cdf" ]'
+See here for additional documentation on the mod API.
+Types of Web Services Offered
+
+Users may access ARM data via several methods.
+Browser View
+
+By default, entering a valid REST URL in a browser will return a page containing download links to data files. The user may include the wt=json parameter to instead return a JSON object in plain text containing an array of the data file names, which can be used in scripts.
+
+Both varieties use a service type of query, an example user ID of example, an example access token of abcd1234, request the datastream sgpmetE11.b1, and have start and end dates of January 1, 2018 and February 1, 2018, respectively.
+Example URL, returns collection of download links. 	https://adc.arm.gov/armlive/query?user=example:abcd1234&ds=sgpmetE11.b1&start=2018-01-01T04:20:14.579Z&end=2018-02-01T04:20:14.579Z
+Example URL with wt=json parameter, returns JSON object in plain text. 	https://adc.arm.gov/armlive/query?user=example:abcd1234&ds=sgpmetE11.b1&start=2018-01-01&end=2018-02-01&wt=json
+Wget and cURL
+
+Wget and cURL are simple-to-use command line tools for downloading files. Wget downloads an individual data file. cURL returns data to the terminal, but the output can be piped into a file.
+
+Below are examples of using both Wget and cURL to download the sgpmetE11.b1.20180101.000000.cdf data file.
+Using wget to retrieve data 	$ wget 'https://adc.arm.gov/armlive/saveData?user=example:abcd1234&file=sgpmetE11.b1.20180101.000000.cdf'
+Using curl to retrieve data 	$ curl 'https://adc.arm.gov/armlive/saveData?user=example:abcd1234&file=sgpmetE11.b1.20180101.000000.cdf'
+
+Note that the file downloaded with wget using a service type of saveData will not have the same name as the original data file. To specify the filename, use the -O option as demonstrated below:
+Using the -O option with wget to specify downloaded file name 	$ wget 'https://adc.arm.gov/armlive/saveData?user=example:abcd1234&file=sgpmetE11.b1.20180101.000000.cdf' -O sgpmetE11.b1.20180101.000000.cdf
+Scripts
+
+Users may wish to perform batch downloads of data files instead of downloading one file at a time. This can be accomplished via scripts, such as the examples shown below.
+Python Script (preferred)
+
+armlive_getfiles is a pip installable package repository that allows users to perform bulk downloads of ARM data.
+
+If a user with an ID of example and an access token of abcd1234 wishes to download all data files from the sgpmetE11.b1 datastream recorded between January 1, 2018 and February 1, 2018, they would run the getFiles.py Python script with the appropriate arguments as shown below:
+Installation: 	$ pip install git+https://code.ornl.gov/ofg/armlive_getfiles.git
+Execution: 	$ getARMFiles -u example:abcd1234 -ds sgpmetE11.b1 -s 2018-01-01 -e 2018-02-01
+
+OR
+Installation: 	$ git clone https://code.ornl.gov/ofg/armlive_getfiles.git
+Execution: 	$ python armlive_getfiles/src/getFiles.py -u example:abcd1234 -ds sgpmetE11.b1 -s 2018-01-01 -e 2018-02-01
+
+You must be logged in to download scripts.
+Simple Bash Script
+
+getFiles.sh is a BASH script that allows users to perform bulk downloads of ARM data.
+
+Last updated: 2018-07-25
+
+If a user with an ID of example and an access token of abcd1234 wishes to download all data files from the sgpmetE11.b1 datastream recorded between January 1, 2018 and February 1, 2018, they would run the getFiles.sh BASH script with the appropriate arguments as shown below:
+Usage of getFiles.sh 	$ bash getFiles.sh example:abcd1234 sgpmetE11.b1 2018-01-01 2018-02-01
+
+You must be logged in to download scripts.
+Raw Data
+
+Raw data can be accessed via the ADRS Web Service (ADRSWS). Instructions on how to use ADRSWS and how to request an access token can be found below.
+
+Registered users of ARM data, who have been provided with access keys, may use ADRSWS to order ARM data outside of the ARM Data Discovery Tool. ADRSWS provides the following functionality:
+
+    Return a list of all datastreams. Output is a JSON object.
+    Given a datastream and date range, return a list of data filenames, as stored in the ARM systems. Output is a JSON object.
+    Given a list of data filenames, place an order for data and return the Order ID and URL to track the state of order processing. Output is a JSON object.
+

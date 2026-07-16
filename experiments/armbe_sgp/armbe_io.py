@@ -47,6 +47,7 @@ from jcm.physics_interface import PhysicsState
 SGP_LAT_DEG = 36.607322
 SGP_LON_DEG = -97.487643
 SGP_OROG_M = 315.0  # approx. elevation; land point (fmask=1)
+KGKG_TO_GKG = 1000.0
 
 # Ordered candidate netCDF names per canonical field. First match wins.
 CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -88,6 +89,10 @@ class VariableNotFound(KeyError):
     """No candidate name for a required field exists in the dataset."""
 
 
+class InvalidArmbeData(ValueError):
+    """ARMBE inputs cannot safely be converted to a SPEEDY column."""
+
+
 def pick(ds: xr.Dataset, field: str, required: bool = True) -> str | None:
     """Resolve a canonical ``field`` to an actual variable name in ``ds``."""
     for name in CANDIDATES[field]:
@@ -118,8 +123,8 @@ def _saturation_vapor_pressure_hpa(t_kelvin: np.ndarray) -> np.ndarray:
 
 
 def specific_humidity_from_dewpoint(dewpoint_k: np.ndarray,
-                                    pressure_hpa: np.ndarray) -> np.ndarray:
-    """q [kg/kg] from dewpoint [K] and pressure [hPa].
+                                     pressure_hpa: np.ndarray) -> np.ndarray:
+    """Specific humidity [kg/kg] from dewpoint [K] and pressure [hPa].
 
     Vapour pressure at the dewpoint is the actual vapour pressure, so
     ``e = e_sat(Td)`` and ``q = eps*e / (p - (1-eps)*e)`` with eps = 0.622.
@@ -130,8 +135,8 @@ def specific_humidity_from_dewpoint(dewpoint_k: np.ndarray,
 
 
 def specific_humidity_from_rh(rh_percent: np.ndarray, t_kelvin: np.ndarray,
-                              pressure_hpa: np.ndarray) -> np.ndarray:
-    """q [kg/kg] from RH [%], temperature [K], pressure [hPa]."""
+                               pressure_hpa: np.ndarray) -> np.ndarray:
+    """Specific humidity [kg/kg] from RH [%], temperature [K], pressure [hPa]."""
     e = np.clip(rh_percent, 0.0, 100.0) / 100.0 * _saturation_vapor_pressure_hpa(t_kelvin)
     eps = 0.622
     return eps * e / np.maximum(pressure_hpa - (1.0 - eps) * e, 1e-6)
@@ -193,7 +198,12 @@ def speedy_column_state(temperature_k: np.ndarray, specific_humidity: np.ndarray
                         u_wind: np.ndarray, v_wind: np.ndarray,
                         surface_pressure_pa: float,
                         sigma: np.ndarray) -> PhysicsState:
-    """Build a SPEEDY-column state whose every profile uses ``sigma``."""
+    """Build a SPEEDY-column state whose every profile uses ``sigma``.
+
+    ``specific_humidity`` is in g/kg. This is the physics-facing unit used by
+    SPEEDY; ARMBE source values are converted from kg/kg in
+    :func:`to_state_series` before reaching this constructor.
+    """
     return PhysicsState(
         temperature=np.asarray(temperature_k),
         specific_humidity=np.maximum(np.asarray(specific_humidity), 0.0),
@@ -208,6 +218,86 @@ def speedy_column_state(temperature_k: np.ndarray, specific_humidity: np.ndarray
 # --------------------------------------------------------------------------
 # loading
 # --------------------------------------------------------------------------
+
+def _require_profile_shape(ds: xr.Dataset, field: str, time_dim: str,
+                           level_dim: str) -> None:
+    """Require a resolved atmospheric profile to use the ARMBE time/level grid."""
+    name = pick(ds, field)
+    dims = ds[name].dims
+    if time_dim not in dims or level_dim not in dims:
+        raise InvalidArmbeData(
+            f"{field!r} resolved to {name!r} with dimensions {dims}; expected "
+            f"both {time_dim!r} and {level_dim!r}."
+        )
+
+
+def validate_armbe_input(ds: xr.Dataset) -> None:
+    """Validate the state fields needed for a safe ARMBE-to-SPEEDY conversion.
+
+    Individual missing profile values are allowed because ``to_state_series``
+    drops only timesteps that cannot be interpolated. Structural errors and
+    impossible coordinate/value ranges fail early with an actionable message.
+    """
+    time_name = pick(ds, "time")
+    level_name = pick(ds, "level")
+    time = np.asarray(ds[time_name].values)
+    levels_hpa = _level_pressure_hpa(ds)
+
+    if time.ndim != 1 or time.size == 0 or not np.issubdtype(time.dtype, np.datetime64):
+        raise InvalidArmbeData("time must be a non-empty one-dimensional datetime coordinate.")
+    time_seconds = time.astype("datetime64[s]").astype(np.int64)
+    if time.size > 1 and not np.all(np.diff(time_seconds) > 0):
+        raise InvalidArmbeData("time coordinate must be strictly increasing with no duplicates.")
+    if levels_hpa.ndim != 1 or levels_hpa.size < 2 or not np.all(np.isfinite(levels_hpa)):
+        raise InvalidArmbeData("pressure-level coordinate must contain at least two finite values.")
+    level_deltas = np.diff(levels_hpa)
+    if not (np.all(level_deltas > 0) or np.all(level_deltas < 0)):
+        raise InvalidArmbeData("pressure-level coordinate must be strictly monotonic.")
+    if np.any((levels_hpa < 1.0) | (levels_hpa > 1100.0)):
+        raise InvalidArmbeData("pressure-level coordinate must be in the physical range 1..1100 hPa.")
+
+    time_dim = ds[time_name].dims[0]
+    level_dim = ds[level_name].dims[0]
+    for field in ("temperature", "u_wind", "v_wind"):
+        _require_profile_shape(ds, field, time_dim, level_dim)
+    moisture_field = next(
+        (field for field in ("specific_humidity", "dewpoint", "relative_humidity")
+         if pick(ds, field, required=False) is not None),
+        None,
+    )
+    if moisture_field is None:
+        raise InvalidArmbeData("one of specific humidity, dewpoint, or relative humidity is required.")
+    _require_profile_shape(ds, moisture_field, time_dim, level_dim)
+
+    temp = np.asarray(ds[pick(ds, "temperature")].values, dtype=float)
+    if np.nanmax(temp) < 100.0:
+        temp = temp + 273.15
+    if not np.any(np.isfinite(temp)) or np.nanmin(temp) < 150.0 or np.nanmax(temp) > 350.0:
+        raise InvalidArmbeData("temperature must contain finite values in the range 150..350 K.")
+
+    ps_hpa = _surface_pressure_hpa(ds)
+    finite_ps = ps_hpa[np.isfinite(ps_hpa)]
+    if not finite_ps.size or np.any((finite_ps < 300.0) | (finite_ps > 1100.0)):
+        raise InvalidArmbeData("finite surface pressure values must be in the range 300..1100 hPa.")
+
+    if moisture_field == "specific_humidity":
+        q = _moisture_profiles(ds, levels_hpa, temp)
+        finite_q = q[np.isfinite(q)]
+        if not finite_q.size or np.any((finite_q < 0.0) | (finite_q > 0.1)):
+            raise InvalidArmbeData("specific humidity must contain finite values in the range 0..0.1 kg/kg.")
+    elif moisture_field == "dewpoint":
+        dewpoint = np.asarray(ds[pick(ds, moisture_field)].values, dtype=float)
+        if np.nanmax(dewpoint) < 100.0:
+            dewpoint = dewpoint + 273.15
+        if (not np.any(np.isfinite(dewpoint)) or np.nanmin(dewpoint) < 150.0
+                or np.nanmax(dewpoint) > 350.0):
+            raise InvalidArmbeData("dewpoint must contain finite values in the range 150..350 K.")
+    elif moisture_field == "relative_humidity":
+        rh = np.asarray(ds[pick(ds, moisture_field)].values, dtype=float)
+        finite_rh = rh[np.isfinite(rh)]
+        if not finite_rh.size or np.any((finite_rh < 0.0) | (finite_rh > 100.0)):
+            raise InvalidArmbeData("relative humidity must contain finite values in the range 0..100 percent.")
+
 
 def load_armbe(atm: str | Path | Iterable[str | Path],
                cldrad: str | Path | Iterable[str | Path] | None = None,
@@ -235,6 +325,7 @@ def load_armbe(atm: str | Path | Iterable[str | Path],
         ds = ds.sel(time=slice(t0, t1))
     if ds.sizes.get("time", 0) == 0:
         raise ValueError(f"no timesteps in window {t0}..{t1}")
+    validate_armbe_input(ds)
     return ds
 
 
@@ -266,8 +357,10 @@ def _moisture_profiles(ds: xr.Dataset, p_hpa: np.ndarray,
     """Specific humidity [kg/kg] with shape (ntime, nlev_arm)."""
     if (q_name := pick(ds, "specific_humidity", required=False)) is not None:
         q = np.asarray(ds[q_name].values, dtype=float)
-        units = str(ds[q_name].attrs.get("units", "")).lower()
-        if "g/kg" in units or "g kg" in units:
+        units = str(ds[q_name].attrs.get("units", "")).lower().replace(" ", "")
+        # Do not use a substring check: ``"g/kg" in "kg/kg"`` is true and
+        # would divide SI humidity by 1,000 a second time.
+        if units in {"g/kg", "gkg-1", "gkg**-1"}:
             q = q / 1000.0
         return q
     if (dp_name := pick(ds, "dewpoint", required=False)) is not None:
@@ -311,7 +404,9 @@ def to_state_series(ds: xr.Dataset, nlev: int = 8):
             n_bad += 1
             continue
         ti = interp_to_sigma(temp[i], p_hpa, psi, sigma)
-        qi = interp_to_sigma(q[i], p_hpa, psi, sigma)
+        # ARMBE and the humidity conversion helpers use kg/kg. The SPEEDY
+        # physics-facing state uses g/kg, matching the Dinosaur state bridge.
+        qi = KGKG_TO_GKG * interp_to_sigma(q[i], p_hpa, psi, sigma)
         ui = interp_to_sigma(u[i], p_hpa, psi, sigma)
         vi = interp_to_sigma(v[i], p_hpa, psi, sigma)
         if not (np.all(np.isfinite(ti)) and np.all(np.isfinite(qi))):

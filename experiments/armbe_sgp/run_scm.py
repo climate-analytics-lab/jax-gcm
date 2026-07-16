@@ -16,15 +16,17 @@ Two things worth knowing about this setup:
   forcing per step from it, and SPEEDY's insolation keys off fraction-of-year;
   getting it wrong silently gives you the wrong season's sun (see
   ``SCM_FORCING_PATCH_NOTE.md`` at the repo root).
-* ``ForcingData`` is otherwise static across the run — surface temperature, soil
-  moisture and albedo are set once from the record's means rather than following
-  the observations hour by hour. Fine for a first look; it is the obvious next
-  thing to improve if surface fluxes look off.
+* Land surface temperature follows the retained input record through a
+  date-aligned ``TimeSeries``. Soil moisture and albedo remain static, so they
+  are the next surface-forcing candidates if real-data fluxes are biased.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -58,7 +60,7 @@ DIAGNOSTICS = {
 
 def unwrap(o):
     """physics_data stores each term as a 0-d object array around a dataclass."""
-    if getattr(o, "dtype", None) == object and getattr(o, "shape", None) == ():
+    if getattr(o, "dtype", None) is object and getattr(o, "shape", None) == ():
         return o.item()
     return o
 
@@ -76,7 +78,8 @@ def extract(physics_data) -> dict[str, np.ndarray]:
 
 def _epoch_seconds(times: np.ndarray) -> np.ndarray:
     """ARMBE timestamps -> seconds since 1970-01-01, which is what TimeSeries
-    BY_DATE indexing expects (mirrors forcing._time_axis_seconds_from_ds)."""
+    BY_DATE indexing expects (mirrors forcing._time_axis_seconds_from_ds).
+    """
     t = np.asarray(times).astype("datetime64[s]")
     return (t - np.datetime64("1970-01-01T00:00:00")).astype(np.int64).astype(float)
 
@@ -105,6 +108,60 @@ def validate_cadence(times: np.ndarray, dt_seconds: float) -> None:
             f"got intervals {np.unique(deltas).tolist()} s with --dt={dt_seconds}. "
             "Choose a contiguous window or add irregular-timestep support."
         )
+
+
+def _git_revision(repo_root: Path) -> str | None:
+    """Return the checked-out revision when this experiment is run from git."""
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def write_manifest(path: Path, args, argv, meta: dict, times: np.ndarray) -> None:
+    """Write the provenance needed to reproduce an SCM archive."""
+    times = np.asarray(times).astype("datetime64[s]")
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = {
+        "archive": str(args.output.resolve()),
+        "inputs": {
+            "atm": str(Path(args.atm).resolve()),
+            "cldrad": str(Path(args.cldrad).resolve()),
+            "resolved_variables": meta["resolved"],
+        },
+        "retained_times": {
+            "start": np.datetime_as_string(times[0], unit="s"),
+            "end": np.datetime_as_string(times[-1], unit="s"),
+            "n_states": meta["n_states"],
+            "n_input_times": meta["n_input_times"],
+            "n_dropped": meta["n_dropped"],
+        },
+        "configuration": {
+            "nlev": args.nlev,
+            "dt_seconds": args.dt,
+            "window_start": args.start,
+            "window_end": args.end,
+            "static_forcing": args.static_forcing,
+            "calendar": "gregorian",
+            "site": "SGP C1",
+            "land_surface_temperature": (
+                "static record mean" if args.static_forcing else "BY_DATE time series"
+            ),
+            "soil_moisture": 0.30,
+            "bare_land_albedo": 0.20,
+            "co2_vmr_ppmv": 407.0,
+        },
+        "command": ["python", Path(__file__).name, *argv],
+        "git_revision": _git_revision(repo_root),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def build_forcing(ds, times, nodal_shape=(1, 1), static: bool = False):
@@ -160,6 +217,7 @@ def build_forcing(ds, times, nodal_shape=(1, 1), static: bool = False):
 
 def main(argv=None) -> int:
     here = Path(__file__).parent
+    argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--atm", default=str(here / "data/synthetic/sgparmbeatmC1.c1.synthetic.nc"))
@@ -169,6 +227,8 @@ def main(argv=None) -> int:
     ap.add_argument("--start", default=None, help="window start, YYYY-MM-DD")
     ap.add_argument("--end", default=None, help="window end, YYYY-MM-DD")
     ap.add_argument("--output", type=Path, default=here / "outputs" / "scm_run.npz")
+    ap.add_argument("--manifest", type=Path, default=None,
+                    help="JSON provenance sidecar (default: <output>.manifest.json)")
     ap.add_argument("--static-forcing", action="store_true",
                     help="pin surface temp at the record mean (the old, broken "
                          "behaviour) — for comparison only")
@@ -227,7 +287,10 @@ def main(argv=None) -> int:
         **{f"model.{k}": v for k, v in diags.items()},
         **{f"obs.{k}": v for k, v in obs.items()},
     )
+    manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
+    write_manifest(manifest_path, args, argv, meta, times)
     print(f"\nwrote {args.output}")
+    print(f"wrote {manifest_path}")
     print("\nmodel diagnostics:")
     for k, v in sorted(diags.items()):
         flat = np.asarray(v).reshape(v.shape[0], -1)
