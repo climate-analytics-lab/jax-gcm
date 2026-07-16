@@ -39,7 +39,8 @@ import numpy as np
 import xarray as xr
 
 from jcm.physics.speedy.speedy_coords import compute_speedy_vertical_coords
-from jcm.utils import create_single_column_state
+from jcm.constants import p0, rd
+from jcm.physics_interface import PhysicsState
 
 # SGP Central Facility (Lamont, OK) — exact coords from the ARM datastream
 # metadata for sgparmbeatmC1.c1 / sgparmbecldradC1.c1.
@@ -169,6 +170,41 @@ def interp_to_sigma(profile: np.ndarray, p_hpa: np.ndarray, ps_hpa: float,
     return np.interp(sigma_target, sigma_obs[order], vals[order])
 
 
+def geopotential_on_sigma(temperature_k: np.ndarray,
+                          sigma: np.ndarray) -> np.ndarray:
+    """Hydrostatic geopotential on the same top-to-bottom sigma grid as ``T``.
+
+    ARMBE profiles have already been interpolated to SPEEDY's ``fsg`` levels.
+    The generic ``create_single_column_state`` helper constructs geopotential on
+    its own linear pressure grid instead, so it must not be used here: radiation,
+    convection, and the surface scheme require every vertical field to share one
+    coordinate.
+    """
+    temperature_k = np.asarray(temperature_k, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    if temperature_k.shape != sigma.shape:
+        raise ValueError("temperature and sigma must have the same shape")
+    # Same column-mean-temperature hydrostatic approximation as the generic
+    # helper, evaluated at SPEEDY's actual full-level sigma values.
+    return -rd * np.mean(temperature_k) * np.log(sigma)
+
+
+def speedy_column_state(temperature_k: np.ndarray, specific_humidity: np.ndarray,
+                        u_wind: np.ndarray, v_wind: np.ndarray,
+                        surface_pressure_pa: float,
+                        sigma: np.ndarray) -> PhysicsState:
+    """Build a SPEEDY-column state whose every profile uses ``sigma``."""
+    return PhysicsState(
+        temperature=np.asarray(temperature_k),
+        specific_humidity=np.maximum(np.asarray(specific_humidity), 0.0),
+        u_wind=np.nan_to_num(np.asarray(u_wind)),
+        v_wind=np.nan_to_num(np.asarray(v_wind)),
+        geopotential=geopotential_on_sigma(temperature_k, sigma),
+        normalized_surface_pressure=np.asarray(surface_pressure_pa / p0),
+        tracers={},
+    )
+
+
 # --------------------------------------------------------------------------
 # loading
 # --------------------------------------------------------------------------
@@ -267,6 +303,7 @@ def to_state_series(ds: xr.Dataset, nlev: int = 8):
 
     ntime = temp.shape[0]
     states = []
+    retained_indices = []
     n_bad = 0
     for i in range(ntime):
         psi = float(ps_hpa[i])
@@ -280,26 +317,29 @@ def to_state_series(ds: xr.Dataset, nlev: int = 8):
         if not (np.all(np.isfinite(ti)) and np.all(np.isfinite(qi))):
             n_bad += 1
             continue
-        states.append(create_single_column_state(
-            temperature=ti,
-            specific_humidity=np.maximum(qi, 0.0),
-            u_wind=np.nan_to_num(ui),
-            v_wind=np.nan_to_num(vi),
-            surface_pressure=psi * 100.0,   # hPa -> Pa
-            nlev=nlev,
+        states.append(speedy_column_state(
+            temperature_k=ti,
+            specific_humidity=qi,
+            u_wind=ui,
+            v_wind=vi,
+            surface_pressure_pa=psi * 100.0,   # hPa -> Pa
+            sigma=sigma,
         ))
+        retained_indices.append(i)
     times = np.asarray(ds[pick(ds, "time")].values)
     meta = {
         "n_input_times": int(ntime),
         "n_states": len(states),
         "n_dropped": int(n_bad),
+        "retained_indices": np.asarray(retained_indices, dtype=int),
         "sigma_levels": sigma,
         "resolved": describe_vars(ds),
     }
-    return states, times[: len(states)], meta
+    return states, times[meta["retained_indices"]], meta
 
 
-def to_obs_targets(ds: xr.Dataset) -> dict[str, np.ndarray]:
+def to_obs_targets(ds: xr.Dataset,
+                   indices: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Observed series to score the SCM against (missing fields are skipped)."""
     out: dict[str, np.ndarray] = {}
     for field in ("precip", "sw_down_sfc", "lw_down_sfc",
@@ -307,7 +347,8 @@ def to_obs_targets(ds: xr.Dataset) -> dict[str, np.ndarray]:
                   "cloud_fraction", "lwp"):
         name = pick(ds, field, required=False)
         if name is not None:
-            out[field] = np.asarray(ds[name].values, dtype=float)
+            values = np.asarray(ds[name].values, dtype=float)
+            out[field] = values if indices is None else values[indices]
     return out
 
 

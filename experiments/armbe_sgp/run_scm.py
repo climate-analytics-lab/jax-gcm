@@ -81,6 +81,32 @@ def _epoch_seconds(times: np.ndarray) -> np.ndarray:
     return (t - np.datetime64("1970-01-01T00:00:00")).astype(np.int64).astype(float)
 
 
+def start_date_from_timestamp(timestamp) -> jdt.Datetime:
+    """Build the SCM start date without discarding its hour/minute/second."""
+    timestamp = np.datetime64(timestamp, "s")
+    return jdt.to_datetime(np.datetime_as_string(timestamp, unit="s"))
+
+
+def validate_cadence(times: np.ndarray, dt_seconds: float) -> None:
+    """Require retained prescribed states to match the SCM integration step.
+
+    A gap cannot safely be represented by merely advancing a regular SCM scan:
+    that would put the profile, date-selected forcing, and diagnostics on
+    different clocks. Reject it explicitly until irregular timestamp support is
+    implemented.
+    """
+    times = np.asarray(times).astype("datetime64[s]")
+    if len(times) < 2:
+        return
+    deltas = np.diff(times).astype("timedelta64[s]").astype(np.int64)
+    if not np.all(deltas == int(dt_seconds)):
+        raise ValueError(
+            "retained ARMBE timestamps must be regularly spaced at --dt; "
+            f"got intervals {np.unique(deltas).tolist()} s with --dt={dt_seconds}. "
+            "Choose a contiguous window or add irregular-timestep support."
+        )
+
+
 def build_forcing(ds, times, nodal_shape=(1, 1), static: bool = False):
     """Land-surface forcing for SGP, with surface temperature following the obs.
 
@@ -153,13 +179,15 @@ def main(argv=None) -> int:
     if not states:
         raise SystemExit("no usable states built from the input — check the loader "
                          "report above for unresolved variables.")
-    obs = to_obs_targets(ds)
+    retained_ds = ds.isel(time=meta["retained_indices"])
+    obs = to_obs_targets(ds, indices=meta["retained_indices"])
+    validate_cadence(times, args.dt)
 
     # The date the states actually correspond to. This drives insolation.
     t0 = np.asarray(times)[0]
-    start_date = jdt.to_datetime(str(np.datetime64(t0, "D")))
+    start_date = start_date_from_timestamp(t0)
 
-    forcing, t_sfc = build_forcing(ds, times, static=args.static_forcing)
+    forcing, t_sfc = build_forcing(retained_ds, times, static=args.static_forcing)
     # SGP is land: fmask=1 (fmask is the LAND fraction — speedy_surface_flux.py:274
     # blends tsfc = sst + fmask*(stl_am - sst)). lfluxland=True is essential and
     # defaults to False: the land flux branch is behind
