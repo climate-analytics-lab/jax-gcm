@@ -2,11 +2,15 @@
 
 import unittest
 
+import jax_datetime as jdt
 import jax.numpy as jnp
+import numpy.testing as npt
 import pytest
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
+from jcm.date import DateData, absolute_seconds_since_epoch
+from jcm.forcing import BY_DATE, ForcingData, make_time_series
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
@@ -71,6 +75,23 @@ def _make_column_state(nlev: int) -> PhysicsState:
     )
 
 
+class _ForcingCapturePhysics(Physics):
+    """Minimal physics package that exposes the forcing received by the SCM."""
+
+    def get_empty_data(self, coords):
+        return {
+            "land_temperature": jnp.zeros(coords.horizontal.nodal_shape),
+            "tyear": jnp.zeros(()),
+        }
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del terrain, prev_physics_data
+        return PhysicsTendency.zeros(state.temperature.shape), {
+            "land_temperature": forcing.stl_am,
+            "tyear": forcing.solar.tyear,
+        }
+
+
 class TestSCMConstruction(unittest.TestCase):
     """Cheap tests for the SCM's coord-stub bookkeeping."""
 
@@ -131,6 +152,47 @@ class TestSCMHeldSuarez(unittest.TestCase):
         states = [self.column_state, self.column_state]
         predictions = scm.run(states)
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
+
+
+class TestSCMForcing(unittest.TestCase):
+    """Forcing selection must happen inside the SCM's jitted scan."""
+
+    def test_run_selects_date_aligned_forcing_and_solar_geometry(self):
+        timestamps = [
+            jdt.to_datetime("2018-06-01"),
+            jdt.to_datetime("2018-06-02"),
+        ]
+        forcing = ForcingData.zeros(
+            (1, 1),
+            stl_am=make_time_series(
+                jnp.array([[[290.0]], [[300.0]]]),
+                jnp.asarray([
+                    absolute_seconds_since_epoch(timestamp)
+                    for timestamp in timestamps
+                ]),
+                align_mode=BY_DATE,
+            ),
+        )
+        scm = SingleColumnModel(
+            physics=_ForcingCapturePhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            forcing=forcing,
+            dt_seconds=86400.0,
+            start_date=timestamps[0],
+            calendar="gregorian",
+        )
+
+        predictions = scm.run([_make_column_state(8)] * 2)
+
+        npt.assert_allclose(
+            predictions.physics_data["land_temperature"][:, 0, 0],
+            [290.0, 300.0],
+        )
+        expected_tyear = [
+            DateData.set_date(timestamp).tyear("gregorian")
+            for timestamp in timestamps
+        ]
+        npt.assert_allclose(predictions.physics_data["tyear"], expected_tyear)
 
 
 class TestSCMEcham(unittest.TestCase):
