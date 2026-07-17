@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from armbe_io import (
     InvalidArmbeData,
     geopotential_on_sigma,
+    load_armbe,
     to_obs_targets,
     to_state_series,
     validate_armbe_input,
@@ -102,6 +103,21 @@ def test_validation_rejects_non_profile_temperature():
     ds = _dataset().drop_vars("temp_p").assign(temp_p=("time", [290.0, 291.0, 292.0]))
     with pytest.raises(InvalidArmbeData, match="expected both"):
         validate_armbe_input(ds)
+
+
+def test_loader_ignores_malformed_auxiliary_time_units(tmp_path):
+    ds = _dataset()
+    ds["time_frac"] = (
+        ("time",),
+        np.arange(ds.sizes["time"], dtype=float),
+        {"units": "days since last day of the previous year"},
+    )
+    path = tmp_path / "sgparmbeatmC1.c1.20180101.000000.nc"
+    ds.to_netcdf(path)
+
+    loaded = load_armbe(path)
+
+    np.testing.assert_array_equal(loaded.time.values, ds.time.values)
 
 
 def test_synthetic_pipeline_runs_and_evaluates(tmp_path, capsys):

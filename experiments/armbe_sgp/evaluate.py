@@ -156,22 +156,22 @@ def main(argv=None) -> int:
         daily[label] = (day, m_d, o_d)
         rows.append((label, metrics(m_d, o_d)))
 
-    print(f"\nDaily-mean comparison, {len(times)} hourly steps "
+    print(f"\nDaily-mean comparison, {len(times)} input steps "
           f"-> {len(next(iter(daily.values()))[0])} days\n")
     hdr = f"{'field':24s}{'obs':>10s}{'model':>10s}{'bias':>10s}{'rmse':>10s}{'corr':>8s}"
     print(hdr)
     print("-" * len(hdr))
     for label, s in rows:
         corr = f"{s['corr']:8.2f}" if np.isfinite(s["corr"]) else f"{'n/a':>8s}"
-        flag = "  <- unexplained, see docstring" if "precip" in label else ""
+        flag = "  <- diagnostic; see docstring" if "precip" in label else ""
         print(f"{label:24s}{s['obs_mean']:10.3f}{s['mod_mean']:10.3f}"
               f"{s['bias']:10.3f}{s['rmse']:10.3f}{corr}{flag}")
 
-    print("\nnote: the model rains continuously here and the cause is not yet "
-          "established.\n      Partly the fixture (unstable 94% of hours by "
-          "construction), but the rate is\n      also flat while instability "
-          "swings ~20x, which that alone doesn't explain.\n      See the module "
-          "docstring. Synthetic data can't settle it — recheck on real ARMBE.")
+    print("\nnote: precipitation is diagnostic rather than a headline skill score. "
+          "In prescribed-state mode,\n      the model cannot retain convective "
+          "thermodynamic feedback between observations. Assess it on\n      a "
+          "longer contiguous real-data window and against a relaxation sensitivity "
+          "run; see the module docstring.")
 
     if args.plot:
         import matplotlib

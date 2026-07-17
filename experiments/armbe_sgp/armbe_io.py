@@ -32,6 +32,7 @@ reports what was matched. When a real file lands, run ``python armbe_io.py
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -69,18 +70,23 @@ CANDIDATES: dict[str, tuple[str, ...]] = {
     # surface
     "surface_pressure": ("pressure_sfc", "p_sfc", "psfc", "surface_pressure",
                          "bar_pres", "barometric_pressure"),
-    "surface_temperature": ("temp_sfc", "T_sfc", "tsfc", "surface_temperature",
-                            "temp_mean"),
+    "surface_temperature": ("temp_sfc", "temperature_sfc", "T_sfc", "tsfc",
+                            "surface_temperature", "temp_mean"),
     # evaluation targets
     "precip": ("precip_rate_sfc", "precip_rate", "prec_sfc", "precip",
                "precip_sfc"),
-    "sensible_heat_flux": ("sensible_heat_flux", "sh_flux", "shf", "SH"),
-    "latent_heat_flux": ("latent_heat_flux", "lh_flux", "lhf", "LH"),
+    # ARMBEATM's BAEBBR estimates are the primary SGP flux target; QCECOR is
+    # retained as a fallback where the BAEBBR stream is unavailable.
+    "sensible_heat_flux": ("sensible_heat_flux_baebbr", "sensible_heat_flux_qcecor",
+                            "sensible_heat_flux", "sh_flux", "shf", "SH"),
+    "latent_heat_flux": ("latent_heat_flux_baebbr", "latent_heat_flux_qcecor",
+                          "latent_heat_flux", "lh_flux", "lhf", "LH"),
     "sw_down_sfc": ("sw_dn_sfc", "surface_downwelling_shortwave",
-                    "rsds", "swdn_sfc", "sw_down"),
+                    "rsds", "swdn_sfc", "swdn", "sw_down"),
     "lw_down_sfc": ("lw_dn_sfc", "surface_downwelling_longwave",
-                    "rlds", "lwdn_sfc", "lw_down"),
-    "cloud_fraction": ("cld_frac", "cloud_fraction", "cldfrac"),
+                    "rlds", "lwdn_sfc", "lwdn", "lw_down"),
+    "cloud_fraction": ("tot_cld", "tot_cld_tsi", "cld_frac", "cloud_fraction",
+                       "cldfrac"),
     "lwp": ("lwp", "liquid_water_path"),
 }
 
@@ -299,9 +305,28 @@ def validate_armbe_input(ds: xr.Dataset) -> None:
             raise InvalidArmbeData("relative humidity must contain finite values in the range 0..100 percent.")
 
 
+def _open_armbe_dataset(path: Path) -> xr.Dataset:
+    """Open one ARMBE file while decoding only its valid primary time axis.
+
+    ARMBEATM's ``time_frac`` auxiliary variable advertises the non-CF unit
+    ``"days since last day of the previous year"``. Letting xarray decode every
+    time-like variable rejects otherwise valid files, so keep auxiliaries raw
+    and decode the actual ``time`` coordinate explicitly.
+    """
+    ds = xr.open_dataset(path, decode_times=False)
+    time = ds["time"]
+    decoded_time = xr.coding.times.decode_cf_datetime(
+        time.values,
+        units=time.attrs["units"],
+        calendar=time.attrs.get("calendar", "standard"),
+    )
+    return ds.assign_coords(time=(time.dims, decoded_time, time.attrs))
+
+
 def load_armbe(atm: str | Path | Iterable[str | Path],
                cldrad: str | Path | Iterable[str | Path] | None = None,
-               t0: str | None = None, t1: str | None = None) -> xr.Dataset:
+               t0: str | None = None, t1: str | None = None,
+               validate: bool = True) -> xr.Dataset:
     """Open ARMBEATM (+ optional ARMBECLDRAD), merge, slice to [t0, t1]."""
     def _open(src):
         if src is None:
@@ -312,20 +337,50 @@ def load_armbe(atm: str | Path | Iterable[str | Path],
             paths = [Path(p) for p in src]
         if not paths:
             raise FileNotFoundError(f"no netCDF files found for {src!r}")
+        # Ordered ARMBE files are annual and encode their start date in the
+        # filename. Avoid combining unrelated years: their coordinate metadata
+        # can differ even though the requested time window needs only one file.
+        if t0 is not None or t1 is not None:
+            requested_years = {
+                year for year in range(
+                    int(str(np.datetime64(t0 or "1900-01-01", "Y"))[:4]),
+                    int(str(np.datetime64(t1 or "2100-01-01", "Y"))[:4]) + 1,
+                )
+            }
+            dated_paths = []
+            for path in paths:
+                match = re.search(r"\.(\d{4})\d{4}\.", path.name)
+                if match is None or int(match.group(1)) in requested_years:
+                    dated_paths.append(path)
+            paths = dated_paths
         if len(paths) == 1:
-            return xr.open_dataset(paths[0])
-        return xr.open_mfdataset(paths, combine="by_coords")
+            return _open_armbe_dataset(paths[0])
+        return xr.concat(
+            [_open_armbe_dataset(path) for path in paths],
+            dim="time",
+            data_vars="all",
+            coords="minimal",
+            compat="override",
+            join="outer",
+            combine_attrs="override",
+        ).sortby("time")
 
     ds = _open(atm)
     ds_c = _open(cldrad)
     if ds_c is not None:
+        # Both products use a ``height`` dimension, but their vertical grids
+        # differ. Keep the evaluation-only cloud-radiation profiles separate
+        # from ARMBEATM's state-profile grid before merging on time.
+        if "height" in ds.dims and "height" in ds_c.dims:
+            ds_c = ds_c.rename({"height": "cldrad_height"})
         # Targets may be on the same hourly axis; merge non-conflicting vars.
         ds = xr.merge([ds, ds_c], compat="override", join="inner")
     if t0 is not None or t1 is not None:
         ds = ds.sel(time=slice(t0, t1))
     if ds.sizes.get("time", 0) == 0:
         raise ValueError(f"no timesteps in window {t0}..{t1}")
-    validate_armbe_input(ds)
+    if validate:
+        validate_armbe_input(ds)
     return ds
 
 
@@ -452,7 +507,7 @@ def _main(argv: Sequence[str]) -> int:
     if not argv:
         print(__doc__)
         return 1
-    ds = load_armbe(argv[0])
+    ds = load_armbe(argv[0], validate=False)
     print(f"dims: {dict(ds.sizes)}\n")
     print("variables in file:")
     for v in sorted(map(str, ds.variables)):
