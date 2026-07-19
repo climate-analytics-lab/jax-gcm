@@ -98,20 +98,29 @@ class AqueousTermTest(unittest.TestCase):
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_sulfur_conserved_without_cloud_borne_number(self):
-        # Spin-up case: no cloud-borne number anywhere. Sulfate must still be
-        # produced (in the coarse "droplet" mode) and match the SO2 sink — the
-        # SO2 sink must not vanish into nothing.
+        # No cloud-borne number anywhere (today's reality: no activation
+        # transfer populates the cloud-borne tracers). Production must land in
+        # INTERSTITIAL accumulation-mode sulfate — the HAM cloud-borne-coarse
+        # fallback fed a tracer nothing scavenges (wetdep is interstitial-
+        # only), which grew ~0.7 mg/m²/day without equilibrium in the first
+        # online-emission ne30 year — and must still match the SO2 sink.
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
 
         state, diagnostics = self._setup(nc=0.0)
         tend, _ = AqueousSulfur()(state, diagnostics, None, None)
-        # All produced sulfate lands in the coarse mode.
+        # All produced sulfate lands in interstitial accumulation mode…
         self.assertGreater(
-            float(tend.tracers[mass_name("so4", "cor", cloud_borne=True)][0, 0]),
-            0.0,
+            float(tend.tracers[mass_name("so4", "acc")][0, 0]), 0.0,
         )
+        # …and none in any cloud-borne tracer.
+        for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
+            np.testing.assert_allclose(
+                np.asarray(tend.tracers[mass_name("so4", m, cloud_borne=True)]),
+                0.0,
+            )
         s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
+        s_rate = s_rate + np.asarray(tend.tracers[mass_name("so4", "acc")]) / _MW_SO4
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             key = mass_name("so4", m, cloud_borne=True)
             s_rate = s_rate + np.asarray(tend.tracers[key]) / _MW_SO4
