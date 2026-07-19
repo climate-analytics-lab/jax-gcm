@@ -1,0 +1,47 @@
+# pySES CAM-SE spectral-element backend — canonical ne30L47 configuration.
+#
+# These are the PRODUCTION-VALIDATED stability settings from the 2026-07
+# ne30 campaign (a full 365-day ECHAM+RRTMGP+2M+JAM year, zero NaN):
+#   * dt = 900 s: pySES's lump-coupling forward-Euler physics kick is the
+#     destabilizer at winter-vortex fronts; 900 s + dribbled dynamics
+#     coupling clears what 1800 s cannot.
+#   * coupling = hybrid (CAM-SE se_ftype 2): tracers lumped for
+#     mass/shape preservation, u/v/T dribbled across dynamics substeps.
+#   * hypervis = quasi_uniform: CAM-SE production dissipation with the
+#     divergent wind damped nu_div_factor(=2.5)x harder — the
+#     vortex-edge front killer. (The tensor config has no divergence
+#     enhancement and lost eight probe runs to day-146 fronts.)
+#   * nu_top = 2.5e5 m^2/s: pySES's own default; the 2.5e4 the prototype
+#     used (to cut sponge sub-cycling cost) under-damps the lid.
+#   * tracer_substeps = 5 at dt=900 -> dt_tracer 180 s (~240 m/s
+#     advective headroom; pySES's CFL sizing assumes 120 m/s, which the
+#     winter polar-night jet exceeds).
+#   * lid_sponge: USSA temperature relaxation + implicit tanh-profile
+#     Rayleigh wind friction over the top levels — the finite ~1 Pa lid
+#     sits outside the radiation schemes' validity and refrigerates /
+#     accelerates unbounded without it.
+#
+# NOTE: the ``grid`` group is IGNORED with this backend — resolution comes
+# from nx/npt/nlev here. ``run.time_step`` is also ignored (the Model
+# adopts dt_seconds). Requires `pip install jcm[pyses]`.
+name: pyses
+nx: 30
+npt: 4
+nlev: 47
+dt_seconds: 900.0
+coupling: hybrid
+hypervis: quasi_uniform
+nu_div_factor: 2.5
+nu_top: 2.5e5
+n_sponge: 8
+tracer_substeps: 5
+dyn_substeps_per_tracer: -1
+compute_frontogenesis: false
+# Terrain file on a regular lon/lat grid, bilinearly interpolated onto the
+# columns at build time. Null -> the packaged T63 climatology (marked as a
+# temporary downscale until native ne30 boundary data exists).
+terrain_file: null
+lid_sponge:
+  levels: 8
+  t_hours: 6.0
+  uv_hours: 72.0

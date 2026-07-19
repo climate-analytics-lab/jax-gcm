@@ -1,0 +1,30 @@
+# Canonical pySES ne30L47 production year: 10-day chunks with health gates,
+# checkpoint + .prev rotation after each healthy chunk, permanent checkpoint
+# archives every 60 days (so later experiments can restart from before a
+# slowly-developing failure), 5-day-mean saves. Pair with
+# ``dycore=pyses_ne30l47`` and an ECHAM physics group, e.g.:
+#
+#   python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
+#
+# ``time_step`` is absent deliberately — the Model adopts the dycore's
+# dt_seconds. The dinosaur-style ``sponge`` group is likewise not used here;
+# the finite-lid sponge lives in ``dycore.lid_sponge``.
+save_interval: 5
+total_time: 365
+output_averages: true
+output: pyses_year.nc
+log_level: INFO
+time_step: null
+
+chunk_days: 10
+output_prefix: pyses_year
+checkpoint_path: pyses_year.ckpt
+archive_ckpt_every: 60
+bail_on_unhealthy: true
+
+mode: full
+state_file: null
+tracer_vars: null
+column:
+  lat_deg: 0.0
+  lon_deg: 0.0

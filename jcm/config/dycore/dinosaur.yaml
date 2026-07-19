@@ -1,0 +1,4 @@
+# Dinosaur spectral dynamical core (the default backend). Horizontal /
+# vertical discretization comes from the ``grid`` group; diffusion from the
+# ``diffusion`` group; the timestep from ``run.time_step`` (minutes).
+name: dinosaur

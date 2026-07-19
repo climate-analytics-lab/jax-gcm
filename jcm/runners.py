@@ -674,8 +674,30 @@ def build_tracer_filter(cfg: DictConfig):
 
 
 def build_model(cfg: DictConfig) -> Model:
-    """Build a fully-configured ``Model`` from a Hydra config."""
+    """Build a fully-configured ``Model`` from a Hydra config.
+
+    The ``dycore`` config group selects the backend: ``dinosaur`` (default,
+    grid/diffusion/time_step from their own groups) or ``pyses`` (CAM-SE;
+    resolution and timestep come from the dycore group itself — see
+    ``config/dycore/pyses_ne30l47.yaml``).
+    """
     from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
+    dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
+    if dycore_name == "pyses":
+        init_kind = cfg.get("init", {}).get("kind", "isothermal")
+        if init_kind not in ("isothermal",):
+            raise ValueError(
+                f"init={init_kind!r} is dinosaur-specific; the pySES backend "
+                "initializes from its own resting USSA-1976 state (keep the "
+                "default init=isothermal)."
+            )
+        return _build_pyses_model(cfg)
+    if dycore_name != "dinosaur":
+        raise ValueError(
+            f"Unknown dycore config name {dycore_name!r} — expected "
+            "'dinosaur' or 'pyses'."
+        )
 
     coords = build_coords(cfg)
     physics = build_physics(cfg)
@@ -707,11 +729,95 @@ def build_model(cfg: DictConfig) -> Model:
     )
 
 
+def _build_pyses_model(cfg: DictConfig) -> Model:
+    """Build a Model on the pySES CAM-SE backend from ``cfg.dycore``.
+
+    Composition mirrors the production ne30 campaign driver this replaces:
+    the backend owns resolution and timestep (``grid`` group and
+    ``run.time_step`` are ignored — the Model adopts ``dt_seconds``), the
+    physics runs float32 on the float64 core, and a finite-lid sponge term
+    (USSA temperature relaxation + implicit Rayleigh wind friction, see the
+    dycore config's ``lid_sponge``) is appended to the physics: the ~1 Pa
+    lid sits outside the shipped radiation schemes' validity and both
+    refrigerates and accelerates unbounded without it.
+    """
+    import jax.numpy as jnp
+
+    from jcm.dycore.pyses import PysesCamSEDycore
+
+    dc = cfg.dycore
+    physics = build_physics(cfg)
+    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
+
+    dycore = PysesCamSEDycore(
+        nx=int(dc.nx), npt=int(dc.npt), nlev=int(dc.nlev),
+        dt_seconds=float(dc.dt_seconds),
+        nu_top=float(dc.nu_top), n_sponge=int(dc.n_sponge),
+        coupling=str(dc.coupling), hypervis=str(dc.hypervis),
+        nu_div_factor=float(dc.get("nu_div_factor", 2.5)),
+        tracer_substeps=int(dc.get("tracer_substeps", -1)),
+        dyn_substeps_per_tracer=int(dc.get("dyn_substeps_per_tracer", -1)),
+        compute_frontogenesis=bool(dc.get("compute_frontogenesis", False)),
+        terrain_file=dc.get("terrain_file", None) or _pyses_default_bc("terrain.nc"),
+        tracer_specs=tracer_specs,
+        physics_dtype=jnp.float32,
+    )
+
+    sponge = dc.get("lid_sponge", None)
+    if sponge is not None and int(sponge.get("levels", 0)) > 0:
+        physics = physics + _pyses_lid_sponge_term(dycore, sponge)
+
+    log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
+    # No time_step: the Model adopts the dycore's dt_seconds (single source
+    # of truth; a conflicting run.time_step would raise).
+    return Model(dycore=dycore, physics=physics, log_level=log_level)
+
+
+def _pyses_default_bc(filename: str) -> str:
+    """Resolve the packaged T63 boundary file (temporary downscale)."""
+    import jcm
+
+    return str(Path(jcm.__file__).resolve().parent / "data" / "bc" / "t63"
+               / filename)
+
+
+def _pyses_lid_sponge_term(dycore, sponge_cfg):
+    """Finite-lid sponge: USSA T relaxation + implicit Rayleigh wind drag.
+
+    The USSA-1976 reference temperature is evaluated at the level reference
+    mid-pressures of the dycore's own hybrid grid — the same profile the
+    backend's resting initial state uses, so the relaxation target is
+    consistent with the initialization.
+    """
+    import numpy as np
+
+    from jcm.dycore.pyses.initial_states import ussa_pressure, ussa_temperature
+    from jcm.physics.dissipation.upper_temperature_relaxation import (
+        UpperTemperatureRelaxation,
+    )
+
+    a = np.asarray(dycore.coords.vertical.a_boundaries, dtype=float)
+    b = np.asarray(dycore.coords.vertical.b_boundaries, dtype=float)
+    p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * 101325.0
+    zs = np.linspace(0.0, 84000.0, 4000)
+    ps = np.asarray(ussa_pressure(zs))
+    z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
+    t_ref = np.asarray(ussa_temperature(z_of_p))
+
+    uv_hours = float(sponge_cfg.get("uv_hours", 0.0) or 0.0)
+    return UpperTemperatureRelaxation(
+        t_ref,
+        n_levels=int(sponge_cfg.get("levels", 8)),
+        timescale_s=float(sponge_cfg.get("t_hours", 6.0)) * 3600.0,
+        wind_timescale_s=(uv_hours * 3600.0 if uv_hours > 0 else None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Forcing
 # ---------------------------------------------------------------------------
 
-def build_forcing(cfg: DictConfig, coords):
+def build_forcing(cfg: DictConfig, coords, dycore=None):
     """Build a ``ForcingData`` from ``cfg.forcing``.
 
     ``kind: default`` returns ``None`` — ``Model.run`` then falls back to the
@@ -726,6 +832,25 @@ def build_forcing(cfg: DictConfig, coords):
     horizontal grid (the HAMMOZ-style natural-emission files may have
     descending latitude — they are validated and flipped to model order).
     """
+    if dycore is not None and hasattr(dycore, "colmap"):
+        # pySES backend: monthly lon/lat climatology interpolated onto the
+        # physics columns at build time. The JAM aerosol inputs
+        # (emissions/dms/dust/oxidants files) are not carried on this path
+        # yet — fail loudly rather than run silently aerosol-dark (that is
+        # exactly what produced the sea-salt-only ne30 JAM year).
+        for key in ("emissions_file", "dms_file", "dust_file", "oxidants_file"):
+            if cfg.forcing.get(key, None):
+                raise NotImplementedError(
+                    f"forcing.{key} is not supported on the pySES column "
+                    "path yet — extend jcm.dycore.pyses.forcing.build_forcing "
+                    "to carry the aerosol fields (see the JAM online-aerosol "
+                    "handoff notes)."
+                )
+        from jcm.dycore.pyses.forcing import build_forcing as pyses_build_forcing
+
+        file = cfg.forcing.get("file", None) or _pyses_default_bc("forcing.nc")
+        return pyses_build_forcing(str(file), dycore)
+
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is None or forcing_cfg.kind == "default":
         forcing = None
@@ -1060,7 +1185,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if model is None:
         model = build_model(cfg)
 
-    forcing = build_forcing(cfg, model.coords)
+    forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
     if chunk_days > 0:
         return run_chunked(
@@ -1223,7 +1348,7 @@ def run_chunked(
     if model is None:
         model = build_model(cfg)
     if forcing is None:
-        forcing = build_forcing(cfg, model.coords)
+        forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
     save_interval = float(cfg.run.save_interval)
     total_time = float(cfg.run.total_time)
@@ -1322,10 +1447,32 @@ def run_chunked(
         ds.to_netcdf(nc_path)
         print(f"  Saved {nc_path}")
 
-        if ckpt_path:
+        # Checkpoint only after a PASSING health check, keeping the previous
+        # checkpoint as ``.prev``: an unhealthy chunk must not overwrite the
+        # only restartable state (with save-interval-averaged outputs the
+        # netCDFs cannot reconstruct one — the first ne30 campaign lost a
+        # 120-day run to exactly this ordering). ``archive_ckpt_every`` (days,
+        # 0 = off) additionally keeps permanent copies so a later experiment
+        # can restart from before a slowly-developing failure, not just from
+        # the last two chunk boundaries.
+        if ckpt_path and ok:
             from jcm.checkpoint import save_checkpoint
+
+            cp = Path(ckpt_path)
+            if cp.exists():
+                cp.replace(f"{ckpt_path}.prev")
             save_checkpoint(model, ckpt_path, elapsed_days=elapsed_sim_days)
             print(f"  Saved checkpoint to {ckpt_path}")
+            archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
+            if archive_every > 0 and abs(elapsed_sim_days % archive_every) < 1e-6:
+                import shutil
+
+                archive = f"{output_prefix}_day{int(elapsed_sim_days)}.ckpt"
+                shutil.copyfile(ckpt_path, archive)
+                print(f"  Archived checkpoint {archive}")
+        elif ckpt_path:
+            print("  Checkpoint NOT updated (unhealthy chunk) — restart from "
+                  f"{ckpt_path}")
 
         if not ok:
             # Honour ``run.bail_on_unhealthy`` (default True). The full-year
