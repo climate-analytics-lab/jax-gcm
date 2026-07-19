@@ -72,6 +72,49 @@ class JamOpticsTermTest(unittest.TestCase):
         term.cache_band_config(band)
         return term
 
+    def test_radiation_gate_replays_cache_between_compute_steps(self):
+        """With the gate configured, non-radiation steps must reuse the
+        cached per-band fields (the radiation term can't see fresh optics
+        until its next compute step anyway), and radiation-compute steps
+        must recompute fresh.
+        """
+        import dataclasses
+
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        term = self._term(band)
+        term.configure_radiation_gate(7200.0)   # 8 steps at dt=900
+
+        @dataclasses.dataclass
+        class _Rad:
+            step: jnp.ndarray
+
+        base = {**diagnostics, "_dt_seconds": jnp.asarray(900.0)}
+        # Step 0 (compute): no cache in the carry yet -> unconditional
+        # compute that seeds the ``_jam_band_optics`` slot.
+        _, d0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))},
+                     None, None)
+        self.assertIn("_jam_band_optics", d0)
+
+        # Step 1 (cached): perturb the aerosol state; output must equal the
+        # step-0 fields, not fresh ones.
+        aer2 = d0["_jam_state"].copy(number=d0["_jam_state"].number * 3.0)
+        d1_in = {**base, "radiation": _Rad(jnp.int32(1)),
+                 "_jam_state": aer2,
+                 "_jam_band_optics": d0["_jam_band_optics"]}
+        _, d1 = term(state, d1_in, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(d1["aerosol"].aod_sw_per_band),
+            np.asarray(d0["aerosol"].aod_sw_per_band),
+        )
+
+        # Step 8 (compute): the tripled number must now show (larger AOD).
+        d8_in = {**d1_in, "radiation": _Rad(jnp.int32(8))}
+        _, d8 = term(state, d8_in, None, None)
+        self.assertGreater(
+            float(jnp.sum(d8["aerosol"].aod_sw_per_band)),
+            float(jnp.sum(d0["aerosol"].aod_sw_per_band)),
+        )
+
     def test_writes_finite_bounded_optics(self):
         state, diagnostics, band, n_sw, n_lw = _setup()
         term = self._term(band)

@@ -69,6 +69,27 @@ class JamOpticsTerm(PhysicsTerm):
         self._spec = spec or MAM4_SPEC
         self._lut = default_mie_lut()
         self._cache = None   # set by cache_band_config
+        self._radiation_interval_s: float | None = None
+
+    def configure_radiation_gate(self, interval_s) -> None:
+        """Recompute band optics only on radiation-compute steps.
+
+        The per-band optics are consumed exclusively by the radiation term,
+        which replays cached heating rates between its ``radiation_interval``
+        compute steps (default 2 h = every 8th step at dt = 900 s) — so the
+        30-band × 4-mode Mie evaluation on the intermediate steps is
+        discarded work (~8× of the second-largest JAM cost). With the gate
+        configured, those steps replay the previous compute's per-band
+        fields from the ``_jam_band_optics`` carry slot instead, using the
+        *same* ``radiation.step`` counter the radiation gate reads (this
+        term runs earlier in the chain, so both see the identical
+        pre-increment value and agree within a step). ``interval_s <= 0``
+        disables the gate (compute every step — the pre-gating behaviour).
+        The column AOD-550 diagnostic then also updates at the radiation
+        cadence.
+        """
+        v = float(interval_s)
+        self._radiation_interval_s = v if v > 0 else None
 
     def cache_band_config(self, band_config) -> None:
         """Precompute band centers and per-species refractive indices."""
@@ -178,9 +199,9 @@ class JamOpticsTerm(PhysicsTerm):
 
         return jax.vmap(one_band)(lam_all, ri_j)
 
-    def __call__(self, state, diagnostics, forcing, terrain):
+    def _compute_fields(self, state, diagnostics) -> dict:
+        """Fresh per-band optics + the AOD-550 column diagnostic."""
         aer = diagnostics["_jam_state"]
-        aerosol = diagnostics["aerosol"]
         air_density = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]
         c = self._cache
@@ -205,11 +226,6 @@ class JamOpticsTerm(PhysicsTerm):
             state, aer, num_per_area, c.lw_nm, c.ri_lw
         )
 
-        new_aerosol = aerosol.copy(
-            aod_sw_per_band=aod_sw, ssa_sw_per_band=ssa_sw, asy_sw_per_band=asy_sw,
-            aod_lw_per_band=aod_lw, ssa_lw_per_band=ssa_lw, asy_lw_per_band=asy_lw,
-        )
-
         # Column aerosol optical depth at ~550 nm: the total-column extinction
         # optical depth (sum of the per-layer band AOD over the vertical axis 0)
         # in the SW band closest to 550 nm. This is the standard satellite /
@@ -224,9 +240,47 @@ class JamOpticsTerm(PhysicsTerm):
         else:
             aod_550 = jnp.zeros_like(state.temperature[0])
 
+        return {
+            "aod_sw_per_band": aod_sw, "ssa_sw_per_band": ssa_sw,
+            "asy_sw_per_band": asy_sw,
+            "aod_lw_per_band": aod_lw, "ssa_lw_per_band": ssa_lw,
+            "asy_lw_per_band": asy_lw,
+            "aod_550": aod_550,
+        }
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        cached = diagnostics.get("_jam_band_optics")
+        if (self._radiation_interval_s is None or cached is None
+                or "radiation" not in diagnostics):
+            # Ungated (every step): gate unconfigured, or no cached fields in
+            # the carry yet (the structural-template pass builds them here).
+            fields = self._compute_fields(state, diagnostics)
+        else:
+            # Same gate arithmetic as ``radiation_should_compute``, on the
+            # same pre-increment ``radiation.step`` carry counter (see
+            # ``configure_radiation_gate``).
+            dt = diagnostics["_dt_seconds"]
+            steps_per_call = jnp.int32(
+                jnp.maximum(jnp.round(self._radiation_interval_s / dt), 1)
+            )
+            fields = jax.lax.cond(
+                jnp.mod(diagnostics["radiation"].step, steps_per_call) == 0,
+                # Pin fresh leaves to the carry's dtypes so both cond branches
+                # type-check (under x64 hosts some constants promote).
+                lambda: jax.tree.map(
+                    lambda n, o: n.astype(o.dtype),
+                    self._compute_fields(state, diagnostics), cached,
+                ),
+                lambda: cached,
+            )
+
+        new_aerosol = diagnostics["aerosol"].copy(
+            **{k: v for k, v in fields.items() if k != "aod_550"}
+        )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
         return tendency, {
             **diagnostics,
             "aerosol": new_aerosol,
-            "aerosol_optical_depth": aod_550,
+            "aerosol_optical_depth": fields["aod_550"],
+            "_jam_band_optics": fields,
         }
