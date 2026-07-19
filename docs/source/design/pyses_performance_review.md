@@ -137,7 +137,43 @@ A single `jax.profiler` trace of ~4 steps (1-GPU 2m-jam) would confirm the
 MAM4 : optics : rest split this review infers structurally. Cheap insurance
 (~30 min GPU) before spending effort on B1/B2.
 
-## 5. Recommended sequence
+## 5. Verification round (measured, ne30 2m-jam, 1× A100 unless noted)
+
+The B-levers and the collective work were implemented and **measured against
+the compiled XLA graph** (jobs `verify_levers_6802639`, `pyses_head_bench_6802910`):
+
+| change | steady sim days/hr | verdict |
+|---|---|---|
+| baseline (wheel 0.1.3a2, f64 core, CRE, ungated optics) | 6.4 | — |
+| + f32 MAM4 core (B1) | 6.4 | **engaged but ~neutral** (−28 ms/step) |
+| + optics gate (B2) | 6.5 | −74 ms on non-radiation steps |
+| + no-CRE (B3) | 6.7 | −1.05 s on radiation steps only |
+| **pyses HEAD** (kernel fusions) + levers | **9.2** | **+40 % — the real single-GPU lever** |
+| pyses HEAD + batched projections + live ppermute DSS, 4 GPU | 5.4 | up from 4.8, still < 1 GPU |
+
+Why the physics levers were neutral, from the graph itself: the step
+executable is an ~87 MB HLO module of ~230 k ops whose f64 census barely
+moved with the f32 core (235 k → 227 k tensor refs — MAM4 is ~3 % of the
+graph), and the profiler trace shows **~20,400 kernels/step with device-busy
+time ≈ wall time** (5.49 s): the GPU is compute-saturated by **f64
+tracer-transport work** (scatter/gather fusions ~0.55 s, f64 GEMM
+derivative contractions ~0.6 s, limiter select/compare fusions ~0.9 s, and a
+~2.9 s tail of per-tracer pipeline kernels). §3's structural inference
+(MAM4 dominant) was wrong; the measurement stands corrected: **the 2m→jam
+3.3× is the ~95-tracer transport in the f64 dynamics**, exactly the kernels
+upstream's fusion commits attack (Zerroukat-remap vectorization → the
+scatters/selects; GLL-contraction unroll → the d884 GEMMs).
+
+4-GPU remains below the crossover at ne30 even with one lane-aware neighbor
+exchange per projection site — consistent with upstream's own NX30 2-GPU
+62 % efficiency. Instance parallelism (A1) stays the node-throughput answer.
+
+**Flagged follow-up (science decision, not tonight)**: pyses supports f32
+dynamics (`PYSES_USE_DOUBLE=0`, benchmarked upstream at ~2× on NX15). jcm
+runs the CAM-SE core f64 by choice; an f32-dynamics jam experiment is the
+one remaining ~2× single-GPU lever, gated on thin-lid stability validation.
+
+## 6. Recommended sequence
 
 1. **A1 now** (zero code): 4× node throughput for the ensemble/production use
    case; the running 1-year chain already occupies only 1 of 4 GPUs on its
