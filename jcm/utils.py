@@ -175,12 +175,6 @@ def pass_fn(operand):
 def ones_like(x):
     return tree_map(jnp.ones_like, x)
 
-def _index_if_3d(arr, key):
-    return arr[:, :, key] if arr.ndim > 2 else arr
-
-def tree_index_3d(tree, key):
-    return tree_map(lambda arr: _index_if_3d(jnp.array(arr), key), tree)
-
 def _check_type_ones_like_tangent(x):
         if jnp.result_type(x) == jnp.result_type(float):
             return jnp.ones_like(x)
@@ -191,14 +185,6 @@ def _check_type_ones_like_tangent(x):
 
 def ones_like_tangent(pytree):
     return tree_map(_check_type_ones_like_tangent, pytree)
-
-def _check_type_zeros_like_tangent(x):
-        if jnp.result_type(x) == jnp.result_type(float):
-            return jnp.zeros_like(x)
-        return np.zeros((), dtype=jax.dtypes.float0)
-
-def zeros_like_tangent(pytree):
-    return tree_map(_check_type_zeros_like_tangent, pytree)
 
 def _check_type_convert_to_float(x):
     return jnp.asarray(x, dtype=float)
