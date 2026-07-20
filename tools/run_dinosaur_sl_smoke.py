@@ -46,6 +46,9 @@ def main() -> None:
     ap.add_argument("--aquaplanet", action="store_true",
                     help="flat terrain (isolates orography from blow-ups)")
     ap.add_argument("--no-emissions", action="store_true")
+    ap.add_argument("--save-nc", default=None,
+                    help="write the trajectory (one frame per step) here for "
+                         "offline first-NaN forensics")
     args = ap.parse_args()
 
     import jax
@@ -116,11 +119,17 @@ def main() -> None:
     model.bootstrap_state(None)
     t0 = time.time()
     step_days = args.dt / 86400.0
+    # With --save-nc, save EVERY step so first-NaN forensics can bisect in
+    # time; otherwise a single end frame.
+    save_days = step_days if args.save_nc else args.steps * step_days
     preds = model.resume(
-        forcing=forcing, save_interval=args.steps * step_days,
+        forcing=forcing, save_interval=save_days,
         total_time=args.steps * step_days, output_averages=False,
     )
     ds_out = preds.to_xarray()
+    if args.save_nc:
+        ds_out.to_netcdf(args.save_nc)
+        print(f"[save] wrote {args.save_nc}")
     print(f"[run] {args.steps} steps in {time.time() - t0:.1f}s (incl. compile)")
     # Steady-state timing segment (already compiled).
     t1 = time.time()
