@@ -167,13 +167,15 @@ def _regrid_to_gaussian(path: Path, truncation: int) -> None:
     from dinosaur.sigma_coordinates import SigmaCoordinates
 
     from jcm.dycore.pyses.interp import interp_grid_to_points
+    from jcm.runners import _model_latlon_deg
     from jcm.utils import get_coords
 
     coords = get_coords(SigmaCoordinates.equidistant(8),
                         spectral_truncation=truncation)
-    lons_m, lats_m = coords.horizontal.nodal_mesh
-    lon_t = np.rad2deg(lons_m[:, 0])
-    lat_t = np.rad2deg(lats_m[0, :])
+    # Use the SAME lat/lon accessor as the runners' grid validation
+    # (dinosaur's nodal_mesh carries sin(latitude); rad2deg on it silently
+    # produces a ±57.3° pseudo-grid the validator then rightly rejects).
+    lat_t, lon_t = _model_latlon_deg(coords)
     glon, glat = np.meshgrid(lon_t, lat_t, indexing="ij")
 
     ds = xr.open_dataset(path)
