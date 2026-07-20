@@ -156,17 +156,82 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     print(f"wrote {out} {dict(out_ds.sizes)}")
 
 
+def _regrid_to_gaussian(path: Path, truncation: int) -> None:
+    """Rewrite a prepped file bilinearly onto the T{truncation} Gaussian grid.
+
+    The pySES loader interpolates arbitrary lon/lat grids onto its columns,
+    but the spectral-backend runners (``jcm.runners._attach_*``) require the
+    file to already be on the model's Gaussian grid — this makes the same
+    products usable there (suffix ``_t{truncation}.nc``).
+    """
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+
+    from jcm.dycore.pyses.interp import interp_grid_to_points
+    from jcm.utils import get_coords
+
+    coords = get_coords(SigmaCoordinates.equidistant(8),
+                        spectral_truncation=truncation)
+    lons_m, lats_m = coords.horizontal.nodal_mesh
+    lon_t = np.rad2deg(lons_m[:, 0])
+    lat_t = np.rad2deg(lats_m[0, :])
+    glon, glat = np.meshgrid(lon_t, lat_t, indexing="ij")
+
+    ds = xr.open_dataset(path)
+    out_vars = {}
+    for name, da in ds.data_vars.items():
+        if "lat" not in da.dims or "lon" not in da.dims:
+            out_vars[name] = da
+            continue
+        lat_s = np.asarray(ds["lat"].values, float)
+        lon_s = np.asarray(ds["lon"].values, float)
+        arr = np.asarray(da.transpose(..., "lat", "lon").values)
+        flip = lat_s[0] > lat_s[-1]
+        if flip:
+            lat_s = lat_s[::-1]
+            arr = arr[..., ::-1, :]
+        lead = arr.shape[:-2]
+        flat = arr.reshape((-1,) + arr.shape[-2:])
+        res = np.stack([
+            interp_grid_to_points(lon_s, lat_s, f.T, glon, glat) for f in flat
+        ]).reshape(lead + glon.shape)          # (..., lon, lat)
+        # runners' readers expect (…, lat, lon) file layout with 'lat'/'lon'.
+        dims = tuple(d for d in da.dims if d not in ("lat", "lon")) + ("lat", "lon")
+        out_vars[name] = (dims, np.moveaxis(res, -2, -1), da.attrs)
+    out = xr.Dataset(
+        out_vars,
+        coords={**{k: v for k, v in ds.coords.items() if k not in ("lat", "lon")},
+                "lat": lat_t, "lon": lon_t},
+        attrs={**ds.attrs, "regridded": f"bilinear to T{truncation} Gaussian"},
+    )
+    dst = path.with_name(path.stem + f"_t{truncation}.nc")
+    out.to_netcdf(dst)
+    print(f"wrote {dst} {dict(out.sizes)}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--year", type=int, default=2014)
     ap.add_argument("--outdir",
                     default=f"/glade/derecho/scratch/{os.environ['USER']}/jam_inputs")
+    ap.add_argument("--target-truncation", type=int, default=None,
+                    help="also write copies regridded onto this Gaussian "
+                         "grid (for the spectral-backend runners, which do "
+                         "no runtime regridding)")
     args = ap.parse_args()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    prep_dms(outdir / "dms_lana2011_climo.nc")
-    prep_dust(outdir / "dust_erodibility_cam_f19.nc")
-    prep_oxidants(outdir / f"oxidants_cam_echam_l47_{args.year}.nc", args.year)
+    products = [outdir / "dms_lana2011_climo.nc",
+                outdir / "dust_erodibility_cam_f19.nc",
+                outdir / f"oxidants_cam_echam_l47_{args.year}.nc"]
+    if not products[0].exists():
+        prep_dms(products[0])
+    if not products[1].exists():
+        prep_dust(products[1])
+    if not products[2].exists():
+        prep_oxidants(products[2], args.year)
+    if args.target_truncation:
+        for p in products:
+            _regrid_to_gaussian(p, args.target_truncation)
 
 
 if __name__ == "__main__":
