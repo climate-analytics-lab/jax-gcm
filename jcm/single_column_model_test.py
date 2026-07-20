@@ -2,6 +2,7 @@
 
 import unittest
 
+import jax_datetime as jdt
 import jax.numpy as jnp
 import pytest
 from dinosaur.sigma_coordinates import SigmaCoordinates
@@ -9,7 +10,7 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers, create_single_column_state
 
@@ -28,6 +29,17 @@ def _make_column_state(nlev: int) -> PhysicsState:
         normalized_surface_pressure=jnp.asarray(1.0),
         tracers={'qc': jnp.zeros(nlev), 'qi': jnp.zeros(nlev)},
     )
+
+
+class _SolarGeometryPhysics(Physics):
+    """Expose selected solar geometry as a deterministic tendency."""
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tendencies = PhysicsTendency.zeros(
+            state.temperature.shape,
+            temperature=jnp.full_like(state.temperature, forcing.solar.tyear),
+        )
+        return tendencies, prev_physics_data
 
 
 class TestSCMConstruction(unittest.TestCase):
@@ -90,6 +102,40 @@ class TestSCMHeldSuarez(unittest.TestCase):
         states = [self.column_state, self.column_state]
         predictions = scm.run(states)
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
+
+
+class TestSCMForcing(unittest.TestCase):
+    """Regression tests for per-step forcing selection."""
+
+    def test_forcing_selection_tracks_start_date_and_step(self):
+        column_state = _make_column_state(nlev=8)
+        scm = SingleColumnModel(
+            physics=_SolarGeometryPhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            dt_seconds=86400.0,
+            start_date=jdt.to_datetime('2000-01-01'),
+            calendar='365_day',
+        )
+
+        predictions = scm.run([column_state, column_state])
+        selected_tyear = predictions.tendencies.temperature[:, 0]
+        expected_tyear = jnp.array([
+            scm._date_at_step(step).tyear(scm.calendar) for step in range(2)
+        ])
+        self.assertTrue(jnp.allclose(selected_tyear, expected_tyear))
+
+        june_scm = SingleColumnModel(
+            physics=_SolarGeometryPhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            start_date=jdt.to_datetime('2000-06-21'),
+            calendar='365_day',
+        )
+        june_predictions = june_scm.run([column_state])
+        june_tyear = june_predictions.tendencies.temperature[0, 0]
+        self.assertTrue(jnp.allclose(
+            june_tyear, june_scm._date_at_step(0).tyear(june_scm.calendar),
+        ))
+        self.assertNotAlmostEqual(float(june_tyear), float(selected_tyear[0]))
 
 
 class TestSCMEcham(unittest.TestCase):
