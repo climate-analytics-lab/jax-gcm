@@ -166,11 +166,12 @@ def date_from_sim_time(
     Date arithmetic uses non-differentiable operations, so elapsed time is
     excluded from automatic differentiation before deriving the date.
     """
+    SECONDS_PER_DAY = 86400  # 24 hours in seconds
     sim_time = jax.lax.stop_gradient(sim_time)
     return DateData.set_date(
         model_time=start_date + jdt.Timedelta(
-            days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-            seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
+            days=jnp.floor(sim_time / SECONDS_PER_DAY).astype(jnp.int32),
+            seconds=jnp.round(sim_time % SECONDS_PER_DAY).astype(jnp.int32),
         ),
         model_step=jnp.int32(sim_time / dt_seconds),
         dt_seconds=float(dt_seconds),
