@@ -13,6 +13,14 @@ builds a duck-typed ``(1, 1)`` coords stub so column-based physics can
 cache its coord-dependent transforms (lat, vertical-level transforms,
 etc.) without dragging in a full horizontal grid.
 
+Forcing is re-selected every step from ``start_date + step * dt_seconds``
+via ``ForcingData.select``, mirroring ``Model``'s per-step
+``forcing.select(date)``. That is what drives the solar cycle: a
+user-built ``ForcingData`` carries a null ``SolarGeometry``, so a column
+whose forcing is never re-selected sees a frozen sun and produces no
+diurnal cycle in shortwave — set ``start_date`` to the real date of the
+prescribed states to get physical insolation.
+
 Multiple columns at unrelated locations should be run in parallel one
 layer above the SCM (e.g. ``jax.vmap`` over a list of
 ``(lat, lon, column_state)`` triples).
@@ -29,11 +37,13 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import tree_math
 from jax import lax
 from jax.tree_util import tree_map
 
+from jcm.date import DateData
 from jcm.forcing import ForcingData
 from jcm.physics_interface import (
     Physics,
@@ -186,6 +196,13 @@ class SingleColumnModel:
         forcing: Optional single-column ``ForcingData`` (shape ``(1, 1)``);
             defaults to ``ForcingData.zeros((1, 1))``.
         dt_seconds: Physics timestep in seconds (default 1800).
+        start_date: ``jax_datetime.Datetime`` for the start of the run. Each
+            scan step advances it by ``dt_seconds`` and re-selects ``forcing``
+            for that date, which is what gives the column its solar cycle (see
+            :meth:`_date_at_step`). Mirrors ``Model``'s argument of the same
+            name.
+        calendar: Calendar string (``"365_day"`` or ``"gregorian"``) used for
+            the date/forcing selection.
         apply_tracer_tendencies: When ``False`` tracers are reported
             diagnostically but not advanced.
         relaxation_timescales: Optional ``{var_name: tau_seconds}`` mapping.
@@ -205,6 +222,8 @@ class SingleColumnModel:
         terrain: TerrainData | None = None,
         forcing: ForcingData | None = None,
         dt_seconds: float = 1800.0,
+        start_date: jdt.Datetime = None,
+        calendar: str = "365_day",
         apply_tracer_tendencies: bool = True,
         relaxation_timescales: dict[str, float] | None = None,
     ) -> None:
@@ -214,6 +233,9 @@ class SingleColumnModel:
         self.lat_deg = float(lat_deg)
         self.lon_deg = float(lon_deg)
         self.dt_seconds = float(dt_seconds)
+        self.start_date = (jdt.to_datetime('2000-01-01') if start_date is None
+                           else start_date)
+        self.calendar = calendar
         self.apply_tracer_tendencies = apply_tracer_tendencies
         self.relaxation_timescales = dict(relaxation_timescales or {})
 
@@ -235,6 +257,27 @@ class SingleColumnModel:
     @staticmethod
     def _stack_states(states: list[PhysicsState]) -> PhysicsState:
         return tree_map(lambda *arrays: jnp.stack(arrays, axis=0), *states)
+
+    def _date_at_step(self, time_idx) -> DateData:
+        """``DateData`` for scan step ``time_idx``.
+
+        Mirrors ``Model._date_from_sim_time``: the same floor/round split into
+        whole days plus seconds, and the same stop_gradient (date/calendar math
+        uses non-differentiable floor/round/int casts and must stay out of the
+        AD graph, or ``jax.grad`` through a run would break).
+        """
+        sim_time = jax.lax.stop_gradient(
+            jnp.asarray(time_idx, dtype=jnp.float32) * self.dt_seconds
+        )
+        return DateData.set_date(
+            model_time=self.start_date + jdt.Timedelta(
+                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
+                seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
+            ),
+            model_step=jnp.int32(time_idx),
+            dt_seconds=float(self.dt_seconds),
+            calendar=self.calendar,
+        )
 
     def _make_step_fn(
         self,
@@ -258,8 +301,15 @@ class SingleColumnModel:
 
             grid_state = _column_state_to_grid(column_state, nlev)
             clamped = verify_state(grid_state)
+            # Re-select forcing for this step's date, exactly as ``Model`` does
+            # each step. This is what populates ``SolarGeometry`` (and slices any
+            # ``TimeSeries`` leaves); without it the sun is frozen at the null
+            # geometry of a user-built ``ForcingData`` and the column has no
+            # diurnal cycle.
+            forcing_now = forcing.select(self._date_at_step(time_idx),
+                                         calendar=self.calendar)
             tendencies_grid, new_physics_data = physics.compute_tendencies(
-                clamped, forcing, terrain,
+                clamped, forcing_now, terrain,
                 prev_physics_data=physics_data,
             )
             tendencies = _squeeze_tendency(tendencies_grid)
