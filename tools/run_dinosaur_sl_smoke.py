@@ -52,6 +52,11 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=1,
                     help="steps between saved frames when --save-nc is set "
                          "(1 = every step; larger keeps the compile small)")
+    ap.add_argument("--moist-init", type=float, default=0.5,
+                    help="initialize specific humidity at this relative "
+                         "humidity (0 disables = dinosaur's dry rest state, "
+                         "which blows up the full moist physics at L47 "
+                         "regardless of advection scheme)")
     args = ap.parse_args()
 
     import jax
@@ -120,6 +125,29 @@ def main() -> None:
           f"emis={not args.no_emissions}")
 
     model.bootstrap_state(None)
+    if args.moist_init > 0:
+        # Dinosaur's isothermal rest state is bone dry; the full moist physics
+        # at L47 NaNs from that regardless of the advection scheme (verified:
+        # the Eulerian control fails identically). Seed a uniform-RH moisture
+        # profile through the physics-state round trip.
+        from jcm.physics.convection.saturation import (
+            saturation_specific_humidity,
+        )
+        st = dycore.to_physics_state(model._final_dycore_state)
+        a_h = np.asarray(dycore._a_half)
+        b_h = np.asarray(dycore._b_half)
+        a_f = 0.5 * (a_h[:-1] + a_h[1:])
+        b_f = 0.5 * (b_h[:-1] + b_h[1:])
+        import jcm.constants as jc
+        ps = st.normalized_surface_pressure * jc.p0
+        p_full = (a_f[:, None, None] + b_f[:, None, None] * ps[None])
+        qs = saturation_specific_humidity(st.temperature, p_full)  # kg/kg
+        q0 = args.moist_init * np.asarray(qs) * 1.0e3              # g/kg
+        st = st.copy(specific_humidity=q0.astype(np.float32))
+        model._final_dycore_state = dycore.initial_state(
+            st, tracer_specs=tracer_specs,
+        )
+        print(f"[init] moist init at RH={args.moist_init:.2f}")
     t0 = time.time()
     step_days = args.dt / 86400.0
     # With --save-nc, save every --save-every steps so first-NaN forensics
