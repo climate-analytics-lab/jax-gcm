@@ -91,9 +91,15 @@ def prep_dust(out: Path) -> None:
 
 
 def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
-    """Vertically remap the CAM L26 oxidant climatology onto ECHAM L47."""
-    from jcm.dycore.pyses.coords import full_echam_hybrid
+    """Vertically remap the CAM L26 oxidant climatology onto ECHAM L47.
 
+    Level coefficients are written from the RAW ECHAM table
+    (``get_echam_levels`` — dinosaur's grid, ``a[0]=0``), as ``hyam`` in Pa
+    with NO ``p0`` variable: the spectral runners' validator treats a ``p0``
+    as "hyam is normalized" and rescales. The pySES loader maps levels
+    one-for-one and only checks ordering, so one file serves both backends
+    (its finite-top table differs only microscopically at the lid).
+    """
     ds = xr.open_dataset(_OXID_SRC, decode_times=False)
     dates = ds["date"].values  # YYYYMMDD ints
     years = np.unique(dates // 10000)
@@ -114,9 +120,12 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     # field, so the mapping is a pure vertical-coordinate change. The model's
     # instantaneous ps will differ — read_oxidant_vmr's documented contract is
     # level-for-level anyway, so climatological ps is the consistent choice.
-    a_b, b_b = full_echam_hybrid(nlev)                  # boundaries, a in Pa
-    a_mid = 0.5 * (np.asarray(a_b)[:-1] + np.asarray(a_b)[1:])
-    b_mid = 0.5 * (np.asarray(b_b)[:-1] + np.asarray(b_b)[1:])
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    vert = get_echam_levels(nlev)
+    a_b = np.asarray(vert.a_boundaries, dtype=float)    # Pa
+    b_b = np.asarray(vert.b_boundaries, dtype=float)
+    a_mid = 0.5 * (a_b[:-1] + a_b[1:])
+    b_mid = 0.5 * (b_b[:-1] + b_b[1:])
     p_tgt = (a_mid[None, :, None, None]
              + b_mid[None, :, None, None] * ps[:, None, :, :])
 
@@ -148,10 +157,11 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
                           "log-p vertical remap (clamped above CAM top); "
                           "MACC-layout for jcm read_oxidant_vmr"},
     )
-    # ECHAM convention: hyam in Pa (p = hyam + hybm*ps), top→bottom.
+    # ECHAM convention: hyam in Pa (p = hyam + hybm*ps), top→bottom. NO p0
+    # variable — the runners' validator would treat its presence as "hyam is
+    # normalized by p0" and rescale the already-Pa values.
     out_ds["hyam"] = ("mlev", a_mid, {"units": "Pa"})
     out_ds["hybm"] = ("mlev", b_mid, {"units": "1"})
-    out_ds["p0"] = ((), 101325.0, {"units": "Pa"})
     out_ds.to_netcdf(out)
     print(f"wrote {out} {dict(out_ds.sizes)}")
 
