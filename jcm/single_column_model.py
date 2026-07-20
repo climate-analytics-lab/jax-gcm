@@ -13,14 +13,6 @@ builds a duck-typed ``(1, 1)`` coords stub so column-based physics can
 cache its coord-dependent transforms (lat, vertical-level transforms,
 etc.) without dragging in a full horizontal grid.
 
-Forcing is re-selected every step from ``start_date + step * dt_seconds``
-via ``ForcingData.select``, mirroring ``Model``'s per-step
-``forcing.select(date)``. That is what drives the solar cycle: a
-user-built ``ForcingData`` carries a null ``SolarGeometry``, so a column
-whose forcing is never re-selected sees a frozen sun and produces no
-diurnal cycle in shortwave — set ``start_date`` to the real date of the
-prescribed states to get physical insolation.
-
 Multiple columns at unrelated locations should be run in parallel one
 layer above the SCM (e.g. ``jax.vmap`` over a list of
 ``(lat, lon, column_state)`` triples).
@@ -198,9 +190,8 @@ class SingleColumnModel:
         dt_seconds: Physics timestep in seconds (default 1800).
         start_date: ``jax_datetime.Datetime`` for the start of the run. Each
             scan step advances it by ``dt_seconds`` and re-selects ``forcing``
-            for that date, which is what gives the column its solar cycle (see
-            :meth:`_date_at_step`). Mirrors ``Model``'s argument of the same
-            name.
+            for that date, which gives the column its solar cycle.
+            Mirrors ``Model``'s argument of the same name.
         calendar: Calendar string (``"365_day"`` or ``"gregorian"``) used for
             the date/forcing selection.
         apply_tracer_tendencies: When ``False`` tracers are reported
@@ -301,11 +292,6 @@ class SingleColumnModel:
 
             grid_state = _column_state_to_grid(column_state, nlev)
             clamped = verify_state(grid_state)
-            # Re-select forcing for this step's date, exactly as ``Model`` does
-            # each step. This is what populates ``SolarGeometry`` (and slices any
-            # ``TimeSeries`` leaves); without it the sun is frozen at the null
-            # geometry of a user-built ``ForcingData`` and the column has no
-            # diurnal cycle.
             forcing_now = forcing.select(self._date_at_step(time_idx),
                                          calendar=self.calendar)
             tendencies_grid, new_physics_data = physics.compute_tendencies(
