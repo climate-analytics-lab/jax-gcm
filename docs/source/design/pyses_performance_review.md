@@ -166,7 +166,14 @@ scatters/selects; GLL-contraction unroll → the d884 GEMMs).
 
 4-GPU remains below the crossover at ne30 even with one lane-aware neighbor
 exchange per projection site — consistent with upstream's own NX30 2-GPU
-62 % efficiency. Instance parallelism (A1) stays the node-throughput answer.
+62 % efficiency. **2 GPUs are worse than 4** (4.6 vs 5.4): fitting
+``wall = compute/N + overhead`` gives a ~570–585 s/day fixed sharding tax
+(~6 s/step) nearly independent of device count — the tax, not the split,
+is the problem. Instance parallelism (A1) stays the node-throughput answer.
+
+**CPU node** (128-core Milan, same stack): 1 dev × 128 threads ≈ 0.2 sim
+days/hr; 8 dev × 16 ≈ 0.3 (best); 120 × 1 worse than the measurement
+budget. 30–45× slower than one A100 — usable only as debug capacity.
 
 **Flagged follow-up (science decision, not tonight)**: pyses supports f32
 dynamics (`PYSES_USE_DOUBLE=0`, benchmarked upstream at ~2× on NX15). jcm
