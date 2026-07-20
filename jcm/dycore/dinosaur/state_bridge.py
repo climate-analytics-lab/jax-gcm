@@ -41,6 +41,7 @@ def dynamics_state_to_physics_state(
     state: State,
     dynamics: PrimitiveEquations,
     tracer_specs: dict | None = None,
+    nodal_tracers: tuple = (),
 ) -> PhysicsState:
     """Convert a dinosaur modal ``State`` into a gridpoint :class:`PhysicsState`.
 
@@ -52,12 +53,26 @@ def dynamics_state_to_physics_state(
             spec has ``nondimensionalize=False`` (e.g. number concentrations,
             VMRs) bypass the gram/kg conversion. Default ``None`` applies the
             gram/kg conversion to every non-``specific_humidity`` tracer.
+        nodal_tracers: Names of tracers the (semi-Lagrangian) dycore carries
+            as NODAL arrays inside ``State.tracers`` — they skip every
+            spectral transform (that is their whole point: no per-step Gibbs
+            ringing for sharp sources), so they must bypass the modal
+            diagnostic pipeline here and only get the spec-driven
+            dimensionalization. Empty for the Eulerian spectral core.
 
     Returns:
         Gridpoint :class:`PhysicsState`.
 
     """
     jax.debug.callback(lambda: logger.debug("Converting state variables from dynamics to physics state variables"))
+
+    # Nodal tracers must not enter the modal->nodal diagnostic pipeline;
+    # split them off and merge them (dimensionalized) into the output below.
+    nodal_direct = {k: v for k, v in state.tracers.items() if k in nodal_tracers}
+    if nodal_direct:
+        state = state.replace(tracers={
+            k: v for k, v in state.tracers.items() if k not in nodal_tracers
+        })
 
     u, v = vor_div_to_uv_nodal(dynamics.coords.horizontal, state.vorticity, state.divergence)
 
@@ -106,9 +121,10 @@ def dynamics_state_to_physics_state(
 
     # Extra tracers — those with ``nondimensionalize=False`` (e.g. number
     # concentrations) pass through untouched; everything else is treated as a
-    # mass mixing ratio in gram/kilogram.
+    # mass mixing ratio in gram/kilogram. Nodal tracers (split off above) are
+    # already gridpoint arrays and only need the same dimensionalization.
     all_tracers = {}
-    for tracer_name, tracer_value in nodal_state.tracers.items():
+    for tracer_name, tracer_value in {**nodal_state.tracers, **nodal_direct}.items():
         if tracer_name == 'specific_humidity':
             continue
         spec = tracer_specs.get(tracer_name) if tracer_specs else None
@@ -135,6 +151,7 @@ def physics_state_to_dynamics_state(
     physics_state: PhysicsState,
     dynamics: PrimitiveEquations,
     tracer_specs: dict | None = None,
+    nodal_tracers: tuple = (),
 ) -> State:
     """Convert a gridpoint :class:`PhysicsState` back into a dinosaur ``State``.
 
@@ -176,7 +193,13 @@ def physics_state_to_dynamics_state(
             tracer_nd = dynamics.physics_specs.nondimensionalize(
                 tracer_value * units.gram / units.kilogram,
             )
-        tracers_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_nd)
+        # Nodal tracers stay gridpoint (the semi-Lagrangian core transports
+        # them without any spectral round trip — see
+        # ``dynamics_state_to_physics_state``).
+        if tracer_name in nodal_tracers:
+            tracers_modal[tracer_name] = jnp.asarray(tracer_nd)
+        else:
+            tracers_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_nd)
 
     return State(
         vorticity=modal_vorticity,
@@ -191,6 +214,7 @@ def physics_tendency_to_dynamics_tendency(
     physics_tendency: PhysicsTendency,
     dynamics: PrimitiveEquations,
     tracer_specs: dict | None = None,
+    nodal_tracers: tuple = (),
 ) -> State:
     """Convert gridpoint physics tendencies into a dinosaur dynamics-tendency ``State``.
 
@@ -225,7 +249,12 @@ def physics_tendency_to_dynamics_tendency(
             tracer_tend_nd = dynamics.physics_specs.nondimensionalize(
                 tracer_tend * units.gram / units.kilogram / units.second,
             )
-        tracers_tend_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_tend_nd)
+        # Nodal tracer tendencies stay gridpoint so the operator-split
+        # forward-Euler add matches the nodal state entries shape-for-shape.
+        if tracer_name in nodal_tracers:
+            tracers_tend_modal[tracer_name] = jnp.asarray(tracer_tend_nd)
+        else:
+            tracers_tend_modal[tracer_name] = dynamics.coords.horizontal.to_modal(tracer_tend_nd)
 
     return State(
         vor_tend_modal,
