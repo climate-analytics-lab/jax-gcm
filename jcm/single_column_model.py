@@ -35,7 +35,7 @@ import tree_math
 from jax import lax
 from jax.tree_util import tree_map
 
-from jcm.date import DateData
+from jcm.date import date_from_sim_time
 from jcm.forcing import ForcingData
 from jcm.physics_interface import (
     Physics,
@@ -249,27 +249,6 @@ class SingleColumnModel:
     def _stack_states(states: list[PhysicsState]) -> PhysicsState:
         return tree_map(lambda *arrays: jnp.stack(arrays, axis=0), *states)
 
-    def _date_at_step(self, time_idx) -> DateData:
-        """``DateData`` for scan step ``time_idx``.
-
-        Mirrors ``Model._date_from_sim_time``: the same floor/round split into
-        whole days plus seconds, and the same stop_gradient (date/calendar math
-        uses non-differentiable floor/round/int casts and must stay out of the
-        AD graph, or ``jax.grad`` through a run would break).
-        """
-        sim_time = jax.lax.stop_gradient(
-            jnp.asarray(time_idx, dtype=jnp.float32) * self.dt_seconds
-        )
-        return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(
-                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
-            ),
-            model_step=jnp.int32(time_idx),
-            dt_seconds=float(self.dt_seconds),
-            calendar=self.calendar,
-        )
-
     def _make_step_fn(
         self,
         forcing: ForcingData,
@@ -292,8 +271,14 @@ class SingleColumnModel:
 
             grid_state = _column_state_to_grid(column_state, nlev)
             clamped = verify_state(grid_state)
-            forcing_now = forcing.select(self._date_at_step(time_idx),
-                                         calendar=self.calendar)
+            sim_time = jnp.asarray(time_idx, dtype=jnp.float32) * self.dt_seconds
+            date = date_from_sim_time(
+                self.start_date,
+                sim_time,
+                dt_seconds=self.dt_seconds,
+                calendar=self.calendar,
+            )
+            forcing_now = forcing.select(date, calendar=self.calendar)
             tendencies_grid, new_physics_data = physics.compute_tendencies(
                 clamped, forcing_now, terrain,
                 prev_physics_data=physics_data,

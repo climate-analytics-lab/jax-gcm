@@ -26,7 +26,7 @@ import pandas as pd
 from functools import partial
 import logging
 
-from jcm.date import DateData, parse_duration_days
+from jcm.date import DateData, date_from_sim_time, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
     PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
@@ -393,15 +393,9 @@ class Model:
         self._final_physics_state = None
 
     def _date_from_sim_time(self, sim_time) -> DateData:
-        # Stop gradient: date/calendar computations use non-differentiable ops
-        # (floor, round, int casts) and should not be part of the AD graph.
-        sim_time = jax.lax.stop_gradient(sim_time)
-        return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(
-                days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
-            ),
-            model_step=jnp.int32(sim_time / self.dt_si.m),
+        return date_from_sim_time(
+            self.start_date,
+            sim_time,
             dt_seconds=float(self.dt_si.m),
             calendar=self.calendar,
         )

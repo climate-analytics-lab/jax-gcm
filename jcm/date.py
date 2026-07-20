@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import tree_math
 import jax_datetime as jdt
@@ -152,6 +153,29 @@ class DateData:
             model_step=model_step if model_step is not None else self.model_step,
             dt_seconds=dt_seconds if dt_seconds is not None else self.dt_seconds,
         )
+
+
+def date_from_sim_time(
+    start_date: jdt.Datetime,
+    sim_time: jnp.ndarray,
+    dt_seconds: float,
+    calendar: str = DEFAULT_CALENDAR,
+) -> DateData:
+    """Build ``DateData`` from elapsed simulation seconds.
+
+    Date arithmetic uses non-differentiable operations, so elapsed time is
+    excluded from automatic differentiation before deriving the date.
+    """
+    sim_time = jax.lax.stop_gradient(sim_time)
+    return DateData.set_date(
+        model_time=start_date + jdt.Timedelta(
+            days=jnp.floor(sim_time / 86400).astype(jnp.int32),
+            seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
+        ),
+        model_step=jnp.int32(sim_time / dt_seconds),
+        dt_seconds=float(dt_seconds),
+        calendar=calendar,
+    )
 
 
 # ---------------------------------------------------------------------------

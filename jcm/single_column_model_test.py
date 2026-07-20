@@ -8,6 +8,7 @@ import pytest
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
+from jcm.date import date_from_sim_time
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
@@ -120,7 +121,13 @@ class TestSCMForcing(unittest.TestCase):
         predictions = scm.run([column_state, column_state])
         selected_tyear = predictions.tendencies.temperature[:, 0]
         expected_tyear = jnp.array([
-            scm._date_at_step(step).tyear(scm.calendar) for step in range(2)
+            date_from_sim_time(
+                scm.start_date,
+                step * scm.dt_seconds,
+                scm.dt_seconds,
+                scm.calendar,
+            ).tyear(scm.calendar)
+            for step in range(2)
         ])
         self.assertTrue(jnp.allclose(selected_tyear, expected_tyear))
 
@@ -133,7 +140,13 @@ class TestSCMForcing(unittest.TestCase):
         june_predictions = june_scm.run([column_state])
         june_tyear = june_predictions.tendencies.temperature[0, 0]
         self.assertTrue(jnp.allclose(
-            june_tyear, june_scm._date_at_step(0).tyear(june_scm.calendar),
+            june_tyear,
+            date_from_sim_time(
+                june_scm.start_date,
+                0.0,
+                june_scm.dt_seconds,
+                june_scm.calendar,
+            ).tyear(june_scm.calendar),
         ))
         self.assertNotAlmostEqual(float(june_tyear), float(selected_tyear[0]))
 

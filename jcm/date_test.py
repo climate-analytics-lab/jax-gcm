@@ -1,5 +1,5 @@
 import unittest
-from jcm.date import fraction_of_year_elapsed, DateData, parse_duration_days
+from jcm.date import date_from_sim_time, fraction_of_year_elapsed, DateData, parse_duration_days
 from jcm.model import Model
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -55,6 +55,17 @@ class TestDateUnit(unittest.TestCase):
         # copy with a new dt overrides.
         d3 = d.copy(dt=jdt.to_datetime('2001-04-01'))
         self.assertAlmostEqual(float(d3.tyear()), 90/365, places=4)
+
+    def test_date_from_sim_time(self):
+        date = date_from_sim_time(
+            start_date=jdt.to_datetime('2001-01-01'),
+            sim_time=jnp.asarray(86461.0),
+            dt_seconds=30.0,
+            calendar='gregorian',
+        )
+        self.assertEqual(int(date.dt.delta.days), int(jdt.to_datetime('2001-01-02').delta.days))
+        self.assertEqual(int(date.dt.delta.seconds), 61)
+        self.assertEqual(int(date.model_step), 2882)
 
     def test_overflow(self):
         model = Model(
