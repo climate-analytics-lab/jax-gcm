@@ -47,8 +47,11 @@ def main() -> None:
                     help="flat terrain (isolates orography from blow-ups)")
     ap.add_argument("--no-emissions", action="store_true")
     ap.add_argument("--save-nc", default=None,
-                    help="write the trajectory (one frame per step) here for "
-                         "offline first-NaN forensics")
+                    help="write the trajectory here for offline first-NaN "
+                         "forensics")
+    ap.add_argument("--save-every", type=int, default=1,
+                    help="steps between saved frames when --save-nc is set "
+                         "(1 = every step; larger keeps the compile small)")
     args = ap.parse_args()
 
     import jax
@@ -119,9 +122,10 @@ def main() -> None:
     model.bootstrap_state(None)
     t0 = time.time()
     step_days = args.dt / 86400.0
-    # With --save-nc, save EVERY step so first-NaN forensics can bisect in
-    # time; otherwise a single end frame.
-    save_days = step_days if args.save_nc else args.steps * step_days
+    # With --save-nc, save every --save-every steps so first-NaN forensics
+    # can bisect in time; otherwise a single end frame.
+    save_days = (args.save_every * step_days if args.save_nc
+                 else args.steps * step_days)
     preds = model.resume(
         forcing=forcing, save_interval=save_days,
         total_time=args.steps * step_days, output_averages=False,
