@@ -72,6 +72,24 @@ class JamOpticsTermTest(unittest.TestCase):
         term.cache_band_config(band)
         return term
 
+    def test_no_aerosol_radiative_effect_above_pmin(self):
+        """Levels above _AER_RAD_PMIN must carry exactly zero tau — the thin
+        lid otherwise turns any absorbed flux into unbounded heating once
+        real absorbers mix up there (day-207 winter blow-up).
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        nlev = state.temperature.shape[0]
+        # Top level above the cutoff, the rest well below it.
+        p = np.full((nlev,) + state.temperature.shape[1:], 5.0e4)
+        p[0] = 100.0    # < _AER_RAD_PMIN
+        term = self._term(band)
+        _, out = term(state, {**diagnostics,
+                              "pressure_full": jnp.asarray(p)}, None, None)
+        a = out["aerosol"]
+        np.testing.assert_array_equal(np.asarray(a.aod_sw_per_band[:, 0]), 0.0)
+        np.testing.assert_array_equal(np.asarray(a.aod_lw_per_band[:, 0]), 0.0)
+        self.assertGreater(float(jnp.sum(a.aod_sw_per_band[:, 1:])), 0.0)
+
     def test_radiation_gate_replays_cache_between_compute_steps(self):
         """With the gate configured, non-radiation steps must reuse the
         cached per-band fields (the radiation term can't see fresh optics

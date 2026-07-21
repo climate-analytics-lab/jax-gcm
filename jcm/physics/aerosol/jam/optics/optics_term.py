@@ -41,6 +41,12 @@ _FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 #: so it is the natural observable to validate the scheme against.
 _AOD_REF_NM = 550.0
 
+#: No aerosol radiative effect above this pressure [Pa] — see the gate in
+#: ``_compute_fields``: absorbed flux over the ~1 Pa lid layers gives
+#: effectively unbounded heating once real absorbers mix up there, and the
+#: aerosol mass above ~2 hPa is radiatively negligible.
+_AER_RAD_PMIN = 200.0
+
 
 @dataclasses.dataclass(frozen=True)
 class _OpticsCache:
@@ -225,6 +231,22 @@ class JamOpticsTerm(PhysicsTerm):
         aod_lw, ssa_lw, asy_lw = self._band_optics(
             state, aer, num_per_area, c.lw_nm, c.ri_lw
         )
+
+        # No aerosol radiative effect above _AER_RAD_PMIN. In the thin lid
+        # layers (Δp of order 1 Pa on the L47 grid) ANY absorbed flux divides
+        # by a near-zero air mass: once real absorbing aerosol mixes up there
+        # — which took ~200 simulated days of online emissions — the heating
+        # rate is effectively unbounded (day-207 winter blow-up: 453 K at
+        # level 2 with the aerosol burden grown through winter; the
+        # aerosol-dark validation year could never trigger this). The aerosol
+        # mass above ~2 hPa is radiatively negligible, so zeroing tau there
+        # is the same pragmatism as the upper-atmosphere temperature sponge
+        # (radiation schemes are outside their validity at the lid).
+        p_full = diagnostics.get("pressure_full")
+        if p_full is not None:
+            keep = (p_full > _AER_RAD_PMIN)[jnp.newaxis]
+            aod_sw = aod_sw * keep
+            aod_lw = aod_lw * keep
 
         # Column aerosol optical depth at ~550 nm: the total-column extinction
         # optical depth (sum of the per-layer band AOD over the vertical axis 0)
