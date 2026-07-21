@@ -1,87 +1,93 @@
 # Remaining Questions: ARMBE Single-Column Experiment
 
-This document records unresolved work for the SGP ARMBE/SPEEDY SCM
-experiment. It intentionally does not retain resolved implementation history.
+This document records unresolved scientific and data-quality work for the SGP
+ARMBE/SPEEDY SCM experiment. Completed run configurations and results are in
+`LONG_INTERVAL_2018_FALL.md` and `UNNUDGED_6H_HINDCASTS_2018_FALL.md`.
 
-## Current baseline
+## Established Baseline
 
-- The SCM selects `ForcingData` at every timestep using the supplied
-  `start_date` and calendar. This supplies seasonal solar geometry and slices
-  `TimeSeries` forcing leaves.
-- `run_scm.py` derives `start_date` from the first retained ARMBE timestamp and
-  uses the Gregorian calendar.
+- The production 2018 SGP ARMBEATM and ARMBECLDRAD records support both a
+  prescribed-state diagnostic run and independent unnudged six-hour physics-only
+  hindcasts.
+- The SCM selects date-aligned forcing at every timestep, including seasonal
+  solar geometry and the surface-temperature `TimeSeries`.
 - Land fluxes are enabled for SGP (`fmask=1`, `lfluxland=True`), and evaluation
-  uses surface-flux tile 0, the land tile.
-- Land surface temperature (`stl_am`) follows the retained input record through
-  a date-aligned `TimeSeries`. Soil moisture and albedo remain fixed.
-- ARMBE humidity is normalized to kg/kg while it is read, then converted to the
-  g/kg unit used by the SPEEDY physics-facing state. The adapter has regression
-  coverage for both kg/kg and g/kg source-unit handling.
-- The synthetic fixture is only a plumbing fixture. Its profiles and evaluation
-  targets are generated independently, so its skill metrics are not scientific
-  results.
-- Focused SCM and ARMBE-adapter tests cover the date-aligned surface-temperature
-  forcing path, dropped-profile alignment, and regular-cadence validation.
+  selects surface-flux tile 0, the land tile.
+- ARMBE humidity is normalized to kg/kg at input and converted to the g/kg
+  unit used by the SPEEDY physics-facing state. Regression tests cover both
+  supported source-unit conventions.
+- The 2018 autumn sequence has 119 contiguous six-hour profiles after dropping
+  580 incomplete hourly profiles and 10 valid profiles outside its dominant
+  cadence phase.
+- The independent hindcast resets atmospheric state, tracers, and physics carry
+  for every six-hour window. Temperature, humidity, and horizontal winds evolve
+  with SPEEDY physics only; there is no nudging, dynamics, advection, or
+  large-scale forcing.
 
-## 1. Extend real-data quality assurance
+## 1. Apply Observation Quality Control
 
-The production 2018 SGP ARMBEATM and ARMBECLDRAD records now support both the
-prescribed-state diagnostic run and independent unnudged six-hour hindcasts.
-The remaining data-quality work is:
+The current scores use mapped ARMBE values without ARM quality-control masks.
+Before interpreting model-observation differences as physics errors:
 
-- Apply ARM quality-control masks before calculating model-observation scores.
+- Apply product quality-control flags to radiative and surface-flux targets.
 - Confirm pressure-level orientation, surface-pressure units, and the
   dewpoint-to-specific-humidity conversion against selected soundings.
-- Report within-window observational variability alongside interval means.
-- Compare BAEBBR and QCECOR surface turbulent-flux products where both are
-  available.
+- Report observational spread within each six-hour window with its mean.
+- Compare BAEBBR and QCECOR turbulent-flux products where both are available.
 
-## 2. Establish an appropriate surface-temperature forcing
+## 2. Replace the Surface-Temperature Proxy
 
-The current input field is named `temp_sfc` and may represent surface air
-temperature rather than land skin temperature. Passing air temperature as
-`stl_am` suppresses the land-air temperature contrast and can bias sensible
-heat fluxes.
+`temp_sfc` is used as `stl_am`, but it may be surface air temperature rather
+than land skin temperature. This can suppress the land-air temperature contrast
+and bias sensible heat fluxes.
 
-When real data are available, identify a true land/skin-temperature variable.
-If none is present, assess whether it can be estimated from observed upwelling
-longwave radiation using an explicit emissivity assumption. Record the choice
-and its units in `armbe_io.py` rather than silently reusing air temperature.
+- Identify a true land/skin-temperature field in an available ARM product.
+- If none is suitable, assess an estimate from observed upwelling longwave with
+  an explicit emissivity assumption.
+- Record the selected source, units, and uncertainty in `armbe_io.py`.
 
-## 3. Interpret precipitation only with real profiles
+## 3. Use Scores Appropriate to Each Experiment
 
-On the synthetic fixture, SPEEDY convection rains nearly every timestep at an
-almost constant rate. This cannot diagnose a model defect: the fixture is
-frequently convectively unstable by construction, and its precipitation target
-is independent of its prescribed profiles.
+The prescribed-state run is a diagnostic calculation, not forecast skill. The
+unnudged run is forecast error over six-hour physics-only windows. Do not pool
+their metrics.
 
-For a real contiguous window, check:
+- Use daily means for SPEEDY radiation comparisons because its shortwave scheme
+  has daily-mean, zonally averaged insolation and no diurnal cycle.
+- For interval-mean hindcast data, duration-weight intervals into complete UTC
+  days and exclude incomplete boundary days. The existing complete-day plot
+  does this; the old-style daily plot remains only for visual comparison with
+  `compare.png`.
+- Add a six-hour persistence baseline: the initial observed profile held fixed
+  through the forecast window. This establishes whether physics-only evolution
+  improves on no evolution.
+- Retain six-hour surface/radiation values as process diagnostics, not directly
+  comparable headline scores against a model without a diurnal cycle.
 
-- Whether convection and total precipitation are intermittent.
-- Whether precipitation covaries with observed thermodynamic instability.
-- Whether diagnostic prescribed-state mode is suitable for the intended score.
+## 4. Add Missing Physical Constraints Deliberately
 
-If repeatedly prescribing temperature and humidity prevents the convective
-feedback needed for the experiment, test prognostic relaxation with
-`relaxation_timescales` for those fields. That is an experiment design choice,
-not a correction to synthetic-fixture metrics.
+Only the surface-temperature proxy varies with the record. Soil moisture,
+albedo, snow, sea ice, greenhouse gases, and all large-scale atmospheric
+forcings are fixed or absent.
 
-## 4. Decide how much time-varying surface forcing is required
+- Assess time-varying soil moisture and albedo only after identifying a source
+  and a defensible mapping to SPEEDY forcing fields.
+- Decide whether a forcing-constrained SCM experiment is needed for the target
+  question. It must be labelled separately from the current physics-only
+  hindcast.
+- Keep pressure and geopotential treatment explicit: they are held at the
+  initial observed state in each current hindcast window.
 
-Only land surface temperature varies with the record today. Soil moisture,
-albedo, snow, sea ice, and greenhouse gases are fixed. For SGP land columns,
-the most relevant next candidates are soil moisture and albedo, subject to data
-availability and a clear mapping to the SPEEDY forcing fields.
+## 5. Interpret Hydrology and Clouds With Their Limits
 
-Any added time-varying field must use `make_time_series(..., align_mode=BY_DATE)`
-and share the retained timestamp axis. The runner deliberately rejects gaps and
-irregular cadence because the SCM currently advances with a single fixed
-`dt_seconds`.
+The real-data runs show very low modeled latent heat and positive precipitation
+biases. These are useful diagnostics but do not yet isolate a parameterization
+defect because the surface-temperature proxy, fixed land state, and missing
+large-scale forcing all affect them.
 
-## 5. Choose the model and comparison resolution deliberately
-
-SPEEDY shortwave uses fraction-of-year and produces daily-mean,
-zonally-averaged insolation. It has no diurnal cycle, so `evaluate.py` compares
-daily means. Hourly radiation or surface-flux evaluation requires an ECHAM
-radiation configuration or a different experiment design; it cannot be added by
-changing the ARMBE input cadence alone.
+- Evaluate precipitation intermittency and its relationship to observed
+  thermodynamic instability in the real windows.
+- Keep precipitation diagnostic for prescribed-state calculations because
+  temperature and humidity are reset at every observation.
+- Liquid-water path remains target-only: the current SPEEDY archive has no
+  directly comparable liquid-water-path diagnostic.
