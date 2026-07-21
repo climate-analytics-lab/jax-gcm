@@ -10,9 +10,8 @@ observations.
    date-aligned forcing and refresh solar geometry inside its JITted scan.
 2. Synthetic integration: fixture generation, `run_scm.py` archive output, and
    `evaluate.py` run together in a regression test.
-3. SPEEDY downward-longwave humidity response: `longwave_sweep.py` traces the
-   full SCM path. It found and corrected the ARMBE-to-SPEEDY unit boundary:
-   source humidity is normalized to kg/kg, then converted to SPEEDY's g/kg.
+3. ARMBE humidity is normalized to kg/kg, then converted to SPEEDY's g/kg;
+   adapter tests cover both supported source-unit conventions.
 4. Input validation: `validate_armbe_input` rejects malformed dimensions,
    pressure coordinates, timestamps, and implausible required state fields.
 5. Run manifest: `run_scm.py` writes a JSON sidecar with input paths, resolved

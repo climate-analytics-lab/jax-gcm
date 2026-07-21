@@ -2,7 +2,6 @@
 #
 # Source this before running any script here:
 #     source /data/MOSAIC/jax-gcm/experiments/armbe_sgp/env.sh
-#     python smoke_test.py
 #
 # Why each line matters on this box:
 # - The venv's jax[cuda12] ships its own CUDA 12.9 libs. The system
