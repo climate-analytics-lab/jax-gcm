@@ -47,6 +47,16 @@ _AOD_REF_NM = 550.0
 #: aerosol mass above ~2 hPa is radiatively negligible.
 _AER_RAD_PMIN = 200.0
 
+#: Cap on the per-layer, per-band aerosol optical depth. A single model
+#: layer with tau > 1 is already an extreme plume (whole-column dust-storm
+#: AODs are ~5); the winter year-run blow-up (day 212, a Philippine monsoon
+#: column at 496 K) showed the aerosol->SW-heating->convection feedback has
+#: no other brake once transport ringing plus accumulation push a layer's
+#: extinction into pathological territory. The aerosol-optics analogue of
+#: ``_MAX_IN_CLOUD_CONDENSATE`` in the RRTMGP wrapper: genuine plumes are
+#: untouched, only the runaway tail is clipped.
+_MAX_LAYER_TAU = 1.0
+
 
 @dataclasses.dataclass(frozen=True)
 class _OpticsCache:
@@ -247,6 +257,9 @@ class JamOpticsTerm(PhysicsTerm):
             keep = (p_full > _AER_RAD_PMIN)[jnp.newaxis]
             aod_sw = aod_sw * keep
             aod_lw = aod_lw * keep
+        # Bound the per-layer extinction (see _MAX_LAYER_TAU).
+        aod_sw = jnp.minimum(aod_sw, _MAX_LAYER_TAU)
+        aod_lw = jnp.minimum(aod_lw, _MAX_LAYER_TAU)
 
         # Column aerosol optical depth at ~550 nm: the total-column extinction
         # optical depth (sum of the per-layer band AOD over the vertical axis 0)
