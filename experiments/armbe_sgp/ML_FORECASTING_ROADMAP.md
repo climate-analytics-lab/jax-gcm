@@ -20,32 +20,16 @@ week, and one month.
 
 ## Prerequisites
 
-### 1. Use a 30-Minute Physics Timestep
+### 1. Experiment policies
 
-The prescribed-state diagnostic runner must not use a six-hour physics step.
-It should hold each available observed profile for twelve 30-minute substeps.
-The experiment configuration must state whether physics carry and tracers reset
-at each observed profile or persist within a contiguous segment.
+- Physics model runs in 30-minute timesteps. Horizon (for evaluation and resetting against observational data)
+  is configurable.
+- Quality Control: Flagged hours (non-0 QC) are omitted from evaluation, since they are rare (< 3%).
+- Missing data timesteps are omitted (25% missing, pretty rough)
+- Record valid hourly sample counts and dropped-window reasons in experiment manifest. 
 
-The existing independent six-hour hindcast is a prototype of this approach, but
-it resets after every six-hour window. The forecasting core must generalize it
-to longer free rollouts without a reset inside the requested horizon.
 
-### 2. Define Missing-Data Policy
-
-- Do not interpolate missing atmospheric profiles.
-- Split prescribed-state runs into contiguous profile segments and reset carry
-  between segments.
-- A valid initial profile permits a free rollout. Missing observed profiles
-  inside that rollout do not alter model integration; they only mask the
-  corresponding intermediate or endpoint scores.
-- Reset atmospheric state, tracers, and physics carry only between independent
-  rollout cases, never at an internal six-hour observation time.
-- Apply ARMBE QC flags before scoring each target field.
-- Record valid hourly sample counts and dropped-window reasons in archives and
-  manifests.
-
-### 3. Define the Cloud Observation Operator
+### 2. Define the Cloud Observation Operator
 
 The current SPEEDY comparison uses `shortwave_rad.cloudc`. It is diagnosed from
 relative humidity and precipitation. SPEEDY separately diagnoses `cloudstr`, a
@@ -56,7 +40,27 @@ first loss can compare QC-passed, consistently aggregated `cloudc` and
 `tot_cld`, but this must be labelled as an imperfect observation operator.
 
 Do not define total model cloud as `cloudc + cloudstr` without an explicit
-cloud-overlap model.
+cloud-overlap model. Save both diagnostics and assess the following hypotheses
+against QC-passed `tot_cld` before choosing a training target:
+
+\[
+C_{\mathrm{max}} = \max(C_{\mathrm{cloudc}}, C_{\mathrm{cloudstr}}),
+\]
+
+\[
+C_{\mathrm{random}} = C_{\mathrm{cloudc}} + C_{\mathrm{cloudstr}}
+                       - C_{\mathrm{cloudc}}C_{\mathrm{cloudstr}},
+\]
+
+\[
+C_{\mathrm{disjoint}} = \min(1,
+                               C_{\mathrm{cloudc}} + C_{\mathrm{cloudstr}}).
+\]
+
+These are maximum-overlap, random-overlap, and zero-overlap bounds, not known
+properties of the current SPEEDY closure. `cloudstr` is a low-level shortwave
+optical diagnostic, so even the best of these may not be a faithful all-sky
+cloud-fraction observation operator.
 
 ## Batched Forecast Core
 
@@ -148,6 +152,7 @@ VARANAL must be a separately labelled experiment.
 ## Evaluation Splits
 
 Do not randomly split adjacent windows because weather regimes are temporally
+correlated.
 
 - Use chronological training, validation, and held-out test blocks.
 - Keep the test period untouched during parameter selection.

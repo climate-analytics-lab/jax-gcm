@@ -19,6 +19,36 @@ winds, surface pressure, and 2 m temperature to construct SPEEDY states. It
 scores precipitation, BAEBBR sensible/latent heat, surface SW/LW fluxes, TOA
 SW fluxes, total cloud fraction, and LWP where a model diagnostic exists.
 
+## Downloaded Multi-Site Coverage
+
+ARM order `267892` contains the following nominal coordinate-time coverage.
+Coverage does not imply a complete usable atmospheric profile at every listed
+timestamp; standard ARMBEATM sounding-derived states are substantially sparser
+than their hourly time coordinate.
+
+| Site | Standard ATM coverage | Standard CLDRAD coverage | High-resolution coverage |
+|---|---|---|---|
+| ANX, Andenes/COMBLE | 2019-12-01 to 2020-05-31 | Same | None |
+| AWR, West Antarctica/AWARE | 2016-01-01 to 2016-12-31 | Same | None |
+| COR, Cordoba/CACTI | 2018-09-23 to 2019-04-30 | Same | None |
+| ENA, Azores | 2014-01-01 to 2023-12-31 | Same | ATMHIRES and CLDRADHIRES: 2023-01-01 to 2024-12-31 |
+| EPC, La Jolla/EPCAPE | 2023-02-15 to 2024-02-14 | Same | None |
+| GUC, Gunnison/SAIL | 2021-09-01 to 2023-06-15 | Same | None |
+| HOU, Houston/TRACER | 2021-10-01 to 2022-09-30 | Same | None |
+| MAO, Manacapuru | 2014-01-01 to 2015-12-31 | 2014-01-01 to 2015-12-01 | None |
+| MOS, MOSAiC | None in this order | 2019-11-01 to 2020-10-31 | None |
+| NIM, Niamey | 2006-01-01 to 2006-12-30 | Same | None |
+| NSA, Barrow | 2001-01-01 to 2023-12-31 | 1998-01-01 to 2023-12-31 | ATMHIRES and CLDRADHIRES: 2023-01-01 to 2024-12-31 |
+| OLI, Oliktok Point | 2013-10-01 to 2021-06-14 | Same | None |
+| SGP, Lamont | 1994-01-01 to 2023-12-31 | 1996-01-01 to 2023-12-31 | ATMHIRES and CLDRADHIRES: 2023-01-01 to 2024-12-31 |
+| TWP C1, Manus | 1996-01-01 to 2010-12-31 | 1996-01-01 to 2011-12-31 | None |
+| TWP C2, Nauru | 1998-01-01 to 2010-12-31 | Same | None |
+| TWP C3, Darwin | 2002-01-01 to 2010-12-31 | 2002-01-01 to 2011-12-31 | None |
+
+For SGP, standard ATM and CLDRAD overlap from 1996 through 2023. The separate
+SGP ARMBELAND stream covers 1994 through 2016. MOSAiC has no ARMBEATM file in
+this order and therefore cannot initialize the current SCM experiment.
+
 ## Downloaded but Unused Fields
 
 ### Quality Control and Observational Spread

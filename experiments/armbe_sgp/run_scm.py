@@ -53,7 +53,7 @@ from armbe_io import (
 DIAGNOSTICS = {
     "_condensation": ("precls",),
     "_convection": ("precnv",),
-    "_shortwave_rad": ("rsds", "rsns", "fsol", "cloudc", "ftop"),
+    "_shortwave_rad": ("rsds", "rsns", "fsol", "cloudc", "cloudstr", "ftop"),
     "_surface_flux": ("rlds", "rlus", "shf", "evap", "tsfc"),
 }
 
