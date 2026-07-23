@@ -72,6 +72,32 @@ are not a budget-consistent large-scale SCM forcing data set.
 - Direct cloud liquid/ice profiles. ARMBE LWP is available, but the current
   SPEEDY diagnostic archive has no directly comparable LWP output.
 
+`armbeland` is a separate ARMBE product family, but the SGP C1 stream
+`sgparmbelandC1.c1` covers 1994-2016 only. It cannot provide land constraints
+for the current 2018 experiments.
+
+## SPEEDY Forcing and Terrain Inputs
+
+The following are boundary conditions rather than atmospheric profile-state
+inputs. Current values and potential upgrades are:
+
+| SPEEDY input | Current value | Better data possibility |
+|---|---|---|
+| Latitude / longitude | SGP C1 constants | Already exact from ARMBE metadata. |
+| Surface elevation | Fixed 315 m | Read ARMBE `alt` directly; expected effect is minor. |
+| Land fraction | 1.0 | Correct for the SGP land column. |
+| Land surface temperature `stl_am` | ARMBE `temperature_sfc`, a 2 m air-temperature proxy | Highest-priority upgrade: a verified land skin temperature. |
+| Soil moisture `soilw_am` | Fixed 0.30 | Not in the downloaded ATM/CLDRAD pair; obtain a defensible land/soil source. |
+| Bare-land albedo `alb0` | Fixed 0.20 | Diagnose effective observed albedo from QC-passed daytime `swup / swdn`; test a fixed-value sensitivity before adding time variation. |
+| Snow cover | Fixed 0 | Requires a separate snow/land source. |
+| Sea ice / SST | Fixed; irrelevant at `fmask=1` | Not relevant for this land column. |
+| CO2 | Fixed 407 ppmv | Reasonable for 2018; unimportant for six-hour forecasts. |
+| Solar geometry | Calendar date and SGP latitude | Used, but SPEEDY resolves only seasonal daily-mean insolation, not the local solar diurnal cycle. |
+
+Generic `ForcingData` also carries CH4, aerosol, and ozone-climatology fields,
+but the configured SPEEDY path does not currently use them as observational SGP
+forcing inputs.
+
 ## Interpretation Limits
 
 - ARMBE is a single-point observation product. ARM recommends statistics when
