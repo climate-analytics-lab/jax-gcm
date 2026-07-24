@@ -1,5 +1,8 @@
 # Downloaded ARMBE netCDF (large, reproducible via download.py) — do not commit.
 data/
+# Keep small, reproducible experiment definitions despite the repository-wide JSON ignore.
+!configs/
+!configs/*.json
 # Run outputs (figures, cached predictions).
 outputs/
 *.png
