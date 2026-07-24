@@ -33,8 +33,8 @@ week, and one month.
 Build the offline cache before invoking JEM-Cal. The JSON config requires
 `atm`; `cldrad` is required for the default `cloud_fraction` target. The timing
 fields below are the supported defaults and must satisfy: horizon is divisible
-by the physics timestep, horizon includes one profile cadence, and stride is a
-multiple of profile cadence.
+by the physics timestep, horizon includes one observation cadence, and stride is
+a multiple of observation cadence.
 
 ```json
 {
@@ -43,10 +43,10 @@ multiple of profile cadence.
   "start": "2018-09-03",
   "end": "2018-10-02",
   "nlev": 8,
-  "physics_dt_seconds": 1800,
-  "horizon_seconds": 21600,
-  "stride_seconds": 21600,
-  "profile_cadence_seconds": 21600,
+  "physics_dt_minutes": 30,
+  "horizon_minutes": 360,
+  "stride_minutes": 360,
+  "observation_cadence_minutes": 360,
   "target": {
     "observation": "cloud_fraction",
     "model": "shortwave_rad.cloudc",
@@ -85,7 +85,7 @@ The cache writes `windows.nc` (initial states, prescribed surface-temperature
 record, targets, and QC mask), `config.json`, `recipe.json`, and `manifest.json`.
 The evaluator writes `predictions.nc`, `lead_metrics.csv`, and `run_manifest.json`
 even when execution fails. The cache manifest records its resolved configuration,
-recipe, retained-state count, and window count. The evaluator manifest records
+recipe (including resolved second-based timing), retained-state count, and window count. The evaluator manifest records
 the resolved configuration, selected windows, output paths, and available git
 revisions.
 
@@ -135,8 +135,9 @@ Replace the Python loop that constructs one SCM per six-hour window with a pure
 JAX free-rollout function:
 
 - Batch initial states with shape `(n_windows, n_levels)`.
-- Accept `horizon_seconds` and `stride_seconds` as experiment configuration.
-  With a fixed 30-minute physics step, `horizon_steps = horizon_seconds / 1800`.
+- Accept `horizon_minutes` and `stride_minutes` as experiment configuration.
+  The resolved configuration converts these to seconds before computing
+  `horizon_steps = horizon_seconds / physics_dt_seconds`.
 - Advance `horizon_steps` with `jax.lax.scan`; the horizon is static for each
   compiled experiment but can be changed between runs.
 - Evaluate independent rollout cases in parallel with `jax.vmap`.
@@ -152,7 +153,7 @@ The batched function must return per-step cloud diagnostics, interval means,
 trajectory states, and final profiles without converting arrays to NumPy inside
 the differentiable path.
 
-The rollout start times are selected with `stride_seconds`. Starts may overlap,
+The rollout start times are selected with `stride_minutes`. Starts may overlap,
 but train/validation/test splits must be chronological and non-overlapping in
 their underlying time ranges to prevent leakage.
 

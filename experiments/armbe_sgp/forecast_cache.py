@@ -24,10 +24,10 @@ DEFAULT_TARGET = {
 }
 DEFAULT_CONFIG = {
     "nlev": 8,
-    "physics_dt_seconds": 1800,
-    "horizon_seconds": 21600,
-    "stride_seconds": 21600,
-    "profile_cadence_seconds": 21600,
+    "physics_dt_minutes": 30,
+    "horizon_minutes": 360,
+    "stride_minutes": 360,
+    "observation_cadence_minutes": 360,
     "target": DEFAULT_TARGET,
 }
 
@@ -45,15 +45,22 @@ def resolved_config(config: Mapping[str, Any], root: Path | None = None) -> dict
         raise ValueError("cache config requires an 'atm' ARMBE file or directory")
     if target["reduction"] != "trajectory":
         raise ValueError("only the trajectory target reduction is currently supported")
-    for key in ("physics_dt_seconds", "horizon_seconds", "stride_seconds", "profile_cadence_seconds"):
+    timing_keys = (
+        "physics_dt_minutes", "horizon_minutes", "stride_minutes", "observation_cadence_minutes"
+    )
+    for key in timing_keys:
         if float(resolved[key]) <= 0:
             raise ValueError(f"{key} must be positive")
-    if float(resolved["horizon_seconds"]) % float(resolved["physics_dt_seconds"]):
-        raise ValueError("horizon_seconds must be divisible by physics_dt_seconds")
-    if float(resolved["horizon_seconds"]) < float(resolved["profile_cadence_seconds"]):
-        raise ValueError("horizon_seconds must include at least one profile evaluation cadence")
-    if float(resolved["stride_seconds"]) % float(resolved["profile_cadence_seconds"]):
-        raise ValueError("stride_seconds must be a multiple of profile_cadence_seconds")
+    if float(resolved["horizon_minutes"]) % float(resolved["physics_dt_minutes"]):
+        raise ValueError("horizon_minutes must be divisible by physics_dt_minutes")
+    if float(resolved["horizon_minutes"]) < float(resolved["observation_cadence_minutes"]):
+        raise ValueError("horizon_minutes must include at least one observation cadence")
+    if float(resolved["stride_minutes"]) % float(resolved["observation_cadence_minutes"]):
+        raise ValueError("stride_minutes must be a multiple of observation_cadence_minutes")
+    resolved.update({
+        key.replace("_minutes", "_seconds"): float(resolved[key]) * 60
+        for key in timing_keys
+    })
     return resolved
 
 
@@ -66,7 +73,7 @@ def cache_recipe(config: Mapping[str, Any], resolved_variables: Mapping[str, str
         "physics_dt_seconds": float(config["physics_dt_seconds"]),
         "horizon_seconds": float(config["horizon_seconds"]),
         "stride_seconds": float(config["stride_seconds"]),
-        "profile_cadence_seconds": float(config["profile_cadence_seconds"]),
+        "observation_cadence_seconds": float(config["observation_cadence_seconds"]),
         "nlev": int(config["nlev"]),
         "resolved_variables": dict(resolved_variables),
         "target_order": "window, profile evaluation lead",
@@ -84,14 +91,14 @@ def build_cache(config: Mapping[str, Any], cache: str | Path, root: Path | None 
         raise ValueError("ARMBE contains no valid atmospheric profiles")
     physics_dt = int(config["physics_dt_seconds"])
     horizon = int(config["horizon_seconds"])
-    profile_cadence = int(config["profile_cadence_seconds"])
+    observation_cadence = int(config["observation_cadence_seconds"])
     stride = int(config["stride_seconds"])
     steps = horizon // physics_dt
     seconds = np.asarray(times).astype("datetime64[s]").astype(np.int64)
     # Profiles define independent initial conditions, not the SCM integration grid.
-    profile_phases, profile_counts = np.unique(seconds % profile_cadence, return_counts=True)
+    observation_phases, observation_counts = np.unique(seconds % observation_cadence, return_counts=True)
     start_phases, start_counts = np.unique(seconds % stride, return_counts=True)
-    profile_phase = profile_phases[np.argmax(profile_counts)]
+    observation_phase = observation_phases[np.argmax(observation_counts)]
     start_phase = start_phases[np.argmax(start_counts)]
     surface_name = pick(ds, "surface_temperature", required=False)
     if surface_name is not None:
@@ -102,7 +109,7 @@ def build_cache(config: Mapping[str, Any], cache: str | Path, root: Path | None 
     forcing_times = np.asarray(ds.time.values)
     forcing_seconds = forcing_times.astype("datetime64[s]").astype(np.int64)
     start_indices = np.flatnonzero(
-        (seconds % profile_cadence == profile_phase)
+        (seconds % observation_cadence == observation_phase)
         & (seconds % stride == start_phase)
         & (seconds + (steps - 1) * physics_dt <= forcing_seconds[-1])
     )
@@ -114,7 +121,7 @@ def build_cache(config: Mapping[str, Any], cache: str | Path, root: Path | None 
     if target_name not in observations:
         raise KeyError(f"ARMBE does not provide target {target_name!r}")
     target = np.asarray(observations[target_name])
-    lead_times = np.arange(profile_cadence, horizon + 1, profile_cadence, dtype=np.int64)
+    lead_times = np.arange(observation_cadence, horizon + 1, observation_cadence, dtype=np.int64)
     target_values = np.zeros((n_windows, len(lead_times)), dtype=float)
     target_mask = np.zeros((n_windows, len(lead_times)), dtype=bool)
     by_time = {time: i for i, time in enumerate(times.astype("datetime64[s]"))}

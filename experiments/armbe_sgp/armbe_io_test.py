@@ -18,7 +18,7 @@ from armbe_io import (
     to_state_series,
     validate_armbe_input,
 )
-from forecast_cache import build_cache
+from forecast_cache import build_cache, resolved_config
 from jcm.date import DateData
 from evaluate import main as evaluate_main
 from make_synthetic_armbe import build as build_synthetic_armbe
@@ -209,17 +209,22 @@ def test_forecast_cache_uses_profile_evaluations_and_cloud_qc(tmp_path):
     cache = build_cache({
         "atm": str(atm_path),
         "cldrad": str(cldrad_path),
-        "horizon_seconds": 21600,
-        "stride_seconds": 21600,
+        "horizon_minutes": 360,
+        "stride_minutes": 360,
     }, tmp_path / "cache")
 
     config = json.loads((cache / "config.json").read_text())
     recipe = json.loads((cache / "recipe.json").read_text())
+    manifest = json.loads((cache / "manifest.json").read_text())
     windows = xr.open_dataset(cache / "windows.nc")
     assert config["target"]["observation"] == "cloud_fraction"
     assert recipe["target"]["model"] == "shortwave_rad.cloudc"
+    assert config["physics_dt_minutes"] == 30
+    assert config["observation_cadence_minutes"] == 360
     assert config["physics_dt_seconds"] == 1800
-    assert config["profile_cadence_seconds"] == 21600
+    assert config["observation_cadence_seconds"] == 21600
+    assert manifest["config"]["horizon_seconds"] == 21600
+    assert manifest["recipe"]["horizon_seconds"] == 21600
     assert recipe["target_order"] == "window, profile evaluation lead"
     assert windows["target"].shape == (3, 1)
     assert windows["target_mask"].shape == (3, 1)
@@ -227,3 +232,16 @@ def test_forecast_cache_uses_profile_evaluations_and_cloud_qc(tmp_path):
     assert windows["lead_time_seconds"].values.tolist() == [21600]
     assert windows["temperature"].shape == (3, 8)
     assert windows["surface_temperature"].attrs["source_variable"] == "temp_sfc"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"horizon_minutes": 361}, "horizon_minutes must be divisible"),
+        ({"horizon_minutes": 30, "observation_cadence_minutes": 60}, "include at least one"),
+        ({"stride_minutes": 30, "observation_cadence_minutes": 60}, "multiple of"),
+    ],
+)
+def test_forecast_cache_validates_public_minute_timing(config, message):
+    with pytest.raises(ValueError, match=message):
+        resolved_config({"atm": "atm.nc", **config})
