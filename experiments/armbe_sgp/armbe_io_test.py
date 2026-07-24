@@ -18,6 +18,7 @@ from armbe_io import (
     to_state_series,
     validate_armbe_input,
 )
+from forecast_cache import build_cache
 from jcm.date import DateData
 from evaluate import main as evaluate_main
 from make_synthetic_armbe import build as build_synthetic_armbe
@@ -195,3 +196,34 @@ def test_synthetic_pipeline_runs_and_evaluates(tmp_path, capsys):
 
     assert evaluate_main(["--run", str(output_path)]) == 0
     assert "Daily-mean comparison" in capsys.readouterr().out
+
+
+def test_forecast_cache_uses_profile_evaluations_and_cloud_qc(tmp_path):
+    atm, cldrad = build_synthetic_armbe(days=1)
+    atm_path, cldrad_path = tmp_path / "atm.nc", tmp_path / "cldrad.nc"
+    atm.to_netcdf(atm_path)
+    cldrad.to_netcdf(cldrad_path)
+
+    cldrad["qc_tot_cld"][6] = 1
+    cldrad.to_netcdf(cldrad_path)
+    cache = build_cache({
+        "atm": str(atm_path),
+        "cldrad": str(cldrad_path),
+        "horizon_seconds": 21600,
+        "stride_seconds": 21600,
+    }, tmp_path / "cache")
+
+    config = json.loads((cache / "config.json").read_text())
+    recipe = json.loads((cache / "recipe.json").read_text())
+    windows = xr.open_dataset(cache / "windows.nc")
+    assert config["target"]["observation"] == "cloud_fraction"
+    assert recipe["target"]["model"] == "shortwave_rad.cloudc"
+    assert config["physics_dt_seconds"] == 1800
+    assert config["profile_cadence_seconds"] == 21600
+    assert recipe["target_order"] == "window, profile evaluation lead"
+    assert windows["target"].shape == (3, 1)
+    assert windows["target_mask"].shape == (3, 1)
+    assert windows["target_mask"][0, 0] == 0
+    assert windows["lead_time_seconds"].values.tolist() == [21600]
+    assert windows["temperature"].shape == (3, 8)
+    assert windows["surface_temperature"].attrs["source_variable"] == "temp_sfc"

@@ -28,6 +28,73 @@ week, and one month.
 - Missing data timesteps are omitted (25% missing, pretty rough)
 - Record valid hourly sample counts and dropped-window reasons in experiment manifest. 
 
+## Cache And Evaluation Usage
+
+Build the offline cache before invoking JEM-Cal. The JSON config requires
+`atm`; `cldrad` is required for the default `cloud_fraction` target. The timing
+fields below are the supported defaults and must satisfy: horizon is divisible
+by the physics timestep, horizon includes one profile cadence, and stride is a
+multiple of profile cadence.
+
+```json
+{
+  "atm": "data/sgparmbeatmC1.c1.20180101.000000.nc",
+  "cldrad": "data/sgparmbecldradC1.c1.20180101.000000.nc",
+  "start": "2018-09-03",
+  "end": "2018-10-02",
+  "nlev": 8,
+  "physics_dt_seconds": 1800,
+  "horizon_seconds": 21600,
+  "stride_seconds": 21600,
+  "profile_cadence_seconds": 21600,
+  "target": {
+    "observation": "cloud_fraction",
+    "model": "shortwave_rad.cloudc",
+    "reduction": "trajectory"
+  }
+}
+```
+
+```bash
+python forecast_cache.py --config cache_config.json --cache outputs/cache_2018_fall
+PYTHONPATH=/path/to/jax-gcm:/path/to/JEM-Cal/src \
+  python /path/to/JEM-Cal/examples/evaluate_jcm_armbe.py --config evaluation_config.json
+```
+
+The evaluator config requires `cache` and `out_dir`; select `all` or one named,
+half-open chronological split. Do not randomly split overlapping or adjacent
+windows. Keep training, validation, and held-out test intervals disjoint in
+their underlying time ranges, and leave the test block untouched while choosing
+parameters.
+
+```json
+{
+  "cache": "outputs/cache_2018_fall",
+  "out_dir": "outputs/eval_2018_fall_test",
+  "split": "test",
+  "batch_size": 8,
+  "splits": {
+    "train": {"start": "2018-09-03", "end": "2018-09-20"},
+    "validation": {"start": "2018-09-20", "end": "2018-09-26"},
+    "test": {"start": "2018-09-26", "end": "2018-10-02"}
+  }
+}
+```
+
+The cache writes `windows.nc` (initial states, prescribed surface-temperature
+record, targets, and QC mask), `config.json`, `recipe.json`, and `manifest.json`.
+The evaluator writes `predictions.nc`, `lead_metrics.csv`, and `run_manifest.json`
+even when execution fails. The cache manifest records its resolved configuration,
+recipe, retained-state count, and window count. The evaluator manifest records
+the resolved configuration, selected windows, output paths, and available git
+revisions.
+
+The surface-temperature record is prescribed at every forecast step as SPEEDY
+land `stl_am`. ARMBE `temperature_sfc` is a 2 m air-temperature proxy, not a
+verified skin temperature. Consequently these are boundary-forced atmospheric
+forecasts, not fully free land-surface forecasts: future surface observations
+remain available during each rollout and this caveat must accompany results.
+
 
 ### 2. Define the Cloud Observation Operator
 

@@ -38,9 +38,11 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import xarray as xr
+import jax.numpy as jnp
 
 from jcm.physics.speedy.speedy_coords import compute_speedy_vertical_coords
 from jcm.constants import p0, rd
+from jcm.forcing import BY_DATE, ForcingData, make_time_series
 from jcm.physics_interface import PhysicsState
 
 # SGP Central Facility (Lamont, OK) — exact coords from the ARM datastream
@@ -510,6 +512,50 @@ def to_obs_targets(ds: xr.Dataset,
         # directions, while SPEEDY's rsns is net downward.
         out["sw_net_sfc"] = out["sw_down_sfc"] - out["sw_up_sfc"]
     return out
+
+
+def epoch_seconds(times: np.ndarray) -> np.ndarray:
+    """Convert ARMBE timestamps to the epoch seconds used by ``BY_DATE``."""
+    times = np.asarray(times).astype("datetime64[s]")
+    return (times - np.datetime64("1970-01-01T00:00:00")).astype(np.int64).astype(float)
+
+
+def build_forcing(ds: xr.Dataset, times: np.ndarray, nodal_shape=(1, 1), static: bool = False):
+    """Build the SGP land forcing, using observed surface temperature when present.
+
+    Keeping this next to ARMBE I/O makes the offline cache and external adapters
+    use the identical forcing convention as the diagnostic SCM experiment.
+    """
+    t_name = pick(ds, "surface_temperature", required=False)
+    if t_name is not None:
+        t_obs = np.asarray(ds[t_name].values, dtype=float)
+        if np.nanmax(t_obs) < 100.0:
+            t_obs = t_obs + 273.15
+    else:
+        t_obs = np.full(len(times), 295.0)
+    t_obs = np.nan_to_num(t_obs, nan=float(np.nanmean(t_obs)))
+    n = min(len(t_obs), len(times))
+    t_obs, times = t_obs[:n], times[:n]
+    ones = jnp.ones(nodal_shape)
+    if static:
+        stl = float(np.mean(t_obs)) * ones
+        sst = stl
+    else:
+        stl = make_time_series(
+            jnp.asarray(t_obs.reshape(n, *nodal_shape)),
+            jnp.asarray(epoch_seconds(times)), align_mode=BY_DATE,
+        )
+        sst = float(np.mean(t_obs)) * ones
+    return ForcingData.zeros(
+        nodal_shape,
+        alb0=0.20 * ones,
+        stl_am=stl,
+        sea_surface_temperature=sst,
+        soilw_am=0.30 * ones,
+        snowc_am=jnp.zeros(nodal_shape),
+        sice_am=jnp.zeros(nodal_shape),
+        co2_vmr=jnp.asarray(407.0),
+    ), float(np.mean(t_obs))
 
 
 def _main(argv: Sequence[str]) -> int:

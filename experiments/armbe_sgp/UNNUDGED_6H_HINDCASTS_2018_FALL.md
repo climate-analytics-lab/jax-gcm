@@ -49,19 +49,13 @@ Each row pools all forecast-window final states and vertical levels.
 | Zonal wind | 6.103 m/s | 6.069 | -0.034 | 3.800 | 0.90 |
 | Meridional wind | 2.686 m/s | 2.450 | -0.236 | 4.299 | 0.76 |
 
-## Reproduction
+## Historical Artifacts
 
-```bash
-JAX_PLATFORMS=cpu python run_6h_hindcasts.py \
-  --atm data/order-267737/ftp.archive.arm.gov/fisherm1/267737/sgparmbeatmC1.c1 \
-  --cldrad data/order-267737/ftp.archive.arm.gov/fisherm1/267737/sgparmbecldradC1.c1 \
-  --start 2018-09-03T11:30:00 --end 2018-10-02T23:30:00 \
-  --dt 1800 --window-seconds 21600 \
-  --plot \
-  --output outputs/hindcast_2018-09-03_10-02.npz
-```
+This result was produced by the superseded `run_6h_hindcasts.py` prototype. Its
+semantics are retained here for provenance, but new work must use the
+config-driven cache and evaluator documented in `ML_FORECASTING_ROADMAP.md`.
 
-The local archive, manifest, and plot are ignored under `outputs/`.
+The local archive, manifest, and plots are ignored under `outputs/`.
 `hindcast_compare.png` aggregates the six-hour interval means to calendar-day
 means, matching the temporal resolution of `compare.png`. The metrics above
 remain six-hour interval metrics.
