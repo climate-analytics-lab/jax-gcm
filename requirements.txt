@@ -3,6 +3,7 @@ flax>=0.12.0
 jax-datetime
 tree-math
 hydra-core
+pyyaml>=6.0
 
 # I/O requirements
 xarray[io, parallel]

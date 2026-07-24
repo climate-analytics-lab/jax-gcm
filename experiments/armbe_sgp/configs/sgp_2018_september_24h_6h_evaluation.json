@@ -1,6 +1,0 @@
-{
-  "cache": "../outputs/cache_sgp_2018_september_24h_6h",
-  "out_dir": "../outputs/evaluation_sgp_2018_september_24h_6h",
-  "split": "all",
-  "batch_size": 8
-}

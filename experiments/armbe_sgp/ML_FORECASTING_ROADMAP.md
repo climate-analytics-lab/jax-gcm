@@ -30,35 +30,32 @@ week, and one month.
 
 ## Cache And Evaluation Usage
 
-Build the offline cache before invoking JEM-Cal. The JSON config requires
+Build the offline cache before invoking JEM-Cal. The YAML config requires
 `atm`; `cldrad` is required for the default `cloud_fraction` target. The timing
 fields below are the supported defaults and must satisfy: horizon is divisible
 by the physics timestep, horizon includes one observation cadence, and stride is
 a multiple of observation cadence.
 
-```json
-{
-  "atm": "data/sgparmbeatmC1.c1.20180101.000000.nc",
-  "cldrad": "data/sgparmbecldradC1.c1.20180101.000000.nc",
-  "start": "2018-09-03",
-  "end": "2018-10-02",
-  "nlev": 8,
-  "physics_dt_minutes": 30,
-  "horizon_minutes": 360,
-  "stride_minutes": 360,
-  "observation_cadence_minutes": 360,
-  "target": {
-    "observation": "cloud_fraction",
-    "model": "shortwave_rad.cloudc",
-    "reduction": "trajectory"
-  }
-}
+```yaml
+atm: "data/sgparmbeatmC1.c1.20180101.000000.nc"
+cldrad: "data/sgparmbecldradC1.c1.20180101.000000.nc"
+start: "2018-09-03"
+end: "2018-10-02"
+nlev: 8
+physics_dt_minutes: 30
+horizon_minutes: 360
+stride_minutes: 360
+observation_cadence_minutes: 360
+target:
+  observation: cloud_fraction
+  model: shortwave_rad.cloudc
+  reduction: trajectory
 ```
 
 ```bash
-python forecast_cache.py --config cache_config.json --cache outputs/cache_2018_fall
+python forecast_cache.py --config cache_config.yaml --cache outputs/cache_2018_fall
 PYTHONPATH=/path/to/jax-gcm:/path/to/JEM-Cal/src \
-  python /path/to/JEM-Cal/examples/evaluate_jcm_armbe.py --config evaluation_config.json
+  python /path/to/JEM-Cal/examples/evaluate_jcm_armbe.py --config evaluation_config.yaml
 ```
 
 The evaluator config requires `cache` and `out_dir`; select `all` or one named,

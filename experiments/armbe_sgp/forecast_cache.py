@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import xarray as xr
+import yaml
 
 from armbe_io import load_armbe, pick, to_obs_targets, to_state_series
 
@@ -30,6 +31,31 @@ DEFAULT_CONFIG = {
     "observation_cadence_minutes": 360,
     "target": DEFAULT_TARGET,
 }
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects ambiguous duplicate mapping keys."""
+
+
+def _construct_mapping(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ValueError(f"duplicate YAML key {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+
+def load_config(path: Path) -> dict:
+    """Load a human-authored YAML configuration, rejecting duplicate keys."""
+    config = yaml.load(path.read_text(), Loader=UniqueKeyLoader)
+    if not isinstance(config, dict):
+        raise ValueError("configuration must be a YAML mapping")
+    return config
 
 
 def resolved_config(config: Mapping[str, Any], root: Path | None = None) -> dict:
@@ -178,11 +204,11 @@ def build_cache(config: Mapping[str, Any], cache: str | Path, root: Path | None 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True, help="JSON configuration")
+    parser.add_argument("--config", type=Path, required=True, help="YAML configuration")
     parser.add_argument("--cache", type=Path, required=True)
     args = parser.parse_args(argv)
     config_path = args.config.resolve()
-    out = build_cache(json.loads(config_path.read_text()), args.cache, config_path.parent)
+    out = build_cache(load_config(config_path), args.cache, config_path.parent)
     print(f"wrote ARMBE forecast cache to {out}")
     return 0
 

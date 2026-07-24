@@ -18,7 +18,7 @@ from armbe_io import (
     to_state_series,
     validate_armbe_input,
 )
-from forecast_cache import build_cache, resolved_config
+from forecast_cache import build_cache, load_config, resolved_config
 from jcm.date import DateData
 from evaluate import main as evaluate_main
 from make_synthetic_armbe import build as build_synthetic_armbe
@@ -245,3 +245,10 @@ def test_forecast_cache_uses_profile_evaluations_and_cloud_qc(tmp_path):
 def test_forecast_cache_validates_public_minute_timing(config, message):
     with pytest.raises(ValueError, match=message):
         resolved_config({"atm": "atm.nc", **config})
+
+
+def test_load_config_rejects_duplicate_yaml_keys(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("atm: first.nc\natm: second.nc\n")
+    with pytest.raises(ValueError, match="duplicate YAML key"):
+        load_config(config_path)
