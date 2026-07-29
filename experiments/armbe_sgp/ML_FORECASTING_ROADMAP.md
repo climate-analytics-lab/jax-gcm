@@ -89,6 +89,19 @@ The rollout start times are selected with `stride_seconds`. Starts may overlap,
 but train/validation/test splits must be chronological and non-overlapping in
 their underlying time ranges to prevent leakage.
 
+### Surface Boundary Condition
+
+Phase one prescribes the time-varying ARMBE `temperature_sfc` record as
+SPEEDY's `stl_am` land-temperature boundary condition throughout every rollout.
+The field is a 2 m air-temperature proxy, not a verified skin temperature.
+
+This is a boundary-forced atmospheric forecast, not a fully free forecast:
+future surface observations are available to the model during the rollout. The
+experiment manifest and every result must label this choice explicitly. The
+current SPEEDY SCM has no prognostic land/skin-temperature equation, so a fully
+free land-surface forecast requires separate physics development. A future
+frozen-initial-temperature sensitivity can be added as a distinct experiment.
+
 ## Trainable Cloud Parameters
 
 Start with the existing SPEEDY shortwave cloud parameters:

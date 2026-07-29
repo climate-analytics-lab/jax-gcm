@@ -2,6 +2,7 @@
 
 import unittest
 
+import jax
 import jax_datetime as jdt
 import jax.numpy as jnp
 import numpy.testing as npt
@@ -10,7 +11,7 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
 from jcm.date import DateData, absolute_seconds_since_epoch
-from jcm.forcing import BY_DATE, ForcingData, make_time_series
+from jcm.forcing import BY_DATE, ForcingData, SolarGeometry, make_time_series
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
@@ -222,6 +223,75 @@ class TestSCMForcing(unittest.TestCase):
 
         expected = state.temperature + jnp.array([2.0, 4.0, 6.0])[:, None]
         npt.assert_allclose(predictions.relaxed_states["temperature"], expected)
+
+    def test_run_uses_preselected_forcing_trajectory(self):
+        state = _make_column_state(8)
+        single_forcing = ForcingData.zeros(
+            (1, 1),
+            stl_am=jnp.array([[290.0]]),
+        )
+        forcing_steps = jax.tree_util.tree_map(
+            lambda x: jnp.stack([x, x]), single_forcing,
+        ).copy(
+            stl_am=jnp.array([[[290.0]], [[300.0]]]),
+            solar=SolarGeometry(
+                tyear=jnp.array([0.1, 0.2]),
+                orbital_phase=jnp.array([0.0, 0.0]),
+                synodic_phase=jnp.array([0.0, 0.0]),
+            ),
+        )
+        scm = SingleColumnModel(
+            physics=_ForcingCapturePhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            free_evolve=("temperature",),
+        )
+
+        repeated_state = jax.tree_util.tree_map(
+            lambda value: jnp.broadcast_to(value, (2,) + value.shape), state
+        )
+        predictions = scm.run(repeated_state, forcing_steps=forcing_steps)
+
+        npt.assert_allclose(
+            predictions.physics_data["land_temperature"][:, 0, 0],
+            [290.0, 300.0],
+        )
+        npt.assert_allclose(predictions.physics_data["tyear"], [0.1, 0.2])
+
+    def test_run_can_be_vmapped_over_independent_windows(self):
+        state = _make_column_state(8)
+        single_forcing = ForcingData.zeros((1, 1))
+        forcing_steps = jax.tree_util.tree_map(
+            lambda x: jnp.stack([x, x]), single_forcing,
+        ).copy(
+            stl_am=jnp.array([[[290.0]], [[300.0]]]),
+            solar=SolarGeometry(
+                tyear=jnp.array([0.1, 0.2]),
+                orbital_phase=jnp.zeros(2),
+                synodic_phase=jnp.zeros(2),
+            ),
+        )
+        batched_states = jax.tree_util.tree_map(lambda x: jnp.stack([x, x]), state)
+        batched_forcing = jax.tree_util.tree_map(
+            lambda x: jnp.stack([x, x]), forcing_steps,
+        )
+        scm = SingleColumnModel(
+            physics=_ForcingCapturePhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+        )
+
+        predictions = jax.vmap(
+            lambda initial, forcing: scm.run(
+                jax.tree_util.tree_map(
+                    lambda value: jnp.broadcast_to(value, (2,) + value.shape), initial
+                ),
+                forcing_steps=forcing,
+            ),
+        )(batched_states, batched_forcing)
+
+        npt.assert_allclose(
+            predictions.physics_data["land_temperature"][:, :, 0, 0],
+            [[290.0, 300.0], [290.0, 300.0]],
+        )
 
 
 class TestSCMEcham(unittest.TestCase):
