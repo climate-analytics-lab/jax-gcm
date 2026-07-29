@@ -64,18 +64,15 @@ windows. Keep training, validation, and held-out test intervals disjoint in
 their underlying time ranges, and leave the test block untouched while choosing
 parameters.
 
-```json
-{
-  "cache": "outputs/cache_2018_fall",
-  "out_dir": "outputs/eval_2018_fall_test",
-  "split": "test",
-  "batch_size": 8,
-  "splits": {
-    "train": {"start": "2018-09-03", "end": "2018-09-20"},
-    "validation": {"start": "2018-09-20", "end": "2018-09-26"},
-    "test": {"start": "2018-09-26", "end": "2018-10-02"}
-  }
-}
+```yaml
+cache: "outputs/cache_2018_fall"
+out_dir: "outputs/eval_2018_fall_test"
+split: test
+batch_size: 8
+splits:
+  train: {start: "2018-09-03", end: "2018-09-20"}
+  validation: {start: "2018-09-20", end: "2018-09-26"}
+  test: {start: "2018-09-26", end: "2018-10-02"}
 ```
 
 The cache writes `windows.nc` (initial states, prescribed surface-temperature
