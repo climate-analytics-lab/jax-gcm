@@ -92,6 +92,21 @@ class _ForcingCapturePhysics(Physics):
         }
 
 
+class _ConstantTendencyPhysics(Physics):
+    """Minimal physics package for unnudged prognostic-state tests."""
+
+    def get_empty_data(self, coords):
+        del coords
+        return {}
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        del forcing, terrain, prev_physics_data
+        return PhysicsTendency.zeros(
+            state.temperature.shape,
+            temperature=jnp.ones_like(state.temperature),
+        ), {}
+
+
 class TestSCMConstruction(unittest.TestCase):
     """Cheap tests for the SCM's coord-stub bookkeeping."""
 
@@ -193,6 +208,20 @@ class TestSCMForcing(unittest.TestCase):
             for timestamp in timestamps
         ]
         npt.assert_allclose(predictions.physics_data["tyear"], expected_tyear)
+
+    def test_free_evolving_variable_advances_without_nudging(self):
+        state = _make_column_state(8)
+        scm = SingleColumnModel(
+            physics=_ConstantTendencyPhysics(),
+            vertical=SigmaCoordinates.equidistant(8),
+            dt_seconds=2.0,
+            free_evolve=("temperature",),
+        )
+
+        predictions = scm.run([state] * 3)
+
+        expected = state.temperature + jnp.array([2.0, 4.0, 6.0])[:, None]
+        npt.assert_allclose(predictions.relaxed_states["temperature"], expected)
 
 
 class TestSCMEcham(unittest.TestCase):

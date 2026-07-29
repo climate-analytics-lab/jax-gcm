@@ -83,8 +83,14 @@ CANDIDATES: dict[str, tuple[str, ...]] = {
                           "latent_heat_flux", "lh_flux", "lhf", "LH"),
     "sw_down_sfc": ("sw_dn_sfc", "surface_downwelling_shortwave",
                     "rsds", "swdn_sfc", "swdn", "sw_down"),
+    "sw_up_sfc": ("sw_up_sfc", "surface_upwelling_shortwave", "swup",
+                  "sw_up"),
     "lw_down_sfc": ("lw_dn_sfc", "surface_downwelling_longwave",
                     "rlds", "lwdn_sfc", "lwdn", "lw_down"),
+    "lw_up_sfc": ("lw_up_sfc", "surface_upwelling_longwave", "lwup",
+                  "lw_up"),
+    "sw_down_toa": ("sw_dn_TOA", "toa_incoming_shortwave", "toa_sw_down"),
+    "sw_net_toa": ("sw_net_TOA", "toa_net_shortwave", "toa_sw_net"),
     "cloud_fraction": ("tot_cld", "tot_cld_tsi", "cld_frac", "cloud_fraction",
                        "cldfrac"),
     "lwp": ("lwp", "liquid_water_path"),
@@ -492,13 +498,17 @@ def to_obs_targets(ds: xr.Dataset,
                    indices: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Observed series to score the SCM against (missing fields are skipped)."""
     out: dict[str, np.ndarray] = {}
-    for field in ("precip", "sw_down_sfc", "lw_down_sfc",
+    for field in ("precip", "sw_down_sfc", "sw_up_sfc", "lw_down_sfc", "lw_up_sfc",
                   "sensible_heat_flux", "latent_heat_flux",
-                  "cloud_fraction", "lwp"):
+                  "cloud_fraction", "lwp", "sw_down_toa", "sw_net_toa"):
         name = pick(ds, field, required=False)
         if name is not None:
             values = np.asarray(ds[name].values, dtype=float)
             out[field] = values if indices is None else values[indices]
+    if "sw_down_sfc" in out and "sw_up_sfc" in out:
+        # ARMBE reports both components positive in their propagation
+        # directions, while SPEEDY's rsns is net downward.
+        out["sw_net_sfc"] = out["sw_down_sfc"] - out["sw_up_sfc"]
     return out
 
 

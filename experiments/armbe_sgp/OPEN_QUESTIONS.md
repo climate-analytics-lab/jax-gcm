@@ -23,22 +23,18 @@ experiment. It intentionally does not retain resolved implementation history.
 - Focused SCM and ARMBE-adapter tests cover the date-aligned surface-temperature
   forcing path, dropped-profile alignment, and regular-cadence validation.
 
-## 1. Validate against real ARMBE files
+## 1. Extend real-data quality assurance
 
-The candidate variable mappings in `armbe_io.CANDIDATES` have not been
-validated against a downloaded production ARMBE record. Before interpreting any
-model-observation comparison:
+The production 2018 SGP ARMBEATM and ARMBECLDRAD records now support both the
+prescribed-state diagnostic run and independent unnudged six-hour hindcasts.
+The remaining data-quality work is:
 
-- Download a contiguous SGP ARMBEATM and ARMBECLDRAD window.
-- Run `python armbe_io.py <atm-file>` and verify every required field resolves
-  to the expected variable and units.
+- Apply ARM quality-control masks before calculating model-observation scores.
 - Confirm pressure-level orientation, surface-pressure units, and the
-  dewpoint-to-specific-humidity conversion against a few soundings.
-- Run `run_scm.py` with the real files and retain the loader report alongside
-  the output.
-
-The downloader queries the ARM API for availability; do not hardcode a coverage
-period from stale metadata pages.
+  dewpoint-to-specific-humidity conversion against selected soundings.
+- Report within-window observational variability alongside interval means.
+- Compare BAEBBR and QCECOR surface turbulent-flux products where both are
+  available.
 
 ## 2. Establish an appropriate surface-temperature forcing
 

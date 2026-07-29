@@ -110,6 +110,36 @@ def validate_cadence(times: np.ndarray, dt_seconds: float) -> None:
         )
 
 
+def filter_regular_cadence(states, times: np.ndarray, meta: dict,
+                           dt_seconds: float):
+    """Retain the dominant timestamp phase on a requested regular cadence.
+
+    ARMBEATM can contain otherwise valid profile records between its nominal
+    six-hour analysis times. This opt-in filter removes those off-cadence
+    records; :func:`validate_cadence` still rejects an actual missing step on
+    the retained phase rather than interpolating across it.
+    """
+    times = np.asarray(times).astype("datetime64[s]")
+    if len(times) < 2:
+        return states, times, meta
+    seconds = times.astype(np.int64)
+    phases, counts = np.unique(np.mod(seconds, int(dt_seconds)), return_counts=True)
+    dominant_phase = phases[np.argmax(counts)]
+    keep = np.mod(seconds, int(dt_seconds)) == dominant_phase
+    if np.all(keep):
+        return states, times, meta
+
+    retained_indices = meta["retained_indices"][keep]
+    filtered_meta = {
+        **meta,
+        "n_states": int(keep.sum()),
+        "retained_indices": retained_indices,
+        "n_off_cadence_dropped": int((~keep).sum()),
+        "cadence_phase_seconds": int(dominant_phase),
+    }
+    return [state for state, use in zip(states, keep) if use], times[keep], filtered_meta
+
+
 def _git_revision(repo_root: Path) -> str | None:
     """Return the checked-out revision when this experiment is run from git."""
     try:
@@ -148,6 +178,7 @@ def write_manifest(path: Path, args, argv, meta: dict, times: np.ndarray) -> Non
             "window_start": args.start,
             "window_end": args.end,
             "static_forcing": args.static_forcing,
+            "regular_cadence": args.regular_cadence,
             "calendar": "gregorian",
             "site": "SGP C1",
             "land_surface_temperature": (
@@ -231,11 +262,16 @@ def main(argv=None) -> int:
                     help="JSON provenance sidecar (default: <output>.manifest.json)")
     ap.add_argument("--static-forcing", action="store_true",
                     help="pin surface temp at the record mean (the old, broken "
-                         "behaviour) — for comparison only")
+                          "behaviour) — for comparison only")
+    ap.add_argument("--regular-cadence", action="store_true",
+                    help="retain only the dominant timestamp phase at --dt before "
+                         "rejecting genuine missing steps")
     args = ap.parse_args(argv)
 
     ds = load_armbe(args.atm, args.cldrad, args.start, args.end)
     states, times, meta = to_state_series(ds, nlev=args.nlev)
+    if args.regular_cadence:
+        states, times, meta = filter_regular_cadence(states, times, meta, args.dt)
     if not states:
         raise SystemExit("no usable states built from the input — check the loader "
                          "report above for unresolved variables.")
@@ -274,7 +310,8 @@ def main(argv=None) -> int:
     print(f"steps     : {len(states)}  ({len(states)*args.dt/86400:.1f} days)")
     print(f"sfc temp  : {t_sfc:.1f} K mean, "
           f"{'STATIC (broken, comparison only)' if args.static_forcing else 'following obs per step'}")
-    print(f"dropped   : {meta['n_dropped']} of {meta['n_input_times']} input times")
+    print(f"dropped   : {meta['n_dropped']} invalid profile times, "
+          f"{meta.get('n_off_cadence_dropped', 0)} off-cadence times")
 
     pred = scm.run(states)
     diags = extract(pred.physics_data)

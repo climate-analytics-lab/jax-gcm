@@ -322,6 +322,7 @@ class SingleColumnModel:
         tracer_names: tuple[str, ...],
         evolving_var_params: tuple[tuple[str, float | None], ...],
         state_closure: Callable | None,
+        forcing_steps: ForcingData | None = None,
     ) -> Callable:
         physics = self.physics
         terrain = self.terrain
@@ -348,13 +349,15 @@ class SingleColumnModel:
 
             grid_state = _column_state_to_grid(column_state, nlev)
             clamped = verify_state(grid_state)
-            # Re-select forcing for this step's date, exactly as ``Model`` does
-            # each step. This is what populates ``SolarGeometry`` (and slices any
-            # ``TimeSeries`` leaves); without it the sun is frozen at the null
-            # geometry of a user-built ``ForcingData`` and the column has no
-            # diurnal cycle.
-            forcing_now = forcing.select(self._date_at_step(time_idx),
-                                         calendar=self.calendar)
+            if forcing_steps is None:
+                # Re-select forcing for this step's date, exactly as ``Model`` does
+                # each step. This populates ``SolarGeometry`` and slices any
+                # ``TimeSeries`` leaves.
+                forcing_now = forcing.select(
+                    self._date_at_step(time_idx), calendar=self.calendar
+                )
+            else:
+                forcing_now = tree_map(lambda value: value[time_idx], forcing_steps)
             tendencies_grid, new_physics_data = physics.compute_tendencies(
                 clamped, forcing_now, terrain,
                 prev_physics_data=physics_data,
@@ -409,6 +412,7 @@ class SingleColumnModel:
         initial_physics_data: Any = None,
         times: jnp.ndarray | None = None,
         initial_relaxed_vars: dict | None = None,
+        forcing_steps: ForcingData | None = None,
     ) -> SCMPredictions:
         """Run the SCM with evolving tracers.
 
@@ -427,6 +431,9 @@ class SingleColumnModel:
                 variables — both nudged (``relaxation_timescales``) and freely
                 evolving (``free_evolve``) — 1-D ``(nlev,)`` per variable.
                 Defaults to the first prescribed state's values.
+            forcing_steps: Optional forcing trajectory with one preselected
+                slice per model step. This supports vmapped forecast windows
+                with different calendar starts.
 
         Returns:
             ``SCMPredictions``.
@@ -487,6 +494,7 @@ class SingleColumnModel:
             tracer_names=tuple(initial_tracers.keys()),
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
+            forcing_steps=forcing_steps,
         )
 
         def scan_step(carry, time_idx):

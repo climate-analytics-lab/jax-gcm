@@ -21,7 +21,12 @@ from armbe_io import (
 from jcm.date import DateData
 from evaluate import main as evaluate_main
 from make_synthetic_armbe import build as build_synthetic_armbe
-from run_scm import build_forcing, start_date_from_timestamp, validate_cadence
+from run_scm import (
+    build_forcing,
+    filter_regular_cadence,
+    start_date_from_timestamp,
+    validate_cadence,
+)
 from run_scm import main as run_scm_main
 
 
@@ -70,6 +75,25 @@ def test_gkg_source_humidity_is_normalized_once():
     np.testing.assert_allclose(states[0].specific_humidity, 5.0)
 
 
+def test_observation_targets_include_radiation_components():
+    ds = _dataset().assign(
+        swdn=("time", [100.0, 110.0, 120.0]),
+        swup=("time", [20.0, 21.0, 22.0]),
+        lwdn=("time", [300.0, 301.0, 302.0]),
+        lwup=("time", [400.0, 401.0, 402.0]),
+        sw_dn_TOA=("time", [500.0, 501.0, 502.0]),
+        sw_net_TOA=("time", [250.0, 251.0, 252.0]),
+        tot_cld=("time", [0.1, 0.2, 0.3]),
+    )
+    targets = to_obs_targets(ds)
+    np.testing.assert_array_equal(targets["sw_net_sfc"], [80.0, 89.0, 98.0])
+    np.testing.assert_array_equal(targets["sw_up_sfc"], [20.0, 21.0, 22.0])
+    np.testing.assert_array_equal(targets["lw_up_sfc"], [400.0, 401.0, 402.0])
+    np.testing.assert_array_equal(targets["sw_down_toa"], [500.0, 501.0, 502.0])
+    np.testing.assert_array_equal(targets["sw_net_toa"], [250.0, 251.0, 252.0])
+    np.testing.assert_array_equal(targets["cloud_fraction"], [0.1, 0.2, 0.3])
+
+
 def test_subdaily_start_timestamp_selects_matching_forcing_step():
     times = np.array(["2018-06-01T00", "2018-06-01T06"], dtype="datetime64[h]")
     ds = xr.Dataset(
@@ -91,6 +115,20 @@ def test_irregular_retained_cadence_is_rejected():
     times = np.array(["2018-06-01T00", "2018-06-01T02"], dtype="datetime64[h]")
     with pytest.raises(ValueError, match="regularly spaced"):
         validate_cadence(times, 3600)
+
+
+def test_regular_cadence_filter_removes_extra_profile_times():
+    times = np.array(
+        ["2018-06-01T00", "2018-06-01T06", "2018-06-01T07", "2018-06-01T12"],
+        dtype="datetime64[h]",
+    )
+    states, filtered_times, meta = filter_regular_cadence(
+        list("abcd"), times, {"retained_indices": np.arange(4), "n_states": 4}, 21600,
+    )
+    assert states == ["a", "b", "d"]
+    np.testing.assert_array_equal(filtered_times, times[[0, 1, 3]])
+    np.testing.assert_array_equal(meta["retained_indices"], [0, 1, 3])
+    assert meta["n_off_cadence_dropped"] == 1
 
 
 def test_validation_rejects_duplicate_pressure_levels():

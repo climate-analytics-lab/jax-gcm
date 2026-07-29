@@ -78,7 +78,13 @@ G_PER_M2_PER_S_TO_MM_PER_HR = 3.6     # 1 g/m²/s = 1e-3 kg/m²/s = 1e-3 mm/s
 PAIRS = {
     "precip [mm/hr]": ("precip", "obs.precip"),
     "sfc SW down [W/m2]": ("sw_down", "obs.sw_down_sfc"),
+    "sfc SW net [W/m2]": ("sw_net", "obs.sw_net_sfc"),
     "sfc LW down [W/m2]": ("lw_down", "obs.lw_down_sfc"),
+    # ARMBE's `lwup` is measured at 10 m while SPEEDY emits at the surface.
+    "sfc LW up [W/m2]": ("lw_up", "obs.lw_up_sfc"),
+    "TOA SW down [W/m2]": ("sw_down_toa", "obs.sw_down_toa"),
+    "TOA SW net [W/m2]": ("sw_net_toa", "obs.sw_net_toa"),
+    "cloud fraction [1]": ("cloud_fraction", "obs.cloud_fraction"),
     "sensible heat [W/m2]": ("shf", "obs.sensible_heat_flux"),
     "latent heat [W/m2]": ("lhf", "obs.latent_heat_flux"),
 }
@@ -99,7 +105,12 @@ def model_series(d) -> dict[str, np.ndarray]:
     return {
         "precip": (precls + precnv) * G_PER_M2_PER_S_TO_MM_PER_HR,
         "sw_down": _tile(d["model.shortwave_rad.rsds"]),
+        "sw_net": _tile(d["model.shortwave_rad.rsns"]),
         "lw_down": _tile(d["model.surface_flux.rlds"]),
+        "lw_up": _tile(d["model.surface_flux.rlus"]),
+        "sw_down_toa": _tile(d["model.shortwave_rad.fsol"]),
+        "sw_net_toa": _tile(d["model.shortwave_rad.ftop"]),
+        "cloud_fraction": _tile(d["model.shortwave_rad.cloudc"]),
         "shf": _tile(d["model.surface_flux.shf"]),
         "lhf": _tile(d["model.surface_flux.evap"]) * 1e-3 * LATENT_HEAT_VAPORIZATION,
     }
@@ -171,7 +182,9 @@ def main(argv=None) -> int:
           "In prescribed-state mode,\n      the model cannot retain convective "
           "thermodynamic feedback between observations. Assess it on\n      a "
           "longer contiguous real-data window and against a relaxation sensitivity "
-          "run; see the module docstring.")
+          "run; see the module docstring. Surface LW-up compares SPEEDY's surface "
+          "emission\n      against ARMBE's 10 m measurement and is therefore a "
+          "near-surface diagnostic, not an exact collocation.")
 
     if args.plot:
         import matplotlib
