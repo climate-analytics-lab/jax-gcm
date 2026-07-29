@@ -1,0 +1,9 @@
+atm: "../data/order-267737/ftp.archive.arm.gov/fisherm1/267737/sgparmbeatmC1.c1/sgparmbeatmC1.c1.20180101.003000.nc"
+cldrad: "../data/order-267737/ftp.archive.arm.gov/fisherm1/267737/sgparmbecldradC1.c1/sgparmbecldradC1.c1.20180101.003000.nc"
+start: "2018-09-01"
+end: "2018-10-01"
+nlev: 8
+batch_size: 8
+target:
+  observation: cloud_fraction
+  model: shortwave_rad.cloudc

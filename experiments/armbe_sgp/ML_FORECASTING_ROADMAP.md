@@ -1,5 +1,10 @@
 # Differentiable SCM Forecasting Roadmap
 
+> **Status: deferred.** The active experiment is the independent same-time
+> cloud-diagnostic evaluation in `SCM_CLOUD_EXPERIMENT_SETUP.md`. Retain this
+> document and its forecast cache only for later online validation of a
+> calibrated cloud equation.
+
 ## Goal
 
 Turn SPEEDY single-column experiments into a differentiable forecasting problem:

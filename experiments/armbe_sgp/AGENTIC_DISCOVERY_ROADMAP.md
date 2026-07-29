@@ -9,7 +9,7 @@ It is not yet the full MOSAIC system, global JEM integration, or observational
 targeting workflow.
 
 The first target is the SPEEDY cloud-cover diagnostic, `cloudc`. The first
-observational validation is the existing ARMBE single-column forecast setup at
+observational validation is the independent, same-time ARMBE diagnostic setup at
 SGP. ERA5 provides the next validation level, initially for globally resolved
 state/forcing and nudged or short-window experiments rather than as a
 replacement for the site-level cloud target.
@@ -25,7 +25,7 @@ candidate equation discovery
 differentiable JCM PhysicsTerm
         |
         v
-short-window forecast and calibration
+independent diagnostic evaluation and calibration
 (ARMBE SCM, then ERA5/global cases)
         |
         v
@@ -38,16 +38,12 @@ validated metrics, gradients, and failure records
 
 The current ARMBE/SPEEDY work has most of the first evaluation layer:
 
-- ARMBE atmospheric profiles initialize independent SPEEDY single-column
-  forecasts.
-- The model can run free physics forecasts with a configurable timestep,
-  horizon, stride, and observation cadence.
-- A cache stores initial states, prescribed surface-temperature forcing,
-  QC-masked cloud targets, and a versioned comparison recipe.
-- The evaluator produces per-lead cloud-fraction RMSE, predictions, and
-  provenance manifests.
-- The September 2018 experiment runs 24-hour forecasts every six hours and
-  compares SPEEDY `cloudc` to QC-passed ARMBE `tot_cld`.
+- ARMBE atmospheric profiles drive independent one-step SPEEDY diagnostics.
+- Every sample resets tracer and physics carry, and uses the surface-temperature
+  forcing selected for that observation time.
+- The evaluator writes same-time cloud pairs, QC masks, RMSE, and provenance.
+- The September 2018 experiment compares SPEEDY `cloudc` to QC-passed ARMBE
+  `tot_cld` at every valid profile time.
 
 This is an evaluation scaffold, not yet a discovery system. In particular, it
 does not yet accept a candidate cloud equation, optimize its coefficients, or
@@ -79,10 +75,10 @@ the discovery system, not differentiated through.
    range, finite forward values, smooth behavior near thresholds, and
    automatic-differentiation versus finite-difference agreement on a small
    column battery.
-2. **ARMBE SCM gate.** Run independent short forecasts from observed SGP
-   profiles. Compare the cloud trajectory to QC-passed `tot_cld`; retain the
-   per-lead RMSE and the prediction-target pairs. This is the inexpensive
-   inner-loop evidence for most candidates.
+2. **ARMBE SCM gate.** Run an independent one-step diagnostic from every
+   observed SGP profile. Compare `cloudc` with simultaneous QC-passed `tot_cld`
+   and retain the prediction-target pairs. This is the inexpensive inner-loop
+   evidence for most candidates.
 3. **ERA5 gate.** Test surviving candidates in short globally resolved or
    nudged JCM windows. This asks whether an equation that helps one observed
    column has a useful effect in a broader atmospheric state distribution.
@@ -101,7 +97,7 @@ Symbolic regression and calibration answer different questions:
 - **Symbolic regression** searches the discrete equation structure and normally
   fits provisional coefficients against its offline training data.
 - **JEM-Cal calibration** holds a chosen structure fixed and tunes its
-  continuous coefficients through the forecast loss, using JCM gradients.
+  continuous coefficients through the diagnostic loss, using JCM gradients.
 
 We should not assume that one replaces the other. The first research comparison
 is:
@@ -119,12 +115,12 @@ parameter count, runtime, and physical-gate failures reported alongside it.
 ## Effective Use Of JCM Gradients
 
 Gradients are useful after a candidate has a fixed, differentiable structure.
-For an SCM window, JEM-Cal can differentiate the masked cloud-trajectory loss
-with respect to the candidate coefficients and update them through smooth,
-bounded parameter transforms. The practical rules are:
+For an independent SCM diagnostic batch, JEM-Cal can differentiate the masked
+same-time cloud loss with respect to candidate coefficients and update them
+through smooth, bounded parameter transforms. The practical rules are:
 
-- Use short independent forecast windows and accumulate information over many
-  windows. Do not treat a long free rollout as one reliable gradient sample.
+- Accumulate information across independent observed profiles. Do not introduce
+  a long free rollout into this first diagnostic calibration objective.
 - Verify each new scheme with finite-difference versus automatic-differentiation
   tests before using its gradients for calibration.
 - Reject or repair a scheme with non-finite gradients, even if its forward
@@ -142,7 +138,7 @@ same forecast/evaluation path, then move to ARMBE observations.
 ## Near-Term Milestones
 
 1. **Generic candidate runner:** replace the default `cloudc` diagnostic with a
-   supplied `PhysicsTerm`, then run the existing ARMBE cache and evaluator
+   supplied `PhysicsTerm`, then run the existing ARMBE diagnostic evaluator
    unchanged.
 2. **Candidate gates and artifacts:** implement the mechanical checks and a
    durable candidate/result record before generating many equations.
