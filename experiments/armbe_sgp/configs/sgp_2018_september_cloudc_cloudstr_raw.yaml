@@ -6,4 +6,4 @@ nlev: 8
 batch_size: 8
 target:
   observation: cloud_fraction
-  operator: cloudc
+  operator: cloudc_plus_cloudstr_raw

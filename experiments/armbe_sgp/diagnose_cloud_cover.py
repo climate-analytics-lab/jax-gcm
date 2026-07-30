@@ -27,6 +27,7 @@ from armbe_io import (
     to_obs_targets,
     to_state_series,
 )
+from cloud_operators import get_operator
 from forecast_cache import load_config
 
 DEFAULT_CONFIG = {
@@ -34,7 +35,7 @@ DEFAULT_CONFIG = {
     "batch_size": 8,
     "target": {
         "observation": "cloud_fraction",
-        "model": "shortwave_rad.cloudc",
+        "operator": "cloudc",
     },
 }
 
@@ -48,8 +49,9 @@ def resolved_config(config: dict, root: Path) -> dict:
             raise ValueError(f"diagnostic config requires {key!r}")
         path = Path(resolved[key])
         resolved[key] = str((root / path).resolve() if not path.is_absolute() else path.resolve())
-    if target != DEFAULT_CONFIG["target"]:
-        raise ValueError(f"only target {DEFAULT_CONFIG['target']!r} is supported")
+    if target["observation"] != "cloud_fraction":
+        raise ValueError("only the cloud_fraction observation target is supported")
+    get_operator(target["operator"])
     if int(resolved["nlev"]) < 1:
         raise ValueError("nlev must be positive")
     if int(resolved["batch_size"]) < 1:
@@ -68,18 +70,42 @@ def _one_step(scm: SingleColumnModel, state, forcing):
     return scm.run(state_step, forcing_steps=forcing_step)
 
 
-def _cloudc(predictions):
+def _cloud_diagnostics(predictions) -> dict[str, jax.Array]:
+    """Extract the one-step SPEEDY cloud diagnostics used by reviewed operators."""
     term = predictions.physics_data["_shortwave_rad"]
-    cloud = term.cloudc if hasattr(term, "cloudc") else term["cloudc"]
-    return jnp.reshape(cloud, (cloud.shape[0], -1))[0, 0]
+    values = {
+        field: getattr(term, field) if hasattr(term, field) else term[field]
+        for field in ("cloudc", "cloudstr")
+    }
+    return {field: jnp.reshape(value, (value.shape[0], -1))[0, 0] for field, value in values.items()}
 
 
-def masked_rmse(prediction: np.ndarray, target: np.ndarray, mask: np.ndarray) -> float:
-    """Return RMSE over the finite, QC-passed comparison subset."""
+def goodness_of_fit(prediction: np.ndarray, target: np.ndarray, mask: np.ndarray) -> dict[str, float]:
+    """Return standard goodness-of-fit metrics over the QC-passed comparison subset."""
     valid = np.asarray(mask, dtype=bool)
     if not valid.any():
-        return float("nan")
-    return float(np.sqrt(np.mean((prediction[valid] - target[valid]) ** 2)))
+        return {key: float("nan") for key in ("rmse", "mae", "bias", "pearson_r", "r_squared")}
+    residual = prediction[valid] - target[valid]
+    observed = target[valid]
+    metrics = {
+        "rmse": float(np.sqrt(np.mean(residual**2))),
+        "mae": float(np.mean(np.abs(residual))),
+        "bias": float(np.mean(residual)),
+        "prediction_std": float(np.std(prediction[valid])),
+        "target_std": float(np.std(observed)),
+    }
+    centered_target = observed - observed.mean()
+    metrics["r_squared"] = (
+        float(1.0 - np.sum(residual**2) / np.sum(centered_target**2))
+        if np.any(centered_target)
+        else float("nan")
+    )
+    metrics["pearson_r"] = (
+        float(np.corrcoef(prediction[valid], observed)[0, 1])
+        if len(observed) > 1 and metrics["prediction_std"] > 0 and metrics["target_std"] > 0
+        else float("nan")
+    )
+    return metrics
 
 
 def run_diagnostic(config: dict, out_dir: Path) -> dict:
@@ -112,7 +138,9 @@ def run_diagnostic(config: dict, out_dir: Path) -> dict:
         calendar="gregorian",
     )
 
-    prediction_batches = []
+    operator_name = config["target"]["operator"]
+    operator = get_operator(operator_name)
+    diagnostic_batches = {field: [] for field in ("cloudc", "cloudstr")}
     for first in range(0, len(states), int(config["batch_size"])):
         state_batch = _stack(states[first : first + int(config["batch_size"])])
         forcing_batch = jax.tree.map(
@@ -121,25 +149,31 @@ def run_diagnostic(config: dict, out_dir: Path) -> dict:
         predictions = jax.vmap(lambda state, force: _one_step(scm, state, force))(
             state_batch, forcing_batch
         )
-        prediction_batches.append(np.asarray(jax.vmap(_cloudc)(predictions)))
-    prediction = np.concatenate(prediction_batches)
+        diagnostics = jax.vmap(_cloud_diagnostics)(predictions)
+        for field in diagnostic_batches:
+            diagnostic_batches[field].append(np.asarray(diagnostics[field]))
+    diagnostics = {field: np.concatenate(values) for field, values in diagnostic_batches.items()}
+    prediction = np.asarray(operator({field: jnp.asarray(value) for field, value in diagnostics.items()}))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     xr.Dataset(
         {
             "prediction": ("sample", prediction),
+            "cloudc": ("sample", diagnostics["cloudc"]),
+            "cloudstr": ("sample", diagnostics["cloudstr"]),
             "target": ("sample", target),
             "target_mask": ("sample", target_mask),
         },
         coords={"sample": np.arange(len(times)), "time": ("sample", times)},
-    ).to_netcdf(out_dir / "cloud_pairs.nc")
+    ).assign_attrs(operator=operator_name).to_netcdf(out_dir / "cloud_pairs.nc")
     metrics = {
         "metric": "qc_masked_cloud_fraction_rmse",
-        "rmse": masked_rmse(prediction, target, target_mask),
         "count": int(target_mask.sum()),
         "samples": int(len(times)),
         "dropped_profiles": int(meta["n_dropped"]),
         "semantics": "independent one-step diagnostics; no atmospheric, tracer, or physics carry",
+        "operator": operator_name,
+        **goodness_of_fit(prediction, target, target_mask),
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     manifest = {"config": config, "metrics": metrics, "outputs": {"pairs": "cloud_pairs.nc"}}

@@ -34,6 +34,11 @@ narrow-field-of-view total cloud fraction, while SPEEDY `cloudc` is a cloud
 diagnostic. SPEEDY `cloudstr` is retained as a separate diagnostic and is not
 added to `cloudc` without an explicit cloud-overlap assumption.
 
+The diagnostic evaluator selects reviewed model operators by name. The
+exploratory `cloudc_plus_cloudstr_raw` operator returns the literal sum without
+clipping or an overlap assumption, so it can exceed one and must not be
+interpreted as a physical cloud fraction.
+
 ## Fixed Defaults
 
 | Choice | Value |
