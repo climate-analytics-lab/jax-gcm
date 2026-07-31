@@ -170,6 +170,8 @@ def radiation_scheme_emulated(
         # see stale data in the diagnostic key.
         toa_sw_up_clear=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear=jnp.zeros_like(lw_flux_up[0]),
+        # No sub-column machinery in the emulator: McICA cloud cover is 0.
+        total_cloud_cover=jnp.zeros_like(sw_flux_up[0]),
         # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
         # carry — the standalone scheme emits 0 and the term bumps it
         # after its compute-vs-cache cond.
@@ -403,6 +405,9 @@ class NNEmulatorRadiation(PhysicsTerm):
             ),
             toa_lw_up_clear=_column_vector_emulated(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
+            ),
+            total_cloud_cover=_column_vector_emulated(
+                diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.

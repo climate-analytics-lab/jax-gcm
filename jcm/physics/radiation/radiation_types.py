@@ -177,6 +177,16 @@ class RadiationData:
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
 
+    # Total (2-D) cloud cover as the RADIATION sees it: the fraction of
+    # McICA g-point sub-columns containing at least one cloudy layer,
+    # pooled over the LW and SW mask draws. This bakes in the exact
+    # overlap assumption (``cloud_overlap`` + decorrelation length) the
+    # flux solve integrates, so it is the model quantity to compare with
+    # satellite total cloud cover — unlike any offline overlap formula
+    # applied to ``cloud_fraction`` after the fact. Zero on schemes with
+    # no sub-column machinery (grey, NN emulator).
+    total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
+
     # Internal step counter incremented by the radiation term on every
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
@@ -208,6 +218,7 @@ class RadiationData:
             toa_sw_down=jnp.zeros(nodal_shape),
             toa_sw_up_clear=jnp.zeros(nodal_shape),
             toa_lw_up_clear=jnp.zeros(nodal_shape),
+            total_cloud_cover=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
         )
 
@@ -232,6 +243,7 @@ class RadiationData:
             'toa_sw_down': self.toa_sw_down,
             'toa_sw_up_clear': self.toa_sw_up_clear,
             'toa_lw_up_clear': self.toa_lw_up_clear,
+            'total_cloud_cover': self.total_cloud_cover,
             'step': self.step,
         }
         new_data.update(kwargs)
