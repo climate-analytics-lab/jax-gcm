@@ -112,6 +112,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
             dvdt=zeros,
             qc_conv=dqc_col * dt_seconds,
             qi_conv=dqi_col * dt_seconds,
+            precip_formation=zeros,
             precip_conv=jnp.array(0.0),
             dqc_dt=dqc_col,
             dqi_dt=dqi_col,
@@ -179,7 +180,9 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
             dtedt=zeros, dqdt=moisture_tend_profile, dudt=zeros, dvdt=zeros,
-            qc_conv=temperature, qi_conv=humidity, precip_conv=jnp.array(0.0),
+            qc_conv=temperature, qi_conv=humidity,
+            precip_formation=jnp.zeros_like(temperature),
+            precip_conv=jnp.array(0.0),
             dqc_dt=zeros, dqi_dt=zeros,
         ), None
 
@@ -269,6 +272,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
             dvdt=zeros,
             qc_conv=zeros,
             qi_conv=zeros,
+            precip_formation=zeros,
             precip_conv=jnp.array(0.0),
             dqc_dt=zeros,
             dqi_dt=zeros,

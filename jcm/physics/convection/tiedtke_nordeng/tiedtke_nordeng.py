@@ -846,6 +846,7 @@ def tiedtke_nordeng_convection(
             dvdt=tendencies.dvdt,
             qc_conv=qc_conv,
             qi_conv=qi_conv,
+            precip_formation=tendencies.precip_formation,
             precip_conv=tendencies.precip_conv,
             dqc_dt=dqc_dt,
             dqi_dt=dqi_dt,
@@ -892,7 +893,9 @@ def tiedtke_nordeng_convection(
         
         tendencies = ConvectionTendencies(
             dtedt=dtedt, dqdt=dqdt, dudt=dudt, dvdt=dvdt,
-            qc_conv=qc_conv, qi_conv=qi_conv, precip_conv=precip_conv,
+            qc_conv=qc_conv, qi_conv=qi_conv,
+            precip_formation=jnp.zeros_like(qc),
+            precip_conv=precip_conv,
             dqc_dt=dqc_dt, dqi_dt=dqi_dt
         )
         return tendencies, state
@@ -1167,6 +1170,9 @@ class TiedtkeConvection(PhysicsTerm):
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
             precip_conv=tendencies_all.precip_conv * cap_scale_col,
+            precip_formation=(
+                tendencies_all.precip_formation.T * cap_scale_col[jnp.newaxis]
+            ),
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
             heating_rate=tendency.temperature,

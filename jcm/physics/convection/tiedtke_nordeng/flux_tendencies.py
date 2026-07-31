@@ -472,6 +472,7 @@ def calculate_tendencies(
         dvdt=dvdt,
         qc_conv=qc_conv,
         qi_conv=qi_conv,
+        precip_formation=jnp.maximum(updraft_state.pdmfup, 0.0),
         precip_conv=precip_rate,
         dqc_dt=dqc_dt,
         dqi_dt=dqi_dt
