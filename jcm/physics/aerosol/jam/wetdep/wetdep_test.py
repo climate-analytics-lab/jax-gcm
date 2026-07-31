@@ -10,6 +10,7 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
     below_cloud_rate,
+    conv_in_cloud_rate,
     in_cloud_rate,
     precip_formation_rate,
 )
@@ -49,6 +50,19 @@ class ScavengingFunctionTest(unittest.TestCase):
             jnp.zeros((1,)), jnp.zeros((1, 1)), jnp.full((1, 1), 1e-6), params,
         )
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
+
+    def test_conv_in_cloud_confined_to_heated_layers(self):
+        # Removal only where the updraft condenses (heating > 0); zero
+        # elsewhere and zero everywhere without convective rain.
+        params = WetDepParameters.default()
+        precip = jnp.asarray([1.0e-3])                 # ~3.6 mm/h
+        heating = jnp.array([[0.0], [1.0e-4], [-1.0e-5]])
+        rate = conv_in_cloud_rate(precip, heating, params)
+        self.assertAlmostEqual(float(rate[0, 0]), 0.0)
+        self.assertGreater(float(rate[1, 0]), 0.0)
+        self.assertAlmostEqual(float(rate[2, 0]), 0.0)
+        none = conv_in_cloud_rate(jnp.zeros((1,)), heating, params)
+        self.assertAlmostEqual(float(jnp.abs(none).max()), 0.0)
 
 
 class WetDepTermTest(unittest.TestCase):
@@ -157,6 +171,54 @@ class WetDepTermTest(unittest.TestCase):
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         self.assertTrue(bool(jnp.allclose(tend.tracers[key], 0.0)))
 
+    def _attach_convection(self, diagnostics, nlev, ncols, conv_precip=1.0e-4):
+        from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
+
+        import dataclasses
+        conv = dataclasses.replace(
+            ConvectionData.zeros((ncols,), nlev),
+            precip_conv=jnp.full((ncols,), conv_precip),
+            # Heat the mid column: levels 1..nlev-2 are convectively active.
+            heating_rate=jnp.full((nlev, ncols), 1.0e-4)
+            .at[0].set(0.0).at[-1].set(0.0),
+        )
+        diagnostics = dict(diagnostics)
+        diagnostics["convection"] = conv
+        return diagnostics
+
+    def test_convective_precip_scavenges(self):
+        # The convective pathway must strengthen removal vs the same state
+        # without it: soluble modes via in-cloud + washout, the insoluble
+        # pcm mode via washout only (below-cloud sees total precip).
+        state, diagnostics, spec, mass_name = self._setup()
+        term = WetScavenging()
+        tend_ref, _ = term(state, diagnostics, None, None)
+        tend_conv, _ = term(
+            state, self._attach_convection(diagnostics, 4, 2), None, None,
+        )
+        for i, mode in enumerate(spec.modes):
+            key = mass_name(mode.species[0], mode.short)
+            self.assertLess(
+                float(tend_conv.tracers[key].sum()),
+                float(tend_ref.tracers[key].sum()),
+                f"convective precip must add removal for mode {mode.short}",
+            )
+        # (Layer confinement of the convective in-cloud rate is asserted at
+        # the function level in ``test_conv_in_cloud_confined_to_heated_layers``;
+        # here the stratiform in-cloud term already near-saturates the implicit
+        # exponential update in cloudy layers, so only the sign/monotonicity of
+        # the total increment is meaningful.)
+
+    def test_conv_scavenging_no_convection_key_is_noop(self):
+        # Without a "convection" diagnostic the term must fall back to the
+        # stratiform-only behaviour (composability without a convection scheme).
+        state, diagnostics, spec, mass_name = self._setup()
+        self.assertNotIn("convection", diagnostics)
+        term = WetScavenging()
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
     def test_grad_through_below_coeff(self):
         state, diagnostics, spec, mass_name = self._setup()
 
@@ -165,6 +227,7 @@ class WetDepTermTest(unittest.TestCase):
                 incloud_scale=jnp.asarray(1.0),
                 below_coeff=coeff,
                 below_radius_ref=jnp.asarray(1.0e-7),
+                conv_incloud_coeff=jnp.asarray(5.0e-4),
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
@@ -172,6 +235,27 @@ class WetDepTermTest(unittest.TestCase):
 
         g = jax.grad(loss)(jnp.asarray(1.0e-4))
         self.assertTrue(np.isfinite(float(g)))
+
+    def test_grad_through_conv_coeff(self):
+        # The new convective coefficient must be a live differentiable knob:
+        # nonzero, finite gradient when convective precip is present.
+        state, diagnostics, spec, mass_name = self._setup()
+        diagnostics = self._attach_convection(diagnostics, 4, 2)
+
+        def loss(coeff):
+            params = WetDepParameters(
+                incloud_scale=jnp.asarray(1.0),
+                below_coeff=jnp.asarray(1.0e-4),
+                below_radius_ref=jnp.asarray(1.0e-7),
+                conv_incloud_coeff=coeff,
+            )
+            term = WetScavenging(params=params)
+            tend, _ = term(state, diagnostics, None, None)
+            return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
+
+        g = jax.grad(loss)(jnp.asarray(5.0e-4))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertNotEqual(float(g), 0.0)
 
 
 if __name__ == "__main__":

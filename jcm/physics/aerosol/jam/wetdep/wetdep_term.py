@@ -15,7 +15,27 @@ microphysics terms are untouched):
 * **Below-cloud impaction scavenging** — falling precipitation collects
   interstitial aerosol in clear air, with a size-dependent (∝ r²) collection
   efficiency so coarse particles are scavenged far faster than accumulation
-  mode.
+  mode. Driven by the TOTAL precipitation (stratiform + convective): both
+  fall through the same clear air below cloud.
+* **Convective in-cloud scavenging** — HAMMOZ scavenges aerosol in raining
+  convective columns with per-mode scavenging ratios applied to the
+  convective precipitation formation. The Tiedtke port does not (yet) expose
+  in-updraft condensate or the ``cloud_base``/``cloud_top`` indices (reserved
+  zero-filled fields), so the removal is parameterised as first-order in the
+  column convective rain intensity, applied on the convectively active
+  layers — where ``ConvectionData.heating_rate > 0`` marks the condensing
+  updraft — and only to activatable (soluble) modes, matching the stratiform
+  in-cloud gating. Without this pathway the majority of tropical
+  precipitation removed no aerosol at all, and mass lofted by the
+  convectively driven circulation accumulated in the upper troposphere
+  (observed after 200 days online: 43 % of the SO4 burden above 300 hPa,
+  burdens 3–5× climatological anchors, AOD ~3× low).
+
+``ConvectionData`` is read via ``diagnostics.get("convection")`` with a
+zero-precip fallback (rather than a hard ``requires`` entry) so the term
+still composes in setups without a convection scheme; in the ECHAM ordering
+convection runs upstream of every aerosol term, so real runs always see the
+current step's convective precipitation.
 
 Mirrors ``mo_hammoz_wetdep``.
 """
@@ -43,13 +63,22 @@ class WetDepParameters:
     incloud_scale: jnp.ndarray     # multiplies in-cloud removal
     below_coeff: jnp.ndarray       # below-cloud Λ per mm/h of rain [1/s]
     below_radius_ref: jnp.ndarray  # reference radius for ∝r² impaction [m]
+    conv_incloud_coeff: jnp.ndarray  # convective in-cloud Λ per mm/h [1/s]
 
     @classmethod
     def default(cls) -> "WetDepParameters":
+        # conv_incloud_coeff = 5e-4 (1/s per mm/h): a 10 mm/h deep-convective
+        # core gives Λ = 5e-3 1/s, so a 15-min step's implicit update removes
+        # 1 − exp(−4.5) ≈ 99 % of soluble aerosol in the active layers —
+        # matching HAMMOZ's ~0.99 in-cloud scavenging ratio per raining
+        # convective pass — while light convective drizzle (0.5 mm/h) gives a
+        # ~1 h removal timescale. Differentiable: a first-line calibration
+        # target alongside ``incloud_scale``.
         return cls(
             incloud_scale=jnp.asarray(1.0),
             below_coeff=jnp.asarray(1.0e-4),
             below_radius_ref=jnp.asarray(1.0e-7),
+            conv_incloud_coeff=jnp.asarray(5.0e-4),
         )
 
 
@@ -101,6 +130,29 @@ def below_cloud_rate(
     return params.below_coeff * rain_mmph * clear_fraction * efficiency
 
 
+def conv_in_cloud_rate(
+    conv_precip_col: jnp.ndarray,  # (*horiz,) convective precip [kg/m²/s]
+    conv_heating: jnp.ndarray,     # (nlev, *horiz) convective heating [K/s]
+    params: WetDepParameters,
+) -> jnp.ndarray:
+    """Convective in-cloud (nucleation) scavenging rate [1/s].
+
+    First-order in the column convective rain intensity, restricted to the
+    convectively active layers (``heating_rate > 0``, i.e. where the updraft
+    condenses — the only per-level footprint the Tiedtke port exposes today;
+    switch to the true updraft condensate / cloud_base–cloud_top bounds when
+    those diagnostics are ported). The linear-in-rain form mirrors
+    ``below_cloud_rate`` but without the clear-sky factor (removal happens
+    inside the convective cloud) and without the ∝r² impaction efficiency
+    (nucleation scavenging is not size-selective in HAMMOZ's soluble-mode
+    ratios). Non-negative by construction; bounded overall by the implicit
+    exponential update in ``WetScavenging.__call__``.
+    """
+    rain_mmph = conv_precip_col[jnp.newaxis] * 3600.0  # kg/m²/s -> mm/h
+    active = (conv_heating > 0.0).astype(conv_heating.dtype)
+    return params.conv_incloud_coeff * rain_mmph * active
+
+
 class WetScavenging(PhysicsTerm):
     """In-cloud + below-cloud scavenging of interstitial aerosol."""
 
@@ -136,12 +188,28 @@ class WetScavenging(PhysicsTerm):
         cloud_fraction = clouds.cloud_fraction
         qc = clouds.qc
 
+        # Convective precipitation (Tiedtke). Zero-precip fallback keeps the
+        # term composable without a convection scheme (see module docstring).
+        conv = diagnostics.get("convection")
+        if conv is None:
+            conv_precip = jnp.zeros_like(precip_col)
+            rate_conv_incloud = jnp.zeros_like(state.temperature)
+        else:
+            conv_precip = conv.precip_conv
+            rate_conv_incloud = conv_in_cloud_rate(
+                conv_precip, conv.heating_rate, params,
+            )
+
         p_form = precip_formation_rate(
             precip_col, cloud_fraction, qc, air_density, dz,
         )
         rate_incloud = params.incloud_scale * in_cloud_rate(
             activated_fraction, p_form, qc,
-        )
+        ) + rate_conv_incloud
+
+        # Everything that falls — stratiform and convective — washes out
+        # interstitial aerosol below cloud.
+        precip_total = precip_col + conv_precip
 
         # Build a per-tracer scavenging rate and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
@@ -154,7 +222,7 @@ class WetScavenging(PhysicsTerm):
         rate_list: list[jnp.ndarray] = []
         for i, mode in enumerate(self._spec.modes):
             rate_below = below_cloud_rate(
-                precip_col, cloud_fraction, aer.r_wet[i], params,
+                precip_total, cloud_fraction, aer.r_wet[i], params,
             )
             # In-cloud only removes from activatable (soluble) modes.
             rate = rate_below + (rate_incloud if mode.can_activate else 0.0)
