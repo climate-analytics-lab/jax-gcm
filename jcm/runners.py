@@ -128,7 +128,7 @@ def build_coords(cfg: DictConfig):
         except ValueError as exc:
             raise ValueError(
                 f"hybrid coords with {layers} levels are not pre-configured. "
-                "Use one of the supported counts (40, 47) or extend "
+                "Use one of the supported counts (40, 47, 95) or extend "
                 "jcm.physics.echam.echam_levels.get_echam_levels."
             ) from exc
         return get_coords(
