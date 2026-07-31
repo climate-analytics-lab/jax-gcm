@@ -246,6 +246,52 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
         )
 
 
+class TestAutoOzoneDefault(unittest.TestCase):
+    """``forcing.ozone_file: auto`` — packaged per-grid climatology default.
+
+    The analytic ozone fallback carries ~7.6× the climatological ozone
+    column (linear tropospheric ramp) and biases clear-sky OLR ~12 W/m²
+    low; ``auto`` makes the packaged climatology the default wherever one
+    matching the grid ships, and degrades loudly (warning) elsewhere.
+    """
+
+    def test_auto_resolves_t63_and_loads(self):
+        from jcm.runners import _resolve_auto_ozone, build_forcing
+
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        coords = build_coords(cfg)
+        path = _resolve_auto_ozone(coords)
+        self.assertIsNotNone(path)
+        self.assertTrue(path.endswith(os.path.join("t63", "ozone.nc")), path)
+
+        cfg.forcing.kind = "default"
+        cfg.forcing.ozone_file = "auto"
+        forcing = build_forcing(cfg, coords)
+        clim = forcing.ozone_climatology
+        self.assertTrue(bool(clim.is_loaded()))
+        o3 = np.asarray(clim.o3_ppmv.values)
+        # Climatological, not the analytic ramp: physical ppmv bounds with a
+        # genuine stratospheric peak.
+        self.assertGreater(float(o3.max()), 1.0)
+        self.assertLess(float(o3.max()), 20.0)
+        self.assertGreater(float(o3.min()), 0.0)
+
+    def test_auto_miss_warns_and_falls_back(self):
+        from jcm.runners import build_forcing
+
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma"])
+        coords = build_coords(cfg)
+        cfg.forcing.kind = "default"
+        cfg.forcing.ozone_file = "auto"
+        with self.assertLogs(level="WARNING") as logs:
+            forcing = build_forcing(cfg, coords)
+        self.assertTrue(any("ANALYTIC ozone" in m for m in logs.output))
+        # ``kind: default`` with no attachments returns None (aquaplanet
+        # built later); either way no ozone climatology must be loaded.
+        if forcing is not None:
+            self.assertFalse(bool(forcing.ozone_climatology.is_loaded()))
+
+
 class TestEmissionsConfig(unittest.TestCase):
     """CLI/config plumbing for prescribed aerosol emissions (#498)."""
 
