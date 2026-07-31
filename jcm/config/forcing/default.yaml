@@ -3,14 +3,10 @@
 kind: default
 
 # Ozone climatology netCDF. ``auto`` (default) picks the packaged
-# ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid (T63L47 ships a
-# CAM6chem 2005-2014 monthly climatology) and falls back to the analytical
-# profile with a warning when none fits. The analytical fallback in
-# ``EchamBoundaryConditions`` carries ~7.6× the climatological ozone column
-# (linear tropospheric ramp) and biases clear-sky OLR ~12 W/m² low — it has
-# cost two independent debugging campaigns, hence climatology-by-default.
-# Set an explicit path for other products, or ``null`` to force the
-# analytical profile (no warning).
+# ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid, warning and
+# falling back to the analytical profile when none fits (that profile
+# biases clear-sky OLR ~12 W/m² low). Explicit path, or ``null`` for the
+# analytical profile without the warning.
 ozone_file: auto
 
 # Optional prescribed aerosol emissions netCDF, already on the model grid

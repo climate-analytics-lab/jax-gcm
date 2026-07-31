@@ -766,16 +766,11 @@ def _ensure_parent_forcing(forcing, coords):
 def _resolve_auto_ozone(coords):
     """Find a packaged ``jcm/data/bc/*/ozone.nc`` matching the model grid.
 
-    Scans the shipped boundary-condition directories and returns the first
-    file whose (nlev, nlat, nlon) match the coords — grid identity is then
-    fully validated (exact latitudes/longitudes) by
-    ``OzoneClimatology.from_file``. Shape-based discovery avoids a fragile
-    truncation→directory-name table. Returns ``None`` when no packaged file
-    fits (e.g. T21/T42 test grids); the caller then falls back to the
-    analytic profile — with a loud warning, because that profile's linear
-    tropospheric ramp carries ~7.6× the climatological ozone column and
-    depresses clear-sky OLR by ~12 W/m² (tracked down independently in two
-    run campaigns; hence climatological ozone is the default).
+    Shape-based discovery (nlev, nlat, nlon); grid identity is then fully
+    validated by ``OzoneClimatology.from_file``. Returns ``None`` when no
+    packaged file fits — the caller warns and falls back to the analytic
+    profile, whose ~7.6× tropospheric ozone column biases clear-sky OLR
+    ~12 W/m² low.
     """
     from importlib import resources
 
