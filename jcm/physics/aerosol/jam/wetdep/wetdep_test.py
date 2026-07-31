@@ -209,6 +209,26 @@ class WetDepTermTest(unittest.TestCase):
         # exponential update in cloudy layers, so only the sign/monotonicity of
         # the total increment is meaningful.)
 
+    def test_conv_washout_confined_below_cloud_top(self):
+        # With ONLY convective precip and a pressure diagnostic, levels
+        # above the convective cloud top (no heating, lower pressure than
+        # any active level) must see EXACTLY zero removal — falling rain
+        # cannot collect aerosol above where it forms (#574 review).
+        state, diagnostics, spec, mass_name = self._setup(precip=0.0)
+        diagnostics = self._attach_convection(diagnostics, 4, 2)
+        # Level 0 is the model top (200 hPa); heating is active on levels
+        # 1..2, so the convective cloud top is at 500 hPa.
+        diagnostics["pressure_full"] = (
+            jnp.array([200.0, 500.0, 800.0, 1000.0])[:, None]
+            * jnp.ones((1, 2)) * 100.0
+        )
+        term = WetScavenging()
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        dq = np.asarray(tend.tracers[key])
+        np.testing.assert_array_equal(dq[0], 0.0)      # above conv top
+        self.assertTrue(np.all(dq[3] < 0.0))           # below cloud
+
     def test_conv_scavenging_no_convection_key_is_noop(self):
         # Without a "convection" diagnostic the term must fall back to the
         # stratiform-only behaviour (composability without a convection scheme).
