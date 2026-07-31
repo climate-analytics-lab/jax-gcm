@@ -74,6 +74,16 @@ class PhysicsTerm(nnx.Module):
 
     name: ClassVar[str] = ""
     category: ClassVar[str] = ""
+    # Diagnostics keys this term reads UNCONDITIONALLY in ``__call__``.
+    # Convention (enforced by ``jcm/physics/requires_audit_test.py``):
+    # every bare ``diagnostics["key"]`` read must appear here (or in
+    # ``provides``/``carry_slots``/``requires_dycore_fields``); optional
+    # dependencies must be read via ``diagnostics.get("key")`` or behind
+    # an ``if "key" in diagnostics`` guard, with a documented fallback.
+    # Prognostic fields (temperature, specific_humidity, winds, tracers)
+    # arrive on ``PhysicsState``, not diagnostics, and are never listed.
+    # The framework-injected plumbing keys (``_dt_seconds``,
+    # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
     # Diagnostic fields this term needs the DYCORE (or an upstream term)

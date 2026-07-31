@@ -1,4 +1,4 @@
-"""U.S. Standard Atmosphere 1976 profiles for CAM-SE initial states.
+"""U.S. Standard Atmosphere 1976 temperature/pressure profiles.
 
 Why USSA-1976 and not the analytic baroclinic-wave base state
 -------------------------------------------------------------

@@ -791,7 +791,7 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
     """
     import numpy as np
 
-    from jcm.dycore.pyses.initial_states import ussa_pressure, ussa_temperature
+    from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
     from jcm.physics.dissipation.upper_temperature_relaxation import (
         UpperTemperatureRelaxation,
     )

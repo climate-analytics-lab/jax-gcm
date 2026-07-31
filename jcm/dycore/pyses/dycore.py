@@ -34,7 +34,7 @@ docstrings of the helpers for the full rationale):
 * full 47-level ECHAM/ICON hybrid grid with a finite ~1 Pa top
   (:func:`jcm.dycore.pyses.coords.full_echam_hybrid`);
 * resting, dry U.S. Standard Atmosphere 1976 initial state over the real
-  orography (:mod:`jcm.dycore.pyses.initial_states`) — the analytic
+  orography (:mod:`jcm.initial_states.ussa1976`) — the analytic
   baroclinic state goes negative-temperature at the ~1 Pa top;
 * native CAM-SE ``nu_top`` Laplacian upper sponge, deepened to ``n_sponge=8``
   (the full L47 column adds ~15 thin levels over the reduced grid pyses's
@@ -106,7 +106,7 @@ from jcm.dycore.pyses.coords import (
     full_echam_hybrid,
     make_echam_se_coords,
 )
-from jcm.dycore.pyses.initial_states import ussa_pressure, ussa_temperature
+from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
 from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.dycore.pyses.physics_grid import FVPhysicsGrid
 from jcm.physics_interface import PhysicsState, PhysicsTendency

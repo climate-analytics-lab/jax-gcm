@@ -108,11 +108,10 @@ def echam_physics(
             Doppler-spread scheme, the default), ``"frontal"`` (CAM's
             frontogenesis-triggered spectral scheme — requires a
             frontogenesis provider, e.g.
-            ``DinosaurDycore(compute_frontogenesis=True)``), or ``"none"``.
-            The two schemes fill the same role (mid-atmosphere momentum
-            deposition from non-orographic waves), so they are exclusive
-            alternatives — running both would double-count the drag
-            unless ``taubgnd``/Hines source strength are retuned together.
+            ``DinosaurDycore(compute_frontogenesis=True)``), ``"both"``
+            (Hines background + frontal storm-track deposition; some
+            double-counting near strong fronts — retune ``taubgnd`` and
+            the Hines source strength jointly if it shows), or ``"none"``.
         checkpoint_terms: Whether to checkpoint each term's compute
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,

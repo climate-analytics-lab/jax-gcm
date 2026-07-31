@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from jcm.dycore import list_dycores
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.pyses import PysesCamSEDycore, build_forcing, full_echam_hybrid
-from jcm.dycore.pyses.initial_states import ussa_pressure, ussa_temperature
+from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
 from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.physics_term import TracerSpec
