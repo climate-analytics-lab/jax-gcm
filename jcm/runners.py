@@ -896,11 +896,46 @@ def _ensure_parent_forcing(forcing, coords):
     return default_forcing(coords.horizontal)
 
 
+def _resolve_auto_ozone(coords):
+    """Find a packaged ``jcm/data/bc/*/ozone.nc`` matching the model grid.
+
+    Scans the shipped boundary-condition directories and returns the first
+    file whose (nlev, nlat, nlon) match the coords — grid identity is then
+    fully validated (exact latitudes/longitudes) by
+    ``OzoneClimatology.from_file``. Shape-based discovery avoids a fragile
+    truncation→directory-name table. Returns ``None`` when no packaged file
+    fits (e.g. T21/T42 test grids); the caller then falls back to the
+    analytic profile — with a loud warning, because that profile's linear
+    tropospheric ramp carries ~7.6× the climatological ozone column and
+    depresses clear-sky OLR by ~12 W/m² (tracked down independently in two
+    run campaigns; hence climatological ozone is the default).
+    """
+    from importlib import resources
+
+    import xarray as xr
+
+    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
+    nlev = int(coords.nodal_shape[0])
+    bc_root = Path(str(resources.files("jcm"))) / "data" / "bc"
+    for cand in sorted(bc_root.glob("*/ozone.nc")):
+        with xr.open_dataset(cand) as ds:
+            sizes = ds.sizes
+            if (sizes.get("level") == nlev and sizes.get("lat") == nlat
+                    and sizes.get("lon") == nlon):
+                return str(cand)
+    return None
+
+
 def _attach_ozone(forcing, forcing_cfg, coords):
     """Load the ozone climatology and attach to ``forcing``.
 
-    No-op when the cfg has no ``ozone_file`` or the path is null. When
-    ``forcing`` is ``None`` (``kind: default``) and an ozone file IS
+    ``ozone_file: auto`` (the shipped default) resolves a packaged
+    climatology matching the grid via ``_resolve_auto_ozone``; no match
+    degrades to the analytic ozone profile with a warning. An explicit
+    path is loaded strictly (errors on any mismatch). ``null`` disables
+    the climatology silently (analytic profile, no warning).
+
+    When ``forcing`` is ``None`` (``kind: default``) and an ozone file IS
     given, build the parent struct via ``default_forcing(...)`` so the
     aquaplanet cos²-latitude SST climatology is preserved — using
     ``ForcingData.zeros`` here would silently swap it for the uniform
@@ -912,6 +947,18 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     ozone_file = forcing_cfg.get("ozone_file", None)
     if ozone_file in (None, "", "null"):
         return forcing
+    if ozone_file == "auto":
+        ozone_file = _resolve_auto_ozone(coords)
+        if ozone_file is None:
+            logging.warning(
+                "forcing.ozone_file=auto: no packaged jcm/data/bc/*/ozone.nc "
+                "matches this grid — falling back to the ANALYTIC ozone "
+                "profile, whose ~7.6x tropospheric ozone column biases "
+                "clear-sky OLR low by ~12 W/m2. Prepare a climatology with "
+                "jcm.data.bc.interpolate_ozone for production radiation."
+            )
+            return forcing
+        logging.info("forcing.ozone_file=auto resolved to %s", ozone_file)
     import numpy as np
 
     from jcm.forcing import default_forcing
