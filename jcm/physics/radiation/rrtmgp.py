@@ -426,6 +426,7 @@ def prepare_icon_data(
         # outside the beam-split context.
         toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear=jnp.zeros_like(toa_lw_up),
+        total_cloud_cover=jnp.zeros_like(toa_sw_up),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
         # the standalone scheme emits 0 and the term bumps the counter
         # after its compute-vs-cache cond.
@@ -595,6 +596,14 @@ def radiation_scheme_rrtmgp(
         n_subcols=n_gpt_sw, overlap=overlap_str,
         decorrelation_km=decorrelation_km, key=key_sw,
     )    # [n_gpt_sw, nlev], TOA-first
+
+    # Total cloud cover exactly as this radiation call sees it: the
+    # fraction of stochastic sub-columns (pooled over the LW and SW
+    # draws) with at least one cloudy layer. Encodes the very overlap
+    # assumption + decorrelation length the flux solve integrates.
+    total_cloud_cover = (
+        jnp.sum(jnp.any(masks_lw, axis=1)) + jnp.sum(jnp.any(masks_sw, axis=1))
+    ) / (n_gpt_lw + n_gpt_sw)
 
     # Per-gpoint cloud paths in surface-first convention (the library's
     # internal expectation, see the flip in ``prepare_rrtmgp_data``).
@@ -812,6 +821,7 @@ def radiation_scheme_rrtmgp(
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        total_cloud_cover=total_cloud_cover,
     )
     return tendencies, diagnostics
 
@@ -1205,6 +1215,9 @@ class RRTMGPRadiation(PhysicsTerm):
             ),
             toa_lw_up_clear=_column_vector_rrtmgp(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
+            ),
+            total_cloud_cover=_column_vector_rrtmgp(
+                diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             # Placeholder — the enclosing ``__call__`` overwrites
             # ``step`` after the compute-vs-cache cond.

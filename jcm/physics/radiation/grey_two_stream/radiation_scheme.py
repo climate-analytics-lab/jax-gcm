@@ -572,6 +572,9 @@ def radiation_scheme(
         surface_lw_up=surface_lw_up,
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        # Grey two-stream has no McICA sub-columns; the radiation-view
+        # cloud-cover diagnostic is defined as 0 here (see RadiationData).
+        total_cloud_cover=jnp.zeros_like(olr),
         step=jnp.int32(0),
     )
 
