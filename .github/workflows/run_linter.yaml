@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Ruff
-        run: pip install ruff
+        run: pip install ruff==0.15.17  # pin: unpinned latest drifted new rules (BLE001/RUF059) onto a clean repo 2026-07
       - name: Run Ruff
         run: ruff check .
         continue-on-error: false
