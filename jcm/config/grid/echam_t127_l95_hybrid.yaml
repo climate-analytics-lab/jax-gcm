@@ -1,8 +1,0 @@
-# T127 / 95 hybrid levels — high-resolution ECHAM MA configuration
-# (384 lon x 192 lat). No packaged boundary data at this truncation yet:
-# use terrain=from_file with interpolate=true from a coarser file, or the
-# aquaplanet defaults for stability/throughput checks.
-vertical: hybrid
-layers: 95
-spectral_truncation: 127
-spmd_mesh: null
