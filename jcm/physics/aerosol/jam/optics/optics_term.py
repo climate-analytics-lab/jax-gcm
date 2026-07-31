@@ -202,17 +202,30 @@ class JamOpticsTerm(PhysicsTerm):
                 # σ is assumed preserved under hygroscopic growth (standard
                 # MAM assumption), and the volume-mixed refractive index is
                 # size-independent, so only x varies across nodes.
-                sec = jnp.zeros_like(r_wet)
-                sec_scat = jnp.zeros_like(r_wet)
-                sec_gscat = jnp.zeros_like(r_wet)
-                for t_k, w_k in zip(_GH_NODES, _GH_WEIGHTS):
-                    growth = math.exp(math.sqrt(2.0) * ln_sig * t_k)
+                # ``lax.scan`` over the nodes rather than an unrolled Python
+                # loop: unrolling held every node's (nlev, ncols) Mie
+                # intermediates live at once across 30+ bands x 4 modes and
+                # blew the step graph to 38 GiB (OOM on the 40 GB A100);
+                # the scan reuses one node's worth of temporaries.
+                def _gh_node(carry, t_w):
+                    t_k, w_k = t_w
+                    growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)
                     x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
                     q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
                     wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
-                    sec = sec + wgt * q_k
-                    sec_scat = sec_scat + wgt * q_k * ssa_k
-                    sec_gscat = sec_gscat + wgt * q_k * ssa_k * g_k
+                    c_sec, c_scat, c_gscat = carry
+                    return (
+                        c_sec + wgt * q_k,
+                        c_scat + wgt * q_k * ssa_k,
+                        c_gscat + wgt * q_k * ssa_k * g_k,
+                    ), None
+
+                (sec, sec_scat, sec_gscat), _ = jax.lax.scan(
+                    _gh_node,
+                    (jnp.zeros_like(r_wet),) * 3,
+                    (jnp.asarray(_GH_NODES, r_wet.dtype),
+                     jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
+                )
                 aod_i = num_per_area[i] * sec * math.pi * r_wet ** 2
                 # Physical mass gate: tau is EXACTLY zero where the mode
                 # carries no material. The number floor above handles the
