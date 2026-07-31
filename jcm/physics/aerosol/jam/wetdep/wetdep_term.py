@@ -19,25 +19,14 @@ microphysics terms are untouched):
   convective contribution masked to levels at/below the convective cloud
   top (diagnosed by pressure from the heating footprint), since rain
   cannot collect aerosol above where it forms.
-* **Convective in-cloud scavenging** — HAMMOZ scavenges aerosol in raining
-  convective columns with per-mode scavenging ratios applied to the
-  convective precipitation formation. The Tiedtke port does not (yet) expose
-  in-updraft condensate or the ``cloud_base``/``cloud_top`` indices (reserved
-  zero-filled fields), so the removal is parameterised as first-order in the
-  column convective rain intensity, applied on the convectively active
-  layers — where ``ConvectionData.heating_rate > 0`` marks the condensing
-  updraft — and only to activatable (soluble) modes, matching the stratiform
-  in-cloud gating. Without this pathway the majority of tropical
-  precipitation removed no aerosol at all, and mass lofted by the
-  convectively driven circulation accumulated in the upper troposphere
-  (observed after 200 days online: 43 % of the SO4 burden above 300 hPa,
-  burdens 3–5× climatological anchors, AOD ~3× low).
+* **Convective in-cloud scavenging** — first-order in the column convective
+  rain intensity on the convectively active layers (``heating_rate > 0``),
+  soluble modes only: a proxy for HAMMOZ's per-mode convective scavenging
+  ratios until the Tiedtke port exposes in-updraft condensate.
 
 ``ConvectionData`` is read via ``diagnostics.get("convection")`` with a
-zero-precip fallback (rather than a hard ``requires`` entry) so the term
-still composes in setups without a convection scheme; in the ECHAM ordering
-convection runs upstream of every aerosol term, so real runs always see the
-current step's convective precipitation.
+zero-precip fallback so the term still composes without a convection
+scheme.
 
 Mirrors ``mo_hammoz_wetdep``.
 """
@@ -69,13 +58,8 @@ class WetDepParameters:
 
     @classmethod
     def default(cls) -> "WetDepParameters":
-        # conv_incloud_coeff = 5e-4 (1/s per mm/h): a 10 mm/h deep-convective
-        # core gives Λ = 5e-3 1/s, so a 15-min step's implicit update removes
-        # 1 − exp(−4.5) ≈ 99 % of soluble aerosol in the active layers —
-        # matching HAMMOZ's ~0.99 in-cloud scavenging ratio per raining
-        # convective pass — while light convective drizzle (0.5 mm/h) gives a
-        # ~1 h removal timescale. Differentiable: a first-line calibration
-        # target alongside ``incloud_scale``.
+        # conv_incloud_coeff: Λ per mm/h of convective rain. 5e-4 removes
+        # ~99 % of soluble aerosol per 15-min step in a 10 mm/h core.
         return cls(
             incloud_scale=jnp.asarray(1.0),
             below_coeff=jnp.asarray(1.0e-4),
@@ -139,16 +123,10 @@ def conv_in_cloud_rate(
 ) -> jnp.ndarray:
     """Convective in-cloud (nucleation) scavenging rate [1/s].
 
-    First-order in the column convective rain intensity, restricted to the
-    convectively active layers (``heating_rate > 0``, i.e. where the updraft
-    condenses — the only per-level footprint the Tiedtke port exposes today;
-    switch to the true updraft condensate / cloud_base–cloud_top bounds when
-    those diagnostics are ported). The linear-in-rain form mirrors
-    ``below_cloud_rate`` but without the clear-sky factor (removal happens
-    inside the convective cloud) and without the ∝r² impaction efficiency
-    (nucleation scavenging is not size-selective in HAMMOZ's soluble-mode
-    ratios). Non-negative by construction; bounded overall by the implicit
-    exponential update in ``WetScavenging.__call__``.
+    First-order in column convective rain intensity on the convectively
+    active layers (``heating_rate > 0``). No clear-sky factor (removal is
+    inside the cloud) and no ∝r² efficiency (nucleation, not impaction);
+    bounded by the implicit exponential update in ``__call__``.
     """
     rain_mmph = conv_precip_col[jnp.newaxis] * 3600.0  # kg/m²/s -> mm/h
     active = (conv_heating > 0.0).astype(conv_heating.dtype)
@@ -202,17 +180,11 @@ class WetScavenging(PhysicsTerm):
             rate_conv_incloud = conv_in_cloud_rate(
                 conv_precip, conv.heating_rate, params,
             )
-            # Convective WASHOUT acts only at/below the convective cloud
-            # top — falling rain cannot collect aerosol above where it
-            # forms. Codex review of #574: broadcasting the surface conv
-            # rain over the whole column (gated only by the stratiform
-            # clear fraction) would scrub the UTLS in every raining
-            # column. The top of the convectively active layer is
-            # diagnosed from the heating footprint via PRESSURE (a level
-            # is below the top if its pressure exceeds the lowest active
-            # pressure), which is agnostic to the column's vertical index
-            # orientation. Columns with no active layer get an all-zero
-            # mask (min over empty set = +inf).
+            # Convective washout acts only at/below the convective cloud
+            # top — rain cannot collect aerosol above where it forms. The
+            # top is the lowest-pressure convectively active level
+            # (orientation-agnostic); columns with no active layer get an
+            # all-zero mask (min over empty set = +inf).
             p_full = diagnostics.get("pressure_full")
             if p_full is not None:
                 active = conv.heating_rate > 0.0
@@ -221,8 +193,7 @@ class WetScavenging(PhysicsTerm):
                 )
                 conv_below = (p_full >= p_conv_top).astype(p_full.dtype)
             else:
-                # No pressure diagnostic (reduced test harnesses):
-                # fall back to column-wide washout rather than none.
+                # No pressure diagnostic: column-wide washout, not none.
                 conv_below = jnp.ones_like(state.temperature)
 
         p_form = precip_formation_rate(
@@ -242,9 +213,8 @@ class WetScavenging(PhysicsTerm):
         q_list: list[jnp.ndarray] = []
         rate_list: list[jnp.ndarray] = []
         for i, mode in enumerate(self._spec.modes):
-            # Stratiform washout column-wide (per the documented interim in
-            # the module docstring); convective washout only at/below the
-            # convective cloud top.
+            # Stratiform washout column-wide (interim, #499); convective
+            # only below the convective cloud top.
             rate_below = below_cloud_rate(
                 precip_col, cloud_fraction, aer.r_wet[i], params,
             ) + conv_below * below_cloud_rate(

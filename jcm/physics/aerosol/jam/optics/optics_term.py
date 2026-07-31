@@ -34,10 +34,7 @@ from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
 
-# Gauss–Hermite quadrature (8 nodes) for integrating Mie efficiencies over
-# each mode's lognormal size distribution in ln r (see ``_band_optics``).
-# Static Python floats so the per-node loop unrolls at trace time — 8 LUT
-# interpolations per mode per band, negligible under the hourly optics gate.
+# Gauss–Hermite nodes (8) for the lognormal quadrature in ``_band_optics``.
 _GH_NODES, _GH_WEIGHTS = (
     tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
 )
@@ -148,28 +145,16 @@ class JamOpticsTerm(PhysicsTerm):
                 safe = jnp.maximum(vol_tot, _TINY)
                 m_n = jnp.where(vol_tot > _TINY, vol_n / safe, 1.5)
                 m_k = jnp.where(vol_tot > _TINY, vol_k / safe, 1.0e-8)
-                # Integrate the Mie efficiencies over the mode's lognormal
-                # size distribution. ``r_wet`` is the NUMBER-MEDIAN radius
-                # (r_dry = dgnum/2 in calcsize, grown hygroscopically), so
-                # evaluating a single Qext(r_wet)·π·r_wet² treats the mode as
-                # monodisperse at its median — which misses both the r²
-                # moment of the distribution (×exp(2·ln²σ) ≈ 2.0 at σ=1.8)
-                # and the larger Qext at the extinction-carrying sizes
-                # (r_eff = r_g·exp(2.5·ln²σ) ≈ 2.4·r_g). On the day-210
-                # T63L47 state that monodisperse shortcut gave column AOD
-                # 0.028 vs 0.121 from this quadrature (obs ~0.14): a 4.3×
-                # under-estimate — the "high burdens, tiny AOD" symptom.
-                # Gauss–Hermite in ln r is exact for polynomial moments:
-                # r_k = r_g·exp(√2·lnσ·t_k), weight (w_k/√π)·exp(2√2·lnσ·t_k)
-                # recovers ⟨r²⟩ = r_g²·exp(2 ln²σ) for constant Q. The mode
-                # σ is assumed preserved under hygroscopic growth (standard
-                # MAM assumption), and the volume-mixed refractive index is
-                # size-independent, so only x varies across nodes.
-                # ``lax.scan`` over the nodes rather than an unrolled Python
-                # loop: unrolling held every node's (nlev, ncols) Mie
-                # intermediates live at once across 30+ bands x 4 modes and
-                # blew the step graph to 38 GiB (OOM on the 40 GB A100);
-                # the scan reuses one node's worth of temporaries.
+                # Integrate Mie efficiencies over the mode's lognormal in
+                # ln r — ``r_wet`` is the NUMBER-MEDIAN radius, so a single
+                # Qext(r_wet)·π·r_wet² misses the r² moment (×e^{2ln²σ})
+                # and Qext at the extinction-carrying sizes. Gauss–Hermite:
+                # r_k = r_g·e^{√2 lnσ t_k}, weight (w_k/√π)·e^{2√2 lnσ t_k};
+                # σ preserved under hygroscopic growth, refractive index
+                # size-independent (only x varies per node).
+                # ``lax.scan`` so only one node's Mie intermediates are
+                # live at a time (unrolling multiplies the working set by
+                # n_nodes × n_bands and exceeds GPU memory).
                 def _gh_node(carry, t_w):
                     t_k, w_k = t_w
                     growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)

@@ -177,14 +177,10 @@ class RadiationData:
     toa_sw_up_clear: jnp.ndarray     # Clear-sky TOA upward SW [W/m²] (ncols,)
     toa_lw_up_clear: jnp.ndarray     # Clear-sky TOA OLR [W/m²] (ncols,)
 
-    # Total (2-D) cloud cover as the RADIATION sees it: the fraction of
-    # McICA g-point sub-columns containing at least one cloudy layer,
-    # pooled over the LW and SW mask draws. This bakes in the exact
-    # overlap assumption (``cloud_overlap`` + decorrelation length) the
-    # flux solve integrates, so it is the model quantity to compare with
-    # satellite total cloud cover — unlike any offline overlap formula
-    # applied to ``cloud_fraction`` after the fact. Zero on schemes with
-    # no sub-column machinery (grey, NN emulator).
+    # Total (2-D) cloud cover as the radiation sees it: fraction of McICA
+    # g-point sub-columns (pooled LW+SW draws) with ≥1 cloudy layer, under
+    # the exact overlap + decorrelation the flux solve integrates. Zero on
+    # schemes without sub-columns (grey, NN emulator).
     total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
     # Internal step counter incremented by the radiation term on every

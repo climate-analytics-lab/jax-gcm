@@ -597,10 +597,7 @@ def radiation_scheme_rrtmgp(
         decorrelation_km=decorrelation_km, key=key_sw,
     )    # [n_gpt_sw, nlev], TOA-first
 
-    # Total cloud cover exactly as this radiation call sees it: the
-    # fraction of stochastic sub-columns (pooled over the LW and SW
-    # draws) with at least one cloudy layer. Encodes the very overlap
-    # assumption + decorrelation length the flux solve integrates.
+    # Fraction of sub-columns (LW+SW draws pooled) with any cloudy layer.
     total_cloud_cover = (
         jnp.sum(jnp.any(masks_lw, axis=1)) + jnp.sum(jnp.any(masks_sw, axis=1))
     ) / (n_gpt_lw + n_gpt_sw)
