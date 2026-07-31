@@ -19,10 +19,11 @@ microphysics terms are untouched):
   convective contribution masked to levels at/below the convective cloud
   top (diagnosed by pressure from the heating footprint), since rain
   cannot collect aerosol above where it forms.
-* **Convective in-cloud scavenging** — first-order in the column convective
-  rain intensity on the convectively active layers (``heating_rate > 0``),
-  soluble modes only: a proxy for HAMMOZ's per-mode convective scavenging
-  ratios until the Tiedtke port exposes in-updraft condensate.
+* **Convective in-cloud scavenging** — the convective mirror of the
+  stratiform pathway: scavenging ratio × (per-layer updraft precip
+  formation / in-updraft condensate), from ``ConvectionData``'s
+  ``precip_formation`` (ECHAM ``pdmfup``) and ``qc_conv``/``qi_conv``;
+  soluble modes only.
 
 ``ConvectionData`` is read via ``diagnostics.get("convection")`` with a
 zero-precip fallback so the term still composes without a convection
@@ -54,17 +55,17 @@ class WetDepParameters:
     incloud_scale: jnp.ndarray     # multiplies in-cloud removal
     below_coeff: jnp.ndarray       # below-cloud Λ per mm/h of rain [1/s]
     below_radius_ref: jnp.ndarray  # reference radius for ∝r² impaction [m]
-    conv_incloud_coeff: jnp.ndarray  # convective in-cloud Λ per mm/h [1/s]
+    conv_scav_ratio: jnp.ndarray   # convective in-cloud scavenging ratio [-]
 
     @classmethod
     def default(cls) -> "WetDepParameters":
-        # conv_incloud_coeff: Λ per mm/h of convective rain. 5e-4 removes
-        # ~99 % of soluble aerosol per 15-min step in a 10 mm/h core.
+        # conv_scav_ratio: fraction of soluble aerosol removed with the
+        # condensate-to-precip conversion (HAMMOZ soluble-mode value).
         return cls(
             incloud_scale=jnp.asarray(1.0),
             below_coeff=jnp.asarray(1.0e-4),
             below_radius_ref=jnp.asarray(1.0e-7),
-            conv_incloud_coeff=jnp.asarray(5.0e-4),
+            conv_scav_ratio=jnp.asarray(0.99),
         )
 
 
@@ -117,20 +118,25 @@ def below_cloud_rate(
 
 
 def conv_in_cloud_rate(
-    conv_precip_col: jnp.ndarray,  # (*horiz,) convective precip [kg/m²/s]
-    conv_heating: jnp.ndarray,     # (nlev, *horiz) convective heating [K/s]
+    precip_formation: jnp.ndarray,  # (nlev, *horiz) updraft precip gen [kg/m²/s]
+    conv_condensate: jnp.ndarray,   # (nlev, *horiz) in-updraft qc+qi [kg/kg]
+    air_density: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
     params: WetDepParameters,
 ) -> jnp.ndarray:
     """Convective in-cloud (nucleation) scavenging rate [1/s].
 
-    First-order in column convective rain intensity on the convectively
-    active layers (``heating_rate > 0``). No clear-sky factor (removal is
-    inside the cloud) and no ∝r² efficiency (nucleation, not impaction);
-    bounded by the implicit exponential update in ``__call__``.
+    The convective mirror of ``in_cloud_rate``: scavenging ratio × (local
+    condensate→precip conversion rate / in-updraft condensate), with the
+    per-layer formation flux converted to a mixing-ratio rate by ρ·Δz.
+    Zero wherever the updraft carries no condensate.
     """
-    rain_mmph = conv_precip_col[jnp.newaxis] * 3600.0  # kg/m²/s -> mm/h
-    active = (conv_heating > 0.0).astype(conv_heating.dtype)
-    return params.conv_incloud_coeff * rain_mmph * active
+    local_form = jnp.maximum(precip_formation, 0.0) / (
+        air_density * layer_thickness
+    )
+    qcond = jnp.maximum(conv_condensate, _EPS)
+    rate = params.conv_scav_ratio * local_form / qcond
+    return jnp.where(conv_condensate > 1.0e-12, rate, 0.0)
 
 
 class WetScavenging(PhysicsTerm):
@@ -177,17 +183,19 @@ class WetScavenging(PhysicsTerm):
             conv_below = jnp.zeros_like(state.temperature)
         else:
             conv_precip = conv.precip_conv
+            conv_condensate = conv.qc_conv + conv.qi_conv
             rate_conv_incloud = conv_in_cloud_rate(
-                conv_precip, conv.heating_rate, params,
+                conv.precip_formation, conv_condensate,
+                air_density, dz, params,
             )
             # Convective washout acts only at/below the convective cloud
             # top — rain cannot collect aerosol above where it forms. The
-            # top is the lowest-pressure convectively active level
-            # (orientation-agnostic); columns with no active layer get an
-            # all-zero mask (min over empty set = +inf).
+            # top is the lowest-pressure level with in-updraft condensate
+            # (orientation-agnostic); no convective cloud -> all-zero mask
+            # (min over empty set = +inf).
             p_full = diagnostics.get("pressure_full")
             if p_full is not None:
-                active = conv.heating_rate > 0.0
+                active = conv_condensate > 1.0e-12
                 p_conv_top = jnp.min(
                     jnp.where(active, p_full, jnp.inf), axis=0, keepdims=True,
                 )

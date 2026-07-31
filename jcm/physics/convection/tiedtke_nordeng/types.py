@@ -159,6 +159,8 @@ class ConvectionTendencies(NamedTuple):
     # Convective fluxes
     qc_conv: jnp.ndarray     # Convective cloud water (kg/kg)
     qi_conv: jnp.ndarray     # Convective cloud ice (kg/kg)
+    precip_formation: jnp.ndarray  # Per-layer updraft precip generation
+                                   # (ECHAM ``pdmfup``) [kg/m²/s] (nlev,)
     
     # Surface fluxes
     precip_conv: jnp.ndarray # Convective precipitation (kg/m²/s)
@@ -190,6 +192,8 @@ class ConvectionData:
                                      # (ECHAM gates on ktype==0) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
+    precip_formation: jnp.ndarray    # Per-layer updraft precip generation
+                                     # [kg/m²/s] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
     # Convective heating / moistening rates actually applied to the column
     # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
@@ -213,6 +217,7 @@ class ConvectionData:
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
+            precip_formation=jnp.zeros((nlev,) + nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
             heating_rate=jnp.zeros((nlev,) + nodal_shape),

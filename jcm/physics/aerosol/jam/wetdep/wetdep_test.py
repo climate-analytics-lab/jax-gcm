@@ -51,17 +51,20 @@ class ScavengingFunctionTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
 
-    def test_conv_in_cloud_confined_to_heated_layers(self):
-        # Removal only where the updraft condenses (heating > 0); zero
-        # elsewhere and zero everywhere without convective rain.
+    def test_conv_in_cloud_hammoz_form(self):
+        # rate = ratio * (formation/(rho*dz)) / condensate on cloudy
+        # layers; exactly zero where the updraft carries no condensate.
         params = WetDepParameters.default()
-        precip = jnp.asarray([1.0e-3])                 # ~3.6 mm/h
-        heating = jnp.array([[0.0], [1.0e-4], [-1.0e-5]])
-        rate = conv_in_cloud_rate(precip, heating, params)
-        self.assertAlmostEqual(float(rate[0, 0]), 0.0)
-        self.assertGreater(float(rate[1, 0]), 0.0)
-        self.assertAlmostEqual(float(rate[2, 0]), 0.0)
-        none = conv_in_cloud_rate(jnp.zeros((1,)), heating, params)
+        form = jnp.array([[0.0], [1.0e-4], [0.0]])        # kg/m²/s
+        qcond = jnp.array([[0.0], [1.0e-3], [1.0e-3]])    # kg/kg
+        rho = jnp.ones((3, 1))
+        dz = jnp.full((3, 1), 500.0)
+        rate = conv_in_cloud_rate(form, qcond, rho, dz, params)
+        self.assertAlmostEqual(float(rate[0, 0]), 0.0)    # no condensate
+        expected = 0.99 * (1.0e-4 / 500.0) / 1.0e-3
+        self.assertAlmostEqual(float(rate[1, 0]), expected, places=8)
+        self.assertAlmostEqual(float(rate[2, 0]), 0.0)    # no formation
+        none = conv_in_cloud_rate(jnp.zeros((3, 1)), qcond, rho, dz, params)
         self.assertAlmostEqual(float(jnp.abs(none).max()), 0.0)
 
 
@@ -175,12 +178,14 @@ class WetDepTermTest(unittest.TestCase):
         from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
 
         import dataclasses
+        # Convective cloud on levels 1..nlev-2: condensate + formation
+        # there, none at the top level or the sub-cloud bottom level.
+        prof = jnp.ones((nlev, ncols)).at[0].set(0.0).at[-1].set(0.0)
         conv = dataclasses.replace(
             ConvectionData.zeros((ncols,), nlev),
             precip_conv=jnp.full((ncols,), conv_precip),
-            # Heat the mid column: levels 1..nlev-2 are convectively active.
-            heating_rate=jnp.full((nlev, ncols), 1.0e-4)
-            .at[0].set(0.0).at[-1].set(0.0),
+            precip_formation=prof * 1.0e-4,
+            qc_conv=prof * 1.0e-3,
         )
         diagnostics = dict(diagnostics)
         diagnostics["convection"] = conv
@@ -247,7 +252,7 @@ class WetDepTermTest(unittest.TestCase):
                 incloud_scale=jnp.asarray(1.0),
                 below_coeff=coeff,
                 below_radius_ref=jnp.asarray(1.0e-7),
-                conv_incloud_coeff=jnp.asarray(5.0e-4),
+                conv_scav_ratio=jnp.asarray(0.99),
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
@@ -256,24 +261,24 @@ class WetDepTermTest(unittest.TestCase):
         g = jax.grad(loss)(jnp.asarray(1.0e-4))
         self.assertTrue(np.isfinite(float(g)))
 
-    def test_grad_through_conv_coeff(self):
-        # The new convective coefficient must be a live differentiable knob:
-        # nonzero, finite gradient when convective precip is present.
+    def test_grad_through_conv_scav_ratio(self):
+        # The convective scavenging ratio must be a live differentiable
+        # knob: nonzero, finite gradient when convective cloud is present.
         state, diagnostics, spec, mass_name = self._setup()
         diagnostics = self._attach_convection(diagnostics, 4, 2)
 
-        def loss(coeff):
+        def loss(ratio):
             params = WetDepParameters(
                 incloud_scale=jnp.asarray(1.0),
                 below_coeff=jnp.asarray(1.0e-4),
                 below_radius_ref=jnp.asarray(1.0e-7),
-                conv_incloud_coeff=coeff,
+                conv_scav_ratio=ratio,
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
             return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
 
-        g = jax.grad(loss)(jnp.asarray(5.0e-4))
+        g = jax.grad(loss)(jnp.asarray(0.99))
         self.assertTrue(np.isfinite(float(g)))
         self.assertNotEqual(float(g), 0.0)
 
