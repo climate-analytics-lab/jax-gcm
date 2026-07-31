@@ -41,7 +41,7 @@ _TIME_FIELDS = {
 
 def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   emissions_file=None, dms_file=None, dust_file=None,
-                  oxidants_file=None) -> ForcingData:
+                  oxidants_file=None, ozone_file=None) -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
     Args:
@@ -140,6 +140,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         forcing, col_lon, col_lat, nlev=dycore.nlev,
         emissions_file=emissions_file, dms_file=dms_file,
         dust_file=dust_file, oxidants_file=oxidants_file,
+        ozone_file=ozone_file,
     )
 
 
@@ -187,7 +188,7 @@ def _reader_grid(ds):
 
 def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        emissions_file=None, dms_file=None, dust_file=None,
-                       oxidants_file=None) -> ForcingData:
+                       oxidants_file=None, ozone_file=None) -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
     The column analogue of ``jcm.runners``' ``_attach_emissions`` /
@@ -269,5 +270,47 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
             vmr = read_oxidant_vmr(ds, nlev=nlev)
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
+
+    if ozone_file is not None:
+        # Column analogue of ``jcm.runners._attach_ozone`` (Codex review of
+        # #575: without this the pySES path silently kept the analytic ozone
+        # profile and its ~12 W/m2 clear-sky OLR bias). The file follows the
+        # ``jcm.data.bc.interpolate_ozone`` contract — ``O3 (time, level,
+        # lat, lon)`` mole/mole already on the model's vertical levels — so
+        # only the horizontal is sampled onto the columns; unlike the
+        # spectral runner there is no exact-grid requirement.
+        from jcm.ozone_climatology import OzoneClimatology
+
+        with xr.open_dataset(str(ozone_file)) as ds:
+            file_nlev = int(ds.sizes.get("level", -1))
+            if file_nlev != int(nlev):
+                raise ValueError(
+                    f"ozone file {ozone_file!r} has {file_nlev} levels but the "
+                    f"model has {nlev}; regenerate with "
+                    "jcm.data.bc.interpolate_ozone --nlevels matching the run."
+                )
+            if int(ds.sizes.get("time", 0)) != 12:
+                raise ValueError(
+                    f"ozone file {ozone_file!r} is not a 12-month climatology "
+                    "(transient files are not supported on the pySES path)."
+                )
+            lat = np.asarray(ds["lat"].values, dtype=float)
+            o3 = np.asarray(
+                ds["O3"].transpose("time", "level", "lon", "lat").values,
+                dtype=float,
+            ) * 1.0e6                                    # mole/mole -> ppmv
+            if lat[0] > lat[-1]:                         # ascending-lat kernel
+                lat = lat[::-1]
+                o3 = o3[..., ::-1]
+            lon = np.asarray(ds["lon"].values, dtype=float)
+        cols = _leaf_to_columns(o3, lon, lat, col_lon, col_lat)
+        seconds_per_month = 30.4375 * 86400.0            # match from_file
+        ts = make_time_series(
+            jnp.asarray(cols, dtype=jnp.float32),
+            jnp.asarray((np.arange(12) + 0.5) * seconds_per_month,
+                        dtype=jnp.float32),
+            WRAP_YEAR,
+        )
+        forcing = forcing.copy(ozone_climatology=OzoneClimatology(o3_ppmv=ts))
 
     return forcing

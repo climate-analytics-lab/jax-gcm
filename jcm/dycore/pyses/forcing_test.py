@@ -132,6 +132,43 @@ class AttachJamForcingTest(unittest.TestCase):
             np.asarray(oh.values[0, :, 0, 0]),
             np.arange(1, nlev + 1) * 1.0e-9, rtol=1e-6)
 
+    def test_ozone_climatology_on_columns(self):
+        # jcm/data/bc ozone contract: O3 (time, level, lat, lon) mole/mole
+        # on the model's levels. Distinct per-level values verify levels
+        # ride through the horizontal sampling unmixed; mole/mole -> ppmv.
+        nlev = 4
+        base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
+        data = np.broadcast_to(base * 1.0e-6,
+                               (12, nlev, _LAT.size, _LON.size)).copy()
+        ds = xr.Dataset(
+            {"O3": (("time", "level", "lat", "lon"), data,
+                    {"units": "mole/mole"})},
+            coords={"time": np.arange(12), "level": np.arange(nlev),
+                    "lat": _LAT, "lon": _LON},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(ozone_file=_write(tmp, "ozone.nc", ds))
+        clim = forcing.ozone_climatology
+        self.assertTrue(bool(clim.is_loaded()))
+        leaf = clim.o3_ppmv
+        self.assertIsInstance(leaf, TimeSeries)
+        self.assertEqual(leaf.values.shape, (12, nlev, 1, _NCOL))
+        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+        np.testing.assert_allclose(                      # ppmv, per level
+            np.asarray(leaf.values[0, :, 0, 0]),
+            np.arange(1, nlev + 1, dtype=float), rtol=1e-6)
+
+    def test_ozone_level_mismatch_rejected(self):
+        ds = xr.Dataset(
+            {"O3": (("time", "level", "lat", "lon"),
+                    np.full((12, 3, _LAT.size, _LON.size), 1e-6))},
+            coords={"time": np.arange(12), "level": np.arange(3),
+                    "lat": _LAT, "lon": _LON},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                _attach(ozone_file=_write(tmp, "ozone_bad.nc", ds))
+
     def test_select_slices_all_jam_leaves(self):
         """`ForcingData.select` must slice the attached dict leaves too."""
         import jax_datetime as jdt
