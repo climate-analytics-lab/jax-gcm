@@ -274,6 +274,42 @@ class JamOpticsTermTest(unittest.TestCase):
             rtol=1e-6,
         )
 
+    def test_lognormal_exceeds_monodisperse_extinction(self):
+        # ``r_wet`` is the NUMBER-MEDIAN radius of a lognormal mode; treating
+        # the mode as monodisperse at that radius under-counted extinction
+        # ~4x on real states (column AOD 0.028 vs 0.121 on the day-210
+        # T63L47 run — the "high burdens, tiny AOD" bug). The Gauss-Hermite
+        # quadrature must beat the monodisperse cross-section by at least
+        # the pure r^2-moment factor exp(2 ln^2 sigma) (1.55 at sigma=1.6) —
+        # Qext weighting only adds to it for sub-micron sizes at 550 nm.
+        from jcm.physics.aerosol.jam.optics.mie_lut import (
+            default_mie_lut,
+            interp_mie,
+        )
+
+        state, diagnostics, band, *_ = _setup()
+        term = self._term(band)
+        _, diag = term(state, diagnostics, None, None)
+        aod_lognormal = float(jnp.max(diag["aerosol_optical_depth"]))
+
+        # Monodisperse expectation: same LUT, same geometry, single radius.
+        lut = default_mie_lut()
+        lam = term._cache.aod_band_nm * 1e-9
+        aer = diagnostics["_jam_state"]
+        rho_dz = float(diagnostics["air_density"][0, 0]
+                       * diagnostics["layer_thickness"][0, 0])
+        nlev = state.temperature.shape[0]
+        mono = 0.0
+        for i in range(MAM4_SPEC.n_modes()):
+            r = float(aer.r_wet[i, 0, 0])
+            n_col = float(aer.number[i, 0, 0]) * rho_dz * nlev
+            q = float(interp_mie(
+                lut, jnp.asarray(2.0 * np.pi * r / lam),
+                jnp.asarray(1.45), jnp.asarray(1e-2))[0])
+            mono += n_col * q * np.pi * r ** 2
+        self.assertGreater(aod_lognormal, 1.5 * mono)
+        self.assertLess(aod_lognormal, 20.0 * mono)
+
     def test_grad_through_mass(self):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)

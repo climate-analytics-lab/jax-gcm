@@ -33,6 +33,14 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
+
+# Gauss–Hermite quadrature (8 nodes) for integrating Mie efficiencies over
+# each mode's lognormal size distribution in ln r (see ``_band_optics``).
+# Static Python floats so the per-node loop unrolls at trace time — 8 LUT
+# interpolations per mode per band, negligible under the hourly optics gate.
+_GH_NODES, _GH_WEIGHTS = (
+    tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
+)
 _FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 
 
@@ -154,6 +162,7 @@ class JamOpticsTerm(PhysicsTerm):
             gscat = jnp.zeros_like(state.temperature)
             for i, mode in enumerate(self._spec.modes):
                 r_wet = aer.r_wet[i]
+                ln_sig = math.log(mode.geom_std_dev)
                 vol_n = jnp.zeros_like(state.temperature)
                 vol_k = jnp.zeros_like(state.temperature)
                 vol_tot = jnp.zeros_like(state.temperature)
@@ -176,9 +185,35 @@ class JamOpticsTerm(PhysicsTerm):
                 safe = jnp.maximum(vol_tot, _TINY)
                 m_n = jnp.where(vol_tot > _TINY, vol_n / safe, 1.5)
                 m_k = jnp.where(vol_tot > _TINY, vol_k / safe, 1.0e-8)
-                x = 2.0 * math.pi * r_wet / lam_m
-                q_ext, ssa, g = interp_mie(self._lut, x, m_n, m_k)
-                aod_i = num_per_area[i] * q_ext * math.pi * r_wet ** 2
+                # Integrate the Mie efficiencies over the mode's lognormal
+                # size distribution. ``r_wet`` is the NUMBER-MEDIAN radius
+                # (r_dry = dgnum/2 in calcsize, grown hygroscopically), so
+                # evaluating a single Qext(r_wet)·π·r_wet² treats the mode as
+                # monodisperse at its median — which misses both the r²
+                # moment of the distribution (×exp(2·ln²σ) ≈ 2.0 at σ=1.8)
+                # and the larger Qext at the extinction-carrying sizes
+                # (r_eff = r_g·exp(2.5·ln²σ) ≈ 2.4·r_g). On the day-210
+                # T63L47 state that monodisperse shortcut gave column AOD
+                # 0.028 vs 0.121 from this quadrature (obs ~0.14): a 4.3×
+                # under-estimate — the "high burdens, tiny AOD" symptom.
+                # Gauss–Hermite in ln r is exact for polynomial moments:
+                # r_k = r_g·exp(√2·lnσ·t_k), weight (w_k/√π)·exp(2√2·lnσ·t_k)
+                # recovers ⟨r²⟩ = r_g²·exp(2 ln²σ) for constant Q. The mode
+                # σ is assumed preserved under hygroscopic growth (standard
+                # MAM assumption), and the volume-mixed refractive index is
+                # size-independent, so only x varies across nodes.
+                sec = jnp.zeros_like(r_wet)
+                sec_scat = jnp.zeros_like(r_wet)
+                sec_gscat = jnp.zeros_like(r_wet)
+                for t_k, w_k in zip(_GH_NODES, _GH_WEIGHTS):
+                    growth = math.exp(math.sqrt(2.0) * ln_sig * t_k)
+                    x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
+                    q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
+                    wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
+                    sec = sec + wgt * q_k
+                    sec_scat = sec_scat + wgt * q_k * ssa_k
+                    sec_gscat = sec_gscat + wgt * q_k * ssa_k * g_k
+                aod_i = num_per_area[i] * sec * math.pi * r_wet ** 2
                 # Physical mass gate: tau is EXACTLY zero where the mode
                 # carries no material. The number floor above handles the
                 # NEGATIVE side of the cold-start Gibbs ringing, but the
@@ -194,10 +229,11 @@ class JamOpticsTerm(PhysicsTerm):
                 # term n·(r_wet³−r_dry³) is itself ringing garbage when
                 # there is no dry aerosol to condense on, and it passes a
                 # total-volume gate on its own.
-                aod_i = jnp.where(vol_dry > 1.0e-24, aod_i, 0.0)
-                aod = aod + aod_i
-                scat = scat + ssa * aod_i
-                gscat = gscat + g * ssa * aod_i
+                gate = (vol_dry > 1.0e-24)
+                area = num_per_area[i] * math.pi * r_wet ** 2
+                aod = aod + jnp.where(gate, aod_i, 0.0)
+                scat = scat + jnp.where(gate, area * sec_scat, 0.0)
+                gscat = gscat + jnp.where(gate, area * sec_gscat, 0.0)
             # Clamp the extinction-/scattering-weighted SSA and asymmetry to
             # their physical [0, 1] range. With a non-negative per-mode AOD
             # (number floored at 0 in ``__call__``) these ratios are already
