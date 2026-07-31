@@ -15,8 +15,10 @@ microphysics terms are untouched):
 * **Below-cloud impaction scavenging** — falling precipitation collects
   interstitial aerosol in clear air, with a size-dependent (∝ r²) collection
   efficiency so coarse particles are scavenged far faster than accumulation
-  mode. Driven by the TOTAL precipitation (stratiform + convective): both
-  fall through the same clear air below cloud.
+  mode. Driven by stratiform AND convective precipitation — with the
+  convective contribution masked to levels at/below the convective cloud
+  top (diagnosed by pressure from the heating footprint), since rain
+  cannot collect aerosol above where it forms.
 * **Convective in-cloud scavenging** — HAMMOZ scavenges aerosol in raining
   convective columns with per-mode scavenging ratios applied to the
   convective precipitation formation. The Tiedtke port does not (yet) expose
@@ -194,11 +196,34 @@ class WetScavenging(PhysicsTerm):
         if conv is None:
             conv_precip = jnp.zeros_like(precip_col)
             rate_conv_incloud = jnp.zeros_like(state.temperature)
+            conv_below = jnp.zeros_like(state.temperature)
         else:
             conv_precip = conv.precip_conv
             rate_conv_incloud = conv_in_cloud_rate(
                 conv_precip, conv.heating_rate, params,
             )
+            # Convective WASHOUT acts only at/below the convective cloud
+            # top — falling rain cannot collect aerosol above where it
+            # forms. Codex review of #574: broadcasting the surface conv
+            # rain over the whole column (gated only by the stratiform
+            # clear fraction) would scrub the UTLS in every raining
+            # column. The top of the convectively active layer is
+            # diagnosed from the heating footprint via PRESSURE (a level
+            # is below the top if its pressure exceeds the lowest active
+            # pressure), which is agnostic to the column's vertical index
+            # orientation. Columns with no active layer get an all-zero
+            # mask (min over empty set = +inf).
+            p_full = diagnostics.get("pressure_full")
+            if p_full is not None:
+                active = conv.heating_rate > 0.0
+                p_conv_top = jnp.min(
+                    jnp.where(active, p_full, jnp.inf), axis=0, keepdims=True,
+                )
+                conv_below = (p_full >= p_conv_top).astype(p_full.dtype)
+            else:
+                # No pressure diagnostic (reduced test harnesses):
+                # fall back to column-wide washout rather than none.
+                conv_below = jnp.ones_like(state.temperature)
 
         p_form = precip_formation_rate(
             precip_col, cloud_fraction, qc, air_density, dz,
@@ -206,10 +231,6 @@ class WetScavenging(PhysicsTerm):
         rate_incloud = params.incloud_scale * in_cloud_rate(
             activated_fraction, p_form, qc,
         ) + rate_conv_incloud
-
-        # Everything that falls — stratiform and convective — washes out
-        # interstitial aerosol below cloud.
-        precip_total = precip_col + conv_precip
 
         # Build a per-tracer scavenging rate and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
@@ -221,8 +242,13 @@ class WetScavenging(PhysicsTerm):
         q_list: list[jnp.ndarray] = []
         rate_list: list[jnp.ndarray] = []
         for i, mode in enumerate(self._spec.modes):
+            # Stratiform washout column-wide (per the documented interim in
+            # the module docstring); convective washout only at/below the
+            # convective cloud top.
             rate_below = below_cloud_rate(
-                precip_total, cloud_fraction, aer.r_wet[i], params,
+                precip_col, cloud_fraction, aer.r_wet[i], params,
+            ) + conv_below * below_cloud_rate(
+                conv_precip, cloud_fraction, aer.r_wet[i], params,
             )
             # In-cloud only removes from activatable (soluble) modes.
             rate = rate_below + (rate_incloud if mode.can_activate else 0.0)
