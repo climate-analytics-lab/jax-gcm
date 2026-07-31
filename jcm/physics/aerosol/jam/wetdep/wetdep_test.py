@@ -212,8 +212,8 @@ class WetDepTermTest(unittest.TestCase):
     def test_conv_washout_confined_below_cloud_top(self):
         # With ONLY convective precip and a pressure diagnostic, levels
         # above the convective cloud top (no heating, lower pressure than
-        # any active level) must see EXACTLY zero removal — falling rain
-        # cannot collect aerosol above where it forms (#574 review).
+        # any active level) must see EXACTLY zero removal — rain
+        # cannot collect aerosol above where it forms.
         state, diagnostics, spec, mass_name = self._setup(precip=0.0)
         diagnostics = self._attach_convection(diagnostics, 4, 2)
         # Level 0 is the model top (200 hPa); heating is active on levels

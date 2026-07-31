@@ -275,13 +275,10 @@ class JamOpticsTermTest(unittest.TestCase):
         )
 
     def test_lognormal_exceeds_monodisperse_extinction(self):
-        # ``r_wet`` is the NUMBER-MEDIAN radius of a lognormal mode; treating
-        # the mode as monodisperse at that radius under-counted extinction
-        # ~4x on real states (column AOD 0.028 vs 0.121 on the day-210
-        # T63L47 run — the "high burdens, tiny AOD" bug). The Gauss-Hermite
-        # quadrature must beat the monodisperse cross-section by at least
-        # the pure r^2-moment factor exp(2 ln^2 sigma) (1.55 at sigma=1.6) —
-        # Qext weighting only adds to it for sub-micron sizes at 550 nm.
+        # ``r_wet`` is the number-median radius: the lognormal quadrature
+        # must beat a monodisperse cross-section by at least the r^2-moment
+        # factor exp(2 ln^2 sigma) (1.55 at sigma=1.6); Qext weighting only
+        # adds to it for sub-micron sizes at 550 nm.
         from jcm.physics.aerosol.jam.optics.mie_lut import (
             default_mie_lut,
             interp_mie,

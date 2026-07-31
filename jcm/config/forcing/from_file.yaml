@@ -4,13 +4,10 @@
 kind: from_file
 file: ???
 
-# Ozone climatology netCDF (pre-interpolated to model levels — see
-# ``jcm.data.bc.interpolate_ozone``; CMIP6/ECHAM plev products like
-# ``T63_ozone_picontrol.nc`` must be passed through it first). ``auto``
-# (default) resolves the packaged ``jcm/data/bc/<grid>/ozone.nc`` for this
-# grid and warns + falls back to the analytical profile when none fits —
-# the analytical ramp's ~7.6× ozone column biases clear-sky OLR ~12 W/m²
-# low, a bug hunted down twice; hence climatology-by-default. ``null``
+# Ozone climatology netCDF, pre-interpolated to model levels (see
+# ``jcm.data.bc.interpolate_ozone``). ``auto`` (default) resolves the
+# packaged ``jcm/data/bc/<grid>/ozone.nc``, warning and falling back to
+# the analytical profile when none fits (~12 W/m² OLR low bias). ``null``
 # forces the analytical profile silently.
 ozone_file: auto
 

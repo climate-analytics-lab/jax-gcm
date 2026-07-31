@@ -272,13 +272,11 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 
     if ozone_file is not None:
-        # Column analogue of ``jcm.runners._attach_ozone`` (Codex review of
-        # #575: without this the pySES path silently kept the analytic ozone
-        # profile and its ~12 W/m2 clear-sky OLR bias). The file follows the
-        # ``jcm.data.bc.interpolate_ozone`` contract — ``O3 (time, level,
-        # lat, lon)`` mole/mole already on the model's vertical levels — so
-        # only the horizontal is sampled onto the columns; unlike the
-        # spectral runner there is no exact-grid requirement.
+        # Column analogue of ``jcm.runners._attach_ozone``. The file follows
+        # the ``jcm.data.bc.interpolate_ozone`` contract (``O3 (time, level,
+        # lat, lon)`` mole/mole on the model's levels), so only the
+        # horizontal is sampled onto the columns — no exact-grid
+        # requirement.
         from jcm.ozone_climatology import OzoneClimatology
 
         with xr.open_dataset(str(ozone_file)) as ds:
