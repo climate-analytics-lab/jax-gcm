@@ -841,6 +841,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_lw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
+            total_cloud_cover=_column_vector(
+                diagnostics_vmapped.total_cloud_cover, ncols,
+            ),
             # Placeholder — the enclosing ``__call__`` overwrites this
             # via ``new_radiation.copy(step=radiation.step + 1)`` after
             # the compute-vs-cache cond, so the value here is unused.
