@@ -329,7 +329,14 @@ def prepare_rrtmgp_data(
             pressure_1d, dp_bottom, dp_top, nlev, halo,
         ),
         "sg_map": sg_map,
-        "use_scan": True,
+        # Unrolled z-recurrence (the jax-rrtmgp default). The lax.scan
+        # variant moveaxis's z to the leading axis for every vertical sweep;
+        # on an A100 (4096 columns x 62 levels, f32) that costs 20% (LW) /
+        # 41% (SW) of the solve relative to the unrolled slice-indexed loop
+        # — the same layout effect RRTMGP.jl measured on GPUs. The unrolled
+        # HLO is larger (one slice per level per sweep), which only shows up
+        # as a modest one-off compile-time cost.
+        "use_scan": False,
     }
 
 
