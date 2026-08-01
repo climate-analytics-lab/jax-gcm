@@ -55,6 +55,24 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
 
+## No bespoke run scripts — new configurations go through Hydra
+Every runnable configuration must be expressible as ``python -m jcm.main``
+with Hydra groups/overrides — never as a standalone driver script:
+
+ - New backends, physics packages, or run patterns get a config group entry
+   (``jcm/config/<group>/*.yaml``) and, if needed, wiring in
+   ``jcm/runners.py`` — which already provides the production run loop
+   (chunked integration, health gates, checkpoint/.prev rotation, periodic
+   checkpoint archives, resume).
+ - Canonical/validated configurations are enshrined as named config files
+   with comments explaining WHY each setting is what it is (see
+   ``dycore/pyses_ne30l47.yaml``), so a production run is one command.
+ - One-off experiment scripts (personal paths, GPU indices, ad-hoc drivers)
+   do not belong in the repo at all. The 2026-07 ne30 campaign's bespoke
+   driver drifted a parallel checkpoint/health implementation and
+   crash-prone defaults before being folded back into Hydra — that is the
+   failure mode this rule prevents.
+
 ## Documentation lives with the change — no doc debt
 Documentation updates are part of the change, not a follow-up. A PR that alters
 user-facing behaviour is incomplete until the docs say so:
@@ -208,6 +226,11 @@ Test files use the `*_test.py` naming convention and are co-located with their s
 ```bash
 ruff check .
 ```
+
+**Always run `ruff check .` locally and get it clean BEFORE every push.**
+A push with lint errors burns a full CI cycle on a failure ruff reports in
+seconds locally. Treat it like the test suite: part of the definition of
+done for any commit that will be pushed.
 
 Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
 

@@ -35,10 +35,12 @@ class ModelPredictions:
 
     """
 
-    def __init__(self, predictions: Predictions, coords, physics: Physics):  # noqa: D107
+    def __init__(self, predictions: Predictions, coords,  # noqa: D107
+                 physics: Physics, dycore=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
+        self._dycore = dycore
 
     @property
     def dynamics(self):
@@ -59,6 +61,15 @@ class ModelPredictions:
             An xarray.Dataset ready for analysis and plotting.
 
         """
+        # Backends whose native horizontal layout is not the separable
+        # lat/lon grid the legacy path below assumes (pySES cubed-sphere
+        # columns) own their trajectory conversion per the DynamicalCore
+        # protocol; delegate whenever the grid has no modal axes.
+        if self._dycore is not None and not hasattr(
+                self._coords.horizontal, "modal_axes"):
+            times = jax.device_get(self.times)
+            return self._dycore.to_xarray(self._predictions, times)
+
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
         # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives.

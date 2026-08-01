@@ -66,6 +66,7 @@ def echam_physics(
     aerosol: AerosolParameters | None = None,
     hines: HinesParameters | None = None,
     sso: SSOParameters | None = None,
+    gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
     cloud_scheme: str = "1m",
@@ -103,6 +104,14 @@ def echam_physics(
             when ``cloud_scheme="2m"``.
         hines: Override for non-orographic GW ``HinesParameters``.
         sso: Override for sub-grid-scale orography ``SSOParameters``.
+        gw_scheme: Non-orographic gravity-wave scheme: ``"hines"`` (ECHAM's
+            Doppler-spread scheme, the default), ``"frontal"`` (CAM's
+            frontogenesis-triggered spectral scheme — requires a
+            frontogenesis provider, e.g.
+            ``DinosaurDycore(compute_frontogenesis=True)``), ``"both"``
+            (Hines background + frontal storm-track deposition; some
+            double-counting near strong fronts — retune ``taubgnd`` and
+            the Hines source strength jointly if it shows), or ``"none"``.
         checkpoint_terms: Whether to checkpoint each term's compute
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
@@ -259,6 +268,34 @@ def echam_physics(
     # the moist physics rather than between vdiff and cucall — it feeds
     # nothing that convection/cloud read same-step, and moving it is an
     # independent change we keep out of this reordering.
+    if gw_scheme == "hines":
+        nonoro_gw_terms: list[PhysicsTerm] = [HinesGwd(params=hines_p)]
+    elif gw_scheme == "frontal":
+        from jcm.physics.gravity_waves.spectral.term import (
+            FrontalGravityWaveDrag,
+        )
+        nonoro_gw_terms = [FrontalGravityWaveDrag()]
+    elif gw_scheme == "both":
+        # Hines carries the broad-spectrum background (the role CAM fills
+        # with its convective + ridge sources, which are not ported);
+        # frontal adds the storm-track/vortex-edge deposition. Replacing
+        # Hines with frontal-only under-drags the subtropical jet (+15-25
+        # m/s by day 60 in the v4 ne30 year, blowing up at the NH spring
+        # transition) — the frontal source only launches where fronts
+        # exceed frontgfc. Some overlap double-counting near strong fronts
+        # is accepted; retune taubgnd/rms_launch_wind jointly if it shows.
+        from jcm.physics.gravity_waves.spectral.term import (
+            FrontalGravityWaveDrag,
+        )
+        nonoro_gw_terms = [HinesGwd(params=hines_p),
+                           FrontalGravityWaveDrag()]
+    elif gw_scheme == "none":
+        nonoro_gw_terms = []
+    else:
+        raise ValueError(
+            f"gw_scheme={gw_scheme!r} not in "
+            "('hines', 'frontal', 'both', 'none')")
+
     cosp_terms: list[PhysicsTerm] = []
     if enable_cosp:
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
@@ -278,7 +315,7 @@ def echam_physics(
             micro_term,
             *cosp_terms,
             *jam_post_cloud_terms,
-            HinesGwd(params=hines_p),
+            *nonoro_gw_terms,
             LottMillerSso(params=sso_p),
         ],
         checkpoint_terms=checkpoint_terms,

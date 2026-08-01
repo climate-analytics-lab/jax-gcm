@@ -1,4 +1,6 @@
 import jax.numpy as jnp
+
+from jcm.physics.coords_util import column_lat_lon
 from jcm.physics_interface import PhysicsTendency
 from jcm.forcing import ForcingData
 from .macv2_sp_params import AerosolParameters
@@ -446,15 +448,13 @@ class Macv2SpAerosol(PhysicsTerm):
         construction time avoids repeating the ``meshgrid`` inside the
         jitted compute_tendencies loop.
         """
-        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
-        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
-        # Match get_simple_aerosol's previous meshgrid convention:
-        # ``meshgrid(lat, lon)`` returned (lat[None,:].repeat(nlon, 0),
-        # lon[:,None].repeat(nlat, 1)) reshaped to (nlon*nlat,) ==
-        # (ncols,) with longitude varying fastest.
-        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
-        self._lats = nnx.Variable(lat_2d.reshape(-1))
-        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        # column_lat_lon reproduces get_simple_aerosol's legacy
+        # meshgrid(lat, lon) -> (ncols,) convention on separable grids
+        # (longitude varying fastest) and returns true per-column pairs on
+        # scattered-column grids (pySES SE).
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
     def cache_band_config(self, band_config) -> None:

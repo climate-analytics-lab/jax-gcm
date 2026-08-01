@@ -194,7 +194,7 @@ class Model:
                  time_step: float | None = None,
                  terrain: TerrainData = None,
                  physics: Physics = None,
-                 start_date: jdt.Datetime = jdt.to_datetime('2000-01-01'),
+                 start_date: jdt.Datetime | None = None,
                  calendar: str = "365_day",
                  log_level=logging.CRITICAL) -> None:
         """Initialise the model.
@@ -248,7 +248,15 @@ class Model:
         """
         logging.getLogger().setLevel(log_level)
         self.calendar = calendar
-        self.start_date = start_date
+        # Default built HERE, not as a def-time default: a def-time
+        # ``jdt.to_datetime(...)`` freezes its array dtypes at import time,
+        # and a backend that enables jax_enable_x64 later (pySES does,
+        # process-wide) then mixes 32-bit datetime internals with 64-bit
+        # arithmetic inside the checkpointed scan — an MLIR verifier error
+        # under JAX >= 0.8 (ordering-dependent: only bites when jcm.model
+        # is imported before the x64 flag flips).
+        self.start_date = (start_date if start_date is not None
+                           else jdt.to_datetime('2000-01-01'))
 
         self.physics = physics if physics is not None else speedy_physics()
         time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
@@ -279,6 +287,24 @@ class Model:
         # Convenience aliases so callers don't have to type ``self.dycore.coords``.
         self.coords = dycore.coords
         self.terrain = dycore.terrain
+
+        # Validate the dycore-field contract at construction: every field a
+        # term declares in ``requires_dycore_fields`` must be supplied by the
+        # backend (physics_field_names) or an upstream term's ``provides`` —
+        # fail here, not deep inside the first traced step.
+        self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        required = tuple(getattr(self.physics, "required_dycore_fields",
+                                 lambda: ())())
+        missing = [f for f in required if f not in self._dycore_field_names]
+        if missing:
+            raise ValueError(
+                f"The composed physics requires dycore-supplied fields "
+                f"{missing}, but this backend provides "
+                f"{list(self._dycore_field_names) or 'none'}. Construct the "
+                "dycore with the relevant provider enabled (e.g. "
+                "DinosaurDycore(compute_frontogenesis=True)) or add a "
+                "physics-side provider term upstream."
+            )
 
         self.physics.cache_coords(self.coords)
         # Hand the model's timestep to the physics. ``ComposablePhysics``
@@ -416,6 +442,15 @@ class Model:
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             physics_state_grid = self.dycore.to_physics_state(state)
+            if self._dycore_field_names:
+                # Dycore-supplied diagnostic fields (frontogenesis, ...):
+                # re-injected every step under a plumbing key that
+                # ComposablePhysics strips from its output, so the scan
+                # carry's pytree structure is unaffected (the codex-P1
+                # lesson from the observers work: anything that rides the
+                # carry must exist in the construction-time template).
+                extra = self.dycore.physics_fields(state, physics_state_grid)
+                physics_state = {**physics_state, "_dycore_fields": extra}
             physics_tendency, new_physics_state = compute_physics_step_gridpoint(
                 physics_state_grid, forcing_now, self.terrain, physics_state,
                 physics=self.physics,
@@ -475,12 +510,29 @@ class Model:
         template = self.physics.get_empty_data(self.coords)
         initial_carry = self.physics.initial_carry_state(self.coords)
         if isinstance(initial_carry, dict) and isinstance(template, dict):
-            return {**template, **initial_carry}
-        # Explicit ``is None`` check: ``initial_carry or template`` would
-        # trigger ``bool(carry)`` and raise an ambiguous-truth ``ValueError``
-        # if a ``Physics`` subclass returns a JAX array (or any object with
-        # non-scalar truth semantics).
-        return template if initial_carry is None else initial_carry
+            carry = {**template, **initial_carry}
+        else:
+            # Explicit ``is None`` check: ``initial_carry or template`` would
+            # trigger ``bool(carry)`` and raise an ambiguous-truth
+            # ``ValueError`` if a ``Physics`` subclass returns a JAX array
+            # (or any object with non-scalar truth semantics).
+            carry = template if initial_carry is None else initial_carry
+        # Dycores that run their dynamics at a different precision than the
+        # physics (the pySES CAM-SE backend: float64 dynamics under
+        # jax_enable_x64, float32 physics) expose ``physics_dtype``; the
+        # scan carry must match the dtype the per-step compute produces, or
+        # iteration 1 fails to type-check. The template above was built at
+        # the process default, so cast its float leaves down here. Backends
+        # without the attribute (dinosaur) are untouched.
+        physics_dtype = getattr(self.dycore, "physics_dtype", None)
+        if physics_dtype is not None:
+            carry = jax.tree.map(
+                lambda x: x.astype(physics_dtype)
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                else x,
+                carry,
+            )
+        return carry
 
     def _get_op_split_integrate_fn(
         self,
@@ -623,7 +675,8 @@ class Model:
         return (
             final_dycore_state,
             final_physics_state,
-            ModelPredictions(predictions, self.coords, self.physics),
+            ModelPredictions(predictions, self.coords, self.physics,
+                             dycore=self.dycore),
         )
 
     def resume(self,

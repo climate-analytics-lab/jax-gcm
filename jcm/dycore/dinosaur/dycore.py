@@ -95,6 +95,7 @@ class DinosaurDycore(DynamicalCore):
         tracer_specs: Mapping[str, Any] | None = None,
         diffusion: DiffusionFilter | None = None,
         tracer_filter: Any | None = None,
+        compute_frontogenesis: bool = False,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics."""
         self.coords = coords
@@ -116,6 +117,11 @@ class DinosaurDycore(DynamicalCore):
             self._a_half = jnp.zeros_like(sigma_b)
             self._b_half = sigma_b
         self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
+        # Opt-in per-step frontogenesis diagnostic for the spectral frontal
+        # GW source (CAM computes the analogous field inside its SE dycore).
+        # Off by default: it costs horizontal finite differences of
+        # (u, v, theta) every dt, which only the frontal GW term consumes.
+        self.compute_frontogenesis = bool(compute_frontogenesis)
 
         # Physical constants drive both nondimensionalisation and the primitive
         # equations. Default to the *live* module singleton (read here at
@@ -377,6 +383,47 @@ class DinosaurDycore(DynamicalCore):
         # a free relabelling rather than a reshard. No-op without an
         # ``spmd_mesh``. See docs/source/design/parallelization.md.
         return self.coords.with_physics_sharding(physics_state)
+
+    def physics_field_names(self) -> tuple[str, ...]:
+        """Declare the frontogenesis field when the provider is enabled."""
+        return ("frontogenesis",) if self.compute_frontogenesis else ()
+
+    def physics_fields(self, state, physics_state) -> dict:
+        """Compute the frontogenesis function on the nodal lat-lon grid.
+
+        Uses the already-projected gridpoint ``physics_state`` (SI units):
+        theta = T (p0/p)^kappa with the hybrid/sigma mid-level pressures
+        from this core's own (a, b) coefficients, then the centred
+        finite-difference frontogenesis of :func:`jcm.physics.
+        gravity_waves.spectral.frontogenesis.frontogenesis_function`
+        (a pure lat-lon function; importing it here is a deliberate
+        dycore->shared-math dependency, mirroring CAM where the SE dycore
+        owns ``compute_frontogenesis``). A spectral-gradient
+        implementation is a possible upgrade — the FD version is
+        second-order, and fields are smooth at the truncation scale.
+        """
+        if not self.compute_frontogenesis:
+            return {}
+        from jcm.physics.gravity_waves.spectral.frontogenesis import (
+            frontogenesis_function,
+        )
+        p0 = float(self.constants.p0)
+        ps = physics_state.normalized_surface_pressure * p0
+        a_full = 0.5 * (self._a_half[:-1] + self._a_half[1:])
+        b_full = 0.5 * (self._b_half[:-1] + self._b_half[1:])
+        shape = (-1,) + (1,) * ps.ndim
+        p_full = (a_full.reshape(shape)
+                  + b_full.reshape(shape) * ps[jnp.newaxis])
+        kappa = float(self.constants.akap)
+        theta = physics_state.temperature * (p0 / p_full) ** kappa
+        frontgf = frontogenesis_function(
+            physics_state.u_wind, physics_state.v_wind, theta,
+            lons=jnp.asarray(self.coords.horizontal.longitudes),
+            lats=jnp.asarray(self.coords.horizontal.latitudes),
+        )
+        return {
+            "frontogenesis": frontgf.astype(physics_state.temperature.dtype)
+        }
 
     def step(
         self,
