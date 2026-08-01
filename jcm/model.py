@@ -39,6 +39,84 @@ from jcm.dycore.dinosaur.dycore import DinosaurDycore
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Explicit-mesh (multi-device) support
+# ---------------------------------------------------------------------------
+# The pySES backend shards its element axis across devices under an *explicit*
+# JAX mesh (``jax.set_mesh`` in pyses' JaxBackend). Physics columns are
+# element-major, so the element sharding IS a block sharding of the trailing
+# column axis — but explicit-mode semantics reject the replicated-scratch
+# patterns column physics is written with (``jnp.zeros((nlev, ncols))`` meeting
+# a sharded field, etc.). The physics call therefore runs under
+# ``jax.sharding.auto_axes``: classic GSPMD propagation inside, with the
+# declared column sharding re-imposed on every output that has a trailing
+# column axis. On a single device (or the dinosaur SPMD path, which uses
+# ordinary auto meshes) there is no ambient explicit axis and all of this is
+# inert.
+
+def _ambient_explicit_axis():
+    """Name of the ambient explicit mesh axis (pyses' element axis), or None."""
+    mesh = jax.sharding.get_abstract_mesh()
+    explicit = getattr(mesh, "explicit_axes", ())
+    return explicit[0] if explicit else None
+
+
+def _column_partition_specs(tree, ncols: int, axis: str):
+    """Per-leaf PartitionSpec: shard a trailing ``ncols`` axis, else replicate."""
+    from jax.sharding import PartitionSpec
+
+    def spec(leaf):
+        shape = jnp.shape(leaf)
+        if len(shape) >= 1 and shape[-1] == ncols:
+            return PartitionSpec(*((None,) * (len(shape) - 1)), axis)
+        return PartitionSpec()
+
+    return tree_map(spec, tree)
+
+
+def _reshard_columns(tree, ncols: int, axis: str):
+    """Reshard every trailing-column leaf onto the explicit axis.
+
+    Used on the scan-entry physics carry (and the averaged-diagnostics
+    accumulator template): the per-step physics outputs are column-sharded, and
+    ``lax.scan`` requires the carry type — sharding included — to be
+    invariant, so the *initial* carry must already be sharded the same way.
+    This also covers carries restored from a checkpoint (host numpy arrays).
+    """
+    from jax.sharding import reshard
+
+    return reshard(tree, _column_partition_specs(tree, ncols, axis))
+
+
+def _neutralize_mesh_typing(physics) -> None:
+    """Strip the ambient-mesh typing from a physics module's array state.
+
+    Arrays created while a concrete explicit mesh is set (``jax.set_mesh`` in
+    pyses' backend) carry that mesh on their aval; used as closure constants
+    inside an ``auto_axes`` physics region they raise "context mesh should
+    match the aval mesh". Recreating them with the mesh temporarily unset
+    gives the mesh-less, uncommitted typing that every pre-mesh module
+    constant has — freely usable in both explicit and auto regions. In-place
+    via ``nnx.update``; dtypes are preserved (the float32 physics cast in
+    ``_build_initial_physics_carry`` is unaffected).
+    """
+    import numpy as np
+    from flax import nnx
+
+    graphdef, state = nnx.split(physics)
+    prev_mesh = jax.sharding.get_mesh()
+    jax.set_mesh(None)
+    try:
+        state = tree_map(
+            lambda x: jnp.asarray(np.asarray(x))
+            if isinstance(x, jax.Array) else x,
+            state,
+        )
+    finally:
+        jax.set_mesh(prev_mesh)
+    nnx.update(physics, state)
+
+
 def _op_split_trajectory(
     step_fn: Callable[[Any, Any], tuple[Any, Any]],
     initial_physics_state: Any,
@@ -156,9 +234,12 @@ def _op_split_trajectory(
             empty_sum = tree_map(jnp.zeros_like, x_initial)
             # Cast accumulator leaves to float so that ``acc + new / N`` doesn't
             # promote dtype mid-scan — jax.lax.scan rejects type changes in the
-            # carry.
+            # carry. ``zeros_like`` (not ``zeros(shape)``) so any device
+            # sharding on the template survives into the accumulator — under
+            # an explicit mesh a replicated accumulator could not absorb the
+            # column-sharded per-step diagnostics.
             empty_diag_sum = tree_map(
-                lambda x: jnp.zeros(jnp.shape(x), dtype=float),
+                lambda x: jnp.zeros_like(x, dtype=float),
                 empty_diagnostics,
             )
             outer_step_fn = _averaged_outer_step()
@@ -307,6 +388,16 @@ class Model:
             )
 
         self.physics.cache_coords(self.coords)
+        if _ambient_explicit_axis() is not None:
+            # Multi-device explicit mesh (pySES): the physics' cached arrays
+            # (hybrid tables, per-column lat/lon, parameter scalars) were just
+            # created under the ambient explicit mesh and would clash as
+            # explicit-typed closure constants inside the auto-mode physics
+            # region (see ``_ambient_explicit_axis``). Recreate them mesh-less
+            # (the typing every pre-mesh module constant has) so they behave
+            # as ordinary replicated constants there, while staying concrete
+            # Python values for trace-time configuration reads.
+            _neutralize_mesh_typing(self.physics)
         # Hand the model's timestep to the physics. ``ComposablePhysics``
         # injects it into the diagnostics dict every step under
         # ``"_dt_seconds"`` so any term that integrates by ``dt`` (chemistry,
@@ -451,11 +542,38 @@ class Model:
                 # carry must exist in the construction-time template).
                 extra = self.dycore.physics_fields(state, physics_state_grid)
                 physics_state = {**physics_state, "_dycore_fields": extra}
-            physics_tendency, new_physics_state = compute_physics_step_gridpoint(
-                physics_state_grid, forcing_now, self.terrain, physics_state,
-                physics=self.physics,
-                time_step=self.dt_si.m,
+            call = partial(
+                compute_physics_step_gridpoint,
+                physics=self.physics, time_step=self.dt_si.m,
             )
+            args = (physics_state_grid, forcing_now, self.terrain,
+                    physics_state)
+            axis = _ambient_explicit_axis()
+            if axis is None:
+                physics_tendency, new_physics_state = call(*args)
+            else:
+                # Multi-device explicit mesh (pySES element sharding): run the
+                # physics under auto sharding semantics — see the module-level
+                # note at ``_ambient_explicit_axis``. The physics module's own
+                # cached arrays were made mesh-less at construction
+                # (``_neutralize_mesh_typing``), so they pass as ordinary
+                # replicated closure constants; the array ARGUMENTS are
+                # re-typed by auto_axes itself.
+                from jax.sharding import auto_axes
+
+                ncols = physics_state_grid.temperature.shape[-1]
+                # The shape-only trace must not see the explicit shardings —
+                # tracing the unwrapped physics with explicit-typed inputs
+                # hits the very type errors auto_axes exists to avoid — so
+                # eval_shape runs on bare ShapeDtypeStructs (replicated
+                # typing). Only the output SHAPES are consumed.
+                strip = lambda a: (jax.ShapeDtypeStruct(jnp.shape(a), a.dtype)  # noqa: E731
+                                   if hasattr(a, "dtype") else a)
+                out_shapes = jax.eval_shape(call, *tree_map(strip, args))
+                specs = _column_partition_specs(out_shapes, ncols, axis)
+                physics_tendency, new_physics_state = auto_axes(
+                    call, axes=axis, out_sharding=specs,
+                )(*args)
             state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state
 
@@ -553,10 +671,22 @@ class Model:
         template = self.physics.get_empty_data(self.coords)
 
         def _integrate_fn(state, initial_physics_state):
+            axis = _ambient_explicit_axis()
+            empty_diagnostics = template
+            if axis is not None:
+                # Explicit mesh: the per-step physics outputs are
+                # column-sharded, and the scan carry type must be invariant —
+                # shard the initial carry (which may be a host-built template
+                # or a checkpoint-restored numpy pytree) and the averaging
+                # template the same way up front.
+                ncols = int(self.coords.horizontal.nodal_shape[-1])
+                initial_physics_state = _reshard_columns(
+                    initial_physics_state, ncols, axis)
+                empty_diagnostics = _reshard_columns(template, ncols, axis)
             trajectory = _op_split_trajectory(
                 step_fn=step_fn,
                 initial_physics_state=initial_physics_state,
-                empty_diagnostics=template,
+                empty_diagnostics=empty_diagnostics,
                 outer_steps=outer_steps,
                 inner_steps=inner_steps,
                 post_process_fn=post_process_fn,

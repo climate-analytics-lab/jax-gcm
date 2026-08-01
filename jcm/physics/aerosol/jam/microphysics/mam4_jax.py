@@ -28,11 +28,16 @@ dependency (``pip install jcm[mam4]``). It is imported at this module's top, but
 this adapter module is itself loaded only when JAM selects the mam4_jax core
 (lazily, via ``jam_terms``), so a plain jcm import never pulls in GPL code. The condensation is integrated with the
 operator-split ``substep`` / ``astem`` backends (the original adaptive diffrax
-solver is not supported — too expensive), both of which are float32-safe. By
-default the term runs the core in float64 (``MAM4_JAX_ENABLE_X64``), casting
-jcm's float32 tracers to the working precision at the boundary and the
-resulting tendencies / ``_jam_state`` back to the model dtype; with
-``enable_x64=False`` the whole model (this core included) runs float32.
+solver is not supported — too expensive), both float32-safe FORWARD. The core
+precision is selectable per-instance (``core_dtype``): ``"float32"`` runs the
+~1M-cell amicphys vmap — the dominant JAM cost — under a *scoped*
+``jax.enable_x64(False)`` context while the host model keeps its own precision
+(pySES's float64 dynamics untouched; the RRTMGP wrapper's scoped-context
+pattern), with boundary casts jcm dtype → core dtype on entry and back on the
+tendencies / ``_jam_state``. The default is ``"float64"`` because the float32
+core's reverse pass is unusable (non-finite gradients inside ``amicphys`` —
+upstream issue); forward-only production drivers opt into float32 for the
+speed. ``enable_x64=False`` still runs the whole model float32.
 
 Deliberately not coupled yet (follow-ups)
 -----------------------------------------
@@ -46,6 +51,7 @@ Deliberately not coupled yet (follow-ups)
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import ClassVar
 
@@ -124,6 +130,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         condensation_backend: str = "substep",
         n_substeps: int = 4,
         enable_x64: bool | None = None,
+        core_dtype: str | None = None,
     ):
         """Import the core, set precision, select the condensation backend.
 
@@ -145,13 +152,32 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         Both need a mam4_jax with ``configure_condensation``
         (reflective-org/MAM4-JAX#59).
 
-        ``enable_x64`` controls model precision. Both backends are float32-safe
-        (the coag ``qv12`` underflow was fixed upstream), so float32 runs the
-        *whole* coupled model in float32 — useful memory headroom (the dynamics +
-        60-tracer spectral transport ~halve their traffic). ``None`` (default)
-        reads the ``MAM4_JAX_ENABLE_X64`` env var (default ``"1"`` → float64,
-        the safe default); ``True`` / ``False`` override it. Applied here, at
-        construction, so the dycore state built afterwards inherits it.
+        ``enable_x64`` controls the GLOBAL model precision. Both backends are
+        float32-safe (the coag ``qv12`` underflow was fixed upstream), so
+        float32 runs the *whole* coupled model in float32 — useful memory
+        headroom (the dynamics + 60-tracer spectral transport ~halve their
+        traffic). ``None`` (default) reads the ``MAM4_JAX_ENABLE_X64`` env var
+        (default ``"1"`` → float64, the safe default); ``True`` / ``False``
+        override it. Applied here, at construction, so the dycore state built
+        afterwards inherits it.
+
+        ``core_dtype`` controls THIS CORE's precision independently of the
+        global flag: ``"float32"`` runs the ~1M-cell amicphys vmap — the
+        dominant JAM cost — in float32 under a *scoped*
+        ``jax.enable_x64(False)`` context, even when the host model is float64
+        (pySES CAM-SE dynamics require global x64; the old global-flag route
+        to a float32 core would break them). This is the same scoped-context
+        pattern the RRTMGP wrapper uses, and the float32 FORWARD pass is the
+        casper-validated configuration (MAM4-JAX #60). ``"float64"``
+        (default) keeps the full-precision core. ``None`` reads
+        ``MAM4_JAX_CORE_DTYPE`` (default ``"float64"``).
+
+        The default stays float64 because the float32 core's REVERSE pass is
+        not usable: gradients through ``amicphys`` come out non-finite in
+        float32 (``calcsize``/``wateruptake`` are grad-clean; the failure is
+        inside the amicphys sub-processes — upstream issue). Forward-only
+        production drivers should pass ``core_dtype="float32"`` for the
+        speed; gradient/calibration work must keep float64.
         """
         if spec is not None:
             self.spec = spec
@@ -183,6 +209,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             want_x64 = bool(enable_x64)
         jax.config.update("jax_enable_x64", want_x64)
         self._enable_x64 = want_x64
+
+        if core_dtype is None:
+            core_dtype = os.environ.get("MAM4_JAX_CORE_DTYPE", "float64")
+        if core_dtype not in ("float32", "float64"):
+            raise ValueError(
+                f"core_dtype must be 'float32' or 'float64', got {core_dtype!r}"
+            )
+        # A float64 core is only expressible when x64 is on; a float32 core
+        # works under either global setting (scoped ctx is a no-op when x64
+        # is already off).
+        self._core_f32 = core_dtype == "float32" or not want_x64
 
         # Precompute static (jcm tracer name -> pcnst index) packings and the
         # per-mode index/property tables used to fill ``_jam_state``. All
@@ -255,10 +292,22 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         )
 
     def __call__(self, state, diagnostics, forcing, terrain):
+        # Scoped core precision: with a float32 core under a float64 host
+        # (pySES), everything from tracer packing to the amicphys vmap runs
+        # inside jax.enable_x64(False) so the core's own dtype-less literals
+        # come out float32 too — the RRTMGP-wrapper pattern (commit 27bb36f).
+        # No-op when the host already runs float32, or for a float64 core.
+        ctx = (jax.enable_x64(False) if self._core_f32
+               else contextlib.nullcontext())
+        with ctx:
+            return self._step(state, diagnostics)
+
+    def _step(self, state, diagnostics):
+        cdt = jnp.float32 if self._core_f32 else jnp.float64
         out_dtype = state.temperature.dtype
         shape = state.temperature.shape
-        zeros64 = jnp.zeros(shape, jnp.float64)
-        dt = jnp.asarray(diagnostics["_dt_seconds"], jnp.float64)
+        zeros_c = jnp.zeros(shape, cdt)
+        dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
 
         def fetch(name):
             # Floor gas/aerosol tracers at 0. Spectral advection of the JAM
@@ -270,16 +319,16 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             # _mam_coag_1subarea). The core floors qaer/qnum internally but not
             # wetdens, so guard at the boundary where the tracers enter.
             return jnp.maximum(
-                jnp.asarray(state.tracers.get(name, jnp.zeros(shape)), jnp.float64),
+                jnp.asarray(state.tracers.get(name, jnp.zeros(shape)), cdt),
                 0.0,
             )
 
         # Pack jcm tracers into the flat MAM4 arrays (water vapour at slot 0).
-        q = jnp.zeros(shape + (self._pcnst,), jnp.float64)
-        q = q.at[..., 0].set(jnp.asarray(state.specific_humidity, jnp.float64))
+        q = jnp.zeros(shape + (self._pcnst,), cdt)
+        q = q.at[..., 0].set(jnp.asarray(state.specific_humidity, cdt))
         for name, idx in self._q_pack:
             q = q.at[..., idx].set(fetch(name))
-        qqcw = jnp.zeros(shape + (self._pcnst,), jnp.float64)
+        qqcw = jnp.zeros(shape + (self._pcnst,), cdt)
         for name, idx in self._qqcw_pack:
             qqcw = qqcw.at[..., idx].set(fetch(name))
 
@@ -295,22 +344,22 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # free-tropospheric binary nucleation path fires there.
         vdiff = diagnostics.get("vertical_diffusion")
         pblh = (
-            jnp.asarray(jnp.broadcast_to(vdiff.pbl_height, shape), jnp.float64)
-            if vdiff is not None else zeros64
+            jnp.asarray(jnp.broadcast_to(vdiff.pbl_height, shape), cdt)
+            if vdiff is not None else zeros_c
         )
 
         core_state = {
             "q": q,
             "qqcw": qqcw,
             "dgncur_a": jnp.broadcast_to(
-                jnp.asarray(self._dgnum, jnp.float64), shape + (self._ntot,)
+                jnp.asarray(self._dgnum, cdt), shape + (self._ntot,)
             ),
-            "t": jnp.asarray(state.temperature, jnp.float64),
-            "pmid": jnp.asarray(diagnostics["pressure_full"], jnp.float64),
-            "cldn": zeros64,
-            "zmid": jnp.asarray(diagnostics["height_full"], jnp.float64),
+            "t": jnp.asarray(state.temperature, cdt),
+            "pmid": jnp.asarray(diagnostics["pressure_full"], cdt),
+            "cldn": zeros_c,
+            "zmid": jnp.asarray(diagnostics["height_full"], cdt),
             "pblh": pblh,
-            "relhum": jnp.asarray(rh, jnp.float64),
+            "relhum": jnp.asarray(rh, cdt),
             "deltat": dt,
         }
 

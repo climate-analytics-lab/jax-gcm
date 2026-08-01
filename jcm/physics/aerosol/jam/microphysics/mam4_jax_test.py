@@ -205,6 +205,41 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         finally:
             _amicphys.configure_condensation(backend="substep")
 
+    def test_core_dtype_scoped_float32(self):
+        # The float32 core runs under a SCOPED x64-off context: the global
+        # flag (float64 host, e.g. pySES dynamics) must stay untouched, and
+        # the float32-core forward tendencies must closely track the float64
+        # core (forward is float32-safe per MAM4-JAX #60; the DEFAULT stays
+        # float64 because the float32 REVERSE pass is non-finite — see the
+        # constructor docstring).
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        t64 = Mam4JaxMicrophysics()          # default: float64 core
+        self.assertFalse(t64._core_f32)
+        state, diagnostics = _column_state()
+        tend64, _ = t64(state, diagnostics, None, None)
+
+        t32 = Mam4JaxMicrophysics(core_dtype="float32")
+        self.assertTrue(t32._core_f32)
+        tend32, _ = t32(state, diagnostics, None, None)
+        self.assertTrue(jax.config.read("jax_enable_x64"),
+                        "scoped f32 core must not clear the global x64 flag")
+
+        for k in tend64.tracers:
+            a = np.asarray(tend32.tracers[k], np.float64)
+            b = np.asarray(tend64.tracers[k], np.float64)
+            scale = max(float(np.abs(b).max()), 1e-30)
+            # The 1e-16 floor absorbs tendencies that are numerically zero in
+            # float64 (O(1e-17) round-off) and flush to exact zero in float32.
+            np.testing.assert_allclose(
+                a, b, atol=1e-3 * scale + 1e-16, err_msg=f"tracer {k}",
+            )
+
+        with self.assertRaises(ValueError):
+            Mam4JaxMicrophysics(core_dtype="bf16")
+
     def test_grad_through_a_tracer_is_finite(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (

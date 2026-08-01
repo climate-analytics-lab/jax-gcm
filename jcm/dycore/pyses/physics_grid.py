@@ -63,7 +63,7 @@ class FVPhysicsGrid:
 
     def __init__(self, h_grid, dims, nf: int = 2):
         """Build the FV grid struct and seam-safe cell coordinates."""
-        require_pyses()
+        backend = require_pyses()
         from pyses.dynamical_cores.finite_volume_grid import init_fv_grid
 
         self.h_grid = h_grid
@@ -73,6 +73,14 @@ class FVPhysicsGrid:
         self.npt = int(dims["npt"])
         self.num_cols = self.num_elem * self.nf * self.nf
         self.fv_grid = init_fv_grid(h_grid, dims, nf=self.nf)
+        # Multi-device: pyses shards the element axis across devices under an
+        # *explicit* mesh (jax.set_mesh in its backend). Columns are flattened
+        # element-major here (ncol = E·nf·nf), so the element sharding and a
+        # block sharding of the column axis are the SAME partitioning — but
+        # explicit-mode reshapes that merge/split the sharded axis must state
+        # the output sharding (see _reshape). Single device: plain reshapes.
+        self._do_sharding = bool(getattr(backend, "do_sharding", False))
+        self._elem_axis = getattr(backend, "_elem_axis_name", "f")
 
         # Seam-safe cell centres: area-average the unit Cartesian position
         # of every GLL node over each FV cell, then re-normalise onto the
@@ -116,16 +124,35 @@ class FVPhysicsGrid:
     # Physics-layout gathers/scatters ((nlev, 1, ncol) on the physics side)
     # ------------------------------------------------------------------
 
+    def _reshape(self, x, shape, sharded_axes):
+        """Reshape, stating the element sharding of the output when active.
+
+        ``sharded_axes`` marks which OUTPUT axes carry the (block) element
+        sharding — always the axis that contains the element dimension,
+        since columns are element-major. Explicit-mesh JAX requires
+        merge/split reshapes of a sharded axis to state their output
+        sharding; on a single device this is a plain reshape.
+        """
+        if not self._do_sharding:
+            return x.reshape(shape)
+        import jax
+        from jax.sharding import PartitionSpec
+
+        spec = PartitionSpec(
+            *[self._elem_axis if s else None for s in sharded_axes])
+        return jax.lax.reshape(x, shape, out_sharding=spec)
+
     def gather_3d(self, field):
         """GLL ``(E, npt, npt, nlev)`` → physics ``(nlev, 1, ncol)``."""
         fv = self.gather_cells(field)                       # (E, nf, nf, nlev)
-        cols = fv.reshape(self.num_cols, fv.shape[-1])      # (ncol, nlev)
+        cols = self._reshape(fv, (self.num_cols, fv.shape[-1]),
+                             (True, False))                 # (ncol, nlev)
         return jnp.moveaxis(cols, 0, 1)[:, None, :]         # (nlev, 1, ncol)
 
     def gather_2d(self, field):
         """GLL ``(E, npt, npt)`` → physics ``(1, ncol)``."""
         fv = self.gather_cells(field)                       # (E, nf, nf)
-        return fv.reshape(1, self.num_cols)
+        return self._reshape(fv, (1, self.num_cols), (False, True))
 
     def scatter_3d(self, cols):
         """Physics ``(nlev, 1, ncol)`` → GLL ``(E, npt, npt, nlev)`` in float64.
@@ -135,15 +162,18 @@ class FVPhysicsGrid:
         result is element-discontinuous; apply :meth:`dss` afterwards.
         """
         nlev = cols.shape[0]
-        flat = jnp.asarray(cols, dtype=jnp.float64).reshape(nlev, self.num_cols)
-        fv = jnp.moveaxis(flat, 0, 1).reshape(
-            self.num_elem, self.nf, self.nf, nlev)
+        flat = self._reshape(jnp.asarray(cols, dtype=jnp.float64),
+                             (nlev, self.num_cols), (False, True))
+        fv = self._reshape(jnp.moveaxis(flat, 0, 1),
+                           (self.num_elem, self.nf, self.nf, nlev),
+                           (True, False, False, False))
         return self.scatter_cells(fv)
 
     def scatter_2d(self, cols):
         """Physics ``(1, ncol)`` → GLL ``(E, npt, npt)`` in float64 (discontinuous)."""
-        fv = jnp.asarray(cols, dtype=jnp.float64).reshape(
-            self.num_elem, self.nf, self.nf)
+        fv = self._reshape(jnp.asarray(cols, dtype=jnp.float64),
+                           (self.num_elem, self.nf, self.nf),
+                           (True, False, False))
         return self.scatter_cells(fv)
 
     # ------------------------------------------------------------------

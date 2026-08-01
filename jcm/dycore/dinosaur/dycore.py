@@ -96,8 +96,38 @@ class DinosaurDycore(DynamicalCore):
         diffusion: DiffusionFilter | None = None,
         tracer_filter: Any | None = None,
         compute_frontogenesis: bool = False,
+        advection: str = "eulerian",
+        sl_options: Mapping[str, Any] | None = None,
     ):
-        """Initialise the dinosaur backend; see the class docstring for argument semantics."""
+        """Initialise the dinosaur backend; see the class docstring for argument semantics.
+
+        ``advection`` selects the transport formulation:
+
+        * ``"eulerian"`` (default) — the classic spectral-transform core
+          (IMEX-RK SIL3), unchanged.
+        * ``"semi_lagrangian"`` — dinosaur's semi-Lagrangian core
+          (neuralgcm/dinosaur#135): departure-point transport with the
+          Bermejo–Staniforth quasi-monotone limiter, integrated with
+          ``semi_lagrangian_crank_nicolson_rk2`` (self-starting, so jcm's
+          chunk/resume structure needs no special first step). Every jcm
+          extra tracer (aerosol mass/number, gases, cloud condensate — all
+          of ``tracer_specs``) is carried as a NODAL tracer: it never
+          round-trips through the spectral basis, which removes the
+          per-step Gibbs ringing that made sharp emission sources go
+          negative and NaN the aerosol microphysics (#521), and makes the
+          limiter's non-negativity exact. ``specific_humidity`` stays
+          modal (it participates in the implicit q↔Tv coupling).
+          ``sl_options`` forwards extras: ``interpolation_order``
+          ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
+          (1), ``off_centering`` (0.0), ``vertical_interpolation_order``
+          ('linear').
+        """
+        if advection not in ("eulerian", "semi_lagrangian"):
+            raise ValueError(
+                f"advection must be 'eulerian' or 'semi_lagrangian', got {advection!r}"
+            )
+        self.advection = advection
+        self._sl_options = dict(sl_options or {})
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
@@ -151,11 +181,45 @@ class DinosaurDycore(DynamicalCore):
             self.terrain.orog, self.coords, wavenumbers_to_clip=2,
         )
 
-        # Dispatch on the vertical-coordinate family. Hybrid coords carry
-        # ``a_boundaries`` in Pa; tell the dycore to interpret ``hpa_quantity``
-        # accordingly. Hybrid is the only family that currently accepts a
-        # ``humidity_key`` (q ↔ Tv coupling).
-        if isinstance(self.coords.vertical, HybridCoordinates):
+        # Every jcm extra tracer rides nodally under semi-Lagrangian
+        # transport (see the constructor docstring); the Eulerian core has
+        # no nodal tracers.
+        self._nodal_tracers = (
+            tuple(self.tracer_specs) if advection == "semi_lagrangian" else ()
+        )
+
+        # Dispatch on (advection, vertical-coordinate family). Hybrid coords
+        # carry ``a_boundaries`` in Pa; tell the dycore to interpret
+        # ``hpa_quantity`` accordingly. Hybrid is the only family that
+        # currently accepts a ``humidity_key`` (q ↔ Tv coupling).
+        if advection == "semi_lagrangian":
+            sl_kwargs = dict(
+                interpolation_order=self._sl_options.get("interpolation_order", "cubic"),
+                monotone_tracers=self._sl_options.get("monotone_tracers", True),
+                nodal_tracers=self._nodal_tracers,
+                departure_iterations=self._sl_options.get("departure_iterations", 1),
+                vertical_interpolation_order=self._sl_options.get(
+                    "vertical_interpolation_order", "linear"),
+            )
+            if isinstance(self.coords.vertical, HybridCoordinates):
+                self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
+                    reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                    hpa_quantity=units.pascal,
+                    humidity_key='specific_humidity',
+                    **sl_kwargs,
+                )
+            else:
+                self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
+                    reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                    **sl_kwargs,
+                )
+        elif isinstance(self.coords.vertical, HybridCoordinates):
             self._primitive = primitive_equations.PrimitiveEquationsHybrid(
                 reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
                 orography=self._truncated_orography,
@@ -277,25 +341,46 @@ class DinosaurDycore(DynamicalCore):
             ),
             level_orders=self.diffusion.level_orders_temp,
         )
-        return [
+        filters = [
             self._conserve_global_mean_ps,
             diffuse_div,
             diffuse_vor_q,
             diffuse_temp,
         ]
+        if self._nodal_tracers:
+            # Modal hyperdiffusion masks are shaped like the spectral basis —
+            # meaningless (and shape-incompatible) for the nodal tracers the
+            # SL core carries. Wrap every filter so nodal tracers pass
+            # through untouched (their smoothing is the SL interpolation +
+            # quasi-monotone limiter, by design).
+            filters = [
+                primitive_equations.step_filter_excluding_nodal_tracers(
+                    f, self._nodal_tracers,
+                )
+                for f in filters
+            ]
+        return filters
 
     # ------------------------------------------------------------------
     # Dynamics step (IMEX-RK SIL3)
     # ------------------------------------------------------------------
 
     def _build_dynamics_step_fn(self):
-        """Build the IMEX-RK SIL3 step over pure dynamics.
+        """Build the dynamics step (IMEX-RK SIL3, or SL Crank–Nicolson RK2).
 
         The op-split caller adds the physics dynamics-tendency to the state
         forward-Euler-style before invoking this; the integrator advances
-        ``state.sim_time`` by ``dt`` and applies the implicit-explicit RK
-        stages.
+        ``state.sim_time`` by ``dt`` and applies its stages. The
+        semi-Lagrangian path uses the self-starting two-stage
+        ``semi_lagrangian_crank_nicolson_rk2`` (not SETTLS): it carries no
+        cross-step departure memory, so jcm's chunked ``lax.scan`` /
+        checkpoint-resume structure works unchanged.
         """
+        if self.advection == "semi_lagrangian":
+            return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
+                self._primitive, self._dt,
+                off_centering=self._sl_options.get("off_centering", 0.0),
+            )
         return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
 
     # ------------------------------------------------------------------
@@ -323,6 +408,7 @@ class DinosaurDycore(DynamicalCore):
         if physics_state is not None:
             state = physics_state_to_dynamics_state(
                 physics_state, self._primitive, tracer_specs=specs,
+                nodal_tracers=self._nodal_tracers,
             )
         else:
             state = self._default_state_fn(jax.random.PRNGKey(random_seed))
@@ -340,19 +426,29 @@ class DinosaurDycore(DynamicalCore):
             }
 
         # Seed any required tracers not already present in ``state.tracers``.
+        # Nodal tracers live on the gridpoint lat-lon grid (the whole point:
+        # no spectral representation), so their seed is a nodal constant.
+        nodal_ones = None
+        if self._nodal_tracers:
+            nlev = self.coords.vertical.layers
+            nodal_ones = jnp.ones((nlev,) + self.coords.horizontal.nodal_shape)
         for spec in specs.values():
             if spec.name in state.tracers:
                 continue
-            state.tracers[spec.name] = (
-                spec.initial_value
-                * jnp.ones_like(state.tracers['specific_humidity'])
-            )
+            if spec.name in self._nodal_tracers:
+                state.tracers[spec.name] = spec.initial_value * nodal_ones
+            else:
+                state.tracers[spec.name] = (
+                    spec.initial_value
+                    * jnp.ones_like(state.tracers['specific_humidity'])
+                )
 
         return State(**state.asdict(), sim_time=sim_time)
 
     def to_physics_state(self, state: State) -> PhysicsState:
         physics_state = dynamics_state_to_physics_state(
             state, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
         )
         # Clean the gridpoint tracers as we hand them to the physics. A spectral
         # projection of a sharp, near-zero tracer source rings into negatives
@@ -444,6 +540,7 @@ class DinosaurDycore(DynamicalCore):
             physics_tendency = self.coords.with_physics_sharding(physics_tendency)
             dyn_tendency = physics_tendency_to_dynamics_tendency(
                 physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
+                nodal_tracers=self._nodal_tracers,
             )
             state_after_physics = state + self._dt * dyn_tendency
         else:

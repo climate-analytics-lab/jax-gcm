@@ -223,12 +223,22 @@ class AqueousSulfur(PhysicsTerm):
         self._so4_modes = tuple(
             m.short for m in self._spec.modes if "so4" in m.species
         )
-        # Fallback "droplet" mode for sulfate produced where no cloud-borne
-        # number exists yet — HAM assigns it to the coarse mode (Seinfeld &
-        # Pandis 1998); fall back to the last sulfate mode if there is none.
-        self._droplet_mode = next(
-            (m.short for m in self._spec.modes if m.name == "coarse"),
-            self._so4_modes[-1],
+        # Fallback destination for sulfate produced where no cloud-borne
+        # number exists: the INTERSTITIAL accumulation mode. HAM assigns this
+        # droplet sulfate to the cloud-borne coarse mode (Seinfeld & Pandis
+        # 1998) — but HAM also scavenges cloud-borne aerosol. This chain has
+        # neither an activation transfer populating cloud-borne tracers
+        # (``nc_* ≡ 0`` everywhere today) nor cloud-borne wet scavenging
+        # (``wetdep_term`` is interstitial-only), so the HAM fallback made
+        # ``mc_so4_cor`` a sourced, sink-less reservoir: the first online-
+        # emission ne30 year grew it linearly ~0.7 mg/m²/day with no
+        # equilibrium. Producing into interstitial accumulation instead is
+        # the simpler-HAM "immediate detrainment" treatment — transport,
+        # optics and both deposition pathways all act on it. Revisit when
+        # real cloud-borne cycling (activation transfer + cloud-borne
+        # scavenging) exists.
+        self._fallback_interstitial = (
+            "acc" if "acc" in self._so4_modes else self._so4_modes[0]
         )
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -274,12 +284,14 @@ class AqueousSulfur(PhysicsTerm):
         so2_rate = -so4_rate * (_MW_SO2 / _MW_SO4)   # S-conserving SO2 sink
 
         # Distribute the cloud-borne sulfate over the sulfate modes by their
-        # cloud-borne number fraction (HAM ms4as/ms4cs split). Where a cell has
-        # no cloud-borne number yet (spin-up, or a column without cloud-borne
-        # aerosol) the fractions would all be zero and the sulfur consumed by
-        # the SO2 sink would vanish; HAM instead deposits that droplet sulfate
-        # in the coarse mode, so ``frac`` falls back to 1 there. The fractions
-        # always sum to 1, so the produced sulfate exactly matches the SO2 sink.
+        # cloud-borne number fraction (HAM ms4as/ms4cs split). Where a cell
+        # has no cloud-borne number (spin-up, or — today — everywhere, since
+        # no activation transfer populates the cloud-borne tracers yet) the
+        # production goes to INTERSTITIAL accumulation-mode sulfate instead
+        # (see ``_fallback_interstitial`` in ``__init__`` for why this
+        # deviates from HAM's cloud-borne-coarse assignment). The cloud-borne
+        # fractions plus the fallback branch always sum to 1, so the produced
+        # sulfate exactly matches the SO2 sink.
         nc = {
             m: jnp.maximum(
                 state.tracers.get(number_name(m, cloud_borne=True), zeros), 0.0
@@ -292,9 +304,14 @@ class AqueousSulfur(PhysicsTerm):
 
         tracer_tends: dict[str, jnp.ndarray] = {"g_so2": so2_rate}
         for m in self._so4_modes:
-            fallback = 1.0 if m == self._droplet_mode else 0.0
-            frac = jnp.where(has_number, nc[m] / nc_safe, fallback)
+            frac = jnp.where(has_number, nc[m] / nc_safe, 0.0)
             tracer_tends[mass_name("so4", m, cloud_borne=True)] = so4_rate * frac
+        # Interstitial fallback carries the full production where no droplet
+        # population exists (m_so4_* keys are disjoint from the mc_* ones
+        # above, so this is a fresh entry, not an accumulation).
+        tracer_tends[mass_name("so4", self._fallback_interstitial)] = (
+            jnp.where(has_number, 0.0, so4_rate)
+        )
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

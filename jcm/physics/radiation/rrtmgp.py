@@ -74,7 +74,10 @@ def _ensure_rrtmgp():
     rrtmgp_data_path = rrtmgp_root / "optics" / "rrtmgp_data"
     test_data_path = rrtmgp_root / "optics" / "test_data"
 
-    with warnings.catch_warnings():
+    # Constructed under scoped x64-off so the lookup tables load float32 even
+    # on x64 hosts (pySES / MAM4-JAX) — see the compute_heating_rate call in
+    # ``radiation_scheme_rrtmgp`` for the full rationale.
+    with warnings.catch_warnings(), jax.enable_x64(False):
         warnings.simplefilter("ignore")
         _GLOBAL_RRTMGP_INSTANCE = RRTMGP(
             radiative_transfer_cfg=radiative_transfer.RadiativeTransfer(
@@ -127,9 +130,17 @@ def _ensure_rrtmgp():
 def _to_3d_with_nan_halo(
     arr_1d: jnp.ndarray, nlev: int, halo: int = 1
 ) -> jnp.ndarray:
-    """Convert 1D profile to 3D (1,1,nz+2*halo) with NaN halos (for temperature)."""
+    """Convert 1D profile to 3D (1,1,nz+2*halo) with NaN halos (for temperature).
+
+    The halo buffer is pinned to the profile's dtype: a dtype-less
+    ``jnp.full`` defaults to float64 under ``jax_enable_x64`` (which pySES /
+    MAM4-JAX hosts turn on process-wide), and a float64 temperature meeting
+    the float32 ``vmr_fields`` inside the library's gas-optics ``lax.cond``
+    branches is a trace-time TypeError — every other padder here already
+    pins ``dtype=arr_1d.dtype``.
+    """
     nzh = nlev + 2 * halo
-    arr_3d = jnp.full((1, 1, nzh), jnp.nan)
+    arr_3d = jnp.full((1, 1, nzh), jnp.nan, dtype=arr_1d.dtype)
     arr_3d = arr_3d.at[0, 0, halo : halo + nlev].set(arr_1d)
     return arr_3d
 
@@ -242,10 +253,11 @@ def prepare_rrtmgp_data(
     nlev = icon_data.temperature.shape[0]
     halo = 1
 
+    # dtype pinned for the same x64 reason as _to_3d_with_nan_halo.
     if r_eff_liq_um is None:
-        r_eff_liq_um = jnp.zeros((nlev,))
+        r_eff_liq_um = jnp.zeros((nlev,), dtype=icon_data.temperature.dtype)
     if r_eff_ice_um is None:
-        r_eff_ice_um = jnp.zeros((nlev,))
+        r_eff_ice_um = jnp.zeros((nlev,), dtype=icon_data.temperature.dtype)
 
     to3d_nan = lambda a: _to_3d_with_nan_halo(a, nlev, halo)  # noqa: E731
     to3d_fill = lambda a: _to_3d_with_filled_halo(a, nlev, halo)  # noqa: E731
@@ -779,7 +791,33 @@ def radiation_scheme_rrtmgp(
     # map in the library — deferred to the cloud/surface optics overhaul.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
 
-    rrtmgp_output = rrtmgp_instance.compute_heating_rate(
+    # The library call is float32 end-to-end regardless of the host's x64
+    # state, in two coordinated steps (either alone is insufficient — the
+    # first two derecho pySES JAM smoke runs failed on each half separately):
+    #
+    # 1. Every floating leaf crossing the library boundary is cast to
+    #    float32. On ``jax_enable_x64`` hosts (pySES CAM-SE, MAM4-JAX)
+    #    float64 leaks into *some* of these upstream (hybrid pressure
+    #    tables, solar-geometry scalars), and one mixed-dtype leaf is a
+    #    trace-time TypeError inside the library's gas-optics ``lax.cond``
+    #    branches.
+    # 2. The call itself runs under a scoped ``jax.enable_x64(False)``
+    #    context so the library's own dtype-less internals (``jnp.float_``
+    #    gas tables in ``get_vmr``, dtype-less literals) also come out
+    #    float32 instead of float64.
+    #
+    # Together they reproduce exactly the float32 radiation the scheme is
+    # validated with on non-x64 hosts, without touching the host's global
+    # flag (upstream issue class: runs/UPSTREAM_ISSUE_jax-rrtmgp.md).
+    def _f32_leaves(tree):
+        return jax.tree_util.tree_map(
+            lambda x: (x.astype(jnp.float32)
+                       if isinstance(x, jnp.ndarray)
+                       and jnp.issubdtype(x.dtype, jnp.floating) else x),
+            tree,
+        )
+
+    lib_in = _f32_leaves(dict(
         zenith=zenith_angle, irrad=irrad_val,
         sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
         cloud_path_liq_lw_per_gpt=cpl_lw_4d,
@@ -790,7 +828,9 @@ def radiation_scheme_rrtmgp(
         aerosol_optics_sw=aerosol_optics_sw,
         aerosol_optics_lw=aerosol_optics_lw,
         **rrtmgp_input,
-    )
+    ))
+    with jax.enable_x64(False):
+        rrtmgp_output = rrtmgp_instance.compute_heating_rate(**lib_in)
 
     # Optional clear-sky call for the cloud radiative effect. With the
     # broadcast q_liq / q_ice already zero and no per-gpoint cloud
@@ -798,14 +838,15 @@ def radiation_scheme_rrtmgp(
     # Aerosols are intentionally included on the clear-sky branch — CMIP
     # convention is that "clear-sky" means cloud-free, aerosols included.
     if compute_cre:
-        rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
-            zenith=zenith_angle, irrad=irrad_val,
-            sfc_alb=sfc_alb_broadband, sfc_emis=surface_emissivity,
-            vmr_fields=vmr_fields or None,
-            aerosol_optics_sw=aerosol_optics_sw,
-            aerosol_optics_lw=aerosol_optics_lw,
-            **rrtmgp_input,
-        )
+        # Same float32 boundary + scoped-x64 rationale as the all-sky call;
+        # the clear-sky call is simply the same inputs minus the per-gpoint
+        # cloud paths.
+        clear_in = {k: v for k, v in lib_in.items()
+                    if not k.startswith("cloud_path_")}
+        with jax.enable_x64(False):
+            rrtmgp_output_clear = rrtmgp_instance.compute_heating_rate(
+                **clear_in,
+            )
         toa_sw_up_clear = (
             rrtmgp_output_clear["toa_sw_flux_outgoing_2d_xy"][0, 0]
         )

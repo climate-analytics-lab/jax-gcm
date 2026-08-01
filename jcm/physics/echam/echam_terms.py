@@ -69,6 +69,7 @@ def echam_physics(
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
+    radiation_compute_cre: bool = True,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
@@ -116,6 +117,10 @@ def echam_physics(
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
             ``"emulated"``, or a custom radiation ``PhysicsTerm``.
+        radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
+            for the cloud-radiative-effect diagnostic (default True).
+            ``False`` halves the RRTMGP cost on radiation-compute steps;
+            use for production throughput runs that don't analyse CRE.
         cloud_scheme: ``"1m"`` (default, single-moment) or ``"2m"``
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
@@ -174,7 +179,11 @@ def echam_physics(
             )
         rad_term = radiation_scheme
     elif radiation_scheme == "rrtmgp":
-        rad_term = RRTMGPRadiation(params=radiation_p)
+        # compute_cre doubles the RRTMGP work on radiation steps (a second
+        # full clear-sky solve) purely for the CRE diagnostic — production
+        # throughput runs can turn it off.
+        rad_term = RRTMGPRadiation(params=radiation_p,
+                                   compute_cre=radiation_compute_cre)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":
@@ -234,6 +243,14 @@ def echam_physics(
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
         )
+        # The per-band Mie optics are only consumed by the interval-gated
+        # radiation term, so the optics term skips recomputing them on the
+        # steps where radiation replays its cache (see
+        # ``JamOpticsTerm.configure_radiation_gate``) — same post-compose
+        # configuration pattern as ``configure_spa`` below.
+        for _t in jam_terms:
+            if hasattr(_t, "configure_radiation_gate"):
+                _t.configure_radiation_gate(radiation_p.radiation_interval)
         # Aqueous chemistry + wet deposition need the current step's clouds, so
         # they run after the cloud microphysics term; the rest of the JAM chain
         # is the pre-cloud aerosol block.
