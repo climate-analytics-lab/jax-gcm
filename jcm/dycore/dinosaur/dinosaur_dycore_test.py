@@ -40,3 +40,24 @@ class SemiLagrangianAvailabilityTest(unittest.TestCase):
                 dt_seconds=1800.0,
             )
         self.assertEqual(dyc.advection, "eulerian")
+
+    def test_availability_probe_checks_both_modules(self):
+        # The operator classes live on primitive_equations, the integrator
+        # on time_integration; probing one module reports unavailable on a
+        # capable build and blocks every SL run.
+        from unittest import mock
+
+        from dinosaur import primitive_equations, time_integration
+
+        from jcm.dycore.dinosaur.dycore import semi_lagrangian_available
+
+        with mock.patch.object(primitive_equations,
+                               "SemiLagrangianPrimitiveEquations",
+                               object, create=True), \
+             mock.patch.object(primitive_equations,
+                               "SemiLagrangianPrimitiveEquationsHybrid",
+                               object, create=True), \
+             mock.patch.object(time_integration,
+                               "semi_lagrangian_crank_nicolson_rk2",
+                               object, create=True):
+            self.assertTrue(semi_lagrangian_available())

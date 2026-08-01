@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import dinosaur
-from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur import primitive_equations, primitive_equations_states, time_integration
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -44,11 +44,13 @@ def semi_lagrangian_available() -> bool:
     dinosaur yet; ``advection="semi_lagrangian"`` requires a build that
     exposes it.
     """
-    return all(hasattr(primitive_equations, name) for name in (
-        "SemiLagrangianPrimitiveEquations",
-        "SemiLagrangianPrimitiveEquationsHybrid",
-        "semi_lagrangian_crank_nicolson_rk2",
-    ))
+    return (
+        all(hasattr(primitive_equations, name) for name in (
+            "SemiLagrangianPrimitiveEquations",
+            "SemiLagrangianPrimitiveEquationsHybrid",
+        ))
+        and hasattr(time_integration, "semi_lagrangian_crank_nicolson_rk2")
+    )
 
 
 def physics_specs_from_constants(
