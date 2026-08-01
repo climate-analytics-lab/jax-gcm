@@ -2,6 +2,8 @@
 
 import unittest
 
+import pytest
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -283,8 +285,13 @@ class GeometryTest(unittest.TestCase):
             TrackObserver([0.0], [0.0], [0.0], variables=())
 
 
+@pytest.mark.slow
 class ModelIntegrationTest(unittest.TestCase):
-    """End-to-end: observers threaded through Model.run / resume."""
+    """End-to-end: observers threaded through Model.run / resume.
+
+    Slow-marked so the PR-gate coverage run (slow tests only) exercises
+    the observers module end-to-end.
+    """
 
     def _model(self, observers, coords=None, physics=None):
         from jcm.model import Model
