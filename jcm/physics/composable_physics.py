@@ -365,9 +365,20 @@ class ComposablePhysics(nnx.Module, Physics):
         nlev = coords.nodal_shape[0]
         shape_3d = (nlev,) + nodal_shape
 
+        # Seed the probe with every declared tracer (zeros) so the template's
+        # pytree structure matches real steps, where ``state.tracers`` holds
+        # the keys aggregated from ``required_tracers()``. Terms that echo
+        # ``state.tracers`` into the diagnostics dict (e.g. the StateSampler
+        # feeding the virtual-observation channel) would otherwise produce a
+        # carry whose structure differs from this template — a lax.scan
+        # pytree mismatch on the first step.
         probe_state = PhysicsState.zeros(shape_3d).copy(
             temperature=jnp.full(shape_3d, 288.0),
             normalized_surface_pressure=jnp.ones(nodal_shape),
+            tracers={
+                spec.name: jnp.zeros(shape_3d)
+                for spec in self.required_tracers()
+            },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
         probe_terrain = TerrainData.aquaplanet(coords)
