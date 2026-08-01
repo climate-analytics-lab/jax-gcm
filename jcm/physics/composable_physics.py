@@ -425,6 +425,7 @@ class ComposablePhysics(nnx.Module, Physics):
         "_dycore_fields",
         "_forcing_2d",
         "_echam_params",
+        "_echam_coords",
         "_speedy_coords",
     })
 
