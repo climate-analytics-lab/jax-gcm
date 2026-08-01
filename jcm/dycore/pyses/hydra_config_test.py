@@ -59,17 +59,17 @@ class PysesHydraConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dinosaur-specific"):
             build_model(cfg)
 
-    def test_jam_forcing_files_fail_loudly_on_pyses(self):
-        # The column forcing path does not carry the aerosol inputs yet;
-        # running silently aerosol-dark is exactly the ne30 JAM failure —
-        # it must raise instead.
+    def test_jam_forcing_files_flow_and_fail_loudly_on_pyses(self):
+        # The column path carries the JAM aerosol inputs through
+        # attach_jam_forcing; a bad path must still fail loudly rather
+        # than run silently aerosol-dark.
         pytest.importorskip("pyses")
         from jcm.runners import build_forcing, build_model
 
         cfg = _cfg(["dycore=pyses_ne30l47", "physics=speedy", "dycore.nx=3",
                     "forcing.dms_file=/nonexistent.nc"])
         model = build_model(cfg)
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises((FileNotFoundError, OSError, ValueError)):
             build_forcing(cfg, model.coords, dycore=model.dycore)
 
 
