@@ -841,23 +841,41 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
     descending latitude — they are validated and flipped to model order).
     """
     if dycore is not None and hasattr(dycore, "colmap"):
-        # pySES backend: monthly lon/lat climatology interpolated onto the
-        # physics columns at build time. The JAM aerosol inputs
-        # (emissions/dms/dust/oxidants files) are not carried on this path
-        # yet — fail loudly rather than run silently aerosol-dark (that is
-        # exactly what produced the sea-salt-only ne30 JAM year).
-        for key in ("emissions_file", "dms_file", "dust_file", "oxidants_file"):
-            if cfg.forcing.get(key, None):
-                raise NotImplementedError(
-                    f"forcing.{key} is not supported on the pySES column "
-                    "path yet — extend jcm.dycore.pyses.forcing.build_forcing "
-                    "to carry the aerosol fields (see the JAM online-aerosol "
-                    "handoff notes)."
-                )
+        # pySES backend: monthly lon/lat climatology + JAM aerosol inputs,
+        # each bilinearly interpolated onto the physics columns at build
+        # time by ``jcm.dycore.pyses.forcing`` (files may live on any
+        # regular lon/lat grid). ``ozone_file: auto`` resolves the packaged
+        # climatology — column sampling has no exact-grid requirement, so
+        # the T63 file serves any pySES resolution.
         from jcm.dycore.pyses.forcing import build_forcing as pyses_build_forcing
 
+        ozone_file = cfg.forcing.get("ozone_file", None)
+        if ozone_file == "auto":
+            from importlib import resources
+
+            cand = (Path(str(resources.files("jcm")))
+                    / "data" / "bc" / "t63" / "ozone.nc")
+            if cand.exists():
+                ozone_file = str(cand)
+            else:
+                logging.warning(
+                    "forcing.ozone_file=auto: packaged t63/ozone.nc missing "
+                    "— pySES run falls back to the ANALYTIC ozone profile "
+                    "(~12 W/m2 clear-sky OLR low bias)."
+                )
+                ozone_file = None
+        elif ozone_file in ("", "null", "none"):
+            ozone_file = None
+
         file = cfg.forcing.get("file", None) or _pyses_default_bc("forcing.nc")
-        return pyses_build_forcing(str(file), dycore)
+        return pyses_build_forcing(
+            str(file), dycore,
+            emissions_file=cfg.forcing.get("emissions_file", None),
+            dms_file=cfg.forcing.get("dms_file", None),
+            dust_file=cfg.forcing.get("dust_file", None),
+            oxidants_file=cfg.forcing.get("oxidants_file", None),
+            ozone_file=ozone_file,
+        )
 
     forcing_cfg = cfg.get("forcing", None)
     if forcing_cfg is None or forcing_cfg.kind == "default":
