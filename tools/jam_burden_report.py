@@ -1,32 +1,28 @@
-"""Column-burden sanity report for pySES JAM runs.
+"""Column-burden report for JAM aerosol runs — any dycore, any grid.
 
-Reads one or more chunk netCDFs from ``tools/run_pyses_climatology.py``
-(regular lat/lon output, hybrid tables attached by
-``PysesCamSEDycore.to_xarray``), sums interstitial + cloud-borne mass over
-all modes per species, integrates ``q·dp/g`` over the column, and prints
-time-mean global burdens against the HAMMOZ/CESM climatological anchors —
-the §8 validation gate for the online-aerosol wiring (BC/SO4/dust must come
-alive, sea salt must stay in range).
+Reads jcm output netCDF(s), sums interstitial + cloud-borne mass over the
+modes carrying each species, integrates ``q·dp/g`` over the column with the
+file's own ``pressure_half``, and prints time-mean global burdens against
+climatological anchor ranges. With ``--emissions-file`` it also prints each
+primarily-emitted species' inferred lifetime
+(burden / global-mean primary emission rate).
 
 Usage:
-    python tools/jam_burden_report.py out_day*.nc [--png burdens.png]
+    python tools/jam_burden_report.py out_day*.nc
+        [--emissions-file emis.nc] [--png burdens.png]
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 GRAV = 9.80665
 
-# species -> (modes carrying it, (lo, hi) mg/m² global-mean anchor range).
-# Anchors are the handoff's HAMMOZ/CESM climatology magnitudes.
+# species -> (modes carrying it, (lo, hi) mg/m² global-mean anchor range;
+# HAMMOZ/CESM climatology magnitudes).
 _SPECIES = {
     "so4": (("acc", "ait", "cor"), (2.0, 4.0)),
     "bc": (("acc", "cor", "pcm"), (0.1, 0.3)),
@@ -35,48 +31,120 @@ _SPECIES = {
     "poa": (("acc", "cor", "pcm"), (1.0, 3.0)),
 }
 
+# Emission channels are speciated as SO2/BC/OC; map each burden species to
+# its primary channel. so4's sulfur arrives as SO2 — its source is reported
+# as potential sulfate (× 96/64 by molar mass).
+_EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
+                 "poa": ("oc", 1.0)}
+
+
+def _horizontal_dims(da: xr.DataArray) -> list[str]:
+    return [d for d in da.dims if d not in ("time", "level", "level_i",
+                                            "level_interface", "mode")]
+
+
+def _area_weights(ds: xr.Dataset):
+    if "lat" in ds.coords:
+        return xr.DataArray(np.cos(np.deg2rad(ds["lat"].values)), dims="lat")
+    return None
+
+
+def _wmean(da: xr.DataArray, weights) -> float:
+    dims = _horizontal_dims(da)
+    if weights is not None and "lat" in dims:
+        return float(da.weighted(weights).mean(dims))
+    return float(da.mean(dims))
+
+
+def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
+    """Per-layer Δp aligned with the 3-D fields' level orientation.
+
+    ``pressure_half`` may be stored in the opposite vertical order to the
+    full-level fields (dinosaur writes interfaces top-first, fields
+    surface-first); orient by comparing which end is the surface.
+    """
+    iface_dim = next(d for d in ("level_i", "level_interface") if d in ds.dims)
+    ph = ds["pressure_half"]
+    if "time" in ph.dims:
+        ph = ph.isel(time=0)
+    axis = list(ph.dims).index(iface_dim)
+    dp = np.abs(np.diff(np.asarray(ph.values), axis=axis))
+    half_surface_first = (float(ph.isel({iface_dim: 0}).mean())
+                          > float(ph.isel({iface_dim: -1}).mean()))
+    pf = ds["pressure_full"]
+    if "time" in pf.dims:
+        pf = pf.isel(time=0)
+    full_surface_first = (float(pf.isel(level=0).mean())
+                          > float(pf.isel(level=-1).mean()))
+    if half_surface_first != full_surface_first:
+        dp = np.flip(dp, axis=axis)
+    dims = tuple("level" if d == iface_dim else d for d in ph.dims)
+    return xr.DataArray(dp, dims=dims)
+
 
 def burden(ds: xr.Dataset, species: str, modes) -> xr.DataArray | None:
     """Time-mean column burden [mg/m²] of a species summed over modes."""
-    from jcm.dycore.pyses.coords import full_echam_hybrid
-
     names = [f"{p}_{species}_{m}" for m in modes for p in ("m", "mc")]
     present = [n for n in names if n in ds]
     if not present:
         return None
-    q = sum(ds[n] for n in present)              # (time, level, lon, lat) kg/kg
-    a_b, b_b = full_echam_hybrid(ds.sizes["level"])
-    # Output level axis is surface-first; boundaries are top-first.
-    da = np.diff(np.asarray(a_b))[::-1]
-    db = np.diff(np.asarray(b_b))[::-1]
-    ps = ds["surface_pressure"]                  # (time, lon, lat) Pa
-    dp = (xr.DataArray(da, dims="level") +
-          xr.DataArray(db, dims="level") * ps)
-    return (q * dp / GRAV).sum("level").mean("time") * 1e6   # kg/m² -> mg/m²
+    q = sum(ds[n] for n in present)
+    col = (q * _layer_dp(ds)).sum("level") / GRAV * 1e6   # kg/m² -> mg/m²
+    return col.mean("time") if "time" in col.dims else col
+
+
+def emission_rate(emis: xr.Dataset, channel: str, weights) -> float | None:
+    """Global-mean emission of one channel [mg/m²/day], summed over sectors."""
+    fields = [v for v in emis.data_vars
+              if str(v).startswith("emis_") and str(v).endswith(f"_{channel}")]
+    if not fields:
+        return None
+    total = sum(emis[v] for v in fields)          # kg/m²/s
+    if "time" in total.dims:
+        total = total.mean("time")
+    return _wmean(total, weights) * 86400.0 * 1e6
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
+    ap.add_argument("--emissions-file", default=None,
+                    help="jcm emissions netCDF; adds an inferred-lifetime "
+                         "column (burden / primary emission rate)")
     ap.add_argument("--png", default=None, help="optional burden-map figure")
     args = ap.parse_args()
 
-    ds = xr.open_mfdataset(args.files, combine="by_coords")
-    w = np.cos(np.deg2rad(ds["lat"]))            # regridded regular lat/lon
+    ds = xr.open_mfdataset(args.files, combine="nested", concat_dim="time")
+    weights = _area_weights(ds)
 
-    print(f"{'species':>8} {'global mean':>12} {'max':>10}   anchor [mg/m²]")
+    sources: dict[str, float] = {}
+    if args.emissions_file:
+        with xr.open_dataset(args.emissions_file) as emis:
+            ew = _area_weights(emis)
+            for sp, (channel, scale) in _EMIS_SPECIES.items():
+                rate = emission_rate(emis, channel, ew)
+                if rate:
+                    sources[sp] = scale * rate
+
+    header = f"{'species':>8} {'global mean':>12} {'max':>10}   anchor [mg/m²]"
+    if sources:
+        header += "   lifetime [d]"
+    print(header)
     maps = {}
     for sp, (modes, (lo, hi)) in _SPECIES.items():
-        b = burden(ds, sp, modes)
-        if b is None:
+        col = burden(ds, sp, modes)
+        if col is None:
             print(f"{sp:>8} {'— no tracers in file —':>24}")
             continue
-        b = b.compute()
-        gmean = float(b.weighted(w).mean())
+        col = col.compute()
+        gmean = _wmean(col, weights)
         flag = "OK" if lo <= gmean <= hi else ("LOW" if gmean < lo else "HIGH")
-        print(f"{sp:>8} {gmean:12.3f} {float(b.max()):10.2f}   "
-              f"[{lo:g}–{hi:g}] {flag}")
-        maps[sp] = b
+        line = (f"{sp:>8} {gmean:12.3f} {float(col.max()):10.2f}   "
+                f"[{lo:g}–{hi:g}] {flag}")
+        if sp in sources:
+            line += f"   {gmean / sources[sp]:8.1f}"
+        print(line)
+        maps[sp] = col
 
     if args.png and maps:
         import matplotlib
@@ -84,10 +152,10 @@ def main() -> None:
         import matplotlib.pyplot as plt
 
         n = len(maps)
-        fig, axes = plt.subplots((n + 1) // 2, 2, figsize=(12, 3 * ((n + 1) // 2)),
+        fig, axes = plt.subplots((n + 1) // 2, 2,
+                                 figsize=(12, 3 * ((n + 1) // 2)),
                                  constrained_layout=True)
         for ax, (sp, b) in zip(np.ravel(axes), maps.items()):
-            # (lon, lat) -> plot as (lat, lon)
             pm = ax.pcolormesh(b["lon"], b["lat"], b.transpose("lat", "lon"),
                                shading="auto")
             ax.set_title(f"{sp} burden [mg/m²]")

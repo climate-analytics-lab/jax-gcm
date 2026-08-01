@@ -192,3 +192,18 @@ one remaining ~2× single-GPU lever, gated on thin-lid stability validation.
    pyses — the durable fix that makes multi-GPU-per-simulation viable and
    ne60+ practical.
 5. **A2** when ensemble workflows become routine.
+
+## Where the verification lives now
+
+The one-off scripts used for this review (`verify_perf_levers.py`,
+`probe_pyses_sharding.py`) are retired from the repo. Their durable
+assertions moved into unit tests:
+
+- optics gating replays cached per-band fields between radiation steps —
+  ``optics_term_test.py::test_radiation_gate_replays_cache_between_compute_steps``
+- ``compute_cre=False`` drops the clear-sky RRTMGP call —
+  covered in ``rrtmgp_test.py`` (term- and scheme-level)
+
+The sharding measurements (GSPMD gather DSS cost, explicit-mesh
+requirements, per-step sharding tax) are recorded in the tables above;
+re-measure with a scaled-down production run rather than a bespoke probe.
