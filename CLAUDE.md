@@ -126,7 +126,6 @@ jcm/                          # Main package
 │   │   └── physical_constants.py
 │   ├── echam/                   # ECHAM infrastructure (terms, coords)
 │   │   ├── echam_terms.py       # Composable terms + echam_physics() factory
-│   │   ├── echam_coords.py      # ECHAM-specific coordinate transforms
 │   │   └── echam_levels.py      # Hybrid vertical level definitions
 │   │   # (per-scheme Parameters live with each scheme; boundary
 │   │   # conditions live in jcm/physics/forcing/echam_boundary_conditions.py)
@@ -163,7 +162,6 @@ jcm/                          # Main package
 │   ├── dissipation/upper_sponge.py  # Upper-level sponge dissipation
 │   ├── surface/                 # Speedy bulk + ECHAM multi-tile (in surface/echam/)
 │   ├── forcing/                 # speedy_forcing.py, echam_boundary_conditions.py
-│   ├── orographic_correction/speedy_orographic.py
 │   └── held_suarez/             # Simplified Held-Suarez forcing
 │       ├── held_suarez_physics.py
 │       └── utils.py             # Coordinate helpers for Held-Suarez

@@ -113,10 +113,8 @@ def find_lfs(
     
     # Scan from cloud top down to find LFS
     def check_lfs(k):
-        # Check if outside cloud bounds - handled by calling function now
-        # if k < ktop or k > kbase:
-        #     return False, 0.0
-            
+        # Cloud-bound checks (k within [ktop, kbase]) are the calling
+        # function's responsibility.
         # Calculate wet-bulb values for environment
         twb, qwb = wetbulb_temperature(temperature[k], humidity[k], pressure[k])
         
