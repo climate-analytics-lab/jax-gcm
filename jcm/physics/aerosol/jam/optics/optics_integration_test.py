@@ -27,6 +27,7 @@ class OpticsIntegrationTest(unittest.TestCase):
     def test_jam_optics_rrtmgp_runs_finite(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -34,9 +35,16 @@ class OpticsIntegrationTest(unittest.TestCase):
         model = Model(
             coords=coords, time_step=30,
             terrain=TerrainData.aquaplanet(coords),
+            # radiation_interval=0: per-step radiation AND per-step band
+            # optics. With the default 2 h gate this 3-step test saves a
+            # frame that replays the step-0 (cold-start, zero-aerosol)
+            # optics cache, so the AOD assertion below reads an exact zero
+            # regardless of wiring. The gate's replay semantics have their
+            # own unit test (optics_term_test); this test wants the wiring.
             physics=echam_physics(
                 aerosol_module="jam", cloud_scheme="2m",
                 radiation_scheme="rrtmgp",
+                radiation=RadiationParameters.default(radiation_interval=0),
             ),
         )
         predictions = model.run(save_interval=0.0625, total_time=0.0625)
