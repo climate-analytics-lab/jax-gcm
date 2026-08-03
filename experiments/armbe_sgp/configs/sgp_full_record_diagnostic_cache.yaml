@@ -1,0 +1,9 @@
+atm: "../data/full_range_armlive/sgparmbeatmC1.c1"
+cldrad: "../data/full_range_armlive/sgparmbecldradC1.c1"
+nlev: 8
+split_seed: 20260731
+validation_years: 4
+test_years: 3
+target:
+  observation: cloud_fraction
+  operator: cloudc_plus_cloudstr_raw

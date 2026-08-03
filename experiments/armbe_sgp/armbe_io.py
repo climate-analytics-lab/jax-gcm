@@ -340,7 +340,15 @@ def load_armbe(atm: str | Path | Iterable[str | Path],
         if src is None:
             return None
         if isinstance(src, (str, Path)):
-            paths = sorted(Path(src).glob("*.nc")) if Path(src).is_dir() else [Path(src)]
+            source_path = Path(src)
+            paths = (
+                sorted(
+                    path for pattern in ("*.nc", "*.cdf")
+                    for path in source_path.glob(pattern)
+                )
+                if source_path.is_dir()
+                else [source_path]
+            )
         else:
             paths = [Path(p) for p in src]
         if not paths:

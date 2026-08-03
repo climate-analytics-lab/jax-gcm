@@ -24,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     operator_name = pairs.attrs.get("operator", "cloudc")
     rmse = np.sqrt(np.mean((prediction[mask] - target[mask]) ** 2))
     prediction_limit = max(1.0, float(np.nanmax(prediction[mask])))
+    period = (
+        f"{np.datetime_as_string(time[mask].min(), unit='D')} to "
+        f"{np.datetime_as_string(time[mask].max(), unit='D')}"
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     import matplotlib
@@ -57,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         xlabel="Time",
         ylabel="Cloud fraction",
         ylim=(0, prediction_limit),
-        title=f"SGP instantaneous {operator_name} diagnostics, September 2018",
+        title=f"SGP instantaneous {operator_name} diagnostics, {period}",
     )
     ax.grid(alpha=0.25)
     ax.legend()

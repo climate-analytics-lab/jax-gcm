@@ -19,6 +19,7 @@ from armbe_io import (
     validate_armbe_input,
 )
 from forecast_cache import build_cache, load_config, resolved_config
+from diagnostic_cache import assign_year_splits, build_diagnostic_cache, discover_annual_files
 from jcm.date import DateData
 from evaluate import main as evaluate_main
 from make_synthetic_armbe import build as build_synthetic_armbe
@@ -157,6 +158,61 @@ def test_loader_ignores_malformed_auxiliary_time_units(tmp_path):
     loaded = load_armbe(path)
 
     np.testing.assert_array_equal(loaded.time.values, ds.time.values)
+
+
+def test_directory_loader_accepts_legacy_cdf_files(tmp_path):
+    ds = _dataset()
+    path = tmp_path / "sgparmbeatmC1.c1.19960101.000000.cdf"
+    ds.to_netcdf(path)
+
+    loaded = load_armbe(tmp_path)
+
+    np.testing.assert_array_equal(loaded.time.values, ds.time.values)
+
+
+def test_annual_discovery_prefers_modern_duplicate_and_year_splits_are_disjoint(tmp_path):
+    for suffix in (".cdf", ".nc"):
+        (tmp_path / f"sgparmbeatmC1.c1.20110101.000000{suffix}").touch()
+    for year in range(1996, 2002):
+        (tmp_path / f"sgparmbeatmC1.c1.{year}0101.000000.cdf").touch()
+
+    found = discover_annual_files(tmp_path)
+    splits = assign_year_splits(found, validation_years=2, test_years=1, seed=20260731)
+
+    assert found[2011].suffix == ".nc"
+    assert set(splits.values()) == {"train", "validation", "test"}
+    assert sum(value == "validation" for value in splits.values()) == 2
+    assert sum(value == "test" for value in splits.values()) == 1
+
+
+def test_diagnostic_cache_records_raw_sum_recipe_and_whole_year_splits(tmp_path):
+    atm_dir, cldrad_dir = tmp_path / "atm", tmp_path / "cldrad"
+    atm_dir.mkdir()
+    cldrad_dir.mkdir()
+    for year in (2016, 2017, 2018):
+        atm, cldrad = build_synthetic_armbe(days=1)
+        offset = np.datetime64(f"{year}-01-01") - np.datetime64("2018-01-01")
+        atm = atm.assign_coords(time=atm.time.values + offset)
+        cldrad = cldrad.assign_coords(time=cldrad.time.values + offset)
+        atm.to_netcdf(atm_dir / f"sgparmbeatmC1.c1.{year}0101.000000.cdf")
+        cldrad.to_netcdf(cldrad_dir / f"sgparmbecldradC1.c1.{year}0101.000000.cdf")
+
+    cache = build_diagnostic_cache({
+        "atm": str(atm_dir),
+        "cldrad": str(cldrad_dir),
+        "validation_years": 1,
+        "test_years": 1,
+    }, tmp_path / "diagnostic-cache")
+
+    recipe = json.loads((cache / "recipe.json").read_text())
+    samples = xr.open_dataset(cache / "samples.nc")
+    splits = {str(value) for value in samples["split"].values}
+
+    assert recipe["target"]["operator"] == "cloudc_plus_cloudstr_raw"
+    assert "raw sum is unclipped" in recipe["semantics"]
+    assert splits == {"train", "validation", "test"}
+    assert all(np.unique(samples["split"].values[samples["year"].values == year]).size == 1
+               for year in np.unique(samples["year"].values))
 
 
 def test_synthetic_pipeline_runs_and_evaluates(tmp_path, capsys):

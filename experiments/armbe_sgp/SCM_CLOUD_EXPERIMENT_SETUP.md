@@ -31,8 +31,9 @@ QC-passed same-time pairs.
 
 This remains an imperfect observation operator: ARMBE `tot_cld` is a
 narrow-field-of-view total cloud fraction, while SPEEDY `cloudc` is a cloud
-diagnostic. SPEEDY `cloudstr` is retained as a separate diagnostic and is not
-added to `cloudc` without an explicit cloud-overlap assumption.
+diagnostic. SPEEDY `cloudstr` is retained as a separate diagnostic. The
+baseline operator is `cloudc`; the raw-sum calibration experiment below uses a
+separately named empirical operator rather than assuming cloud overlap.
 
 The diagnostic evaluator selects reviewed model operators by name. The
 exploratory `cloudc_plus_cloudstr_raw` operator returns the literal sum without
@@ -74,7 +75,7 @@ nlev: 8
 batch_size: 8
 target:
   observation: cloud_fraction
-  model: shortwave_rad.cloudc
+  operator: cloudc
 ```
 
 ```bash
@@ -89,3 +90,44 @@ pair per profile, plus `metrics.json` and a resolved `manifest.json`.
 The former free-rollout forecast setup is retained separately for later online
 validation of a calibrated equation. It is not the current equation-accuracy
 experiment.
+
+## Full-Record Raw-Sum Calibration
+
+`configs/sgp_full_record_diagnostic_cache.yaml` builds an offline cache from
+the locally available 1996-2023 SGP ARMBEATM and ARMBECLDRAD records. It accepts
+both legacy `.cdf` files and modern `.nc` files, audits every year before
+assigning splits, and records any excluded year in its manifest. The initial
+fixed seed (`20260731`) assigns four complete years to validation and three to
+the untouched test split; all remaining eligible years are training data.
+
+The calibration prediction is deliberately the literal, unclipped sum:
+
+```text
+prediction = cloudc + cloudstr
+```
+
+It can exceed one and is not a physical cloud-fraction overlap rule. Reports
+therefore include the rate and maximum of predictions above one, plus each
+component separately.
+
+Build the cache from the `jax-gcm` root:
+
+```bash
+JAX_PLATFORMS=cpu python experiments/armbe_sgp/diagnostic_cache.py \
+  --config experiments/armbe_sgp/configs/sgp_full_record_diagnostic_cache.yaml \
+  --cache experiments/armbe_sgp/outputs/cache_sgp_full_record_diagnostic_raw_sum
+```
+
+The JEM-Cal adapter is intentionally separate from the free-forecast adapter.
+From the `JEM-Cal` root, a compact wiring check is:
+
+```bash
+JAX_PLATFORMS=cpu PYTHONPATH="src:examples:/data/MOSAIC/jax-gcm" \
+  python examples/calibrate_jcm_armbe_diagnostic.py \
+  --cache /data/MOSAIC/jax-gcm/experiments/armbe_sgp/outputs/cache_sgp_full_record_diagnostic_raw_sum \
+  --out-dir /tmp/armbe_diagnostic_smoke \
+  --epochs 1 --batch-size 2 --max-samples 2
+```
+
+The initial free parameter set is `rhcl1`, `wpcl`, `clsmax`, and `clsminl`.
+`rhcl2`, `pmaxcl`, `gse_s0`, `gse_s1`, and `cover_smoothing` remain fixed.
