@@ -80,6 +80,15 @@ _N_THRESHOLDS = {"N70": 70e-9, "N100": 100e-9}
 # Aerodynamic diameters for particulate-matter diagnostics [m].
 _PM_THRESHOLDS = {"PM1": 1e-6, "PM10": 10e-6}
 
+# Species emitted as column burdens. AeroCom wants ONE total per species,
+# so each entry sums every matching tracer: interstitial ``m_<spec>_<mode>``,
+# cloud-borne ``mc_<spec>_<mode>`` and, for gases, ``g_<spec>``. Keeping the
+# list static matters — the diagnostics dict is part of the scan carry, so
+# key names derived from the live tracer dict (which is empty in the initial
+# carry probe) change the pytree and the scan rejects it.
+_BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
+                   "dms", "so2", "h2so4", "soag")
+
 
 def _layer_mass(pressure_half: jnp.ndarray) -> jnp.ndarray:
     """Dry-air mass per unit area of each layer, ``dp/g`` [kg/m^2].
@@ -305,15 +314,38 @@ class AerocomDiagnostics(PhysicsTerm):
 
     Everything is emitted as grid-box means, per the protocol Q/A —
     in-cloud values are formed in the analysis, after time-averaging.
+
+    Measured cost at T63L47 on an A100, against the same run with the term
+    absent: ``cloud`` +3.3 %, ``column`` +3.3 %, ``plev`` +3.0 %,
+    ``aerosol`` +3.2 %, the first three together +4.4 %, all four +9.4 %.
+    Most of a single group's ~3 % is the term's fixed per-step overhead, so
+    groups cost much less together than their sum; ``aerosol`` is the
+    largest true increment (~5 % on top of the other three) because of the
+    per-mode lognormal integrals. No group triggers extra physics or an
+    extra radiation call — the diagnostics that would (aerosol-free
+    radiation, ~2x) are deliberately excluded; see jax-gcm#583.
     """
 
     name: ClassVar[str] = "aerocom_diagnostics"
     category: ClassVar[str] = "diagnostics"
     requires: ClassVar[tuple[str, ...]] = ("clouds", "pressure_full", "pressure_half")
+    # Every key this term can publish. The emitted set must be static (the
+    # diagnostics dict is part of the scan carry), so each selected group
+    # writes all of its keys, zero-filled where the active configuration
+    # cannot supply a value.
     provides: ClassVar[tuple[str, ...]] = (
+        # cloud
         "aerocom_clt", "aerocom_ttop", "aerocom_cdr", "aerocom_icr",
         "aerocom_cdnc", "aerocom_lcc", "aerocom_icc", "aerocom_cod",
         "aerocom_codliq", "aerocom_codice", "aerocom_lwp", "aerocom_iwp",
+        "aerocom_cllvi", "aerocom_clivi",
+        # column
+        "aerocom_prw", "aerocom_cdnum", "aerocom_icnum", "aerocom_albedo",
+        # plev
+        "aerocom_lts",
+        # aerosol (per-tracer burdens are named from the active tracer set)
+        "aerocom_N70", "aerocom_N100", "aerocom_PM1", "aerocom_PM10",
+        *(f"aerocom_burden_{sp}" for sp in _BURDEN_SPECIES),
     )
 
     ALL_GROUPS: ClassVar[tuple[str, ...]] = ("cloud", "column", "plev", "aerosol")
@@ -367,10 +399,11 @@ class AerocomDiagnostics(PhysicsTerm):
         thermo = diagnostics.get("thermo_run")
         temperature = thermo["temperature"] if thermo else state.temperature
 
+        cdnc_m3, qnc, qni = self._number_concentrations(state, diagnostics, clouds)
         if "cloud" in self.groups:
-            out.update(self._cloud_group(clouds, temperature, p_half))
+            out.update(self._cloud_group(clouds, temperature, p_half, cdnc_m3))
         if "column" in self.groups:
-            out.update(self._column_group(state, diagnostics, p_half))
+            out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
             out.update(self._plev_group(state, temperature, p_full))
         if "aerosol" in self.groups:
@@ -384,7 +417,37 @@ class AerocomDiagnostics(PhysicsTerm):
         )
         return tendency, {**diagnostics, **out}
 
-    def _cloud_group(self, clouds, temperature, p_half) -> dict:
+    @staticmethod
+    def _number_concentrations(state, diagnostics, clouds):
+        """Return (cdnc_m3, qnc_per_kg, qni_per_kg) from whichever scheme ran.
+
+        The two microphysics schemes publish droplet number differently and
+        in different units, so the diagnostics must not assume one of them:
+
+        * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
+          **m^-3** and carries no prognostic number tracer;
+        * 2-moment (``lohmann_2m``) carries prognostic ``qnc``/``qni``
+          tracers in **kg^-1** and leaves ``CloudData.droplet_number`` at
+          its zero carry init.
+
+        Preferring the prognostic tracers where present keeps the 2-moment
+        preset from silently reporting zero CDNC, and returning both the
+        volumetric and per-mass forms lets each consumer integrate in the
+        measure that is exact for it (dz for m^-3, dp/g for kg^-1).
+        """
+        tracers = getattr(state, "tracers", None) or {}
+        rho = diagnostics.get("air_density")
+        qnc = tracers.get("qnc")
+        qni = tracers.get("qni")
+        if qnc is not None and rho is not None:
+            cdnc_m3 = qnc * rho          # kg^-1 -> m^-3
+        else:
+            cdnc_m3 = clouds.droplet_number  # 1M path, already m^-3
+            if qnc is None and rho is not None:
+                qnc = jnp.where(rho > 0.0, cdnc_m3 / jnp.where(rho > 0.0, rho, 1.0), 0.0)
+        return cdnc_m3, qnc, qni
+
+    def _cloud_group(self, clouds, temperature, p_half, cdnc_m3) -> dict:
         """Cloud-top sampling, optical depths and condensate paths."""
         # jcm carries effective radii in microns; the protocol wants metres.
         r_liq_m = clouds.r_eff_liq * 1e-6
@@ -405,7 +468,7 @@ class AerocomDiagnostics(PhysicsTerm):
         cf = clouds.cloud_fraction
         in_cloud = cf > THRES_CLD
         cdnc3d = jnp.where(
-            in_cloud, clouds.droplet_number / jnp.where(in_cloud, cf, 1.0), 0.0)
+            in_cloud, cdnc_m3 / jnp.where(in_cloud, cf, 1.0), 0.0)
 
         top = cloud_top_sample(
             cod3d=cod3d, f3d=cf, t3d=temperature, phase3d=phase3d,
@@ -431,28 +494,34 @@ class AerocomDiagnostics(PhysicsTerm):
             "aerocom_clivi": iwp,
         }
 
-    def _column_group(self, state, diagnostics, p_half) -> dict:
+    def _column_group(self, state, diagnostics, p_half, qnc, qni) -> dict:
         """Water-vapour path, column number concentrations, albedo."""
         out = {
             "aerocom_prw": _column_integral(state.specific_humidity, p_half),
         }
-        clouds = diagnostics["clouds"]
+        # Column number [m^-2]. The prognostic number tracers are per unit
+        # MASS (kg^-1), so dp/g is the exact measure for them; a volumetric
+        # (m^-3) number would instead need dz. Using dp/g on an m^-3 field
+        # would silently fold in an extra density factor.
+        #
+        # Both keys are emitted unconditionally, with zeros where the active
+        # microphysics carries no such tracer: the diagnostics dict is part
+        # of the scan carry, so a key set that varies with configuration (or
+        # between steps) changes the carry pytree and the scan rejects it.
         dm = _layer_mass(p_half)
-        # Droplet/ice number are per kg of air, so the same mass weighting
-        # gives the column number per unit area.
-        out["aerocom_cdnum"] = jnp.sum(clouds.droplet_number * dm, axis=0)
-        qni = getattr(clouds, "ice_number", None)
-        if qni is not None:
-            out["aerocom_icnum"] = jnp.sum(qni * dm, axis=0)
+        zero = jnp.zeros(p_half.shape[1:], dtype=p_half.dtype)
+        out["aerocom_cdnum"] = jnp.sum(qnc * dm, axis=0) if qnc is not None else zero
+        out["aerocom_icnum"] = jnp.sum(qni * dm, axis=0) if qni is not None else zero
 
         rad = diagnostics.get("radiation")
-        if rad is not None:
-            toa_down = getattr(rad, "toa_sw_down", None)
-            toa_up = getattr(rad, "toa_sw_up", None)
-            if toa_down is not None and toa_up is not None:
-                lit = toa_down > 0.0
-                out["aerocom_albedo"] = jnp.where(
-                    lit, toa_up / jnp.where(lit, toa_down, 1.0), 0.0)
+        toa_down = getattr(rad, "toa_sw_down", None) if rad is not None else None
+        toa_up = getattr(rad, "toa_sw_up", None) if rad is not None else None
+        if toa_down is not None and toa_up is not None:
+            lit = toa_down > 0.0
+            albedo = jnp.where(lit, toa_up / jnp.where(lit, toa_down, 1.0), 0.0)
+        else:
+            albedo = zero
+        out["aerocom_albedo"] = albedo
         return out
 
     def _plev_group(self, state, temperature, p_full) -> dict:
@@ -479,12 +548,34 @@ class AerocomDiagnostics(PhysicsTerm):
         dm = _layer_mass(p_half)
         # Per-tracer burdens: every aerosol mass tracer the state carries.
         tracers = getattr(state, "tracers", None) or {}
-        for tname, field in tracers.items():
-            if tname.startswith(("m_", "g_")) and jnp.ndim(field) >= 1:
-                out[f"aerocom_burden_{tname}"] = jnp.sum(field * dm, axis=0)
+        # MAM4-JAX splits aerosol mass between interstitial (``m_*``) and
+        # cloud-borne (``mc_*``) populations; the AeroCom species burden is
+        # the TOTAL, so both are summed here (omitting the cloud-borne half
+        # undercounts wherever aerosol has been activated). Gas-phase
+        # species use the ``g_<spec>`` tracer.
+        zero_col = jnp.zeros(p_half.shape[1:], dtype=p_half.dtype)
+        for spec in _BURDEN_SPECIES:
+            total = None
+            for tname, field in tracers.items():
+                if jnp.ndim(field) < 1:
+                    continue
+                if (tname.startswith((f"m_{spec}_", f"mc_{spec}_"))
+                        or tname == f"g_{spec}"):
+                    contrib = jnp.sum(field * dm, axis=0)
+                    total = contrib if total is None else total + contrib
+            out[f"aerocom_burden_{spec}"] = zero_col if total is None else total
 
+        # The number/PM keys are emitted unconditionally (zero-filled when the
+        # modal state is unavailable) for the same reason as the column group:
+        # the diagnostics dict is part of the scan carry, so a key set that
+        # appears only on some steps changes the carry pytree and the scan
+        # rejects it. ``_jam_state`` in particular is absent from the initial
+        # carry probe but present once the JAM chain has run.
         jam = diagnostics.get("_jam_state")
         if jam is None:
+            zero = jnp.zeros(p_half.shape[1:], dtype=p_half.dtype)
+            for label in (*_N_THRESHOLDS, *_PM_THRESHOLDS):
+                out[f"aerocom_{label}"] = zero
             return out
         # Modal number metrics. jam_state is (n_aer, nlev, ncols); the
         # per-mode widths are static configuration, so a Python loop over

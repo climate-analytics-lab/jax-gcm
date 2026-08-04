@@ -7,11 +7,29 @@
 #
 #     python -m jcm.main physics=echam-jam-aerocom grid=echam_t63_l47_hybrid
 #
-# The diagnostics are computed AFTER every other term, add no tendency, and
-# cost only what their selected groups cost — see
-# jcm.physics.diagnostics.aerocom and jax-gcm#581 for the coverage gaps
-# that still need model-side work (aerosol-free radiation, per-species
-# optics, microphysical process rates, emission fluxes).
+# The diagnostics are computed AFTER every other term and add no tendency.
+#
+# MEASURED COST (T63L47, A100, warm compiled step, vs the same run with
+# enable_aerocom=false):
+#
+#   cloud                          +3.3 %
+#   column                         +3.3 %
+#   plev                           +3.0 %
+#   aerosol                        +3.2 %
+#   cloud+column+plev              +4.4 %
+#   cloud+column+plev+aerosol      +9.4 %   <-- this preset
+#
+# Most of a single group's ~3 % is the term's fixed per-step overhead, so
+# the groups are much cheaper together than their sum; the aerosol group is
+# the largest true increment (~5 % on top of the other three) because of the
+# per-mode lognormal integrals. Drop `aerosol` from the list below if a run
+# does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
+#
+# NOT included here because it roughly DOUBLES runtime: the aerosol-free
+# (*noa) radiation diagnostic needs a second radiation call, and radiation
+# is ~87 % of the step. It is gated separately — see jax-gcm#583. Remaining
+# coverage gaps: #584 (per-species/mode optics), #585 (process rates and
+# emission fluxes), #586 (3-hourly instantaneous output).
 
 defaults:
   - echam-jam

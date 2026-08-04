@@ -62,7 +62,13 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "u_wind": ("ua", "m s-1", "ModelLevel", 1.0, 0.0),
     "v_wind": ("va", "m s-1", "ModelLevel", 1.0, 0.0),
     "pressure_full": ("pfull", "Pa", "ModelLevel", 1.0, 0.0),
-    "geopotential": ("zg", "m", "ModelLevel", 1.0, 0.0),
+    # ``height_full`` is already geopotential HEIGHT in metres. jcm also
+    # writes ``geopotential`` in m2/s2 (see the dynamics units table); it
+    # is mapped with the explicit 1/g conversion so a run that only saved
+    # the potential still produces a correct ``zg``. When both are
+    # present the height wins (dict order below, resolved in convert()).
+    "geopotential": ("zg", "m", "ModelLevel", 1.0 / 9.80665, 0.0),
+    "height_full": ("zg", "m", "ModelLevel", 1.0, 0.0),
     "air_density": ("rho", "kg m-3", "ModelLevel", 1.0, 0.0),
     "layer_thickness": ("dzhalf", "m", "ModelLevel", 1.0, 0.0),
     # --- clouds ---
@@ -113,9 +119,11 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "aerocom_PM10": ("PM10", "kg m-3", "ModelLevel", 1.0, 0.0),
 }
 
-# Aerosol burdens are emitted per tracer as ``aerocom_burden_m_<spec>_<mode>``;
-# AeroCom wants them summed per species as ``burden_<spec>``.
-BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa")
+# Column burdens arrive pre-summed per species from AerocomDiagnostics
+# (interstitial + cloud-borne + gas), so the writer only renames them.
+BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
+                  "dms", "so2", "h2so4", "soag")
+
 
 VALID_VERT = ("Surface", "TOA", "Column", "ModelLevel")
 
@@ -140,16 +148,12 @@ def _filename(convention, model, experiment, var, vert, period, freq):
 
 
 def _collect_burdens(ds: xr.Dataset) -> dict[str, xr.DataArray]:
-    """Sum per-tracer column burdens into per-species totals."""
+    """Rename the per-species column burdens to their CMOR names."""
     out: dict[str, xr.DataArray] = {}
     for spec in BURDEN_SPECIES:
-        parts = [ds[v] for v in ds.data_vars
-                 if v.startswith("aerocom_burden_m_") and f"_{spec}_" in v]
-        if parts:
-            total = parts[0]
-            for p in parts[1:]:
-                total = total + p
-            out[f"burden_{spec}"] = total
+        src = f"aerocom_burden_{spec}"
+        if src in ds.data_vars:
+            out[f"burden_{spec}"] = ds[src]
     return out
 
 
@@ -172,6 +176,8 @@ def convert(
     for src, (cmor, units, vert, scale, offset) in NAME_MAP.items():
         if src not in ds.data_vars:
             continue
+        # Later entries win, so a directly-available field (e.g.
+        # height_full for zg) overrides a converted one (geopotential/g).
         da = ds[src] * scale + offset
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
@@ -198,7 +204,7 @@ def convert(
 
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}
     skipped = sorted(set(ds.data_vars) - mapped_srcs
-                     - {v for v in ds.data_vars if v.startswith("aerocom_burden_")})
+                     - {f"aerocom_burden_{sp}" for sp in BURDEN_SPECIES})
     return written, skipped
 
 
