@@ -58,9 +58,44 @@ do not report the number.
 device at 95%+ while it is still *choosing kernels*. "The GPU is pegged" is
 not evidence a chunk time is steady-state. Only chunk-to-chunk agreement is.
 
-**One run per GPU.** Stacking invalidates the timing and can OOM the other
-tenant. Check for free GPUs with both memory *and* compute-apps queries (see
-`jcm-run`). Pick a genuinely idle card even if it means waiting.
+### Run on a genuinely free GPU. Always. No exceptions.
+
+This is the hardest rule here. Simulations should always run on free cards;
+**benchmarks especially**, because a contended card does not fail loudly — it
+returns a plausible-looking number that is simply wrong, and you will not be
+able to tell from the report. Every other precaution in this document is
+wasted if the card was shared.
+
+**Before launching, verify the target card is idle on BOTH queries** —
+neither column alone is sufficient, since a process can hold memory at 0 %
+utilisation and spike later, or run hot in a small allocation:
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.free,utilization.gpu --format=csv
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv
+```
+
+Require **no compute apps** and **near-zero used memory**. On this shared box
+most cards are usually busy with other people's work; wait for a free one
+rather than squeezing in. `nvidia-smi --query-compute-apps` reports UUIDs, so
+map them to indices with the `--query-gpu=index,uuid` query.
+
+**Never stack two runs on one card.** It invalidates both timings and can OOM
+the other tenant.
+
+**Do not start other GPU work anywhere on the box mid-A/B.** This is the
+non-obvious one. Even on a *different, genuinely free* card, a concurrent job
+competes for host CPU, PCIe bandwidth and the allocator. If it overlaps only
+the candidate arm and not the baseline arm, it contaminates exactly one side
+of the comparison — an asymmetry that shows up as a fake speedup or
+regression and is invisible in the report. Halving your wall time is not
+worth a result you then cannot trust. Let the whole interleaved sequence
+finish on one card before starting anything else.
+
+The corollary: **parallelising an A/B across cards is not a shortcut.** If
+you must (because a card is going away), run *both* arms on card A and both
+on card B, and report the pairs separately — never baseline on A against
+candidate on B.
 
 **Compare like with like on chunk size.** Every chunk boundary costs a host
 sync, a health check and a netCDF write. The short benchmark uses 5-day

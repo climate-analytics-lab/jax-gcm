@@ -58,20 +58,33 @@ echo "$PREFIX PID=$!"
 Write outputs to `/scr/dwatsonparris/...` for anything large — `/data` is
 near-full. Logs conventionally go in `run_logs/` at the repo root.
 
-## Pre-flight: pick a genuinely free GPU
+## Pre-flight: pick a genuinely free GPU — always
 
-The box is shared, and stacking runs invalidates any timing and can OOM the
-other tenant. Check **both** memory and running compute apps — neither column
-alone is sufficient:
+**Simulations always run on a free card.** The box is shared with other
+people's jobs; stacking onto an occupied GPU can OOM them, OOM you, or slow
+both. Wait for a free card rather than squeezing in — there is no run urgent
+enough to justify taking someone else's GPU out from under them.
+
+For **benchmarks this is absolute** — a contended card yields a wrong number
+that still looks plausible, so the result is worse than no result. See the
+`jcm-benchmark` skill, which also covers the subtler trap: starting other GPU
+work *anywhere on the box* during an A/B can contaminate one arm through host
+CPU/PCIe contention even if it is on a different, free card.
+
+Check **both** memory and running compute apps — neither column alone is
+sufficient (a process can hold memory at 0 % utilisation and spike later):
 
 ```bash
 nvidia-smi --query-gpu=index,memory.used,memory.free,utilization.gpu --format=csv
 nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv
 ```
 
-Pick an index with no compute app *and* near-zero used memory. Set
-`CUDA_VISIBLE_DEVICES=<idx>` and `XLA_PYTHON_CLIENT_PREALLOCATE=false` so
-concurrent runs on *different* GPUs don't each grab the whole HBM.
+Require an index with **no compute app** *and* **near-zero used memory**.
+`--query-compute-apps` reports UUIDs, so map them to indices with
+`nvidia-smi --query-gpu=index,uuid --format=csv,noheader`.
+
+Set `CUDA_VISIBLE_DEVICES=<idx>` and `XLA_PYTHON_CLIENT_PREALLOCATE=false` so
+your own runs on *different* GPUs don't each grab the whole HBM.
 
 `JAX_PLATFORMS=cpu` is for **unit tests only**. Anything beyond ~5 simulated
 days belongs on a GPU.

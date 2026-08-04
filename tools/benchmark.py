@@ -95,6 +95,77 @@ PRESETS: dict[str, list[str]] = {
 }
 
 
+# A card is "free" below this much resident memory. Not zero: an idle A100
+# on this box still reports ~1 GiB of driver/ECC overhead.
+_FREE_MEM_MIB = 2048.0
+
+
+def _gpu_state(idx: int) -> tuple[float, list[str]]:
+    """Return (memory used [MiB], other processes) for one GPU."""
+    uuid = subprocess.run(
+        ["nvidia-smi", f"--id={idx}", "--query-gpu=uuid",
+         "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=20, check=False).stdout.strip()
+    mem = subprocess.run(
+        ["nvidia-smi", f"--id={idx}", "--query-gpu=memory.used",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=20, check=False).stdout.strip()
+    apps = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name",
+         "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=20, check=False).stdout
+    procs = [ln.strip() for ln in apps.splitlines()
+             if uuid and ln.startswith(uuid)]
+    try:
+        used = float(mem)
+    except ValueError:
+        used = 0.0
+    return used, procs
+
+
+def require_free_gpu(idx: int, wait_s: float = 0.0,
+                     allow_busy: bool = False) -> None:
+    """Refuse to benchmark on a GPU somebody else is using.
+
+    A contended card does not fail loudly -- it returns a plausible-looking
+    number that is simply wrong, and nothing in the report reveals it. So
+    this is a hard gate rather than a warning. Both signals are checked:
+    a process can hold memory at 0 % utilisation and spike mid-run, and a
+    small allocation can still run the card hot.
+
+    With ``wait_s`` it waits for the card to free rather than failing
+    immediately -- which is the documented remedy ("wait for a free card
+    rather than squeezing in"), and also absorbs the second or two it takes
+    the driver to release memory after a previous run exits.
+    """
+    deadline = wait_s
+    while True:
+        used, procs = _gpu_state(idx)
+        if not procs and used < _FREE_MEM_MIB:
+            return
+        why = (f"GPU {idx} is busy: {used:.0f} MiB used"
+               + (f", {len(procs)} compute app(s): {procs}" if procs else ""))
+        if allow_busy:
+            print(f"warning: {why} -- proceeding because --allow-busy-gpu "
+                  "was passed. The resulting timing is NOT trustworthy.",
+                  file=sys.stderr)
+            return
+        if deadline <= 0:
+            raise SystemExit(
+                f"{why}\n"
+                "Benchmarks must run on a genuinely idle card: a shared GPU "
+                "yields a wrong number that still looks plausible. Wait for a "
+                "free card (--wait-for-gpu SECONDS), pick another "
+                "(--gpu N), or override with --allow-busy-gpu if you accept "
+                "an untrustworthy result."
+            )
+        step = min(30.0, deadline)
+        print(f"{why} -- waiting {deadline:.0f}s more for it to free",
+              file=sys.stderr)
+        time.sleep(step)
+        deadline -= step
+
+
 def _gpu_sampler(gpu: int, out_path: pathlib.Path, stop: threading.Event):
     """Sample memory/utilisation until ``stop`` is set."""
     query = ("--query-gpu=timestamp,memory.used,memory.total,"
@@ -234,6 +305,10 @@ def run(args) -> dict:
         env["PYTHONPATH"] = args.pythonpath
         env_note["PYTHONPATH"] = args.pythonpath
 
+    # Hard gate: never benchmark on a card someone else is using.
+    require_free_gpu(args.gpu, wait_s=args.wait_for_gpu,
+                     allow_busy=args.allow_busy_gpu)
+
     log_path = outdir / "run.log"
     gpu_path = outdir / "gpu.csv"
     stop = threading.Event()
@@ -359,6 +434,12 @@ def main(argv=None):
     p.add_argument("--python", default=DEFAULT_PY)
     p.add_argument("--pythonpath", default=None,
                    help="prepend a library worktree (editable-install A/B)")
+    p.add_argument("--wait-for-gpu", type=float, default=120.0,
+                   help="seconds to wait for the target GPU to become free "
+                        "before giving up (default 120)")
+    p.add_argument("--allow-busy-gpu", action="store_true",
+                   help="run even if the GPU is in use; the timing will NOT "
+                        "be trustworthy")
     p.add_argument("--extra", nargs="*", default=[],
                    help="additional raw Hydra overrides")
     args = p.parse_args(argv)
