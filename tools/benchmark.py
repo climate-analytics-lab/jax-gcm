@@ -52,6 +52,9 @@ DEFAULT_OUTDIR = pathlib.Path("/scr/dwatsonparris/benchmarks")
 # Chunk-to-chunk agreement required before a rate is called converged.
 CONVERGENCE_TOL = 0.03      # 3 % between consecutive chunks
 GPU_SAMPLE_SECONDS = 10.0
+# Utilisation above this counts as "the GPU is doing the run",
+# separating integration from the idle stretches during compile.
+_ACTIVE_UTIL_PCT = 5.0
 
 _WALL_RE = re.compile(r"Wall:\s*([0-9.]+)s this chunk")
 _NAN_RE = re.compile(r"NaN vars:\s*(\d+)\s*/\s*(\d+)")
@@ -65,13 +68,22 @@ _T63_COMMON = [
     "init=jw", "init.rh=0.0",
     "terrain=from_file", f"terrain.file={REPO}/jcm/data/bc/t63/terrain.nc",
     "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-    ("forcing.ozone_file="
-     f"{REPO}/jcm/data/bc/T63L47_ozone_picontrol_latflip.nc"),
+    # run=longrun already carries the settled production sponge config
+    # (levels=10, timescale_h=1.5, enspodi=2.0, damp_temperature=true,
+    # target_T_K=250 -- see the rationale in run/longrun.yaml). Do NOT
+    # re-specify those here: duplicating them invites drift from the
+    # validated values, which is how this preset briefly ran with
+    # target_T_K=270 against the repo's settled 250.
     "run=longrun",
     "run.time_step=12",
-    "run.sponge.levels=10", "run.sponge.timescale_h=1.5",
-    "run.sponge.enspodi=2.0", "+run.sponge.target_T_K=270",
 ]
+
+# No ozone override: `forcing.ozone_file: auto` is the shipped default and
+# resolves the packaged CMIP6 climatology `jcm/data/bc/t63/ozone.nc`, which
+# is already on the L47 model levels and already S->N. Confirm it in the log
+# ("forcing.ozone_file=auto resolved to ..."); a run that instead warns about
+# the ANALYTIC profile is NOT a valid benchmark of the radiation, since that
+# surrogate has ~7.6x the tropospheric ozone column.
 
 PRESETS: dict[str, list[str]] = {
     "t63-echam-rrtmgp": ["physics=echam-rrtmgp", *_T63_COMMON],
@@ -122,19 +134,34 @@ def _summarize_gpu(csv_path: pathlib.Path) -> dict:
             continue
     if not mem:
         return {}
-    # Drop the first 20 % of samples from the utilisation/power stats: that
-    # window is compile, where the GPU is idle or autotuning and neither
-    # number reflects the steady-state workload. Peak MEMORY keeps the whole
-    # series, since an allocation spike during compile is still a real
-    # requirement for provisioning.
-    warm = max(1, len(util) // 5)
+    # Utilisation/power are summarised over ACTIVE samples only -- those
+    # above _ACTIVE_UTIL_PCT. A positional heuristic ("drop the first 20 %")
+    # does not work: XLA compilation leaves the GPU genuinely idle, and on a
+    # short run compile is most of the wall clock, so a positional cut still
+    # averages mostly zeros and reports ~0 % for a run that was pegged at 85 %
+    # whenever it was actually integrating.
+    #
+    # Peak MEMORY keeps the whole series -- an allocation spike during
+    # compile is still a real provisioning requirement.
+    #
+    # ``active_fraction`` is reported because it is informative in its own
+    # right: it is the share of wall time the GPU was busy, so a short run
+    # shows how much went to compile, and a long run that does NOT approach
+    # 1.0 is host-bound (dispatch, I/O, chunk writes) rather than
+    # compute-bound.
+    active = [(u, p) for u, p in zip(util, power) if u > _ACTIVE_UTIL_PCT]
+    au = [u for u, _ in active] or util
+    ap = [p for _, p in active] or power
     return {
         "peak_mem_mib": max(mem),
         "peak_mem_gib": round(max(mem) / 1024, 2),
         "mem_total_gib": round(max(total) / 1024, 2) if total else None,
-        "median_util_pct": round(statistics.median(util[warm:] or util), 1),
-        "median_power_w": round(statistics.median(power[warm:] or power), 1),
+        "median_util_active_pct": round(statistics.median(au), 1),
+        "max_util_pct": round(max(util), 1),
+        "median_power_active_w": round(statistics.median(ap), 1),
+        "active_fraction": round(len(active) / len(util), 3) if util else 0.0,
         "n_samples": len(mem),
+        "n_active_samples": len(active),
     }
 
 
@@ -294,10 +321,13 @@ def _report(r: dict) -> str:
     lines += ["", "## GPU", ""]
     if g:
         lines += [
-            f"- peak memory: {g['peak_mem_gib']} GiB",
-            f"- median utilisation (post-compile): {g['median_util_pct']} %",
-            f"- median power: {g['median_power_w']} W",
-            f"- samples: {g['n_samples']}",
+            f"- peak memory: {g['peak_mem_gib']} GiB of "
+            f"{g['mem_total_gib']} GiB",
+            f"- median utilisation while active: "
+            f"{g['median_util_active_pct']} % (max {g['max_util_pct']} %)",
+            f"- median power while active: {g['median_power_active_w']} W",
+            f"- GPU busy for {g['active_fraction']:.0%} of wall time "
+            f"({g['n_active_samples']}/{g['n_samples']} samples)",
         ]
     else:
         lines.append("No GPU telemetry collected.")

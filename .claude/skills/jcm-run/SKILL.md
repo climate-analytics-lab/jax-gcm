@@ -42,10 +42,8 @@ COMMON="physics=echam-rrtmgp \
         init=jw init.rh=0.0 \
         terrain=from_file terrain.file=$REPO/jcm/data/bc/t63/terrain.nc \
         forcing=from_file forcing.file=$REPO/jcm/data/bc/t63/forcing.nc \
-        forcing.ozone_file=$REPO/jcm/data/bc/T63L47_ozone_picontrol_latflip.nc \
         run=longrun \
-        run.time_step=12 run.save_interval=5 run.chunk_days=30 \
-        run.sponge.levels=10 run.sponge.timescale_h=1.5 run.sponge.enspodi=2.0"
+        run.time_step=12 run.save_interval=5 run.chunk_days=30"
 
 PREFIX=myrun_$TS
 nohup env CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -87,13 +85,16 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
   `init=isothermal` on a real-orography grid is not a viable start.
 - `terrain=from_file` + `forcing=from_file` — real orography/land-sea mask and
   SSTs.
-- `run.sponge.levels=10` with `damp_temperature` — the upper sponge is what
-  arrests the cold-cap runaway at L47. Level-dependent diffusion alone does
-  **not** do this.
-- For ICs that are not radiatively equilibrated (JW-dry), also set
-  `+run.sponge.target_T_K=270` — the zonal-mean relaxation by construction
-  cannot touch the m=0 mode, and without an absolute target the zonal-mean
-  top-level T drifts several K/hr straight to NaN.
+- `run=longrun` — this already carries the **settled production sponge**
+  (`levels=10, timescale_h=1.5, enspodi=2.0, damp_temperature=true,
+  target_T_K=250`, rationale in `run/longrun.yaml`). Do **not** re-specify
+  those on the command line: duplicating them invites drift from the
+  validated values, and `+run.sponge.target_T_K=...` now fails outright with
+  `An item is already at 'run.sponge.target_T_K'` because the key exists.
+  The sponge is what arrests the cold-cap runaway at L47 — the absolute
+  target catches the m=0 zonal mean that pure zonal-mean damping cannot
+  touch, without which the top level drifts ~4 K/hr to NaN before the first
+  save. Level-dependent diffusion alone does **not** do this.
 
 ## Hydra gotchas
 
@@ -107,10 +108,16 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
   Hydra's add syntax: `+run.checkpoint_path=...`. Plain
   `run.checkpoint_path=...` fails with `Key 'checkpoint_path' is not in
   struct`. `run/default.yaml` does define it.
-- The ozone file's latitudes are checked against the model grid to 0.001°.
-  The CMIP6-style file ships N→S while the model grid is S→N — use the
-  `..._latflip.nc` sibling. Never overwrite the original; the shared BC files
-  are not regenerable in one step.
+- **Ozone**: `forcing.ozone_file: auto` is the shipped default and resolves a
+  packaged climatology matching the grid (`jcm/data/bc/t63/ozone.nc` — already
+  on L47 levels, already S→N). Leave it alone. Confirm in the log:
+  `forcing.ozone_file=auto resolved to .../t63/ozone.nc`. If instead you see a
+  warning about the **ANALYTIC** profile, the grid did not match and the run
+  has ~7.6× the tropospheric ozone column — a large clear-sky OLR bias, and
+  not a valid basis for any radiation comparison.
+  Regenerate for a new grid with
+  `python -m jcm.data.bc.interpolate_ozone --in T63_ozone_picontrol.nc --out
+  jcm/data/bc/<grid>/ozone.nc --nlevels 47`.
 - The conda env is not on `PATH`. Invoke
   `/home/dwatsonparris/micromamba/envs/jcm/bin/python` directly, or
   `eval "$(micromamba shell hook --shell bash)" && micromamba activate jcm`.

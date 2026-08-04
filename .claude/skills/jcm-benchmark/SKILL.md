@@ -62,6 +62,22 @@ not evidence a chunk time is steady-state. Only chunk-to-chunk agreement is.
 tenant. Check for free GPUs with both memory *and* compute-apps queries (see
 `jcm-run`). Pick a genuinely idle card even if it means waiting.
 
+**Compare like with like on chunk size.** Every chunk boundary costs a host
+sync, a health check and a netCDF write. The short benchmark uses 5-day
+chunks (to get ~6 chunks and so detect convergence) while a 12-month run uses
+30-day chunks, so the short number carries slightly more per-day write
+overhead than production. That is a couple of percent, and it cancels
+entirely in an A/B at the same `--chunk-days` — but do not quote a
+5-day-chunk number as the production throughput.
+
+**The run must be a real one.** This is a production configuration made
+shorter and more instrumented, not a reduced-physics proxy: real orography,
+real SSTs, the packaged CMIP6 ozone, JW init and the production sponge. Check
+the log line `forcing.ozone_file=auto resolved to .../t63/ozone.nc` — if it
+warns about the **ANALYTIC** ozone profile instead, the radiation is seeing
+~7.6x the tropospheric ozone column and the benchmark is measuring the wrong
+workload.
+
 **A NaN'd run is not a benchmark.** The tool reports `nan_any` and exits
 non-zero. Timing from a run that blew up mid-flight is meaningless — fix the
 configuration and re-run rather than quoting the chunks before the blow-up.
@@ -71,8 +87,11 @@ configuration and re-run rather than quoting the chunks before the blow-up.
 The presets are not `physics=X grid=Y` — they carry the whole known-stable
 override set, because a T63L47 run from an isothermal cold start with no
 sponge **goes NaN within days**, which silently destroys the benchmark. Each
-T63 preset pins `init=jw init.rh=0.0`, real terrain/forcing/ozone from file,
-and the upper sponge with `target_T_K=270`.
+T63 preset pins `init=jw init.rh=0.0`, real terrain and forcing from file,
+and `run=longrun` — which carries the settled production sponge
+(`target_T_K=250`). Ozone comes from `ozone_file: auto`, the shipped default,
+which resolves the packaged CMIP6 climatology; the preset deliberately does
+not override it.
 
 Adding a preset: put the *complete* validated override set in `PRESETS`, and
 verify it completes the short benchmark NaN-free before using it for
