@@ -1,0 +1,27 @@
+# AeroCom phase-4 diagnostics INCLUDING the per-species / per-mode /
+# spectral aerosol optics (jax-gcm#584).
+#
+#     python -m jcm.main physics=echam-jam-aerocom-optics \
+#         grid=echam_t63_l47_hybrid
+#
+# Adds a second Mie sweep at the observation wavelengths
+# (355/440/550/670/865 nm) rather than at the radiation band centres, so the
+# reported AOD, Angstrom exponent and SSA are at the wavelengths the
+# satellite/AERONET products are actually at. The pass rides the same
+# radiation gate as the radiative optics, so it costs
+# len(_DIAG_WAVELENGTHS_NM) / n_sw_band of the (already gated) aerosol
+# optics rather than a per-step Mie evaluation.
+#
+# MEASURED COST (T63L47, A100-80GB, converged chunk, against
+# echam-jam-aerocom on the same GPU): 241.1 s vs 240.7 s per simulated day,
+# i.e. +0.2 % -- BELOW the noise floor of a single-run comparison, so read it
+# as "under ~1 %", not as a precise 0.2 %. That is the radiation gate doing
+# its job: the extra Mie sweep runs only on radiation-compute steps, and it
+# adds 5 wavelengths against the shortwave's 14 bands of already-gated work.
+#
+# The diagnostics add 34 output variables (239 -> 273 at this resolution).
+
+defaults:
+  - echam-jam-aerocom
+
+aerocom_optics: true

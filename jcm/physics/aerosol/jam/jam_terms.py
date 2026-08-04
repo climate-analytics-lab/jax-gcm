@@ -98,6 +98,7 @@ def jam_aerosol_physics(
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
     arg_variant: str = "arg2000",
     optics: bool = True,
+    optics_diagnostics: bool = False,
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
@@ -173,7 +174,12 @@ def jam_aerosol_physics(
     ]
     # Online aerosol direct radiative effect (#495): placed right after the core
     # (needs ``_jam_state``); overwrites the MACv2-SP ``aerosol`` optics.
-    optics_terms = [JamOpticsTerm(spec=spec)] if optics else []
+    # ``optics_diagnostics`` adds the AeroCom per-species / per-mode /
+    # spectral optics pass (jax-gcm#584) — a second Mie sweep at the
+    # observation wavelengths, off unless a run asks for it.
+    optics_terms = [
+        JamOpticsTerm(spec=spec, optics_diagnostics=optics_diagnostics)
+    ] if optics else []
     post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
         # Heterogeneous ice nucleation on dust/BC → ``ice_nuclei`` for the 2M

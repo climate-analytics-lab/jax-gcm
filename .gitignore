@@ -196,4 +196,10 @@ docs/source/generated
 docs/source/speedy_translation.rst
 
 # Local claude files
-.claude/
+.claude/*
+# ...except skills, which are shared tooling: they encode how to run and
+# benchmark the model reproducibly, so a collaborator needs the same copy.
+# NOTE: the pattern above must be `.claude/*`, not `.claude/`; git does not
+# descend into an excluded DIRECTORY, so a trailing-slash exclusion makes the
+# negations below unreachable.
+!.claude/skills/

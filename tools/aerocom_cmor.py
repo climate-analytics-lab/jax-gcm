@@ -89,6 +89,22 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "convection.precip_conv": ("prc", "kg m-2 s-1", "Surface", 1.0, 0.0),
     # --- aerosol optics ---
     "aerosol.aod_total": ("od550aer", "1", "Column", 1.0, 0.0),
+    # --- spectral aerosol optics (jax-gcm#584) ---
+    # These come from the diagnostic Mie pass at the OBSERVATION
+    # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
+    # after ``aerosol.aod_total`` (the nearest radiation band centre)
+    # deliberately: later entries win, so the exact-wavelength field
+    # supersedes the band-centre one when a run has both.
+    "od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
+    "abs550aer": ("abs550aer", "1", "Column", 1.0, 0.0),
+    "od355aer": ("od355aer", "1", "Column", 1.0, 0.0),
+    "od440aer": ("od440aer", "1", "Column", 1.0, 0.0),
+    "od670aer": ("od670aer", "1", "Column", 1.0, 0.0),
+    "od865aer": ("od865aer", "1", "Column", 1.0, 0.0),
+    "ssa440aer": ("ssa440aer", "1", "Column", 1.0, 0.0),
+    "ang4487aer": ("ang4487aer", "1", "Column", 1.0, 0.0),
+    "aerindex": ("aerindex", "1", "Column", 1.0, 0.0),
+    "ec355aer": ("ec355aer", "m-1", "ModelLevel", 1.0, 0.0),
     "aerosol.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
     # --- microphysical process rates (jax-gcm#585), column-integrated ---
     "autoconv": ("autoconv", "kg m-2 s-1", "Column", 1.0, 0.0),
@@ -176,6 +192,15 @@ CF_STANDARD_NAMES = {
     "hfls": "surface_upward_latent_heat_flux",
     "hfss": "surface_upward_sensible_heat_flux",
     "od550aer": "atmosphere_optical_thickness_due_to_ambient_aerosol_particles",
+    "abs550aer": "atmosphere_absorption_optical_thickness_due_to_ambient_aerosol_particles",
+    "od550so4": "atmosphere_optical_thickness_due_to_sulfate_ambient_aerosol_particles",
+    "od550bc": "atmosphere_optical_thickness_due_to_black_carbon_ambient_aerosol_particles",
+    "od550oa": "atmosphere_optical_thickness_due_to_particulate_organic_matter_ambient_aerosol_particles",
+    "od550ss": "atmosphere_optical_thickness_due_to_sea_salt_ambient_aerosol_particles",
+    "od550dust": "atmosphere_optical_thickness_due_to_dust_ambient_aerosol_particles",
+    "od550aerh2o": "atmosphere_optical_thickness_due_to_water_in_ambient_aerosol_particles",
+    "ec355aer": "volume_extinction_coefficient_in_air_due_to_ambient_aerosol_particles",
+    "ang4487aer": "angstrom_exponent_of_ambient_aerosol_in_air",
 }
 
 VALID_VERT = ("Surface", "TOA", "Column", "ModelLevel")
@@ -210,6 +235,42 @@ def _collect_burdens(ds: xr.Dataset) -> dict[str, xr.DataArray]:
     return out
 
 
+# jcm species -> AeroCom component suffix. The three organic species
+# (primary, secondary, marine) are reported as one ``oa`` component, which
+# is what the protocol asks for; the raw per-species fields stay in the
+# model output if a finer split is wanted.
+_OPTICS_COMPONENT = {
+    "so4": "so4", "bc": "bc", "du": "dust", "ss": "ss", "wat": "aerh2o",
+    "poa": "oa", "soa": "oa", "moa": "oa",
+}
+
+
+def _collect_optics(ds: xr.Dataset) -> dict[str, xr.DataArray]:
+    """Group the per-species optics into AeroCom components (jax-gcm#584).
+
+    Several jcm species map to one AeroCom component, so contributions are
+    SUMMED rather than overwritten. Per-mode fields are passed through
+    under their own names — they are a JAM extra, not part of the protocol,
+    but they are what makes a size-resolved AOD evaluation possible.
+    """
+    out: dict[str, xr.DataArray] = {}
+    for var in ds.data_vars:
+        for prefix in ("od550_", "abs550_"):
+            if not str(var).startswith(prefix):
+                continue
+            rest = str(var)[len(prefix):]
+            if rest.startswith("mode_"):
+                out[str(var)] = ds[var]
+                break
+            comp = _OPTICS_COMPONENT.get(rest)
+            if comp is None:
+                break
+            name = f"{prefix[:-1]}{comp}"
+            out[name] = out[name] + ds[var] if name in out else ds[var]
+            break
+    return out
+
+
 def convert(
     ds: xr.Dataset,
     model: str,
@@ -235,6 +296,8 @@ def convert(
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
         candidates[name] = (da, "kg m-2", "Column")
+    for name, da in _collect_optics(ds).items():
+        candidates[name] = (da, "1", "Column")
 
     for cmor, (da, units, vert) in sorted(candidates.items()):
         assert vert in VALID_VERT, vert

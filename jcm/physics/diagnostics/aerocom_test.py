@@ -440,6 +440,60 @@ class CmorWriterTest(unittest.TestCase):
         got = _collect_burdens(ds)
         np.testing.assert_allclose(np.asarray(got["burden_so4"]), [3.0, 3.0])
 
+    def test_organic_optics_species_are_summed_not_overwritten(self):
+        """AeroCom reports ONE organic component, but jcm carries primary,
+        secondary and marine organics separately — so the three must add
+        into od550oa. Overwriting instead of summing would silently report
+        only whichever species happened to be visited last (jax-gcm#584).
+        """
+        import xarray as xr
+        from tools.aerocom_cmor import _collect_optics
+        ds = xr.Dataset({
+            "od550_poa": xr.DataArray(np.array([1.0])),
+            "od550_soa": xr.DataArray(np.array([2.0])),
+            "od550_moa": xr.DataArray(np.array([4.0])),
+            "od550_du": xr.DataArray(np.array([0.5])),
+            "od550_wat": xr.DataArray(np.array([0.25])),
+            "abs550_bc": xr.DataArray(np.array([0.1])),
+            "od550_mode_acc": xr.DataArray(np.array([0.7])),
+        })
+        got = _collect_optics(ds)
+        np.testing.assert_allclose(np.asarray(got["od550oa"]), [7.0])
+        np.testing.assert_allclose(np.asarray(got["od550dust"]), [0.5])
+        np.testing.assert_allclose(np.asarray(got["od550aerh2o"]), [0.25])
+        np.testing.assert_allclose(np.asarray(got["abs550bc"]), [0.1])
+        # Per-mode fields are a JAM extra, passed through under their own name.
+        np.testing.assert_allclose(np.asarray(got["od550_mode_acc"]), [0.7])
+
+    def test_spectral_optics_reach_submission_files(self):
+        """End-to-end: the #584 fields must come out of ``convert`` as their
+        own CMOR files with a real CF standard_name, not be dropped for want
+        of a NAME_MAP entry.
+        """
+        import pathlib
+        import tempfile
+        import xarray as xr
+        from tools.aerocom_cmor import convert
+        ds = self._dataset(
+            ang4487aer=((), np.float64(1.4)),
+            od550aer=((), np.float64(0.21)),
+            abs550aer=((), np.float64(0.01)),
+            od550_bc=((), np.float64(0.004)),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            convert(ds, "JCM-t", "all_2000", "2010", "monthly", pathlib.Path(td))
+            root = pathlib.Path(td)
+            got = xr.open_dataset(
+                root / "aerocom_JCM-t_all_2000_od550aer_Column_2010_monthly.nc")
+            self.assertAlmostEqual(float(got["od550aer"]), 0.21, places=6)
+            self.assertEqual(
+                got["od550aer"].attrs["standard_name"],
+                "atmosphere_optical_thickness_due_to_ambient_aerosol_particles")
+            # The per-species field is grouped to its AeroCom component name.
+            bc = xr.open_dataset(
+                root / "aerocom_JCM-t_all_2000_od550bc_Column_2010_monthly.nc")
+            self.assertAlmostEqual(float(bc["od550bc"]), 0.004, places=6)
+
 
 class AerosolGroupEndToEndTest(unittest.TestCase):
     """The aerosol group must survive a real JAM step.
@@ -472,3 +526,14 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
             key = f"aerocom_burden_{spec}"
             self.assertIn(key, ds.data_vars)
             self.assertTrue(np.isfinite(np.asarray(ds[key])).all(), key)
+
+
+class AerocomOpticsConfigTest(unittest.TestCase):
+    def test_optics_diagnostics_require_the_jam_module(self):
+        """MACv2-SP has no species tracers, so the per-species split cannot
+        be produced. Fail at construction rather than write an output file
+        that is silently missing the requested fields (jax-gcm#584).
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        with self.assertRaisesRegex(ValueError, "aerosol_module='jam'"):
+            echam_physics(aerosol_module="macv2sp", aerocom_optics=True)

@@ -85,6 +85,7 @@ def echam_physics(
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
+    aerocom_optics: bool = False,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -171,6 +172,10 @@ def echam_physics(
         aerocom_groups: Which diagnostic groups to compute
             (``cloud``/``column``/``plev``/``aerosol``); a run
             pays only for the groups it selects.
+        aerocom_optics: Add the AeroCom per-species / per-mode /
+            spectral aerosol optics diagnostics (jax-gcm#584). Requires
+            ``aerosol_module="jam"``; a second Mie sweep at the
+            observation wavelengths, riding the radiation gate.
         aerocom_overlap: Cloud-overlap hypothesis for the
             cloud-top scan; should match the radiation scheme's.
         cosp_calipso: Also run the CALIPSO lidar simulator on the
@@ -255,6 +260,17 @@ def echam_physics(
     # rest of the JAM chain runs in the pre-cloud aerosol block — activation
     # must precede the cloud term that consumes ``activated_cdnc``).
     jam_post_cloud_terms: list[PhysicsTerm] = []
+    # The per-species/per-mode split only exists for a modal scheme with
+    # explicit species tracers. Asking for it with MACv2-SP (prescribed
+    # plumes, no species) or with the aerosol module off would otherwise
+    # produce an output file silently missing the very fields the run was
+    # configured to get.
+    if aerocom_optics and aerosol_module != "jam":
+        raise ValueError(
+            "aerocom_optics=True needs aerosol_module='jam' — the per-species "
+            "and per-mode optics come from the JAM modal population, which "
+            f"aerosol_module={aerosol_module!r} does not carry."
+        )
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
     elif aerosol_module == "jam":
@@ -265,6 +281,7 @@ def echam_physics(
             ice_scheme=jam_ice_scheme,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
+            optics_diagnostics=aerocom_optics,
         )
         # The per-band Mie optics are only consumed by the interval-gated
         # radiation term, so the optics term skips recomputing them on the

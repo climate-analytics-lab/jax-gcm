@@ -27,9 +27,12 @@
 #
 # NOT included here because it roughly DOUBLES runtime: the aerosol-free
 # (*noa) radiation diagnostic needs a second radiation call, and radiation
-# is ~87 % of the step. It is gated separately — see jax-gcm#583. Remaining
-# coverage gaps: #584 (per-species/mode optics), #585 (process rates and
-# emission fluxes), #586 (3-hourly instantaneous output).
+# is ~87 % of the step. It is gated separately — see jax-gcm#583.
+#
+# Also gated separately: the per-species / per-mode / spectral aerosol
+# optics (#584), which need a second Mie sweep — use the
+# ``echam-jam-aerocom-optics`` preset. Remaining coverage gap: #586
+# (3-hourly instantaneous output).
 
 defaults:
   - echam-jam
@@ -42,3 +45,7 @@ enable_aerocom: true
 aerocom_groups: [cloud, column, plev, aerosol]
 # Should match the radiation scheme's overlap assumption.
 aerocom_overlap: maximum-random
+
+# Per-species / per-mode / spectral aerosol optics (jax-gcm#584). Off here;
+# see echam-jam-aerocom-optics.yaml.
+aerocom_optics: false
