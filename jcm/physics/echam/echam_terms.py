@@ -80,6 +80,8 @@ def echam_physics(
     jam_prescribed_speciated: bool = False,
     enable_cosp: bool = False,
     cosp_ncolumns: int = 40,
+    cosp_calipso: bool = False,
+    cosp_modis: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -171,6 +173,14 @@ def echam_physics(
             pays only for the groups it selects.
         aerocom_overlap: Cloud-overlap hypothesis for the
             cloud-top scan; should match the radiation scheme's.
+        cosp_calipso: Also run the CALIPSO lidar simulator on the
+            SAME subcolumn realization, giving the CFMIP
+            ``cltcalipso``/``cllcalipso``/``clmcalipso``/
+            ``clhcalipso`` layered cloud cover.
+        cosp_modis: Also run the MODIS imager simulator on that
+            realization (``cltmodis``, ``clwmodis``, ``climodis``,
+            ``tauwmodis``, ``tauimodis``, ``reffclwmodis``,
+            ``reffclimodis``, ``lwpmodis``, ``iwpmodis``).
 
     """
     convection_p = convection or ConvectionParameters.default()
@@ -329,7 +339,9 @@ def echam_physics(
     cosp_terms: list[PhysicsTerm] = []
     if enable_cosp:
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
-        cosp_terms = [CloudsatCosp(ncolumns=cosp_ncolumns)]
+        cosp_terms = [CloudsatCosp(ncolumns=cosp_ncolumns,
+                                   enable_calipso=cosp_calipso,
+                                   enable_modis=cosp_modis)]
 
     aerocom_terms: list[PhysicsTerm] = []
     if enable_aerocom:

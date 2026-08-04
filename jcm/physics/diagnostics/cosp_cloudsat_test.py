@@ -138,3 +138,90 @@ class FactoryWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
+class CalipsoModisTest(unittest.TestCase):
+    """CALIPSO and MODIS run on the radar's SCOPS realization."""
+
+    @classmethod
+    def setUpClass(cls):
+        state, diagnostics, forcing, terrain = _setup()
+        # The shared fixture leaves the effective radii at zero, which the
+        # LIDAR reads as "no particles" (unlike the radar, for which zero
+        # selects the PSD defaults). Give the cloudy layers realistic radii
+        # so the lidar has something to detect.
+        clouds = diagnostics["clouds"]
+        reff_liq = jnp.where(clouds.qc > 0.0, 10.0, 0.0)   # microns
+        reff_ice = jnp.where(clouds.qi > 0.0, 30.0, 0.0)
+        diagnostics = {**diagnostics,
+                       "clouds": clouds.copy(r_eff_liq=reff_liq,
+                                             r_eff_ice=reff_ice)}
+        cls.setup = (state, diagnostics, forcing, terrain)
+
+    def _run(self, **kw):
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        term = CloudsatCosp(ncolumns=20, seed=1, **kw)
+        state, diagnostics, forcing, terrain = self.setup
+        return term(state, diagnostics, forcing, terrain)[1]
+
+    def test_calipso_layered_cover_is_a_fraction(self):
+        diag = self._run(enable_calipso=True)
+        for key in ("cltcalipso", "cllcalipso", "clmcalipso", "clhcalipso"):
+            arr = np.asarray(diag[key])
+            self.assertEqual(arr.shape, (NCOLS,), key)
+            self.assertTrue(np.isfinite(arr).all(), key)
+            # jcosp reports percent; the term converts to a [0,1] fraction.
+            self.assertGreaterEqual(arr.min(), -1e-6, key)
+            self.assertLessEqual(arr.max(), 1.0 + 1e-6, key)
+
+    def test_calipso_sees_the_seeded_cloud(self):
+        """The fixture has cloud, so total lidar cover must be non-zero."""
+        diag = self._run(enable_calipso=True)
+        self.assertGreater(float(np.asarray(diag["cltcalipso"]).max()), 0.0)
+
+    def test_zero_effective_radius_gives_no_lidar_cloud(self):
+        """Documents the radar/lidar convention difference.
+
+        ``lidar_optics`` treats radius <= 0 as "class absent", whereas the
+        radar treats reff == 0 as "use PSD defaults". A configuration that
+        never sets the effective radii therefore reports zero lidar cover —
+        surprising enough to pin down so it is not mistaken for a bug.
+        """
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        state, diagnostics, forcing, terrain = _setup()  # radii left at zero
+        term = CloudsatCosp(ncolumns=20, seed=1, enable_calipso=True)
+        _, diag = term(state, diagnostics, forcing, terrain)
+        self.assertEqual(float(np.asarray(diag["cltcalipso"]).max()), 0.0)
+
+    def test_modis_outputs_are_finite_and_physical(self):
+        diag = self._run(enable_modis=True)
+        for key in ("cltmodis", "clwmodis", "climodis"):
+            arr = np.asarray(diag[key])
+            self.assertEqual(arr.shape, (NCOLS,), key)
+            self.assertGreaterEqual(arr.min(), -1e-6, key)
+            self.assertLessEqual(arr.max(), 1.0 + 1e-6, key)
+        for key in ("tauwmodis", "tauimodis", "reffclwmodis", "reffclimodis",
+                    "lwpmodis", "iwpmodis"):
+            arr = np.asarray(diag[key])
+            self.assertTrue(np.isfinite(arr).all(), key)
+            self.assertGreaterEqual(arr.min(), -1e-9, key)
+
+    def test_radar_diagnostics_unchanged_by_the_extra_simulators(self):
+        """Adding MODIS/CALIPSO must not perturb the CloudSat results.
+
+        They share one SCOPS draw, so the radar output has to be identical —
+        if it moves, the subcolumn realization is being regenerated rather
+        than reused, which would both cost more and decouple the instruments.
+        """
+        base = self._run()
+        both = self._run(enable_calipso=True, enable_modis=True)
+        for key in ("cosp_warm_rain", "cosp_cold_rain", "cosp_pia"):
+            np.testing.assert_allclose(
+                np.asarray(both[key]), np.asarray(base[key]), rtol=1e-6,
+                err_msg=f"{key} changed when extra simulators were enabled")
+
+    def test_disabled_by_default(self):
+        diag = self._run()
+        for key in ("cltcalipso", "cltmodis"):
+            self.assertNotIn(key, diag)
