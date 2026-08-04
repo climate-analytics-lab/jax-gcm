@@ -1,0 +1,160 @@
+---
+name: derecho-jcm-runs
+description: Submit, monitor and benchmark jax-gcm (jcm) simulations on NCAR Derecho's PBS queues. Use when running any jcm model integration, timestep/resolution sweep, performance benchmark, or GPU job on Derecho — covers job-script generation, queue/account selection, environment setup, and reliable completion monitoring.
+---
+
+# Running jcm on Derecho
+
+Generate a PBS script with `scripts/mkjob.py`, sanity-check the config, submit,
+then monitor with the patterns below. Every default here was established by a
+real campaign; the failure modes listed are ones that have actually happened.
+
+## 1. Generate and submit
+
+```bash
+python scripts/mkjob.py --name my_run --days 30 > runs/my_run.pbs
+qsub runs/my_run.pbs
+```
+
+Common flags (see `python scripts/mkjob.py --help` for all):
+
+| flag | default | notes |
+|---|---|---|
+| `--gpus N` | 1 | >1 adds `+grid.spmd_mesh` and drops the memory fraction |
+| `--queue` | `main` | `main` routes to `gpu`; `gpudev` for <1 h debugging |
+| `--hours` | 6 | walltime |
+| `--grid` | `echam_t63_l47_hybrid` | any `jcm/config/grid/*.yaml` stem |
+| `--dt` | 15 | minutes |
+| `--advection` | `semi_lagrangian` | needs the SL dinosaur (see §3) |
+| `--physics` | `echam-jam` | `echam-rrtmgp-2m` for no aerosol |
+| `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
+| `--aquaplanet` | off | skips terrain/forcing files |
+| `--resume` | off | reuse the run dir's checkpoint |
+| `--extra "k=v ..."` | — | raw Hydra overrides appended last |
+
+## 2. Always pre-flight before burning a queue slot
+
+Two checks, both cheap, both catch failures that otherwise waste a job:
+
+```bash
+# (a) Hydra composition — catches +/++ prefix errors and unknown keys
+JAX_PLATFORMS=cpu python -m jcm.main <exact overrides> --cfg job >/dev/null
+
+# (b) coords constructibility — --cfg job does NOT build coords, so an
+#     invalid spectral truncation only fails at runtime
+JAX_PLATFORMS=cpu python -c "
+from jcm.utils import get_coords
+from jcm.physics.echam.echam_levels import get_echam_levels
+get_coords(vertical_coords=get_echam_levels(<layers>), spectral_truncation=<T>)"
+```
+
+`mkjob.py --check` runs (a) for you and prints the command for (b).
+
+Hydra override prefixes are a recurring trap: a key that already exists in the
+composed config takes no `+`; one that does not, requires it. `run=longrun`
+*replaces* the whole run group, so `run.checkpoint_path` needs `+` under it but
+not under the default run config.
+
+## 3. Environment (baked into generated scripts)
+
+```bash
+source ~/.venvs/jaxgcm/bin/activate
+export PYTHONPATH=~/dinosaur-sl:$REPO     # SL dinosaur; jcm worktree wins over the venv's editable install
+export JAX_PLATFORMS=cuda,cpu
+export MAM4_JAX_ENABLE_X64=0              # f32 MAM4 core (forward-only); f64 default is much slower
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93   # 0.85 when ngpus>1 — 0.93 starves CUDA command buffers
+```
+
+Overridable site paths: `JCM_REPO`, `JCM_VENV`, `JCM_DINOSAUR`, `JAM_INPUTS`,
+`JCM_EMISSIONS`, `PBS_ACCOUNT`, `SCRATCH`.
+
+`advection=semi_lagrangian` requires a dinosaur carrying PR #135 (`JCM_DINOSAUR`,
+`~/dinosaur-sl` by default). Without it the dycore raises a clear error; use
+Eulerian plus `diffusion.tracer_positivity=true` instead.
+
+## 4. Input data
+
+`reference/data_paths.md` lists every boundary-condition, emissions and aux
+file: what ships in the repo, what must be prepared first, where the CESM
+upstream sources are, and the preparation gotchas.
+
+Two things to remember: terrain/forcing/ozone are **packaged in the repo**
+(nothing to prepare), while the JAM aux inputs (emissions, DMS, dust,
+oxidants) are **prepared files on scratch and therefore purge-eligible**.
+`mkjob.py` checks they exist and refuses to emit a script if any is missing.
+Paths come from `JAM_INPUTS` / `JCM_EMISSIONS` (see the file for defaults).
+
+Level-resolved files must match the run: an L47 oxidant/ozone file will not
+work in an L95 run.
+
+## 5. PBS facts specific to this machine
+
+- GPU account is **UCSD0085** (UCSD0044 is casper-only and is rejected).
+- `gpu_type=a100` must be **inside the select chunk**, not a separate `-l`.
+- `-q main` is a routing queue that lands GPU jobs in `gpu`; `gpudev` exists for
+  short interactive-style debugging.
+- **`qsub -v VAR=x` does not reach the job environment here** — generated
+  scripts hardcode their variables.
+- Keep `#PBS -m abe` so job mail keeps working (it was silently lost once when a
+  script was derived by `sed` from one that omitted it).
+- Use `set -euo pipefail`; without `-e` a failed run still reaches a trailing
+  `touch DONE` and looks successful.
+
+## 6. Monitoring (`scripts/watch_job.sh`)
+
+```bash
+scripts/watch_job.sh <jobid> <logfile> "<completion marker>"
+```
+
+Use it as the command of a persistent `Monitor`. It encodes four lessons:
+
+1. **Read the log once per check.** Grep the log into a variable, then both
+   decide *and* report from those same bytes. Live NFS logs give stale re-reads,
+   which produced repeated phantom "failures" whose detail printed empty.
+2. **Debounce**: a failure signature must persist across two checks.
+3. **3-strike `qstat`**: PBS requeues and transient `qstat` errors otherwise look
+   like a vanished job.
+4. **File existence is not success**: the driver writes chunk netCDFs *before*
+   the NaN check. Verify the `NaN vars: 0/N` health line instead.
+
+Filter Lmod's "unknown module" noise — it is harmless on these nodes.
+
+## 7. Reading throughput correctly
+
+The `N sim days/hr` in the log is **cumulative and includes compile**. Quote
+`Wall: X s this chunk` from a late chunk, and only when two consecutive chunks
+agree within ~5% (rates need 3–4 chunks to settle; the first can be off by
+20×). High GPU utilisation does not prove steady state — XLA autotuning also
+keeps the GPU ~95% busy.
+
+```bash
+scripts/settled_rate.py <log> [--dt 15]   # per-chunk walls + convergence-checked rate
+```
+
+Log locations differ by job type: a plain run writes to the PBS `-o` file
+(`<name>.log` in the submit directory); `--bench` variants write to
+`$RUNDIR/<tag>/run.log`. A 10-day run yields only two chunks and the analyzer
+will correctly refuse to quote a rate — allow >= 20 days (4 chunks) for a
+number worth reporting.
+
+Reference points at T63L47, JAM + SL, dt=15, one A100-40GB: **151 s per 5 days
+= 119 days/hr**, of which radiation is ~78%. Grey radiation gives ~34 s / 533
+days/hr. See `docs/source/design/dinosaur_sl_jam_configuration.md` in the repo.
+
+## 8. Benchmarking or debugging a performance difference
+
+`--bench` emits a variant-matrix job (reference / grey radiation / any extra
+override sets) with convergence checks and GPU sampling under load. When
+comparing machines, capture on both: `nvidia-smi` static specs, clocks/power
+under load, `Clocks Event Reasons`, dependency provenance including git HEADs of
+editable installs, and the **dtypes the model actually runs in** — a config flag
+is not enough, since one f64 input promotes whole subgraphs. Power draw is
+diagnostic: high power at max clocks with low throughput indicates FP64 units
+engaging.
+
+## 9. Memory guidance (A100-40GB)
+
+T63L47 JAM fits comfortably at fraction 0.93 with 1 saved frame per chunk (2
+frames OOM'd). T63L95 fits on one GPU. T106L95 does **not** — use 4 GPUs with
+`+grid.spmd_mesh=[2,2,1]` and fraction 0.85. Valid spectral truncations are
+21, 31, 42, 63, 85, 106, 119, 170, 213, 340, 425 — **T127 does not exist**.

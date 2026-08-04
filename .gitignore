@@ -195,5 +195,7 @@ docs/source/generated
 # (docs/source/conf.py); never committed — see issue #394.
 docs/source/speedy_translation.rst
 
-# Local claude files
-.claude/
+# Local claude state (settings, sessions, caches) stays untracked; shared
+# project skills under .claude/skills/ are versioned.
+.claude/*
+!.claude/skills/
