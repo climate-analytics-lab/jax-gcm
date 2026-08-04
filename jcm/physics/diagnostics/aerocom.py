@@ -341,6 +341,7 @@ class AerocomDiagnostics(PhysicsTerm):
         "aerocom_cllvi", "aerocom_clivi",
         # column
         "aerocom_prw", "aerocom_cdnum", "aerocom_icnum", "aerocom_albedo",
+        "aerocom_cdnc3d",
         # plev
         "aerocom_lts",
         # aerosol (per-tracer burdens are named from the active tracer set)
@@ -396,12 +397,25 @@ class AerocomDiagnostics(PhysicsTerm):
         # Use the running thermodynamic state where an upstream term has
         # published it, so the diagnostics describe the same atmosphere the
         # microphysics saw (matching the CloudSat simulator's convention).
-        thermo = diagnostics.get("thermo_run")
-        temperature = thermo["temperature"] if thermo else state.temperature
+        # The running thermodynamic view carries the POST-microphysics
+        # condensate (both cloud schemes advance it), so these diagnostics
+        # describe the same atmosphere as the tracers saved at this
+        # timestamp. ``CloudData.qc``/``qi`` are the step-START values —
+        # the schemes return their condensate change in the tendency only —
+        # so using them here would date every cloud product one step.
+        thermo = diagnostics.get("thermo_run") or {}
+        temperature = thermo.get("temperature", state.temperature)
+        qc = thermo.get("qc", clouds.qc)
+        qi = thermo.get("qi", clouds.qi)
 
         cdnc_m3, qnc, qni = self._number_concentrations(state, diagnostics, clouds)
+        # Publish the resolved 3-D droplet number: CloudData.droplet_number
+        # is zero under the 2-moment scheme (which carries qnc instead), so
+        # the CMOR writer needs this rather than the raw CloudData field.
+        out["aerocom_cdnc3d"] = cdnc_m3
         if "cloud" in self.groups:
-            out.update(self._cloud_group(clouds, temperature, p_half, cdnc_m3))
+            out.update(self._cloud_group(clouds, temperature, p_half,
+                                         cdnc_m3, qc, qi))
         if "column" in self.groups:
             out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
@@ -447,20 +461,21 @@ class AerocomDiagnostics(PhysicsTerm):
                 qnc = jnp.where(rho > 0.0, cdnc_m3 / jnp.where(rho > 0.0, rho, 1.0), 0.0)
         return cdnc_m3, qnc, qni
 
-    def _cloud_group(self, clouds, temperature, p_half, cdnc_m3) -> dict:
+    def _cloud_group(self, clouds, temperature, p_half, cdnc_m3,
+                     qc, qi) -> dict:
         """Cloud-top sampling, optical depths and condensate paths."""
         # jcm carries effective radii in microns; the protocol wants metres.
         r_liq_m = clouds.r_eff_liq * 1e-6
         r_ice_m = clouds.r_eff_ice * 1e-6
         tau_liq, tau_ice = _cloud_optical_depth(
-            clouds.qc, clouds.qi, r_liq_m, r_ice_m, p_half)
+            qc, qi, r_liq_m, r_ice_m, p_half)
         cod3d = tau_liq + tau_ice
 
         # Liquid fraction of the condensate; a condensate-free layer is
         # assigned phase 0 but is masked out by the visibility test anyway.
-        total = clouds.qc + clouds.qi
+        total = qc + qi
         has_cond = total > 0.0
-        phase3d = jnp.where(has_cond, clouds.qc / jnp.where(has_cond, total, 1.0), 0.0)
+        phase3d = jnp.where(has_cond, qc / jnp.where(has_cond, total, 1.0), 0.0)
 
         # In-cloud droplet number for the cloud-top weighting: the protocol
         # asks for in-cloud cdnc3d as input to the sampler (the grid-mean
@@ -474,8 +489,8 @@ class AerocomDiagnostics(PhysicsTerm):
             cod3d=cod3d, f3d=cf, t3d=temperature, phase3d=phase3d,
             cdr3d=r_liq_m, icr3d=r_ice_m, cdnc3d=cdnc3d, overlap=self.overlap)
 
-        lwp = _column_integral(clouds.qc, p_half)
-        iwp = _column_integral(clouds.qi, p_half)
+        lwp = _column_integral(qc, p_half)
+        iwp = _column_integral(qi, p_half)
         return {
             "aerocom_clt": top["clt"],
             "aerocom_ttop": top["ttop"],
@@ -513,12 +528,16 @@ class AerocomDiagnostics(PhysicsTerm):
         out["aerocom_cdnum"] = jnp.sum(qnc * dm, axis=0) if qnc is not None else zero
         out["aerocom_icnum"] = jnp.sum(qni * dm, axis=0) if qni is not None else zero
 
+        # SURFACE albedo, from the surface fluxes. The TOA ratio is the
+        # PLANETARY albedo, which folds in cloud and aerosol reflection and
+        # would therefore move with the very ACI signal these experiments
+        # are trying to isolate.
         rad = diagnostics.get("radiation")
-        toa_down = getattr(rad, "toa_sw_down", None) if rad is not None else None
-        toa_up = getattr(rad, "toa_sw_up", None) if rad is not None else None
-        if toa_down is not None and toa_up is not None:
-            lit = toa_down > 0.0
-            albedo = jnp.where(lit, toa_up / jnp.where(lit, toa_down, 1.0), 0.0)
+        sfc_down = getattr(rad, "surface_sw_down", None) if rad is not None else None
+        sfc_up = getattr(rad, "surface_sw_up", None) if rad is not None else None
+        if sfc_down is not None and sfc_up is not None:
+            lit = sfc_down > 0.0
+            albedo = jnp.where(lit, sfc_up / jnp.where(lit, sfc_down, 1.0), 0.0)
         else:
             albedo = zero
         out["aerocom_albedo"] = albedo

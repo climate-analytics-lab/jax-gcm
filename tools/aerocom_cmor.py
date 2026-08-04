@@ -76,7 +76,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "clouds.cloud_fraction": ("cl", "1", "ModelLevel", 1.0, 0.0),
     "qc": ("clw", "kg kg-1", "ModelLevel", 1.0, 0.0),
     "qi": ("cli", "kg kg-1", "ModelLevel", 1.0, 0.0),
-    "clouds.droplet_number": ("cdnc3d", "m-3", "ModelLevel", 1.0, 0.0),
+    # CloudData.droplet_number is zero under the 2-moment scheme, which
+    # carries qnc instead; AerocomDiagnostics publishes the resolved
+    # volumetric profile, so map that.
+    "aerocom_cdnc3d": ("cdnc3d", "m-3", "ModelLevel", 1.0, 0.0),
     # jcm carries effective radii in microns; AeroCom asks for metres.
     "clouds.r_eff_liq": ("cdr3d", "m", "ModelLevel", 1e-6, 0.0),
     "clouds.r_eff_ice": ("icr3d", "m", "ModelLevel", 1e-6, 0.0),
@@ -124,6 +127,41 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
 BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
                   "dms", "so2", "h2so4", "soag")
 
+
+# CF standard names for the subset where the mapping is unambiguous. The
+# short CMOR id is NOT a CF standard name, so anything absent here simply
+# gets no ``standard_name`` attribute (which is optional) rather than a
+# guessed one that a CF checker would reject.
+CF_STANDARD_NAMES = {
+    "ta": "air_temperature",
+    "ps": "surface_air_pressure",
+    "ts": "surface_temperature",
+    "hus": "specific_humidity",
+    "hur": "relative_humidity",
+    "ua": "eastward_wind",
+    "va": "northward_wind",
+    "zg": "geopotential_height",
+    "rho": "air_density",
+    "clt": "cloud_area_fraction",
+    "cl": "cloud_area_fraction_in_atmosphere_layer",
+    "clw": "mass_fraction_of_cloud_liquid_water_in_air",
+    "cli": "mass_fraction_of_cloud_ice_in_air",
+    "lwp": "atmosphere_mass_content_of_cloud_liquid_water",
+    "iwp": "atmosphere_mass_content_of_cloud_ice",
+    "prw": "atmosphere_mass_content_of_water_vapor",
+    "rlut": "toa_outgoing_longwave_flux",
+    "rlutcs": "toa_outgoing_longwave_flux_assuming_clear_sky",
+    "rsut": "toa_outgoing_shortwave_flux",
+    "rsutcs": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+    "rsdt": "toa_incoming_shortwave_flux",
+    "rsds": "surface_downwelling_shortwave_flux_in_air",
+    "rsus": "surface_upwelling_shortwave_flux_in_air",
+    "rlds": "surface_downwelling_longwave_flux_in_air",
+    "rlus": "surface_upwelling_longwave_flux_in_air",
+    "hfls": "surface_upward_latent_heat_flux",
+    "hfss": "surface_upward_sensible_heat_flux",
+    "od550aer": "atmosphere_optical_thickness_due_to_ambient_aerosol_particles",
+}
 
 VALID_VERT = ("Surface", "TOA", "Column", "ModelLevel")
 
@@ -188,9 +226,16 @@ def convert(
         if flip_levels and "level" in da.dims:
             da = da.isel(level=slice(None, None, -1))
         da = da.rename(cmor)
-        da.attrs.update(units=units, standard_name=cmor,
-                        comment=("Produced by tools/aerocom_cmor.py from JCM "
-                                 "output; see jax-gcm#581 for coverage."))
+        # ``standard_name`` must be a real CF standard name, not the short
+        # CMOR id (``ta`` is not a standard name; ``air_temperature`` is), or
+        # a CF checker rejects the file. Omitted where we do not have a
+        # verified mapping rather than guessed.
+        attrs = {"units": units, "long_name": cmor,
+                 "comment": ("Produced by tools/aerocom_cmor.py from JCM "
+                             "output; see jax-gcm#581 for coverage.")}
+        if cmor in CF_STANDARD_NAMES:
+            attrs["standard_name"] = CF_STANDARD_NAMES[cmor]
+        da.attrs.update(attrs)
         fname = _filename(convention, model, experiment, cmor, vert, period, freq)
         if not dry_run:
             out = xr.Dataset({cmor: da})
