@@ -80,6 +80,9 @@ def echam_physics(
     jam_prescribed_speciated: bool = False,
     enable_cosp: bool = False,
     cosp_ncolumns: int = 40,
+    enable_aerocom: bool = False,
+    aerocom_groups: tuple[str, ...] = ("cloud", "column"),
+    aerocom_overlap: str = "maximum-random",
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -158,6 +161,16 @@ def echam_physics(
         cosp_ncolumns: Stochastic subcolumns per gridbox for the
             radar simulator (COSP canonical value is 100; fewer
             is cheaper and averages out in climatologies).
+        enable_aerocom: Attach the AeroCom phase-4 derived
+            diagnostics term (cloud-top sampling, column
+            integrals, pressure-level fields, aerosol number
+            metrics). Diagnostic-only; adds no tendency. See
+            ``jcm.physics.diagnostics.aerocom``.
+        aerocom_groups: Which diagnostic groups to compute
+            (``cloud``/``column``/``plev``/``aerosol``); a run
+            pays only for the groups it selects.
+        aerocom_overlap: Cloud-overlap hypothesis for the
+            cloud-top scan; should match the radiation scheme's.
 
     """
     convection_p = convection or ConvectionParameters.default()
@@ -318,6 +331,12 @@ def echam_physics(
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
         cosp_terms = [CloudsatCosp(ncolumns=cosp_ncolumns)]
 
+    aerocom_terms: list[PhysicsTerm] = []
+    if enable_aerocom:
+        from jcm.physics.diagnostics.aerocom import AerocomDiagnostics
+        aerocom_terms = [AerocomDiagnostics(
+            groups=tuple(aerocom_groups), overlap=aerocom_overlap)]
+
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
@@ -334,6 +353,9 @@ def echam_physics(
             *jam_post_cloud_terms,
             *nonoro_gw_terms,
             LottMillerSso(params=sso_p),
+            # Terminal: summarises the completed step, so it runs after
+            # every term that can still modify the state.
+            *aerocom_terms,
         ],
         checkpoint_terms=checkpoint_terms,
         vectorize_columns=True,

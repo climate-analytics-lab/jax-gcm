@@ -1,0 +1,26 @@
+# ECHAM + JAM aerosol with the AeroCom phase-4 diagnostics attached.
+#
+# The AP4-CTRL / aci-baseline / MMPPE / imo2020 submissions need derived
+# fields (cloud-top sampled quantities, column integrals, pressure-level
+# winds, aerosol number metrics) that are not part of the normal output.
+# This preset turns them on; post-process with tools/aerocom_cmor.py.
+#
+#     python -m jcm.main physics=echam-jam-aerocom grid=echam_t63_l47_hybrid
+#
+# The diagnostics are computed AFTER every other term, add no tendency, and
+# cost only what their selected groups cost — see
+# jcm.physics.diagnostics.aerocom and jax-gcm#581 for the coverage gaps
+# that still need model-side work (aerosol-free radiation, per-species
+# optics, microphysical process rates, emission fluxes).
+
+defaults:
+  - echam-jam
+
+enable_aerocom: true
+# cloud: cloud-top sampling + optical depths + condensate paths
+# column: water-vapour path, column number, albedo
+# plev: winds on pressure surfaces + LTS
+# aerosol: per-species burdens + N70/N100/PM1/PM10 (needs the JAM module)
+aerocom_groups: [cloud, column, plev, aerosol]
+# Should match the radiation scheme's overlap assumption.
+aerocom_overlap: maximum-random
