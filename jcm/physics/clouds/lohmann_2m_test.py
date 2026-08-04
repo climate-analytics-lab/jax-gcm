@@ -205,7 +205,8 @@ class TestAutoconversion_2M:
         cloud_water_in = jnp.full(shape, 1e-3)
         dt = jnp.full(shape, 10.0)
 
-        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+        (droplet_number, cloud_water, pmratepr, prpr, prprn,
+         _autoconv_only, _accretion_only) = precip_formation_warm(
             warm_precip_mask=warm_precip_mask,
             autoconversion_factor=autoconversion_factor,
             cloud_fraction=cloud_fraction,
@@ -244,7 +245,8 @@ class TestAutoconversion_2M:
         cloud_water_in = jnp.full(shape, 2e-3)
         dt = jnp.full(shape, 10.0)
 
-        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+        (droplet_number, cloud_water, pmratepr, prpr, prprn,
+         _autoconv_only, _accretion_only) = precip_formation_warm(
             warm_precip_mask=warm_precip_mask,
             autoconversion_factor=autoconversion_factor,
             cloud_fraction=cloud_fraction,
@@ -286,7 +288,8 @@ class TestAutoconversion_2M:
         cloud_water_in = jnp.full((4,), 1e-3)
         dt = jnp.full((4,), 10.0)
 
-        droplet_number, cloud_water, pmratepr, prpr, prprn = precip_formation_warm(
+        (droplet_number, cloud_water, pmratepr, prpr, prprn,
+         _autoconv_only, _accretion_only) = precip_formation_warm(
             warm_precip_mask=warm_precip_mask,
             autoconversion_factor=autoconversion_factor,
             cloud_fraction=cloud_fraction,
@@ -1678,8 +1681,12 @@ class TestPrecipFluxProfiles2M:
         )
 
     def test_bottom_row_equals_surface_fluxes(self):
-        (_, rain_sfc, snow_sfc, _, _, _, _,
-         rain_prof, snow_prof) = self._run(self._mixed_phase_column())
+        # Index by position rather than unpacking: the flux profiles are
+        # last by convention, and the scalars in between (eff. radii, the
+        # rain-source split, the process rates) are not exercised here.
+        out = self._run(self._mixed_phase_column())
+        rain_sfc, snow_sfc = out[1], out[2]
+        rain_prof, snow_prof = out[-2], out[-1]
         assert float(rain_sfc + snow_sfc) > 0.0, "column must precipitate"
         # Same carry values → exact equality (not just allclose).
         assert float(jnp.abs(rain_prof[-1] - rain_sfc)) < 1e-12

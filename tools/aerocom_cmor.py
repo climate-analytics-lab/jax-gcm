@@ -90,6 +90,21 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- aerosol optics ---
     "aerosol.aod_total": ("od550aer", "1", "Column", 1.0, 0.0),
     "aerosol.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
+    # --- microphysical process rates (jax-gcm#585), column-integrated ---
+    "autoconv": ("autoconv", "kg m-2 s-1", "Column", 1.0, 0.0),
+    "accretn": ("accretn", "kg m-2 s-1", "Column", 1.0, 0.0),
+    "wbf": ("wbf", "kg m-2 s-1", "Column", 1.0, 0.0),
+    # --- emission fluxes, summed per species over all emitting terms ---
+    "emi_so2": ("emi_so2", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_so4": ("emi_so4", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_bc": ("emi_bc", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_oc": ("emi_oc", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_poa": ("emi_poa", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_soa": ("emi_soa", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_ss": ("emi_ss", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_du": ("emi_du", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_moa": ("emi_moa", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_dms": ("emi_dms", "kg m-2 s-1", "Surface", 1.0, 0.0),
     # --- boundary layer ---
     "vertical_diffusion.pbl_height": ("hdtcbl", "m", "Surface", 1.0, 0.0),
     # --- AerocomDiagnostics term output ---

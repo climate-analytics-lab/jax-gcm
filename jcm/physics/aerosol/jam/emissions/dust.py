@@ -34,6 +34,8 @@ from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_fl
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+    accumulate_emission_fluxes, emission_flux_keys)
 
 
 @tree_math.struct
@@ -74,7 +76,7 @@ class DustEmissions(PhysicsTerm):
     name: ClassVar[str] = "jam_dust_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
-    provides: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
 
     def __init__(
         self,
@@ -124,4 +126,11 @@ class DustEmissions(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tracer_tends,
         )
+        # Publish this term's contribution to the AeroCom per-species
+        # emission fluxes (accumulated across all emitting terms).
+        diagnostics = accumulate_emission_fluxes(
+            diagnostics, tracer_tends,
+            diagnostics["air_density"],
+            diagnostics["layer_thickness"])
+
         return tendency, diagnostics
