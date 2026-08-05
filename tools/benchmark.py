@@ -376,9 +376,6 @@ def run(args) -> dict:
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
-    (outdir / "result.json").write_text(json.dumps(result, indent=2))
-    (outdir / "report.md").write_text(_report(result))
-
     # Reclaim the model output. Deliberately AFTER the log has been parsed and
     # the report written, and skipped when the run was unhealthy so a failure
     # can still be investigated -- deleting the evidence of a bad run is how
@@ -392,7 +389,9 @@ def run(args) -> dict:
             freed = _dir_size_mib(data_dir)
             shutil.rmtree(data_dir, ignore_errors=True)
             result["output_removed_mib"] = round(freed, 1)
-        (outdir / "result.json").write_text(json.dumps(result, indent=2))
+    # Written last, so the report can state what happened to the output.
+    (outdir / "result.json").write_text(json.dumps(result, indent=2))
+    (outdir / "report.md").write_text(_report(result))
     return result
 
 

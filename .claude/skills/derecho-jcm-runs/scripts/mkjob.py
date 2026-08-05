@@ -90,8 +90,8 @@ def check_ozone(a) -> str | None:
         "  forcing.ozone_file=auto would fall back to the ANALYTIC profile "
         "(~7.6x the tropospheric ozone column), which runs fine and silently "
         "invalidates the radiation.\n"
-        "  Pass --ozone /path/to/ozone_<grid>.nc — see reference/data_paths.md "
-        "(e.g. ozone_cam6chem_2005-2014_t63_l95.nc), or prepare one with\n"
+        "  Pass --ozone /path/to/ozone_<grid>.nc — L95 files for t63/t106/t119 "
+        "already exist, see reference/data_paths.md — or prepare one with\n"
         f"    python -m jcm.data.bc.interpolate_ozone --in T63_ozone_picontrol.nc"
         f" --out ozone_{tr}_l{lev}.nc --nlevels {lev}"
     )

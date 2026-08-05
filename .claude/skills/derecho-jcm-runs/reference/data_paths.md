@@ -32,6 +32,38 @@ submitting; regenerate with the commands below if not.
 | `oxidants_cam_echam_l47_2014_t63.nc` | sulfur chemistry | idem |
 | `ozone_cam6chem_2005-2014_t63_l95.nc` | L95 runs only | `jcm.data.bc.interpolate_ozone --nlevels 95` |
 
+### L95 ozone — already prepared, NOT packaged
+
+Only **T63L47** ozone ships in the repo (`jcm/data/bc/t63/ozone.nc`), so
+`forcing.ozone_file: auto` cannot serve an L95 or T106/T119 run and silently
+falls back to the analytic profile. `mkjob.py` refuses those grids without an
+explicit `--ozone` for that reason.
+
+The files exist, generated 2026-08-01 for the MA L95 benchmark and verified
+NaN-free with latitudes already S->N:
+
+| grid | file | shape |
+|---|---|---|
+| T63 L95 | `t63_ozone_l95.nc` | 12 x 95 x 96 x 192 |
+| T106 L95 | `t106_ozone_l95.nc` | 12 x 95 x 160 x 320 |
+| T119 L95 | `t119_ozone_l95.nc` | 12 x 95 x 180 x 360 |
+
+Currently under `/scr/dwatsonparris/bc_l95/` on the dev workstation — **which
+is purge-eligible**; copy them somewhere durable before relying on them, and
+re-verify before use (`np.isnan(ds.O3).sum() == 0`).
+
+They are deliberately **not** committed: the interpolated field is
+near-maximum entropy (17.7M unique values of 21M), so it does not compress —
+84 MB raw becomes 48 MB with zlib-9, against 0.99 MB for the packaged L47
+file, and T106/T119 are several times larger again. Regenerating is cheap and
+scripted; storing them in git is not.
+
+**The polar trap** (worth knowing if regenerating): T106/T119 Gaussian
+latitudes fall *outside* the T63 source range, and `xarray.interp` with
+`fill_value=None` returns NaN rather than extrapolating — which silently
+NaN'd 730k of 820k ozone points and killed every T106/T119 run until the
+source was extended to +/-90 by nearest-neighbour first.
+
 Current locations on this machine:
 
 ```bash
