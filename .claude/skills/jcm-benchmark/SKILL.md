@@ -166,6 +166,24 @@ Run baseline and candidate on the **same GPU model**, ideally the same card,
 and interleave if the box is noisy. Report both absolute numbers, not just the
 ratio.
 
+**Pin EVERY editable install, not just the one under test.** Pinning only the
+library you are varying leaves the others free to move mid-sweep — and they
+do: a six-config sweep here had jax-rrtmgp switch from a feature branch to
+`main` between config 1 and config 2 because someone merged a PR, so the two
+were measuring different radiation code. Nothing failed; the numbers were
+simply incomparable. It was caught only because the report records resolved
+SHAs. Put all of `jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` on
+`--pythonpath` as pinned worktrees for any run whose numbers you intend to
+compare across hours.
+
+**Check the precision the configuration needs before launching.** f32
+(`MAM4_JAX_ENABLE_X64=0`) is required above T63 and is forward-only. It
+changes both memory and speed, so it cannot be switched on partway through a
+sweep without making the halves incomparable — decide once, for all configs.
+Memory scales with both axes: T63L47 18 GiB, T63L95 61 GiB, T106L47 62 GiB
+on an 80 GiB card, so T106L95 needs both scalings at once and will not fit in
+f64.
+
 **Benchmark A/Bs must attribute to a single change.** A comparison across a
 merge commit that bundled two independent changes is not evidence about
 either one — that error is precisely what made the jax-rrtmgp#22 diagnosis
