@@ -384,18 +384,28 @@ def run(args) -> dict:
     # can still be investigated -- deleting the evidence of a bad run is how
     # you end up unable to explain it.
     if not args.keep_output and data_dir != outdir:
-        unhealthy = (result["nan_any"] or result.get("unhealthy")
-                     or result["exit_code"] != 0)
-        if unhealthy:
+        if should_keep_output(result):
             result["output_kept_at"] = str(data_dir)
-            print(f"run was unhealthy — model output kept at {data_dir} "
-                  "for investigation", file=sys.stderr)
+            print(f"run did not complete cleanly — model output kept at "
+                  f"{data_dir} for investigation", file=sys.stderr)
         else:
             freed = _dir_size_mib(data_dir)
             shutil.rmtree(data_dir, ignore_errors=True)
             result["output_removed_mib"] = round(freed, 1)
         (outdir / "result.json").write_text(json.dumps(result, indent=2))
     return result
+
+
+def should_keep_output(result: dict) -> bool:
+    """Whether a benchmark's model output is worth keeping.
+
+    Only a run that completed cleanly is safe to discard: its numbers are in
+    the report and the fields were never the point. Anything that failed,
+    NaN'd, tripped the health gate or stopped short keeps its output, because
+    deleting the evidence of a failure is how you end up unable to explain it.
+    """
+    return bool(result.get("nan_any") or result.get("unhealthy")
+                or result.get("truncated") or result.get("exit_code", 0) != 0)
 
 
 def _dir_size_mib(d: pathlib.Path) -> float:

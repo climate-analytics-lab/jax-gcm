@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from benchmark import _summarize_gpu  # noqa: E402
+from benchmark import _summarize_gpu, should_keep_output  # noqa: E402
 from chunk_timing import analyse as _analyse_chunks  # noqa: E402
 
 
@@ -147,3 +147,32 @@ class SummarizeGpuTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeepOutputTest(unittest.TestCase):
+    """A benchmark discards its model fields; a FAILED benchmark must not.
+
+    Deleting the output of a run that NaN'd or stopped short destroys the only
+    evidence of why — so the discard is gated on the run having completed
+    cleanly, not merely on having finished.
+    """
+
+    def test_clean_run_output_is_discardable(self):
+        self.assertFalse(should_keep_output(
+            {"exit_code": 0, "nan_any": False, "unhealthy": False,
+             "truncated": False}))
+
+    def test_failure_modes_all_retain_output(self):
+        base = {"exit_code": 0, "nan_any": False, "unhealthy": False,
+                "truncated": False}
+        for key, val in (("nan_any", True), ("unhealthy", True),
+                         ("truncated", True), ("exit_code", 1)):
+            with self.subTest(key):
+                self.assertTrue(should_keep_output({**base, key: val}),
+                                f"{key} must retain the output")
+
+    def test_missing_keys_default_to_discardable(self):
+        """A result dict from an older run has no unhealthy/truncated keys;
+        absence must not be read as failure.
+        """
+        self.assertFalse(should_keep_output({"exit_code": 0}))
