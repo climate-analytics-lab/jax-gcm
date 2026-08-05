@@ -150,6 +150,15 @@ recording. If your fix added a mechanism, check you consumed *all* of it: in
 that session the new accumulator already carried the wind and humidity
 tendencies that the next round's findings were about.
 
+**Check the invariant at each USE, not at each textual read.** The same
+session's fourth round was a value that arrived as a *parameter*, three lines
+from a call site fixed two commits earlier — no grep over `state.<field>`
+could have found it, because the source text at that point said
+`temperature`. Enumerating reads finds direct accesses; it misses anything
+passed in, aliased, or defaulted. When the invariant is about *provenance*
+("is this value the post-physics one?"), follow the values, not the
+spellings.
+
 ## 6. Re-request review when the response is substantial
 
 If the fixes were more than trivial, ask for another pass with a comment
