@@ -373,6 +373,15 @@ def run(args) -> dict:
     if args.pythonpath:
         env["PYTHONPATH"] = args.pythonpath
         env_note["PYTHONPATH"] = args.pythonpath
+    # Precision belongs in the report, not in an invisible shell export: it
+    # changes BOTH memory and speed, so a sweep that mixes it is not
+    # internally comparable, and a number quoted without it is unreadable.
+    # f32 is required above T63 (the f64 model saturates an 80 GiB card at
+    # ~62 GiB and OOMs at T106/T119 L95) and is forward-only — MAM4
+    # microphysics gradients are non-finite in f32, which is fine for a
+    # benchmark and not for a training run.
+    env["MAM4_JAX_ENABLE_X64"] = "0" if args.f32 else "1"
+    env_note["MAM4_JAX_ENABLE_X64"] = env["MAM4_JAX_ENABLE_X64"]
 
     log_path = outdir / "run.log"
     gpu_path = outdir / "gpu.csv"
@@ -478,6 +487,8 @@ def _report(r: dict) -> str:
         "",
         f"- preset: `{r['preset']}`",
         f"- GPU {r['gpu_index']}: {r['gpu_name']}",
+        f"- precision: {'f32' if r.get('env', {}).get('MAM4_JAX_ENABLE_X64') == '0' else 'f64'}"
+        " (MAM4 core)",
         f"- requested {r['requested_days']} d, "
         f"completed {r['completed_days']} d",
         f"- exit code: {r['exit_code']}",
@@ -572,6 +583,9 @@ def main(argv=None):
     p.add_argument("--python", default=DEFAULT_PY)
     p.add_argument("--pythonpath", default=None,
                    help="prepend a library worktree (editable-install A/B)")
+    p.add_argument("--f32", action="store_true",
+                   help="MAM4_JAX_ENABLE_X64=0 — required above T63; "
+                        "forward-only (MAM4 gradients are non-finite in f32)")
     p.add_argument("--tol", type=float, default=DEFAULT_TOL,
                    help="chunk-to-chunk agreement required to call a rate "
                         # %% : argparse %-expands help strings
