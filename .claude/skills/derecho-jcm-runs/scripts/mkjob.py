@@ -143,10 +143,15 @@ def build_overrides(a) -> list[str]:
             "forcing=from_file",
             f"forcing.file={a.repo}/jcm/data/bc/t63/forcing.nc",
         ]
+        # Ozone belongs to RADIATION, not to the aerosol chain, so it must be
+        # emitted for every prescribed-forcing run. Nesting it under the JAM
+        # emissions guard left `--physics echam-rrtmgp` and `--no-emissions`
+        # runs on `ozone_file: auto` -> the analytic profile, i.e. exactly the
+        # high-resolution radiation runs this guard exists to protect.
+        if a.ozone:
+            ov.append(f"forcing.ozone_file={a.ozone}")
         if a.physics.endswith("jam") and not a.no_emissions:
             ov.append(f"forcing.emissions_file={a.emissions}")
-            if a.ozone:
-                ov.append(f"forcing.ozone_file={a.ozone}")
             ov += [f"forcing.{k}={v}"
                    for k, v in aux_files(a.grid).items()]
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
@@ -176,8 +181,21 @@ def build_overrides(a) -> list[str]:
 
 
 def check_compose(a, overrides) -> None:
-    """Compose the config on the login node; fail loudly before qsub."""
-    cmd = [sys.executable, "-m", "jcm.main",
+    """Compose the config on the login node; fail loudly before qsub.
+
+    Uses the JOB's interpreter (``--venv``), not whichever Python is running
+    this generator. The two routinely differ in the documented Derecho setup,
+    and composing with the wrong one either rejects a valid job or — worse —
+    passes using packages the real job will not import, which is the failure
+    a preflight is supposed to prevent.
+    """
+    job_python = f"{a.venv}/bin/python"
+    if not os.path.exists(job_python):
+        print(f"warning: {job_python} not found; composing with "
+              f"{sys.executable} instead — this preflight may not reflect "
+              "what the job will import", file=sys.stderr)
+        job_python = sys.executable
+    cmd = [job_python, "-m", "jcm.main",
            *[o.strip('"') for o in overrides
              if not o.startswith(("run.output", "hydra.run.dir", "+run.checkpoint"))],
            "--cfg", "job"]
@@ -188,8 +206,8 @@ def check_compose(a, overrides) -> None:
         sys.exit("COMPOSE FAILED:\n" + (r.stderr or r.stdout)[-2000:])
     layers = grid_layers(a.grid)
     trunc = a.grid.split("_t")[-1].split("_")[0] if "_t" in a.grid else "?"
-    print(f"# compose OK; also verify coords build:\n"
-          f"#   JAX_PLATFORMS=cpu python -c \"from jcm.utils import get_coords;"
+    print(f"# compose OK (via {job_python}); also verify coords build:\n"
+          f"#   JAX_PLATFORMS=cpu {job_python} -c \"from jcm.utils import get_coords;"
           f" from jcm.physics.echam.echam_levels import get_echam_levels;"
           f" get_coords(vertical_coords=get_echam_levels({layers}),"
           f" spectral_truncation={trunc})\"", file=sys.stderr)
