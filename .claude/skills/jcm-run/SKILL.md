@@ -134,8 +134,13 @@ tail -F -n 0 run_logs/PREFIX.log 2>/dev/null | grep -E --line-buffered \
 `NaN vars: N/239` is the health-check line. Parse the count — do **not** grep
 for the bare string `nan`, which matches unrelated output.
 
-Beware: `specific_humidity` is **labelled** `g/kg` in the health check and
-netCDF but the values are `kg/kg`. It looks 1000× too dry and isn't.
+`specific_humidity` in the saved netCDF and the health report is genuinely in
+**g/kg**, and the `units: 'g/kg'` label is correct — `state_bridge` calls
+`dimensionalize(q, gram/kilogram)` on the way out. Healthy tropical surface
+values are ~20-30 g/kg. (An earlier version of `check_health` assumed kg/kg
+and applied a `*1000`, which double-counted and tripped the `q_max > 100`
+threshold on every chunked run; that conversion was removed. Do not
+reintroduce the assumption in either direction.)
 
 ## Failure modes worth recognising
 

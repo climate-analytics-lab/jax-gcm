@@ -42,6 +42,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import os
 import threading
 import time
 
@@ -63,6 +64,11 @@ GPU_SAMPLE_SECONDS = 10.0
 _ACTIVE_UTIL_PCT = 5.0
 
 _NAN_RE = re.compile(r"NaN vars:\s*(\d+)\s*/\s*(\d+)")
+# check_health trips on more than NaN -- q_max, temperature range -- and
+# run_chunked then stops early while jcm.main still exits 0. Without this a
+# truncated run prints a converged-looking rate and returns success.
+_UNHEALTHY_RE = re.compile(r"atmosphere unhealthy|FAILED: T_min|FAILED: T_max"
+                           r"|q_max=", re.I)
 _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 
 # Validated stable configurations. Each is the *known-good* override set for
@@ -170,6 +176,67 @@ def _summarize_gpu(csv_path: pathlib.Path) -> dict:
     }
 
 
+# Libraries whose version materially changes what a benchmark measures. All
+# are editable installs, so the working tree IS the running code -- a report
+# that does not say which tree it used cannot be reproduced or trusted.
+_PROVENANCE_MODULES = ("jcm", "rrtmgp", "dinosaur", "mam4_jax")
+
+
+def _provenance(env: dict) -> dict:
+    """Resolve each key library to a path + git SHA under the run's env.
+
+    Runs a probe subprocess with the SAME environment as the benchmark, so a
+    ``PYTHONPATH`` override is reflected here exactly as the run saw it. This
+    is the difference between recording the override that was *requested* and
+    the code that was actually *imported* -- the whole point when A/B'ing an
+    editable install.
+    """
+    # Record a version alongside the path: a packaged (non-editable) install
+    # has no git SHA, and "site-packages" alone does not identify what ran.
+    probe = (
+        "import importlib,importlib.metadata as md,os,json\n"
+        "out={}\n"
+        "for m in %r:\n"
+        "    e={}\n"
+        "    try:\n"
+        "        e['path']=os.path.dirname(importlib.import_module(m).__file__)\n"
+        "    except Exception as ex:\n"
+        "        e['path']='unavailable: %%s' %% type(ex).__name__\n"
+        "    for dist in (m, m.replace('_','-')):\n"
+        "        try:\n"
+        "            e['version']=md.version(dist); break\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    out[m]=e\n"
+        "print(json.dumps(out))" % (_PROVENANCE_MODULES,)
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                           text=True, timeout=180, env=env, check=False)
+        found = json.loads(r.stdout.strip() or "{}")
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return {}
+
+    out = {}
+    for mod, entry in found.items():
+        path = entry.get("path", "")
+        if isinstance(path, str) and os.path.isdir(path):
+            for key, args in (("sha", ["rev-parse", "--short", "HEAD"]),
+                              ("branch", ["rev-parse", "--abbrev-ref", "HEAD"])):
+                g = subprocess.run(["git", "-C", path, *args],
+                                   capture_output=True, text=True, timeout=30,
+                                   check=False)
+                if g.returncode == 0:
+                    entry[key] = g.stdout.strip()
+            d = subprocess.run(["git", "-C", path, "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=30,
+                               check=False)
+            if d.returncode == 0:
+                entry["dirty"] = bool(d.stdout.strip())
+        out[mod] = entry
+    return out
+
+
 def _require_free_gpu(idx: int, wait_s: float, allow_busy: bool) -> None:
     """Refuse to start unless the target GPU is genuinely idle.
 
@@ -271,11 +338,16 @@ def run(args) -> dict:
         "gpu_name": _gpu_name(args.gpu),
         "exit_code": proc.returncode,
         "total_wall_s": round(wall_total, 1),
+        "unhealthy": bool(_UNHEALTHY_RE.search(log)),
+        # A run that stopped early is not a benchmark of the requested
+        # workload even if every chunk it did finish looked healthy.
+        "truncated": last_day < days,
         "nan_any": any(n > 0 for n, _ in nan_hits),
         "nan_max_vars": max((n for n, _ in nan_hits), default=0),
         "nan_total_vars": nan_hits[0][1] if nan_hits else None,
         "overrides": overrides,
         "env": env_note,
+        "provenance": _provenance(env),
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
@@ -324,6 +396,16 @@ def _report(r: dict) -> str:
         ]
     else:
         lines.append(f"Not enough chunks: {r.get('reason')}")
+    prov = r.get("provenance") or {}
+    if prov:
+        lines += ["", "## Code measured", ""]
+        for mod, e in sorted(prov.items()):
+            dirty = " **+uncommitted**" if e.get("dirty") else ""
+            if e.get("sha"):
+                what = f"{e['sha']} ({e.get('branch', '?')}){dirty}"
+            else:
+                what = f"v{e.get('version', '?')} (packaged)"
+            lines.append(f"- `{mod}` {what} — `{e.get('path')}`")
     lines += ["", "## GPU", ""]
     if g:
         lines += [
@@ -338,13 +420,24 @@ def _report(r: dict) -> str:
     else:
         lines.append("No GPU telemetry collected.")
     lines += ["", "## Health", ""]
+    bad = []
     if r["nan_any"]:
-        lines.append(
-            f"**NaN detected** — up to {r['nan_max_vars']}/"
-            f"{r['nan_total_vars']} variables. Timing from a run that blew up "
-            "is not a valid benchmark: fix the configuration and re-run.")
+        bad.append(f"**NaN detected** — up to {r['nan_max_vars']}/"
+                   f"{r['nan_total_vars']} variables.")
+    if r.get("unhealthy"):
+        bad.append("**Health gate tripped** (temperature range / q_max, not "
+                   "necessarily NaN) — the run was stopped early.")
+    if r.get("truncated"):
+        bad.append(f"**Truncated** — completed {r['completed_days']} of "
+                   f"{r['requested_days']} requested days.")
+    if bad:
+        lines += bad + [
+            "", "Timing from a run that did not complete the requested "
+            "workload healthily is not a valid benchmark: fix the "
+            "configuration and re-run."]
     else:
-        lines.append("No NaN reported by the health gate.")
+        lines.append("Completed the full request with no NaN and no health "
+                     "gate trip.")
     return "\n".join(lines) + "\n"
 
 
@@ -386,7 +479,9 @@ def main(argv=None):
     r = run(args)
     print((pathlib.Path(args.outdir) /
            (args.label or args.preset) / "report.md").read_text())
-    return 0 if r["exit_code"] == 0 and not r["nan_any"] else 1
+    ok = (r["exit_code"] == 0 and not r["nan_any"]
+          and not r.get("unhealthy") and not r.get("truncated"))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

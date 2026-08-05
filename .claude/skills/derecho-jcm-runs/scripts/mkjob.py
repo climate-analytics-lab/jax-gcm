@@ -33,20 +33,33 @@ def grid_layers(grid: str) -> str:
     return "".join(c for c in grid.split("_l")[-1] if c.isdigit()) or "?"
 
 
+def grid_truncation(grid: str) -> str:
+    """Spectral truncation parsed out of a grid name (..._t63_... -> "t63")."""
+    if "_t" not in grid:
+        return "t63"
+    return "t" + "".join(c for c in grid.split("_t")[-1].split("_")[0]
+                         if c.isdigit())
+
+
 # Prepared aux inputs (purge-eligible on scratch — see reference/data_paths.md).
-# Oxidants are LEVEL-RESOLVED, so the filename has to follow the requested
-# grid: the runner validates the oxidant level count against the model levels,
-# so a hard-coded L47 file made every L95 job die after it reached the front
-# of the queue. Deriving it here means a missing/misnamed file is caught by
-# check_inputs() before qsub instead. dms/dust are surface fields (no level
-# axis) and so are grid-independent.
+# EVERY one of these is grid-specific, in one of two ways, and both were got
+# wrong here before:
+#   * oxidants are LEVEL-resolved — the runner validates the level count, so a
+#     hard-coded L47 file killed every L95 job after it reached the queue front;
+#   * dms/dust are HORIZONTALLY resolved — read_dms_seawater/read_dust_source
+#     validate lat/lon against the model Gaussian grid, so the T63 files are
+#     not usable on T106/T119 despite having no vertical axis. (An earlier
+#     comment here claimed they were "grid-independent" because they are
+#     surface fields. That conflated the vertical with the horizontal.)
+# Deriving all of them means check_inputs() catches a missing or wrong-grid
+# file BEFORE qsub rather than the job dying in the queue.
 def aux_files(grid: str) -> dict:
-    lev = grid_layers(grid)
+    lev, tr = grid_layers(grid), grid_truncation(grid)
     return {
-        "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_t63.nc",
-        "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f19_t63.nc",
+        "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_{tr}.nc",
+        "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f19_{tr}.nc",
         "oxidants_file":
-            f"{JAM_INPUTS}/oxidants_cam_echam_l{lev}_2014_t63.nc",
+            f"{JAM_INPUTS}/oxidants_cam_echam_l{lev}_2014_{tr}.nc",
     }
 
 
@@ -238,9 +251,17 @@ run_variant () {
     FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
   fi
   # A variant that ran but went unhealthy is also a failure: the driver
-  # returns normally after tripping the health gate.
-  if grep -aqE "unhealthy|Traceback" "$d/run.log" 2>/dev/null; then
+  # returns normally after tripping the health gate. Each variant's output is
+  # redirected to its own run.log, so the outer watcher never sees these
+  # per-chunk health lines -- they have to be checked HERE. A non-zero
+  # "NaN vars: N/M" counts even with no "unhealthy" line, because the health
+  # line is printed per chunk before the gate reacts, and a NaN in a
+  # non-gated variable never produces one at all.
+  if grep -aqE "unhealthy|Traceback" "$d/run.log" 2>/dev/null \
+     || grep -aoE "NaN vars:[[:space:]]*[0-9]+" "$d/run.log" 2>/dev/null \
+        | grep -avqE "NaN vars:[[:space:]]*0$"; then
     echo "  VARIANT $tag UNHEALTHY"
+    grep -aE "unhealthy|NaN vars:[[:space:]]*[1-9]" "$d/run.log" | tail -2
     FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
   fi
   # Non-zero here only means "not enough chunks to quote a rate", which is
