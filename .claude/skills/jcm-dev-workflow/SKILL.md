@@ -130,11 +130,25 @@ NaN-check hole fixed in one file and left in another, and an
 `sys.executable`-vs-run-interpreter assumption fixed in one script and left
 in its sibling. Both were avoidable with one grep.
 
-Concretely, when you fix something ask: does another file make the same
-assumption? Is there a second call site? Does a sibling script have the same
-line? If the fix has a name — "check failures before accepting the marker",
-"probe with the interpreter that will actually run it" — that name is your
-search.
+**Enumerate the category; do not grep for the forms you were shown.** This
+is the part that is easy to get wrong, and getting it wrong looks exactly
+like having done the sweep. Grepping for the specific strings in the review
+comment finds only what you already knew about.
+
+The same session ran three rounds of one defect — diagnostics reading
+step-start state under operator splitting — because each sweep searched the
+reported spellings (`state.tracers`, then `clouds.qc`) instead of asking
+"which prognostic fields does any diagnostic read?". The third round finally
+enumerated *every* `state.<field>` access in *every* diagnostics-category
+term and produced a table with a verdict per site. That table is the
+deliverable; a grep hit-count is not.
+
+So: name the invariant ("a diagnostic must report the state as saved"), list
+every place that invariant could be violated, and check each — including the
+ones that turn out fine, because "already correct" is a result worth
+recording. If your fix added a mechanism, check you consumed *all* of it: in
+that session the new accumulator already carried the wind and humidity
+tendencies that the next round's findings were about.
 
 ## 6. Re-request review when the response is substantial
 
