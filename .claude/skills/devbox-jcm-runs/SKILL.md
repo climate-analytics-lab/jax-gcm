@@ -50,6 +50,26 @@ Note `nvidia-smi --query-compute-apps` reports GPU **uuids**, not indices, so
 the two queries must be joined on uuid — the reason this is a module and not a
 shell one-liner.
 
+## Abandoned processes pin cards — check periodically
+
+```bash
+python tools/gpu_util.py --stale   # >24 h old and holding <4 GiB
+```
+
+A Jupyter kernel holding 1.2 GiB of an 80 GiB card contributes no compute
+contention but **pins the GPU** for anyone whose scheduler — or safety gate —
+treats "has a tenant" as "busy". At the time of writing that is 6 processes
+from one user, 24-26 days old, holding 9.4 GiB and pinning 3 of the 8 cards.
+
+Report these to their owner rather than quietly working around them; the
+whole box benefits. `--stale` exists so the list is *generated* rather than
+hand-maintained, since the specific PIDs change but the pattern does not.
+
+If a card is blocked only by a long-parked kernel and nothing else is free,
+`--allow-busy-gpu` is defensible — a dormant tenant does not perturb timings
+— but it is a judgement call about someone else's process, so **ask first**,
+and record it in the report's provenance.
+
 ## Etiquette on a shared box
 
 - **Never kill a process you did not start.** Other users' jobs are visible

@@ -105,12 +105,61 @@ def wait_for_free(timeout_s: float, poll_s: float = 30.0,
         time.sleep(min(poll_s, max(1.0, deadline - time.monotonic())))
 
 
+# A process older than this holding a small allocation is almost certainly a
+# parked notebook kernel or an abandoned session, not work in progress.
+STALE_AGE_HOURS = 24.0
+STALE_MAX_MIB = 4096.0
+
+
+def stale_processes() -> list[dict]:
+    """Long-lived, low-memory GPU processes — likely abandoned.
+
+    On a shared box these are the real cost: a Jupyter kernel holding 1.2 GiB
+    of an 80 GiB card contributes no compute contention but pins the GPU for
+    anyone whose scheduler (or safety gate) treats "has a tenant" as "busy".
+    Reported so the owners can be asked to clear them, rather than each user
+    quietly working around it.
+
+    Age comes from ``ps``; memory and GPU index from ``nvidia-smi``.
+    """
+    out = []
+    for g in gpu_table():
+        for proc in g["procs"]:
+            try:
+                mib = float(str(proc["mem"]).split()[0])
+            except (ValueError, IndexError):
+                continue
+            if mib > STALE_MAX_MIB:
+                continue
+            r = subprocess.run(
+                ["ps", "-o", "etimes=,user=,comm=", "-p", str(proc["pid"])],
+                capture_output=True, text=True, timeout=20, check=False)
+            parts = r.stdout.split()
+            if len(parts) < 3:
+                continue
+            try:
+                hours = float(parts[0]) / 3600.0
+            except ValueError:
+                continue
+            if hours < STALE_AGE_HOURS:
+                continue
+            out.append({"gpu": g["index"], "pid": proc["pid"],
+                        "user": parts[1], "comm": parts[2],
+                        "mem_mib": mib, "age_hours": round(hours, 1),
+                        "cmd": proc["name"]})
+    return sorted(out, key=lambda d: -d["age_hours"])
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--free", action="store_true",
                    help="print free indices only; exit 1 if none")
     p.add_argument("--wait", type=float, default=None, metavar="SECONDS",
                    help="block until a GPU frees, then print its index")
+    p.add_argument("--stale", action="store_true",
+                   help=f"list GPU processes older than {STALE_AGE_HOURS:.0f} h "
+                        f"holding under {STALE_MAX_MIB:.0f} MiB — likely "
+                        "abandoned, worth asking the owner to clear")
     a = p.parse_args(argv)
 
     if a.wait is not None:
@@ -119,6 +168,18 @@ def main(argv=None) -> int:
             print("no GPU became free within the timeout", file=sys.stderr)
             return 1
         print(idx)
+        return 0
+
+    if a.stale:
+        rows = stale_processes()
+        if not rows:
+            print("no stale GPU processes")
+            return 0
+        print(f"{'GPU':>3}  {'PID':>8}  {'USER':<12} {'AGE':>9}  {'MEM':>9}  CMD")
+        for r in rows:
+            print(f"{r['gpu']:>3}  {r['pid']:>8}  {r['user']:<12} "
+                  f"{r['age_hours'] / 24:>6.1f} d  {r['mem_mib']:>6.0f} MiB  "
+                  f"{r['cmd']}")
         return 0
 
     if a.free:
