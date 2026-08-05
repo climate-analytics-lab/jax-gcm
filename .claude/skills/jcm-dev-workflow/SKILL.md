@@ -112,12 +112,29 @@ is one, say why.
 
 For each Codex finding: **verify it against the code before acting.** They are
 usually right and often catch real defects, but not always — confirm the
-failure it describes is reachable. Then either fix it, or reply explaining
+failure it describes is reachable. Verify against the *code*, not against
+your notes or memory: a finding that contradicts something you believe is
+the highest-value kind, because one of the two is stale and it may not be
+the finding. Then either fix it, or reply explaining
 concretely why it does not apply. Never silently ignore one.
 
 Findings are labelled P1/P2/P3. P1s block. Reply on the PR summarising what
 you changed for each, so the human reviewer can see the loop closed without
 re-deriving it.
+
+**Fix the class, not the instance.** Before calling a finding done, grep for
+the same mistake elsewhere — a reviewer reports the instance they happened to
+look at, not every occurrence. This is the single most common way a review
+round gets repeated: in one session the *same* review loop re-reported a
+NaN-check hole fixed in one file and left in another, and an
+`sys.executable`-vs-run-interpreter assumption fixed in one script and left
+in its sibling. Both were avoidable with one grep.
+
+Concretely, when you fix something ask: does another file make the same
+assumption? Is there a second call site? Does a sibling script have the same
+line? If the fix has a name — "check failures before accepting the marker",
+"probe with the interpreter that will actually run it" — that name is your
+search.
 
 ## 6. Re-request review when the response is substantial
 
