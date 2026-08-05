@@ -5,6 +5,12 @@ description: Submit, monitor and benchmark jax-gcm (jcm) simulations on NCAR Der
 
 # Running jcm on Derecho
 
+**Layering.** This is the Derecho/PBS site layer. The site-agnostic model
+layer (config groups, Hydra traps, stability overrides) is `jcm-run`, and
+throughput methodology is `jcm-benchmark`; both apply here too. The
+shared-workstation counterpart is `devbox-jcm-runs` — worth a glance for the
+contrast, since there GPUs are self-allocated rather than scheduled.
+
 Generate a PBS script with `scripts/mkjob.py`, sanity-check the config, submit,
 then monitor with the patterns below. Every default here was established by a
 real campaign; the failure modes listed are ones that have actually happened.
@@ -121,15 +127,20 @@ Filter Lmod's "unknown module" noise — it is harmless on these nodes.
 
 ## 7. Reading throughput correctly
 
-The `N sim days/hr` in the log is **cumulative and includes compile**. Quote
-`Wall: X s this chunk` from a late chunk, and only when two consecutive chunks
-agree within ~5% (rates need 3–4 chunks to settle; the first can be off by
-20×). High GPU utilisation does not prove steady state — XLA autotuning also
-keeps the GPU ~95% busy.
+Full methodology is in `jcm-benchmark`; the short version is that the
+`N sim days/hr` line in the log is **cumulative and includes compile**, so it
+must not be quoted. Use `Wall: X s this chunk`, discard chunk 1, and quote a
+rate only once the last two chunks agree.
 
 ```bash
 scripts/settled_rate.py <log> [--dt 15]   # per-chunk walls + convergence-checked rate
 ```
+
+That script and `tools/benchmark.py` share `tools/chunk_timing.py`, so the
+same run cannot yield two different answers. `settled_rate.py` reads a log
+that already exists (what you want for a job back from the queue);
+`benchmark.py` drives a run and samples GPU telemetry alongside (what you want
+on an interactive box).
 
 Log locations differ by job type: a plain run writes to the PBS `-o` file
 (`<name>.log` in the submit directory); `--bench` variants write to
