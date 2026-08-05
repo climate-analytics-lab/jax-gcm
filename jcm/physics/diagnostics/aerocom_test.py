@@ -537,3 +537,43 @@ class AerocomOpticsConfigTest(unittest.TestCase):
         from jcm.physics.echam.echam_terms import echam_physics
         with self.assertRaisesRegex(ValueError, "aerosol_module='jam'"):
             echam_physics(aerosol_module="macv2sp", aerocom_optics=True)
+
+
+class PostPhysicsTracerTest(unittest.TestCase):
+    """Diagnostics must report tracers as SAVED, not as at step start.
+
+    Operator splitting means every term sees the step-start state and returns
+    a tendency; the dycore applies the sum afterwards. A diagnostic reading
+    ``state.tracers`` therefore reports a field one step behind the tracers
+    written at the same timestamp — for the 2M number tracers that is every
+    step microphysics does anything, and for aerosol mass it silently drops
+    the whole step's emissions, chemistry, deposition and scavenging.
+    """
+
+    def _call(self, tend_per_s):
+        import jax.numpy as jnp
+        from jcm.physics.diagnostics.aerocom import _post_physics_tracer
+
+        class _S:
+            tracers = {"m_so4_acc": jnp.full((3, 4), 2.0)}
+        diags = {"_dt_seconds": 100.0}
+        if tend_per_s is not None:
+            diags["_tendency_run"] = {
+                "tracers": {"m_so4_acc": jnp.full((3, 4), tend_per_s)}}
+        return _post_physics_tracer(_S(), diags, "m_so4_acc")
+
+    def test_tendency_is_applied(self):
+        # 2.0 + 0.01 * 100 s = 3.0
+        np.testing.assert_allclose(np.asarray(self._call(0.01)), 3.0)
+
+    def test_without_the_running_view_the_raw_tracer_is_used(self):
+        """Absence must degrade to the old behaviour, not to zero — the view
+        is missing in configurations that never build it.
+        """
+        np.testing.assert_allclose(np.asarray(self._call(None)), 2.0)
+
+    def test_result_is_floored_at_zero(self):
+        """A sink larger than the step-start burden must not report negative
+        mass (deposition can exceed it in a single step for a trace tracer).
+        """
+        np.testing.assert_allclose(np.asarray(self._call(-1.0)), 0.0)

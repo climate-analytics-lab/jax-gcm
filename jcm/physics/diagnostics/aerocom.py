@@ -290,6 +290,36 @@ def _lognormal_number_above(
     return jnp.where(valid, number * frac, 0.0)
 
 
+def _post_physics_tracer(state, diagnostics, name, default=None):
+    """Return a tracer as it will be SAVED, not as at step start.
+
+    Operator splitting means ``state.tracers`` is the step-start value for
+    every term: schemes return their effect as a tendency and the dycore
+    applies the sum once, afterwards. A diagnostic that reads ``state.tracers``
+    therefore reports a field one step behind the tracers written at the same
+    timestamp — for the 2M number tracers that is every step the microphysics
+    does anything, and for aerosol mass it drops the whole step's emissions,
+    chemistry, sedimentation, deposition and scavenging.
+
+    ``_tendency_run`` carries the sum over the terms that have already run
+    (see ``ComposablePhysics``); these diagnostics run last, so it is the
+    full physics tendency. Falls back to the raw tracer when the view is
+    absent, which keeps this structural rather than data-dependent.
+    """
+    q = state.tracers.get(name, default)
+    if q is None:
+        return None
+    run = diagnostics.get("_tendency_run")
+    dt = diagnostics.get("_dt_seconds")
+    if run is None or dt is None:
+        return q
+    dq = run.get("tracers", {}).get(name)
+    if dq is None:
+        return q
+    # Mixing ratios and number concentrations are both non-negative.
+    return jnp.maximum(q + dq * dt, 0.0)
+
+
 class AerocomDiagnostics(PhysicsTerm):
     """AeroCom phase-4 derived diagnostics (diagnostic-only, no tendency).
 
@@ -449,10 +479,12 @@ class AerocomDiagnostics(PhysicsTerm):
         volumetric and per-mass forms lets each consumer integrate in the
         measure that is exact for it (dz for m^-3, dp/g for kg^-1).
         """
-        tracers = getattr(state, "tracers", None) or {}
         rho = diagnostics.get("air_density")
-        qnc = tracers.get("qnc")
-        qni = tracers.get("qni")
+        # Post-physics, not step-start: the 2M scheme returns number changes
+        # as tendencies, so the raw tracers lag a step (see
+        # _post_physics_tracer).
+        qnc = _post_physics_tracer(state, diagnostics, "qnc")
+        qni = _post_physics_tracer(state, diagnostics, "qni")
         if qnc is not None and rho is not None:
             cdnc_m3 = qnc * rho          # kg^-1 -> m^-3
         else:
@@ -575,11 +607,16 @@ class AerocomDiagnostics(PhysicsTerm):
         zero_col = jnp.zeros(p_half.shape[1:], dtype=p_half.dtype)
         for spec in _BURDEN_SPECIES:
             total = None
-            for tname, field in tracers.items():
-                if jnp.ndim(field) < 1:
+            for tname, raw in tracers.items():
+                if jnp.ndim(raw) < 1:
                     continue
                 if (tname.startswith((f"m_{spec}_", f"mc_{spec}_"))
                         or tname == f"g_{spec}"):
+                    # Post-physics mass, so the burden matches the aerosol
+                    # tracers saved at this timestamp rather than missing the
+                    # step's emissions, chemistry, sedimentation, deposition
+                    # and wet scavenging.
+                    field = _post_physics_tracer(state, diagnostics, tname)
                     contrib = jnp.sum(field * dm, axis=0)
                     total = contrib if total is None else total + contrib
             out[f"aerocom_burden_{spec}"] = zero_col if total is None else total
