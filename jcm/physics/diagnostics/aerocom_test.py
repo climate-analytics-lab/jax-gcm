@@ -577,3 +577,48 @@ class PostPhysicsTracerTest(unittest.TestCase):
         mass (deposition can exceed it in a single step for a trace tracer).
         """
         np.testing.assert_allclose(np.asarray(self._call(-1.0)), 0.0)
+
+
+class EmissionFluxResetTest(unittest.TestCase):
+    """emi_* must measure ONE step, not the run so far.
+
+    The accumulator is additive across terms because several of them emit the
+    same species — but the diagnostics dict is threaded back in from the
+    previous step as prev_physics_data, so without an explicit per-step reset
+    the accumulation also runs across timesteps and emi_* grows without bound
+    with run length. Snapshots inflate and any time-average is meaningless.
+    """
+
+    def test_previous_step_values_are_cleared(self):
+        import jax.numpy as jnp
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            ResetEmissionFluxes, accumulate_emission_fluxes,
+            emission_flux_keys)
+        from jcm.physics_interface import PhysicsState
+
+        st = PhysicsState.zeros((3, 4)).copy(temperature=jnp.ones((3, 4)))
+        carried = {k: jnp.full((4,), 7.0) for k in emission_flux_keys()}
+        _, after = ResetEmissionFluxes()(st, carried, None, None)
+        for k in emission_flux_keys():
+            np.testing.assert_allclose(np.asarray(after[k]), 0.0, err_msg=k)
+
+        out = accumulate_emission_fluxes(
+            after, {"m_so2_acc": jnp.full((3, 4), 1e-9)},
+            jnp.ones((3, 4)), jnp.full((3, 4), 100.0))
+        # rho*dz = 100 per layer x 3 layers x 1e-9 = 3e-7, with no 7.0 carried.
+        np.testing.assert_allclose(np.asarray(out["emi_so2"]), 3e-7, rtol=1e-5)
+
+    def test_reset_runs_before_every_emitter(self):
+        """Ordering is structural, not a convention each term must honour."""
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            ResetEmissionFluxes)
+        from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
+        terms = jam_aerosol_physics()
+        names = [type(t).__name__ for t in terms]
+        self.assertIn("ResetEmissionFluxes", names)
+        first = names.index("ResetEmissionFluxes")
+        emitters = [i for i, t in enumerate(terms)
+                    if "Emission" in type(t).__name__
+                    and not isinstance(t, ResetEmissionFluxes)]
+        if emitters:
+            self.assertLess(first, min(emitters))

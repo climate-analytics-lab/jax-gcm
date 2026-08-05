@@ -20,7 +20,12 @@ probe and the real step changes the pytree and the scan rejects it.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import jax.numpy as jnp
+
+from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics_interface import PhysicsTendency
 
 # Species published as emission fluxes. Fixed so the carry pytree is stable;
 # a species no term emits simply stays zero.
@@ -92,3 +97,34 @@ def accumulate_emission_fluxes(
 def emission_flux_keys() -> tuple[str, ...]:
     """Return the diagnostics keys :func:`accumulate_emission_fluxes` publishes."""
     return tuple(f"emi_{s}" for s in EMITTED_SPECIES)
+
+
+class ResetEmissionFluxes(PhysicsTerm):
+    """Zero the ``emi_*`` accumulators at the start of each physics step.
+
+    ``accumulate_emission_fluxes`` adds each term's contribution to what is
+    already in the diagnostics dict, because several terms emit the same
+    species. That dict is threaded back in from the PREVIOUS step as
+    ``prev_physics_data``, so without this the accumulation runs across
+    timesteps as well as across terms and ``emi_*`` grows without bound with
+    run length — snapshots inflate and any time-average is meaningless.
+
+    Placed at the head of the emissions chain by ``jam_aerosol_physics`` so
+    the ordering is structural rather than a convention each term has to
+    honour. Writing zeros costs nothing and keeps the key set static.
+    """
+
+    name: ClassVar[str] = "reset_emission_fluxes"
+    # Same category as the emitters it precedes: it is part of the
+    # emissions block, not a separate stage.
+    category: ClassVar[str] = "aerosol_emissions"
+    requires: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        zero = jnp.zeros(state.temperature.shape[1:],
+                         dtype=state.temperature.dtype)
+        return (PhysicsTendency.zeros(state.temperature.shape),
+                {**diagnostics, **{k: zero for k in emission_flux_keys()}})
+
+

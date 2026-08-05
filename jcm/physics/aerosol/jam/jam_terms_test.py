@@ -10,9 +10,13 @@ class JamFactoryTest(unittest.TestCase):
         terms = jam_aerosol_physics()
         cats = [t.category for t in terms]
         names = [t.name for t in terms]
-        # Three natural-emission scheme terms, then the core + processes.
+        # The emi_* accumulator reset MUST precede every emitter (the
+        # diagnostics dict is threaded back from the previous step, so
+        # without it emission fluxes accumulate across the whole run), then
+        # the natural-emission schemes, then the core + processes.
+        self.assertEqual(names[0], "reset_emission_fluxes")
         self.assertEqual(
-            names[:3],
+            names[1:4],
             [
                 "jam_seasalt_emissions",
                 "jam_dms_emissions",
@@ -20,7 +24,7 @@ class JamFactoryTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            cats[3:],
+            cats[4:],
             [
                 "aerosol_oxidants",
                 "aerosol_gas_chemistry",
@@ -34,7 +38,9 @@ class JamFactoryTest(unittest.TestCase):
                 "aerosol_wetdep",
             ],
         )
-        self.assertTrue(all(c == "aerosol_emissions" for c in cats[:3]))
+        # The reset shares the emitters' category — it is part of that
+        # block, not a separate stage.
+        self.assertTrue(all(c == "aerosol_emissions" for c in cats[:4]))
 
     def test_activation_precedes_deposition(self):
         # wetdep requires activated_fraction, so ARG must come first.

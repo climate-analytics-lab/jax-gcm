@@ -165,6 +165,13 @@ def jam_aerosol_physics(
         # CAM6/MAM4-faithful already-speciated emissions (#498); inert until
         # per-tracer forcing fields are supplied.
         emissions.append(PreSpeciatedEmissions())
+    if emissions:
+        # Must precede every emitter: the emi_* accumulators are additive
+        # across terms, and the diagnostics dict is threaded back in from the
+        # previous step, so they have to be zeroed once per step.
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            ResetEmissionFluxes)
+        emissions = [ResetEmissionFluxes(), *emissions]
     pre_core = [
         *emissions,
         # Sulfur chemistry: oxidants → gas-phase DMS/SO2 oxidation, producing

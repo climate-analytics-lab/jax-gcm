@@ -606,6 +606,10 @@ class AerocomDiagnostics(PhysicsTerm):
         # fields disagree with the winds saved at this timestamp.
         u_post = _post_physics(state, diagnostics, "u_wind")
         v_post = _post_physics(state, diagnostics, "v_wind")
+        # LTS likewise: the caller passes the thermo_run temperature, which
+        # radiation and gravity-wave drag never advance even though they move
+        # the saved ta. Use the accumulator, which captures every term.
+        temperature = _post_physics(state, diagnostics, "temperature")
         for target in self.plev_pa:
             tag = f"{int(round(target / 100.0)):d}"
             out[f"aerocom_u{tag}"] = _interp_to_pressure(u_post, p_full, target)
