@@ -55,6 +55,16 @@ from gpu_util import free_indices, is_free, gpu_table  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_PY = "/home/dwatsonparris/micromamba/envs/jcm/bin/python"
 DEFAULT_OUTDIR = pathlib.Path("/scr/dwatsonparris/benchmarks")
+# A benchmark only needs the timings, the telemetry and the health verdict --
+# all of which are read from the log while the run is happening. The netCDF it
+# produces is dead weight: a 30-day T63L47 run writes several GB per arm, and
+# a 3-pair A/B fills a scratch disk for nothing. So model output goes to a
+# scratch directory that is deleted afterwards by default.
+#
+# NOT the same call as for a science run: there the output IS the point. This
+# is why the removal lives in the benchmark harness and not in jcm-run.
+DEFAULT_SCRATCH_ROOT = pathlib.Path(
+    os.environ.get("JCM_BENCH_SCRATCH", "/tmp/jcm-bench"))
 
 # Chunk-to-chunk agreement required before a rate is called converged.
 CONVERGENCE_TOL = 0.03      # 3 % between consecutive chunks
@@ -182,14 +192,18 @@ def _summarize_gpu(csv_path: pathlib.Path) -> dict:
 _PROVENANCE_MODULES = ("jcm", "rrtmgp", "dinosaur", "mam4_jax")
 
 
-def _provenance(env: dict) -> dict:
+def _provenance(env: dict, python: str = None) -> dict:
     """Resolve each key library to a path + git SHA under the run's env.
 
-    Runs a probe subprocess with the SAME environment as the benchmark, so a
-    ``PYTHONPATH`` override is reflected here exactly as the run saw it. This
-    is the difference between recording the override that was *requested* and
-    the code that was actually *imported* -- the whole point when A/B'ing an
-    editable install.
+    Runs a probe subprocess with the SAME interpreter and environment as the
+    benchmark, so a ``PYTHONPATH`` override is reflected exactly as the run saw
+    it. Both halves matter: the environment gives the override that was
+    actually in force, and the interpreter matters because ``--python``
+    routinely points at a different environment from the one running this
+    wrapper (the micromamba env is not on PATH here). Probing
+    ``sys.executable`` would happily attribute a benchmark to whichever
+    ``jcm``/``rrtmgp`` the *wrapper* imports -- a provenance record that is
+    confidently wrong is worse than none.
     """
     # Record a version alongside the path: a packaged (non-editable) install
     # has no git SHA, and "site-packages" alone does not identify what ran.
@@ -211,8 +225,9 @@ def _provenance(env: dict) -> dict:
         "print(json.dumps(out))" % (_PROVENANCE_MODULES,)
     )
     try:
-        r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
-                           text=True, timeout=180, env=env, check=False)
+        r = subprocess.run([python or sys.executable, "-c", probe],
+                           capture_output=True, text=True, timeout=180,
+                           env=env, cwd=str(REPO), check=False)
         found = json.loads(r.stdout.strip() or "{}")
     except (subprocess.SubprocessError, OSError, ValueError):
         return {}
@@ -276,8 +291,24 @@ def run(args) -> dict:
     preset = PRESETS[args.preset]
     days = args.days if args.days else args.months * 30
     chunk = args.chunk_days
+    # Gate first: a refused run must not leave directories behind.
+    _require_free_gpu(args.gpu, wait_s=args.wait_for_gpu,
+                      allow_busy=args.allow_busy_gpu)
+
     outdir = pathlib.Path(args.outdir) / (args.label or args.preset)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # Model output (netCDF, checkpoints) goes somewhere disposable; the report,
+    # log and telemetry stay in outdir. --keep-output writes it into outdir
+    # instead and leaves it, for when a run needs inspecting after the fact.
+    if args.keep_output:
+        data_dir = outdir
+    else:
+        data_dir = (pathlib.Path(args.scratch_root)
+                    / f"{args.label or args.preset}")
+        if data_dir.exists():
+            shutil.rmtree(data_dir, ignore_errors=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
     overrides = [
         *preset,
@@ -286,7 +317,8 @@ def run(args) -> dict:
         # save_interval must be <= chunk_days or the chunk write dies with an
         # IndexError from to_xarray() on an empty time axis.
         f"run.save_interval={min(args.save_interval, chunk)}",
-        f"run.output_prefix={outdir}/state",
+        f"run.output_prefix={data_dir}/state",
+        f"hydra.run.dir={data_dir}",
         *args.extra,
     ]
     cmd = [args.python, "-m", "jcm.main", *overrides]
@@ -299,13 +331,6 @@ def run(args) -> dict:
     if args.pythonpath:
         env["PYTHONPATH"] = args.pythonpath
         env_note["PYTHONPATH"] = args.pythonpath
-
-    # Hard gate: never benchmark on a card someone else is using. A
-    # contended card does not fail loudly -- it returns a plausible-looking
-    # number that nothing in the report reveals as wrong, so every other
-    # precaution here is wasted if this is skipped.
-    _require_free_gpu(args.gpu, wait_s=args.wait_for_gpu,
-                      allow_busy=args.allow_busy_gpu)
 
     log_path = outdir / "run.log"
     gpu_path = outdir / "gpu.csv"
@@ -347,13 +372,41 @@ def run(args) -> dict:
         "nan_total_vars": nan_hits[0][1] if nan_hits else None,
         "overrides": overrides,
         "env": env_note,
-        "provenance": _provenance(env),
+        "provenance": _provenance(env, args.python),
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
     (outdir / "result.json").write_text(json.dumps(result, indent=2))
     (outdir / "report.md").write_text(_report(result))
+
+    # Reclaim the model output. Deliberately AFTER the log has been parsed and
+    # the report written, and skipped when the run was unhealthy so a failure
+    # can still be investigated -- deleting the evidence of a bad run is how
+    # you end up unable to explain it.
+    if not args.keep_output and data_dir != outdir:
+        unhealthy = (result["nan_any"] or result.get("unhealthy")
+                     or result["exit_code"] != 0)
+        if unhealthy:
+            result["output_kept_at"] = str(data_dir)
+            print(f"run was unhealthy — model output kept at {data_dir} "
+                  "for investigation", file=sys.stderr)
+        else:
+            freed = _dir_size_mib(data_dir)
+            shutil.rmtree(data_dir, ignore_errors=True)
+            result["output_removed_mib"] = round(freed, 1)
+        (outdir / "result.json").write_text(json.dumps(result, indent=2))
     return result
+
+
+def _dir_size_mib(d: pathlib.Path) -> float:
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            pass
+    return total / (1024 * 1024)
 
 
 def _gpu_name(idx: int) -> str:
@@ -419,6 +472,16 @@ def _report(r: dict) -> str:
         ]
     else:
         lines.append("No GPU telemetry collected.")
+    if r.get("output_removed_mib") is not None:
+        lines += ["", "## Output", "",
+                  f"- model netCDF discarded after the report was written "
+                  f"({r['output_removed_mib']:.0f} MiB reclaimed) — a "
+                  f"benchmark needs the timings, not the fields. "
+                  f"`--keep-output` to retain them."]
+    elif r.get("output_kept_at"):
+        lines += ["", "## Output", "",
+                  f"- **kept** at `{r['output_kept_at']}` because the run was "
+                  f"unhealthy — investigate before deleting."]
     lines += ["", "## Health", ""]
     bad = []
     if r["nan_any"]:
@@ -463,6 +526,14 @@ def main(argv=None):
                         # %% : argparse %-expands help strings
                         f"converged (default {DEFAULT_TOL:.0%})".replace(
                             "%", "%%"))
+    p.add_argument("--keep-output", action="store_true",
+                   help="write model netCDF into the result directory and "
+                        "keep it; default is a disposable scratch dir that is "
+                        "removed once the report is written")
+    p.add_argument("--scratch-root", default=str(DEFAULT_SCRATCH_ROOT),
+                   help=f"disposable model-output root "
+                        f"(default {DEFAULT_SCRATCH_ROOT}; "
+                        "override with $JCM_BENCH_SCRATCH)")
     p.add_argument("--wait-for-gpu", type=float, default=120.0,
                    help="seconds to wait for the target GPU to become free "
                         "before giving up (default 120)")

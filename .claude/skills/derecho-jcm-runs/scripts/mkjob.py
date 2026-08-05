@@ -25,8 +25,7 @@ DEFAULT_VENV = os.environ.get("JCM_VENV", f"{HOME}/.venvs/jaxgcm")
 DEFAULT_DINOSAUR = os.environ.get("JCM_DINOSAUR", f"{HOME}/dinosaur-sl")
 DEFAULT_ACCOUNT = os.environ.get("PBS_ACCOUNT", "UCSD0085")
 JAM_INPUTS = os.environ.get("JAM_INPUTS", f"{SCRATCH}/jam_inputs")
-EMISSIONS = os.environ.get(
-    "JCM_EMISSIONS", f"{HOME}/jax-gcm/runs/emissions_echam_t63_l47_hybrid_2014.nc")
+
 
 def grid_layers(grid: str) -> str:
     """Layer count parsed out of a grid name (echam_t63_l47_hybrid -> "47")."""
@@ -63,6 +62,63 @@ def aux_files(grid: str) -> dict:
     }
 
 
+# Level count of the packaged ozone climatology, per truncation directory
+# under jcm/data/bc/. `_resolve_auto_ozone` only ever picks from these.
+PACKAGED_OZONE_LEVELS = {"t63": "47", "t30": "8"}
+
+
+def check_ozone(a) -> str | None:
+    """Return an explicit ozone override, or None to leave ``auto``.
+
+    ``forcing.ozone_file: auto`` resolves a PACKAGED climatology and silently
+    falls back to RRTMGP's ANALYTIC profile when none matches the grid. That
+    surrogate carries ~7.6x the tropospheric ozone column, so an L95 or
+    T106/T119 job would run to completion and quietly produce radiation that
+    cannot be compared with anything — no preflight failure, no warning the
+    watcher looks for. Refuse instead, unless the run is aquaplanet (no
+    prescribed forcing at all) or an explicit --ozone was supplied.
+    """
+    if a.ozone:
+        return a.ozone
+    if a.aquaplanet:
+        return None
+    tr, lev = grid_truncation(a.grid), grid_layers(a.grid)
+    if PACKAGED_OZONE_LEVELS.get(tr) == lev:
+        return None          # auto will resolve the packaged file correctly
+    sys.exit(
+        f"NO PACKAGED OZONE for {a.grid} ({tr}, L{lev}).\n"
+        "  forcing.ozone_file=auto would fall back to the ANALYTIC profile "
+        "(~7.6x the tropospheric ozone column), which runs fine and silently "
+        "invalidates the radiation.\n"
+        "  Pass --ozone /path/to/ozone_<grid>.nc — see reference/data_paths.md "
+        "(e.g. ozone_cam6chem_2005-2014_t63_l95.nc), or prepare one with\n"
+        f"    python -m jcm.data.bc.interpolate_ozone --in T63_ozone_picontrol.nc"
+        f" --out ozone_{tr}_l{lev}.nc --nlevels {lev}"
+    )
+
+
+def default_emissions(grid: str) -> str:
+    """Emissions file for a grid.
+
+    ``_validate_emissions_grid`` rejects fields whose horizontal shape differs
+    from the model grid, so the T63 default cannot be reused on T85/T106/T119 —
+    the job would pass check_inputs() and then die after reaching the queue
+    front. Derived here so a missing file is caught before qsub instead.
+    """
+    # $JCM_EMISSIONS pins ONE file, so honour it (an explicit site choice) but
+    # say so when it does not name the requested grid -- silently reusing a
+    # T63 file on T106 is the failure this function exists to prevent.
+    pinned = os.environ.get("JCM_EMISSIONS")
+    if pinned:
+        if grid not in os.path.basename(pinned):
+            print(f"warning: $JCM_EMISSIONS={pinned} does not name grid "
+                  f"{grid}; _validate_emissions_grid will reject it if the "
+                  "horizontal shape differs", file=sys.stderr)
+        return pinned
+    root = os.environ.get("JCM_EMISSIONS_DIR", f"{HOME}/jax-gcm/runs")
+    return f"{root}/emissions_{grid}_2014.nc"
+
+
 def check_inputs(a) -> None:
     """Fail before qsub if a required input file is missing (scratch purges)."""
     needed = [("emissions", a.emissions), *aux_files(a.grid).items()]
@@ -89,6 +145,8 @@ def build_overrides(a) -> list[str]:
         ]
         if a.physics.endswith("jam") and not a.no_emissions:
             ov.append(f"forcing.emissions_file={a.emissions}")
+            if a.ozone:
+                ov.append(f"forcing.ozone_file={a.ozone}")
             ov += [f"forcing.{k}={v}"
                    for k, v in aux_files(a.grid).items()]
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
@@ -163,7 +221,11 @@ def main() -> None:
     p.add_argument("--save-every", type=float, default=5)
     p.add_argument("--aquaplanet", action="store_true")
     p.add_argument("--no-emissions", action="store_true")
-    p.add_argument("--emissions", default=EMISSIONS,
+    p.add_argument("--ozone", default=None,
+                   help="explicit ozone file; required for any grid without a "
+                        "packaged climatology (non-T63L47), since `auto` would "
+                        "silently fall back to the analytic profile")
+    p.add_argument("--emissions", default=None,
                    help="anthropogenic emissions netCDF")
     p.add_argument("--resume", action="store_true",
                    help="keep an existing checkpoint in the run dir")
@@ -178,6 +240,12 @@ def main() -> None:
     p.add_argument("--check", action="store_true",
                    help="compose the config before emitting the script")
     a = p.parse_args()
+
+    # Grid-derived defaults, resolved before any check runs.
+    if a.emissions is None:
+        a.emissions = default_emissions(a.grid)
+    # Refuses (with instructions) when the grid has no packaged climatology.
+    a.ozone = check_ozone(a)
 
     a.mem = a.mem or ("200GB" if a.gpus > 1 else "160GB")
     frac = 0.85 if a.gpus > 1 else 0.93

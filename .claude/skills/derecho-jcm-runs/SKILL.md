@@ -36,6 +36,8 @@ Common flags (see `python scripts/mkjob.py --help` for all):
 | `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
 | `--aquaplanet` | off | skips terrain/forcing files |
 | `--resume` | off | reuse the run dir's checkpoint |
+| `--ozone` | — | **required** for any grid without a packaged climatology (i.e. anything but T63L47) |
+| `--emissions` | derived from `--grid` | override explicitly to pin a file |
 | `--extra "k=v ..."` | — | raw Hydra overrides appended last |
 
 ## 2. Always pre-flight before burning a queue slot
@@ -90,8 +92,22 @@ oxidants) are **prepared files on scratch and therefore purge-eligible**.
 `mkjob.py` checks they exist and refuses to emit a script if any is missing.
 Paths come from `JAM_INPUTS` / `JCM_EMISSIONS` (see the file for defaults).
 
-Level-resolved files must match the run: an L47 oxidant/ozone file will not
-work in an L95 run.
+**Every prepared input is grid-specific**, in one of two ways, and `mkjob.py`
+now derives all of them from `--grid` so a mismatch is caught before `qsub`
+rather than after the job reaches the queue front:
+
+- *level*-resolved — oxidants, ozone (an L47 file will not work in an L95 run);
+- *horizontally* resolved — emissions, DMS, dust (`_validate_emissions_grid`,
+  `read_dms_seawater` and `read_dust_source` all check against the model grid,
+  so the T63 files are unusable on T85/T106/T119 even though DMS and dust have
+  no vertical axis).
+
+**Ozone is the dangerous one.** `forcing.ozone_file: auto` resolves only a
+*packaged* climatology and silently falls back to RRTMGP's ANALYTIC profile
+when none matches — that surrogate carries ~7.6x the tropospheric ozone
+column, so the job runs to completion and quietly produces radiation that
+cannot be compared with anything. Only T63L47 is packaged, so `mkjob.py`
+**refuses** any other grid without an explicit `--ozone`.
 
 ## 5. PBS facts specific to this machine
 
