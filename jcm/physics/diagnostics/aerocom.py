@@ -290,6 +290,25 @@ def _lognormal_number_above(
     return jnp.where(valid, number * frac, 0.0)
 
 
+def _post_physics(state, diagnostics, field):
+    """Return a prognostic FIELD as it will be saved, not as at step start.
+
+    The scalar-field counterpart of :func:`_post_physics_tracer` — same
+    operator-splitting argument, applied to u/v/T/q. ``_tendency_run`` is
+    preferred over ``thermo_run`` here: ``thermo_run`` is advanced only by
+    terms that opt in (convection, the cloud schemes), whereas the running
+    accumulator captures every term's returned tendency automatically —
+    including vertical diffusion, radiation and gravity-wave drag, which
+    never touch ``thermo_run`` but do move the saved winds and temperature.
+    """
+    x = getattr(state, field)
+    run = diagnostics.get("_tendency_run")
+    dt = diagnostics.get("_dt_seconds")
+    if run is None or dt is None or run.get(field) is None:
+        return x
+    return x + run[field] * dt
+
+
 def _post_physics_tracer(state, diagnostics, name, default=None):
     """Return a tracer as it will be SAVED, not as at step start.
 
@@ -449,7 +468,7 @@ class AerocomDiagnostics(PhysicsTerm):
         if "column" in self.groups:
             out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
-            out.update(self._plev_group(state, temperature, p_full))
+            out.update(self._plev_group(state, diagnostics, temperature, p_full))
         if "aerosol" in self.groups:
             out.update(self._aerosol_group(state, diagnostics, p_half))
 
@@ -544,7 +563,11 @@ class AerocomDiagnostics(PhysicsTerm):
     def _column_group(self, state, diagnostics, p_half, qnc, qni) -> dict:
         """Water-vapour path, column number concentrations, albedo."""
         out = {
-            "aerocom_prw": _column_integral(state.specific_humidity, p_half),
+            # Post-physics humidity, so prw matches the hus saved at this
+            # timestamp rather than preceding the step's diffusion,
+            # convection and microphysics.
+            "aerocom_prw": _column_integral(
+                _post_physics(state, diagnostics, "specific_humidity"), p_half),
         }
         # Column number [m^-2]. The prognostic number tracers are per unit
         # MASS (kg^-1), so dp/g is the exact measure for them; a volumetric
@@ -575,13 +598,18 @@ class AerocomDiagnostics(PhysicsTerm):
         out["aerocom_albedo"] = albedo
         return out
 
-    def _plev_group(self, state, temperature, p_full) -> dict:
+    def _plev_group(self, state, diagnostics, temperature, p_full) -> dict:
         """Winds on pressure surfaces and lower-tropospheric stability."""
         out = {}
+        # Post-physics winds: gravity-wave drag and vertical diffusion move
+        # u/v within the step and never touch thermo_run, so the step-start
+        # fields disagree with the winds saved at this timestamp.
+        u_post = _post_physics(state, diagnostics, "u_wind")
+        v_post = _post_physics(state, diagnostics, "v_wind")
         for target in self.plev_pa:
             tag = f"{int(round(target / 100.0)):d}"
-            out[f"aerocom_u{tag}"] = _interp_to_pressure(state.u_wind, p_full, target)
-            out[f"aerocom_v{tag}"] = _interp_to_pressure(state.v_wind, p_full, target)
+            out[f"aerocom_u{tag}"] = _interp_to_pressure(u_post, p_full, target)
+            out[f"aerocom_v{tag}"] = _interp_to_pressure(v_post, p_full, target)
 
         # LTS = theta(700 hPa) - theta(surface), the standard Klein & Hartmann
         # inversion strength. Potential temperature uses the model's own
@@ -657,6 +685,17 @@ class AerocomDiagnostics(PhysicsTerm):
                 # is shifted by exp(3 ln^2 sigma_g) (Hatch-Choate).
                 sg = jnp.asarray(sigmas[m])
                 d_g_mass = 2.0 * jam.r_dry[m] * jnp.exp(3.0 * jnp.log(sg) ** 2)
+                # PM1/PM10 cutoffs are AERODYNAMIC diameters, and an impactor
+                # sizes by settling velocity, not by geometry. Comparing the
+                # geometric diameter against them over-includes dense
+                # particles: d_ae = d_g * sqrt(rho_p / rho_0) with
+                # rho_0 = 1000 kg/m3, so dust (~2650) and sea salt (~2200)
+                # reach a given aerodynamic cut at ~0.6 of the geometric
+                # diameter the cut would otherwise imply. Slip correction is
+                # omitted — it matters below ~0.5 um, where both cuts pass
+                # essentially all the mass anyway, so it cannot move PM1/PM10.
+                rho_p = jnp.maximum(jam.rho[m], 1.0)
+                d_g_mass = d_g_mass * jnp.sqrt(rho_p / 1000.0)
                 valid = (d_g_mass > 0.0) & (jam.mass[m] > 0.0)
                 d_safe = jnp.where(valid, d_g_mass, 1.0)
                 z = jnp.log(d_thresh / d_safe) / (jnp.sqrt(2.0) * jnp.log(sg))
