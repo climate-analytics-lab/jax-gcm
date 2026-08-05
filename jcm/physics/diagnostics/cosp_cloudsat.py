@@ -83,7 +83,28 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
 
-def _layer_optical_depth(clouds, pressure_half):
+def _post_micro_condensate(clouds, diagnostics):
+    """Post-microphysics ``(qc, qi)`` for the satellite simulators.
+
+    ``CloudData.qc``/``.qi`` are the STEP-START condensate: the microphysics
+    returns its effect as a tendency (operator splitting), so the CloudData
+    struct still holds the pre-microphysics values when this term runs. The
+    post-microphysics condensate is published on the running ``thermo_run``
+    view instead. Using CloudData directly makes every satellite product
+    disagree with the saved tracer state whenever microphysics has a non-zero
+    tendency — which is essentially always.
+
+    Falls back to CloudData when ``thermo_run`` carries no condensate (a
+    configuration without the 1M/2M schemes), so this stays a Python-level
+    structural choice and cannot vary between scan steps.
+    """
+    tr = diagnostics.get("thermo_run") or {}
+    qc, qi = tr.get("qc"), tr.get("qi")
+    return (clouds.qc if qc is None else qc,
+            clouds.qi if qi is None else qi)
+
+
+def _layer_optical_depth(clouds, pressure_half, qc, qi):
     """Gridbox-mean 0.67 um layer cloud optical depth for the MODIS optics.
 
     Geometric-optics limit ``tau = 3 W / (2 rho r_eff)`` with ``W`` the layer
@@ -95,8 +116,8 @@ def _layer_optical_depth(clouds, pressure_half):
     dm = jnp.diff(pressure_half, axis=0) / c.grav
     r_liq = jnp.maximum(clouds.r_eff_liq * 1e-6, 1e-9)
     r_ice = jnp.maximum(clouds.r_eff_ice * 1e-6, 1e-9)
-    tau_liq = 1.5 * clouds.qc * dm / (1000.0 * r_liq)
-    tau_ice = 1.5 * clouds.qi * dm / (917.0 * r_ice)
+    tau_liq = 1.5 * qc * dm / (1000.0 * r_liq)
+    tau_ice = 1.5 * qi * dm / (917.0 * r_ice)
     return tau_liq + tau_ice
 
 
@@ -188,6 +209,10 @@ class CloudsatCosp(PhysicsTerm):
             CloudsatInputs, simulate_cloudsat, simulate_cloudsat_modis)
 
         clouds = diagnostics["clouds"]
+        # Every simulator below sees the SAME post-microphysics condensate as
+        # the saved tracer state (see _post_micro_condensate). Bound here,
+        # before any consumer, so the radar and imager cannot diverge.
+        qc_pm, qi_pm = _post_micro_condensate(clouds, diagnostics)
         conv = diagnostics["convection"]
         # Use the running thermodynamic state (advanced by radiation, vdiff
         # and convection — the state the cloud microphysics actually saw) so
@@ -232,8 +257,8 @@ class CloudsatCosp(PhysicsTerm):
             zhalf=diagnostics["height_half"][1:],
             cloud_frac=clouds.cloud_fraction,
             conv_frac=jnp.zeros_like(clouds.cloud_fraction),
-            mr_lsliq=clouds.qc,
-            mr_lsice=clouds.qi,
+            mr_lsliq=qc_pm,
+            mr_lsice=qi_pm,
             mr_ccliq=jnp.zeros_like(clouds.qc),
             mr_ccice=jnp.zeros_like(clouds.qc),
             fl_lsrain=clouds.rain_flux,
@@ -266,7 +291,7 @@ class CloudsatCosp(PhysicsTerm):
             # the same qc/qi fields and carries no separate convective
             # cloud, so all of it is presented as stratiform (matching the
             # conv_frac = 0 choice above).
-            dtau_s = _layer_optical_depth(clouds, p_half)
+            dtau_s = _layer_optical_depth(clouds, p_half, qc_pm, qi_pm)
             dtau_c = jnp.zeros_like(dtau_s)
             joint = simulate_cloudsat_modis(
                 inputs, self._lut, dtau_s, dtau_c, p_half, key=key,

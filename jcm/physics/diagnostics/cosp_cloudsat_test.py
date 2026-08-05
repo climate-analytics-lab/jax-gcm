@@ -67,6 +67,17 @@ def _setup():
                          snow_flux=jnp.zeros((NLEV, NCOLS)),
                          precip_rain=jnp.asarray(rain[-1]))
     convection = ConvectionData.zeros((NCOLS,), NLEV)
+    # Keep ``thermo_run`` consistent with the seeded CloudData. In the real
+    # model these agree by construction — CloudData holds the STEP-START
+    # condensate and ``thermo_run`` the post-microphysics values, and the
+    # simulators read the latter. A fixture that seeds only CloudData would
+    # hand the simulators a cloud-free thermo_run and quietly test the old
+    # (stale-condensate) behaviour.
+    tr = diagnostics.get("thermo_run")
+    if tr is not None:
+        diagnostics = {**diagnostics,
+                       "thermo_run": {**tr, "qc": jnp.asarray(qc),
+                                      "qi": jnp.asarray(qi)}}
     diagnostics = {**diagnostics, "clouds": clouds, "convection": convection}
     return state, diagnostics, forcing, terrain
 
@@ -164,6 +175,39 @@ class CalipsoModisTest(unittest.TestCase):
         term = CloudsatCosp(ncolumns=20, seed=1, **kw)
         state, diagnostics, forcing, terrain = self.setup
         return term(state, diagnostics, forcing, terrain)[1]
+
+    def test_simulators_use_post_microphysics_condensate(self):
+        """The simulators must read ``thermo_run`` qc/qi, not the step-start
+        CloudData values.
+
+        CloudData holds the condensate as it was at the START of the step:
+        microphysics returns its effect as a tendency (operator splitting),
+        so the struct is stale by the time this diagnostic runs. Reading it
+        makes every satellite product disagree with the saved tracer state
+        whenever microphysics is active — which is essentially always.
+
+        Here the two are driven APART deliberately: thermo_run is emptied
+        while CloudData keeps its cloud. A simulator reading CloudData would
+        still report cloud; one reading thermo_run correctly reports none.
+        """
+        state, diagnostics, forcing, terrain = self.setup
+        tr = diagnostics.get("thermo_run")
+        self.assertIsNotNone(tr, "fixture must carry thermo_run")
+        emptied = {**diagnostics,
+                   "thermo_run": {**tr,
+                                  "qc": jnp.zeros_like(tr["qc"]),
+                                  "qi": jnp.zeros_like(tr["qi"])}}
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        term = CloudsatCosp(ncolumns=20, seed=1, enable_calipso=True,
+                            enable_modis=True)
+        out = term(state, emptied, forcing, terrain)[1]
+        # CloudData still has cloud; thermo_run does not. Post-microphysics
+        # wins, so the retrievals must be empty.
+        self.assertEqual(float(np.asarray(out["cltcalipso"]).max()), 0.0)
+        self.assertEqual(float(np.asarray(out["cltmodis"]).max()), 0.0)
+        # ...and with thermo_run carrying the cloud, they are not.
+        full = term(state, diagnostics, forcing, terrain)[1]
+        self.assertGreater(float(np.asarray(full["cltcalipso"]).max()), 0.0)
 
     def test_calipso_layered_cover_is_a_fraction(self):
         diag = self._run(enable_calipso=True)

@@ -89,6 +89,31 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "convection.precip_conv": ("prc", "kg m-2 s-1", "Surface", 1.0, 0.0),
     # --- aerosol optics ---
     "aerosol.aod_total": ("od550aer", "1", "Column", 1.0, 0.0),
+    # --- CFMIP satellite simulators (jax-gcm#581) ---
+    # CALIPSO and MODIS cloud products. jcm already emits these under their
+    # CMOR names, so the mapping is mostly identity — but without an entry
+    # here ``convert`` drops them into ``skipped``, and the advertised
+    # echam-jam-aci run would produce the diagnostics and then no submission
+    # files for them. Cloud FRACTIONS are stored as 0-1 fractions and CMOR
+    # wants percent, hence the x100; the MODIS effective radii are metres in
+    # jcosp and CMOR wants metres, so those pass through.
+    "cltcalipso": ("cltcalipso", "%", "Column", 100.0, 0.0),
+    "cllcalipso": ("cllcalipso", "%", "Column", 100.0, 0.0),
+    "clmcalipso": ("clmcalipso", "%", "Column", 100.0, 0.0),
+    "clhcalipso": ("clhcalipso", "%", "Column", 100.0, 0.0),
+    "cltmodis": ("cltmodis", "%", "Column", 100.0, 0.0),
+    "clwmodis": ("clwmodis", "%", "Column", 100.0, 0.0),
+    "climodis": ("climodis", "%", "Column", 100.0, 0.0),
+    "tauwmodis": ("tauwmodis", "1", "Column", 1.0, 0.0),
+    "tauimodis": ("tauimodis", "1", "Column", 1.0, 0.0),
+    "reffclwmodis": ("reffclwmodis", "m", "Column", 1.0, 0.0),
+    "reffclimodis": ("reffclimodis", "m", "Column", 1.0, 0.0),
+    "lwpmodis": ("lwpmodis", "kg m-2", "Column", 1.0, 0.0),
+    "iwpmodis": ("iwpmodis", "kg m-2", "Column", 1.0, 0.0),
+    # CloudSat warm-rain occurrence: the ACI calibration target of
+    # Muelmenstaedt et al. (2020). Not a CMIP variable, kept under its own
+    # name so the submission still carries it.
+    "cosp_warm_rain": ("cospwarmrain", "1", "Column", 1.0, 0.0),
     # --- spectral aerosol optics (jax-gcm#584) ---
     # These come from the diagnostic Mie pass at the OBSERVATION
     # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
@@ -191,6 +216,19 @@ CF_STANDARD_NAMES = {
     "rlus": "surface_upwelling_longwave_flux_in_air",
     "hfls": "surface_upward_latent_heat_flux",
     "hfss": "surface_upward_sensible_heat_flux",
+    "cltcalipso": "cloud_area_fraction",
+    "cllcalipso": "cloud_area_fraction_in_atmosphere_layer",
+    "clmcalipso": "cloud_area_fraction_in_atmosphere_layer",
+    "clhcalipso": "cloud_area_fraction_in_atmosphere_layer",
+    "cltmodis": "cloud_area_fraction",
+    "clwmodis": "liquid_water_cloud_area_fraction",
+    "climodis": "ice_cloud_area_fraction",
+    "tauwmodis": "atmosphere_optical_thickness_due_to_cloud",
+    "tauimodis": "atmosphere_optical_thickness_due_to_cloud",
+    "reffclwmodis": "effective_radius_of_cloud_liquid_water_particles",
+    "reffclimodis": "effective_radius_of_cloud_ice_particles",
+    "lwpmodis": "atmosphere_mass_content_of_cloud_liquid_water",
+    "iwpmodis": "atmosphere_mass_content_of_cloud_ice",
     "od550aer": "atmosphere_optical_thickness_due_to_ambient_aerosol_particles",
     "abs550aer": "atmosphere_absorption_optical_thickness_due_to_ambient_aerosol_particles",
     "od550so4": "atmosphere_optical_thickness_due_to_sulfate_ambient_aerosol_particles",
