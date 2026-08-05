@@ -28,17 +28,31 @@ JAM_INPUTS = os.environ.get("JAM_INPUTS", f"{SCRATCH}/jam_inputs")
 EMISSIONS = os.environ.get(
     "JCM_EMISSIONS", f"{HOME}/jax-gcm/runs/emissions_echam_t63_l47_hybrid_2014.nc")
 
+def grid_layers(grid: str) -> str:
+    """Layer count parsed out of a grid name (echam_t63_l47_hybrid -> "47")."""
+    return "".join(c for c in grid.split("_l")[-1] if c.isdigit()) or "?"
+
+
 # Prepared aux inputs (purge-eligible on scratch — see reference/data_paths.md).
-AUX_FILES = {
-    "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_t63.nc",
-    "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f19_t63.nc",
-    "oxidants_file": f"{JAM_INPUTS}/oxidants_cam_echam_l47_2014_t63.nc",
-}
+# Oxidants are LEVEL-RESOLVED, so the filename has to follow the requested
+# grid: the runner validates the oxidant level count against the model levels,
+# so a hard-coded L47 file made every L95 job die after it reached the front
+# of the queue. Deriving it here means a missing/misnamed file is caught by
+# check_inputs() before qsub instead. dms/dust are surface fields (no level
+# axis) and so are grid-independent.
+def aux_files(grid: str) -> dict:
+    lev = grid_layers(grid)
+    return {
+        "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_t63.nc",
+        "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f19_t63.nc",
+        "oxidants_file":
+            f"{JAM_INPUTS}/oxidants_cam_echam_l{lev}_2014_t63.nc",
+    }
 
 
 def check_inputs(a) -> None:
     """Fail before qsub if a required input file is missing (scratch purges)."""
-    needed = [("emissions", a.emissions), *AUX_FILES.items()]
+    needed = [("emissions", a.emissions), *aux_files(a.grid).items()]
     missing = [f"{k}: {v}" for k, v in needed if not os.path.exists(v)]
     if missing:
         sys.exit("MISSING INPUT FILES (scratch is purge-eligible; see "
@@ -62,7 +76,8 @@ def build_overrides(a) -> list[str]:
         ]
         if a.physics.endswith("jam") and not a.no_emissions:
             ov.append(f"forcing.emissions_file={a.emissions}")
-            ov += [f"forcing.{k}={v}" for k, v in AUX_FILES.items()]
+            ov += [f"forcing.{k}={v}"
+                   for k, v in aux_files(a.grid).items()]
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
     if a.physics.endswith("jam"):
         ov.append("diffusion.tracer_positivity=true")
@@ -100,7 +115,7 @@ def check_compose(a, overrides) -> None:
     r = subprocess.run(cmd, cwd=a.repo, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("COMPOSE FAILED:\n" + (r.stderr or r.stdout)[-2000:])
-    layers = "".join(c for c in a.grid.split("_l")[-1] if c.isdigit()) or "?"
+    layers = grid_layers(a.grid)
     trunc = a.grid.split("_t")[-1].split("_")[0] if "_t" in a.grid else "?"
     print(f"# compose OK; also verify coords build:\n"
           f"#   JAX_PLATFORMS=cpu python -c \"from jcm.utils import get_coords;"
@@ -206,6 +221,8 @@ echo "{marker}"
         body = f'\nSKILL_DIR={skill_dir}\nCHUNK_DAYS={a.chunk_days}\n'
         body += f'COMMON="{" ".join(o.strip(chr(34)) for o in overrides)}"\n'
         body += """
+FAILED_VARIANTS=0
+
 run_variant () {
   local tag="$1"; shift
   local d="$RUNDIR/$tag"; mkdir -p "$d"
@@ -216,14 +233,31 @@ run_variant () {
   ( sleep 420; for i in $(seq 6); do kill -0 $pid 2>/dev/null || break
       echo "  [$tag] $(nvidia-smi --query-gpu=clocks.sm,power.draw,utilization.gpu --format=csv,noheader | head -1)"
       sleep 30; done ) &
-  wait $pid || echo "  VARIANT $tag FAILED"
+  if ! wait $pid; then
+    echo "  VARIANT $tag FAILED"
+    FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
+  fi
+  # A variant that ran but went unhealthy is also a failure: the driver
+  # returns normally after tripping the health gate.
+  if grep -aqE "unhealthy|Traceback" "$d/run.log" 2>/dev/null; then
+    echo "  VARIANT $tag UNHEALTHY"
+    FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
+  fi
+  # Non-zero here only means "not enough chunks to quote a rate", which is
+  # not a job failure, so it stays tolerated.
   python "$SKILL_DIR/settled_rate.py" --chunk-days $CHUNK_DAYS "$d/run.log" || true
 }
 """
         for v in variants:
             tag, _, extra = v.partition(":")
             body += f'run_variant {tag} {extra}\n'
-        body += f'echo "{marker}"\n'
+        # Withhold the completion marker if any variant failed, so the
+        # monitor cannot read a half-failed matrix as a finished benchmark.
+        body += (f'\nif [ "$FAILED_VARIANTS" -ne 0 ]; then\n'
+                 f'  echo "BENCH FAILED: $FAILED_VARIANTS variant(s)"\n'
+                 f'  exit 1\n'
+                 f'fi\n'
+                 f'echo "{marker}"\n')
 
     print(head + body)
     print(f"# submit: qsub <this file>\n"
