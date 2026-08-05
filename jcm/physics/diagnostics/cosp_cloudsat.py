@@ -124,8 +124,13 @@ class CloudsatCosp(PhysicsTerm):
 
     name: ClassVar[str] = "cloudsat_cosp"
     category: ClassVar[str] = "diagnostics"
+    # ``pressure_half`` is read unconditionally in ``__call__`` — layer mass
+    # for the optical-depth integral, and passed straight to the simulators —
+    # so it belongs here. An undeclared unconditional read is exactly what
+    # ``requires_audit_test`` exists to catch.
     requires: ClassVar[tuple[str, ...]] = (
-        "clouds", "convection", "pressure_full", "height_full", "height_half")
+        "clouds", "convection", "pressure_full", "pressure_half",
+        "height_full", "height_half")
     # Static key set: the diagnostics dict is part of the scan carry, so
     # every enabled simulator must publish the same keys on every step.
     provides: ClassVar[tuple[str, ...]] = (
