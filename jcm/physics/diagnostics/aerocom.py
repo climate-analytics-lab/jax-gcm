@@ -290,6 +290,12 @@ def _lognormal_number_above(
     return jnp.where(valid, number * frac, 0.0)
 
 
+def _default_jam_spec():
+    """Return the MAM4 spec, imported lazily so jcm works without JAM."""
+    from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+    return MAM4_SPEC
+
+
 def _post_physics(state, diagnostics, field):
     """Return a prognostic FIELD as it will be saved, not as at step start.
 
@@ -306,7 +312,16 @@ def _post_physics(state, diagnostics, field):
     dt = diagnostics.get("_dt_seconds")
     if run is None or dt is None or run.get(field) is None:
         return x
-    return x + run[field] * dt
+    out = x + run[field] * dt
+    # ``verify_tendencies`` clamps the applied humidity so the SAVED field is
+    # non-negative; the raw sum here is not clamped, so without this a large
+    # same-step sink could give a negative prw that disagrees with the saved
+    # hus. Water vapour is the only non-negative scalar among these fields —
+    # winds are signed and temperature is far from zero — so the floor is
+    # applied only to it.
+    if field == "specific_humidity":
+        out = jnp.maximum(out, 0.0)
+    return out
 
 
 def _post_physics_tracer(state, diagnostics, name, default=None):
@@ -674,13 +689,40 @@ class AerocomDiagnostics(PhysicsTerm):
         # per-mode widths are static configuration, so a Python loop over
         # modes is fine and keeps the lognormal integral readable.
         n_modes = jam.number.shape[0]
+        # ``_jam_state`` is diagnosed by the JAM core, BEFORE sedimentation,
+        # dry deposition and the post-cloud aqueous / wet-scavenging block
+        # have removed material. Rebuild the modal amounts from the
+        # post-physics tracers so N70/N100/PM describe the aerosol saved at
+        # this timestamp rather than the mid-chain population.
+        #
+        # r_dry / kappa keep the core's diagnosis: recomputing them means
+        # re-running the modal size diagnosis, and they are ratios of mass to
+        # number, so a step that removes both changes them very little —
+        # unlike the amounts themselves, which is what these diagnostics
+        # report. Documented rather than silently approximated.
+        from jcm.physics.aerosol.jam import mass_name, number_name
+        spec = getattr(self, "_jam_spec", None) or _default_jam_spec()
+        num_post, mass_post = [], []
+        for mode in spec.modes:
+            n = _post_physics_tracer(state, diagnostics, number_name(mode.short))
+            num_post.append(n if n is not None else None)
+            parts = [
+                _post_physics_tracer(state, diagnostics, mass_name(sp, mode.short))
+                for sp in mode.species
+            ]
+            parts = [x for x in parts if x is not None]
+            mass_post.append(sum(parts) if parts else None)
+        number_pp = (jnp.stack(num_post) if all(x is not None for x in num_post)
+                     else jam.number)
+        mass_pp = (jnp.stack(mass_post) if all(x is not None for x in mass_post)
+                   else jam.mass)
         sigmas = (self.mode_sigma_g * n_modes)[:n_modes]
         rho_air = diagnostics.get("air_density")
         for label, d_thresh in _N_THRESHOLDS.items():
             total = None
             for m in range(n_modes):
                 nm = _lognormal_number_above(
-                    jam.number[m], jam.r_dry[m], jnp.asarray(sigmas[m]), d_thresh)
+                    number_pp[m], jam.r_dry[m], jnp.asarray(sigmas[m]), d_thresh)
                 total = nm if total is None else total + nm
             # kg^-1 -> m^-3 where air density is available.
             if rho_air is not None:
@@ -705,11 +747,11 @@ class AerocomDiagnostics(PhysicsTerm):
                 # essentially all the mass anyway, so it cannot move PM1/PM10.
                 rho_p = jnp.maximum(jam.rho[m], 1.0)
                 d_g_mass = d_g_mass * jnp.sqrt(rho_p / 1000.0)
-                valid = (d_g_mass > 0.0) & (jam.mass[m] > 0.0)
+                valid = (d_g_mass > 0.0) & (mass_pp[m] > 0.0)
                 d_safe = jnp.where(valid, d_g_mass, 1.0)
                 z = jnp.log(d_thresh / d_safe) / (jnp.sqrt(2.0) * jnp.log(sg))
                 frac_below = 0.5 * (1.0 + jax.scipy.special.erf(z))
-                mm = jnp.where(valid, jam.mass[m] * frac_below, 0.0)
+                mm = jnp.where(valid, mass_pp[m] * frac_below, 0.0)
                 total = mm if total is None else total + mm
             if rho_air is not None:
                 total = total * rho_air
