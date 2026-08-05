@@ -453,7 +453,12 @@ class AerocomDiagnostics(PhysicsTerm):
         # the schemes return their condensate change in the tendency only —
         # so using them here would date every cloud product one step.
         thermo = diagnostics.get("thermo_run") or {}
-        temperature = thermo.get("temperature", state.temperature)
+        # Post-physics temperature: thermo_run is advanced only by terms that
+        # opt in, so radiation and gravity-wave drag are missing from it even
+        # though they move the saved ta. The condensate below still comes
+        # from thermo_run, which is the view that carries qc/qi — and which
+        # now includes convective detrainment.
+        temperature = _post_physics(state, diagnostics, "temperature")
         qc = thermo.get("qc", clouds.qc)
         qi = thermo.get("qi", clouds.qi)
 
