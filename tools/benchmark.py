@@ -106,6 +106,45 @@ _T63_COMMON = [
 # the ANALYTIC profile is NOT a valid benchmark of the radiation, since that
 # surrogate has ~7.6x the tropospheric ozone column.
 
+# Prepared boundary data for the resolutions that are not packaged in the
+# repo. Every entry is grid-AND-level matched: terrain is horizontally
+# resolved, ozone is both. Getting this wrong does not fail loudly -- a
+# mismatched ozone silently falls back to the analytic profile (~7.6x the
+# tropospheric column) and a benchmark then measures the wrong radiative
+# workload. See .claude/skills/derecho-jcm-runs/reference/data_paths.md.
+_BC = pathlib.Path("/scr/dwatsonparris/bc_l95")
+_TERRAIN = {
+    "t63": REPO / "jcm/data/bc/t63/terrain.nc",
+    "t106": _BC / "T106_terrain.nc",
+    "t119": _BC / "T119_terrain.nc",
+}
+
+
+def _ma_preset(trunc: str, levels: int) -> list[str]:
+    """Middle-atmosphere sweep config: full JAM + 2M + semi-Lagrangian.
+
+    Mirrors the original MA L95 benchmark so numbers stay comparable. Ozone
+    is passed explicitly for every combination except the one the repo
+    packages (T63 L47), where `auto` resolves it correctly.
+    """
+    ov = [
+        "physics=echam-jam",
+        f"grid=echam_{trunc}_l{levels}_hybrid",
+        "init=jw", "init.rh=0.0",
+        "terrain=from_file", f"terrain.file={_TERRAIN[trunc]}",
+        # SSTs are upsampled onto the model grid by the forcing loader, so the
+        # packaged T63 file serves every truncation here.
+        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        "run=longrun", "run.time_step=12",
+        # The semi-Lagrangian core the original sweep used; needs the SL
+        # dinosaur on PYTHONPATH (--pythonpath), else the dycore raises.
+        "+advection=semi_lagrangian", "+sl_off_centering=0.2",
+    ]
+    if not (trunc == "t63" and levels == 47):
+        ov.append(f"forcing.ozone_file={_BC}/{trunc}_ozone_l{levels}.nc")
+    return ov
+
+
 PRESETS: dict[str, list[str]] = {
     "t63-echam-rrtmgp": ["physics=echam-rrtmgp", *_T63_COMMON],
     "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
@@ -113,6 +152,9 @@ PRESETS: dict[str, list[str]] = {
     "t63-echam-jam-aerocom": ["physics=echam-jam-aerocom", *_T63_COMMON],
     "t63-echam-jam-aerocom-optics": [
         "physics=echam-jam-aerocom-optics", *_T63_COMMON],
+    # Middle-atmosphere resolution sweep (T63/T106/T119 x L47/L95).
+    **{f"ma-{t}-l{lv}": _ma_preset(t, lv)
+       for t in ("t63", "t106", "t119") for lv in (47, 95)},
 }
 
 
