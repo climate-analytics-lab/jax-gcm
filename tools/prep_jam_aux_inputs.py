@@ -229,18 +229,20 @@ def main() -> None:
                     help="also write copies regridded onto this Gaussian "
                          "grid (for the spectral-backend runners, which do "
                          "no runtime regridding)")
+    ap.add_argument("--nlevels", type=int, default=47,
+                    help="ECHAM hybrid level count for the oxidant remap")
     args = ap.parse_args()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     products = [outdir / "dms_lana2011_climo.nc",
                 outdir / "dust_erodibility_cam_f19.nc",
-                outdir / f"oxidants_cam_echam_l47_{args.year}.nc"]
+                outdir / f"oxidants_cam_echam_l{args.nlevels}_{args.year}.nc"]
     if not products[0].exists():
         prep_dms(products[0])
     if not products[1].exists():
         prep_dust(products[1])
     if not products[2].exists():
-        prep_oxidants(products[2], args.year)
+        prep_oxidants(products[2], args.year, args.nlevels)
     if args.target_truncation:
         for p in products:
             _regrid_to_gaussian(p, args.target_truncation)

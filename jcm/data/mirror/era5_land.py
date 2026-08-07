@@ -21,6 +21,8 @@ FIELDS = {
     "skt": "128_235_skt",      # skin temperature [K]
     "stl1": "128_139_stl1",    # soil temperature level 1 [K]
     "swvl1": "128_039_swvl1",  # volumetric soil water level 1 [m3/m3]
+    "swvl2": "128_040_swvl2",  # volumetric soil water level 2 [m3/m3]
+    "swvl3": "128_041_swvl3",  # volumetric soil water level 3 [m3/m3]
     "sd": "128_141_sd",        # snow depth, water equivalent [m]
     "fal": "128_243_fal",      # forecast albedo [1]
 }
