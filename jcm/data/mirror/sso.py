@@ -17,10 +17,12 @@ invariant land-sea mask in the bundle assembly, which also provides
 the ocean mask applied to the SSO fields there.
 
 The DEM is streamed in latitude strips; per strip the pixels (and the
-spherical-metric gradients computed inside the strip) are binned onto the
-target cells, accumulating the sufficient statistics (Σh, Σh², Σhx²,
-Σhy², Σhx·hy, max, min, counts). This keeps memory at one strip and makes
-the pass exact rather than a two-level coarsening.
+spherical-metric gradients computed inside the strip) are assigned to
+target cells — regular (lat, lon) bins for Gaussian grids, nearest
+column via a unit-sphere KDTree for unstructured grids (ne30pg3) — and
+the sufficient statistics (Σh, Σh², Σhx², Σhy², Σhx·hy, max, min,
+counts) accumulate into flat per-cell arrays. This keeps memory at one
+strip and makes the pass exact rather than a two-level coarsening.
 """
 
 from __future__ import annotations
@@ -31,20 +33,18 @@ import rasterio
 R_EARTH = 6.371e6
 _STRIP = 240                      # DEM rows per strip (2° at 30")
 
+_SUM_KEYS = ("land", "sh", "sh2", "shx2", "shy2", "shxy")
 
-def _accumulate(dem_path: str, lat_edges: np.ndarray,
-                assign_lon, nlon_bins: int):
-    """One pass over the DEM accumulating per-cell sufficient statistics.
 
-    ``lat_edges`` are target latitude bin edges (ascending, degrees).
-    ``assign_lon(lon_deg) -> int bin`` vectorised longitude binning.
+def _accumulate(dem_path: str, assign_strip, ncells: int):
+    """One pass over the DEM accumulating flat per-cell sufficient statistics.
+
+    ``assign_strip(lats, lons) -> (nrows, nlon) int`` maps each pixel to a
+    flat target-cell index; negative means "not on the target grid".
     """
-    nlat_bins = lat_edges.size - 1
-    shape = (nlat_bins, nlon_bins)
-    acc = {k: np.zeros(shape) for k in
-           ("n", "land", "sh", "sh2", "shx2", "shy2", "shxy")}
-    acc["pic"] = np.full(shape, -np.inf)
-    acc["val"] = np.full(shape, np.inf)
+    acc = {k: np.zeros(ncells) for k in ("n",) + _SUM_KEYS}
+    acc["pic"] = np.full(ncells, -np.inf)
+    acc["val"] = np.full(ncells, np.inf)
 
     with rasterio.open(dem_path) as src:
         nodata = src.nodata if src.nodata is not None else -32768
@@ -79,24 +79,18 @@ def _accumulate(dem_path: str, lat_edges: np.ndarray,
 
             h = h[:nrows]
             land = land[:nrows]
-            lat_bin = np.searchsorted(lat_edges, lats[:nrows]) - 1
-            ok_rows = (lat_bin >= 0) & (lat_bin < nlat_bins)
-            lon_bin = assign_lon(lons)
+            idx = assign_strip(lats[:nrows], lons)
+            valid = idx >= 0
+            flat = idx[valid]
 
-            for r in np.nonzero(ok_rows)[0]:
-                li = lat_bin[r]
-                flat = li * nlon_bins + lon_bin
-                n = np.bincount(flat, minlength=nlat_bins * nlon_bins)
-                acc["n"] += n.reshape(shape)
-                for key, arr in (("land", land[r].astype(float)),
-                                 ("sh", h[r]), ("sh2", h[r] ** 2),
-                                 ("shx2", hx[r] ** 2), ("shy2", hy[r] ** 2),
-                                 ("shxy", hx[r] * hy[r])):
-                    acc[key] += np.bincount(
-                        flat, weights=arr,
-                        minlength=nlat_bins * nlon_bins).reshape(shape)
-                np.maximum.at(acc["pic"].ravel(), flat, h[r])
-                np.minimum.at(acc["val"].ravel(), flat, h[r])
+            acc["n"] += np.bincount(flat, minlength=ncells)
+            for key, arr in (("land", land.astype(float)), ("sh", h),
+                             ("sh2", h ** 2), ("shx2", hx ** 2),
+                             ("shy2", hy ** 2), ("shxy", hx * hy)):
+                acc[key] += np.bincount(flat, weights=arr[valid],
+                                        minlength=ncells)
+            np.maximum.at(acc["pic"], flat, h[valid])
+            np.minimum.at(acc["val"], flat, h[valid])
     return acc
 
 
@@ -134,11 +128,44 @@ def gaussian_grid_sso(dem_path: str, lats: np.ndarray,
     """SSO fields on a Gaussian (lat, lon) grid (lats ascending, degrees)."""
     lat_edges = np.concatenate([[-90.0],
                                 0.5 * (lats[1:] + lats[:-1]), [90.0]])
-    dlon = 360.0 / lons.size
+    nlat, nlon = lats.size, lons.size
+    dlon = 360.0 / nlon
     lon0 = lons[0] - dlon / 2.0
 
-    def assign_lon(lon_deg):
-        return ((lon_deg - lon0) // dlon).astype(int) % lons.size
+    def assign_strip(strip_lats, strip_lons):
+        lat_bin = np.searchsorted(lat_edges, strip_lats) - 1
+        lat_bin = np.where((lat_bin >= 0) & (lat_bin < nlat), lat_bin, -1)
+        lon_bin = ((strip_lons - lon0) // dlon).astype(int) % nlon
+        return np.where(lat_bin[:, None] >= 0,
+                        lat_bin[:, None] * nlon + lon_bin[None, :], -1)
 
-    acc = _accumulate(dem_path, lat_edges, assign_lon, lons.size)
+    acc = _accumulate(dem_path, assign_strip, nlat * nlon)
+    return {k: v.reshape(nlat, nlon) for k, v in finalize(acc).items()}
+
+
+def _unit_vectors(lat_deg, lon_deg):
+    lat, lon = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
+    return np.stack([np.cos(lat) * np.cos(lon),
+                     np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1)
+
+
+def column_grid_sso(dem_path: str, col_lats: np.ndarray,
+                    col_lons: np.ndarray) -> dict[str, np.ndarray]:
+    """SSO fields on an unstructured column grid (e.g. ne30pg3).
+
+    Each DEM pixel goes to the nearest column center by great-circle
+    distance (KDTree on unit-sphere vectors) — the Voronoi partition of
+    the columns, which is exact and gap-free without needing cell bounds.
+    """
+    from scipy.spatial import cKDTree
+    tree = cKDTree(_unit_vectors(col_lats, col_lons))
+
+    def assign_strip(strip_lats, strip_lons):
+        pts = _unit_vectors(
+            np.repeat(strip_lats, strip_lons.size),
+            np.tile(strip_lons, strip_lats.size))
+        _, idx = tree.query(pts, workers=-1)
+        return idx.reshape(strip_lats.size, strip_lons.size)
+
+    acc = _accumulate(dem_path, assign_strip, col_lats.size)
     return finalize(acc)
