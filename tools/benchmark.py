@@ -145,6 +145,34 @@ def _ma_preset(trunc: str, levels: int) -> list[str]:
     return ov
 
 
+def _pyses_preset(levels: int) -> list[str]:
+    """PySES CAM-SE ne30 at the requested level count, same physics as the MA sweep.
+
+    Deliberately NOT shaped like the spectral presets:
+
+    * no ``grid=`` — the group is IGNORED by this backend; resolution comes
+      from nx/npt/nlev in the dycore config;
+    * no ``run.time_step`` — the Model adopts the dycore's dt_seconds (900 s);
+    * no ``+advection=semi_lagrangian`` — that is a dinosaur option; pySES
+      does its own tracer sub-cycling (tracer_substeps=5);
+    * no terrain/ozone overrides — pySES bilinearly interpolates the packaged
+      T63 fields onto its columns at build time, so column sampling has no
+      exact-grid requirement and one file serves every resolution. This is
+      why ne30 needs none of the boundary-data prep the T106/T119 spectral
+      configs did.
+
+    ``run=pyses_year`` carries the production-validated settings (the finite
+    lid sponge lives in ``dycore.lid_sponge``, not ``run.sponge``).
+    """
+    return [
+        "physics=echam-jam",
+        f"dycore=pyses_ne30l{levels}",
+        "init=jw", "init.rh=0.0",
+        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        "run=pyses_year",
+    ]
+
+
 PRESETS: dict[str, list[str]] = {
     "t63-echam-rrtmgp": ["physics=echam-rrtmgp", *_T63_COMMON],
     "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
@@ -155,6 +183,8 @@ PRESETS: dict[str, list[str]] = {
     # Middle-atmosphere resolution sweep (T63/T106/T119 x L47/L95).
     **{f"ma-{t}-l{lv}": _ma_preset(t, lv)
        for t in ("t63", "t106", "t119") for lv in (47, 95)},
+    # pySES CAM-SE ne30, same physics, for the dycore comparison.
+    **{f"ma-ne30-l{lv}": _pyses_preset(lv) for lv in (47, 95)},
 }
 
 
