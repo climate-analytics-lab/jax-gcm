@@ -92,15 +92,15 @@ class RegridTest(unittest.TestCase):
 
     def test_fill_nearest_takes_closest_valid_value(self):
         from jcm.data.mirror.regrid import fill_nearest
-        lats = np.array([0.0, 1.0])
-        lons = np.array([0.0, 1.0, 2.0])
+        lats = np.array([0.0, 10.0])
+        lons = np.array([0.0, 1.0, 30.0])
         field = np.array([[[1.0, np.nan, 3.0],
-                           [1.0, 1.0, np.nan]]])
+                           [4.0, 5.0, 6.0]]])
         out = fill_nearest(field, lats, lons)
         self.assertTrue(np.isfinite(out).all())
-        self.assertEqual(out[0, 1, 2], 3.0)     # nearest valid is (0, 2)
+        self.assertEqual(out[0, 0, 1], 1.0)     # nearest valid is (0, 0)
         # untouched cells stay identical
-        self.assertEqual(out[0, 0, 0], 1.0)
+        self.assertEqual(out[0, 1, 2], 6.0)
 
     def test_interp_to_wraps_longitude(self):
         import xarray as xr
