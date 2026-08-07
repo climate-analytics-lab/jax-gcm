@@ -18,15 +18,17 @@ Unit translations into the conventions the packaged t63 files establish
 * ``sst``   = tos [degC] + 273.15, land filled with nearest-ocean value
 * ``icec``  = siconc [%] / 100, land = 0
 * ``stl``   = ERA5 stl1 [K]
-* ``snowc`` = ERA5 sd [m w.e.] (snow-cover factor ``min(1, snowc)``
-  downstream)
-* ``alb``   = annual-mean ERA5 fal
-* ``soilw_am`` — evaporation-availability factor in [0, 1]: root-zone
-  volumetric soil water relative to SPEEDY's field capacity
-  (``swcap`` = 0.30), layers weighted by depth with the deep layer
-  discounted:
-  ``(D1·swvl1 + D2·swvl2 + w·D3·swvl3) / (swcap·(D1 + D2 + w·D3))``,
-  D = (0.07, 0.21, 0.72) m, w = 0.3.
+* ``snowc`` = ERA5 sd [m w.e.] capped at 0.2, zeroed where snow persists
+  year-round (ice sheets) — matching ECHAM's SN, which excludes glaciers:
+  their high albedo lives in ``alb``, and blending toward fresh-snow
+  albedo would darken them
+* ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
+  background albedo (snow brightening is applied dynamically from
+  ``snowc``; an annual mean would double-count it)
+* ``soilw_am`` = root-zone soil-water depth [m], Σᵢ swvlᵢ·Dᵢ with
+  D = (0.07, 0.21, 0.72) m — matching the packaged field's ECHAM
+  WS-bucket convention (land mean ≈ 0.16 m), not an availability
+  fraction
 """
 
 from __future__ import annotations
@@ -47,9 +49,8 @@ SICONC = (f"{AMIP_ROOT}/seaIce/mon/siconc/gn/v20250807/"
 ERA_YEARS = {"pd": ("2005-01-01", "2014-12-31"),
              "pi": ("1870-01-01", "1879-12-31")}
 
-SWCAP = 0.30                       # SPEEDY field capacity (vol. fraction)
 _SOIL_D = np.array([0.07, 0.21, 0.72])   # ERA5 soil-layer depths [m]
-_DEEP_W = 0.3
+SNOW_CAP_M = 0.2                   # packaged ECHAM SN climatology ceiling
 
 SSO_FIELDS = ("orog", "orostd", "orosig", "orogam", "orothe",
               "oropic", "oroval")
@@ -210,18 +211,19 @@ def build_forcing(era5_path: str, era: str, lats, lons,
     icec_c = _monthly_clim(sic, era) / 100.0
     icec_da = icec_c.fillna(0.0)
 
-    d = _SOIL_D * np.array([1.0, 1.0, _DEEP_W])
-    soilw = (d[0] * era5.swvl1 + d[1] * era5.swvl2 + d[2] * era5.swvl3) \
-        / (SWCAP * d.sum())
-    soilw = soilw.clip(0.0, 1.0)
+    soilw = (_SOIL_D[0] * era5.swvl1 + _SOIL_D[1] * era5.swvl2
+             + _SOIL_D[2] * era5.swvl3)
 
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
         "stl": interp_to(era5.stl1, lats, lons),
-        "soilw_am": interp_to(soilw, lats, lons),
-        "snowc": interp_to(era5.sd.clip(0.0, 10.0), lats, lons),
-        "alb": interp_to(era5.fal.mean("time"), lats, lons),
+        "soilw_am": interp_to(soilw, lats, lons).clip(min=0.0),
+        "snowc": interp_to(
+            era5.sd.clip(0.0, SNOW_CAP_M).where(
+                era5.sd.min("time") < 0.5 * SNOW_CAP_M, 0.0),
+            lats, lons).clip(min=0.0),
+        "alb": interp_to(era5.fal.min("time"), lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})
