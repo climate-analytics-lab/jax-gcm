@@ -54,6 +54,11 @@ _DEEP_W = 0.3
 SSO_FIELDS = ("orog", "orostd", "orosig", "orogam", "orothe",
               "oropic", "oroval")
 
+# 12 mid-month timestamps: the readers' align_mode='auto' then resolves to
+# WRAP_YEAR (climatology) indexing, so the year itself is arbitrary.
+CLIMO_TIME = np.array([np.datetime64(f"2014-{m:02d}-15")
+                       for m in range(1, 13)])
+
 
 def gaussian_latlon(nlat: int):
     lats = np.rad2deg(np.arcsin(np.polynomial.legendre.leggauss(nlat)[0]))
@@ -67,8 +72,11 @@ def interp_to(da: xr.DataArray, lats, lons) -> xr.DataArray:
         da = da.isel({latn: slice(None, None, -1)})
     dlon = float(da[lonn][1] - da[lonn][0])
     wrapped = xr.concat(
-        [da, da.isel({lonn: 0}).assign_coords(
-            {lonn: float(da[lonn][-1]) + dlon})], dim=lonn)
+        [da.isel({lonn: -1}).assign_coords(
+            {lonn: float(da[lonn][0]) - dlon}),
+         da,
+         da.isel({lonn: 0}).assign_coords(
+             {lonn: float(da[lonn][-1]) + dlon})], dim=lonn)
     # constant extension to the poles so Gaussian lats beyond the source's
     # first/last row interpolate instead of going NaN
     if float(wrapped[latn][0]) > -90.0:
@@ -149,7 +157,7 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
     ceds = xr.open_zarr(ceds_zarr)
     bb = xr.open_zarr(bb_zarr)
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
-                            "time": np.arange(1, 13)})
+                            "time": CLIMO_TIME})
     for sp in _EMIS_SPECIES:
         up = sp.upper()
         for prefix, store in (("surface_combustion", ceds),
@@ -196,7 +204,7 @@ def build_forcing(era5_path: str, era: str, lats, lons,
     sst_c = _monthly_clim(tos, era)
     sst = _fill_nearest(sst_c.values, sst_c.lat.values, sst_c.lon.values)
     sst_da = xr.DataArray(sst + 273.15, dims=("time", "lat", "lon"),
-                          coords={"time": np.arange(1, 13),
+                          coords={"time": CLIMO_TIME,
                                   "lat": sst_c.lat, "lon": sst_c.lon})
     icec_c = _monthly_clim(sic, era) / 100.0
     icec_da = icec_c.fillna(0.0)
@@ -215,7 +223,7 @@ def build_forcing(era5_path: str, era: str, lats, lons,
         "alb": interp_to(era5.fal.mean("time"), lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
-                            "time": np.arange(1, 13)})
+                            "time": CLIMO_TIME})
     for name, da in fields.items():
         ds[name] = _to_lonlat(da)
     ds.attrs = {
