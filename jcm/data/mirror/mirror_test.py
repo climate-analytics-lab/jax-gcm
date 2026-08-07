@@ -118,6 +118,27 @@ class ResolveDataPathTest(unittest.TestCase):
                          "/local/x.nc")
         self.assertIsNone(runners._resolve_data_path(None))
 
+    def test_fetch_is_cache_first(self):
+        # a warm cache must resolve with local_files_only (no network)
+        try:
+            import huggingface_hub  # noqa: F401
+        except ImportError:
+            self.skipTest("huggingface_hub not installed")
+        from unittest import mock
+
+        from jcm.data import remote
+
+        calls = []
+
+        def fake(**kw):
+            calls.append(kw)
+            return "/cache/hit"
+
+        with mock.patch("huggingface_hub.hf_hub_download", side_effect=fake):
+            self.assertEqual(remote.fetch("bundles/x.nc"), "/cache/hit")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["local_files_only"])
+
     def test_list_paths_resolve_elementwise(self):
         from unittest import mock
 
