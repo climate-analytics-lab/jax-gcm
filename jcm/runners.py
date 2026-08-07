@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import types
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -371,6 +372,24 @@ def maybe_add_sponge(physics, cfg: DictConfig):
 # Terrain
 # ---------------------------------------------------------------------------
 
+def _resolve_data_path(path):
+    """Resolve a boundary-file path from config.
+
+    ``hf://<path-in-dataset>`` fetches (or reuses from the local HF cache)
+    the file from the project data mirror via :mod:`jcm.data.remote`, e.g.
+    ``hf://bundles/t63/terrain.nc``. Anything else passes through
+    unchanged. Fetch on a login/head node first — compute nodes usually
+    have no internet, but a warm cache needs none.
+    """
+    if isinstance(path, str) and path.startswith("hf://"):
+        from jcm.data.remote import fetch
+        return fetch(path[len("hf://"):])
+    if not isinstance(path, str) and isinstance(path, Iterable):
+        # emissions_file may be a list of paths (incl. Hydra ListConfig)
+        return [_resolve_data_path(p) for p in path]
+    return path
+
+
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     terrain_cfg = cfg.terrain
     kind = terrain_cfg.kind
@@ -379,12 +398,12 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     if kind == "from_file":
         return TerrainData.from_coords(
             coords,
-            terrain_file=terrain_cfg.file,
+            terrain_file=_resolve_data_path(terrain_cfg.file),
             interpolate=terrain_cfg.get("interpolate", True),
         )
     if kind == "from_file_enveloped":
         return TerrainData.from_file(
-            terrain_cfg.file, coords=coords,
+            _resolve_data_path(terrain_cfg.file), coords=coords,
             orog_envelope_wavenumber=terrain_cfg.get(
                 "orog_envelope_wavenumber", None),
         )
@@ -766,7 +785,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
         tracer_substeps=int(dc.get("tracer_substeps", -1)),
         dyn_substeps_per_tracer=int(dc.get("dyn_substeps_per_tracer", -1)),
         compute_frontogenesis=bool(dc.get("compute_frontogenesis", False)),
-        terrain_file=dc.get("terrain_file", None) or _pyses_default_bc("terrain.nc"),
+        terrain_file=_resolve_data_path(dc.get("terrain_file", None))
+        or _pyses_default_bc("terrain.nc"),
         tracer_specs=tracer_specs,
         physics_dtype=jnp.float32,
     )
@@ -867,14 +887,17 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         elif ozone_file in ("", "null", "none"):
             ozone_file = None
 
-        file = cfg.forcing.get("file", None) or _pyses_default_bc("forcing.nc")
+        file = (_resolve_data_path(cfg.forcing.get("file", None))
+                or _pyses_default_bc("forcing.nc"))
         return pyses_build_forcing(
             str(file), dycore,
-            emissions_file=cfg.forcing.get("emissions_file", None),
-            dms_file=cfg.forcing.get("dms_file", None),
-            dust_file=cfg.forcing.get("dust_file", None),
-            oxidants_file=cfg.forcing.get("oxidants_file", None),
-            ozone_file=ozone_file,
+            emissions_file=_resolve_data_path(
+                cfg.forcing.get("emissions_file", None)),
+            dms_file=_resolve_data_path(cfg.forcing.get("dms_file", None)),
+            dust_file=_resolve_data_path(cfg.forcing.get("dust_file", None)),
+            oxidants_file=_resolve_data_path(
+                cfg.forcing.get("oxidants_file", None)),
+            ozone_file=_resolve_data_path(ozone_file),
         )
 
     forcing_cfg = cfg.get("forcing", None)
@@ -882,7 +905,8 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         forcing = None
     elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
-        forcing = ForcingData.from_file(forcing_cfg.file, coords=coords)
+        forcing = ForcingData.from_file(
+            _resolve_data_path(forcing_cfg.file), coords=coords)
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -957,7 +981,8 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    ozone_file = forcing_cfg.get("ozone_file", None)
+    ozone_file = _resolve_data_path(
+        forcing_cfg.get("ozone_file", None))
     if ozone_file in (None, "", "null"):
         return forcing
     if ozone_file == "auto":
@@ -1018,7 +1043,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = forcing_cfg.get("emissions_file", None)
+    path = _resolve_data_path(forcing_cfg.get("emissions_file", None))
     if path in (None, "", "null"):
         return forcing
 
@@ -1086,7 +1111,7 @@ def _attach_dms(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = forcing_cfg.get("dms_file", None)
+    path = _resolve_data_path(forcing_cfg.get("dms_file", None))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr
@@ -1110,7 +1135,7 @@ def _attach_dust(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = forcing_cfg.get("dust_file", None)
+    path = _resolve_data_path(forcing_cfg.get("dust_file", None))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr
@@ -1140,7 +1165,7 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = forcing_cfg.get("oxidants_file", None)
+    path = _resolve_data_path(forcing_cfg.get("oxidants_file", None))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr

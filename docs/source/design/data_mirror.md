@@ -29,11 +29,36 @@ uses the native CESM CEDS emissions product).
 
 ## Fetching at runtime
 
+Any boundary-file path in the Hydra config accepts an `hf://` prefix,
+resolved through the local HF cache by `jcm.runners._resolve_data_path`:
+
+```bash
+python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
+    terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+    forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc \
+    forcing.emissions_file=hf://bundles/t63/emissions_pd.nc \
+    forcing.dms_file=hf://bundles/t63/dms.nc \
+    forcing.dust_file=hf://bundles/t63/dust.nc \
+    forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc \
+    forcing.ozone_file=hf://bundles/t63_l47/ozone_pd.nc
+```
+
+The pySES backend takes the native bundle directly —
+`dycore.terrain_file=hf://bundles/ne30pg3/sso.nc` maps file columns onto
+the physics columns one-for-one (unit-sphere nearest neighbor) and takes
+GLL-node orography from the file's `orog_gll` (CESM topo `PHIS_gll`),
+replacing the old packaged-T63 downscale. The same `hf://` forcing files
+work there too (the column loader interpolates from any regular lon/lat
+grid).
+
+Programmatic access:
+
 ```python
 from jcm.data.remote import bundle_file
 terrain = bundle_file("t63", "terrain.nc")     # cached HF download
 ```
 
+Fetch once on a node with internet; compute nodes then hit the cache.
 `registry.json` at the dataset root records sha256 + size for every file.
 
 ## Rebuilding the mirror
@@ -60,10 +85,14 @@ inventory):
 
 - **PI SST/sea-ice is the 1870–1879 AMIP mean** — the earliest observed
   decade; no observational 1850 state exists.
-- **Oxidants remain CAM L26** (clamped above the ~3.5 hPa CAM lid). No
-  higher-lid OH/NO3/H2O2 product exists on Glade — the WACCM
-  `waccm_forcing` files carry O3/O/O2/H/NO but not the sulfur-oxidant
-  set.
+- **Bundled oxidants come from the WACCM CCMI REFC1 decade
+  climatologies** (`oxid_ozone_WACCM_CCMI_REFC1_*.f19_f19` under
+  `atm/cam/ozone/`): all species incl. H2O2 on L66 with the full WACCM
+  lid, decades 1850–2009 — so L95 mesospheric levels carry real values.
+  PI uses the 1850s decade; PD uses 2000–2009 (the newest available).
+  The CAM L26 transient remains available via
+  `prep_jam_aux_inputs.py --oxid-source cam` when a specific year
+  matters more than the lid.
 - `soilw_am` is an evaporation-availability factor derived from ERA5
   volumetric soil water against SPEEDY's field capacity (see
   `bundles.py` docstring); it is a modelling choice, not an observed

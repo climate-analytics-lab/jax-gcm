@@ -108,6 +108,37 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     assert sel.size == 12, f"expected a 12-month block for {src_year}, got {sel.size}"
     print(f"oxidants: using {src_year} block (nearest to {year}) from {years.min()}–{years.max()}")
 
+    out_ds = _remap_oxidants_to_echam(ds, sel, nlev)
+    out_ds.attrs.update(source=_OXID_SRC, source_year=src_year)
+    out_ds.to_netcdf(out)
+    print(f"wrote {out} {dict(out_ds.sizes)}")
+
+
+_WACCM_OXID_DIR = ("/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone")
+
+
+def prep_oxidants_waccm(out: Path, year: int, nlev: int = 47) -> None:
+    """Remap a WACCM CCMI REFC1 decade oxidant climatology onto ECHAM levels.
+
+    Unlike the CAM L26 product these files carry all species (incl. H2O2)
+    on L66 with the full WACCM lid (~6e-6 hPa), so L95 mesospheric levels
+    get real values instead of a clamped CAM-top value. Decades run
+    1850–2009; ``year`` selects the nearest decade file.
+    """
+    decade = int(np.clip((year // 10) * 10, 1850, 2000))
+    src = (f"{_WACCM_OXID_DIR}/oxid_ozone_WACCM_CCMI_REFC1_"
+           f"f.e11.FWTREFC1.{decade}-{decade + 9}.f19_f19.ccmi34.001_"
+           "monthly.nc")
+    print(f"oxidants: WACCM CCMI decade {decade}-{decade + 9}")
+    ds = xr.open_dataset(src, decode_times=False)
+    out_ds = _remap_oxidants_to_echam(ds, np.arange(12), nlev)
+    out_ds.attrs.update(source=src, source_decade=f"{decade}-{decade + 9}")
+    out_ds.to_netcdf(out)
+    print(f"wrote {out} {dict(out_ds.sizes)}")
+
+
+def _remap_oxidants_to_echam(ds, sel, nlev: int) -> xr.Dataset:
+    """Log-p remap OH/NO3/O3/H2O2 [mol/mol] onto the ECHAM hybrid grid."""
     p0 = float(ds["P0"])
     hyam = ds["hyam"].values          # normalized (× P0 -> Pa), top→bottom
     hybm = ds["hybm"].values
@@ -152,18 +183,17 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
         out_vars,
         coords={"time": _CLIMO_TIME, "mlev": np.arange(1, nlev + 1),
                 "lat": ds["lat"].values, "lon": ds["lon"].values},
-        attrs={"source": _OXID_SRC, "source_year": src_year,
-               "history": "prep_jam_aux_inputs.py: CAM L26 -> ECHAM L47 "
-                          "log-p vertical remap (clamped above CAM top); "
-                          "MACC-layout for jcm read_oxidant_vmr"},
+        attrs={"history": "prep_jam_aux_inputs.py: source hybrid levels -> "
+                          "ECHAM log-p vertical remap (clamped outside the "
+                          "source range); MACC-layout for jcm "
+                          "read_oxidant_vmr"},
     )
     # ECHAM convention: hyam in Pa (p = hyam + hybm*ps), top→bottom. NO p0
     # variable — the runners' validator would treat its presence as "hyam is
     # normalized by p0" and rescale the already-Pa values.
     out_ds["hyam"] = ("mlev", a_mid, {"units": "Pa"})
     out_ds["hybm"] = ("mlev", b_mid, {"units": "1"})
-    out_ds.to_netcdf(out)
-    print(f"wrote {out} {dict(out_ds.sizes)}")
+    return out_ds
 
 
 def _regrid_to_gaussian(path: Path, truncation: int) -> None:
@@ -231,18 +261,27 @@ def main() -> None:
                          "no runtime regridding)")
     ap.add_argument("--nlevels", type=int, default=47,
                     help="ECHAM hybrid level count for the oxidant remap")
+    ap.add_argument("--oxid-source", choices=["cam", "waccm"], default="cam",
+                    help="cam: L26 transient (lid ~3.5 hPa, no real H2O2 "
+                         "above); waccm: CCMI REFC1 decade climatologies "
+                         "(L66, full lid, all species — preferred for L95)")
     args = ap.parse_args()
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    oxid_name = (f"oxidants_{args.oxid_source}_echam_l{args.nlevels}_"
+                 f"{args.year}.nc")
     products = [outdir / "dms_lana2011_climo.nc",
                 outdir / "dust_erodibility_cam_f05.nc",
-                outdir / f"oxidants_cam_echam_l{args.nlevels}_{args.year}.nc"]
+                outdir / oxid_name]
     if not products[0].exists():
         prep_dms(products[0])
     if not products[1].exists():
         prep_dust(products[1])
     if not products[2].exists():
-        prep_oxidants(products[2], args.year, args.nlevels)
+        if args.oxid_source == "waccm":
+            prep_oxidants_waccm(products[2], args.year, args.nlevels)
+        else:
+            prep_oxidants(products[2], args.year, args.nlevels)
     if args.target_truncation:
         for p in products:
             _regrid_to_gaussian(p, args.target_truncation)

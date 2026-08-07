@@ -491,17 +491,36 @@ class PysesCamSEDycore(DynamicalCore):
             import xarray as xr
 
             ds = xr.open_dataset(source_file)
-            lon = np.asarray(ds["lon"].values)
-            lat = np.asarray(ds["lat"].values)
-
             col_lon = np.degrees(self.colmap.longitudes)
             col_lat = np.degrees(self.colmap.latitudes)
 
-            def sample(name, points_lon, points_lat):
-                return interp_grid_to_points(
-                    lon, lat, ds[name].transpose("lon", "lat").values,
-                    points_lon, points_lat,
-                )
+            def _unit(lat_deg, lon_deg):
+                la, lo = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
+                return np.stack([np.cos(la) * np.cos(lo),
+                                 np.cos(la) * np.sin(lo), np.sin(la)], -1)
+
+            if "ncol" in ds.dims:
+                # Native unstructured file (e.g. bundles/ne30pg3/sso.nc):
+                # map each model column to the nearest file column on the
+                # unit sphere — the identity up to ordering when the file
+                # is on the same grid, with no interpolation smoothing.
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(_unit(ds["lat"].values, ds["lon"].values))
+
+                def sample(name, points_lon, points_lat):
+                    _, i = tree.query(_unit(points_lat, points_lon),
+                                      workers=-1)
+                    return np.asarray(ds[name].values)[i]
+            else:
+                lon = np.asarray(ds["lon"].values)
+                lat = np.asarray(ds["lat"].values)
+
+                def sample(name, points_lon, points_lat):
+                    return interp_grid_to_points(
+                        lon, lat, ds[name].transpose("lon", "lat").values,
+                        points_lon, points_lat,
+                    )
 
             orog_col = np.maximum(sample("orog", col_lon, col_lat), 0.0)
             fmask_col = np.clip(sample("lsm", col_lon, col_lat), 0.0, 1.0)
@@ -524,14 +543,22 @@ class PysesCamSEDycore(DynamicalCore):
             )
             self._orog_col = orog_col
 
-            # Orography on the GLL dynamics nodes for the initial state.
-            orog_gll = np.maximum(
-                sample("orog",
-                       np.degrees(gll[..., 1]).reshape(-1),
-                       np.degrees(gll[..., 0]).reshape(-1)),
-                0.0,
-            ).reshape(gll_shape)
-            self._orog_gll = self._be.np.asarray(orog_gll)
+            # Orography on the GLL dynamics nodes for the initial state: a
+            # native file may carry it exactly (orog_gll from the CESM topo
+            # product); otherwise sample the source orography at the nodes.
+            gll_lat = np.degrees(gll[..., 0]).reshape(-1)
+            gll_lon = np.degrees(gll[..., 1]).reshape(-1)
+            if "orog_gll" in ds:
+                from scipy.spatial import cKDTree
+
+                gtree = cKDTree(_unit(ds["lat_gll"].values,
+                                      ds["lon_gll"].values))
+                _, gi = gtree.query(_unit(gll_lat, gll_lon), workers=-1)
+                orog_gll = np.maximum(
+                    np.asarray(ds["orog_gll"].values)[gi], 0.0)
+            else:
+                orog_gll = np.maximum(sample("orog", gll_lon, gll_lat), 0.0)
+            self._orog_gll = self._be.np.asarray(orog_gll.reshape(gll_shape))
 
         self._phi_surf_gll = self._gravity * self._orog_gll
         self.terrain = terrain

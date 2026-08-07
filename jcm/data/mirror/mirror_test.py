@@ -102,6 +102,33 @@ class RegridTest(unittest.TestCase):
         self.assertAlmostEqual(out.values.item(), expected, places=6)
 
 
+class ResolveDataPathTest(unittest.TestCase):
+    def test_hf_prefix_fetches_and_plain_passes_through(self):
+        from unittest import mock
+
+        from jcm import runners
+
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=lambda p: f"/cache/{p}") as m:
+            self.assertEqual(
+                runners._resolve_data_path("hf://bundles/t63/terrain.nc"),
+                "/cache/bundles/t63/terrain.nc")
+            m.assert_called_once_with("bundles/t63/terrain.nc")
+        self.assertEqual(runners._resolve_data_path("/local/x.nc"),
+                         "/local/x.nc")
+        self.assertIsNone(runners._resolve_data_path(None))
+
+    def test_list_paths_resolve_elementwise(self):
+        from unittest import mock
+
+        from jcm import runners
+
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=lambda p: f"/cache/{p}"):
+            out = runners._resolve_data_path(["hf://a.nc", "/local/b.nc"])
+        self.assertEqual(out, ["/cache/a.nc", "/local/b.nc"])
+
+
 class RegistryTest(unittest.TestCase):
     def test_registry_hashes_files(self):
         import json
