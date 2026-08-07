@@ -28,7 +28,6 @@ strip and makes the pass exact rather than a two-level coarsening.
 from __future__ import annotations
 
 import numpy as np
-import rasterio
 
 R_EARTH = 6.371e6
 _STRIP = 240                      # DEM rows per strip (2° at 30")
@@ -42,6 +41,8 @@ def _accumulate(dem_path: str, assign_strip, ncells: int):
     ``assign_strip(lats, lons) -> (nrows, nlon) int`` maps each pixel to a
     flat target-cell index; negative means "not on the target grid".
     """
+    import rasterio          # lazy: only the Glade-side builder needs GDAL
+
     acc = {k: np.zeros(ncells) for k in ("n",) + _SUM_KEYS}
     acc["pic"] = np.full(ncells, -np.inf)
     acc["val"] = np.full(ncells, np.inf)
