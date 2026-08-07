@@ -69,10 +69,17 @@ def interp_to(da: xr.DataArray, lats, lons) -> xr.DataArray:
     wrapped = xr.concat(
         [da, da.isel({lonn: 0}).assign_coords(
             {lonn: float(da[lonn][-1]) + dlon})], dim=lonn)
-    out = wrapped.interp({latn: lats, lonn: lons}, method="linear",
-                         kwargs={"fill_value": None})
-    # poleward of the source's first/last row: nearest (constant) extension
-    out = out.bfill(latn).ffill(latn)
+    # constant extension to the poles so Gaussian lats beyond the source's
+    # first/last row interpolate instead of going NaN
+    if float(wrapped[latn][0]) > -90.0:
+        wrapped = xr.concat(
+            [wrapped.isel({latn: 0}).assign_coords({latn: -90.0}), wrapped],
+            dim=latn)
+    if float(wrapped[latn][-1]) < 90.0:
+        wrapped = xr.concat(
+            [wrapped, wrapped.isel({latn: -1}).assign_coords({latn: 90.0})],
+            dim=latn)
+    out = wrapped.interp({latn: lats, lonn: lons}, method="linear")
     return out.rename({latn: "lat", lonn: "lon"})
 
 
