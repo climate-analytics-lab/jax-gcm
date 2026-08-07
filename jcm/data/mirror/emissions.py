@@ -64,13 +64,17 @@ def load_bb_species(species: str) -> xr.DataArray:
 
 
 def build_store(loader, species, out_path: str, source_attr: str) -> None:
-    """Stream one species at a time into a zarr store."""
-    for i, sp in enumerate(species):
+    """Stream one species at a time into a zarr store (resumable)."""
+    import os
+    for sp in species:
+        if os.path.exists(f"{out_path}/{sp}_pd_clim"):
+            print(f"  {sp} already in {out_path}, skipping", flush=True)
+            continue
         da = loader(sp)
         ds = xr.Dataset({sp: da.chunk({"time": 12}), **{
             k: v for k, v in _climatologies(da).items()}})
         ds.attrs["source"] = source_attr
         ds.attrs["units"] = "kg m-2 s-1"
-        mode = "w" if i == 0 else "a"
+        mode = "w" if not os.path.exists(out_path) else "a"
         ds.to_zarr(out_path, mode=mode)
         print(f"  {sp} -> {out_path}", flush=True)
