@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 _INPUTDATA = "/glade/campaign/cesm/cesmdata/inputdata"
 _DMS_SRC = f"{_INPUTDATA}/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"
-_DUST_SRC = f"{_INPUTDATA}/atm/cam/dst/dst_1.9x2.5_c090203.nc"
+_DUST_SRC = f"{_INPUTDATA}/atm/cam/dst/dst_0.23x0.31_c130710.nc"
 _OXID_SRC = (f"{_INPUTDATA}/atm/cam/chem/trop_mozart_aero/oxid/"
              "oxid_1.9x2.5_L26_1850-2015_c20181106.nc")
 
@@ -235,7 +235,7 @@ def main() -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     products = [outdir / "dms_lana2011_climo.nc",
-                outdir / "dust_erodibility_cam_f19.nc",
+                outdir / "dust_erodibility_cam_f05.nc",
                 outdir / f"oxidants_cam_echam_l{args.nlevels}_{args.year}.nc"]
     if not products[0].exists():
         prep_dms(products[0])
