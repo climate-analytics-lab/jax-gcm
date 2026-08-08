@@ -202,3 +202,7 @@ docs/source/speedy_translation.rst
 # negation below unreachable.
 .claude/*
 !.claude/skills/
+
+# Model checkpoints — runs write these into the cwd (run=pyses_year sets a
+# RELATIVE checkpoint_path), and they are gigabytes. Never committable.
+*.ckpt

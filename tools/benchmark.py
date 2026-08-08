@@ -160,11 +160,12 @@ def _pyses_preset(levels: int) -> list[str]:
       default ``init=isothermal`` is required. (Carried over from the
       spectral presets on the first attempt; ``--cfg job`` did not catch it
       because composing a config is not the same as building the model.)
-    * no terrain/ozone overrides — pySES bilinearly interpolates the packaged
-      T63 fields onto its columns at build time, so column sampling has no
-      exact-grid requirement and one file serves every resolution. This is
-      why ne30 needs none of the boundary-data prep the T106/T119 spectral
-      configs did.
+    * no TERRAIN override — pySES bilinearly interpolates the packaged T63
+      field onto its columns, so the horizontal grid need not match;
+    * but ozone IS still level-validated. "Column sampling has no exact-grid
+      requirement" covers the HORIZONTAL grid only — an L47 ozone file is
+      rejected by an L95 run whatever the backend. L95 therefore needs the
+      95-level file, whose T63 horizontal grid pySES interpolates as usual.
 
     ``run=pyses_year`` carries the production-validated settings (the finite
     lid sponge lives in ``dycore.lid_sponge``, not ``run.sponge``).
@@ -173,7 +174,21 @@ def _pyses_preset(levels: int) -> list[str]:
         "physics=echam-jam",
         f"dycore=pyses_ne30l{levels}",
         "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        # ANALYTIC ozone for the runtime comparison only (user-directed).
+        # The prescribed path is broken for this backend two ways: the L95
+        # file's "months since" time units are rejected by the pySES forcing
+        # loader's calendar decode, and the L47 file reaches RRTMGP shaped
+        # (1, nlev) instead of (nlev,). Analytic ozone changes the radiative
+        # workload (~7.6x tropospheric column) so these numbers are for
+        # TIMING ONLY and are not comparable with the spectral sweep's
+        # radiation; the report records it.
+        "forcing.ozone_file=null",
         "run=pyses_year",
+        # run=pyses_year sets a RELATIVE checkpoint_path, so without this the
+        # run drops a multi-GB .ckpt into whatever cwd it was launched from —
+        # the repo worktree, in practice. Send it to the disposable dir with
+        # the rest of the model output.
+        f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt",
     ]
 
 
