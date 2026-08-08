@@ -1,8 +1,34 @@
 # Boundary conditions, emissions and aux forcing on Derecho
 
-Three tiers: **packaged** (in the repo, always available), **prepared**
-(derived files that must exist before a JAM run), and **upstream sources**
-(the CESM `inputdata` tree the prepared files come from).
+**Preferred source (once uploaded): the HF data mirror.** The dataset
+`climate-analytics-lab/jax-gcm-data` carries per-grid bundles for every
+supported grid (t63/t106 at L47/L95, ne30pg3 native), built by
+`jcm/data/mirror/` (see `docs/source/design/data_mirror.md`). Any
+terrain/forcing file key in the Hydra config accepts an `hf://` path:
+
+    terrain.file=hf://bundles/t63/terrain.nc
+    forcing.file=hf://bundles/t63/forcing_pd.nc
+    forcing.emissions_file=hf://bundles/t63/emissions_pd.nc
+    forcing.dms_file=hf://bundles/t63/dms.nc
+    forcing.dust_file=hf://bundles/t63/dust.nc
+    forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc
+    forcing.ozone_file=hf://bundles/t63_l47/ozone_pd.nc
+    # pySES native terrain: dycore.terrain_file=hf://bundles/ne30pg3/sso.nc
+
+**Prefetch on a login node first** — compute nodes have no internet; the
+resolver is cache-first, so a warm HF cache needs zero network:
+
+    python -c "from jcm.data.remote import fetch; fetch('bundles/t63/terrain.nc')"
+
+Bundle files use `_pi` (1850s; SST/ice = 1870–1879 mean) and `_pd`
+(2005–2014) era suffixes. Bundled oxidants are WACCM CCMI full-lid
+(real mesosphere — required for L95); level-suffixed dirs must match the
+run's layer count.
+
+The local tiers below predate the mirror and remain valid — three tiers:
+**packaged** (in the repo, always available), **prepared** (derived files
+that must exist before a JAM run), and **upstream sources** (the CESM
+`inputdata` tree the prepared files come from).
 
 Set `JAM_INPUTS` to wherever the prepared files live; `mkjob.py` reads it
 (default `/glade/derecho/scratch/$USER/jam_inputs`).

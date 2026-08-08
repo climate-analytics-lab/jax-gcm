@@ -83,8 +83,10 @@ Eulerian plus `diffusion.tracer_positivity=true` instead.
 ## 4. Input data
 
 `reference/data_paths.md` lists every boundary-condition, emissions and aux
-file: what ships in the repo, what must be prepared first, where the CESM
-upstream sources are, and the preparation gotchas.
+file: the HF data-mirror bundles (`hf://bundles/...` paths — preferred,
+prefetch on a login node since compute nodes have no internet), what ships
+in the repo, what must be prepared first, where the CESM upstream sources
+are, and the preparation gotchas.
 
 Two things to remember: terrain/forcing/ozone are **packaged in the repo**
 (nothing to prepare), while the JAM aux inputs (emissions, DMS, dust,
