@@ -155,6 +155,11 @@ def _pyses_preset(levels: int) -> list[str]:
     * no ``run.time_step`` — the Model adopts the dycore's dt_seconds (900 s);
     * no ``+advection=semi_lagrangian`` — that is a dinosaur option; pySES
       does its own tracer sub-cycling (tracer_substeps=5);
+    * no ``init=jw`` — that is dinosaur-specific and pySES REJECTS it; this
+      backend initializes from its own resting USSA-1976 state, so the
+      default ``init=isothermal`` is required. (Carried over from the
+      spectral presets on the first attempt; ``--cfg job`` did not catch it
+      because composing a config is not the same as building the model.)
     * no terrain/ozone overrides — pySES bilinearly interpolates the packaged
       T63 fields onto its columns at build time, so column sampling has no
       exact-grid requirement and one file serves every resolution. This is
@@ -167,7 +172,6 @@ def _pyses_preset(levels: int) -> list[str]:
     return [
         "physics=echam-jam",
         f"dycore=pyses_ne30l{levels}",
-        "init=jw", "init.rh=0.0",
         "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
         "run=pyses_year",
     ]

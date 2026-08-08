@@ -176,6 +176,30 @@ SHAs. Put all of `jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` on
 `--pythonpath` as pinned worktrees for any run whose numbers you intend to
 compare across hours.
 
+**Pre-flight by BUILDING the model, not by composing the config.**
+`--cfg job` resolves the config and stops; it never calls `build_model()`, so
+backend-specific rejections pass it and then fail instantly on the GPU. Two
+have bitten here: an invalid spectral truncation (coords are not built by
+`--cfg job`), and `init=jw` on the pySES backend, which rejects it because it
+initialises from its own resting USSA-1976 state.
+
+```bash
+JAX_PLATFORMS=cpu python -c "
+from hydra import compose, initialize_config_dir
+from jcm.runners import build_model
+import os
+with initialize_config_dir(config_dir=os.path.abspath('jcm/config'), version_base=None):
+    cfg = compose(config_name='config', overrides=[...])
+build_model(cfg)"
+```
+
+**Do not port overrides between backends by analogy.** The pySES preset needed
+*fewer* overrides than the spectral one, not the same set: it ignores `grid`
+and `run.time_step`, does its own tracer sub-cycling instead of
+semi-Lagrangian advection, interpolates the packaged boundary fields onto its
+columns, and rejects `init=jw`. Carrying that last one over "for consistency"
+is exactly how it got in.
+
 **Check the precision the configuration needs before launching.** f32
 (`MAM4_JAX_ENABLE_X64=0`) is required above T63 and is forward-only. It
 changes both memory and speed, so it cannot be switched on partway through a
