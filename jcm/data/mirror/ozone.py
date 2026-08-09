@@ -41,11 +41,9 @@ def load_pd(years=(2005, 2014)) -> xr.DataArray:
 def regrid_climatology(da: xr.DataArray, lats: np.ndarray,
                        lons: np.ndarray) -> xr.Dataset:
     """Bilinear regrid to a Gaussian grid; returns interpolate_ozone input."""
-    wrapped = xr.concat(
-        [da, da.isel(lon=0).assign_coords(lon=float(da.lon[-1]) +
-                                          float(da.lon[1] - da.lon[0]))],
-        dim="lon")
-    out = wrapped.interp(lat=lats, lon=lons, method="linear")
+    from jcm.data.mirror.regrid import interp_to
+
+    out = interp_to(da, lats, lons)
     plev_pa = out.plev.values * 100.0          # source file is hPa
     ds = xr.Dataset({"O3": (("time", "plev", "lat", "lon"),
                             out.transpose("time", "plev", "lat", "lon").values,

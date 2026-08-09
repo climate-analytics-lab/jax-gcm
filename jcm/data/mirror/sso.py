@@ -7,7 +7,13 @@ Computes, per target grid cell, the seven ECHAM terrain fields:
 * ``orosig`` — mean-slope parameter σ (sqrt of the largest eigenvalue of
   the Lott & Miller 1997 gradient tensor)
 * ``orogam`` — anisotropy γ ∈ [0, 1]
-* ``orothe`` — principal-axis angle θ [degrees, ECHAM convention]
+* ``orothe`` — principal-axis angle θ [degrees, ECHAM convention].
+  The DEM is north-up, so the strip differences give the *southward*
+  height gradient and M = ⟨hx·hy⟩ carries the opposite sign to the
+  textbook northward-y Lott-Miller tensor — deliberately: ECHAM's own
+  boundary files (validated against T127GR15_jan_surf) use this sign,
+  and the ported ssodrag consumer was tuned against them. Do not
+  "fix" the sign of hy.
 * ``oropic`` — peak (max) elevation [m]
 * ``oroval`` — valley (min) elevation [m]
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import types
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -384,8 +384,11 @@ def _resolve_data_path(path):
     if isinstance(path, str) and path.startswith("hf://"):
         from jcm.data.remote import fetch
         return fetch(path[len("hf://"):])
-    if not isinstance(path, str) and isinstance(path, Iterable):
-        # emissions_file may be a list of paths (incl. Hydra ListConfig)
+    if (not isinstance(path, (str, bytes, Mapping))
+            and isinstance(path, Iterable)):
+        # emissions_file may be a list of paths (incl. Hydra ListConfig).
+        # Mappings/bytes pass through untouched — iterating them would
+        # silently turn a mis-typed config into a list of keys/ints.
         return [_resolve_data_path(p) for p in path]
     return path
 
@@ -1317,7 +1320,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
 def _load_states_from_cfg(cfg: DictConfig):
     """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``."""
-    state_file = cfg.run.get("state_file", None)
+    state_file = _resolve_data_path(cfg.run.get("state_file", None))
     if not state_file:
         raise ValueError(
             f"run.mode={cfg.run.mode!r} requires run.state_file to point "

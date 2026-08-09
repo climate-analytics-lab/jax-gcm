@@ -103,6 +103,19 @@ python -m jcm.main --cfg job grid=echam_t63_l47_hybrid
 Config groups live under [`jcm/config/`](jcm/config/) (`physics`, `grid`,
 `run`, `init`, `terrain`, `forcing`, and `diffusion`).
 
+Boundary-condition and emissions files can be pulled straight from the
+project data mirror on Hugging Face by prefixing any file path with
+`hf://` (needs `pip install jcm[remote]`; fetch once on a node with
+internet — afterwards the local cache serves compute nodes offline):
+
+```bash
+python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
+    terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+    forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc
+```
+
+See `docs/source/design/data_mirror.md` for the full bundle catalogue.
+
 ## Physics Packages
 
 **SPEEDY** provides a compact climate-physics package for development,

@@ -511,7 +511,8 @@ class PysesCamSEDycore(DynamicalCore):
                 # this grid — warn when nearest-neighbor distances say
                 # otherwise (e.g. an ne30 file driving an ne120 run),
                 # since the blocky sampling is then a silent downscale.
-                d_col, _ = tree.query(_unit(col_lat, col_lon), workers=-1)
+                d_col, col_idx = tree.query(_unit(col_lat, col_lon),
+                                            workers=-1)
                 spacing = np.sqrt(4.0 * np.pi / ds.sizes["ncol"])
                 if ds.sizes["ncol"] != ncol or np.median(d_col) > 0.1 * spacing:
                     import logging
@@ -522,6 +523,10 @@ class PysesCamSEDycore(DynamicalCore):
                         ds.sizes["ncol"], ncol, np.median(d_col) / spacing)
 
                 def sample(name, points_lon, points_lat):
+                    # column points reuse the query above; other point
+                    # sets (GLL fallback) query fresh
+                    if points_lat is col_lat:
+                        return np.asarray(ds[name].values)[col_idx]
                     _, i = tree.query(_unit(points_lat, points_lon),
                                       workers=-1)
                     return np.asarray(ds[name].values)[i]
