@@ -22,7 +22,7 @@ climatology arrays alongside the transient series.
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, `dust.nc`, and per level count
-(`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{1850,2014}.nc`.
+(`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
 SSO only — the pySES path interpolates the Gaussian forcing files and
 uses the native CESM CEDS emissions product).
@@ -93,10 +93,11 @@ inventory):
   The CAM L26 transient remains available via
   `prep_jam_aux_inputs.py --oxid-source cam` when a specific year
   matters more than the lid.
-- `soilw_am` is an evaporation-availability factor derived from ERA5
-  volumetric soil water against SPEEDY's field capacity (see
-  `bundles.py` docstring); it is a modelling choice, not an observed
-  field.
+- `soilw_am` is a root-zone soil-water **depth in metres**
+  (Σᵢ swvlᵢ·Dᵢ over the top three ERA5 layers, land mean ≈ 0.16 m) —
+  the packaged ECHAM WS-bucket convention, **not** an availability
+  fraction (see `bundles.py` docstring). The layer weighting is a
+  modelling choice, not an observed field.
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain.

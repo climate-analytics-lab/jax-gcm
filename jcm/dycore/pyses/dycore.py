@@ -507,6 +507,19 @@ class PysesCamSEDycore(DynamicalCore):
                 from scipy.spatial import cKDTree
 
                 tree = cKDTree(_unit(ds["lat"].values, ds["lon"].values))
+                # the mapping is only the identity when the file is on
+                # this grid — warn when nearest-neighbor distances say
+                # otherwise (e.g. an ne30 file driving an ne120 run),
+                # since the blocky sampling is then a silent downscale.
+                d_col, _ = tree.query(_unit(col_lat, col_lon), workers=-1)
+                spacing = np.sqrt(4.0 * np.pi / ds.sizes["ncol"])
+                if ds.sizes["ncol"] != ncol or np.median(d_col) > 0.1 * spacing:
+                    import logging
+                    logging.warning(
+                        "terrain file has %d columns vs model %d (median "
+                        "offset %.2g of a cell) — sampling nearest-neighbor,"
+                        " which is piecewise-constant across file cells",
+                        ds.sizes["ncol"], ncol, np.median(d_col) / spacing)
 
                 def sample(name, points_lon, points_lat):
                     _, i = tree.query(_unit(points_lat, points_lon),
@@ -557,6 +570,13 @@ class PysesCamSEDycore(DynamicalCore):
                 orog_gll = np.maximum(
                     np.asarray(ds["orog_gll"].values)[gi], 0.0)
             else:
+                if "ncol" in ds.dims:
+                    import logging
+                    logging.warning(
+                        "native terrain file has no orog_gll: GLL "
+                        "orography falls back to nearest-column sampling "
+                        "(piecewise-constant); include orog_gll for a "
+                        "smooth surface geopotential")
                 orog_gll = np.maximum(sample("orog", gll_lon, gll_lat), 0.0)
             self._orog_gll = self._be.np.asarray(orog_gll.reshape(gll_shape))
 

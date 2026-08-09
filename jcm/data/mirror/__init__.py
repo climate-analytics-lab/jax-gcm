@@ -11,6 +11,6 @@ produces the artifacts hosted on Hugging Face:
   ``terrain.nc``, ``forcing.nc``, ``ozone.nc``, ``oxidants.nc``,
   ``emissions.nc`` on the exact model grid.
 
-Users never run these: they pull artifacts via ``jcm.data.downloader``.
+Users never run these: they pull artifacts via ``jcm.data.remote``.
 See ``SOURCES.md`` for provenance and ``registry.json`` for hashes.
 """

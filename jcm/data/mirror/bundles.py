@@ -114,17 +114,26 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
 
 
 def build_terrain(sso_path: str, era5_path: str, out_path: str) -> None:
+    """Gaussian terrain.nc: GMTED SSO fields + fractional ERA5 land mask.
+
+    ``lsm`` stays a fraction — ``TerrainData``'s ``fmask`` is consumed
+    fractionally (coastal flux blending) and the packaged climatology is
+    fractional too. SSO fields are zeroed only below 10% land (matching
+    ``get_terrain``'s snap threshold): open-ocean cells lose the
+    shoreline-step artifacts of the DEM while islands and coasts keep
+    their orography.
+    """
     sso = xr.open_dataset(sso_path)
     era5 = xr.open_dataset(era5_path)
     lats, lons = sso.lat.values, sso.lon.values
-    lsm_frac = interp_to(era5.lsm, lats, lons).values
-    lsm = (lsm_frac > 0.5).astype(np.float64)
+    lsm_frac = np.clip(interp_to(era5.lsm, lats, lons).values, 0.0, 1.0)
+    keep = lsm_frac >= 0.1
     ds = xr.Dataset(coords={"lat": lats, "lon": lons})
-    ds["lsm"] = (("lon", "lat"), lsm.T)
+    ds["lsm"] = (("lon", "lat"), lsm_frac.T)
     for name in SSO_FIELDS:
-        ds[name] = (("lon", "lat"), np.where(lsm, sso[name].values, 0.0).T)
+        ds[name] = (("lon", "lat"), np.where(keep, sso[name].values, 0.0).T)
     ds.attrs = dict(sso.attrs)
-    ds.attrs["lsm_source"] = "ERA5 invariant land-sea mask (>0.5)"
+    ds.attrs["lsm_source"] = "ERA5 invariant land fraction (0.25 deg)"
     ds.to_netcdf(out_path)
     print("wrote", out_path, flush=True)
 

@@ -1,0 +1,225 @@
+"""End-to-end mirror build driver (runs on NCAR Glade only).
+
+Reproduces every artifact in the Hugging Face dataset from the sources in
+``SOURCES.md``::
+
+    python -m jcm.data.mirror.build_mirror --stage all
+    python -m jcm.data.mirror.build_mirror --stage sso,bundles
+
+Stages: ``sso``, ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
+recommended — see ``--help``), ``aux`` (dms/dust/oxidants via
+``tools/prep_jam_aux_inputs.py``), ``bundles``, ``registry``. Outputs land
+in ``$JCM_MIRROR_ROOT`` (default ``$SCRATCH/hf_mirror``): Tier A under
+``build/``, the HF-shaped tree under ``upload/``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+GRIDS = {"t63": 96, "t106": 160}
+NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
+             "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
+             "noleak_greenlndantarcsgh30fac2.50_20250825.nc")
+GRAV = 9.80665
+
+ROOT = Path(os.environ.get(
+    "JCM_MIRROR_ROOT",
+    f"/glade/derecho/scratch/{os.environ.get('USER', '')}/hf_mirror"))
+BUILD = ROOT / "build"
+UPLOAD = ROOT / "upload"
+GMTED = ROOT / "sources" / "gmted" / "mn30_grd"
+
+
+def stage_sso() -> None:
+    """SSO statistics for the Gaussian grids + the native ne30pg3 bundle.
+
+    The ne30 file is assembled directly to its final (Tier B) form: land
+    mask from the CESM topo ``LANDFRAC`` (the GMTED validity mask is a
+    placeholder — GMTED stores oceans as elevation 0), SSO fields zeroed
+    over ocean, and exact GLL-node orography from ``PHIS_gll``.
+    """
+    import xarray as xr
+
+    from jcm.data.mirror.regrid import gaussian_latlon
+    from jcm.data.mirror.sso import column_grid_sso, gaussian_grid_sso
+
+    out = BUILD / "sso"
+    out.mkdir(parents=True, exist_ok=True)
+    for grid, nlat in GRIDS.items():
+        lats, lons = gaussian_latlon(nlat)
+        fields = gaussian_grid_sso(str(GMTED), lats, lons)
+        xr.Dataset({k: (("lat", "lon"), v) for k, v in fields.items()},
+                   coords={"lat": lats, "lon": lons}
+                   ).to_netcdf(out / f"sso_gmted2010_{grid}.nc")
+        print("sso:", grid, flush=True)
+
+    topo = xr.open_dataset(NE30_TOPO)
+    fields = column_grid_sso(str(GMTED), topo.lat.values, topo.lon.values)
+    # fractional LANDFRAC as lsm (fmask is consumed fractionally); zero
+    # SSO only below 10% land so islands keep orography but open-ocean
+    # cells drop shoreline-step DEM artifacts
+    frac = np.clip(topo.LANDFRAC.values, 0.0, 1.0)
+    keep = frac >= 0.1
+    ds = xr.Dataset(coords={"lat": ("ncol", topo.lat.values),
+                            "lon": ("ncol", topo.lon.values)})
+    ds["lsm"] = ("ncol", frac)
+    for name in ("orog", "orostd", "orosig", "orogam", "orothe",
+                 "oropic", "oroval"):
+        ds[name] = ("ncol", np.where(keep, fields[name], 0.0))
+    ds["orog_gll"] = ("ncol_gll", topo.PHIS_gll.values / GRAV)
+    ds["lat_gll"] = ("ncol_gll", topo.lat_gll.values)
+    ds["lon_gll"] = ("ncol_gll", topo.lon_gll.values)
+    ds.attrs = {"source": "GMTED2010 30arcsec + CESM ne30 topo (LANDFRAC, "
+                          "PHIS_gll)"}
+    ds.to_netcdf(out / "sso_gmted2010_ne30pg3.nc")
+    print("sso: ne30pg3", flush=True)
+
+
+def stage_era5() -> None:
+    from jcm.data.mirror.era5_land import build_climatology
+
+    ds = build_climatology()
+    enc = {v: {"zlib": True, "complevel": 4} for v in ds.data_vars}
+    BUILD.mkdir(parents=True, exist_ok=True)
+    ds.to_netcdf(BUILD / "era5_land_climo_2005-2014_0p25.nc", encoding=enc)
+    print("era5: done", flush=True)
+
+
+def stage_ozone() -> None:
+    from jcm.data.bc.interpolate_ozone import interpolate_ozone
+    from jcm.data.mirror.ozone import load_pd, load_pi, regrid_climatology
+    from jcm.data.mirror.regrid import gaussian_latlon
+
+    out = BUILD / "ozone"
+    out.mkdir(parents=True, exist_ok=True)
+    for era, loader in (("pi1850", load_pi), ("pd2005-2014", load_pd)):
+        da = loader()
+        for grid, nlat in GRIDS.items():
+            ds = regrid_climatology(da, *gaussian_latlon(nlat))
+            assert np.isfinite(ds.O3.values).all(), f"NaN in {era}/{grid}"
+            plev = out / f"ozone_fzj_cmip7_{era}_{grid}_plev.nc"
+            ds.to_netcdf(plev)
+            for nlev in (47, 95):
+                interpolate_ozone(
+                    plev, out / f"ozone_fzj_cmip7_{era}_{grid}_l{nlev}.nc",
+                    nlev)
+            print("ozone:", era, grid, flush=True)
+
+
+def stage_emissions() -> None:
+    """Multi-GB streaming — run inside a PBS job, not a login node."""
+    from jcm.data.mirror.emissions import (SPECIES, build_store,
+                                           load_bb_species,
+                                           load_ceds_species)
+    build_store(load_ceds_species, SPECIES, str(BUILD / "ceds_anthro.zarr"),
+                "CEDS-CMIP-2025-04-18 (input4MIPs CMIP7), sector-summed, "
+                "0.5 deg")
+    build_store(load_bb_species, SPECIES, str(BUILD / "bb4cmip7.zarr"),
+                "DRES-CMIP-BB4CMIP7-2-0 (input4MIPs CMIP7), 0.25 deg")
+
+
+def stage_aux() -> None:
+    """DMS/dust/oxidant matrix via tools/prep_jam_aux_inputs.py."""
+    tool = Path(__file__).resolve().parents[3] / "tools" / \
+        "prep_jam_aux_inputs.py"
+    out = BUILD / "aux"
+    for year in (1850, 2005):
+        for nlev in (47, 95):
+            for trunc in (63, 106):
+                subprocess.run(
+                    [sys.executable, str(tool), "--year", str(year),
+                     "--nlevels", str(nlev), "--oxid-source", "waccm",
+                     "--outdir", str(out), "--target-truncation",
+                     str(trunc)],
+                    check=True)
+
+
+def stage_bundles() -> None:
+    from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
+                                         build_terrain)
+    from jcm.data.mirror.regrid import gaussian_latlon
+
+    era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    for grid, nlat in GRIDS.items():
+        lats, lons = gaussian_latlon(nlat)
+        d = UPLOAD / "bundles" / grid
+        d.mkdir(parents=True, exist_ok=True)
+        build_terrain(str(BUILD / "sso" / f"sso_gmted2010_{grid}.nc"),
+                      str(era5), str(d / "terrain.nc"))
+        for era in ("pd", "pi"):
+            build_forcing(str(era5), era, lats, lons,
+                          str(d / f"forcing_{era}.nc"))
+            build_emissions_nc(str(BUILD / "ceds_anthro.zarr"),
+                               str(BUILD / "bb4cmip7.zarr"), era, lats,
+                               lons, str(d / f"emissions_{era}.nc"))
+
+    trunc = {"t63": 63, "t106": 106}
+    for grid in GRIDS:
+        for nlev in (47, 95):
+            d = UPLOAD / "bundles" / f"{grid}_l{nlev}"
+            d.mkdir(parents=True, exist_ok=True)
+            for era, tag in (("pi", "pi1850"), ("pd", "pd2005-2014")):
+                shutil.copy(BUILD / "ozone" /
+                            f"ozone_fzj_cmip7_{tag}_{grid}_l{nlev}.nc",
+                            d / f"ozone_{era}.nc")
+            for era, year in (("pi", 1850), ("pd", 2005)):
+                shutil.copy(
+                    BUILD / "aux" /
+                    f"oxidants_waccm_echam_l{nlev}_{year}_t{trunc[grid]}.nc",
+                    d / f"oxidants_{era}.nc")
+        g = UPLOAD / "bundles" / grid
+        shutil.copy(BUILD / "aux" / f"dms_lana2011_climo_t{trunc[grid]}.nc",
+                    g / "dms.nc")
+        shutil.copy(BUILD / "aux" /
+                    f"dust_erodibility_cam_f05_t{trunc[grid]}.nc",
+                    g / "dust.nc")
+
+    d = UPLOAD / "bundles" / "ne30pg3"
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc", d / "sso.nc")
+    print("bundles: done", flush=True)
+
+
+def stage_registry() -> None:
+    from jcm.data.mirror.registry import write_registry
+
+    for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
+                 "era5_land_climo_2005-2014_0p25.nc"):
+        src, dst = BUILD / name, UPLOAD / "products" / name
+        if src.exists() and not dst.exists():
+            shutil.copytree(src, dst) if src.is_dir() else shutil.copy(src,
+                                                                       dst)
+    sso_dst = UPLOAD / "products" / "sso"
+    sso_dst.mkdir(parents=True, exist_ok=True)
+    for f in (BUILD / "sso").glob("*.nc"):
+        shutil.copy(f, sso_dst / f.name)
+    print(write_registry(str(UPLOAD)), flush=True)
+
+
+STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
+          "emissions": stage_emissions, "aux": stage_aux,
+          "bundles": stage_bundles, "registry": stage_registry}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--stage", default="all",
+                    help="comma-separated stage list, or 'all' "
+                         f"({', '.join(STAGES)})")
+    args = ap.parse_args()
+    names = list(STAGES) if args.stage == "all" else args.stage.split(",")
+    for name in names:
+        print(f"=== stage: {name} ===", flush=True)
+        STAGES[name]()
+
+
+if __name__ == "__main__":
+    main()
