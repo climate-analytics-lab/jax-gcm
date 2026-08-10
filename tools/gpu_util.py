@@ -150,12 +150,33 @@ def stale_processes() -> list[dict]:
     return sorted(out, key=lambda d: -d["age_hours"])
 
 
+def emptiest(need_mib: float = 0.0) -> int | None:
+    """GPU with the most free memory, or None if none can fit ``need_mib``.
+
+    For the case where nothing is idle and the run must share anyway: a
+    hardcoded fallback index is worse than useless once that card fills up
+    (it turns "wait" into "OOM"). Reports by FREE memory, so the choice
+    degrades sensibly as the box fills.
+    """
+    best, best_free = None, -1.0
+    for g in gpu_table():
+        free = g["mem_total_mib"] - g["mem_used_mib"]
+        if free > best_free:
+            best, best_free = g["index"], free
+    if need_mib and best_free < need_mib:
+        return None
+    return best
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--free", action="store_true",
                    help="print free indices only; exit 1 if none")
     p.add_argument("--wait", type=float, default=None, metavar="SECONDS",
                    help="block until a GPU frees, then print its index")
+    p.add_argument("--emptiest", type=float, default=None, metavar="NEED_MIB",
+                   help="print the GPU with the most free memory that can fit "
+                        "NEED_MIB; exit 1 if none can")
     p.add_argument("--stale", action="store_true",
                    help=f"list GPU processes older than {STALE_AGE_HOURS:.0f} h "
                         f"holding under {STALE_MAX_MIB:.0f} MiB — likely "
@@ -166,6 +187,14 @@ def main(argv=None) -> int:
         idx = wait_for_free(a.wait)
         if idx is None:
             print("no GPU became free within the timeout", file=sys.stderr)
+            return 1
+        print(idx)
+        return 0
+
+    if a.emptiest is not None:
+        idx = emptiest(a.emptiest)
+        if idx is None:
+            print("no GPU has that much free", file=sys.stderr)
             return 1
         print(idx)
         return 0

@@ -445,7 +445,11 @@ def run(args) -> dict:
         # compiled program over the same shapes regardless of the values in
         # them, so NaN arithmetic costs what finite arithmetic costs. What is
         # NOT valid is the science, so the report says so loudly.
-        *([f"run.bail_on_unhealthy={'false' if args.allow_unhealthy else 'true'}"]),
+        # ``++`` not ``+``/bare: run/longrun.yaml does NOT define this key
+        # while run/pyses_year.yaml does, so a bare override dies with
+        # "Key 'bail_on_unhealthy' is not in struct" on one and a bare ``+``
+        # would die on the other. ``++`` adds-or-overrides either way.
+        f"++run.bail_on_unhealthy={'false' if args.allow_unhealthy else 'true'}",
         f"run.output_prefix={data_dir}/state",
         f"hydra.run.dir={data_dir}",
         *args.extra,
