@@ -415,6 +415,27 @@ def run(args) -> dict:
     days = args.days if args.days else args.months * 30
     chunk = args.chunk_days
     # Gate first: a refused run must not leave directories behind.
+    #
+    # ``--gpu auto`` selects AND claims in one loop. Selecting with a separate
+    # tool and then gating here leaves a window: on a busy shared box a card
+    # reported free is routinely taken in the seconds before the gate runs,
+    # and the run then dies having waited out its whole timeout on a card
+    # that is no longer available. Re-picking on each poll fixes that.
+    if str(args.gpu) == "auto":
+        deadline = time.monotonic() + max(args.wait_for_gpu, 60.0)
+        while True:
+            free = free_indices()
+            if free:
+                args.gpu = free[0]
+                break
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    "no GPU became free within --wait-for-gpu; nothing was "
+                    "written. Re-run later or pass an explicit --gpu with "
+                    "--allow-busy-gpu.")
+            time.sleep(20)
+    else:
+        args.gpu = int(args.gpu)
     _require_free_gpu(args.gpu, wait_s=args.wait_for_gpu,
                       allow_busy=args.allow_busy_gpu)
 
@@ -674,7 +695,10 @@ def main(argv=None):
                         "(a 'month' is 30 days here)")
     p.add_argument("--days", type=int, default=None,
                    help="explicit sim-day count; overrides --months")
-    p.add_argument("--gpu", type=int, required=True)
+    p.add_argument("--gpu", required=True,
+                   help="GPU index, or 'auto' to select and claim a free card "
+                        "in one operation (avoids the select-then-gate race "
+                        "on a busy shared box)")
     p.add_argument("--label", default=None)
     p.add_argument("--chunk-days", type=int, default=5,
                    help="5 gives several post-compile chunks in a 30-day run")
