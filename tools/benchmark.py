@@ -202,6 +202,23 @@ PRESETS: dict[str, list[str]] = {
     # Middle-atmosphere resolution sweep (T63/T106/T119 x L47/L95).
     **{f"ma-{t}-l{lv}": _ma_preset(t, lv)
        for t in ("t63", "t106", "t119") for lv in (47, 95)},
+    # Released-dinosaur (Eulerian) counterpart to ma-t106-l47, for the
+    # dycore comparison. Run WITHOUT the dinosaur-sl worktree on
+    # --pythonpath so the packaged release is what gets imported; the
+    # semi-Lagrangian core needs dinosaur PR #135, and the documented
+    # fallback for a release without it is Eulerian advection plus tracer
+    # positivity (spectral advection of near-zero tracer fields otherwise
+    # leaves negatives that the JAM optics cannot take).
+    "ma-t106-l47-eulerian": [
+        "physics=echam-jam",
+        "grid=echam_t106_l47_hybrid",
+        "init=jw", "init.rh=0.0",
+        "terrain=from_file", f"terrain.file={_TERRAIN['t106']}",
+        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        f"forcing.ozone_file={_BC}/t106_ozone_l47.nc",
+        "run=longrun", "run.time_step=12",
+        "diffusion.tracer_positivity=true",
+    ],
     # pySES CAM-SE ne30, same physics, for the dycore comparison.
     **{f"ma-ne30-l{lv}": _pyses_preset(lv) for lv in (47, 95)},
 }
