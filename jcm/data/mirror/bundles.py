@@ -82,20 +82,29 @@ def _to_lonlat(da2d: xr.DataArray) -> tuple:
 
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
+_ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
 
 
 def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
                        lats, lons, out_path: str) -> None:
-    """Per-grid emissions file in the model's 6-variable contract."""
+    """Per-grid emissions file keyed ``emis_<super_sector>_<species>``.
+
+    All four model super-sectors (see
+    ``jcm.physics.aerosol.jam.emissions.sectors``) — the three CEDS
+    anthropogenic groups keep their distinct injection altitudes
+    (elevated_industrial ~50 m) plus biomass burning.
+    """
     ceds = xr.open_zarr(ceds_zarr)
     bb = xr.open_zarr(bb_zarr)
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})
     for sp in _EMIS_SPECIES:
         up = sp.upper()
-        for prefix, store in (("surface_combustion", ceds),
-                              ("biomass_burning", bb)):
-            da = store[f"{up}_{era}_clim"].load()
+        channels = [(sector, ceds[f"{up}_{sector}_{era}_clim"])
+                    for sector in _ANTHRO_SECTORS]
+        channels.append(("biomass_burning", bb[f"{up}_{era}_clim"]))
+        for prefix, da in channels:
+            da = da.load()
             arr = conservative_to_gaussian(
                 np.nan_to_num(da.values), da.lat.values, da.lon.values,
                 lats, lons)
