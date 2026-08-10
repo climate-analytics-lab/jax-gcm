@@ -494,10 +494,8 @@ class PysesCamSEDycore(DynamicalCore):
             col_lon = np.degrees(self.colmap.longitudes)
             col_lat = np.degrees(self.colmap.latitudes)
 
-            def _unit(lat_deg, lon_deg):
-                la, lo = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
-                return np.stack([np.cos(la) * np.cos(lo),
-                                 np.cos(la) * np.sin(lo), np.sin(la)], -1)
+            from jcm.data.regridding import (
+                unit_sphere_vectors as _unit)
 
             if "ncol" in ds.dims:
                 # Native unstructured file (e.g. bundles/ne30pg3/sso.nc):

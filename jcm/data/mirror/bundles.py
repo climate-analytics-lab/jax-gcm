@@ -36,9 +36,8 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-from jcm.data.mirror.regrid import (conservative_to_gaussian,  # noqa: F401
-                                    fill_nearest, gaussian_latlon,
-                                    interp_to)
+from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
+                                 interp_to)
 
 AMIP_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
              "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")

@@ -1254,3 +1254,33 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
             {"qc", "qi", "qnc", "qni"}.issubset(keys),
             f"inject_jw_profile dropped cloud tracers; tracers present: {keys}",
         )
+
+
+class ResolveDataPathTest(unittest.TestCase):
+    """hf:// path resolution for boundary-file config values."""
+
+    def test_hf_prefix_fetches_and_plain_passes_through(self):
+        from jcm import runners
+
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=lambda p: f"/cache/{p}") as m:
+            self.assertEqual(
+                runners._resolve_data_path("hf://bundles/t63/terrain.nc"),
+                "/cache/bundles/t63/terrain.nc")
+            m.assert_called_once_with("bundles/t63/terrain.nc")
+        self.assertEqual(runners._resolve_data_path("/local/x.nc"),
+                         "/local/x.nc")
+        self.assertIsNone(runners._resolve_data_path(None))
+
+    def test_list_paths_resolve_elementwise_and_mappings_pass_through(self):
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=lambda p: f"/cache/{p}"):
+            out = runners._resolve_data_path(["hf://a.nc", "/local/b.nc"])
+        self.assertEqual(out, ["/cache/a.nc", "/local/b.nc"])
+        # a mis-typed mapping must NOT be flattened to its keys
+        dc = OmegaConf.create({"so2": "/a.nc"})
+        self.assertIs(runners._resolve_data_path(dc), dc)

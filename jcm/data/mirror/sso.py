@@ -150,12 +150,6 @@ def gaussian_grid_sso(dem_path: str, lats: np.ndarray,
     return {k: v.reshape(nlat, nlon) for k, v in finalize(acc).items()}
 
 
-def _unit_vectors(lat_deg, lon_deg):
-    lat, lon = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
-    return np.stack([np.cos(lat) * np.cos(lon),
-                     np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1)
-
-
 def column_grid_sso(dem_path: str, col_lats: np.ndarray,
                     col_lons: np.ndarray) -> dict[str, np.ndarray]:
     """SSO fields on an unstructured column grid (e.g. ne30pg3).
@@ -165,10 +159,12 @@ def column_grid_sso(dem_path: str, col_lats: np.ndarray,
     the columns, which is exact and gap-free without needing cell bounds.
     """
     from scipy.spatial import cKDTree
-    tree = cKDTree(_unit_vectors(col_lats, col_lons))
+
+    from jcm.data.regridding import unit_sphere_vectors
+    tree = cKDTree(unit_sphere_vectors(col_lats, col_lons))
 
     def assign_strip(strip_lats, strip_lons):
-        pts = _unit_vectors(
+        pts = unit_sphere_vectors(
             np.repeat(strip_lats, strip_lons.size),
             np.tile(strip_lons, strip_lats.size))
         _, idx = tree.query(pts, workers=-1)

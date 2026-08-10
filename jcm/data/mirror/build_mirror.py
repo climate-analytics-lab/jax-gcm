@@ -48,7 +48,7 @@ def stage_sso() -> None:
     """
     import xarray as xr
 
-    from jcm.data.mirror.regrid import gaussian_latlon
+    from jcm.data.regridding import gaussian_latlon
     from jcm.data.mirror.sso import column_grid_sso, gaussian_grid_sso
 
     out = BUILD / "sso"
@@ -96,7 +96,7 @@ def stage_era5() -> None:
 def stage_ozone() -> None:
     from jcm.data.bc.interpolate_ozone import interpolate_ozone
     from jcm.data.mirror.ozone import load_pd, load_pi, regrid_climatology
-    from jcm.data.mirror.regrid import gaussian_latlon
+    from jcm.data.regridding import gaussian_latlon
 
     out = BUILD / "ozone"
     out.mkdir(parents=True, exist_ok=True)
@@ -145,7 +145,7 @@ def stage_aux() -> None:
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
-    from jcm.data.mirror.regrid import gaussian_latlon
+    from jcm.data.regridding import gaussian_latlon
 
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
     for grid, nlat in GRIDS.items():
@@ -200,7 +200,10 @@ def stage_registry() -> None:
     sso_dst = UPLOAD / "products" / "sso"
     sso_dst.mkdir(parents=True, exist_ok=True)
     for f in (BUILD / "sso").glob("*.nc"):
-        shutil.copy(f, sso_dst / f.name)
+        dst = sso_dst / f.name
+        # staging may have hardlinked build -> upload already
+        if not (dst.exists() and dst.samefile(f)):
+            shutil.copy(f, dst)
     print(write_registry(str(UPLOAD)), flush=True)
 
 

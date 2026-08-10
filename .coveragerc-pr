@@ -28,10 +28,11 @@ omit =
     jcm/data/mirror/ozone.py
     jcm/data/mirror/emissions.py
     jcm/data/mirror/bundles.py
-    # PR-only: mirror math + HF downloader utilities, thoroughly
-    # covered by the fast mirror_test suite; slow integration runs
+    jcm/data/mirror/build_mirror.py
+    # PR-only: shared regridding + HF downloader utilities, thoroughly
+    # covered by the fast co-located test suites; slow integration runs
     # use packaged/local files and never touch them.
-    jcm/data/mirror/regrid.py
+    jcm/data/regridding.py
     jcm/data/mirror/registry.py
     jcm/data/remote.py
     # PR-only: utility / orchestration modules. The fast-test suite

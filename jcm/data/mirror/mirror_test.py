@@ -1,15 +1,15 @@
 """Unit tests for the mirror builders' pure-math pieces.
 
 The builders themselves read multi-GB Glade sources; these tests cover
-the grid/statistics machinery on synthetic inputs.
+the statistics/registry machinery on synthetic inputs. The shared
+regridding helpers are tested in ``jcm/data/regridding_test.py``, the
+downloader in ``jcm/data/remote_test.py``.
 """
 
 import unittest
 
 import numpy as np
 
-from jcm.data.mirror.regrid import (conservative_to_gaussian,
-                                    gaussian_latlon, interp_to)
 from jcm.data.mirror.sso import finalize
 from jcm.data.mirror.registry import build_registry, write_registry
 
@@ -54,150 +54,6 @@ class SsoFinalizeTest(unittest.TestCase):
         out = finalize(acc)
         np.testing.assert_allclose(out["orog"], h)
         np.testing.assert_allclose(out["orostd"], 1.0)
-
-
-class RegridTest(unittest.TestCase):
-    def test_gaussian_latlon_shapes(self):
-        lats, lons = gaussian_latlon(96)
-        self.assertEqual((lats.size, lons.size), (96, 192))
-        self.assertTrue(np.all(np.diff(lats) > 0))
-        self.assertAlmostEqual(lons[0], 0.0)
-
-    def test_conservative_preserves_constant_field(self):
-        src_lats = np.linspace(-89.75, 89.75, 360)
-        src_lons = np.arange(720) * 0.5
-        lats, lons = gaussian_latlon(32)
-        out = conservative_to_gaussian(np.full((360, 720), 3.5),
-                                       src_lats, src_lons, lats, lons)
-        np.testing.assert_allclose(out, 3.5)
-
-    def test_conservative_preserves_global_integral(self):
-        rng = np.random.default_rng(0)
-        src_lats = np.linspace(-89.75, 89.75, 360)
-        src_lons = np.arange(720) * 0.5
-        field = rng.random((360, 720))
-        lats, lons = gaussian_latlon(24)
-        out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
-        w_src = np.cos(np.deg2rad(src_lats))[:, None]
-        # target cell weights: sum of source weights landing in each cell
-        src_int = (field * w_src).sum()
-        lat_edges = np.concatenate([[-90], 0.5 * (lats[1:] + lats[:-1]),
-                                    [90]])
-        # integral back over target using source-weight-consistent areas
-        lat_bin = np.searchsorted(lat_edges, src_lats) - 1
-        w_tgt = np.zeros(lats.size)
-        np.add.at(w_tgt, lat_bin, w_src[:, 0] * src_lons.size)
-        tgt_int = (out.mean(axis=1) * w_tgt).sum()
-        self.assertAlmostEqual(tgt_int / src_int, 1.0, places=6)
-
-    def test_fill_nearest_takes_closest_valid_value(self):
-        from jcm.data.mirror.regrid import fill_nearest
-        lats = np.array([0.0, 10.0])
-        lons = np.array([0.0, 1.0, 30.0])
-        field = np.array([[[1.0, np.nan, 3.0],
-                           [4.0, 5.0, 6.0]]])
-        out = fill_nearest(field, lats, lons)
-        self.assertTrue(np.isfinite(out).all())
-        self.assertEqual(out[0, 0, 1], 1.0)     # nearest valid is (0, 0)
-        # untouched cells stay identical
-        self.assertEqual(out[0, 1, 2], 6.0)
-
-    def test_interp_to_wraps_longitude(self):
-        import xarray as xr
-        src = xr.DataArray(
-            np.tile(np.sin(np.deg2rad(np.arange(360))), (91, 1)),
-            dims=("lat", "lon"),
-            coords={"lat": np.linspace(-90, 90, 91),
-                    "lon": np.arange(360.0)})
-        out = interp_to(src, np.array([0.0]), np.array([359.5]))
-        expected = 0.5 * (np.sin(np.deg2rad(359)) + np.sin(0.0))
-        self.assertAlmostEqual(out.values.item(), expected, places=6)
-
-
-class ResolveDataPathTest(unittest.TestCase):
-    def test_hf_prefix_fetches_and_plain_passes_through(self):
-        from unittest import mock
-
-        from jcm import runners
-
-        with mock.patch("jcm.data.remote.fetch",
-                        side_effect=lambda p: f"/cache/{p}") as m:
-            self.assertEqual(
-                runners._resolve_data_path("hf://bundles/t63/terrain.nc"),
-                "/cache/bundles/t63/terrain.nc")
-            m.assert_called_once_with("bundles/t63/terrain.nc")
-        self.assertEqual(runners._resolve_data_path("/local/x.nc"),
-                         "/local/x.nc")
-        self.assertIsNone(runners._resolve_data_path(None))
-
-    @staticmethod
-    def _fake_hub(download):
-        """sys.modules stand-in for huggingface_hub (works without it)."""
-        import sys
-        import types
-        from unittest import mock
-
-        class LocalEntryNotFoundError(Exception):
-            pass
-
-        hub = types.ModuleType("huggingface_hub")
-        hub.hf_hub_download = download
-        errors = types.ModuleType("huggingface_hub.errors")
-        errors.LocalEntryNotFoundError = LocalEntryNotFoundError
-        hub.errors = errors
-        patcher = mock.patch.dict(sys.modules, {
-            "huggingface_hub": hub, "huggingface_hub.errors": errors})
-        return patcher, LocalEntryNotFoundError
-
-    def test_fetch_is_cache_first(self):
-        # a warm cache must resolve with local_files_only (no network)
-        from jcm.data import remote
-
-        calls = []
-
-        def fake(**kw):
-            calls.append(kw)
-            return "/cache/hit"
-
-        patcher, _ = self._fake_hub(fake)
-        with patcher:
-            self.assertEqual(remote.fetch("bundles/x.nc"), "/cache/hit")
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0]["local_files_only"])
-
-    def test_fetch_cache_miss_goes_online_then_errors_helpfully(self):
-        from jcm.data import remote
-
-        def cold_then_ok(**kw):
-            if kw.get("local_files_only"):
-                raise err("not cached")
-            return "/downloaded"
-
-        patcher, err = self._fake_hub(cold_then_ok)
-        with patcher:
-            self.assertEqual(
-                remote.bundle_file("t63", "terrain.nc"), "/downloaded")
-
-        def always_fails(**kw):
-            if kw.get("local_files_only"):
-                raise err2("not cached")
-            raise ConnectionError("no internet")
-
-        patcher, err2 = self._fake_hub(always_fails)
-        with patcher:
-            with self.assertRaisesRegex(FileNotFoundError,
-                                        "prefetch on a login node"):
-                remote.fetch("bundles/t63/terrain.nc")
-
-    def test_list_paths_resolve_elementwise(self):
-        from unittest import mock
-
-        from jcm import runners
-
-        with mock.patch("jcm.data.remote.fetch",
-                        side_effect=lambda p: f"/cache/{p}"):
-            out = runners._resolve_data_path(["hf://a.nc", "/local/b.nc"])
-        self.assertEqual(out, ["/cache/a.nc", "/local/b.nc"])
 
 
 class RegistryTest(unittest.TestCase):
