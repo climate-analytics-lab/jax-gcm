@@ -93,11 +93,12 @@ inventory):
   The CAM L26 transient remains available via
   `prep_jam_aux_inputs.py --oxid-source cam` when a specific year
   matters more than the lid.
-- `soilw_am` is a root-zone soil-water **depth in metres**
-  (Σᵢ swvlᵢ·Dᵢ over the top three ERA5 layers, land mean ≈ 0.16 m) —
-  the packaged ECHAM WS-bucket convention, **not** an availability
-  fraction (see `bundles.py` docstring). The layer weighting is a
-  modelling choice, not an observed field.
+- `soilw_am` is the SPEEDY soil-availability **fraction** in [0, 1],
+  computed from ERA5 volumetric layers with the `jcm.data.bc.compile`
+  formula (vegetation-gated deep layer, wilting/capacity thresholds);
+  `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`. Both
+  follow the packaged files' conventions exactly (see the `bundles.py`
+  docstring).
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient
