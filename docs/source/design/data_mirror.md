@@ -100,4 +100,8 @@ inventory):
   modelling choice, not an observed field.
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
-  differently (more drag) than with the packaged terrain.
+  differently (more drag) than with the packaged terrain. The gradient
+  tensor is computed on 10′ block-mean topography (Lott & Miller's
+  source resolution) — calibrated against the ECHAM T127 reference,
+  where 30″ gradients give ~5× the reference σ and 10′ gives 1.16×
+  with the best structural agreement (r = 0.84).

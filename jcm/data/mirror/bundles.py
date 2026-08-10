@@ -18,17 +18,19 @@ Unit translations into the conventions the packaged t63 files establish
 * ``sst``   = tos [degC] + 273.15, land filled with nearest-ocean value
 * ``icec``  = siconc [%] / 100, land = 0
 * ``stl``   = ERA5 stl1 [K]
-* ``snowc`` = ERA5 sd [m w.e.] capped at 0.2, zeroed where snow persists
-  year-round (ice sheets) — matching ECHAM's SN, which excludes glaciers:
-  their high albedo lives in ``alb``, and blending toward fresh-snow
-  albedo would darken them
+* ``snowc`` = snow-cover fraction ``min(1, sd·1000/sd2sc)`` — the
+  ``jcm.data.bc.compile`` convention (``sd2sc`` = 60 mm w.e. for full
+  cover), zeroed where snow persists year-round (ice sheets): their
+  high albedo lives in ``alb``, and blending toward fresh-snow albedo
+  would darken them
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
-* ``soilw_am`` = root-zone soil-water depth [m], Σᵢ swvlᵢ·Dᵢ with
-  D = (0.07, 0.21, 0.72) m — matching the packaged field's ECHAM
-  WS-bucket convention (land mean ≈ 0.16 m), not an availability
-  fraction
+* ``soilw_am`` = SPEEDY availability fraction in [0, 1] per
+  ``jcm.data.bc.compile``:
+  ``min(1, (swvl1 + veg·3·max(0, swvl2 − swwil)) / (swcap + 3·(swcap − swwil)))``
+  with ``veg = cvh + 0.8·cvl``. ERA5's layer depths (7 cm, 21 cm) match
+  the formula's 1:3 layer weighting.
 """
 
 from __future__ import annotations
@@ -51,8 +53,9 @@ SICONC = (f"{AMIP_ROOT}/seaIce/mon/siconc/gn/v20250807/"
 ERA_YEARS = {"pd": ("2005-01-01", "2014-12-31"),
              "pi": ("1870-01-01", "1879-12-31")}
 
-_SOIL_D = np.array([0.07, 0.21, 0.72])   # ERA5 soil-layer depths [m]
-SNOW_CAP_M = 0.2                   # packaged ECHAM SN climatology ceiling
+# snow/soil conversion constants live with the SPEEDY physics
+from jcm.physics.speedy.physical_constants import (sd2sc,  # noqa: E402
+                                                   swcap, swwil)
 
 SSO_FIELDS = ("orog", "orostd", "orosig", "orogam", "orothe",
               "oropic", "oroval")
@@ -160,18 +163,24 @@ def build_forcing(era5_path: str, era: str, lats, lons,
     icec_c = _monthly_clim(sic, era) / 100.0
     icec_da = icec_c.fillna(0.0)
 
-    soilw = (_SOIL_D[0] * era5.swvl1 + _SOIL_D[1] * era5.swvl2
-             + _SOIL_D[2] * era5.swvl3)
+    # SPEEDY soil availability (jcm.data.bc.compile formula): ERA5 layer
+    # depths (7, 21 cm) match the 1:3 weighting; veg gates the deep layer.
+    veg = (era5.cvh + 0.8 * era5.cvl).clip(0.0, 1.0)
+    soilw = ((era5.swvl1 + veg * 3.0 * (era5.swvl2 - swwil).clip(min=0.0))
+             / (swcap + 3.0 * (swcap - swwil))).clip(0.0, 1.0)
+
+    # snow-cover fraction; permanent snow (ice sheets) is excluded — its
+    # albedo lives in alb, and ECHAM's SN climatology does the same
+    sd_mm = era5.sd * 1000.0
+    snowc = (sd_mm / sd2sc).clip(0.0, 1.0).where(
+        era5.sd.min("time") < 0.1, 0.0)
 
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
         "stl": interp_to(era5.stl1, lats, lons),
-        "soilw_am": interp_to(soilw, lats, lons).clip(min=0.0),
-        "snowc": interp_to(
-            era5.sd.clip(0.0, SNOW_CAP_M).where(
-                era5.sd.min("time") < 0.5 * SNOW_CAP_M, 0.0),
-            lats, lons).clip(min=0.0),
+        "soilw_am": interp_to(soilw, lats, lons).clip(0.0, 1.0),
+        "snowc": interp_to(snowc, lats, lons).clip(0.0, 1.0),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,

@@ -207,6 +207,39 @@ def stage_registry() -> None:
     print(write_registry(str(UPLOAD)), flush=True)
 
 
+#: Source paths each stage streams from — checked up front so a wrong
+#: machine or an unmounted filesystem fails in seconds with a clear list,
+#: not hours in with an obscure I/O error.
+_STAGE_SOURCES: dict[str, tuple[str, ...]] = {
+    "sso": (str(GMTED), NE30_TOPO),
+    "era5": ("/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc",),
+    "ozone": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+              "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0",),
+    "emissions": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+                  "CMIP7/CMIP/PNNL-JGCRI/CEDS-CMIP-2025-04-18",
+                  "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+                  "CMIP7/CMIP/DRES/DRES-CMIP-BB4CMIP7-2-0"),
+    "aux": ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst",
+            "/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone"),
+    "bundles": (str(BUILD),),
+    "registry": (str(UPLOAD),),
+}
+
+
+def check_sources(stage_names) -> None:
+    """Fail fast when the Glade sources for the requested stages are absent."""
+    if not Path("/glade").is_dir():
+        sys.exit("This builder streams NCAR Glade source data — /glade is "
+                 "not mounted here. Run it on Derecho/Casper (see "
+                 "jcm/data/mirror/SOURCES.md).")
+    missing = [p for name in stage_names
+               for p in _STAGE_SOURCES.get(name, ())
+               if not Path(p).exists()]
+    if missing:
+        sys.exit("Missing source paths (see jcm/data/mirror/SOURCES.md):\n  "
+                 + "\n  ".join(sorted(set(missing))))
+
+
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
           "bundles": stage_bundles, "registry": stage_registry}
@@ -219,6 +252,10 @@ def main() -> None:
                          f"({', '.join(STAGES)})")
     args = ap.parse_args()
     names = list(STAGES) if args.stage == "all" else args.stage.split(",")
+    unknown = [n for n in names if n not in STAGES]
+    if unknown:
+        sys.exit(f"Unknown stage(s) {unknown}; valid: {', '.join(STAGES)}")
+    check_sources(names)
     for name in names:
         print(f"=== stage: {name} ===", flush=True)
         STAGES[name]()

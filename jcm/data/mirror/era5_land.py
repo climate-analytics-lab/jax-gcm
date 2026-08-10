@@ -36,12 +36,18 @@ def _open_year(field_code: str, year: int) -> xr.DataArray:
     return ds[name]
 
 
-def load_lsm() -> xr.DataArray:
-    path = (f"{RDA_INVARIANT}/e5.oper.invariant.128_172_lsm.ll025sc."
-            f"1979010100_1979010100.nc")
+# Invariant fields: land fraction + low/high vegetation cover (the
+# SPEEDY soil-availability formula weights the deep layer by vegetation).
+INVARIANTS = {"lsm": "128_172_lsm", "cvl": "128_027_cvl",
+              "cvh": "128_028_cvh"}
+
+
+def load_invariant(name: str) -> xr.DataArray:
+    path = (f"{RDA_INVARIANT}/e5.oper.invariant.{INVARIANTS[name]}."
+            f"ll025sc.1979010100_1979010100.nc")
     ds = xr.open_dataset(path)
-    (name,) = [v for v in ds.data_vars if ds[v].ndim >= 2]
-    return ds[name].squeeze(drop=True).rename("lsm")
+    (var,) = [v for v in ds.data_vars if ds[v].ndim >= 2]
+    return ds[var].squeeze(drop=True).rename(name)
 
 
 def build_climatology(years=range(2005, 2015)) -> xr.Dataset:
@@ -61,7 +67,8 @@ def build_climatology(years=range(2005, 2015)) -> xr.Dataset:
                     "longitude": template.longitude},
             attrs=template.attrs)
     ds = xr.Dataset(out)
-    ds["lsm"] = load_lsm()
+    for name in INVARIANTS:
+        ds[name] = load_invariant(name)
     ds.attrs = {
         "source": "ERA5 monthly means (NCAR RDA d633001), 0.25 deg",
         "climatology_years": f"{min(years)}-{max(years)}",

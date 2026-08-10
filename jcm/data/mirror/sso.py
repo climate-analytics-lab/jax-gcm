@@ -41,26 +41,43 @@ _STRIP = 240                      # DEM rows per strip (2° at 30")
 _SUM_KEYS = ("land", "sh", "sh2", "shx2", "shy2", "shxy")
 
 
-def _accumulate(dem_path: str, assign_strip, ncells: int):
+def _block_mean(a: np.ndarray, f: int) -> np.ndarray:
+    """Mean over f×f blocks (array dims must be divisible by f)."""
+    ny, nx = a.shape
+    return a.reshape(ny // f, f, nx // f, f).mean(axis=(1, 3))
+
+
+def _accumulate(dem_path: str, assign_strip, ncells: int,
+                grad_coarsen: int = 20):
     """One pass over the DEM accumulating flat per-cell sufficient statistics.
 
     ``assign_strip(lats, lons) -> (nrows, nlon) int`` maps each pixel to a
     flat target-cell index; negative means "not on the target grid".
+
+    Elevation statistics (mean/std/peak/valley) use the native 30″ pixels.
+    The gradient tensor is computed on ``grad_coarsen``-pixel block means
+    (default 20 → 10′ ≈ 18 km): SSO drag was tuned against ECHAM boundary
+    files whose slopes derive from ~10′ topography, and slope magnitude
+    scales strongly with the differencing resolution — native 30″
+    gradients come out ~5× larger than the reference (validated against
+    T127GR15_jan_surf).
     """
     import rasterio          # lazy: only the Glade-side builder needs GDAL
 
-    acc = {k: np.zeros(ncells) for k in ("n",) + _SUM_KEYS}
+    acc = {k: np.zeros(ncells) for k in ("n", "ng") + _SUM_KEYS}
     acc["pic"] = np.full(ncells, -np.inf)
     acc["val"] = np.full(ncells, np.inf)
+    f = grad_coarsen
 
     with rasterio.open(dem_path) as src:
         nodata = src.nodata if src.nodata is not None else -32768
         t = src.transform
         dlam = np.deg2rad(t.a)                      # pixel size, radians
+        assert _STRIP % f == 0 and src.width % f == 0
         for row0 in range(0, src.height, _STRIP):
             nrows = min(_STRIP, src.height - row0)
-            # one extra row below for the meridional gradient
-            read_rows = min(nrows + 1, src.height - row0)
+            # one extra coarse block below for the meridional gradient
+            read_rows = min(nrows + f, src.height - row0)
             h = src.read(1, window=((row0, row0 + read_rows),
                                     (0, src.width))).astype(np.float64)
             land = h != nodata
@@ -69,21 +86,35 @@ def _accumulate(dem_path: str, assign_strip, ncells: int):
             lats = t.f + t.e * (row0 + 0.5 + np.arange(read_rows))
             lons = t.c + t.a * (0.5 + np.arange(src.width))
 
-            # gradients on the strip (spherical metric); last strip-row
-            # gradient reuses the previous row's to keep shapes aligned.
-            coslat = np.cos(np.deg2rad(lats))[:nrows, None]
-            hx = np.empty((nrows, src.width))
-            hx[:, :-1] = (h[:nrows, 1:] - h[:nrows, :-1])
-            hx[:, -1] = h[:nrows, 0] - h[:nrows, -1]      # periodic in lon
-            hx /= (R_EARTH * np.maximum(coslat, 0.05) * dlam)
-            hy = np.empty((nrows, src.width))
-            if read_rows > nrows:
-                hy[:] = (h[1:nrows + 1] - h[:nrows])
+            # -- gradient tensor on block-mean topography ----------------
+            nc_rows = nrows // f
+            full = (read_rows // f) * f
+            hc = _block_mean(h[:full], f)
+            c_lats = lats[:full].reshape(-1, f).mean(1)
+            coslat_c = np.cos(np.deg2rad(c_lats[:nc_rows]))[:, None]
+            dlam_c = dlam * f
+            hx = np.empty((nc_rows, hc.shape[1]))
+            hx[:, :-1] = hc[:nc_rows, 1:] - hc[:nc_rows, :-1]
+            hx[:, -1] = hc[:nc_rows, 0] - hc[:nc_rows, -1]   # periodic
+            hx /= (R_EARTH * np.maximum(coslat_c, 0.05) * dlam_c)
+            hy = np.empty_like(hx)
+            if hc.shape[0] > nc_rows:
+                hy[:] = hc[1:nc_rows + 1] - hc[:nc_rows]
             else:
-                hy[:-1] = h[1:nrows] - h[:nrows - 1]
-                hy[-1] = hy[-2] if nrows > 1 else 0.0
-            hy /= (R_EARTH * dlam)
+                hy[:-1] = hc[1:nc_rows] - hc[:nc_rows - 1]
+                hy[-1] = hy[-2] if nc_rows > 1 else 0.0
+            hy /= (R_EARTH * dlam_c)
 
+            idx_c = assign_strip(c_lats[:nc_rows], lons.reshape(-1, f).mean(1))
+            valid_c = idx_c >= 0
+            flat_c = idx_c[valid_c]
+            acc["ng"] += np.bincount(flat_c, minlength=ncells)
+            for key, arr in (("shx2", hx ** 2), ("shy2", hy ** 2),
+                             ("shxy", hx * hy)):
+                acc[key] += np.bincount(flat_c, weights=arr[valid_c],
+                                        minlength=ncells)
+
+            # -- elevation statistics on native pixels -------------------
             h = h[:nrows]
             land = land[:nrows]
             idx = assign_strip(lats[:nrows], lons)
@@ -92,8 +123,7 @@ def _accumulate(dem_path: str, assign_strip, ncells: int):
 
             acc["n"] += np.bincount(flat, minlength=ncells)
             for key, arr in (("land", land.astype(float)), ("sh", h),
-                             ("sh2", h ** 2), ("shx2", hx ** 2),
-                             ("shy2", hy ** 2), ("shxy", hx * hy)):
+                             ("sh2", h ** 2)):
                 acc[key] += np.bincount(flat, weights=arr[valid],
                                         minlength=ncells)
             np.maximum.at(acc["pic"], flat, h[valid])
@@ -104,11 +134,12 @@ def _accumulate(dem_path: str, assign_strip, ncells: int):
 def finalize(acc) -> dict[str, np.ndarray]:
     """Sufficient statistics -> the seven SSO fields + land fraction."""
     n = np.maximum(acc["n"], 1.0)
+    ng = np.maximum(acc.get("ng", acc["n"]), 1.0)
     mean = acc["sh"] / n
     var = np.maximum(acc["sh2"] / n - mean ** 2, 0.0)
-    K = 0.5 * (acc["shx2"] + acc["shy2"]) / n
-    L = 0.5 * (acc["shx2"] - acc["shy2"]) / n
-    M = acc["shxy"] / n
+    K = 0.5 * (acc["shx2"] + acc["shy2"]) / ng
+    L = 0.5 * (acc["shx2"] - acc["shy2"]) / ng
+    M = acc["shxy"] / ng
     lm = np.sqrt(L ** 2 + M ** 2)
     lsm = acc["land"] / n
     ocean = lsm < 0.5
@@ -131,7 +162,8 @@ def finalize(acc) -> dict[str, np.ndarray]:
 
 
 def gaussian_grid_sso(dem_path: str, lats: np.ndarray,
-                      lons: np.ndarray) -> dict[str, np.ndarray]:
+                      lons: np.ndarray,
+                      grad_coarsen: int = 20) -> dict[str, np.ndarray]:
     """SSO fields on a Gaussian (lat, lon) grid (lats ascending, degrees)."""
     lat_edges = np.concatenate([[-90.0],
                                 0.5 * (lats[1:] + lats[:-1]), [90.0]])
@@ -146,12 +178,14 @@ def gaussian_grid_sso(dem_path: str, lats: np.ndarray,
         return np.where(lat_bin[:, None] >= 0,
                         lat_bin[:, None] * nlon + lon_bin[None, :], -1)
 
-    acc = _accumulate(dem_path, assign_strip, nlat * nlon)
+    acc = _accumulate(dem_path, assign_strip, nlat * nlon,
+                      grad_coarsen=grad_coarsen)
     return {k: v.reshape(nlat, nlon) for k, v in finalize(acc).items()}
 
 
 def column_grid_sso(dem_path: str, col_lats: np.ndarray,
-                    col_lons: np.ndarray) -> dict[str, np.ndarray]:
+                    col_lons: np.ndarray,
+                    grad_coarsen: int = 20) -> dict[str, np.ndarray]:
     """SSO fields on an unstructured column grid (e.g. ne30pg3).
 
     Each DEM pixel goes to the nearest column center by great-circle
@@ -170,5 +204,6 @@ def column_grid_sso(dem_path: str, col_lats: np.ndarray,
         _, idx = tree.query(pts, workers=-1)
         return idx.reshape(strip_lats.size, strip_lons.size)
 
-    acc = _accumulate(dem_path, assign_strip, col_lats.size)
+    acc = _accumulate(dem_path, assign_strip, col_lats.size,
+                      grad_coarsen=grad_coarsen)
     return finalize(acc)
