@@ -219,6 +219,19 @@ PRESETS: dict[str, list[str]] = {
         "run=longrun", "run.time_step=12",
         "diffusion.tracer_positivity=true",
     ],
+    # T63L47 Eulerian pair. Eulerian at T106L47 OOMs (>80 GiB, against
+    # 34 GiB for the same config under semi-Lagrangian), so the
+    # advection-scheme comparison is done at T63L47 where both fit —
+    # SL needs 17.9 GiB there.
+    **{f"ma-t63-l47-{tag}eulerian": [
+        "physics=echam-jam",
+        "grid=echam_t63_l47_hybrid",
+        "init=jw", "init.rh=0.0",
+        "terrain=from_file", f"terrain.file={_TERRAIN['t63']}",
+        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        "run=longrun", "run.time_step=12",
+        "diffusion.tracer_positivity=true",
+    ] for tag in ("", "sltree-")},
     # Disambiguator: the SL dinosaur TREE but Eulerian advection. Run with
     # dinosaur-sl on --pythonpath, so the only difference from
     # ma-t106-l47 is the advection scheme. Pairs with
