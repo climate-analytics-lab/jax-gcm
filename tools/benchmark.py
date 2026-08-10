@@ -219,6 +219,21 @@ PRESETS: dict[str, list[str]] = {
         "run=longrun", "run.time_step=12",
         "diffusion.tracer_positivity=true",
     ],
+    # Disambiguator: the SL dinosaur TREE but Eulerian advection. Run with
+    # dinosaur-sl on --pythonpath, so the only difference from
+    # ma-t106-l47 is the advection scheme. Pairs with
+    # ma-t106-l47-eulerian (released tree + Eulerian) to separate "the
+    # scheme is unstable" from "the released version is missing a fix".
+    "ma-t106-l47-sltree-eulerian": [
+        "physics=echam-jam",
+        "grid=echam_t106_l47_hybrid",
+        "init=jw", "init.rh=0.0",
+        "terrain=from_file", f"terrain.file={_TERRAIN['t106']}",
+        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+        f"forcing.ozone_file={_BC}/t106_ozone_l47.nc",
+        "run=longrun", "run.time_step=12",
+        "diffusion.tracer_positivity=true",
+    ],
     # pySES CAM-SE ne30, same physics, for the dycore comparison.
     **{f"ma-ne30-l{lv}": _pyses_preset(lv) for lv in (47, 95)},
 }
@@ -425,6 +440,12 @@ def run(args) -> dict:
         # save_interval must be <= chunk_days or the chunk write dies with an
         # IndexError from to_xarray() on an empty time axis.
         f"run.save_interval={min(args.save_interval, chunk)}",
+        # With --allow-unhealthy the driver keeps integrating past a health
+        # gate trip. Timing stays valid when it does: XLA runs the same
+        # compiled program over the same shapes regardless of the values in
+        # them, so NaN arithmetic costs what finite arithmetic costs. What is
+        # NOT valid is the science, so the report says so loudly.
+        *([f"run.bail_on_unhealthy={'false' if args.allow_unhealthy else 'true'}"]),
         f"run.output_prefix={data_dir}/state",
         f"hydra.run.dir={data_dir}",
         *args.extra,
@@ -484,6 +505,7 @@ def run(args) -> dict:
         # A run that stopped early is not a benchmark of the requested
         # workload even if every chunk it did finish looked healthy.
         "truncated": last_day < days,
+        "allow_unhealthy": bool(args.allow_unhealthy),
         "nan_any": any(n > 0 for n, _ in nan_hits),
         "nan_max_vars": max((n for n, _ in nan_hits), default=0),
         "nan_total_vars": nan_hits[0][1] if nan_hits else None,
@@ -512,7 +534,7 @@ def run(args) -> dict:
     return result
 
 
-def should_keep_output(result: dict) -> bool:
+def should_keep_output(result: dict) -> bool:  # noqa: D401
     """Whether a benchmark's model output is worth keeping.
 
     Only a run that completed cleanly is safe to discard: its numbers are in
@@ -621,7 +643,15 @@ def _report(r: dict) -> str:
     if r.get("truncated"):
         bad.append(f"**Truncated** — completed {r['completed_days']} of "
                    f"{r['requested_days']} requested days.")
-    if bad:
+    if bad and r.get("allow_unhealthy"):
+        lines += bad + [
+            "", "**Run with `--allow-unhealthy`: the timing below is a "
+            "deliberate COMPUTE-COST measurement of a configuration already "
+            "known to be unstable.** XLA executes the same compiled program "
+            "over the same shapes whatever the values, so the throughput is "
+            "valid; the simulated fields are not. Do not use this run for "
+            "anything scientific."]
+    elif bad:
         lines += bad + [
             "", "Timing from a run that did not complete the requested "
             "workload healthily is not a valid benchmark: fix the "
@@ -649,6 +679,11 @@ def main(argv=None):
     p.add_argument("--python", default=DEFAULT_PY)
     p.add_argument("--pythonpath", default=None,
                    help="prepend a library worktree (editable-install A/B)")
+    p.add_argument("--allow-unhealthy", action="store_true",
+                   help="keep integrating past NaN / health-gate trips and "
+                        "report the throughput anyway. For measuring COMPUTE "
+                        "COST of a configuration already known to be "
+                        "unstable; the fields are meaningless.")
     p.add_argument("--f32", action="store_true",
                    help="MAM4_JAX_ENABLE_X64=0 — required above T63; "
                         "forward-only (MAM4 gradients are non-finite in f32)")
@@ -681,8 +716,9 @@ def main(argv=None):
     r = run(args)
     print((pathlib.Path(args.outdir) /
            (args.label or args.preset) / "report.md").read_text())
-    ok = (r["exit_code"] == 0 and not r["nan_any"]
-          and not r.get("unhealthy") and not r.get("truncated"))
+    ok = r["exit_code"] == 0 and (
+        r.get("allow_unhealthy")
+        or not (r["nan_any"] or r.get("unhealthy") or r.get("truncated")))
     return 0 if ok else 1
 
 
