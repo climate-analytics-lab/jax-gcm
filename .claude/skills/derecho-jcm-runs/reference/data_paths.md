@@ -1,107 +1,68 @@
 # Boundary conditions, emissions and aux forcing on Derecho
 
-**Preferred source (once uploaded): the HF data mirror.** The dataset
-`climate-analytics-lab/jax-gcm-data` carries per-grid bundles for every
-supported grid (t63/t106 at L47/L95, ne30pg3 native), built by
-`jcm/data/mirror/` (see `docs/source/design/data_mirror.md`). Any
-terrain/forcing file key in the Hydra config accepts an `hf://` path:
+## 1. The HF data mirror — canonical source
 
-    terrain.file=hf://bundles/t63/terrain.nc
-    forcing.file=hf://bundles/t63/forcing_pd.nc
-    forcing.emissions_file=hf://bundles/t63/emissions_pd.nc
-    forcing.dms_file=hf://bundles/t63/dms.nc
-    forcing.dust_file=hf://bundles/t63/dust.nc
-    forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc
-    forcing.ozone_file=hf://bundles/t63_l47/ozone_pd.nc
-    # pySES native terrain: dycore.terrain_file=hf://bundles/ne30pg3/sso.nc
+The dataset `climate-analytics-lab/jax-gcm-data` carries per-grid bundles
+for every supported grid, built by `jcm/data/mirror/` (see
+`docs/source/design/data_mirror.md`). `mkjob.py` uses it by default
+(`--data mirror --era pd|pi`): bundle paths are derived from `--grid`,
+prefetched on the login node at generation time, and the local cache
+paths are baked into the job script — compute nodes need no internet.
 
-**Prefetch on a login node first** — compute nodes have no internet; the
-resolver is cache-first, so a warm HF cache needs zero network:
+Per Gaussian grid `<g>` (t63, t106):
 
-    python -c "from jcm.data.remote import fetch; fetch('bundles/t63/terrain.nc')"
+    bundles/<g>/terrain.nc                 GMTED2010 SSO + fractional ERA5 land mask
+    bundles/<g>/forcing_{pd,pi}.nc         PCMDI-AMIP SST/ice + ERA5 land climatology
+    bundles/<g>/emissions_{pd,pi}.nc       CEDS+BB4CMIP7, 4 super-sectors x 3 species
+    bundles/<g>/dms.nc, dust.nc            Lana 2011; 0.23x0.31 deg erodibility
+    bundles/<g>_<l>/ozone_{pd,pi}.nc       FZJ CMIP7, pre-interpolated per level count
+    bundles/<g>_<l>/oxidants_{pd,pi}.nc    WACCM CCMI full-lid, per level count
 
-Bundle files use `_pi` (1850s; SST/ice = 1870–1879 mean) and `_pd`
-(2005–2014) era suffixes. Bundled oxidants are WACCM CCMI full-lid
-(real mesosphere — required for L95); level-suffixed dirs must match the
-run's layer count.
+Ozone and oxidants are **level-resolved from level-independent sources**
+(FZJ vmro3 on 66 plev; WACCM L66): the `<g>_l47` and `<g>_l95` dirs both
+exist for every grid — there is no "L95-only" special case. Any config
+path also accepts `hf://bundles/...` directly (cache-first resolver;
+prefetch on a login node). `bundles/ne30pg3/sso.nc` serves the pySES
+native-terrain path. `registry.json` has sha256 for every file.
 
-The local tiers below predate the mirror and remain valid — three tiers:
-**packaged** (in the repo, always available), **prepared** (derived files
-that must exist before a JAM run), and **upstream sources** (the CESM
-`inputdata` tree the prepared files come from).
+Era semantics: `pd` = 2005–2014 climatologies; `pi` = 1850s emissions/
+ozone/oxidants with 1870–1879 SST/ice (earliest observed decade).
 
-Set `JAM_INPUTS` to wherever the prepared files live; `mkjob.py` reads it
-(default `/glade/derecho/scratch/$USER/jam_inputs`).
-
-## 1. Packaged in the repo — nothing to prepare
+## 2. Packaged in the repo — offline fallback
 
 | file | contents |
 |---|---|
-| `jcm/data/bc/t63/terrain.nc` | ECHAM T63GR15 orography, land-sea mask, subgrid-orography stats (`orostd/orosig/orogam/orothe/oropic/oroval`) |
-| `jcm/data/bc/t63/forcing.nc` | AMIP monthly SST, sea ice, land T, soil moisture, snow, albedo |
-| `jcm/data/bc/t63/ozone.nc` | CAM6chem 2005–2014 monthly ozone climatology on T63L47 |
+| `jcm/data/bc/t63/terrain.nc` | ECHAM T63GR15 orography + SSO stats (NB `orosig`≈0 — defective; mirror supersedes) |
+| `jcm/data/bc/t63/forcing.nc` | AMIP monthly climatology (NB systematically dry soil / low snow vs the mirror — see release notes) |
+| `jcm/data/bc/t63/ozone.nc` | CAM6chem 2005–2014 on T63L47 (`forcing.ozone_file: auto` resolves it by grid shape) |
 | `jcm/data/bc/t30/…` | same set at T30 |
 
-`forcing.ozone_file: auto` resolves the packaged ozone by grid shape — leave
-it alone unless you need a different product.
+## 3. Legacy prepared files (`--data local`)
 
-## 2. Prepared files — required for online JAM
+Pre-mirror scratch files, kept for reproducing earlier campaigns. Purge-
+eligible; regenerate with `runs/prep_emissions.py` /
+`tools/prep_jam_aux_inputs.py` (see script headers). `JAM_INPUTS` /
+`JCM_EMISSIONS` point at them. The old portable tarball
+`~/jam_input_bundle_20260720.tar.gz` predates the mirror — prefer the
+mirror for provisioning new machines.
 
-**These live on scratch and are purge-eligible.** Check they exist before
-submitting; regenerate with the commands below if not.
+## 4. Upstream sources (read-only, for rebuilding the mirror)
 
-| file | used for | regenerate with |
-|---|---|---|
-| `emissions_echam_t63_l47_hybrid_2014.nc` | anthropogenic + biomass emissions | `runs/prep_emissions.py` |
-| `dms_lana2011_climo_t63.nc` | interactive DMS | `tools/prep_jam_aux_inputs.py --target-truncation 63` |
-| `dust_erodibility_cam_f05_t63.nc` | interactive dust | idem |
-| `oxidants_cam_echam_l47_2014_t63.nc` | sulfur chemistry | idem |
-| `ozone_cam6chem_2005-2014_t63_l95.nc` | L95 runs only | `jcm.data.bc.interpolate_ozone --nlevels 95` |
+`jcm/data/mirror/SOURCES.md` is the authoritative inventory (CEDS/BB
+input4MIPs, PCMDI-AMIP, FZJ ozone, ERA5 RDA, GMTED2010, WACCM CCMI
+oxidants, 0.23×0.31° dust). `python -m jcm.data.mirror.build_mirror`
+rebuilds everything, with fail-fast guards for wrong-machine / missing
+sources.
 
-Current locations on this machine:
+## 5. Preparation gotchas (legacy path)
 
-```bash
-JAM_INPUTS=/glade/derecho/scratch/$USER/jam_inputs      # dms/dust/oxidants/ozone
-EMISSIONS=$HOME/jax-gcm/runs/emissions_echam_t63_l47_hybrid_2014.nc
-```
-
-A T42 emissions file (`emissions_echam_t42_l8_sigma_2014.nc`) sits beside it
-for cheap tests.
-
-**Grid variants matter.** The spectral (`jcm.main`) path validates grids
-strictly and needs the `_t63` files — exact Gaussian latitudes. The pySES
-column path interpolates from any regular lon/lat grid, so it can use the
-native-grid variants. Level-resolved files (oxidants, ozone) must match the
-run's layer count: an L47 oxidant file will not work in an L95 run.
-
-**Portable copy:** `~/jam_input_bundle_20260720.tar.gz` (164 MB, md5
-`4e15803b1bed6e01e67e708cef11e47a`) holds all eight files plus a README —
-scp it to provision another machine rather than re-preparing.
-
-## 3. Upstream sources (CESM `inputdata`, read-only)
-
-```
-/glade/campaign/cesm/cesmdata/inputdata
-  atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc   # DMS, nmol/L
-  atm/cam/dst/dst_1.9x2.5_c090203.nc                                    # dust: mbl_bsn_fct_geo
-  atm/cam/chem/trop_mozart_aero/oxid/oxid_1.9x2.5_L26_1850-2015_c20181106.nc
-  atm/cam/ozone/ozone_strataero_CAM6chem_1849-2014_zm_5day_c170924.nc   # ozone (zonal mean)
-/glade/campaign/cesm/cesmdata/cseg/inputdata/atm/cam/chem/emis/cmip7/ne30  # CEDS + BB4CMIP7
-```
-
-Note the emissions live under `cesmdata/cseg/inputdata`, the rest under
-`cesmdata/inputdata`.
-
-## 4. Preparation gotchas
-
-- Regrid to the **model's Gaussian latitudes**, not a uniform lat/lon grid.
-  `prep_jam_aux_inputs.py` uses the model latitude helper for this; a
-  sin-latitude mesh silently produces a ±57° pseudo-grid.
-- Oxidant files need `hyam` in **Pa from the raw ECHAM table with no `p0`
-  variable** — the runner's validator treats a present `p0` as "normalized
-  hyam" and double-scales the pressures.
+- Regrid to the **model's Gaussian latitudes**, not a uniform lat/lon
+  grid (a sin-latitude mesh silently produces a ±57° pseudo-grid).
+- Oxidant files need `hyam` in **Pa with no `p0` variable** — the
+  runner's validator treats a present `p0` as "normalized hyam" and
+  double-scales the pressures.
 - Ozone must be pre-interpolated to the model's levels
   (`jcm.data.bc.interpolate_ozone`); the online loader does not regrid
-  vertically.
-- Chained `&&` prep commands that short-circuit leave stale outputs behind;
-  regenerate into a clean directory when a step fails.
+  vertically. Level-resolved files must match the run's layer count.
+- Chained `&&` prep commands that short-circuit leave stale outputs
+  behind; regenerate into a clean directory when a step fails.

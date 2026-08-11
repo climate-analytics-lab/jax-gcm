@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -46,6 +47,45 @@ def check_inputs(a) -> None:
                  "\n  ".join(missing))
 
 
+def grid_tags(grid: str) -> tuple[str, str]:
+    """(t63, l47)-style tags from a grid stem like echam_t63_l47_hybrid."""
+    m = re.match(r".*_(t\d+)_(l\d+)_", grid)
+    if not m:
+        sys.exit(f"cannot derive mirror bundle tags from grid={grid!r}; "
+                 "use --data local with explicit files")
+    return m.group(1), m.group(2)
+
+
+def fetch_bundles(a) -> dict[str, str]:
+    """Prefetch mirror bundles on this (login) node; return local cache paths.
+
+    Compute nodes have no internet, so hf:// paths are resolved HERE and
+    the cached filesystem paths are baked into the job script. The fetch
+    is cache-first: warm files cost no network at all.
+    """
+    gtag, ltag = grid_tags(a.grid)
+    era = a.era
+    wanted = {
+        "terrain": f"bundles/{gtag}/terrain.nc",
+        "forcing": f"bundles/{gtag}/forcing_{era}.nc",
+        "emissions_file": f"bundles/{gtag}/emissions_{era}.nc",
+        "dms_file": f"bundles/{gtag}/dms.nc",
+        "dust_file": f"bundles/{gtag}/dust.nc",
+        "oxidants_file": f"bundles/{gtag}_{ltag}/oxidants_{era}.nc",
+        "ozone_file": f"bundles/{gtag}_{ltag}/ozone_{era}.nc",
+    }
+    paths = {}
+    for key, rel in wanted.items():
+        r = subprocess.run(
+            [sys.executable, "-c",
+             f"from jcm.data.remote import fetch; print(fetch({rel!r}))"],
+            cwd=a.repo, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"mirror fetch failed for {rel}:\n{r.stderr[-800:]}")
+        paths[key] = r.stdout.strip().splitlines()[-1]
+    return paths
+
+
 def build_overrides(a) -> list[str]:
     """Hydra overrides for one variant, in composition order."""
     ov = [f"physics={a.physics}", f"grid={a.grid}"]
@@ -54,15 +94,25 @@ def build_overrides(a) -> list[str]:
     if a.radiation:
         ov.append(f"physics.radiation_scheme={a.radiation}")
     if not a.aquaplanet:
-        ov += [
-            "terrain=from_file",
-            f"terrain.file={a.repo}/jcm/data/bc/t63/terrain.nc",
-            "forcing=from_file",
-            f"forcing.file={a.repo}/jcm/data/bc/t63/forcing.nc",
-        ]
-        if a.physics.endswith("jam") and not a.no_emissions:
-            ov.append(f"forcing.emissions_file={a.emissions}")
-            ov += [f"forcing.{k}={v}" for k, v in AUX_FILES.items()]
+        if a.data == "mirror":
+            b = a.bundle_paths
+            ov += ["terrain=from_file", f"terrain.file={b['terrain']}",
+                   "forcing=from_file", f"forcing.file={b['forcing']}",
+                   f"forcing.ozone_file={b['ozone_file']}"]
+            if a.physics.endswith("jam") and not a.no_emissions:
+                ov += [f"forcing.{k}={b[k]}" for k in
+                       ("emissions_file", "dms_file", "dust_file",
+                        "oxidants_file")]
+        else:
+            ov += [
+                "terrain=from_file",
+                f"terrain.file={a.repo}/jcm/data/bc/t63/terrain.nc",
+                "forcing=from_file",
+                f"forcing.file={a.repo}/jcm/data/bc/t63/forcing.nc",
+            ]
+            if a.physics.endswith("jam") and not a.no_emissions:
+                ov.append(f"forcing.emissions_file={a.emissions}")
+                ov += [f"forcing.{k}={v}" for k, v in AUX_FILES.items()]
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
     if a.physics.endswith("jam"):
         ov.append("diffusion.tracer_positivity=true")
@@ -133,6 +183,12 @@ def main() -> None:
     p.add_argument("--account", default=DEFAULT_ACCOUNT)
     p.add_argument("--chunk-days", type=float, default=5)
     p.add_argument("--save-every", type=float, default=5)
+    p.add_argument("--data", choices=["mirror", "local"], default="mirror",
+                   help="mirror: HF bundles (prefetched here, cache paths "
+                        "baked into the job); local: legacy prepared files")
+    p.add_argument("--era", choices=["pd", "pi"], default="pd",
+                   help="mirror era: present-day (2005-2014) or "
+                        "pre-industrial (1850s) climatologies")
     p.add_argument("--aquaplanet", action="store_true")
     p.add_argument("--no-emissions", action="store_true")
     p.add_argument("--emissions", default=EMISSIONS,
@@ -154,7 +210,9 @@ def main() -> None:
     a.mem = a.mem or ("200GB" if a.gpus > 1 else "160GB")
     frac = 0.85 if a.gpus > 1 else 0.93
     rundir = f"{SCRATCH}/jam_runs/{a.name}"
-    if a.physics.endswith("jam") and not a.aquaplanet and not a.no_emissions:
+    if not a.aquaplanet and a.data == "mirror":
+        a.bundle_paths = fetch_bundles(a)
+    elif a.physics.endswith("jam") and not a.no_emissions:
         check_inputs(a)
     overrides = build_overrides(a)
     if a.check:
