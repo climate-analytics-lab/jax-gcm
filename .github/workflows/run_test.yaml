@@ -1,8 +1,46 @@
 name: Run Unit Tests via Pytest
 
+# Documentation-only changes cannot change a test result, so they do not run
+# the suite. This matters here because a single push to a PR branch costs TWO
+# ~35-minute jobs (push -> fast tests, pull_request -> slow tests), and over
+# half the commits on a docs-heavy branch touch no testable code at all.
+#
+# Nothing below holds tests: pytest collects `*_test.py` only, and there are
+# none under docs/ or .claude/. docs/ has its own targeted workflow
+# (run_docs.yaml, which watches the three files that actually drive doc
+# generation), and ruff still lints EVERYTHING on every push via
+# run_linter.yaml — including the Python under .claude/skills — so a syntax
+# error in a skill script is still caught in ~30 s.
+#
+# Note the two events filter differently. `push` matches the files in the
+# pushed commits; `pull_request` matches the whole PR diff. So a docs commit
+# on a PR that also contains code skips the push job but still runs the PR
+# job — that is correct (the PR as a whole does touch code), and `[skip ci]`
+# in the commit message is the escape hatch for the rest.
+#
+# Safe because no branch has protection rules: with a required status check,
+# a filtered-out job never reports and the PR blocks forever on a pending
+# check. Revisit this if branch protection is ever enabled.
+# The two lists are duplicated deliberately: GitHub Actions does not resolve
+# YAML anchors/aliases in workflow files, so `&x`/`*x` would silently not do
+# what it looks like. Keep them in sync by hand.
 on:
   push:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.claude/**'
+      - 'LICENSE'
+      - '**.png'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.claude/**'
+      - 'LICENSE'
+      - '**.png'
+      - '.gitignore'
 
 concurrency:
   # For pull requests: group by PR number
@@ -24,6 +62,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
+          # Cache the wheel downloads. jax/jaxlib and the scientific stack are
+          # a large, almost-never-changing install repeated on every job, and
+          # a PR branch push runs two jobs. Keyed on requirements.txt, so a
+          # dependency change invalidates it automatically. Unlike the path
+          # filter this costs no coverage at all — it speeds up the runs that
+          # DO need to happen.
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |

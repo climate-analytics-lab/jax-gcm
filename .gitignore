@@ -195,5 +195,14 @@ docs/source/generated
 # (docs/source/conf.py); never committed — see issue #394.
 docs/source/speedy_translation.rst
 
-# Local claude files
-.claude/
+# Local claude state (settings, sessions, caches) stays untracked; shared
+# project skills under .claude/skills/ are versioned.
+# NOTE: the pattern must be `.claude/*`, not `.claude/` — git does not descend
+# into an excluded DIRECTORY, so a trailing-slash exclusion would make the
+# negation below unreachable.
+.claude/*
+!.claude/skills/
+
+# Model checkpoints — runs write these into the cwd (run=pyses_year sets a
+# RELATIVE checkpoint_path), and they are gigabytes. Never committable.
+*.ckpt
