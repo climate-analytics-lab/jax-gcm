@@ -33,6 +33,12 @@ REPOS = {
     "dinosaur-sl": ("https://github.com/neuralgcm/dinosaur", "main"),
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
+    # Required by every echam-jam preset and NOT present in the published
+    # image, so it has to be cloned like the others. Pinned to main: the
+    # configure_gas_netprod work the dev box ran from a local branch was
+    # merged (and developed further) upstream, so main is the same code plus
+    # later fixes — verified by diffing, the only differences were comments.
+    "mam4-jax": ("https://github.com/reflective-org/MAM4-JAX", "main"),
 }
 
 GPU_MEMORY_MIB = "81920"
@@ -69,7 +75,8 @@ def build(a, resolved) -> dict:
         f'&& git -C /work/{d} checkout --detach {sha}'
         for d, (url, sha) in resolved.items()
     )
-    pythonpath = ":".join(f"/work/{d}" for d in ("dinosaur-sl", "jax-rrtmgp"))
+    pythonpath = ":".join(
+        f"/work/{d}" for d in ("dinosaur-sl", "jax-rrtmgp", "mam4-jax"))
     overrides = " ".join([
         f"physics={a.physics}",
         f"grid={a.grid}",

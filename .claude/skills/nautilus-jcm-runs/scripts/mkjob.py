@@ -34,6 +34,12 @@ REPOS = {
     "dinosaur-sl": ("https://github.com/neuralgcm/dinosaur", "main"),
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
+    # Required by every echam-jam preset and NOT present in the published
+    # image, so it has to be cloned like the others. Pinned to main: the
+    # configure_gas_netprod work the dev box ran from a local branch was
+    # merged (and developed further) upstream, so main is the same code plus
+    # later fixes — verified by diffing, the only differences were comments.
+    "mam4-jax": ("https://github.com/reflective-org/MAM4-JAX", "main"),
 }
 
 # The a100 quota spans FOUR products: 80GB-PCIe, SXM4-80GB, PCIE-40GB and a
@@ -79,7 +85,8 @@ def job(preset: str, a) -> dict:
         f'&& echo "{d} @ {sha}"'
         for d, (url, sha) in a._resolved.items()
     )
-    pythonpath = ":".join(f"/work/{d}" for d in ("dinosaur-sl", "jax-rrtmgp"))
+    pythonpath = ":".join(
+        f"/work/{d}" for d in ("dinosaur-sl", "jax-rrtmgp", "mam4-jax"))
     bench = (
         f"python /work/jcm/tools/benchmark.py --preset {preset} "
         f"--months {a.months} --gpu 0 --chunk-days {a.chunk_days} "
