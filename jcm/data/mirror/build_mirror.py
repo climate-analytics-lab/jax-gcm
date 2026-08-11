@@ -189,7 +189,11 @@ def stage_bundles() -> None:
 
     d = UPLOAD / "bundles" / "ne30pg3"
     d.mkdir(parents=True, exist_ok=True)
-    shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc", d / "sso.nc")
+    # terrain.nc, matching the Gaussian bundles: the file is the fully
+    # assembled terrain (LANDFRAC lsm + orog_gll), and the old sso.nc
+    # name invited grabbing a raw SSO product instead (#596)
+    shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
+                d / "terrain.nc")
     print("bundles: done", flush=True)
 
 

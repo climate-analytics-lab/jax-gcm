@@ -34,6 +34,12 @@ corrections, listed here because they change climate:
   small islands retain orography).
 - PI (1850s; SST/ice = 1870–1879 mean) and PD (2005–2014) eras ship for
   every product.
+- The native ne30pg3 terrain published as ``bundles/ne30pg3/sso.nc``
+  carried a DEM-validity placeholder ``lsm`` (99.8 % land) instead of a
+  land-sea mask; it is replaced by the assembled
+  ``bundles/ne30pg3/terrain.nc`` (CESM ``LANDFRAC`` land fraction, exact
+  GLL orography), and the pySES ``build_terrain`` now rejects any
+  terrain file averaging >0.9 land as a placeholder (#596).
 
 v2.0.0b1
 --------

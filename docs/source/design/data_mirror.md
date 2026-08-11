@@ -24,8 +24,11 @@ reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, `dust.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
-SSO only — the pySES path interpolates the Gaussian forcing files and
-uses the native CESM CEDS emissions product).
+`terrain.nc` only — the pySES path interpolates the Gaussian forcing
+files and uses the native CESM CEDS emissions product). The ne30pg3
+`terrain.nc` is fully assembled: GMTED2010 SSO statistics, land fraction
+from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
+GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 
 ## Fetching at runtime
 
@@ -44,10 +47,13 @@ python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
 ```
 
 The pySES backend takes the native bundle directly —
-`dycore.terrain_file=hf://bundles/ne30pg3/sso.nc` maps file columns onto
-the physics columns one-for-one (unit-sphere nearest neighbor) and takes
-GLL-node orography from the file's `orog_gll` (CESM topo `PHIS_gll`),
-replacing the old packaged-T63 downscale. The same `hf://` forcing files
+`dycore.terrain_file=hf://bundles/ne30pg3/terrain.nc` maps file columns
+onto the physics columns one-for-one (unit-sphere nearest neighbor) and
+takes GLL-node orography from the file's `orog_gll` (CESM topo
+`PHIS_gll`), replacing the old packaged-T63 downscale. (`build_terrain`
+refuses a file whose mean land fraction exceeds 0.9 — that is the
+signature of a raw SSO product's DEM-validity placeholder `lsm`, which
+would silently produce an all-land planet; see #596.) The same `hf://` forcing files
 work there too (the column loader interpolates from any regular lon/lat
 grid).
 
