@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 
@@ -58,6 +59,32 @@ DEFAULT_SWEEP = [
     "ma-t63-l47", "ma-t63-l95", "ma-t106-l47",
     "ma-t106-l95", "ma-t119-l47", "ma-t119-l95",
 ]
+
+
+def pod_runnable(preset: str) -> tuple[bool, str]:
+    """Can this preset's inputs exist inside a pod?
+
+    Presets referencing prepared boundary data by absolute path (the
+    T63L95/T106/T119 ozone under the dev box's scratch) cannot run here: the
+    manifest mounts no such host path and sets no JCM_BC_DIR, so the
+    harness's missing-input preflight rejects them. Submitting those wastes
+    a queue slot and reads as a platform failure rather than absent data.
+
+    Everything under the repo is fine — the pod clones it. This check is
+    deliberately derived from the preset rather than a hardcoded exclusion
+    list, so a preset becomes runnable automatically once its data is
+    reachable (e.g. via the HF mirror).
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]
+                           / "tools"))
+    from benchmark import PRESETS
+    for o in PRESETS.get(preset, []):
+        key, _, val = o.partition("=")
+        if not key.endswith((".file", "_file")) or val in ("auto", "null", ""):
+            continue
+        if val.startswith("/") and "/jcm/data/" not in val:
+            return False, val
+    return True, ""
 
 
 def resolve_refs() -> dict:
@@ -122,28 +149,17 @@ if not any(x.platform == "gpu" for x in d):
 PYCHK
 # The pod has exactly one GPU, so --gpu 0 is unambiguous and the
 # free-GPU gate is a no-op: Kubernetes already gave us exclusive use.
+# `set -e` would abort here on a nonzero exit — which is precisely the case
+# the epilogue below exists for. Capture the status, always emit the
+# diagnostics, and re-exit with it at the end. Observed: every failed job so
+# far produced NO report/log output, so debugging meant reading the PVC by
+# hand.
+set +e
 {bench}
-# Stamp which card actually ran it — the a100 quota spans two 80GB
-# products with different power limits, so the report is not
-# interpretable without this.
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader \\
-    > /reports/{preset}-nautilus/gpu_product.txt || true
-# Echo the report to stdout so `kubectl logs` retrieves it. Reports are a
-# few KB, so there is no reason to make anyone mount the PVC to read one —
-# and per NRP's data-movement guidance kubectl cp is for small files only,
-# with S3 for anything bulky. This removes the exec-into-a-pod dance
-# entirely for the common case.
-echo "===== REPORT BEGIN ====="
-cat /reports/{preset}-nautilus/report.md 2>/dev/null || echo "(no report)"
-echo "===== REPORT END ====="
-# On failure, surface the model's own log too. Without this the pod log
-# shows only the harness's "truncated" verdict and the actual traceback
-# stays on the PVC — which cost several debug cycles here.
-if ! grep -q "sim days/hr" /reports/{preset}-nautilus/report.md 2>/dev/null; then
-  echo "===== RUN LOG TAIL (run did not produce a rate) ====="
-  tail -40 /reports/{preset}-nautilus/run.log 2>/dev/null || true
-fi
-echo "=== done ==="
+BENCH_RC=$?
+set -e
+echo "=== done (benchmark rc=$BENCH_RC) ==="
+exit $BENCH_RC
 """
     selector = dict(S["gpu_selector"])
     if a.gpu_product:
@@ -231,6 +247,21 @@ def main() -> int:
     if not a.sweep and not a.preset:
         p.error("need --preset or --sweep")
     presets = DEFAULT_SWEEP if a.sweep else [a.preset]
+    if a.sweep:
+        keep, drop = [], []
+        for x in presets:
+            ok, why = pod_runnable(x)
+            (keep if ok else drop).append((x, why))
+        for x, why in drop:
+            print(f"# SKIP {x}: needs {why}, which no pod can see",
+                  file=sys.stderr)
+        if drop:
+            print(f"# {len(drop)} preset(s) excluded — mount the data or "
+                  "serve it from the HF mirror to include them",
+                  file=sys.stderr)
+        presets = [x for x, _ in keep]
+        if not presets:
+            raise SystemExit("no preset in the sweep can run in a pod")
     a._resolved = resolve_refs()
     for d, (_, sha) in a._resolved.items():
         print(f"# {d} pinned at {sha[:12]}", file=sys.stderr)

@@ -99,6 +99,7 @@ def main() -> int:
             print("no benchmark jobs found; --from-pvc to read older reports "
                   "off the volume")
             return 0
+        copied = 0
         for j in jobs:
             # Distinguish "still running" from "finished without a rate".
             # Both show no throughput, but only the second is a refusal —
@@ -124,6 +125,26 @@ def main() -> int:
             print(f"{j:44s} {rate:>12s}")
             if a.raw and a.raw in j:
                 print(body)
+            # --copy is documented on the front page and previously did
+            # nothing in this branch: the log path returned without ever
+            # consulting it, so the command succeeded and wrote no files.
+            if a.copy and body.strip():
+                import pathlib as _p
+                d = _p.Path(a.copy) / j
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "report.md").write_text(body)
+                (d / "job.log").write_text(log)
+                copied += 1
+        if a.copy:
+            # Say what actually happened. "copied to DIR" when nothing was
+            # written is the same class of lie as a status line that always
+            # reads rc=0 — it reports the intent, not the outcome.
+            if copied:
+                print(f"\ncopied {copied} report(s) to {a.copy}")
+            else:
+                print("\nnothing to copy: no job log contained a report "
+                      "(jobs predating the stdout-echo change, or expired "
+                      "logs). Try --from-pvc.")
         return 0
 
     if not _spawn():

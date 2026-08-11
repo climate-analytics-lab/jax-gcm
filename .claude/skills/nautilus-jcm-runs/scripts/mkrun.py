@@ -69,6 +69,27 @@ def resolve_refs(pins: dict) -> dict:
     return out
 
 
+# Only T63L47 ozone is packaged in the repo. `forcing.ozone_file: auto`
+# resolves that and SILENTLY falls back to the analytic profile otherwise —
+# ~7.6x the tropospheric column, so the run completes and its radiation is
+# simply wrong. For a production year that is the worst possible failure
+# mode, so anything else must supply --ozone explicitly.
+PACKAGED_OZONE = {"echam_t63_l47_hybrid"}
+
+
+def ozone_override(a) -> list:
+    if a.ozone:
+        return [f"forcing.ozone_file={a.ozone}"]
+    if a.grid in PACKAGED_OZONE:
+        return []          # `auto` resolves the packaged file correctly
+    raise SystemExit(
+        f"grid {a.grid} has no packaged ozone climatology, and leaving it at "
+        "`auto` silently falls back to the ANALYTIC profile (~7.6x the "
+        "tropospheric column) — the run would finish and be scientifically "
+        "wrong.\nPass --ozone <file reachable from the pod>, or use "
+        f"{sorted(PACKAGED_OZONE)[0]}.")
+
+
 def build(a, resolved) -> dict:
     S = site_profile.get(a.site)
     name = f"jcm-run-{a.name}".lower().replace("_", "-")[:60]
@@ -89,6 +110,7 @@ def build(a, resolved) -> dict:
         "terrain.file=/work/jcm/jcm/data/bc/t63/terrain.nc",
         "forcing=from_file",
         "forcing.file=/work/jcm/jcm/data/bc/t63/forcing.nc",
+        *ozone_override(a),
         "run=longrun",
         f"run.total_time={a.days}",
         f"run.time_step={a.dt}",
@@ -130,9 +152,30 @@ done
 if [ -f "{rundir}/{a.name}.ckpt" ]; then
   echo "=== resuming from $(ls -la {rundir}/{a.name}.ckpt | awk '{{print $5}}') byte checkpoint ==="
 fi
+set +e
 PYTHONPATH={pythonpath} MAM4_JAX_ENABLE_X64={"0" if a.f32 else "1"} \\
   python -m jcm.main {overrides} 2>&1 | tee -a {rundir}/run.log
-echo "=== finished $(date -u +%FT%TZ) ==="
+RC=${{PIPESTATUS[0]}}
+set -e
+
+# jcm.runners.run_chunked BREAKS OUT of its loop and returns NORMALLY when
+# bail_on_unhealthy trips, so jcm.main exits 0 even though the year stopped
+# at the first bad chunk. Without this check Kubernetes marks a 365-day Job
+# Complete after 30 days of output — the worst kind of failure, because it
+# looks like success. Verify the health verdict and the day count.
+if grep -qiE "unhealthy|NaN vars: *[1-9]" {rundir}/run.log; then
+  echo "FATAL: health gate tripped — run stopped early, not complete"
+  grep -iE "unhealthy|NaN vars: *[1-9]" {rundir}/run.log | tail -3
+  exit 1
+fi
+LAST=$(grep -oE "_day[0-9]+\\.nc" {rundir}/run.log | grep -oE "[0-9]+" \\
+       | sort -n | tail -1)
+if [ -z "$LAST" ] || [ "$LAST" -lt {a.days} ]; then
+  echo "FATAL: reached day ${{LAST:-0}} of {a.days} — incomplete"
+  exit 1
+fi
+echo "=== finished $(date -u +%FT%TZ), day $LAST of {a.days}, rc=$RC ==="
+exit $RC
 """
     return {
         "apiVersion": "batch/v1", "kind": "Job",
@@ -204,6 +247,9 @@ def main() -> int:
     p.add_argument("--no-f32", dest="f32", action="store_false")
     p.add_argument("--site", default="nautilus",
                    help="site profile from site.py")
+    p.add_argument("--ozone", default=None,
+                   help="ozone file; REQUIRED for any grid without a packaged "
+                        "climatology (i.e. anything but T63L47)")
     p.add_argument("--gpu-product", default=None)
     p.add_argument("--retries", type=int, default=20,
                    help="Job backoffLimit; each retry resumes from the "
