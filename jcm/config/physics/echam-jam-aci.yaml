@@ -27,6 +27,7 @@ defaults:
 enable_cosp: true
 cosp_calipso: true
 cosp_modis: true
+cosp_isccp: true
 # Subcolumns per gridbox. COSP's canonical value is 100; 40 is the jcm
 # default and trades sampling noise against a roughly linear cost.
 cosp_ncolumns: 40
