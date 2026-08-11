@@ -152,26 +152,53 @@ done
 if [ -f "{rundir}/{a.name}.ckpt" ]; then
   echo "=== resuming from $(ls -la {rundir}/{a.name}.ckpt | awk '{{print $5}}') byte checkpoint ==="
 fi
+# run.log is append-only ACROSS pod restarts (that is what makes the
+# eviction-resume design debuggable), so every gate below must read only THIS
+# attempt's slice. Grepping the cumulative log gets both verdicts wrong:
+#   * completion: an attempt that integrated NOTHING inherits the previous
+#     attempt's "_day365.nc" line and the Job is marked Complete. That is how
+#     a no-op resume — e.g. a stale or foreign checkpoint already at/past the
+#     target — reports success having done no work.
+#   * health: one bad chunk that a later attempt already recovered from fails
+#     the Job forever.
+# Record the byte offset first and slice from it.
+ATTEMPT_START=$(stat -c%s "{rundir}/run.log" 2>/dev/null || echo 0)
 set +e
 PYTHONPATH={pythonpath} MAM4_JAX_ENABLE_X64={"0" if a.f32 else "1"} \\
   python -m jcm.main {overrides} 2>&1 | tee -a {rundir}/run.log
 RC=${{PIPESTATUS[0]}}
 set -e
+tail -c +$((ATTEMPT_START + 1)) "{rundir}/run.log" > /tmp/attempt.log
 
 # jcm.runners.run_chunked BREAKS OUT of its loop and returns NORMALLY when
 # bail_on_unhealthy trips, so jcm.main exits 0 even though the year stopped
 # at the first bad chunk. Without this check Kubernetes marks a 365-day Job
 # Complete after 30 days of output — the worst kind of failure, because it
 # looks like success. Verify the health verdict and the day count.
-if grep -qiE "unhealthy|NaN vars: *[1-9]" {rundir}/run.log; then
+if grep -qiE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log; then
   echo "FATAL: health gate tripped — run stopped early, not complete"
-  grep -iE "unhealthy|NaN vars: *[1-9]" {rundir}/run.log | tail -3
+  grep -iE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log | tail -3
   exit 1
 fi
-LAST=$(grep -oE "_day[0-9]+\\.nc" {rundir}/run.log | grep -oE "[0-9]+" \\
+LAST=$(grep -oE "_day[0-9]+\\.nc" /tmp/attempt.log | grep -oE "[0-9]+" \\
        | sort -n | tail -1)
-if [ -z "$LAST" ] || [ "$LAST" -lt {a.days} ]; then
-  echo "FATAL: reached day ${{LAST:-0}} of {a.days} — incomplete"
+if [ -z "$LAST" ]; then
+  # No output this attempt. Distinguish the one benign case — the run was
+  # already finished and the pod merely restarted — from a no-op resume,
+  # which must NOT look like success.
+  RESUMED=$(grep -oE "Resumed from checkpoint .* at sim-day [0-9.]+" \\
+            /tmp/attempt.log | grep -oE "[0-9.]+$" | tail -1)
+  if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {a.days} ]; then
+    echo "=== already complete: checkpoint at day $RESUMED of {a.days}, nothing to do ==="
+    exit 0
+  fi
+  echo "FATAL: this attempt wrote no output and resumed at day ${{RESUMED:-0}}"
+  echo "       of {a.days} — no progress made. Check for a stale or foreign"
+  echo "       checkpoint at {rundir}/{a.name}.ckpt."
+  exit 1
+fi
+if [ "$LAST" -lt {a.days} ]; then
+  echo "FATAL: reached day $LAST of {a.days} — incomplete"
   exit 1
 fi
 echo "=== finished $(date -u +%FT%TZ), day $LAST of {a.days}, rc=$RC ==="
