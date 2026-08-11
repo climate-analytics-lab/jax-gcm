@@ -110,47 +110,67 @@ _T63_COMMON = [
 # the ANALYTIC profile is NOT a valid benchmark of the radiation, since that
 # surrogate has ~7.6x the tropospheric ozone column.
 
-# Prepared boundary data for the resolutions that are not packaged in the
-# repo. Every entry is grid-AND-level matched: terrain is horizontally
-# resolved, ozone is both. Getting this wrong does not fail loudly -- a
-# mismatched ozone silently falls back to the analytic profile (~7.6x the
-# tropospheric column) and a benchmark then measures the wrong radiative
-# workload. See .claude/skills/derecho-jcm-runs/reference/data_paths.md.
-# Prepared T106/T119 boundary data. Dev-box scratch by default, overridable
-# because that path does not exist off that machine — a container needs it
-# from a PVC or the HF mirror. Presets that reference it are simply
-# unusable where it is absent, which _preset_available() reports up front
-# rather than failing 20 minutes into a pod.
+# Boundary data comes from the project's Hugging Face mirror (jax-gcm#515,
+# merged as #590) as ``hf://bundles/<grid>/<file>`` paths, which
+# ``jcm.runners._resolve_data_path`` fetches into the local HF cache. This
+# replaced a set of dev-box scratch paths that made every non-T63 preset
+# unrunnable anywhere else -- a container had no way to see them, which is
+# what kept T106+ out of the Nautilus sweep.
+#
+# Every entry is grid-AND-level matched: terrain is horizontally resolved,
+# ozone is both. Getting this wrong does not fail loudly -- a mismatched
+# ozone silently falls back to the analytic profile (~7.6x the tropospheric
+# column) and a benchmark then measures the wrong radiative workload.
+#
+# The mirror carries t63 and t106 only. T119 has no bundle, so those presets
+# still point at prepared dev-box files and remain machine-local;
+# $JCM_BC_DIR overrides where they live.
+_ERA = "pd"                                  # present-day climatology bundles
+_MIRROR_GRIDS = ("t63", "t106")
 _BC = pathlib.Path(os.environ.get("JCM_BC_DIR", "/scr/dwatsonparris/bc_l95"))
 _TERRAIN = {
-    "t63": REPO / "jcm/data/bc/t63/terrain.nc",
-    "t106": _BC / "T106_terrain.nc",
-    "t119": _BC / "T119_terrain.nc",
+    "t63": "hf://bundles/t63/terrain.nc",
+    "t106": "hf://bundles/t106/terrain.nc",
+    "t119": str(_BC / "T119_terrain.nc"),
 }
 
 
 def _ma_preset(trunc: str, levels: int) -> list[str]:
     """Middle-atmosphere sweep config: full JAM + 2M + semi-Lagrangian.
 
-    Mirrors the original MA L95 benchmark so numbers stay comparable. Ozone
-    is passed explicitly for every combination except the one the repo
-    packages (T63 L47), where `auto` resolves it correctly.
+    Mirrors the original MA L95 benchmark so numbers stay comparable, with
+    the boundary data moved onto the mirror. Terrain, SST forcing and ozone
+    are all grid-native now rather than a T63 field upsampled -- that costs
+    nothing at runtime (the loader interpolates once at startup, and the
+    arrays are the same shape either way) but it is the correct science, so
+    there is no reason to keep the downscale.
     """
     ov = [
         "physics=echam-jam",
         f"grid=echam_{trunc}_l{levels}_hybrid",
         "init=jw", "init.rh=0.0",
         "terrain=from_file", f"terrain.file={_TERRAIN[trunc]}",
-        # SSTs are upsampled onto the model grid by the forcing loader, so the
-        # packaged T63 file serves every truncation here.
-        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
         "run=longrun", "run.time_step=12",
         # The semi-Lagrangian core the original sweep used; needs the SL
         # dinosaur on PYTHONPATH (--pythonpath), else the dycore raises.
         "+advection=semi_lagrangian", "+sl_off_centering=0.2",
     ]
-    if not (trunc == "t63" and levels == 47):
-        ov.append(f"forcing.ozone_file={_BC}/{trunc}_ozone_l{levels}.nc")
+    if trunc in _MIRROR_GRIDS:
+        ov += [
+            "forcing=from_file",
+            f"forcing.file=hf://bundles/{trunc}/forcing_{_ERA}.nc",
+            "forcing.ozone_file="
+            f"hf://bundles/{trunc}_l{levels}/ozone_{_ERA}.nc",
+        ]
+    else:
+        # T119: no mirror bundle. SSTs are upsampled from the packaged T63
+        # file by the forcing loader; ozone must still be grid-and-level
+        # matched, so it comes from prepared local files.
+        ov += [
+            "forcing=from_file",
+            f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+            f"forcing.ozone_file={_BC}/{trunc}_ozone_l{levels}.nc",
+        ]
     return ov
 
 
@@ -170,7 +190,15 @@ def _pyses_preset(levels: int) -> list[str]:
       spectral presets on the first attempt; ``--cfg job`` did not catch it
       because composing a config is not the same as building the model.)
     * no TERRAIN override — pySES bilinearly interpolates the packaged T63
-      field onto its columns, so the horizontal grid need not match;
+      field onto its columns, so the horizontal grid need not match. The
+      mirror's native ``hf://bundles/ne30pg3/sso.nc`` is deliberately NOT
+      used despite the dycore config recommending it: its ``lsm`` is the
+      DEM-validity placeholder its own attrs warn about (mean 0.998, against
+      a true land fraction of ~0.335 in ``bundles/t63/terrain.nc``), so it
+      would run an essentially all-land planet — silently, since the dycore
+      just clips it to [0, 1]. It also lacks the ``orog_gll`` the same
+      comment promises. Revisit once an assembled ne30pg3 terrain bundle
+      exists.
     * but ozone IS still level-validated. "Column sampling has no exact-grid
       requirement" covers the HORIZONTAL grid only — an L47 ozone file is
       rejected by an L95 run whatever the backend. L95 therefore needs the
@@ -182,16 +210,17 @@ def _pyses_preset(levels: int) -> list[str]:
     return [
         "physics=echam-jam",
         f"dycore=pyses_ne30l{levels}",
-        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-        # ANALYTIC ozone for the runtime comparison only (user-directed).
-        # The prescribed path is broken for this backend two ways: the L95
-        # file's "months since" time units are rejected by the pySES forcing
-        # loader's calendar decode, and the L47 file reaches RRTMGP shaped
-        # (1, nlev) instead of (nlev,). Analytic ozone changes the radiative
-        # workload (~7.6x tropospheric column) so these numbers are for
-        # TIMING ONLY and are not comparable with the spectral sweep's
-        # radiation; the report records it.
-        "forcing.ozone_file=null",
+        "forcing=from_file",
+        f"forcing.file=hf://bundles/t63/forcing_{_ERA}.nc",
+        # REAL ozone, unlike the first ne30 timing attempt. That one fell
+        # back to the analytic profile because the two prescribed paths then
+        # available were both broken (an L95 file whose "months since" time
+        # units the pySES calendar decode rejected, and an L47 file reaching
+        # RRTMGP shaped (1, nlev)). The mirror bundles carry a plain 1..12
+        # integer month axis and load through the pySES column sampler, so
+        # the radiative workload here is now the same kind as the spectral
+        # sweep's and the numbers are comparable.
+        f"forcing.ozone_file=hf://bundles/t63_l{levels}/ozone_{_ERA}.nc",
         "run=pyses_year",
         # run=pyses_year sets a RELATIVE checkpoint_path, so without this the
         # run drops a multi-GB .ckpt into whatever cwd it was launched from —
@@ -436,18 +465,36 @@ def run(args) -> dict:
     preset = PRESETS[args.preset]
     days = args.days if args.days else args.months * 30
     chunk = args.chunk_days
-    # Every file the preset names must exist BEFORE a GPU is claimed. A
+    # Every file the preset names must be in hand BEFORE a GPU is claimed. A
     # preset referencing prepared boundary data is unusable wherever that
     # data is absent (a container, another machine), and finding out 20
     # minutes into a pod — after the image pull and the clone — wastes the
     # slot and the quota.
-    missing = [o.split("=", 1)[1] for o in preset
-               if o.split("=", 1)[0].endswith((".file", "_file"))
-               and not o.endswith(("=auto", "=null", "=none"))
-               and not pathlib.Path(o.split("=", 1)[1]).exists()]
+    #
+    # ``hf://`` paths are DOWNLOADED here rather than merely checked. The
+    # mirror bundles run to ~2 GB (t106_l95 oxidants), and jcm resolves them
+    # lazily during model construction — which on this path is after the GPU
+    # is claimed and the telemetry sampler is running. Pulling them first
+    # keeps the download out of the timed region and turns an unreachable
+    # mirror into an immediate refusal instead of a stall on a held card.
+    files = [o.split("=", 1)[1] for o in preset
+             if o.split("=", 1)[0].endswith((".file", "_file"))
+             and not o.endswith(("=auto", "=null", "=none"))]
+    missing = []
+    for f in files:
+        if f.startswith("hf://"):
+            sys.path.insert(0, str(REPO))
+            from jcm.data.remote import fetch
+            try:
+                print(f"prefetching {f}", file=sys.stderr)
+                fetch(f[len("hf://"):])
+            except Exception as e:              # unreachable or absent
+                missing.append(f"{f}  ({type(e).__name__}: {e})")
+        elif not pathlib.Path(f).exists():
+            missing.append(f)
     if missing:
         raise SystemExit(
-            "preset references files that do not exist here:\n  "
+            "preset references files that are not available here:\n  "
             + "\n  ".join(missing)
             + "\nSet $JCM_BC_DIR, or use a preset whose data is present.")
 

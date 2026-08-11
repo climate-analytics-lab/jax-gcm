@@ -48,8 +48,12 @@ NAUTILUS = {
     # 0 pods — including "default" — so naming one gets the pod refused by
     # quota, while an unnamed pod runs at priority 0 and is fine.
     "priority_class": None,
-    # MAM4-JAX needs these and the image lacks them.
-    "extra_pip": ["diffrax>=0.7", "matplotlib"],
+    # MAM4-JAX needs diffrax/matplotlib. huggingface_hub is what resolves the
+    # ``hf://bundles/...`` boundary-data paths the presets now use: it became
+    # a jcm requirement with the data mirror (#590), which is NEWER than the
+    # release baked into the image, so the image does not carry it and every
+    # non-packaged grid would fail at the first fetch without it.
+    "extra_pip": ["diffrax>=0.7", "matplotlib", "huggingface_hub"],
 }
 
 # A new site must supply every key above. The ones most likely to differ:

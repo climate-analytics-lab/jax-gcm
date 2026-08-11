@@ -55,9 +55,15 @@ REPOS = {
 # identity: SXM4 is a 400 W part against PCIe's 300 W, so single-GPU
 # throughput differs even though both have 80 GB.
 
+# Grid x levels resolution sweep. ne30 is the pySES CAM-SE backend rather
+# than a spectral truncation, so this compares BOTH resolution and dycore
+# under one physics package. T119 is not here: the data mirror carries t63
+# and t106 only, so its presets are still dev-box-local (pod_runnable
+# excludes them anyway, but listing them would just print six skip lines).
 DEFAULT_SWEEP = [
-    "ma-t63-l47", "ma-t63-l95", "ma-t106-l47",
-    "ma-t106-l95", "ma-t119-l47", "ma-t119-l95",
+    "ma-t63-l47", "ma-t63-l95",
+    "ma-t106-l47", "ma-t106-l95",
+    "ma-ne30-l47", "ma-ne30-l95",
 ]
 
 
