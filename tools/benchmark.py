@@ -461,6 +461,27 @@ def _require_free_gpu(idx: int, wait_s: float, allow_busy: bool) -> None:
         deadline -= step
 
 
+def _hf_fetch(path: str) -> str:
+    """Prefetch one mirror file, WITHOUT importing the ``jcm`` package.
+
+    ``jcm.data.remote.fetch`` is the function we want, but reaching it as
+    ``from jcm.data.remote import fetch`` executes ``jcm/__init__.py``,
+    which initialises a JAX backend -- and JAX preallocates ~75 % of the
+    device the instant it is touched. Doing that here, before the free-GPU
+    gate, makes the harness look like a 61 GiB tenant to its own gate; a
+    six-job sweep died that way. So load the module from its file with no
+    package context: ``remote.py`` has no intra-package imports, which is
+    what makes this safe, and it stays the single source of truth for the
+    dataset id rather than being copied in here.
+    """
+    import importlib.util
+    src = REPO / "jcm" / "data" / "remote.py"
+    spec = importlib.util.spec_from_file_location("_jcm_remote", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.fetch(path)
+
+
 def run(args) -> dict:
     preset = PRESETS[args.preset]
     days = args.days if args.days else args.months * 30
@@ -483,11 +504,9 @@ def run(args) -> dict:
     missing = []
     for f in files:
         if f.startswith("hf://"):
-            sys.path.insert(0, str(REPO))
-            from jcm.data.remote import fetch
             try:
                 print(f"prefetching {f}", file=sys.stderr)
-                fetch(f[len("hf://"):])
+                _hf_fetch(f[len("hf://"):])
             except Exception as e:              # unreachable or absent
                 missing.append(f"{f}  ({type(e).__name__}: {e})")
         elif not pathlib.Path(f).exists():

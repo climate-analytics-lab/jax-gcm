@@ -22,6 +22,7 @@ lives in one place rather than being re-typed as a shell one-liner.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -39,9 +40,38 @@ def _smi(args: list[str]) -> str:
         return ""
 
 
+def _own_pids() -> set[str]:
+    """Collect this process and its direct descendants.
+
+    A tenant that IS the caller must not read as somebody else's work. The
+    free-GPU gate refuses to start when a card has tenants, so if anything
+    the harness imported has already initialised a JAX backend -- which
+    preallocates ~75 % of the device the moment it is touched -- the gate
+    sees a 61 GiB tenant and waits out its whole timeout against itself.
+    That is not hypothetical: it is exactly how a six-job sweep died after
+    an ``hf://`` prefetch was added ahead of the gate, and the symptom
+    ("GPU 0 is busy ... tenants: python(pid 364)") reads like a busy
+    cluster rather than a bug in here.
+    """
+    pids = {str(os.getpid())}
+    try:
+        out = subprocess.run(["ps", "-o", "pid=", "--ppid", str(os.getpid())],
+                             capture_output=True, text=True, timeout=20)
+        pids |= {p.strip() for p in out.stdout.split() if p.strip()}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return pids
+
+
 def gpu_table() -> list[dict]:
-    """One entry per GPU: index, uuid, memory, utilisation, tenant processes."""
+    """One entry per GPU: index, uuid, memory, utilisation, tenant processes.
+
+    ``procs`` excludes the caller's own process tree (see ``_own_pids``);
+    ``mem_used_mib`` is likewise net of what those processes hold, so a card
+    occupied only by us reads as free.
+    """
     rows = []
+    mine = _own_pids()
     out = _smi(["--query-gpu=index,uuid,memory.used,memory.total,"
                 "utilization.gpu", "--format=csv,noheader,nounits"])
     apps = _smi(["--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
@@ -51,14 +81,18 @@ def gpu_table() -> list[dict]:
         if len(parts) < 5:
             continue
         idx, uuid, used, total, util = parts[:5]
-        procs = []
+        procs, own_mib = [], 0.0
         for a in apps.splitlines():
             f = [x.strip() for x in a.split(",")]
             if len(f) >= 4 and f[0] == uuid:
+                if f[1] in mine:
+                    own_mib += float(f[3].split()[0] or 0)
+                    continue
                 procs.append({"pid": f[1], "name": f[2], "mem": f[3]})
         rows.append({
             "index": int(idx), "uuid": uuid,
-            "mem_used_mib": float(used or 0), "mem_total_mib": float(total or 0),
+            "mem_used_mib": max(0.0, float(used or 0) - own_mib),
+            "mem_total_mib": float(total or 0),
             "util_pct": float(util or 0), "procs": procs,
         })
     return rows
