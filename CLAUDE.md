@@ -189,16 +189,27 @@ the automatic Codex review, and handing back for human review only once
 everything is green), so the details live in one place rather than drifting
 between here and there.
 
-The two things worth repeating because getting them wrong is expensive:
+The repo skills live in `.claude/skills/` — before opening any PR, run the
+**`jcm-local-ci`** skill's gates locally; CI must confirm a result you have
+already seen, not discover it:
 
 ```bash
 ruff check .                     # MUST be clean before EVERY push
-JAX_PLATFORMS=cpu pytest -n 12   # JAX_PLATFORMS=cpu is REQUIRED on GPU hosts
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
+    --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
-Without `JAX_PLATFORMS=cpu` every xdist worker grabs the same GPU and XLA
-fails with `CUDA_ERROR_OUT_OF_MEMORY` / `dnn_support != nullptr`. And a lint
-error in CI burns a full cycle on something ruff reports locally in seconds.
+Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
+hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
+`CUDA_ERROR_OUT_OF_MEMORY`). And coverage must be measured at **CI
+dependency parity**: CI installs `pip install -e .` with no extras, so code
+gated behind an optional extra (`jcm[cosp]`, ...) counts as UNCOVERED there
+even when its tests pass locally — uninstall the extra before measuring, or
+the gate you cleared locally fails in CI (PR #582 and #598 both hit
+coverage this way). Every Codex/bot inline comment gets an explicit
+threaded reply ("Confirmed and fixed in <sha>" / "Refuted: <evidence>")
+before handing back — see `jcm-local-ci` for the `gh api` one-liner.
 
 Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
 checker, no pre-commit hooks. Tests are `*_test.py` co-located with their

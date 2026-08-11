@@ -82,6 +82,7 @@ def echam_physics(
     cosp_ncolumns: int = 40,
     cosp_calipso: bool = False,
     cosp_modis: bool = False,
+    cosp_isccp: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -185,7 +186,12 @@ def echam_physics(
         cosp_modis: Also run the MODIS imager simulator on that
             realization (``cltmodis``, ``clwmodis``, ``climodis``,
             ``tauwmodis``, ``tauimodis``, ``reffclwmodis``,
-            ``reffclimodis``, ``lwpmodis``, ``iwpmodis``).
+            ``reffclimodis``, ``lwpmodis``, ``iwpmodis``, and the
+            joint histograms ``clmodis`` / ``jpdftaure*modis`` /
+            ``lwpreffmodis`` / ``iwpreffmodis``).
+        cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
+            realization (``clisccp`` tau/CTP histogram and
+            ``cltisccp``); see jax-gcm#597.
 
     """
     convection_p = convection or ConvectionParameters.default()
@@ -358,7 +364,8 @@ def echam_physics(
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
         cosp_terms = [CloudsatCosp(ncolumns=cosp_ncolumns,
                                    enable_calipso=cosp_calipso,
-                                   enable_modis=cosp_modis)]
+                                   enable_modis=cosp_modis,
+                                   enable_isccp=cosp_isccp)]
 
     aerocom_terms: list[PhysicsTerm] = []
     if enable_aerocom:

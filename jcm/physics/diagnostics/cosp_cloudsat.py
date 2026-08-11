@@ -44,6 +44,24 @@ protocols request (jax-gcm#581):
 * MODIS ``cltmodis`` / ``clwmodis`` / ``climodis`` / ``tauwmodis`` /
   ``tauimodis`` / ``reffclwmodis`` / ``reffclimodis``.
 
+The joint histograms those simulators compute anyway are emitted too
+(jax-gcm#597), flattened to a trailing bin-channel axis that the output
+layer expands to ``<name>.<i>`` fields (the ``cosp_precip_cover`` pattern;
+``tools/aerocom_cmor.py`` reassembles them into properly-binned CF files):
+
+* MODIS ``clmodis`` (tau x CTP), ``jpdftaureliqmodis`` /
+  ``jpdftaureicemodis`` (tau x Reff) and the LWP/IWP x Reff pair
+  (``lwpreffmodis`` / ``iwpreffmodis``, Pincus et al. 2023);
+* CALIPSO ``cfadLidarsr532`` (scattering ratio x height);
+* ISCCP ``clisccp`` (tau x CTP) and ``cltisccp``, via ``enable_isccp``:
+  the ICARUS simulator on the same SCOPS realization, with the 10.5-um
+  cloud emissivity derived from the condensate paths
+  (1 - exp(-k W), Stephens 1978 liquid / Ebert & Curry 1992 ice).
+
+Bin-axis order in the flattened channel is C-order (tau-major for the
+tau x CTP histograms); the CTP axis is surface-first, as the jcosp
+drivers emit it (matching cosp.F90's output flip).
+
 ``parasolRefl`` is NOT available: jax-cosp carries the PARASOL optical-depth
 inputs (``tau_sfc_liq``/``tau_sfc_ice``) but no reflectance simulator, so
 that one AeroCom field needs upstream work.
@@ -121,8 +139,49 @@ def _layer_optical_depth(clouds, pressure_half, qc, qi):
     return tau_liq + tau_ice
 
 
+def _lw_emissivity(qc, qi, pressure_half):
+    """Gridbox-mean 10.5-um cloud emissivity per layer, for ISCCP.
+
+    The standard COSP host-side closure: ``dem = 1 - exp(-(k_l W_l + k_i
+    W_i))`` on the layer condensate paths, with broadband-window mass
+    absorption coefficients (diffusivity folded in) of 0.158 m2 g-1 for
+    liquid (Stephens 1978) and 0.0735 m2 g-1 for ice (Ebert & Curry 1992,
+    mid-size crystals). jcm's radiation does not expose a per-layer LW
+    cloud emissivity, so this is derived here the way the ECHAM and CAM
+    COSP interfaces derive theirs; the ISCCP CTP retrieval is sensitive
+    to it only through the partial-emissivity adjustment of thin cloud.
+    """
+    dm = jnp.diff(pressure_half, axis=0) / c.grav
+    k_liq = 158.0   # m2/kg
+    k_ice = 73.5    # m2/kg
+    return 1.0 - jnp.exp(-(k_liq * qc * dm + k_ice * qi * dm))
+
+
+def _flat_hist(hist):
+    """Flatten a (nb1, nb2, ncols) joint histogram to (ncols, nb1*nb2).
+
+    The leading ncols axis and trailing flat bin-channel axis are what the
+    output layer's multi-channel expansion expects (it emits one 2-D field
+    per channel, ``<name>.<i>``); the C-order flattening (bin1-major) is
+    what ``tools/aerocom_cmor.py`` inverts when it reassembles the binned
+    file.
+    """
+    nb1, nb2 = hist.shape[0], hist.shape[1]
+    return jnp.moveaxis(hist, -1, 0).reshape(hist.shape[-1], nb1 * nb2)
+
+
 # Values at or below this are the COSP R_UNDEF missing-data sentinel.
 _R_UNDEF_THRESHOLD = -1e20
+
+
+def _defined(x):
+    """Map COSP R_UNDEF sentinels (dark / cloud-free retrievals) to zero.
+
+    Emitting the huge negative sentinel would poison time averages; these
+    are grid-box means the protocol explicitly does NOT divide by cloud
+    cover, so a cloud-free (or night) box legitimately contributes zero.
+    """
+    return jnp.where(x > _R_UNDEF_THRESHOLD, x, 0.0)
 
 
 class CloudsatCosp(PhysicsTerm):
@@ -158,14 +217,20 @@ class CloudsatCosp(PhysicsTerm):
         "cosp_warm_rain",
         # CALIPSO (enable_calipso)
         "cltcalipso", "cllcalipso", "clmcalipso", "clhcalipso",
+        "cfadLidarsr532",
         # MODIS (enable_modis)
         "cltmodis", "clwmodis", "climodis", "tauwmodis", "tauimodis",
         "reffclwmodis", "reffclimodis", "lwpmodis", "iwpmodis",
+        "clmodis", "jpdftaureliqmodis", "jpdftaureicemodis",
+        "lwpreffmodis", "iwpreffmodis",
+        # ISCCP (enable_isccp)
+        "clisccp", "cltisccp",
     )
 
     def __init__(self, ncolumns: int = 40, overlap: int = 3, seed: int = 0,
                  lut_path=None, enable_calipso: bool = False,
-                 enable_modis: bool = False):
+                 enable_modis: bool = False, enable_isccp: bool = False,
+                 isccp_emsfc_lw: float = 0.98):
         """Configure the simulator; loads the radar Z-scale LUT eagerly.
 
         ncolumns trades subcolumn sampling noise against cost (COSP's
@@ -195,6 +260,8 @@ class CloudsatCosp(PhysicsTerm):
         # simulator costs nothing rather than being masked out.
         self.enable_calipso = bool(enable_calipso)
         self.enable_modis = bool(enable_modis)
+        self.enable_isccp = bool(enable_isccp)
+        self.isccp_emsfc_lw = float(isccp_emsfc_lw)
 
     def __call__(
         self,
@@ -283,22 +350,46 @@ class CloudsatCosp(PhysicsTerm):
 
         p_half = diagnostics["pressure_half"]
 
-        if self.enable_modis:
-            # One SCOPS draw feeds radar and imager together (COSP's own
-            # wiring), so the subcolumn sampling is paid once. MODIS needs
-            # the gridbox-mean 0.67 um layer optical depths of stratiform
-            # and convective cloud; jcm detrains convective condensate into
-            # the same qc/qi fields and carries no separate convective
-            # cloud, so all of it is presented as stratiform (matching the
-            # conv_frac = 0 choice above).
+        isccp_out = None
+        if self.enable_modis or self.enable_isccp:
+            # One SCOPS draw feeds radar, imager and ISCCP together (COSP's
+            # own wiring), so the subcolumn sampling is paid once. MODIS
+            # needs the gridbox-mean 0.67 um layer optical depths of
+            # stratiform and convective cloud; jcm detrains convective
+            # condensate into the same qc/qi fields and carries no separate
+            # convective cloud, so all of it is presented as stratiform
+            # (matching the conv_frac = 0 choice above). ISCCP additionally
+            # needs the 10.5-um cloud emissivity (derived from the same
+            # condensate, see _lw_emissivity), the skin temperature and a
+            # day mask; its boxptop also completes the MODIS low-cloud CTP
+            # substitution, exactly as in cosp.F90.
             dtau_s = _layer_optical_depth(clouds, p_half, qc_pm, qi_pm)
             dtau_c = jnp.zeros_like(dtau_s)
+            isccp_kwargs = {}
+            if self.enable_isccp:
+                sfc = diagnostics.get("surface")
+                skt = getattr(sfc, "surface_temperature", None)
+                if skt is None:
+                    skt = temperature[-1]  # lowest-layer T as skin proxy
+                rad = diagnostics.get("radiation")
+                toa_sw = getattr(rad, "toa_sw_down", None)
+                sunlit = None if toa_sw is None else (toa_sw > 0.0)
+                isccp_kwargs = dict(
+                    run_isccp=True,
+                    dem_s=_lw_emissivity(qc_pm, qi_pm, p_half),
+                    dem_c=jnp.zeros_like(dtau_c),
+                    skt=skt, emsfc_lw=self.isccp_emsfc_lw, sunlit=sunlit)
             joint = simulate_cloudsat_modis(
                 inputs, self._lut, dtau_s, dtau_c, p_half, key=key,
-                ncolumns=self.ncolumns, overlap=self.overlap)
+                ncolumns=self.ncolumns, overlap=self.overlap,
+                **isccp_kwargs)
             # ``ModisOutputs`` wraps optics/subcolumn/column; the column
-            # stage holds the gridbox statistics AeroCom asks for.
-            out, modis_out = joint.cloudsat, joint.modis.column
+            # stage holds the gridbox statistics AeroCom asks for. MODIS
+            # fields are only EMITTED when enable_modis, even though the
+            # joint driver computes them whenever ISCCP runs.
+            out = joint.cloudsat
+            modis_out = joint.modis.column if self.enable_modis else None
+            isccp_out = joint.isccp.column if self.enable_isccp else None
         else:
             out = simulate_cloudsat(inputs, self._lut, key=key,
                                     ncolumns=self.ncolumns,
@@ -307,15 +398,6 @@ class CloudsatCosp(PhysicsTerm):
 
         extra: dict = {}
         if modis_out is not None:
-            # MODIS marks dark (night) and cloud-free retrievals with the
-            # COSP R_UNDEF sentinel (a large negative number). Emitting it
-            # would poison the time average, so it is mapped to zero: these
-            # are grid-box means and the protocol Q/A is explicit that they
-            # are NOT divided by cloud cover, so a cloud-free box legitimately
-            # contributes zero.
-            def _defined(x):
-                return jnp.where(x > _R_UNDEF_THRESHOLD, x, 0.0)
-
             # jcosp reports the MODIS cloud fractions in percent and the
             # AeroCom/CFMIP request is a fraction, so convert here rather
             # than leaving a factor of 100 for the post-processor.
@@ -329,6 +411,24 @@ class CloudsatCosp(PhysicsTerm):
                 "reffclimodis": _defined(modis_out.size_ice),
                 "lwpmodis": _defined(modis_out.lwp),
                 "iwpmodis": _defined(modis_out.iwp),
+                # Joint histograms (jax-gcm#597), percent -> fraction like
+                # the scalar covers; accumulating the per-step fields gives
+                # the time-MEAN histogram, which is what CFMIP expects.
+                "clmodis": _flat_hist(_defined(modis_out.tau_vs_ctp)) * 0.01,
+                "jpdftaureliqmodis":
+                    _flat_hist(_defined(modis_out.tau_vs_reff_liq)) * 0.01,
+                "jpdftaureicemodis":
+                    _flat_hist(_defined(modis_out.tau_vs_reff_ice)) * 0.01,
+                "lwpreffmodis":
+                    _flat_hist(_defined(modis_out.lwp_vs_reff_liq)) * 0.01,
+                "iwpreffmodis":
+                    _flat_hist(_defined(modis_out.iwp_vs_reff_ice)) * 0.01,
+            })
+
+        if isccp_out is not None:
+            extra.update({
+                "clisccp": _flat_hist(_defined(isccp_out.fq_isccp)) * 0.01,
+                "cltisccp": _defined(isccp_out.totalcldarea) * 0.01,
             })
 
         if self.enable_calipso:
@@ -406,5 +506,9 @@ class CloudsatCosp(PhysicsTerm):
 
         # cldlayer is (4, *batch) = low / mid / high / total, in percent.
         low, mid, high, total = (col.cldlayer[i] * 0.01 for i in range(4))
-        return {"cllcalipso": low, "clmcalipso": mid,
+        # The scattering-ratio CFAD is already a fraction (of subcolumns,
+        # per height bin); flatten (SR_BINS, nvgrid, ncols) to the
+        # channel-expansion layout like the other joint histograms.
+        extra_cfad = {"cfadLidarsr532": _flat_hist(col.cfad_sr)}
+        return {**extra_cfad, "cllcalipso": low, "clmcalipso": mid,
                 "clhcalipso": high, "cltcalipso": total}

@@ -114,6 +114,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # Muelmenstaedt et al. (2020). Not a CMIP variable, kept under its own
     # name so the submission still carries it.
     "cosp_warm_rain": ("cospwarmrain", "1", "Column", 1.0, 0.0),
+    # ISCCP total cloud area (tau >= 0.3), stored as a fraction like the
+    # other simulator covers; CMIP wants percent. The clisccp histogram is
+    # reassembled separately (see _HISTOGRAMS below).
+    "cltisccp": ("cltisccp", "%", "Column", 100.0, 0.0),
     # --- spectral aerosol optics (jax-gcm#584) ---
     # These come from the diagnostic Mie pass at the OBSERVATION
     # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
@@ -225,6 +229,7 @@ CF_STANDARD_NAMES = {
     "clmcalipso": "cloud_area_fraction_in_atmosphere_layer",
     "clhcalipso": "cloud_area_fraction_in_atmosphere_layer",
     "cltmodis": "cloud_area_fraction",
+    "cltisccp": "cloud_area_fraction",
     "clwmodis": "liquid_water_cloud_area_fraction",
     "climodis": "ice_cloud_area_fraction",
     "tauwmodis": "atmosphere_optical_thickness_due_to_cloud",
@@ -275,6 +280,107 @@ def _collect_burdens(ds: xr.Dataset) -> dict[str, xr.DataArray]:
         if src in ds.data_vars:
             out[f"burden_{spec}"] = ds[src]
     return out
+
+
+# COSP joint histograms: emitted by the model as flattened bin channels
+# ``<name>.<i>`` (the output layer's multi-channel expansion), reassembled
+# here into properly-binned variables with CF bounds. Bin tables mirror
+# jcosp/config.py (cosp_config.F90 / Pincus et al. 2023) and are
+# cross-checked against the live jcosp values by
+# ``CmorWriterTest.test_histogram_bins_match_jcosp``. Axis order of the
+# flat channel is C-order, first axis major; the CTP axes are
+# surface-first, as the jcosp drivers emit them (cosp.F90's output flip).
+_TAU_CENTERS = [0.15, 0.80, 2.45, 6.5, 16.2, 41.5, 100.0]
+_TAU_EDGES = [0.0, 0.3, 1.3, 3.6, 9.4, 23.0, 60.0, 10000.0]
+_CTP_CENTERS_PA = [90000.0, 74000.0, 62000.0, 50000.0, 37500.0, 24500.0, 9000.0]
+_CTP_EDGES_PA = [100000.0, 80000.0, 68000.0, 56000.0, 44000.0, 31000.0,
+                 18000.0, 0.0]
+_REFF_LIQ_EDGES = [0.0, 4.0e-6, 8e-6, 1.0e-5, 1.25e-5, 1.5e-5, 2.0e-5,
+                   3.0e-5, 1.0e-2]
+_REFF_ICE_EDGES = [0.0, 5.0e-6, 1.0e-5, 2.0e-5, 3.0e-5, 4.0e-5, 5.0e-5,
+                   6.0e-5, 1.0e-2]
+_LWP_EDGES = [0.0, 0.01, 0.03, 0.06, 0.10, 0.15, 0.25, 20.0]
+_IWP_EDGES = [0.0, 0.02, 0.05, 0.10, 0.20, 0.40, 1.00, 20.0]
+# CALIPSO SR CFAD: 15 scattering-ratio bins x 40 height levels (480 m).
+# SR edges are cosp_config.F90's calipso_histBsct (-1 is the "no signal"
+# floor; 999 the physical SR cap).
+_SR_EDGES = [-1.0, 0.01, 1.2, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 25.0, 30.0,
+             40.0, 50.0, 60.0, 80.0, 999.0]
+_CFAD_NLEV, _CFAD_DZ = 40, 480.0
+
+
+def _centers(edges):
+    return [0.5 * (a + b) for a, b in zip(edges[:-1], edges[1:])]
+
+
+# name -> (dim1 name, centers1, edges1, dim2 name, centers2, edges2,
+#          units, scale, standard_name or None)
+_HISTOGRAMS = {
+    "clmodis": ("tau", _TAU_CENTERS, _TAU_EDGES,
+                "plev7", _CTP_CENTERS_PA, _CTP_EDGES_PA,
+                "%", 100.0, "cloud_area_fraction_in_atmosphere_layer"),
+    "clisccp": ("tau", _TAU_CENTERS, _TAU_EDGES,
+                "plev7", _CTP_CENTERS_PA, _CTP_EDGES_PA,
+                "%", 100.0, "cloud_area_fraction_in_atmosphere_layer"),
+    "jpdftaureliqmodis": ("tau", _TAU_CENTERS, _TAU_EDGES,
+                          "effectiveRadiusLiq", _centers(_REFF_LIQ_EDGES),
+                          _REFF_LIQ_EDGES, "%", 100.0, None),
+    "jpdftaureicemodis": ("tau", _TAU_CENTERS, _TAU_EDGES,
+                          "effectiveRadiusIce", _centers(_REFF_ICE_EDGES),
+                          _REFF_ICE_EDGES, "%", 100.0, None),
+    "lwpreffmodis": ("lwp", _centers(_LWP_EDGES), _LWP_EDGES,
+                     "effectiveRadiusLiq", _centers(_REFF_LIQ_EDGES),
+                     _REFF_LIQ_EDGES, "%", 100.0, None),
+    "iwpreffmodis": ("iwp", _centers(_IWP_EDGES), _IWP_EDGES,
+                     "effectiveRadiusIce", _centers(_REFF_ICE_EDGES),
+                     _REFF_ICE_EDGES, "%", 100.0, None),
+    "cfadLidarsr532": ("scatratio", _centers(_SR_EDGES), _SR_EDGES,
+                       "alt40", [(_CFAD_NLEV - 1 - i) * _CFAD_DZ + _CFAD_DZ / 2
+                                 for i in range(_CFAD_NLEV)], None,
+                       "1", 1.0,
+                       "histogram_of_backscattering_ratio_over_height_above_reference_ellipsoid"),
+}
+
+
+def _collect_histograms(ds: xr.Dataset) -> tuple[dict[str, xr.Dataset], set[str]]:
+    """Reassemble flattened ``<name>.<i>`` histogram channels.
+
+    Returns per-histogram single-variable Datasets (the variable plus its
+    bin coordinates and CF ``bounds`` variables) and the set of source
+    channel names consumed, so the skipped-variables report stays honest.
+    """
+    out: dict[str, xr.Dataset] = {}
+    consumed: set[str] = set()
+    for name, (d1, c1, e1, d2, c2, e2, units, scale, std) in _HISTOGRAMS.items():
+        n1, n2 = len(c1), len(c2)
+        srcs = [f"{name}.{i}" for i in range(n1 * n2)]
+        if not all(v in ds.data_vars for v in srcs):
+            continue
+        channels = xr.concat([ds[v] for v in srcs], dim="__bin__")
+        stacked = channels.data.reshape((n1, n2) + channels.shape[1:]) * scale
+        da = xr.DataArray(
+            stacked,
+            dims=(d1, d2) + tuple(channels.dims[1:]),
+            coords={d1: c1, d2: c2,
+                    **{k: v for k, v in channels.coords.items()
+                       if k in channels.dims}},
+            name=name,
+        )
+        attrs = {"units": units, "long_name": name}
+        if std is not None:
+            attrs["standard_name"] = std
+        pieces = {name: da}
+        for dim, edges in ((d1, e1), (d2, e2)):
+            if edges is None:
+                continue
+            bounds = [[a, b] for a, b in zip(edges[:-1], edges[1:])]
+            pieces[f"{dim}_bnds"] = xr.DataArray(
+                bounds, dims=(dim, "bnds"), name=f"{dim}_bnds")
+            da.coords[dim].attrs["bounds"] = f"{dim}_bnds"
+        da.attrs.update(attrs)
+        out[name] = xr.Dataset(pieces)
+        consumed.update(srcs)
+    return out, consumed
 
 
 # jcm species -> AeroCom component suffix. The three organic species
@@ -349,6 +455,7 @@ def convert(
     optics_vars, optics_srcs = _collect_optics(ds)
     for name, da in optics_vars.items():
         candidates[name] = (da, "1", "Column")
+    hist_dsets, hist_srcs = _collect_histograms(ds)
 
     for cmor, (da, units, vert) in sorted(candidates.items()):
         assert vert in VALID_VERT, vert
@@ -376,8 +483,21 @@ def convert(
             out.to_netcdf(outdir / fname)
         written.append(fname)
 
+    # Joint histograms are whole Datasets (variable + bin bounds), written
+    # outside the DataArray loop above.
+    for name, hds in sorted(hist_dsets.items()):
+        fname = _filename(convention, model, experiment, name, "Column",
+                          period, freq)
+        if not dry_run:
+            hds.attrs.update(
+                model_id=model, experiment_id=experiment, frequency=freq,
+                vertical_coordinate_type="Column",
+            )
+            hds.to_netcdf(outdir / fname)
+        written.append(fname)
+
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}
-    skipped = sorted(set(ds.data_vars) - mapped_srcs - optics_srcs
+    skipped = sorted(set(ds.data_vars) - mapped_srcs - optics_srcs - hist_srcs
                      - {f"aerocom_burden_{sp}" for sp in BURDEN_SPECIES})
     return written, skipped
 
