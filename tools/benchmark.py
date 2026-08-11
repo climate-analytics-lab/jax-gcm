@@ -191,14 +191,10 @@ def _pyses_preset(levels: int) -> list[str]:
       because composing a config is not the same as building the model.)
     * no TERRAIN override — pySES bilinearly interpolates the packaged T63
       field onto its columns, so the horizontal grid need not match. The
-      mirror's native ``hf://bundles/ne30pg3/sso.nc`` is deliberately NOT
-      used despite the dycore config recommending it: its ``lsm`` is the
-      DEM-validity placeholder its own attrs warn about (mean 0.998, against
-      a true land fraction of ~0.335 in ``bundles/t63/terrain.nc``), so it
-      would run an essentially all-land planet — silently, since the dycore
-      just clips it to [0, 1]. It also lacks the ``orog_gll`` the same
-      comment promises. See jax-gcm#596; revisit once an assembled bundle
-      exists.
+      assembled native ``hf://bundles/ne30pg3/terrain.nc`` (real LANDFRAC
+      land fraction + exact GLL orography; the fix for jax-gcm#596) is
+      deliberately not used here so the sweep stays comparable with the
+      validated 2026-07 campaign, which ran on the packaged T63 downscale.
     * but ozone IS still level-validated. "Column sampling has no exact-grid
       requirement" covers the HORIZONTAL grid only — an L47 ozone file is
       rejected by an L95 run whatever the backend. L95 therefore needs the

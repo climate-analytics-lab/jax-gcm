@@ -22,8 +22,11 @@ Ozone and oxidants are **level-resolved from level-independent sources**
 (FZJ vmro3 on 66 plev; WACCM L66): the `<g>_l47` and `<g>_l95` dirs both
 exist for every grid — there is no "L95-only" special case. Any config
 path also accepts `hf://bundles/...` directly (cache-first resolver;
-prefetch on a login node). `bundles/ne30pg3/sso.nc` serves the pySES
-native-terrain path. `registry.json` has sha256 for every file.
+prefetch on a login node). `bundles/ne30pg3/terrain.nc` serves the pySES
+native-terrain path (fully assembled: LANDFRAC land fraction + GLL
+orography — the raw SSO product's placeholder `lsm` made the old
+`sso.nc` an all-land trap, #596). `registry.json` has sha256 for every
+file.
 
 Era semantics: `pd` = 2005–2014 climatologies; `pi` = 1850s emissions/
 ozone/oxidants with 1870–1879 SST/ice (earliest observed decade).

@@ -498,7 +498,7 @@ class PysesCamSEDycore(DynamicalCore):
                 unit_sphere_vectors as _unit)
 
             if "ncol" in ds.dims:
-                # Native unstructured file (e.g. bundles/ne30pg3/sso.nc):
+                # Native unstructured file (e.g. bundles/ne30pg3/terrain.nc):
                 # map each model column to the nearest file column on the
                 # unit sphere — the identity up to ordering when the file
                 # is on the same grid, with no interpolation smoothing.
@@ -540,6 +540,17 @@ class PysesCamSEDycore(DynamicalCore):
 
             orog_col = np.maximum(sample("orog", col_lon, col_lat), 0.0)
             fmask_col = np.clip(sample("lsm", col_lon, col_lat), 0.0, 1.0)
+            # >90% land is almost certainly a DEM-validity placeholder
+            # (raw SSO products mark ~all pixels valid), not a land-sea
+            # mask — refuse rather than silently run an all-land planet
+            # (#596)
+            if fmask_col.mean() > 0.9:
+                raise ValueError(
+                    f"terrain file {source_file}: 'lsm' averages "
+                    f"{fmask_col.mean():.2f} land — this looks like a "
+                    "DEM-validity placeholder from a raw SSO product, "
+                    "not a land-sea mask. Use an assembled terrain "
+                    "bundle (e.g. hf://bundles/ne30pg3/terrain.nc).")
             sso_col = {}
             for name in _SSO_NAMES:
                 vals = sample(name, col_lon, col_lat)
