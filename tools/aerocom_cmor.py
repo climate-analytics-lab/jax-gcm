@@ -168,10 +168,14 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "aerocom_icnum": ("icnum", "m-2", "Column", 1.0, 0.0),
     "aerocom_albedo": ("albedo", "1", "Column", 1.0, 0.0),
     "aerocom_lts": ("lts", "K", "Surface", 1.0, 0.0),
-    "aerocom_u200": ("u200", "m s-1", "Surface", 1.0, 0.0),
-    "aerocom_v200": ("v200", "m s-1", "Surface", 1.0, 0.0),
-    "aerocom_u700": ("u700", "m s-1", "Surface", 1.0, 0.0),
-    "aerocom_v700": ("v700", "m s-1", "Surface", 1.0, 0.0),
+    # 2-D fields on pressure surfaces: none of the AeroCom vertical-
+    # coordinate words fits a 200 hPa wind exactly; "Column" (a 2-D field
+    # characterising the column) is the least wrong, and "Surface" would be
+    # actively misleading. Recorded in the submission notes.
+    "aerocom_u200": ("u200", "m s-1", "Column", 1.0, 0.0),
+    "aerocom_v200": ("v200", "m s-1", "Column", 1.0, 0.0),
+    "aerocom_u700": ("u700", "m s-1", "Column", 1.0, 0.0),
+    "aerocom_v700": ("v700", "m s-1", "Column", 1.0, 0.0),
     "aerocom_N70": ("N70", "m-3", "ModelLevel", 1.0, 0.0),
     "aerocom_N100": ("N100", "m-3", "ModelLevel", 1.0, 0.0),
     "aerocom_PM1": ("PM1", "kg m-3", "ModelLevel", 1.0, 0.0),
@@ -283,15 +287,21 @@ _OPTICS_COMPONENT = {
 }
 
 
-def _collect_optics(ds: xr.Dataset) -> dict[str, xr.DataArray]:
+def _collect_optics(ds: xr.Dataset) -> tuple[dict[str, xr.DataArray], set[str]]:
     """Group the per-species optics into AeroCom components (jax-gcm#584).
 
     Several jcm species map to one AeroCom component, so contributions are
     SUMMED rather than overwritten. Per-mode fields are passed through
     under their own names — they are a JAM extra, not part of the protocol,
     but they are what makes a size-resolved AOD evaluation possible.
+
+    Also returns the set of SOURCE variable names consumed, so ``convert``
+    can keep them out of the "had no AeroCom mapping" report — that report
+    is the coverage-gap watchdog, and it must not list variables that were
+    in fact written.
     """
     out: dict[str, xr.DataArray] = {}
+    consumed: set[str] = set()
     for var in ds.data_vars:
         for prefix in ("od550_", "abs550_"):
             if not str(var).startswith(prefix):
@@ -299,14 +309,16 @@ def _collect_optics(ds: xr.Dataset) -> dict[str, xr.DataArray]:
             rest = str(var)[len(prefix):]
             if rest.startswith("mode_"):
                 out[str(var)] = ds[var]
+                consumed.add(str(var))
                 break
             comp = _OPTICS_COMPONENT.get(rest)
             if comp is None:
                 break
             name = f"{prefix[:-1]}{comp}"
             out[name] = out[name] + ds[var] if name in out else ds[var]
+            consumed.add(str(var))
             break
-    return out
+    return out, consumed
 
 
 def convert(
@@ -334,7 +346,8 @@ def convert(
         candidates[cmor] = (da, units, vert)
     for name, da in _collect_burdens(ds).items():
         candidates[name] = (da, "kg m-2", "Column")
-    for name, da in _collect_optics(ds).items():
+    optics_vars, optics_srcs = _collect_optics(ds)
+    for name, da in optics_vars.items():
         candidates[name] = (da, "1", "Column")
 
     for cmor, (da, units, vert) in sorted(candidates.items()):
@@ -364,7 +377,7 @@ def convert(
         written.append(fname)
 
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}
-    skipped = sorted(set(ds.data_vars) - mapped_srcs
+    skipped = sorted(set(ds.data_vars) - mapped_srcs - optics_srcs
                      - {f"aerocom_burden_{sp}" for sp in BURDEN_SPECIES})
     return written, skipped
 

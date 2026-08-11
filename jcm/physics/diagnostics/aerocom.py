@@ -71,6 +71,15 @@ OVERLAP_MAXIMUM_RANDOM = "maximum-random"
 # zero, so the guarded value never affects a physical result.
 _MIN_REFF_M = 1e-9
 
+# Physical floor for condensate guards. A guard of ``> 0.0`` is not enough
+# in reverse mode: the division VJP forms ``-g x / y^2`` and ``y^2``
+# underflows to exactly zero for ``y`` below sqrt(TINY) (~1e-154 in f64,
+# ~1e-19 in f32), turning a finite forward into a NaN gradient. Spectral
+# ringing puts condensate tails deep inside that window, so guard on a
+# physical floor, never on zero (CLAUDE.md). 1e-19 covers both dtypes and
+# is still ~11 orders below any physically meaningful condensate.
+_MIN_CONDENSATE = 1e-19
+
 # Densities used for the geometric-optics optical depth.
 _RHO_WATER = 1000.0  # kg/m^3
 _RHO_ICE = 917.0     # kg/m^3
@@ -442,8 +451,17 @@ class AerocomDiagnostics(PhysicsTerm):
         self.overlap = str(overlap)
         self.plev_pa = tuple(float(p) for p in plev_pa)
         # MAM4 modal widths (Aitken, accumulation, coarse, primary-carbon).
-        self.mode_sigma_g = (tuple(mode_sigma_g) if mode_sigma_g is not None
+        self.mode_sigma_g = (tuple(float(s) for s in mode_sigma_g)
+                             if mode_sigma_g is not None
                              else (1.6, 1.8, 1.8, 1.6))
+        # sigma_g = 1 is a monodisperse delta: ln(sigma) = 0 divides both
+        # lognormal integrals by zero, and sigma < 1 is not a width at all.
+        # The per-mode COUNT is checked against the live modal state in
+        # _aerosol_group, where it is known.
+        bad = [s for s in self.mode_sigma_g if s <= 1.0]
+        if bad:
+            raise ValueError(
+                f"mode_sigma_g entries must be > 1 (geometric std dev); got {bad}")
 
     def __call__(
         self,
@@ -477,14 +495,16 @@ class AerocomDiagnostics(PhysicsTerm):
         qc = thermo.get("qc", clouds.qc)
         qi = thermo.get("qi", clouds.qi)
 
-        cdnc_m3, qnc, qni = self._number_concentrations(state, diagnostics, clouds)
+        cdnc_gm, cdnc_ic, qnc, qni = self._number_concentrations(
+            state, diagnostics, clouds)
         # Publish the resolved 3-D droplet number: CloudData.droplet_number
         # is zero under the 2-moment scheme (which carries qnc instead), so
         # the CMOR writer needs this rather than the raw CloudData field.
-        out["aerocom_cdnc3d"] = cdnc_m3
+        # GRID-MEAN under both schemes, so the CMOR'd cdnc3d means one thing.
+        out["aerocom_cdnc3d"] = cdnc_gm
         if "cloud" in self.groups:
             out.update(self._cloud_group(clouds, temperature, p_half,
-                                         cdnc_m3, qc, qi))
+                                         cdnc_ic, qc, qi))
         if "column" in self.groups:
             out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
@@ -502,39 +522,60 @@ class AerocomDiagnostics(PhysicsTerm):
 
     @staticmethod
     def _number_concentrations(state, diagnostics, clouds):
-        """Return (cdnc_m3, qnc_per_kg, qni_per_kg) from whichever scheme ran.
+        """Return ``(cdnc_gm_m3, cdnc_ic_m3, qnc_per_kg, qni_per_kg)``.
 
-        The two microphysics schemes publish droplet number differently and
-        in different units, so the diagnostics must not assume one of them:
+        The two microphysics schemes publish droplet number differently, in
+        different units AND with different in-cloud semantics, so the
+        diagnostics must not assume one of them:
 
-        * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
-          **m^-3** and carries no prognostic number tracer;
         * 2-moment (``lohmann_2m``) carries prognostic ``qnc``/``qni``
-          tracers in **kg^-1** and leaves ``CloudData.droplet_number`` at
-          its zero carry init.
+          tracers in **kg^-1** as **grid means** (they are advected
+          tracers) and leaves ``CloudData.droplet_number`` at its zero
+          carry init;
+        * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
+          **m^-3** as a characteristic **in-cloud** value
+          (``base_cdnc * cdnc_factor``), nonzero even in clear sky.
 
-        Preferring the prognostic tracers where present keeps the 2-moment
-        preset from silently reporting zero CDNC, and returning both the
-        volumetric and per-mass forms lets each consumer integrate in the
-        measure that is exact for it (dz for m^-3, dp/g for kg^-1).
+        Both a grid-mean and an in-cloud volumetric field are returned so
+        each consumer takes the semantics it needs: the CMOR'd ``cdnc3d``
+        and the ``cdnum`` column integral want grid means, the cloud-top
+        sampler wants the in-cloud value. Deriving both HERE, per scheme,
+        is what stops the 1M in-cloud field being divided by cloud
+        fraction a second time (inflating cloud-top CDNC by 1/cf) or
+        integrated over clear sky (inflating cdnum). ``qnc`` is returned
+        as the grid-mean per-mass form, the exact measure for dp/g.
         """
         rho = diagnostics.get("air_density")
+        cf = clouds.cloud_fraction
+        cloudy = cf > THRES_CLD
+        cf_safe = jnp.where(cloudy, cf, 1.0)
         # Post-physics, not step-start: the 2M scheme returns number changes
         # as tendencies, so the raw tracers lag a step (see
         # _post_physics_tracer).
         qnc = _post_physics_tracer(state, diagnostics, "qnc")
         qni = _post_physics_tracer(state, diagnostics, "qni")
         if qnc is not None and rho is not None:
-            cdnc_m3 = qnc * rho          # kg^-1 -> m^-3
+            cdnc_gm = qnc * rho          # kg^-1 -> m^-3, grid mean
+            cdnc_ic = jnp.where(cloudy, cdnc_gm / cf_safe, 0.0)
         else:
-            cdnc_m3 = clouds.droplet_number  # 1M path, already m^-3
+            ic_char = clouds.droplet_number  # 1M path: in-cloud, m^-3
+            cdnc_ic = jnp.where(cloudy, ic_char, 0.0)
+            cdnc_gm = ic_char * cf
             if qnc is None and rho is not None:
-                qnc = jnp.where(rho > 0.0, cdnc_m3 / jnp.where(rho > 0.0, rho, 1.0), 0.0)
-        return cdnc_m3, qnc, qni
+                qnc = jnp.where(
+                    rho > 0.0, cdnc_gm / jnp.where(rho > 0.0, rho, 1.0), 0.0)
+        return cdnc_gm, cdnc_ic, qnc, qni
 
-    def _cloud_group(self, clouds, temperature, p_half, cdnc_m3,
+    def _cloud_group(self, clouds, temperature, p_half, cdnc_ic,
                      qc, qi) -> dict:
-        """Cloud-top sampling, optical depths and condensate paths."""
+        """Cloud-top sampling, optical depths and condensate paths.
+
+        ``cdnc_ic`` is the IN-CLOUD droplet number [m^-3], already resolved
+        per scheme by :meth:`_number_concentrations` — the protocol asks for
+        in-cloud cdnc3d as input to the sampler (the grid-mean output then
+        follows from the area weighting inside it). Do not divide by cloud
+        fraction here: for the 1M scheme the field is in-cloud already.
+        """
         # jcm carries effective radii in microns; the protocol wants metres.
         r_liq_m = clouds.r_eff_liq * 1e-6
         r_ice_m = clouds.r_eff_ice * 1e-6
@@ -544,21 +585,18 @@ class AerocomDiagnostics(PhysicsTerm):
 
         # Liquid fraction of the condensate; a condensate-free layer is
         # assigned phase 0 but is masked out by the visibility test anyway.
+        # The guard floor excludes the squared-underflow window, not just
+        # zero (see _MIN_CONDENSATE): ringing tails feed that window, where
+        # the division VJP would emit NaN into any gradient taken through
+        # these diagnostics — and they are natural calibration observables.
         total = qc + qi
-        has_cond = total > 0.0
+        has_cond = total > _MIN_CONDENSATE
         phase3d = jnp.where(has_cond, qc / jnp.where(has_cond, total, 1.0), 0.0)
 
-        # In-cloud droplet number for the cloud-top weighting: the protocol
-        # asks for in-cloud cdnc3d as input to the sampler (the grid-mean
-        # output then follows from the area weighting inside it).
         cf = clouds.cloud_fraction
-        in_cloud = cf > THRES_CLD
-        cdnc3d = jnp.where(
-            in_cloud, cdnc_m3 / jnp.where(in_cloud, cf, 1.0), 0.0)
-
         top = cloud_top_sample(
             cod3d=cod3d, f3d=cf, t3d=temperature, phase3d=phase3d,
-            cdr3d=r_liq_m, icr3d=r_ice_m, cdnc3d=cdnc3d, overlap=self.overlap)
+            cdr3d=r_liq_m, icr3d=r_ice_m, cdnc3d=cdnc_ic, overlap=self.overlap)
 
         lwp = _column_integral(qc, p_half)
         iwp = _column_integral(qi, p_half)
@@ -681,7 +719,13 @@ class AerocomDiagnostics(PhysicsTerm):
         # carry probe but present once the JAM chain has run.
         jam = diagnostics.get("_jam_state")
         if jam is None:
-            zero = jnp.zeros(p_half.shape[1:], dtype=p_half.dtype)
+            # 3-D like the real fields (they are per-level, mapped as
+            # ModelLevel by the writer): a surface-shaped zero here would
+            # change the carry pytree between the probe and the run, and
+            # write 2-D data into a ModelLevel variable when the group is
+            # enabled without JAM.
+            nlev = p_half.shape[0] - 1
+            zero = jnp.zeros((nlev,) + p_half.shape[1:], dtype=p_half.dtype)
             for label in (*_N_THRESHOLDS, *_PM_THRESHOLDS):
                 out[f"aerocom_{label}"] = zero
             return out
@@ -716,7 +760,14 @@ class AerocomDiagnostics(PhysicsTerm):
                      else jam.number)
         mass_pp = (jnp.stack(mass_post) if all(x is not None for x in mass_post)
                    else jam.mass)
-        sigmas = (self.mode_sigma_g * n_modes)[:n_modes]
+        # One width per live mode, positionally. The previous cycling idiom
+        # ((sigma * n)[:n]) silently handed mode 5 mode 1's width if the
+        # modal scheme ever grew; fail loudly instead.
+        if len(self.mode_sigma_g) != n_modes:
+            raise ValueError(
+                f"mode_sigma_g has {len(self.mode_sigma_g)} entries but the "
+                f"modal state carries {n_modes} modes; pass one width per mode")
+        sigmas = self.mode_sigma_g
         rho_air = diagnostics.get("air_density")
         for label, d_thresh in _N_THRESHOLDS.items():
             total = None

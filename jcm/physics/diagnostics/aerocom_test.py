@@ -321,31 +321,65 @@ class CodexRegressionTest(unittest.TestCase):
 
         class _Clouds:
             droplet_number = jnp.zeros((4, 3))  # as the 2M scheme leaves it
+            cloud_fraction = jnp.full((4, 3), 0.5)
 
         class _State:
             tracers = {"qnc": jnp.full((4, 3), 2.0e8), "qni": jnp.full((4, 3), 1.0e6)}
 
         rho = jnp.full((4, 3), 1.2)
-        cdnc_m3, qnc, qni = term._number_concentrations(
+        cdnc_gm, cdnc_ic, qnc, qni = term._number_concentrations(
             _State(), {"air_density": rho}, _Clouds())
-        np.testing.assert_allclose(np.asarray(cdnc_m3), 2.0e8 * 1.2, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(cdnc_gm), 2.0e8 * 1.2, rtol=1e-6)
+        # The tracer is a grid mean, so the in-cloud value is gm / cf.
+        np.testing.assert_allclose(np.asarray(cdnc_ic), 2.0e8 * 1.2 / 0.5, rtol=1e-6)
         self.assertIsNotNone(qni)
 
     def test_cdnc_falls_back_to_1m_volumetric_field(self):
-        """With no qnc tracer (1M scheme) the m^-3 CloudData field is used."""
+        """With no qnc tracer (1M scheme) the m^-3 CloudData field is used.
+
+        The 1M ``droplet_number`` is a characteristic IN-CLOUD value
+        (``base_cdnc * cdnc_factor``), nonzero even in clear sky — so the
+        in-cloud output must equal it (NOT droplet_number / cf, which
+        inflated cloud-top CDNC by 1/cf), the grid mean must be cf-weighted
+        (NOT the raw field, which counted droplets in clear sky), and the
+        per-mass form used for the cdnum column integral must follow the
+        grid mean.
+        """
         term = AerocomDiagnostics()
 
         class _Clouds:
             droplet_number = jnp.full((4, 3), 5.0e7)  # m^-3, as 1M writes it
+            cloud_fraction = jnp.full((4, 3), 0.5)
 
         class _State:
             tracers: dict = {}
 
-        cdnc_m3, qnc, _ = term._number_concentrations(
+        cdnc_gm, cdnc_ic, qnc, _ = term._number_concentrations(
             _State(), {"air_density": jnp.full((4, 3), 1.0)}, _Clouds())
-        np.testing.assert_allclose(np.asarray(cdnc_m3), 5.0e7, rtol=1e-6)
-        # And the per-mass form is recovered for the dp/g column integral.
-        np.testing.assert_allclose(np.asarray(qnc), 5.0e7, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(cdnc_ic), 5.0e7, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(cdnc_gm), 5.0e7 * 0.5, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(qnc), 5.0e7 * 0.5, rtol=1e-6)
+
+    def test_1m_clear_sky_contributes_no_droplet_number(self):
+        """Clear-sky layers must carry zero grid-mean and in-cloud CDNC.
+
+        The 1M characteristic value is nonzero everywhere; without the
+        cf-weighting, cdnum integrated droplets over cloud-free columns.
+        """
+        term = AerocomDiagnostics()
+
+        class _Clouds:
+            droplet_number = jnp.full((4, 3), 5.0e7)
+            cloud_fraction = jnp.zeros((4, 3))
+
+        class _State:
+            tracers: dict = {}
+
+        cdnc_gm, cdnc_ic, qnc, _ = term._number_concentrations(
+            _State(), {"air_density": jnp.full((4, 3), 1.0)}, _Clouds())
+        np.testing.assert_allclose(np.asarray(cdnc_gm), 0.0)
+        np.testing.assert_allclose(np.asarray(cdnc_ic), 0.0)
+        np.testing.assert_allclose(np.asarray(qnc), 0.0)
 
     def test_column_number_integrates_per_mass_tracer_with_dp_over_g(self):
         """Column number must be sum(qnc[kg^-1] * dp/g), giving m^-2."""
@@ -457,7 +491,8 @@ class CmorWriterTest(unittest.TestCase):
             "abs550_bc": xr.DataArray(np.array([0.1])),
             "od550_mode_acc": xr.DataArray(np.array([0.7])),
         })
-        got = _collect_optics(ds)
+        got, consumed = _collect_optics(ds)
+        self.assertIn("od550_poa", consumed)
         np.testing.assert_allclose(np.asarray(got["od550oa"]), [7.0])
         np.testing.assert_allclose(np.asarray(got["od550dust"]), [0.5])
         np.testing.assert_allclose(np.asarray(got["od550aerh2o"]), [0.25])
@@ -622,3 +657,94 @@ class EmissionFluxResetTest(unittest.TestCase):
                     and not isinstance(t, ResetEmissionFluxes)]
         if emitters:
             self.assertLess(first, min(emitters))
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    """Regressions for the residual findings of the full review on PR #582."""
+
+    def test_phase_gradient_finite_with_underflow_condensate(self):
+        """d(cloud products)/d(qc) must be finite for qc deep in the
+        squared-underflow window.
+
+        The liquid-fraction guard was ``total > 0.0``; the division VJP
+        forms ``-g qc / total^2`` and ``total^2`` underflows to exactly
+        zero for ``total`` in (0, ~1e-154), so a finite forward emitted a
+        NaN gradient — the documented underflow-VJP class, reachable
+        because spectral ringing puts condensate tails at 1e-287.
+        """
+        nz, nx = 4, 2
+        term = AerocomDiagnostics()
+
+        class _Clouds:
+            r_eff_liq = jnp.full((nz, nx), 10.0)   # um
+            r_eff_ice = jnp.full((nz, nx), 30.0)
+            cloud_fraction = jnp.full((nz, nx), 0.5)
+
+        p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
+        temperature = jnp.full((nz, nx), 260.0)
+        cdnc_ic = jnp.full((nz, nx), 1.0e8)
+
+        def lcc_sum(qc):
+            out = term._cloud_group(
+                _Clouds(), temperature, p_half, cdnc_ic, qc, qc)
+            return jnp.sum(out["aerocom_lcc"] + out["aerocom_cod"])
+
+        # One probe inside each dtype's underflow-square window: 5e-31
+        # squares to zero in f32 (and is excluded by the 1e-19 floor);
+        # 1e-155 squares to zero in f64 (and flushes to zero entirely in
+        # f32, where the guard then takes the safe branch). Either dtype
+        # therefore exercises the window the old ``> 0.0`` guard NaN'd in.
+        for tiny in (5e-31, 1e-155):
+            g = jax.grad(lcc_sum)(jnp.full((nz, nx), tiny))
+            self.assertTrue(bool(jnp.all(jnp.isfinite(g))),
+                            f"NaN gradient through the condensate-phase "
+                            f"guard at qc={tiny}")
+
+    def test_sigma_g_of_one_is_rejected(self):
+        """sigma_g = 1 divides the lognormal integrals by ln(1) = 0."""
+        with self.assertRaises(ValueError):
+            AerocomDiagnostics(mode_sigma_g=(1.6, 1.0, 1.8, 1.6))
+
+    def test_aerosol_fallback_zeros_are_model_level_shaped(self):
+        """Without _jam_state the N/PM zeros must still be (nlev, ...) 3-D.
+
+        A surface-shaped zero changes the scan-carry pytree between the
+        probe and the run, and writes 2-D data into a ModelLevel variable
+        when the aerosol group is enabled without JAM.
+        """
+        nz, nx = 5, 3
+        term = AerocomDiagnostics(groups=("aerosol",))
+        p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
+
+        class _State:
+            tracers: dict = {}
+
+        out = term._aerosol_group(_State(), {}, p_half)
+        for label in ("N70", "N100", "PM1", "PM10"):
+            self.assertEqual(out[f"aerocom_{label}"].shape, (nz, nx),
+                             f"aerocom_{label} fallback is not ModelLevel-shaped")
+
+    def test_skipped_report_excludes_written_optics(self):
+        """convert() must not report the per-species optics it wrote."""
+        import pathlib
+        import tempfile
+
+        import xarray as xr
+        from tools.aerocom_cmor import convert
+
+        ds = xr.Dataset({
+            "od550_bc": xr.DataArray(np.array([0.004])),
+            "od550_nosuchspecies": xr.DataArray(np.array([1.0])),
+        })
+        with tempfile.TemporaryDirectory() as td:
+            written, skipped = convert(
+                ds, "JCM-t", "all_2000", "2010", "monthly", pathlib.Path(td),
+                dry_run=True)
+        self.assertNotIn("od550_bc", skipped)      # written as od550bc
+        self.assertIn("od550_nosuchspecies", skipped)  # genuinely unmapped
+
+    def test_plev_winds_are_not_labelled_surface(self):
+        """u200 at 200 hPa must not carry VertCoord='Surface'."""
+        from tools.aerocom_cmor import NAME_MAP
+        for src in ("aerocom_u200", "aerocom_v200", "aerocom_u700", "aerocom_v700"):
+            self.assertNotEqual(NAME_MAP[src][2], "Surface", src)
