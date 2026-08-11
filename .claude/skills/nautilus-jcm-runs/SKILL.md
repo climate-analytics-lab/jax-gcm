@@ -116,6 +116,51 @@ Always look at the manifest before applying it. `kubectl apply
   gate is a no-op here. Kubernetes has already guaranteed exclusivity, which
   is the whole reason to run here.
 
+## Production runs — `mkrun.py`
+
+Benchmarks and production runs want opposite things, so they have separate
+generators. Do not use `mkjob.py` for a run whose output you intend to keep.
+
+```bash
+python $S/mkrun.py --name pi-control --days 365 | kubectl apply -f -
+python $S/mkrun.py --name aci-2yr --days 730 --physics echam-jam-aci \
+    --pin jcm=abc1234 | kubectl apply -f -
+```
+
+| | `mkjob.py` (benchmark) | `mkrun.py` (production) |
+|---|---|---|
+| model output | pod-local `emptyDir`, **discarded** | `jcm-runs` PVC, **kept** |
+| health gate | `--allow-unhealthy` optional | **always on** — stop on NaN |
+| `backoffLimit` | **0** — inspect a failure | **20** — survive eviction |
+| on retry | would re-time on another node | **resumes from checkpoint** |
+| TTL | 24 h | none |
+
+**Eviction tolerance is the whole design.** A pod here is not guaranteed a
+node for days, so a year-long run must assume it will be interrupted. jcm
+resumes automatically when its checkpoint exists, so a restarted pod picks up
+at the last completed chunk instead of restarting the year — that is what
+makes multi-day runs viable on this platform at all. `--retries` is
+effectively the eviction budget.
+
+Pin the code for anything long: `--pin jcm=<sha>`. A run resumed days later
+must come back on the *same* code, and cloning a branch name would silently
+restart it on whatever has since been merged, mid-year.
+
+Output lands on the `jcm-runs` PVC (500 Gi RWX) under `/runs/<name>/`,
+alongside a `PROVENANCE` file recording the SHA of every repo, appended on
+each attempt so a resumed run shows its full history.
+
+### Getting the data out
+
+```bash
+kubectl exec -it <reader-pod> -- ls -la /runs/<name>/     # inspect
+kubectl cp <reader-pod>:/runs/<name>/foo_day30.nc ./      # single file
+```
+
+For anything sizeable, run a pod that pushes to object storage or the HF
+mirror rather than pulling multi-GB netCDF through `kubectl cp`, which is
+slow and has no resume.
+
 ## Watching and collecting
 
 ```bash
@@ -150,6 +195,12 @@ failed even if Kubernetes says `Completed`.
   running there. `kubectl describe resourcequota a100-limit` shows current
   use; a ninth pod sits `Pending` rather than failing.
 - No H100/H200/GH200 quota (all 0), so those selectors will never schedule.
+- **Do not set `priorityClassName`.** The namespace bans every named class at
+  **0 pods** — including `default` — via the `high-priority-ban` and
+  `low-priority-ban` quotas. A pod that names one is refused by quota; an
+  unnamed pod runs at priority 0 and is fine. Both generators leave it unset
+  deliberately.
+- Pod cap is 200 (`reached-quota`), well above the 8-A100 GPU limit.
 
 ## Reference point
 
