@@ -194,6 +194,9 @@ def stage_bundles() -> None:
     # name invited grabbing a raw SSO product instead (#596)
     shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
                 d / "terrain.nc")
+    # a rerun over a pre-#596 upload tree must not re-register the trap
+    # file under its old name
+    (d / "sso.nc").unlink(missing_ok=True)
     print("bundles: done", flush=True)
 
 
