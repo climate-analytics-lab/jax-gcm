@@ -98,6 +98,31 @@ python $S/mkjob.py --sweep --f32 | kubectl apply -f -     # all six, parallel
 Always look at the manifest before applying it. `kubectl apply
 --dry-run=server -f -` validates against the API without creating anything.
 
+Useful flags:
+
+| flag | why |
+|---|---|
+| `--suffix TAG` | Jobs are **immutable**, so a rerun collides with the previous Job (TTL 24 h). The suffix goes into the Job name *and* the report label, so the two results sit side by side instead of the second overwriting the first. |
+| `--save-interval N` | Days between writes. Defaults to `--chunk-days`. |
+| `--env K=V` | Container env var, repeatable. Some knobs are env-only — `JCM_RRTMGP_COL_CHUNKS` splits the radiation column vmap. |
+| `--gpu-product P` | Pin an exact A100 variant; default takes any 80 GB one. |
+
+Boundary data comes from the Hugging Face mirror as `hf://bundles/...`
+paths (#590). The harness **prefetches** them before claiming the GPU:
+jcm resolves them lazily during model construction, which is after the
+telemetry sampler starts, so a 2 GB bundle would otherwise download inside
+the timed region.
+
+The image is built from a *release* with `pip install -e .` and no extras,
+so anything newer or optional is installed at pod start —
+`huggingface_hub` (a jcm requirement only since the mirror), `diffrax`
+(MAM4-JAX), and for pySES presets the dycore itself. pySES goes in
+`--no-deps`: it declares `torch>=2.12.0`, 2–3 GB of wheels shipping their
+own nvidia CUDA libraries that can shadow the ones jax resolves against,
+and the environment behind the validated ne30 runs has no torch at all.
+A hard GPU check follows every install, because a pip-induced CPU
+fallback would still "work" and report timings 100× slow.
+
 ## What the generated Job does, and why
 
 - **Image** `ghcr.io/climate-analytics-lab/jcm:latest` — public, GPU-ready
@@ -202,13 +227,59 @@ failed even if Kubernetes says `Completed`.
   deliberately.
 - Pod cap is 200 (`reached-quota`), well above the 8-A100 GPU limit.
 
-## Reference point
+## Reference points
 
 `t63-echam-rrtmgp`, f32, 30 days, rrtmgp pinned at `848da33` (minor-gas scan
 fix merged), A100-SXM4-80GB: **175.2 sim days/hr** (20.55 s/sim-day,
 11.5 sim-years/day), 8.56 GiB peak, ~86 % utilisation. Chunks converged to
 0.5 %. Image pull plus git clone plus compile took ~6 min before the first
 chunk.
+
+### MA resolution sweep (2026-08-11)
+
+`physics=echam-jam` + 2M + semi-Lagrangian, f32, 30 days, A100-80GB, all
+boundary data grid-native from the mirror. Every entry converged to within
+0.15 % on its last two chunks, completed 30/30 days, zero NaN.
+
+| | L47 | L95 | peak GiB (L47 / L95) |
+|---|---|---|---|
+| **T63** | **127.1** | **65.8** | 16.6 / 32.6 |
+| **T106** | **57.4** | **27.6** | 32.7 / 60.2 |
+
+Cross-checks against the dev box within 1–4 % (T106L47 58.0→57.4,
+T106L95 27.9→27.6), so these are the platform's numbers, not a node's.
+
+Two things the shape of that table tells you:
+
+- **Levels cost linearly** (1.93–2.08× for 2.02× the levels); **resolution
+  is sublinear** (T106 has 2.78× T63's columns for 2.21–2.38× the cost) as
+  utilisation climbs 88 % → 96 %. T63L47 leaves the card partly idle; the
+  big configs are the efficient ones.
+- **T106L95 at 60.2 GiB is the largest config that fits one card.**
+
+### pySES ne30 is memory-bound, not compute-bound
+
+ne30 L95 does **not** fit an 80 GB A100. XLA is explicit that this is a
+whole-program floor rather than one fixable op:
+
+```
+hlo_rematerialization: Can't reduce memory use below 51.28GiB;
+  only reduced to 61.92GiB, down from 65.83GiB originally
+```
+
+Per cell, the spectral path gets *more* efficient with size (19 → 12
+GiB/Mcell from T63L47 to T106L95) while pySES sits at 30–50. ne30L95 has
+**42 % of T106L95's cells and needs more memory than it**. So do not read
+this as "ne30L95 is too big" — the same 30-day workload is 2.5–4× more
+memory-hungry through this backend, and ne30L47 has been living at the edge
+too (51 GiB, and a dev-box run that truncated at 26/30 days).
+
+Levers already ruled out by measurement, so they are not worth re-trying:
+`--save-interval` 5→1 *raised* the request to 54.39 GiB (more writes,
+~1.1 GiB each); `--chunk-days` 5→1 left it at 50.45 GiB;
+`JCM_RRTMGP_COL_CHUNKS=8` left it at 50.08 GiB. The remaining option is
+multi-GPU sharding (pySES gained it in #575) — which stops being a
+single-card number comparable with the table above.
 
 ## Related skills
 
