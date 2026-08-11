@@ -67,6 +67,41 @@ DEFAULT_SWEEP = [
 ]
 
 
+def _preset_overrides(preset: str) -> list[str]:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]
+                           / "tools"))
+    from benchmark import PRESETS
+    return PRESETS.get(preset, [])
+
+
+def pip_commands(preset: str, site: dict) -> list[str]:
+    """``pip install`` command lines this preset needs, in order.
+
+    The image runs ``pip install -e .`` with NO extras (see the repo
+    Dockerfile) off a release that predates the data mirror, so anything
+    optional or newer than that release is simply absent.
+
+    pySES is the one that needs care. ``dycore=pyses_*`` presets import it
+    at model construction and would die after the image pull and the clone,
+    but it declares ``torch>=2.12.0`` — 2-3 GB of wheels that also ship
+    their own nvidia-* CUDA libraries, which can shadow the ones jax's CUDA
+    build resolves against. The dev-box environment that produced the
+    validated ne30 runs has pyses 0.1.3a2 and **no torch at all**, so the
+    dependency is unused on this code path. Install it ``--no-deps`` with
+    its one genuinely-needed non-jax dependency (frozendict) named
+    explicitly; numpy/jax/jaxlib/setuptools are already in the image.
+
+    Derived from the preset rather than a hardcoded list, and added only
+    where needed — putting a dycore on the spectral runs' path would make
+    their timings depend on something they never import.
+    """
+    cmds = [" ".join(repr(x) for x in site["extra_pip"])]
+    if any(o.startswith("dycore=pyses") for o in _preset_overrides(preset)):
+        cmds.append("'frozendict>=2.4.7'")
+        cmds.append("--no-deps 'pyses==0.1.3a2'")
+    return [f"pip install --no-cache-dir {c} 2>&1 | tail -2" for c in cmds]
+
+
 def pod_runnable(preset: str) -> tuple[bool, str]:
     """Can this preset's inputs exist inside a pod?
 
@@ -81,10 +116,7 @@ def pod_runnable(preset: str) -> tuple[bool, str]:
     list, so a preset becomes runnable automatically once its data is
     reachable (e.g. via the HF mirror).
     """
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]
-                           / "tools"))
-    from benchmark import PRESETS
-    for o in PRESETS.get(preset, []):
+    for o in _preset_overrides(preset):
         key, _, val = o.partition("=")
         if not key.endswith((".file", "_file")) or val in ("auto", "null", ""):
             continue
@@ -138,12 +170,14 @@ echo "=== node: $NODE_NAME  gpu: $(nvidia-smi --query-gpu=name --format=csv,nohe
 mkdir -p /work /scratch /reports
 {clone}
 cd /work/jcm
-# MAM4-JAX declares diffrax and matplotlib; neither is in the jcm image, and
-# the JAM condensation backend imports diffrax at module load. Installing it
-# here can in principle drag jax with it, which would silently swap the CUDA
-# build for a CPU one — so the install is followed by a hard GPU check rather
-# than trusting it. A CPU fallback would "work" and report timings 100x slow.
-pip install --no-cache-dir {' '.join(repr(x) for x in S['extra_pip'])} 2>&1 | tail -2
+# Packages the image lacks: it runs `pip install -e .` with no extras, off a
+# release that predates the data mirror. diffrax (MAM4-JAX's condensation
+# backend imports it at module load), huggingface_hub (resolves the hf://
+# boundary data) and, for the pySES presets, the dycore itself. Any of these
+# can in principle drag jax with it, which would silently swap the CUDA build
+# for a CPU one — so the install is followed by a hard GPU check rather than
+# trusting it. A CPU fallback would "work" and report timings 100x slow.
+{chr(10).join(pip_commands(preset, S))}
 python - <<'PYCHK'
 import sys, jax
 d = jax.devices()
