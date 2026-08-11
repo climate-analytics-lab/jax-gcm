@@ -202,11 +202,20 @@ work should target the `dev` branch; clean release points are merged to
 If you use JAX-GCM in your research, please cite:
 
 ```bibtex
-@software{jax_gcm,
-  title = {JAX-GCM: A Differentiable General Circulation Model},
-  author = {J. Madan, E. Davenport, et al.},
-  year = {2025},
-  url = {https://github.com/climate-analytics-lab/jax-gcm}
+@article{jcm_gmd_2026,
+  title   = {{JCM} v1.1: a differentiable, intermediate-complexity atmospheric model},
+  author  = {Davenport, Ellen H. and Madan, J. Varan and Gjini, Rebecca and
+             Brzenski, Jared and Ho, Nick and Hsu, Tien-Yiao and Liang, Yueshan and
+             Liu, Zhixing and Manivannan, Veeramakali and Pham, Eric and
+             Vutukuru, Rohith and Williams, Andrew I. L. and Yang, Zhiqi and
+             Yu, Rose and Lutsko, Nicholas J. and Hoyer, Stephan and
+             Watson-Parris, Duncan},
+  journal = {Geoscientific Model Development},
+  volume  = {19},
+  pages   = {6451--6466},
+  year    = {2026},
+  doi     = {10.5194/gmd-19-6451-2026},
+  url     = {https://gmd.copernicus.org/articles/19/6451/2026/}
 }
 ```
 
