@@ -108,7 +108,7 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     assert sel.size == 12, f"expected a 12-month block for {src_year}, got {sel.size}"
     print(f"oxidants: using {src_year} block (nearest to {year}) from {years.min()}–{years.max()}")
 
-    out_ds = _remap_oxidants_to_echam(ds, sel, nlev)
+    out_ds = _remap_oxidants_to_hybrid(ds, sel, nlev)
     out_ds.attrs.update(source=_OXID_SRC, source_year=src_year)
     out_ds.to_netcdf(out)
     print(f"wrote {out} {dict(out_ds.sizes)}")
@@ -118,11 +118,10 @@ _WACCM_OXID_DIR = ("/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone")
 
 
 def prep_oxidants_waccm(out: Path, year: int, nlev: int = 47) -> None:
-    """Remap a WACCM CCMI REFC1 decade oxidant climatology onto ECHAM levels.
+    """Remap a WACCM CCMI REFC1 decade oxidant climatology onto model levels.
 
-    Unlike the CAM L26 product these files carry all species (incl. H2O2)
-    on L66 with the full WACCM lid (~6e-6 hPa), so L95 mesospheric levels
-    get real values instead of a clamped CAM-top value. Decades run
+    The source files carry OH/HO2/NO3/H2O2/O3 on L66 with the full WACCM
+    lid (~6e-6 hPa), so mesospheric levels get real values. Decades run
     1850–2009; ``year`` selects the nearest decade file.
     """
     decade = int(np.clip((year // 10) * 10, 1850, 2000))
@@ -131,14 +130,14 @@ def prep_oxidants_waccm(out: Path, year: int, nlev: int = 47) -> None:
            "monthly.nc")
     print(f"oxidants: WACCM CCMI decade {decade}-{decade + 9}")
     ds = xr.open_dataset(src, decode_times=False)
-    out_ds = _remap_oxidants_to_echam(ds, np.arange(12), nlev)
+    out_ds = _remap_oxidants_to_hybrid(ds, np.arange(12), nlev)
     out_ds.attrs.update(source=src, source_decade=f"{decade}-{decade + 9}")
     out_ds.to_netcdf(out)
     print(f"wrote {out} {dict(out_ds.sizes)}")
 
 
-def _remap_oxidants_to_echam(ds, sel, nlev: int) -> xr.Dataset:
-    """Log-p remap OH/NO3/O3/H2O2 [mol/mol] onto the ECHAM hybrid grid."""
+def _remap_oxidants_to_hybrid(ds, sel, nlev: int) -> xr.Dataset:
+    """Log-p remap OH/NO3/O3/H2O2 [mol/mol] onto the model hybrid levels."""
     p0 = float(ds["P0"])
     hyam = ds["hyam"].values          # normalized (× P0 -> Pa), top→bottom
     hybm = ds["hybm"].values

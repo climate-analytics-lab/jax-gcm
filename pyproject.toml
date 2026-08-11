@@ -56,11 +56,6 @@ pyses = [
     "pyses>=0.1.3a2",
 ]
 
-# hf:// boundary-condition paths (jcm.data.remote): cached downloads from the
-# project data mirror. Install with `pip install jcm[remote]`.
-remote = [
-    "huggingface_hub",
-]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

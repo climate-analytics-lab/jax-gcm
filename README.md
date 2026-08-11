@@ -105,8 +105,7 @@ Config groups live under [`jcm/config/`](jcm/config/) (`physics`, `grid`,
 
 Boundary-condition and emissions files can be pulled straight from the
 project data mirror on Hugging Face by prefixing any file path with
-`hf://` (needs `pip install jcm[remote]`; fetch once on a node with
-internet — afterwards the local cache serves compute nodes offline):
+`hf://` (fetch once on a node with internet — afterwards the local cache serves compute nodes offline):
 
 ```bash
 python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
