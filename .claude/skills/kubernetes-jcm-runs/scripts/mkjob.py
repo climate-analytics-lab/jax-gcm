@@ -86,10 +86,13 @@ def pip_commands(preset: str, site: dict) -> list[str]:
     but it declares ``torch>=2.12.0`` — 2-3 GB of wheels that also ship
     their own nvidia-* CUDA libraries, which can shadow the ones jax's CUDA
     build resolves against. The dev-box environment that produced the
-    validated ne30 runs has pyses 0.1.3a2 and **no torch at all**, so the
-    dependency is unused on this code path. Install it ``--no-deps`` with
-    its one genuinely-needed non-jax dependency (frozendict) named
-    explicitly; numpy/jax/jaxlib/setuptools are already in the image.
+    validated ne30 runs has **no torch at all**, so the dependency is unused
+    on this code path. Install it ``--no-deps`` with its one
+    genuinely-needed non-jax dependency (frozendict) named explicitly;
+    numpy/jax/jaxlib/setuptools are already in the image.
+
+    Keep the pin at or above the pyproject floor (0.1.3.1) — older wheels are
+    much slower on GPU and have an upstream tracer-hyperviscosity bug.
 
     Derived from the preset rather than a hardcoded list, and added only
     where needed — putting a dycore on the spectral runs' path would make
@@ -98,7 +101,7 @@ def pip_commands(preset: str, site: dict) -> list[str]:
     cmds = [" ".join(repr(x) for x in site["extra_pip"])]
     if any(o.startswith("dycore=pyses") for o in _preset_overrides(preset)):
         cmds.append("'frozendict>=2.4.7'")
-        cmds.append("--no-deps 'pyses==0.1.3a2'")
+        cmds.append("--no-deps 'pyses==0.1.3.1'")
     return [f"pip install --no-cache-dir {c} 2>&1 | tail -2" for c in cmds]
 
 
