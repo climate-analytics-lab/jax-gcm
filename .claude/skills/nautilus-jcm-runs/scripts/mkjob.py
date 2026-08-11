@@ -237,6 +237,14 @@ exit $BENCH_RC
                             # harness, which exports it; kept here as the
                             # default for anything else in the image.
                             {"name": "JAX_PLATFORMS", "value": "cuda,cpu"},
+                            # --env passthrough. Some memory/perf knobs are
+                            # environment variables rather than Hydra keys --
+                            # JCM_RRTMGP_COL_CHUNKS above all, which splits the
+                            # radiation column vmap and is what makes ne30 L95
+                            # fit on one 80 GB card. Recorded in the manifest,
+                            # so the run's configuration stays inspectable.
+                            *[{"name": k, "value": v}
+                              for k, v in (e.split("=", 1) for e in a.env)],
                         ],
                         "resources": {
                             "limits": {
@@ -288,6 +296,10 @@ def main() -> int:
     p.add_argument("--gpu-product", default=None,
                    help="pin an exact product, e.g. NVIDIA-A100-80GB-PCIe; "
                         "default selects any 80GB A100 by memory label")
+    p.add_argument("--env", action="append", default=[], metavar="K=V",
+                   help="extra container env var; repeatable. e.g. "
+                        "--env JCM_RRTMGP_COL_CHUNKS=8 to split the radiation "
+                        "column vmap (ncols must divide evenly)")
     p.add_argument("--save-interval", type=int, default=None,
                    help="days between output writes; defaults to --chunk-days "
                         "(one write per chunk). Lower it to shrink the "
