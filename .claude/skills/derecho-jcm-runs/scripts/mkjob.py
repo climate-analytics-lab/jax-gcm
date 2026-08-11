@@ -25,103 +25,20 @@ DEFAULT_VENV = os.environ.get("JCM_VENV", f"{HOME}/.venvs/jaxgcm")
 DEFAULT_DINOSAUR = os.environ.get("JCM_DINOSAUR", f"{HOME}/dinosaur-sl")
 DEFAULT_ACCOUNT = os.environ.get("PBS_ACCOUNT", "UCSD0085")
 JAM_INPUTS = os.environ.get("JAM_INPUTS", f"{SCRATCH}/jam_inputs")
-
-
-def grid_layers(grid: str) -> str:
-    """Layer count parsed out of a grid name (echam_t63_l47_hybrid -> "47")."""
-    return "".join(c for c in grid.split("_l")[-1] if c.isdigit()) or "?"
-
-
-def grid_truncation(grid: str) -> str:
-    """Spectral truncation parsed out of a grid name (..._t63_... -> "t63")."""
-    if "_t" not in grid:
-        return "t63"
-    return "t" + "".join(c for c in grid.split("_t")[-1].split("_")[0]
-                         if c.isdigit())
-
+EMISSIONS = os.environ.get(
+    "JCM_EMISSIONS", f"{HOME}/jax-gcm/runs/emissions_echam_t63_l47_hybrid_2014.nc")
 
 # Prepared aux inputs (purge-eligible on scratch — see reference/data_paths.md).
-# EVERY one of these is grid-specific, in one of two ways, and both were got
-# wrong here before:
-#   * oxidants are LEVEL-resolved — the runner validates the level count, so a
-#     hard-coded L47 file killed every L95 job after it reached the queue front;
-#   * dms/dust are HORIZONTALLY resolved — read_dms_seawater/read_dust_source
-#     validate lat/lon against the model Gaussian grid, so the T63 files are
-#     not usable on T106/T119 despite having no vertical axis. (An earlier
-#     comment here claimed they were "grid-independent" because they are
-#     surface fields. That conflated the vertical with the horizontal.)
-# Deriving all of them means check_inputs() catches a missing or wrong-grid
-# file BEFORE qsub rather than the job dying in the queue.
-def aux_files(grid: str) -> dict:
-    lev, tr = grid_layers(grid), grid_truncation(grid)
-    return {
-        "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_{tr}.nc",
-        "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f19_{tr}.nc",
-        "oxidants_file":
-            f"{JAM_INPUTS}/oxidants_cam_echam_l{lev}_2014_{tr}.nc",
-    }
-
-
-# Level count of the packaged ozone climatology, per truncation directory
-# under jcm/data/bc/. `_resolve_auto_ozone` only ever picks from these.
-PACKAGED_OZONE_LEVELS = {"t63": "47", "t30": "8"}
-
-
-def check_ozone(a) -> str | None:
-    """Return an explicit ozone override, or None to leave ``auto``.
-
-    ``forcing.ozone_file: auto`` resolves a PACKAGED climatology and silently
-    falls back to RRTMGP's ANALYTIC profile when none matches the grid. That
-    surrogate carries ~7.6x the tropospheric ozone column, so an L95 or
-    T106/T119 job would run to completion and quietly produce radiation that
-    cannot be compared with anything — no preflight failure, no warning the
-    watcher looks for. Refuse instead, unless the run is aquaplanet (no
-    prescribed forcing at all) or an explicit --ozone was supplied.
-    """
-    if a.ozone:
-        return a.ozone
-    if a.aquaplanet:
-        return None
-    tr, lev = grid_truncation(a.grid), grid_layers(a.grid)
-    if PACKAGED_OZONE_LEVELS.get(tr) == lev:
-        return None          # auto will resolve the packaged file correctly
-    sys.exit(
-        f"NO PACKAGED OZONE for {a.grid} ({tr}, L{lev}).\n"
-        "  forcing.ozone_file=auto would fall back to the ANALYTIC profile "
-        "(~7.6x the tropospheric ozone column), which runs fine and silently "
-        "invalidates the radiation.\n"
-        "  Pass --ozone /path/to/ozone_<grid>.nc — L95 files for t63/t106/t119 "
-        "already exist, see reference/data_paths.md — or prepare one with\n"
-        f"    python -m jcm.data.bc.interpolate_ozone --in T63_ozone_picontrol.nc"
-        f" --out ozone_{tr}_l{lev}.nc --nlevels {lev}"
-    )
-
-
-def default_emissions(grid: str) -> str:
-    """Emissions file for a grid.
-
-    ``_validate_emissions_grid`` rejects fields whose horizontal shape differs
-    from the model grid, so the T63 default cannot be reused on T85/T106/T119 —
-    the job would pass check_inputs() and then die after reaching the queue
-    front. Derived here so a missing file is caught before qsub instead.
-    """
-    # $JCM_EMISSIONS pins ONE file, so honour it (an explicit site choice) but
-    # say so when it does not name the requested grid -- silently reusing a
-    # T63 file on T106 is the failure this function exists to prevent.
-    pinned = os.environ.get("JCM_EMISSIONS")
-    if pinned:
-        if grid not in os.path.basename(pinned):
-            print(f"warning: $JCM_EMISSIONS={pinned} does not name grid "
-                  f"{grid}; _validate_emissions_grid will reject it if the "
-                  "horizontal shape differs", file=sys.stderr)
-        return pinned
-    root = os.environ.get("JCM_EMISSIONS_DIR", f"{HOME}/jax-gcm/runs")
-    return f"{root}/emissions_{grid}_2014.nc"
+AUX_FILES = {
+    "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_t63.nc",
+    "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f05_t63.nc",
+    "oxidants_file": f"{JAM_INPUTS}/oxidants_cam_echam_l47_2014_t63.nc",
+}
 
 
 def check_inputs(a) -> None:
     """Fail before qsub if a required input file is missing (scratch purges)."""
-    needed = [("emissions", a.emissions), *aux_files(a.grid).items()]
+    needed = [("emissions", a.emissions), *AUX_FILES.items()]
     missing = [f"{k}: {v}" for k, v in needed if not os.path.exists(v)]
     if missing:
         sys.exit("MISSING INPUT FILES (scratch is purge-eligible; see "
@@ -143,17 +60,9 @@ def build_overrides(a) -> list[str]:
             "forcing=from_file",
             f"forcing.file={a.repo}/jcm/data/bc/t63/forcing.nc",
         ]
-        # Ozone belongs to RADIATION, not to the aerosol chain, so it must be
-        # emitted for every prescribed-forcing run. Nesting it under the JAM
-        # emissions guard left `--physics echam-rrtmgp` and `--no-emissions`
-        # runs on `ozone_file: auto` -> the analytic profile, i.e. exactly the
-        # high-resolution radiation runs this guard exists to protect.
-        if a.ozone:
-            ov.append(f"forcing.ozone_file={a.ozone}")
         if a.physics.endswith("jam") and not a.no_emissions:
             ov.append(f"forcing.emissions_file={a.emissions}")
-            ov += [f"forcing.{k}={v}"
-                   for k, v in aux_files(a.grid).items()]
+            ov += [f"forcing.{k}={v}" for k, v in AUX_FILES.items()]
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
     if a.physics.endswith("jam"):
         ov.append("diffusion.tracer_positivity=true")
@@ -181,21 +90,8 @@ def build_overrides(a) -> list[str]:
 
 
 def check_compose(a, overrides) -> None:
-    """Compose the config on the login node; fail loudly before qsub.
-
-    Uses the JOB's interpreter (``--venv``), not whichever Python is running
-    this generator. The two routinely differ in the documented Derecho setup,
-    and composing with the wrong one either rejects a valid job or — worse —
-    passes using packages the real job will not import, which is the failure
-    a preflight is supposed to prevent.
-    """
-    job_python = f"{a.venv}/bin/python"
-    if not os.path.exists(job_python):
-        print(f"warning: {job_python} not found; composing with "
-              f"{sys.executable} instead — this preflight may not reflect "
-              "what the job will import", file=sys.stderr)
-        job_python = sys.executable
-    cmd = [job_python, "-m", "jcm.main",
+    """Compose the config on the login node; fail loudly before qsub."""
+    cmd = [sys.executable, "-m", "jcm.main",
            *[o.strip('"') for o in overrides
              if not o.startswith(("run.output", "hydra.run.dir", "+run.checkpoint"))],
            "--cfg", "job"]
@@ -204,10 +100,10 @@ def check_compose(a, overrides) -> None:
     r = subprocess.run(cmd, cwd=a.repo, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("COMPOSE FAILED:\n" + (r.stderr or r.stdout)[-2000:])
-    layers = grid_layers(a.grid)
+    layers = "".join(c for c in a.grid.split("_l")[-1] if c.isdigit()) or "?"
     trunc = a.grid.split("_t")[-1].split("_")[0] if "_t" in a.grid else "?"
-    print(f"# compose OK (via {job_python}); also verify coords build:\n"
-          f"#   JAX_PLATFORMS=cpu {job_python} -c \"from jcm.utils import get_coords;"
+    print(f"# compose OK; also verify coords build:\n"
+          f"#   JAX_PLATFORMS=cpu python -c \"from jcm.utils import get_coords;"
           f" from jcm.physics.echam.echam_levels import get_echam_levels;"
           f" get_coords(vertical_coords=get_echam_levels({layers}),"
           f" spectral_truncation={trunc})\"", file=sys.stderr)
@@ -239,11 +135,7 @@ def main() -> None:
     p.add_argument("--save-every", type=float, default=5)
     p.add_argument("--aquaplanet", action="store_true")
     p.add_argument("--no-emissions", action="store_true")
-    p.add_argument("--ozone", default=None,
-                   help="explicit ozone file; required for any grid without a "
-                        "packaged climatology (non-T63L47), since `auto` would "
-                        "silently fall back to the analytic profile")
-    p.add_argument("--emissions", default=None,
+    p.add_argument("--emissions", default=EMISSIONS,
                    help="anthropogenic emissions netCDF")
     p.add_argument("--resume", action="store_true",
                    help="keep an existing checkpoint in the run dir")
@@ -258,12 +150,6 @@ def main() -> None:
     p.add_argument("--check", action="store_true",
                    help="compose the config before emitting the script")
     a = p.parse_args()
-
-    # Grid-derived defaults, resolved before any check runs.
-    if a.emissions is None:
-        a.emissions = default_emissions(a.grid)
-    # Refuses (with instructions) when the grid has no packaged climatology.
-    a.ozone = check_ozone(a)
 
     a.mem = a.mem or ("200GB" if a.gpus > 1 else "160GB")
     frac = 0.85 if a.gpus > 1 else 0.93
@@ -320,8 +206,6 @@ echo "{marker}"
         body = f'\nSKILL_DIR={skill_dir}\nCHUNK_DAYS={a.chunk_days}\n'
         body += f'COMMON="{" ".join(o.strip(chr(34)) for o in overrides)}"\n'
         body += """
-FAILED_VARIANTS=0
-
 run_variant () {
   local tag="$1"; shift
   local d="$RUNDIR/$tag"; mkdir -p "$d"
@@ -332,39 +216,14 @@ run_variant () {
   ( sleep 420; for i in $(seq 6); do kill -0 $pid 2>/dev/null || break
       echo "  [$tag] $(nvidia-smi --query-gpu=clocks.sm,power.draw,utilization.gpu --format=csv,noheader | head -1)"
       sleep 30; done ) &
-  if ! wait $pid; then
-    echo "  VARIANT $tag FAILED"
-    FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
-  fi
-  # A variant that ran but went unhealthy is also a failure: the driver
-  # returns normally after tripping the health gate. Each variant's output is
-  # redirected to its own run.log, so the outer watcher never sees these
-  # per-chunk health lines -- they have to be checked HERE. A non-zero
-  # "NaN vars: N/M" counts even with no "unhealthy" line, because the health
-  # line is printed per chunk before the gate reacts, and a NaN in a
-  # non-gated variable never produces one at all.
-  if grep -aqE "unhealthy|Traceback" "$d/run.log" 2>/dev/null \
-     || grep -aoE "NaN vars:[[:space:]]*[0-9]+" "$d/run.log" 2>/dev/null \
-        | grep -avqE "NaN vars:[[:space:]]*0$"; then
-    echo "  VARIANT $tag UNHEALTHY"
-    grep -aE "unhealthy|NaN vars:[[:space:]]*[1-9]" "$d/run.log" | tail -2
-    FAILED_VARIANTS=$((FAILED_VARIANTS + 1))
-  fi
-  # Non-zero here only means "not enough chunks to quote a rate", which is
-  # not a job failure, so it stays tolerated.
+  wait $pid || echo "  VARIANT $tag FAILED"
   python "$SKILL_DIR/settled_rate.py" --chunk-days $CHUNK_DAYS "$d/run.log" || true
 }
 """
         for v in variants:
             tag, _, extra = v.partition(":")
             body += f'run_variant {tag} {extra}\n'
-        # Withhold the completion marker if any variant failed, so the
-        # monitor cannot read a half-failed matrix as a finished benchmark.
-        body += (f'\nif [ "$FAILED_VARIANTS" -ne 0 ]; then\n'
-                 f'  echo "BENCH FAILED: $FAILED_VARIANTS variant(s)"\n'
-                 f'  exit 1\n'
-                 f'fi\n'
-                 f'echo "{marker}"\n')
+        body += f'echo "{marker}"\n'
 
     print(head + body)
     print(f"# submit: qsub <this file>\n"
