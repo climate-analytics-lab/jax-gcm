@@ -23,14 +23,19 @@ import json
 import subprocess
 import sys
 
-NAMESPACE = "climate-analytics"
-IMAGE = "ghcr.io/climate-analytics-lab/jcm:latest"
-RUNS_PVC = "jcm-runs"
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import sites as site_profile  # noqa: E402  (local module)
+
 
 REPOS = {
     "jcm": ("https://github.com/climate-analytics-lab/jax-gcm",
             "feat/derecho-runs-skill"),
-    "dinosaur-sl": ("https://github.com/neuralgcm/dinosaur", "main"),
+    # shoyer's semi-lagrangian branch, NOT neuralgcm/dinosaur main: the
+    # SemiLagrangianPrimitiveEquationsHybrid class the SL dycore needs lives
+    # in PR #135 and is not upstream. Pointing at upstream main gets a clone
+    # that imports fine and then fails at model construction with
+    # AttributeError — which is how this was found.
+    "dinosaur-sl": ("https://github.com/shoyer/dinosaur", "semi-lagrangian"),
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
     # Required by every echam-jam preset and NOT present in the published
@@ -41,8 +46,6 @@ REPOS = {
     "mam4-jax": ("https://github.com/reflective-org/MAM4-JAX", "main"),
 }
 
-GPU_MEMORY_MIB = "81920"
-GPU_RESOURCE = "nvidia.com/a100"
 
 
 def resolve_refs(pins: dict) -> dict:
@@ -67,6 +70,7 @@ def resolve_refs(pins: dict) -> dict:
 
 
 def build(a, resolved) -> dict:
+    S = site_profile.get(a.site)
     name = f"jcm-run-{a.name}".lower().replace("_", "-")[:60]
     rundir = f"/runs/{a.name}"
     clone = "\n".join(
@@ -107,7 +111,7 @@ cd /work/jcm
 # here can in principle drag jax with it, which would silently swap the CUDA
 # build for a CPU one — so the install is followed by a hard GPU check rather
 # than trusting it. A CPU fallback would "work" and report timings 100x slow.
-pip install --no-cache-dir 'diffrax>=0.7' matplotlib 2>&1 | tail -2
+pip install --no-cache-dir {' '.join(repr(x) for x in S['extra_pip'])} 2>&1 | tail -2
 python - <<'PYCHK'
 import sys, jax
 d = jax.devices()
@@ -132,7 +136,7 @@ echo "=== finished $(date -u +%FT%TZ) ==="
 """
     return {
         "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": name, "namespace": NAMESPACE,
+        "metadata": {"name": name, "namespace": S["namespace"],
                      "labels": {"jcm-run": a.name}},
         "spec": {
             # Survive eviction: each retry re-runs the script, which resumes
@@ -147,9 +151,9 @@ echo "=== finished $(date -u +%FT%TZ) ==="
                     "nodeSelector": (
                         {"nvidia.com/gpu.product": a.gpu_product}
                         if a.gpu_product
-                        else {"nvidia.com/gpu.memory": GPU_MEMORY_MIB}),
+                        else dict(S["gpu_selector"])),
                     "containers": [{
-                        "name": "run", "image": IMAGE,
+                        "name": "run", "image": S["image"],
                         "command": ["/bin/bash", "-c", script],
                         "env": [
                             {"name": "NODE_NAME", "valueFrom": {"fieldRef": {
@@ -157,9 +161,9 @@ echo "=== finished $(date -u +%FT%TZ) ==="
                             {"name": "JAX_PLATFORMS", "value": "cuda,cpu"},
                         ],
                         "resources": {
-                            "limits": {GPU_RESOURCE: a.gpus,
+                            "limits": {S["gpu_resource"]: a.gpus,
                                        "cpu": str(a.cpu), "memory": a.memory},
-                            "requests": {GPU_RESOURCE: a.gpus,
+                            "requests": {S["gpu_resource"]: a.gpus,
                                          "cpu": str(a.cpu), "memory": a.memory},
                         },
                         "volumeMounts": [
@@ -170,7 +174,7 @@ echo "=== finished $(date -u +%FT%TZ) ==="
                     }],
                     "volumes": [
                         {"name": "runs", "persistentVolumeClaim": {
-                            "claimName": RUNS_PVC}},
+                            "claimName": S["runs_pvc"]}},
                         {"name": "work", "emptyDir": {}},
                         {"name": "dshm", "emptyDir": {"medium": "Memory"}},
                     ],
@@ -198,6 +202,8 @@ def main() -> int:
     p.add_argument("--memory", default="64Gi")
     p.add_argument("--f32", action="store_true", default=True)
     p.add_argument("--no-f32", dest="f32", action="store_false")
+    p.add_argument("--site", default="nautilus",
+                   help="site profile from site.py")
     p.add_argument("--gpu-product", default=None)
     p.add_argument("--retries", type=int, default=20,
                    help="Job backoffLimit; each retry resumes from the "
@@ -213,7 +219,8 @@ def main() -> int:
     for d, (_, sha) in resolved.items():
         print(f"# {d} pinned at {sha[:12]}", file=sys.stderr)
     print(json.dumps(build(a, resolved), indent=2))
-    print(f"# output -> PVC {RUNS_PVC}:/runs/{a.name} (kept)", file=sys.stderr)
+    print(f"# output -> PVC {site_profile.get(a.site)['runs_pvc']}:"
+          f"/runs/{a.name} (kept)", file=sys.stderr)
     return 0
 
 

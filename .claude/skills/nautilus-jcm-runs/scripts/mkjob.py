@@ -20,9 +20,9 @@ import json
 import subprocess
 import sys
 
-NAMESPACE = "climate-analytics"
-IMAGE = "ghcr.io/climate-analytics-lab/jcm:latest"
-PVC = "jcm-bench"
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import sites as site_profile  # noqa: E402  (local module)
+
 
 # Repos cloned at pinned refs inside the pod. The published image carries a
 # RELEASE of jcm, so branch code (and the benchmark harness itself) has to
@@ -31,7 +31,12 @@ PVC = "jcm-bench"
 REPOS = {
     "jcm": ("https://github.com/climate-analytics-lab/jax-gcm",
             "feat/derecho-runs-skill"),
-    "dinosaur-sl": ("https://github.com/neuralgcm/dinosaur", "main"),
+    # shoyer's semi-lagrangian branch, NOT neuralgcm/dinosaur main: the
+    # SemiLagrangianPrimitiveEquationsHybrid class the SL dycore needs lives
+    # in PR #135 and is not upstream. Pointing at upstream main gets a clone
+    # that imports fine and then fails at model construction with
+    # AttributeError — which is how this was found.
+    "dinosaur-sl": ("https://github.com/shoyer/dinosaur", "semi-lagrangian"),
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
     # Required by every echam-jam preset and NOT present in the published
@@ -48,8 +53,6 @@ REPOS = {
 # --gpu-product pins a single product when a comparison needs strict
 # identity: SXM4 is a 400 W part against PCIe's 300 W, so single-GPU
 # throughput differs even though both have 80 GB.
-GPU_MEMORY_MIB = "81920"
-GPU_RESOURCE = "nvidia.com/a100"
 
 DEFAULT_SWEEP = [
     "ma-t63-l47", "ma-t63-l95", "ma-t106-l47",
@@ -71,6 +74,7 @@ def resolve_refs() -> dict:
 
 
 def job(preset: str, a) -> dict:
+    S = site_profile.get(a.site)
     name = f"jcm-bench-{preset}".lower().replace("_", "-")[:60]
     # Resolve every ref to a SHA at GENERATION time and clone that exact
     # commit. Cloning a branch name means the code depends on when the pod
@@ -106,7 +110,7 @@ cd /work/jcm
 # here can in principle drag jax with it, which would silently swap the CUDA
 # build for a CPU one — so the install is followed by a hard GPU check rather
 # than trusting it. A CPU fallback would "work" and report timings 100x slow.
-pip install --no-cache-dir 'diffrax>=0.7' matplotlib 2>&1 | tail -2
+pip install --no-cache-dir {' '.join(repr(x) for x in S['extra_pip'])} 2>&1 | tail -2
 python - <<'PYCHK'
 import sys, jax
 d = jax.devices()
@@ -124,16 +128,31 @@ PYCHK
 # interpretable without this.
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader \\
     > /reports/{preset}-nautilus/gpu_product.txt || true
+# Echo the report to stdout so `kubectl logs` retrieves it. Reports are a
+# few KB, so there is no reason to make anyone mount the PVC to read one —
+# and per NRP's data-movement guidance kubectl cp is for small files only,
+# with S3 for anything bulky. This removes the exec-into-a-pod dance
+# entirely for the common case.
+echo "===== REPORT BEGIN ====="
+cat /reports/{preset}-nautilus/report.md 2>/dev/null || echo "(no report)"
+echo "===== REPORT END ====="
+# On failure, surface the model's own log too. Without this the pod log
+# shows only the harness's "truncated" verdict and the actual traceback
+# stays on the PVC — which cost several debug cycles here.
+if ! grep -q "sim days/hr" /reports/{preset}-nautilus/report.md 2>/dev/null; then
+  echo "===== RUN LOG TAIL (run did not produce a rate) ====="
+  tail -40 /reports/{preset}-nautilus/run.log 2>/dev/null || true
+fi
 echo "=== done ==="
 """
-    selector = {"nvidia.com/gpu.memory": GPU_MEMORY_MIB}
+    selector = dict(S["gpu_selector"])
     if a.gpu_product:
         selector = {"nvidia.com/gpu.product": a.gpu_product}
 
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": name, "namespace": NAMESPACE},
+        "metadata": {"name": name, "namespace": S["namespace"]},
         "spec": {
             # A benchmark that failed should be inspected, not silently
             # retried on a different node with different timings.
@@ -145,7 +164,7 @@ echo "=== done ==="
                     "nodeSelector": selector,
                     "containers": [{
                         "name": "bench",
-                        "image": IMAGE,
+                        "image": S["image"],
                         "command": ["/bin/bash", "-c", script],
                         "env": [
                             {"name": "NODE_NAME", "valueFrom": {
@@ -157,12 +176,12 @@ echo "=== done ==="
                         ],
                         "resources": {
                             "limits": {
-                                GPU_RESOURCE: 1,
+                                S["gpu_resource"]: 1,
                                 "cpu": str(a.cpu),
                                 "memory": a.memory,
                             },
                             "requests": {
-                                GPU_RESOURCE: 1,
+                                S["gpu_resource"]: 1,
                                 "cpu": str(a.cpu),
                                 "memory": a.memory,
                             },
@@ -178,7 +197,7 @@ echo "=== done ==="
                     }],
                     "volumes": [
                         {"name": "reports",
-                         "persistentVolumeClaim": {"claimName": PVC}},
+                         "persistentVolumeClaim": {"claimName": S["reports_pvc"]}},
                         {"name": "work", "emptyDir": {}},
                         {"name": "scratch", "emptyDir": {}},
                         # JAX/XLA wants more than the 64 MB default /dev/shm.
@@ -200,6 +219,8 @@ def main() -> int:
     p.add_argument("--f32", action="store_true", default=True)
     p.add_argument("--no-f32", dest="f32", action="store_false")
     p.add_argument("--allow-unhealthy", action="store_true")
+    p.add_argument("--site", default="nautilus",
+                   help="site profile from site.py")
     p.add_argument("--gpu-product", default=None,
                    help="pin an exact product, e.g. NVIDIA-A100-80GB-PCIe; "
                         "default selects any 80GB A100 by memory label")

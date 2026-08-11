@@ -5,10 +5,17 @@
     python fetch_reports.py --copy ./   # also copy the report files locally
     python fetch_reports.py --raw <label>   # dump one full report
 
-The reports live on a ReadWriteMany PVC that no local process can see, so
-this runs a short-lived pod that mounts it. The pod is deleted afterwards
-whatever happens — a leaked pod holds a PVC attachment and can block later
-jobs.
+Prefers `kubectl logs`: jobs echo their report to stdout on completion, so
+the common case needs no cluster storage access at all. That is both simpler
+and what NRP recommends — their data-movement guidance reserves `kubectl cp`
+for small files and points at S3 for bulk.
+
+`--from-pvc` falls back to mounting the volume in a short-lived pod, for
+reports whose job has been garbage-collected (TTL is 24 h). That pod is
+always deleted, since a leaked one holds a PVC attachment and can block
+later jobs.
+
+For production netCDF, use neither: see SKILL.md, those go to S3.
 """
 
 from __future__ import annotations
@@ -75,8 +82,49 @@ def _sh(cmd: str) -> str:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--copy", metavar="DIR")
+    p.add_argument("--from-pvc", action="store_true",
+                   help="mount the PVC in a throwaway pod instead of reading "
+                        "job logs; needed once a job's TTL has expired")
     p.add_argument("--raw", metavar="LABEL")
     a = p.parse_args()
+
+    if not a.from_pvc:
+        # Job logs: no pod, no exec, no PVC mount.
+        r = subprocess.run(
+            ["kubectl", "-n", NAMESPACE, "get", "jobs",
+             "-o", "jsonpath={.items[*].metadata.name}"],
+            capture_output=True, text=True, timeout=120)
+        jobs = [x for x in r.stdout.split() if x.startswith("jcm-bench")]
+        if not jobs:
+            print("no benchmark jobs found; --from-pvc to read older reports "
+                  "off the volume")
+            return 0
+        for j in jobs:
+            # Distinguish "still running" from "finished without a rate".
+            # Both show no throughput, but only the second is a refusal —
+            # conflating them makes an in-flight job look like a failure.
+            st = subprocess.run(
+                ["kubectl", "-n", NAMESPACE, "get", "job", j, "-o",
+                 "jsonpath={.status.succeeded}/{.status.failed}/"
+                 "{.status.active}"],
+                capture_output=True, text=True, timeout=60).stdout
+            succ, fail, active = (st.split("/") + ["", "", ""])[:3]
+            log = subprocess.run(
+                ["kubectl", "-n", NAMESPACE, "logs", f"job/{j}", "--tail=400"],
+                capture_output=True, text=True, timeout=180).stdout
+            body = log.split("===== REPORT BEGIN =====")[-1].split(
+                "===== REPORT END =====")[0] if "REPORT BEGIN" in log else ""
+            rate = next((ln.split("**")[1].split(" sim")[0]
+                         for ln in body.splitlines()
+                         if "sim days/hr" in ln and "**" in ln), None)
+            if rate is None:
+                rate = ("RUNNING" if active.strip() else
+                        "REFUSED" if (succ.strip() or fail.strip())
+                        else "PENDING")
+            print(f"{j:44s} {rate:>12s}")
+            if a.raw and a.raw in j:
+                print(body)
+        return 0
 
     if not _spawn():
         return 1
