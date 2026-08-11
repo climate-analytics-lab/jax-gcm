@@ -166,7 +166,8 @@ def job(preset: str, a) -> dict:
     bench = (
         f"python /work/jcm/tools/benchmark.py --preset {preset} "
         f"--months {a.months} --gpu 0 --chunk-days {a.chunk_days} "
-        f"--save-interval {a.chunk_days} --label {tag}-nautilus "
+        f"--save-interval {a.save_interval or a.chunk_days} "
+        f"--label {tag}-nautilus "
         f"--outdir /reports --scratch-root /scratch "
         f"--pythonpath {pythonpath}"
         + (" --f32" if a.f32 else "")
@@ -287,6 +288,14 @@ def main() -> int:
     p.add_argument("--gpu-product", default=None,
                    help="pin an exact product, e.g. NVIDIA-A100-80GB-PCIe; "
                         "default selects any 80GB A100 by memory label")
+    p.add_argument("--save-interval", type=int, default=None,
+                   help="days between output writes; defaults to --chunk-days "
+                        "(one write per chunk). Lower it to shrink the "
+                        "per-outer-step observation buffer: the inner lax.scan "
+                        "STACKS every step between writes, so ne30 L95 needs a "
+                        "50 GiB allocation at save-interval 5 and OOMs an 80 GB "
+                        "card. Chunk timing is unaffected, so a run reduced "
+                        "this way stays comparable.")
     p.add_argument("--suffix", default=None,
                    help="distinguish a rerun: appended to the Job name and "
                         "the report label, so it neither collides with an "
