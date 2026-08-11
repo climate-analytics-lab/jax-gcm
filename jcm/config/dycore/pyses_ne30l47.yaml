@@ -37,9 +37,12 @@ n_sponge: 8
 tracer_substeps: 5
 dyn_substeps_per_tracer: -1
 compute_frontogenesis: false
-# Terrain file on a regular lon/lat grid, bilinearly interpolated onto the
-# columns at build time. Null -> the packaged T63 climatology (marked as a
-# temporary downscale until native ne30 boundary data exists).
+# Terrain source. Null -> the packaged T63 climatology (a downscale).
+# Preferred: the native ne30pg3 GMTED2010 SSO bundle, used column-for-column
+# with exact GLL orography from the CESM topo product —
+#   terrain_file: hf://bundles/ne30pg3/sso.nc
+# Regular lon/lat jcm-canonical terrain files also work (bilinearly
+# interpolated onto the columns). hf:// paths resolve via jcm.data.remote.
 terrain_file: null
 lid_sponge:
   levels: 8

@@ -491,17 +491,52 @@ class PysesCamSEDycore(DynamicalCore):
             import xarray as xr
 
             ds = xr.open_dataset(source_file)
-            lon = np.asarray(ds["lon"].values)
-            lat = np.asarray(ds["lat"].values)
-
             col_lon = np.degrees(self.colmap.longitudes)
             col_lat = np.degrees(self.colmap.latitudes)
 
-            def sample(name, points_lon, points_lat):
-                return interp_grid_to_points(
-                    lon, lat, ds[name].transpose("lon", "lat").values,
-                    points_lon, points_lat,
-                )
+            from jcm.data.regridding import (
+                unit_sphere_vectors as _unit)
+
+            if "ncol" in ds.dims:
+                # Native unstructured file (e.g. bundles/ne30pg3/sso.nc):
+                # map each model column to the nearest file column on the
+                # unit sphere — the identity up to ordering when the file
+                # is on the same grid, with no interpolation smoothing.
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(_unit(ds["lat"].values, ds["lon"].values))
+                # the mapping is only the identity when the file is on
+                # this grid — warn when nearest-neighbor distances say
+                # otherwise (e.g. an ne30 file driving an ne120 run),
+                # since the blocky sampling is then a silent downscale.
+                d_col, col_idx = tree.query(_unit(col_lat, col_lon),
+                                            workers=-1)
+                spacing = np.sqrt(4.0 * np.pi / ds.sizes["ncol"])
+                if ds.sizes["ncol"] != ncol or np.median(d_col) > 0.1 * spacing:
+                    import logging
+                    logging.warning(
+                        "terrain file has %d columns vs model %d (median "
+                        "offset %.2g of a cell) — sampling nearest-neighbor,"
+                        " which is piecewise-constant across file cells",
+                        ds.sizes["ncol"], ncol, np.median(d_col) / spacing)
+
+                def sample(name, points_lon, points_lat):
+                    # column points reuse the query above; other point
+                    # sets (GLL fallback) query fresh
+                    if points_lat is col_lat:
+                        return np.asarray(ds[name].values)[col_idx]
+                    _, i = tree.query(_unit(points_lat, points_lon),
+                                      workers=-1)
+                    return np.asarray(ds[name].values)[i]
+            else:
+                lon = np.asarray(ds["lon"].values)
+                lat = np.asarray(ds["lat"].values)
+
+                def sample(name, points_lon, points_lat):
+                    return interp_grid_to_points(
+                        lon, lat, ds[name].transpose("lon", "lat").values,
+                        points_lon, points_lat,
+                    )
 
             orog_col = np.maximum(sample("orog", col_lon, col_lat), 0.0)
             fmask_col = np.clip(sample("lsm", col_lon, col_lat), 0.0, 1.0)
@@ -524,14 +559,29 @@ class PysesCamSEDycore(DynamicalCore):
             )
             self._orog_col = orog_col
 
-            # Orography on the GLL dynamics nodes for the initial state.
-            orog_gll = np.maximum(
-                sample("orog",
-                       np.degrees(gll[..., 1]).reshape(-1),
-                       np.degrees(gll[..., 0]).reshape(-1)),
-                0.0,
-            ).reshape(gll_shape)
-            self._orog_gll = self._be.np.asarray(orog_gll)
+            # Orography on the GLL dynamics nodes for the initial state: a
+            # native file may carry it exactly (orog_gll from the CESM topo
+            # product); otherwise sample the source orography at the nodes.
+            gll_lat = np.degrees(gll[..., 0]).reshape(-1)
+            gll_lon = np.degrees(gll[..., 1]).reshape(-1)
+            if "orog_gll" in ds:
+                from scipy.spatial import cKDTree
+
+                gtree = cKDTree(_unit(ds["lat_gll"].values,
+                                      ds["lon_gll"].values))
+                _, gi = gtree.query(_unit(gll_lat, gll_lon), workers=-1)
+                orog_gll = np.maximum(
+                    np.asarray(ds["orog_gll"].values)[gi], 0.0)
+            else:
+                if "ncol" in ds.dims:
+                    import logging
+                    logging.warning(
+                        "native terrain file has no orog_gll: GLL "
+                        "orography falls back to nearest-column sampling "
+                        "(piecewise-constant); include orog_gll for a "
+                        "smooth surface geopotential")
+                orog_gll = np.maximum(sample("orog", gll_lon, gll_lat), 0.0)
+            self._orog_gll = self._be.np.asarray(orog_gll.reshape(gll_shape))
 
         self._phi_surf_gll = self._gravity * self._orog_gll
         self.terrain = terrain
