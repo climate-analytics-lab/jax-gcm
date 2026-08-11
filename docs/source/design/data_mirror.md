@@ -80,6 +80,12 @@ inventory):
   cos-lat-weighted conservative binning for emissions fluxes,
   nearest-ocean fill for AMIP SST under land.
 - `registry.py` — hashes the upload tree.
+- `build_mirror.py --stage upload` — pushes to the HF dataset with
+  retries (the xet backend has aborted 44k-file pushes with transient
+  timeouts; uploads resume, committed files are skipped). Deliberately
+  excluded from `--stage all` — publishing is explicit. Needs
+  `hf auth login` with write access; run `python -m` from the repo
+  checkout's own directory.
 
 ## Known caveats
 

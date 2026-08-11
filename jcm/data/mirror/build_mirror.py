@@ -8,9 +8,14 @@ Reproduces every artifact in the Hugging Face dataset from the sources in
 
 Stages: ``sso``, ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/dust/oxidants via
-``tools/prep_jam_aux_inputs.py``), ``bundles``, ``registry``. Outputs land
-in ``$JCM_MIRROR_ROOT`` (default ``$SCRATCH/hf_mirror``): Tier A under
-``build/``, the HF-shaped tree under ``upload/``.
+``tools/prep_jam_aux_inputs.py``), ``bundles``, ``registry``, ``upload``
+(push to the HF dataset; needs ``hf auth login`` with write access).
+Outputs land in ``$JCM_MIRROR_ROOT`` (default ``$SCRATCH/hf_mirror``):
+Tier A under ``build/``, the HF-shaped tree under ``upload/``.
+
+Run from a repo checkout's own directory (``python -m ...`` with the
+worktree as cwd): an editable-installed jcm elsewhere shadows
+``PYTHONPATH`` and hides this package.
 """
 
 from __future__ import annotations
@@ -240,9 +245,43 @@ def check_sources(stage_names) -> None:
                  + "\n  ".join(sorted(set(missing))))
 
 
+def stage_upload() -> None:
+    """Push the upload tree to the HF dataset (needs a write token).
+
+    Retries transient backend failures: the xet upload pipeline has
+    aborted mid-transfer with TimeoutError("error decoding response
+    body") on a 44k-file push — uploads are resumable, so committed
+    files are skipped on the next attempt.
+    """
+    import time
+
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    api = HfApi()
+    last = None
+    for attempt in range(1, 6):
+        print(f"upload attempt {attempt}", flush=True)
+        try:
+            api.upload_folder(repo_id=DEFAULT_REPO, repo_type="dataset",
+                              folder_path=str(UPLOAD),
+                              commit_message="Mirror update via "
+                                             "build_mirror --stage upload")
+            print("upload: done", flush=True)
+            return
+        except Exception as e:                      # noqa: BLE001
+            last = e
+            print(f"upload attempt {attempt} failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            time.sleep(60)
+    raise RuntimeError("upload failed after 5 attempts") from last
+
+
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
-          "bundles": stage_bundles, "registry": stage_registry}
+          "bundles": stage_bundles, "registry": stage_registry,
+          "upload": stage_upload}
 
 
 def main() -> None:
@@ -251,7 +290,8 @@ def main() -> None:
                     help="comma-separated stage list, or 'all' "
                          f"({', '.join(STAGES)})")
     args = ap.parse_args()
-    names = list(STAGES) if args.stage == "all" else args.stage.split(",")
+    names = ([n for n in STAGES if n != "upload"] if args.stage == "all"
+             else args.stage.split(","))
     unknown = [n for n in names if n not in STAGES]
     if unknown:
         sys.exit(f"Unknown stage(s) {unknown}; valid: {', '.join(STAGES)}")
