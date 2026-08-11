@@ -74,6 +74,13 @@ replying — Codex has been right (forcing unit conventions) and wrong
   August). Before believing a red local run, rerun a sample of the
   failures serially; better, don't share the node with heavy I/O jobs
   during the run.
+- **Never run two coverage suites concurrently in one worktree.**
+  pytest-cov erases `.coverage.*` at startup and combines at exit, so a
+  fast-gate run (or a stray `rm .coverage*`) deletes an overlapping
+  slow job's in-flight worker data — all its tests pass but whole
+  modules lose credit (76%, then 0.00%, on a tree whose true number
+  was 85%). Sequence the gates, or give the slow PBS job its own
+  worktree.
 - **Capture pytest's exit via `PIPESTATUS[0]`**, never `$?` after a
   `| tail` — and never pipe the slow suite through `tail` at all (a
   segfault's context ends up truncated).
