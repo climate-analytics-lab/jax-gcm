@@ -1299,4 +1299,18 @@ class Echam1MMicrophysics(PhysicsTerm):
             droplet_number=cdnc_m3,
         )
 
+        # Advance the running condensate view so terms downstream (the
+        # satellite simulators and the AeroCom diagnostics) describe the
+        # POST-microphysics atmosphere, matching the tracers saved at the
+        # same timestamp. ``thermo_run`` is a parallel diagnostic view,
+        # never the prognostic state, so this cannot alter the trajectory
+        # (see ``advance_thermo_run``).
+        from jcm.physics.diagnostics.moist_air_state import (
+            advance_thermo_run)
+        diagnostics = advance_thermo_run(
+            diagnostics, dt,
+            d_temperature=tendency.temperature,
+            d_specific_humidity=tendency.specific_humidity,
+            d_qc=tendency.tracers.get("qc"), d_qi=tendency.tracers.get("qi"))
+
         return tendency, {**diagnostics, "clouds": clouds}

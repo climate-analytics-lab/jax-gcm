@@ -34,6 +34,14 @@ from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
 
+# AeroCom diagnostic wavelengths [nm]. 550 is the reference observable;
+# 440/670/865 give the Angstrom exponent and the 440 nm single-scattering
+# albedo AERONET reports; 355 is the lidar (ATLID/EarthCARE) wavelength.
+# ``refractive_index_at`` interpolates in log10(lambda), so these need not
+# coincide with any radiation band.
+_DIAG_WAVELENGTHS_NM: tuple[float, ...] = (355.0, 440.0, 550.0, 670.0, 865.0)
+_I355, _I440, _I550, _I670, _I865 = 0, 1, 2, 3, 4
+
 # Gauss–Hermite nodes (8) for the lognormal quadrature in ``_band_optics``.
 _GH_NODES, _GH_WEIGHTS = (
     tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
@@ -73,6 +81,7 @@ class _OpticsCache:
     ri_lw: dict
     aod_band_idx: int    # SW band index whose centre is closest to 550 nm
     aod_band_nm: float   # that band's actual centre wavelength [nm]
+    ri_diag: dict | None = None   # RI at _DIAG_WAVELENGTHS_NM (#584), or None
 
 
 class JamOpticsTerm(PhysicsTerm):
@@ -85,12 +94,41 @@ class JamOpticsTerm(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ("aerosol", "aerosol_optical_depth")
 
-    def __init__(self, *, spec: ModalAerosolSpec | None = None):
-        """Build the Mie lookup table and hold the population."""
+    def __init__(self, *, spec: ModalAerosolSpec | None = None,
+                 optics_diagnostics: bool = False):
+        """Build the Mie lookup table and hold the population.
+
+        ``optics_diagnostics`` enables the AeroCom per-species / per-mode /
+        spectral optics diagnostics (jax-gcm#584). It is off by default
+        because it adds a second Mie pass over
+        ``_DIAG_WAVELENGTHS_NM``; enabled, it rides the same radiation gate
+        as the radiative optics, so the incremental cost is
+        ``len(_DIAG_WAVELENGTHS_NM) / n_sw_band`` of the (already gated)
+        aerosol optics rather than a per-step cost.
+        """
         self._spec = spec or MAM4_SPEC
         self._lut = default_mie_lut()
         self._cache = None   # set by cache_band_config
         self._radiation_interval_s: float | None = None
+        self._optics_diagnostics = bool(optics_diagnostics)
+
+    def optics_diagnostic_keys(self) -> tuple[str, ...]:
+        """Diagnostics keys the optics diagnostic publishes (static).
+
+        Derived from the (static) mode/species spec, so the key set cannot
+        vary between the initial scan-carry probe and the real steps.
+        """
+        if not self._optics_diagnostics:
+            return ()
+        species = sorted({sp for m in self._spec.modes for sp in m.species}) + ["wat"]
+        keys = ["od550aer", "abs550aer", "od355aer", "od440aer", "od670aer",
+                "od865aer", "ssa440aer", "ang4487aer", "ang550865aer",
+                "aerindex", "ec355aer"]
+        keys += [f"od550_{sp}" for sp in species]
+        keys += [f"abs550_{sp}" for sp in species]
+        keys += [f"od550_mode_{m.short}" for m in self._spec.modes]
+        keys += [f"abs550_mode_{m.short}" for m in self._spec.modes]
+        return tuple(keys)
 
     def configure_radiation_gate(self, interval_s) -> None:
         """Recompute band optics only on radiation-compute steps.
@@ -131,9 +169,18 @@ class JamOpticsTerm(PhysicsTerm):
             aod_nm = float(sw_nm[aod_idx])
         else:
             aod_idx, aod_nm = 0, float("nan")
-        self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm)
+        ri_diag = None
+        if self._optics_diagnostics:
+            diag_nm = jnp.asarray(_DIAG_WAVELENGTHS_NM)
+            ri_diag = {}
+            for sp in species:
+                n_d, k_d = refractive_index_at(sp, diag_nm)
+                ri_diag[sp] = (np.asarray(n_d), np.asarray(k_d))
+        self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm,
+                                   ri_diag)
 
-    def _band_optics(self, state, aer, num_per_area, centers_nm, ri):
+    def _band_optics(self, state, aer, num_per_area, centers_nm, ri,
+                     want_decomposition: bool = False):
         """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``.
 
         The bands are independent and share the whole modal geometry
@@ -146,7 +193,13 @@ class JamOpticsTerm(PhysicsTerm):
         n_band = centers_nm.shape[0]
         if n_band == 0:
             empty = jnp.zeros((0,) + state.temperature.shape)
-            return empty, empty, empty
+            if not want_decomposition:
+                return empty, empty, empty
+            n_mode = len(self._spec.modes)
+            empty_m = jnp.zeros((0, n_mode) + state.temperature.shape)
+            species = {sp for m in self._spec.modes for sp in m.species} | {"wat"}
+            return (empty, empty, empty, empty_m, empty_m,
+                    {sp: empty for sp in species}, {sp: empty for sp in species})
 
         zeros = jnp.zeros_like(state.temperature)
         lam_all = jnp.asarray(centers_nm, state.temperature.dtype) * 1.0e-9
@@ -157,12 +210,17 @@ class JamOpticsTerm(PhysicsTerm):
             aod = jnp.zeros_like(state.temperature)
             scat = jnp.zeros_like(state.temperature)
             gscat = jnp.zeros_like(state.temperature)
+            per_mode_aod: list = []
+            per_mode_abs: list = []
+            sp_aod: dict = {}
+            sp_abs: dict = {}
             for i, mode in enumerate(self._spec.modes):
                 r_wet = aer.r_wet[i]
                 ln_sig = math.log(mode.geom_std_dev)
                 vol_n = jnp.zeros_like(state.temperature)
                 vol_k = jnp.zeros_like(state.temperature)
                 vol_tot = jnp.zeros_like(state.temperature)
+                vol_sp: dict = {}
                 for sp in mode.species:
                     mass = state.tracers.get(mass_name(sp, mode.short), zeros)
                     v = mass / self._spec.species_props(sp).density
@@ -170,6 +228,7 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_n = vol_n + v * n_sp
                     vol_k = vol_k + v * k_sp
                     vol_tot = vol_tot + v
+                    vol_sp[sp] = v
                 vol_dry = vol_tot
                 v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
                     r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
@@ -229,9 +288,50 @@ class JamOpticsTerm(PhysicsTerm):
                 # total-volume gate on its own.
                 gate = (vol_dry > 1.0e-24)
                 area = num_per_area[i] * math.pi * r_wet ** 2
-                aod = aod + jnp.where(gate, aod_i, 0.0)
-                scat = scat + jnp.where(gate, area * sec_scat, 0.0)
+                aod_gated = jnp.where(gate, aod_i, 0.0)
+                scat_gated = jnp.where(gate, area * sec_scat, 0.0)
+                aod = aod + aod_gated
+                scat = scat + scat_gated
                 gscat = gscat + jnp.where(gate, area * sec_gscat, 0.0)
+
+                # Diagnostic decomposition (jax-gcm#584). The mode's species
+                # are volume-mixed into ONE effective refractive index before
+                # the Mie call, so there is no per-species extinction to
+                # recover: what follows is an APPORTIONMENT of the mode's
+                # extinction, which is what an internally-mixed model can
+                # honestly report. Extinction is apportioned by species
+                # VOLUME fraction; absorption by k-weighted volume,
+                # V_s*k_s / sum(V_s*k_s).
+                #
+                # The absorption weight is not an ad-hoc choice: under the
+                # volume mixing rule used above, sum(V_s*k_s) IS V_tot*k_eff,
+                # so the weight is exactly the linear decomposition of the
+                # effective imaginary index this mode's optics were computed
+                # from. ECHAM-HAM's ham_rad_diag uses the identical pair of
+                # weights (mo_ham_rad.f90:1926-1936, "based on volume average
+                # for optical thickness, additionally weighted with ni for
+                # absorption"), so these fields are directly comparable to
+                # HAM's TAU_COMP_*/ABS_COMP_*. Both reduce to the external-
+                # mixture answer when a mode carries one species.
+                if not want_decomposition:
+                    continue
+                per_mode_aod.append(aod_gated)
+                per_mode_abs.append(aod_gated - scat_gated)
+                # ``vol_tot``/``vol_k`` here INCLUDE the hygroscopic water
+                # added above, so the fractions sum to one over the mode's
+                # species plus water — no extinction is dropped or double
+                # counted.
+                inv_vol = jnp.where(vol_tot > _TINY, 1.0 / jnp.maximum(vol_tot, _TINY), 0.0)
+                inv_volk = jnp.where(vol_k > _TINY, 1.0 / jnp.maximum(vol_k, _TINY), 0.0)
+                abs_gated = aod_gated - scat_gated
+                for sp, v_sp in vol_sp.items():
+                    sp_aod[sp] = sp_aod.get(sp, 0.0) + aod_gated * (v_sp * inv_vol)
+                    sp_abs[sp] = sp_abs.get(sp, 0.0) + abs_gated * (
+                        v_sp * ri_band[sp][1] * inv_volk)
+                # Aerosol water is itself an AeroCom component (TAU_COMP_WAT).
+                sp_aod["wat"] = sp_aod.get("wat", 0.0) + aod_gated * (v_water * inv_vol)
+                sp_abs["wat"] = sp_abs.get("wat", 0.0) + abs_gated * (
+                    v_water * k_w * inv_volk)
             # Clamp the extinction-/scattering-weighted SSA and asymmetry to
             # their physical [0, 1] range. With a non-negative per-mode AOD
             # (number floored at 0 in ``__call__``) these ratios are already
@@ -241,13 +341,101 @@ class JamOpticsTerm(PhysicsTerm):
             # physically [0, 1]; the asymmetry parameter is [-1, 1] (negative g =
             # back-scattering), so keep its lower bound at -1 to preserve valid
             # back-scattering aerosol rather than only bounding overshoot.
-            return (
-                aod,
-                jnp.clip(scat / jnp.maximum(aod, _TINY), 0.0, 1.0),
-                jnp.clip(gscat / jnp.maximum(scat, _TINY), -1.0, 1.0),
-            )
+            ssa_b = jnp.clip(scat / jnp.maximum(aod, _TINY), 0.0, 1.0)
+            asy_b = jnp.clip(gscat / jnp.maximum(scat, _TINY), -1.0, 1.0)
+            if not want_decomposition:
+                return aod, ssa_b, asy_b
+            return (aod, ssa_b, asy_b,
+                    jnp.stack(per_mode_aod), jnp.stack(per_mode_abs),
+                    sp_aod, sp_abs)
 
         return jax.vmap(one_band)(lam_all, ri_j)
+
+    def _optics_diagnostics_fields(self, state, aer, num_per_area, dz) -> dict:
+        """AeroCom per-species / per-mode / spectral optics (jax-gcm#584).
+
+        A second Mie pass at ``_DIAG_WAVELENGTHS_NM``, independent of the
+        radiation banding so the reported quantities are at the wavelengths
+        the observations are actually at (550 nm for satellite/AERONET AOD,
+        440/670/865 nm for the Angstrom exponent and AERONET SSA, 355 nm for
+        the ATLID/EarthCARE lidar) rather than at whichever band centre the
+        radiation configuration happens to provide.
+
+        Everything except the 355 nm extinction profile is reduced to a
+        column integral here rather than downstream: these fields live in the
+        ``lax.scan`` carry (they ride the radiation gate with the rest of the
+        band optics), and keeping ``n_species x n_wavelength x nlev`` 3-D
+        arrays alive there would cost hundreds of MB at T63L47.
+
+        The radiation-stability guards (``_AER_RAD_PMIN`` masking,
+        ``_MAX_LAYER_TAU``) are deliberately NOT applied. Those bound a
+        heating rate divided by a near-zero lid air mass; the diagnostic is
+        meant to be the physical observable a satellite retrieval would see,
+        so it reports the column as the model actually holds it.
+        """
+        c = self._cache
+        tau, ssa, _asy, mode_tau, mode_abs, sp_tau, sp_abs = self._band_optics(
+            state, aer, num_per_area,
+            np.asarray(_DIAG_WAVELENGTHS_NM, np.float64), c.ri_diag,
+            want_decomposition=True,
+        )
+        # (n_wavelength, nlev, *horiz) -> column integral over the vertical.
+        # The ``maximum`` is a defensive clamp only: the modal number is
+        # already floored at 0 in ``_compute_fields`` and the Mie
+        # efficiencies are non-negative, so every per-layer tau here is
+        # non-negative by construction. It is kept so a future change
+        # upstream cannot silently produce a negative reported AOD.
+        def col(x):
+            # x is (n_wavelength, nlev, *horiz); axis 1 is the vertical.
+            return jnp.maximum(jnp.sum(x, axis=1), 0.0)
+
+        od = col(tau)                                   # (n_wavelength, *horiz)
+        absorp = col(tau * (1.0 - ssa))
+        out = {
+            "od550aer": od[_I550], "abs550aer": absorp[_I550],
+            "od355aer": od[_I355], "od440aer": od[_I440],
+            "od670aer": od[_I670], "od865aer": od[_I865],
+        }
+        # Single-scattering albedo needs a non-zero optical depth to be
+        # defined; report 1 (purely scattering) in aerosol-free columns
+        # rather than 0/0, so a zonal mean is not dragged down by clean air.
+        out["ssa440aer"] = jnp.where(
+            od[_I440] > _TINY, 1.0 - absorp[_I440] / jnp.maximum(od[_I440], _TINY), 1.0)
+        # Angstrom exponent from the 440/865 nm pair (AeroCom's ang4487aer is
+        # nominally 440/870; 865 nm is used here because it is a jax-rrtmgp
+        # band centre, a 0.6% lever-arm difference). Undefined without
+        # aerosol at BOTH wavelengths -> 0 (spectrally flat).
+        both = (od[_I440] > _TINY) & (od[_I865] > _TINY)
+        ratio = jnp.maximum(od[_I440], _TINY) / jnp.maximum(od[_I865], _TINY)
+        ang = jnp.where(both, -jnp.log(ratio) / math.log(440.0 / 865.0), 0.0)
+        out["ang4487aer"] = ang
+        # ECHAM-HAM reports its Angstrom exponent over 550/865 nm
+        # (ANG_550nm_865nm) rather than AeroCom's 440/870 pair, so publish
+        # that one too — it is free here (both column AODs already exist)
+        # and it is what a direct HAM intercomparison needs.
+        both58 = (od[_I550] > _TINY) & (od[_I865] > _TINY)
+        ratio58 = jnp.maximum(od[_I550], _TINY) / jnp.maximum(od[_I865], _TINY)
+        out["ang550865aer"] = jnp.where(
+            both58, -jnp.log(ratio58) / math.log(550.0 / 865.0), 0.0)
+        # Aerosol index = AOD x Angstrom exponent: the CCN proxy that
+        # correlates with number far better than AOD alone, because the
+        # Angstrom factor discounts the coarse mode.
+        out["aerindex"] = od[_I550] * ang
+        # 3-D extinction coefficient [m-1] at the lidar wavelength. Same
+        # defensive clamp as ``col`` so that integrating ec355aer over dz
+        # reproduces od355aer exactly under either sign convention.
+        out["ec355aer"] = jnp.maximum(tau[_I355], 0.0) / jnp.maximum(dz, _TINY)
+
+        for i, mode in enumerate(self._spec.modes):
+            out[f"od550_mode_{mode.short}"] = jnp.maximum(
+                jnp.sum(mode_tau[_I550, i], axis=0), 0.0)
+            out[f"abs550_mode_{mode.short}"] = jnp.maximum(
+                jnp.sum(mode_abs[_I550, i], axis=0), 0.0)
+        for sp, v in sp_tau.items():
+            out[f"od550_{sp}"] = jnp.maximum(jnp.sum(v[_I550], axis=0), 0.0)
+        for sp, v in sp_abs.items():
+            out[f"abs550_{sp}"] = jnp.maximum(jnp.sum(v[_I550], axis=0), 0.0)
+        return out
 
     def _compute_fields(self, state, diagnostics) -> dict:
         """Fresh per-band optics + the AOD-550 column diagnostic."""
@@ -309,13 +497,20 @@ class JamOpticsTerm(PhysicsTerm):
         else:
             aod_550 = jnp.zeros_like(state.temperature[0])
 
-        return {
+        fields = {
             "aod_sw_per_band": aod_sw, "ssa_sw_per_band": ssa_sw,
             "asy_sw_per_band": asy_sw,
             "aod_lw_per_band": aod_lw, "ssa_lw_per_band": ssa_lw,
             "asy_lw_per_band": asy_lw,
             "aod_550": aod_550,
         }
+        if self._optics_diagnostics:
+            # Nested so the AerosolData copy in ``__call__`` (which splats
+            # ``fields``) does not see these as struct fields; they are
+            # plain diagnostics keys.
+            fields["_optics_diag"] = self._optics_diagnostics_fields(
+                state, aer, num_per_area, dz)
+        return fields
 
     def __call__(self, state, diagnostics, forcing, terrain):
         cached = diagnostics.get("_jam_band_optics")
@@ -344,11 +539,13 @@ class JamOpticsTerm(PhysicsTerm):
             )
 
         new_aerosol = diagnostics["aerosol"].copy(
-            **{k: v for k, v in fields.items() if k != "aod_550"}
+            **{k: v for k, v in fields.items()
+               if k not in ("aod_550", "_optics_diag")}
         )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
         return tendency, {
             **diagnostics,
+            **fields.get("_optics_diag", {}),
             "aerosol": new_aerosol,
             "aerosol_optical_depth": fields["aod_550"],
             "_jam_band_optics": fields,

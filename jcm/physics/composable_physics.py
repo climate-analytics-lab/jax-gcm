@@ -310,6 +310,24 @@ class ComposablePhysics(nnx.Module, Physics):
         }
 
         for term in self.terms:
+            # Running tendency view, for DIAGNOSTIC terms that must report the
+            # state as it will be saved rather than as it was at step start.
+            #
+            # This is operator splitting: every term computes against the
+            # step-start ``state`` and returns a tendency; the driver sums them
+            # and the dycore applies that sum once. So ``state.tracers`` seen by
+            # a term is ALWAYS the step-start value, and a diagnostic reading it
+            # reports a step-stale field that disagrees with the tracers saved
+            # at the same timestamp. ``thermo_run`` already solves this for
+            # T/q/qc/qi; this is the same idea generalised to tracers and winds,
+            # without each term having to opt in.
+            #
+            # A term running at position i sees the sum over terms [0, i). For
+            # the diagnostics terms that consume it — which run last, after the
+            # physics — that is the whole physics tendency. Structure is fixed
+            # (the tracer key set comes from ``state.tracers``), so this is safe
+            # in the ``lax.scan`` carry.
+            diagnostics["_tendency_run"] = acc
             call_fn = (
                 jax.checkpoint(term)
                 if self.checkpoint_terms
@@ -438,6 +456,9 @@ class ComposablePhysics(nnx.Module, Physics):
         "_echam_params",
         "_echam_coords",
         "_speedy_coords",
+        # Running tendency view for diagnostics (see the term loop); an
+        # intermediate, not a field anyone wants in the netCDF.
+        "_tendency_run",
     })
 
     # Sub-struct fields that survive the flatten step but should be dropped

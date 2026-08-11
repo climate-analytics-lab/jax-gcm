@@ -51,6 +51,8 @@ from jcm.physics.aerosol.jam.tracer_layout import (
     number_name,
 )
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+    accumulate_emission_fluxes, emission_flux_keys)
 
 
 @tree_math.struct
@@ -92,7 +94,7 @@ class AnthropogenicEmissions(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "air_density", "layer_thickness", "height_full",
     )
-    provides: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
 
     def __init__(
         self,
@@ -179,4 +181,11 @@ class AnthropogenicEmissions(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tends,
         )
+        # Publish this term's contribution to the AeroCom per-species
+        # emission fluxes (accumulated across all emitting terms).
+        diagnostics = accumulate_emission_fluxes(
+            diagnostics, tends,
+            diagnostics["air_density"],
+            diagnostics["layer_thickness"])
+
         return tendency, diagnostics

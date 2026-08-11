@@ -312,6 +312,8 @@ def precip_formation_warm(
     autoconversion_rate     : paclc*(zraut+zrac2) + pclcstar*zrac1
     autoconversion_rate_in_cloud : zraut+zrac1+zrac2 (only where ld_prcp_warm)
     droplet_number_removal_rate    : (zraut+zrac1+zrac2)/(old_cloud_water+eps) (only where ld_prcp_warm)
+    autoconversion_only : grid-mean mass to rain by autoconversion alone [kg/kg]
+    accretion_only      : grid-mean mass to rain by accretion alone [kg/kg]
 
     """
     # -------------------------------------------------------------------------
@@ -440,7 +442,16 @@ def precip_formation_warm(
     droplet_number_new = jnp.maximum(droplet_number - droplet_number_removal_rate, params.cqtmin)
     droplet_number = jnp.where(warm_precip_mask, droplet_number_new, droplet_number)
 
-    return droplet_number, cloud_water, autoconversion_rate_in_cloud, autoconversion_rate, droplet_number_removal_rate
+    # Grid-mean mass increments of the two warm-rain pathways, kept separate
+    # for the AeroCom `autoconv` / `accretn` diagnostics (the combined
+    # `autoconversion_rate` above mixes them). Weighting matches that of the
+    # combined term: zraut is in-cloud, zrac1 follows the precip cover.
+    autoconversion_only = cloud_fraction * zraut
+    accretion_only = cloud_fraction * zrac2 + minimum_cloud_precip_fraction * zrac1
+
+    return (droplet_number, cloud_water, autoconversion_rate_in_cloud,
+            autoconversion_rate, droplet_number_removal_rate,
+            autoconversion_only, accretion_only)
 
 def precip_formation_cold(
     cloud_mask: jnp.ndarray,                      # ld_cc
