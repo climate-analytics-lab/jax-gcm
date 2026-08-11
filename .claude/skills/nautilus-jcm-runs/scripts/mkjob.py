@@ -101,6 +101,21 @@ echo "=== node: $NODE_NAME  gpu: $(nvidia-smi --query-gpu=name --format=csv,nohe
 mkdir -p /work /scratch /reports
 {clone}
 cd /work/jcm
+# MAM4-JAX declares diffrax and matplotlib; neither is in the jcm image, and
+# the JAM condensation backend imports diffrax at module load. Installing it
+# here can in principle drag jax with it, which would silently swap the CUDA
+# build for a CPU one — so the install is followed by a hard GPU check rather
+# than trusting it. A CPU fallback would "work" and report timings 100x slow.
+pip install --no-cache-dir 'diffrax>=0.7' matplotlib 2>&1 | tail -2
+python - <<'PYCHK'
+import sys, jax
+d = jax.devices()
+print("jax devices after install:", d)
+if not any(x.platform == "gpu" for x in d):
+    sys.exit("FATAL: no GPU visible to jax after pip install — the CUDA "
+             "build was replaced. Refusing to run: timings would be "
+             "meaningless and the failure would look like a slow run.")
+PYCHK
 # The pod has exactly one GPU, so --gpu 0 is unambiguous and the
 # free-GPU gate is a no-op: Kubernetes already gave us exclusive use.
 {bench}
