@@ -31,7 +31,7 @@ forcing interpolation, output regrid weights).
 - **pg2 physics grid, from pyses itself.** Physics on the GLL nodes imprints
   the element structure onto the forcing; physics therefore runs on 2×2
   quasi-equal-area finite-volume cells per element (Hannah et al. 2021).
-  pySES ≥ 0.1.3a2 ships the remap machinery
+  pySES ≥ 0.1.3.1 ships the remap machinery
   (`pyses.dynamical_cores.finite_volume_grid`); jcm only wraps it
   (`FVPhysicsGrid`) into the `(nlev, 1, ncol)` layout, adds seam-safe
   cell-centre coordinates (Cartesian averaging — direct longitude averaging

@@ -9,7 +9,7 @@ noise. Following Hannah et al. (2021, JAMES, doi:10.1029/2020MS002419) —
 and the developer prototype — physics runs instead on a quasi-equal-area
 finite-volume grid of ``nf × nf`` sub-cells per element (``pg2``: nf = 2).
 
-pyses 0.1.3a2 **ships** the element-local remap machinery
+pyses **ships** the element-local remap machinery
 (:mod:`pyses.dynamical_cores.finite_volume_grid`): ``init_fv_grid`` builds
 the reference operators + per-element metric, ``gll_to_fv`` is the
 area-weighted GLL→cell average and ``fv_to_gll`` its density-weighted

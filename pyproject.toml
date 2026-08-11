@@ -48,12 +48,13 @@ cosp = [
     "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git",
 ]
 
-# pySES CAM-SE spectral-element dynamical core (jcm/dycore/pyses). Pre-release
-# pin: 0.1.3a2 is the first build that ships the pg2 physics-grid coupling
-# machinery (pyses.dynamical_cores.finite_volume_grid) this backend uses.
+# pySES CAM-SE spectral-element dynamical core (jcm/dycore/pyses).
+# Floor is 0.1.3.1: earlier builds lower the SE contractions to per-gridpoint
+# cuBLAS GEMMs on GPU (1.4x slower, 1.8x memory at ne30L47) and carry an
+# upstream tracer-hyperviscosity bug active on the quasi_uniform path.
 # Install with `pip install jcm[pyses]`.
 pyses = [
-    "pyses>=0.1.3a2",
+    "pyses>=0.1.3.1",
 ]
 
 
