@@ -9,7 +9,13 @@ description: Submit, monitor and benchmark jax-gcm (jcm) simulations on NCAR Der
 layer (config groups, Hydra traps, stability overrides) is `jcm-run`, and
 throughput methodology is `jcm-benchmark`; both apply here too. The
 shared-workstation counterpart is `devbox-jcm-runs` — worth a glance for the
-contrast, since there GPUs are self-allocated rather than scheduled.
+contrast, since there GPUs are self-allocated rather than scheduled — and the
+Kubernetes counterpart is `kubernetes-jcm-runs`.
+
+**Derecho's A100s are 40 GB**, half the cluster and dev-box cards. Throughput
+matches at equal work, but the memory ceiling does not: the reference table
+in `jcm-benchmark` is measured on 80 GB, and only its smallest configs fit
+here.
 
 Generate a PBS script with `scripts/mkjob.py`, sanity-check the config, submit,
 then monitor with the patterns below. Every default here was established by a

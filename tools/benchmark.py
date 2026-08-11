@@ -197,7 +197,7 @@ def _pyses_preset(levels: int) -> list[str]:
       a true land fraction of ~0.335 in ``bundles/t63/terrain.nc``), so it
       would run an essentially all-land planet — silently, since the dycore
       just clips it to [0, 1]. It also lacks the ``orog_gll`` the same
-      comment promises. Revisit once an assembled ne30pg3 terrain bundle
+      comment promises. See jax-gcm#596; revisit once an assembled bundle
       exists.
     * but ozone IS still level-validated. "Column sampling has no exact-grid
       requirement" covers the HORIZONTAL grid only — an L47 ozone file is

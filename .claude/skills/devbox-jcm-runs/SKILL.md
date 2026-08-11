@@ -10,6 +10,12 @@ Read `jcm-run` for the model/Hydra layer and `jcm-benchmark` for throughput
 methodology — this file only covers what is specific to this machine. (The
 Derecho equivalent is `derecho-jcm-runs`; the contrast matters, see below.)
 
+**For benchmarks, prefer `kubernetes-jcm-runs`.** Exclusivity is the whole
+problem here — a neighbour landing on your card mid-run corrupts the timing
+silently — and a cluster pod gets it by construction. Use this box when you
+want a card immediately, are iterating interactively, or need the local
+scratch and boundary data.
+
 ## The defining difference from Derecho: nothing allocates GPUs for you
 
 On Derecho, PBS hands you exclusive GPUs and queueing is the scheduler's

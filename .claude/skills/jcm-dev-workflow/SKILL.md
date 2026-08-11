@@ -190,4 +190,5 @@ known gap.
 
 - `jcm-run` — driving the model (config groups, Hydra traps)
 - `jcm-benchmark` — measuring throughput without fooling yourself
-- `devbox-jcm-runs` / `derecho-jcm-runs` — machine-specific execution
+- `devbox-jcm-runs` / `derecho-jcm-runs` / `kubernetes-jcm-runs` —
+  machine-specific execution

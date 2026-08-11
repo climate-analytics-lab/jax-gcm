@@ -72,5 +72,5 @@ def get(name: str = "nautilus") -> dict:
     if name not in SITES:
         raise SystemExit(
             f"unknown site {name!r}; known: {', '.join(sorted(SITES))}. "
-            "Add a profile to site.py rather than editing the generators.")
+            "Add a profile to sites.py rather than editing the generators.")
     return SITES[name]

@@ -73,6 +73,9 @@ GPU selection is machine-specific and lives in the site skills:
   idle for a parked job; both must be checked.
 - **`derecho-jcm-runs`** — PBS allocates exclusive GPUs; pre-flight the Hydra
   composition before spending a queue slot instead.
+- **`kubernetes-jcm-runs`** — a pod gets exclusive GPUs, so timings are
+  trustworthy and a sweep runs in parallel; in exchange the run must survive
+  eviction and the code has to be pinned by SHA.
 
 `JAX_PLATFORMS=cpu` is for **unit tests only**. Anything beyond ~5 simulated
 days belongs on a GPU.

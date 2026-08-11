@@ -292,7 +292,7 @@ def main() -> int:
     p.add_argument("--no-f32", dest="f32", action="store_false")
     p.add_argument("--allow-unhealthy", action="store_true")
     p.add_argument("--site", default="nautilus",
-                   help="site profile from site.py")
+                   help="site profile from sites.py")
     p.add_argument("--gpu-product", default=None,
                    help="pin an exact product, e.g. NVIDIA-A100-80GB-PCIe; "
                         "default selects any 80GB A100 by memory label")

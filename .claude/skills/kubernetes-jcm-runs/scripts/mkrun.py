@@ -246,7 +246,7 @@ def main() -> int:
     p.add_argument("--f32", action="store_true", default=True)
     p.add_argument("--no-f32", dest="f32", action="store_false")
     p.add_argument("--site", default="nautilus",
-                   help="site profile from site.py")
+                   help="site profile from sites.py")
     p.add_argument("--ozone", default=None,
                    help="ozone file; REQUIRED for any grid without a packaged "
                         "climatology (i.e. anything but T63L47)")

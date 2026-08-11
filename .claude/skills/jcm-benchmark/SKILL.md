@@ -228,10 +228,45 @@ attributing.
 ## Known reference points
 
 Re-measure rather than trusting these; they are here to catch order-of-
-magnitude mistakes, and some were taken before the jax-rrtmgp minor-gas scan
-fix (which changes radiation cost substantially).
+magnitude mistakes.
 
 - Radiation is ~87% of an ECHAM+RRTMGP step, so any RRTMGP change dominates.
 - The AeroCom diagnostic groups cost ~9.4% together at T63L47.
 - f32 (`MAM4_JAX_ENABLE_X64=0`) is **required** above T63 and is forward-only:
   MAM4 microphysics gradients are non-finite in f32.
+
+### MA resolution sweep — A100-80GB, 2026-08-11
+
+`physics=echam-jam` + 2M + semi-Lagrangian, f32, 30 days, jax-rrtmgp at
+`848da33` (minor-gas scan fix). Grid-native boundary data. Every entry
+converged, completed 30/30 days, zero NaN.
+
+| grid | levels | sim days/hr | s/sim-day | peak GiB | util |
+|---|---|---|---|---|---|
+| T63 | 47 | 127.1 | 28.3 | 16.6 | 88 % |
+| T63 | 95 | 65.8 | 54.7 | 32.6 | 92 % |
+| T106 | 47 | 57.4 | 62.7 | 32.7 | 93 % |
+| T106 | 95 | 27.6 | 130.6 | 60.2 | 96 % |
+| ne30 (pySES) | 47 | 7.2 | 500.1 | 61.7 | 100 % |
+| ne30 (pySES) | 95 | — | — | OOM at 62 | — |
+
+**Not cluster-specific** — a vanilla A100-80GB, reproduced within 1–4 %
+across two machines and both the PCIe and SXM4 variants. A **40 GB** card
+(Derecho) runs the same speeds where the config fits, but on this table only
+the top two rows do.
+
+Reading it:
+
+- **Levels cost linearly** (1.93–2.08× for 2.02× the levels).
+- **Resolution is sublinear** — T106 has 2.78× T63's columns for 2.21–2.38×
+  the cost, as utilisation climbs 88 % → 96 %. T63L47 leaves the card partly
+  idle; the larger spectral configs are the efficient ones.
+- **T106L95 at 60.2 GiB is the largest spectral config that fits 80 GB.**
+- **pySES ne30 is in a different regime** — far more expensive per column and
+  per cell than any spectral config, and radiation is *not* what dominates
+  it, so the ~87 % rule above does not transfer. See jax-gcm#595; do not
+  extrapolate between the two backends in either direction.
+
+**Chunk length does not affect the measurement.** ne30L47 at `chunk_days` 5
+and 1 gave 500.07 and 499.7 s/sim-day — 0.07 % apart, all 30 chunk-1 walls
+inside 498.3–499.7 s. A config re-chunked to fit memory stays comparable.
