@@ -114,6 +114,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # Muelmenstaedt et al. (2020). Not a CMIP variable, kept under its own
     # name so the submission still carries it.
     "cosp_warm_rain": ("cospwarmrain", "1", "Column", 1.0, 0.0),
+    # ISCCP total cloud area (tau >= 0.3), stored as a fraction like the
+    # other simulator covers; CMIP wants percent. The clisccp histogram is
+    # reassembled separately (see _HISTOGRAMS below).
+    "cltisccp": ("cltisccp", "%", "Column", 100.0, 0.0),
     # --- spectral aerosol optics (jax-gcm#584) ---
     # These come from the diagnostic Mie pass at the OBSERVATION
     # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
@@ -225,6 +229,7 @@ CF_STANDARD_NAMES = {
     "clmcalipso": "cloud_area_fraction_in_atmosphere_layer",
     "clhcalipso": "cloud_area_fraction_in_atmosphere_layer",
     "cltmodis": "cloud_area_fraction",
+    "cltisccp": "cloud_area_fraction",
     "clwmodis": "liquid_water_cloud_area_fraction",
     "climodis": "ice_cloud_area_fraction",
     "tauwmodis": "atmosphere_optical_thickness_due_to_cloud",

@@ -421,3 +421,29 @@ class HistogramCmorTest(unittest.TestCase):
         self.assertEqual(got["clmodis"].attrs["units"], "%")
         # Consumed channels are not reported as unmapped.
         self.assertTrue(all(not s.startswith("clmodis.") for s in skipped))
+
+    def test_cltisccp_reaches_a_submission_file(self):
+        """The scalar ISCCP cover must be written, not silently skipped.
+
+        Codex on PR #598: clisccp was reassembled but cltisccp had no
+        NAME_MAP entry, so the ACI preset lost one of its advertised
+        ISCCP products with only the skipped-report to notice.
+        """
+        import pathlib
+        import tempfile
+
+        import xarray as xr
+        from tools.aerocom_cmor import convert
+
+        ds = xr.Dataset({"cltisccp": xr.DataArray(
+            np.full((3, 4), 0.5), dims=("lat", "lon"))})
+        with tempfile.TemporaryDirectory() as td:
+            written, skipped = convert(
+                ds, "JCM-t", "all_2000", "2010", "monthly", pathlib.Path(td))
+            self.assertNotIn("cltisccp", skipped)
+            fname = [f for f in written if "_cltisccp_" in f]
+            self.assertEqual(len(fname), 1)
+            got = xr.open_dataset(pathlib.Path(td) / fname[0])
+        np.testing.assert_allclose(got["cltisccp"].values, 50.0)
+        self.assertEqual(got["cltisccp"].attrs["standard_name"],
+                         "cloud_area_fraction")
