@@ -53,7 +53,11 @@ from gpu_util import describe as describe_gpu  # noqa: E402
 from gpu_util import free_indices, is_free, gpu_table  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_PY = "/home/dwatsonparris/micromamba/envs/jcm/bin/python"
+# The interpreter running this script, not a hardcoded dev-box path: in a
+# container (Nautilus) that path does not exist, and hardcoding it made the
+# harness die instantly there. $JCM_PYTHON overrides when the model must run
+# under a different interpreter from the wrapper.
+DEFAULT_PY = os.environ.get("JCM_PYTHON") or sys.executable
 DEFAULT_OUTDIR = pathlib.Path("/scr/dwatsonparris/benchmarks")
 # A benchmark only needs the timings, the telemetry and the health verdict --
 # all of which are read from the log while the run is happening. The netCDF it
@@ -112,7 +116,12 @@ _T63_COMMON = [
 # mismatched ozone silently falls back to the analytic profile (~7.6x the
 # tropospheric column) and a benchmark then measures the wrong radiative
 # workload. See .claude/skills/derecho-jcm-runs/reference/data_paths.md.
-_BC = pathlib.Path("/scr/dwatsonparris/bc_l95")
+# Prepared T106/T119 boundary data. Dev-box scratch by default, overridable
+# because that path does not exist off that machine — a container needs it
+# from a PVC or the HF mirror. Presets that reference it are simply
+# unusable where it is absent, which _preset_available() reports up front
+# rather than failing 20 minutes into a pod.
+_BC = pathlib.Path(os.environ.get("JCM_BC_DIR", "/scr/dwatsonparris/bc_l95"))
 _TERRAIN = {
     "t63": REPO / "jcm/data/bc/t63/terrain.nc",
     "t106": _BC / "T106_terrain.nc",
@@ -427,6 +436,21 @@ def run(args) -> dict:
     preset = PRESETS[args.preset]
     days = args.days if args.days else args.months * 30
     chunk = args.chunk_days
+    # Every file the preset names must exist BEFORE a GPU is claimed. A
+    # preset referencing prepared boundary data is unusable wherever that
+    # data is absent (a container, another machine), and finding out 20
+    # minutes into a pod — after the image pull and the clone — wastes the
+    # slot and the quota.
+    missing = [o.split("=", 1)[1] for o in preset
+               if o.split("=", 1)[0].endswith((".file", "_file"))
+               and not o.endswith(("=auto", "=null", "=none"))
+               and not pathlib.Path(o.split("=", 1)[1]).exists()]
+    if missing:
+        raise SystemExit(
+            "preset references files that do not exist here:\n  "
+            + "\n  ".join(missing)
+            + "\nSet $JCM_BC_DIR, or use a preset whose data is present.")
+
     # Gate first: a refused run must not leave directories behind.
     #
     # ``--gpu auto`` selects AND claims in one loop. Selecting with a separate
