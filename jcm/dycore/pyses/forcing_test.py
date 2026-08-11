@@ -152,11 +152,44 @@ class AttachJamForcingTest(unittest.TestCase):
         self.assertTrue(bool(clim.is_loaded()))
         leaf = clim.o3_ppmv
         self.assertIsInstance(leaf, TimeSeries)
-        self.assertEqual(leaf.values.shape, (12, nlev, 1, _NCOL))
+        # (ntime, nlev, ncols) -- the horizontal FLATTENED, unlike the
+        # oxidant leaves above which keep the backend's (1, ncol) pair. This
+        # asymmetry is the OzoneClimatology contract, not an oversight:
+        # ``forcing`` reaches terms unflattened, oxidants get reshaped to
+        # ``temperature.shape`` by their consumer, and ozone does not -- it
+        # goes straight to RRTMGP's ``lev_to_col`` transpose. An earlier
+        # version of this assertion expected (12, nlev, 1, ncol) and so
+        # locked in the extra axis; every ne30 run with prescribed ozone
+        # then died in the radiation halo padder with
+        # "arr_shape=(1, 47) shape=(47,)".
+        self.assertEqual(leaf.values.shape, (12, nlev, _NCOL))
         self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
         np.testing.assert_allclose(                      # ppmv, per level
-            np.asarray(leaf.values[0, :, 0, 0]),
+            np.asarray(leaf.values[0, :, 0]),
             np.arange(1, nlev + 1, dtype=float), rtol=1e-6)
+
+    def test_ozone_leaf_rank_matches_the_spectral_loader(self):
+        """Both backends must hand radiation the same-rank ozone.
+
+        The consumer cannot tell which backend produced its forcing, so a
+        per-backend rank is a latent shape bug in whichever one radiation
+        was not developed against.
+        """
+        nlev = 4
+        data = np.full((12, nlev, _LAT.size, _LON.size), 2.0e-6)
+        ds = xr.Dataset(
+            {"O3": (("time", "level", "lat", "lon"), data,
+                    {"units": "mole/mole"})},
+            coords={"time": np.arange(12), "level": np.arange(nlev),
+                    "lat": _LAT, "lon": _LON},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(ozone_file=_write(tmp, "ozone.nc", ds))
+        leaf = forcing.ozone_climatology.o3_ppmv
+        # Post-select (what a term actually sees) must be 2-D (nlev, ncols),
+        # matching the column-vectorized state's rank.
+        self.assertEqual(leaf.values.ndim, 3)            # (ntime, nlev, ncols)
+        self.assertEqual(np.asarray(leaf.values[0]).ndim, 2)
 
     def test_ozone_level_mismatch_rejected(self):
         ds = xr.Dataset(

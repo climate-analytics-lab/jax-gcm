@@ -192,6 +192,25 @@ class EchamBoundaryConditions(PhysicsTerm):
             # ``jcm.data.bc.interpolate_ozone``) — straight slice, no
             # online vertical interp.
             ozone_vmr_ppmv = forcing.ozone_climatology.o3_ppmv
+            # Enforce the OzoneClimatology contract here, at trace time,
+            # rather than letting a violation travel. Unlike the oxidant
+            # fields -- whose consumer reshapes to ``temperature.shape`` --
+            # this array is handed to RRTMGP's ``lev_to_col`` as a plain
+            # transpose, so an extra horizontal axis does not fail here: it
+            # fails much later inside the radiation halo padder with a shape
+            # error that names neither ozone nor the loader that produced it.
+            # ``forcing`` reaches terms UNFLATTENED, so every loader owes the
+            # flattened ``(nlev, ncols)`` layout the state already has.
+            if ozone_vmr_ppmv.ndim != state.temperature.ndim:
+                raise ValueError(
+                    "forcing.ozone_climatology.o3_ppmv has "
+                    f"{ozone_vmr_ppmv.ndim} dims {ozone_vmr_ppmv.shape}, but "
+                    f"the physics view is {state.temperature.ndim}-D "
+                    f"{state.temperature.shape}. OzoneClimatology must be "
+                    "stored with the horizontal already flattened to the "
+                    "term view -- (ntime, nlev, ncols) pre-select. Fix the "
+                    "loader that built this forcing."
+                )
         else:
             from jcm.physics.chemistry.simple_chemistry import (
                 ChemistryParameters,
