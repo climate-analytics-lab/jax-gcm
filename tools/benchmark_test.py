@@ -4,6 +4,7 @@ These guard the *methodology*, which is where benchmarking goes wrong
 silently: a bug here does not crash, it reports a plausible wrong number.
 """
 
+import os
 import pathlib
 import sys
 import unittest
@@ -12,6 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from benchmark import _summarize_gpu, should_keep_output  # noqa: E402
 from chunk_timing import analyse as _analyse_chunks  # noqa: E402
+import gpu_util  # noqa: E402
 
 
 class AnalyseChunksTest(unittest.TestCase):
@@ -176,3 +178,53 @@ class KeepOutputTest(unittest.TestCase):
         absence must not be read as failure.
         """
         self.assertFalse(should_keep_output({"exit_code": 0}))
+
+
+class GpuTenantTest(unittest.TestCase):
+    """The free-GPU gate must not mistake the harness for a rival tenant.
+
+    A JAX backend preallocates ~75 % of the device the instant it is
+    touched, so any import that reaches jax before the gate makes the
+    harness look like a 61 GiB occupant of the card it is about to claim.
+    The gate then waits out its timeout against itself and refuses. That
+    took out a whole six-job sweep, and the log ("GPU 0 is busy ... tenants:
+    python(pid 364)") reads like a contended cluster rather than a bug here.
+    """
+
+    def _table(self, apps):
+        """Build a gpu_table() with a stubbed nvidia-smi."""
+        gpu = "0, GPU-abc, 61305, 81920, 0"
+
+        def fake_smi(args):
+            return apps if "compute-apps" in args[0] else gpu
+
+        orig = gpu_util._smi
+        gpu_util._smi = fake_smi
+        try:
+            return gpu_util.gpu_table()[0]
+        finally:
+            gpu_util._smi = orig
+
+    def test_own_allocation_does_not_make_a_card_busy(self):
+        mine = os.getpid()
+        g = self._table(f"GPU-abc, {mine}, python, 61294 MiB")
+        self.assertEqual(g["procs"], [], "own process must not be a tenant")
+        # ...and its memory must be netted out, or the mem_used_mib half of
+        # the free test still fails the card.
+        self.assertLess(g["mem_used_mib"], gpu_util.FREE_MEM_MIB)
+        self.assertTrue(gpu_util.is_free(g))
+
+    def test_a_real_tenant_still_makes_a_card_busy(self):
+        """The exclusion must not blind the gate to somebody else's run --
+        that would be far worse than the deadlock it fixes.
+        """
+        g = self._table("GPU-abc, 999999, python, 61294 MiB")
+        self.assertEqual(len(g["procs"]), 1)
+        self.assertFalse(gpu_util.is_free(g))
+
+    def test_mixed_tenancy_reports_the_other_process(self):
+        mine = os.getpid()
+        g = self._table(f"GPU-abc, {mine}, python, 61000 MiB\n"
+                        f"GPU-abc, 999999, python, 305 MiB")
+        self.assertEqual([p["pid"] for p in g["procs"]], ["999999"])
+        self.assertFalse(gpu_util.is_free(g))
