@@ -140,7 +140,14 @@ def resolve_refs() -> dict:
 
 def job(preset: str, a) -> dict:
     S = site_profile.get(a.site)
-    name = f"jcm-bench-{preset}".lower().replace("_", "-")[:60]
+    # --suffix distinguishes a rerun. Kubernetes Jobs are IMMUTABLE, so
+    # re-submitting a preset whose previous Job still exists (TTL is 24 h) is
+    # rejected outright; the alternative is deleting the earlier Job, which
+    # throws away the record of a run someone may still be reading. The
+    # suffix also lands in the report label, so the two results sit side by
+    # side on the PVC instead of the second overwriting the first.
+    tag = f"{preset}-{a.suffix}" if a.suffix else preset
+    name = f"jcm-bench-{tag}".lower().replace("_", "-")[:60]
     # Resolve every ref to a SHA at GENERATION time and clone that exact
     # commit. Cloning a branch name means the code depends on when the pod
     # happened to start: a job submitted seconds before a push silently runs
@@ -159,7 +166,7 @@ def job(preset: str, a) -> dict:
     bench = (
         f"python /work/jcm/tools/benchmark.py --preset {preset} "
         f"--months {a.months} --gpu 0 --chunk-days {a.chunk_days} "
-        f"--save-interval {a.chunk_days} --label {preset}-nautilus "
+        f"--save-interval {a.chunk_days} --label {tag}-nautilus "
         f"--outdir /reports --scratch-root /scratch "
         f"--pythonpath {pythonpath}"
         + (" --f32" if a.f32 else "")
@@ -280,6 +287,10 @@ def main() -> int:
     p.add_argument("--gpu-product", default=None,
                    help="pin an exact product, e.g. NVIDIA-A100-80GB-PCIe; "
                         "default selects any 80GB A100 by memory label")
+    p.add_argument("--suffix", default=None,
+                   help="distinguish a rerun: appended to the Job name and "
+                        "the report label, so it neither collides with an "
+                        "existing Job nor overwrites its report")
     p.add_argument("--cpu", type=int, default=8)
     p.add_argument("--memory", default="64Gi")
     a = p.parse_args()
