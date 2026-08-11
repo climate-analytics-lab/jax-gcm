@@ -36,8 +36,9 @@ Common flags (see `python scripts/mkjob.py --help` for all):
 | `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
 | `--aquaplanet` | off | skips terrain/forcing files |
 | `--resume` | off | reuse the run dir's checkpoint |
-| `--ozone` | — | **required** for any grid without a packaged climatology (i.e. anything but T63L47) |
-| `--emissions` | derived from `--grid` | override explicitly to pin a file |
+| `--data` | `mirror` | HF bundles, prefetched at generation; `local` = legacy prepared files |
+| `--era` | `pd` | `pd` (2005–2014) or `pi` (1850s) mirror climatologies |
+| `--emissions` | (local mode) | legacy emissions file for `--data local` |
 | `--extra "k=v ..."` | — | raw Hydra overrides appended last |
 
 ## 2. Always pre-flight before burning a queue slot
@@ -82,34 +83,23 @@ Eulerian plus `diffusion.tracer_positivity=true` instead.
 
 ## 4. Input data
 
-`reference/data_paths.md` lists every boundary-condition, emissions and aux
-file: the HF data-mirror bundles (`hf://bundles/...` paths — preferred,
-prefetch on a login node since compute nodes have no internet), what ships
-in the repo, what must be prepared first, where the CESM upstream sources
-are, and the preparation gotchas.
+`reference/data_paths.md` lists every data source. The default is the
+**HF data mirror** (`--data mirror --era pd|pi`): `mkjob.py` derives every
+bundle path from `--grid` — terrain, forcing, emissions, DMS, dust, plus
+level-resolved ozone and oxidants from `bundles/<grid>_l<levels>/` — and
+prefetches them on the login node at generation time, baking the local
+cache paths into the job. Compute nodes need no internet, and every
+grid/level combination the mirror carries (t63/t106 × l47/l95) works the
+same way: no packaged-grid special cases, no purge-eligible scratch
+files, and a grid/level mismatch fails at generation, not in the queue.
 
-Two things to remember: terrain/forcing/ozone are **packaged in the repo**
-(nothing to prepare), while the JAM aux inputs (emissions, DMS, dust,
-oxidants) are **prepared files on scratch and therefore purge-eligible**.
-`mkjob.py` checks they exist and refuses to emit a script if any is missing.
-Paths come from `JAM_INPUTS` / `JCM_EMISSIONS` (see the file for defaults).
-
-**Every prepared input is grid-specific**, in one of two ways, and `mkjob.py`
-now derives all of them from `--grid` so a mismatch is caught before `qsub`
-rather than after the job reaches the queue front:
-
-- *level*-resolved — oxidants, ozone (an L47 file will not work in an L95 run);
-- *horizontally* resolved — emissions, DMS, dust (`_validate_emissions_grid`,
-  `read_dms_seawater` and `read_dust_source` all check against the model grid,
-  so the T63 files are unusable on T85/T106/T119 even though DMS and dust have
-  no vertical axis).
-
-**Ozone is the dangerous one.** `forcing.ozone_file: auto` resolves only a
-*packaged* climatology and silently falls back to RRTMGP's ANALYTIC profile
-when none matches — that surrogate carries ~7.6x the tropospheric ozone
-column, so the job runs to completion and quietly produces radiation that
-cannot be compared with anything. Only T63L47 is packaged, so `mkjob.py`
-**refuses** any other grid without an explicit `--ozone`.
+`--data local` keeps the legacy prepared-file behaviour (`JAM_INPUTS` /
+`JCM_EMISSIONS`, existence-checked before qsub). Its inputs are all
+grid-specific — level-resolved (ozone, oxidants) or horizontally
+validated (emissions, DMS, dust) — and **ozone is the dangerous one**:
+`forcing.ozone_file: auto` resolves only a *packaged* climatology
+(T63L47) and silently falls back to an ANALYTIC profile with ~7.6x the
+tropospheric ozone column on any other grid. Prefer the mirror.
 
 ## 5. PBS facts specific to this machine
 

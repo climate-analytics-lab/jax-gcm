@@ -116,9 +116,10 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
   warning about the **ANALYTIC** profile, the grid did not match and the run
   has ~7.6× the tropospheric ozone column — a large clear-sky OLR bias, and
   not a valid basis for any radiation comparison.
-  Regenerate for a new grid with
-  `python -m jcm.data.bc.interpolate_ozone --in T63_ozone_picontrol.nc --out
-  jcm/data/bc/<grid>/ozone.nc --nlevels 47`.
+  Preferred fix for any other grid: the HF mirror ships level-resolved
+  ozone per grid — `forcing.ozone_file=hf://bundles/<grid>_l<levels>/ozone_pd.nc`
+  (prefetch on a node with internet). Regenerating a packaged file with
+  `jcm.data.bc.interpolate_ozone` remains possible for offline work.
 
 ## Watching a run
 
