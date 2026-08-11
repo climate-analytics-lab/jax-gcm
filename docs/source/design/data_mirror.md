@@ -47,10 +47,13 @@ python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
 ```
 
 The pySES backend takes the native bundle directly —
-`dycore.terrain_file=hf://bundles/ne30pg3/terrain.nc` maps file columns
-onto the physics columns one-for-one (unit-sphere nearest neighbor) and
+`dycore.terrain_file=hf://bundles/ne30pg3/terrain.nc` samples the file
+cells onto the physics columns by unit-sphere nearest neighbor and
 takes GLL-node orography from the file's `orog_gll` (CESM topo
-`PHIS_gll`), replacing the old packaged-T63 downscale. (`build_terrain`
+`PHIS_gll`), replacing the old packaged-T63 downscale. The bundle keeps
+full pg3 resolution (48,600 cells) while pySES physics runs on pg2
+columns (21,600), so the dycore's column-count warning is expected and
+benign for this pairing. (`build_terrain`
 refuses a file whose mean land fraction exceeds 0.9 — that is the
 signature of a raw SSO product's DEM-validity placeholder `lsm`, which
 would silently produce an all-land planet; see #596.) The same `hf://` forcing files
