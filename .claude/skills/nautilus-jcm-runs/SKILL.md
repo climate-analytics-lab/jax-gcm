@@ -245,6 +245,7 @@ boundary data grid-native from the mirror. Every entry converged to within
 |---|---|---|---|
 | **T63** | **127.1** | **65.8** | 16.6 / 32.6 |
 | **T106** | **57.4** | **27.6** | 32.7 / 60.2 |
+| **ne30** (pySES) | **7.2** | OOM | 61.7 / — |
 
 Cross-checks against the dev box within 1–4 % (T106L47 58.0→57.4,
 T106L95 27.9→27.6), so these are the platform's numbers, not a node's.
@@ -255,9 +256,39 @@ Two things the shape of that table tells you:
   is sublinear** (T106 has 2.78× T63's columns for 2.21–2.38× the cost) as
   utilisation climbs 88 % → 96 %. T63L47 leaves the card partly idle; the
   big configs are the efficient ones.
-- **T106L95 at 60.2 GiB is the largest config that fits one card.**
+- **T106L95 at 60.2 GiB is the largest spectral config that fits one card.**
 
-### pySES ne30 is memory-bound, not compute-bound
+**Chunk length does not affect the measurement.** ne30L47 run at
+`--chunk-days 5` and `--chunk-days 1` gave 500.07 and 499.7 s/sim-day —
+0.07 % apart, with all 30 of the chunk-1 walls inside 498.3–499.7 s. So a
+config that has to be re-chunked for memory reasons stays comparable with
+the rest of the table.
+
+### pySES ne30 is in a different regime from the spectral configs
+
+**ne30L47 costs 17.7× T63L47 per simulated day for 1.17× the columns** — and
+with a *longer* step (900 s vs 720 s), so fewer steps per day. Per
+column-step that is **18.8×**, at 100 % utilisation and 61.7 GiB.
+
+Radiation does not explain it. Both call RRTMGP on the same 2 h interval, so
+radiation scales with columns alone (1.17×). Against the measured T63L47
+cost profile (radiation ≈ 87 %), ne30's radiation is ~29 s/day of 500,
+leaving **~471 s/day of non-radiation, ≈128× the spectral ~3.7 s/day**. Even
+if that radiation estimate were 2× low, non-radiation still dominates by
+~100×.
+
+So every *spectral* config here is radiation-bound — which is why the
+jax-rrtmgp minor-gas fix bought 3.5× — while ne30/pySES is not. The likely
+cost centre is CAM-SE dynamics with `tracer_substeps=5` plus dynamics
+substepping, which the spectral core has no equivalent of. **Optimising
+radiation will not move ne30.** This is inference from published numbers,
+not a measured ne30 breakdown; the decisive test is a grey-radiation A/B at
+5 days (~45 min, one slot).
+
+Practical consequence: **one ne30L47 year ≈ 5 days of wall clock** on a
+single A100.
+
+### ne30 L95 does not fit one card
 
 ne30 L95 does **not** fit an 80 GB A100. XLA is explicit that this is a
 whole-program floor rather than one fixable op:
