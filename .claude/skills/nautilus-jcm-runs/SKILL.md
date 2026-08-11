@@ -67,13 +67,24 @@ nodeSelector:
   nvidia.com/gpu.memory: "81920"
 ```
 
-**PCIe vs SXM4 still differ**: SXM4 is a 400 W part against PCIe's 300 W, so
-single-GPU throughput is not identical even at equal memory. The generated
-job records which product it actually ran on
-(`/reports/<label>/gpu_product.txt`), so a report stays interpretable.
-Pin one product with `--gpu-product NVIDIA-A100-80GB-PCIe` when a
-comparison needs strict identity — e.g. against numbers taken on the dev
-box, which is an 80GB PCIe part.
+**PCIe vs SXM4: measured, not assumed.** SXM4 is a 400 W part against PCIe's
+300 W, so it is reasonable to expect a difference — but for this workload
+there is none worth worrying about:
+
+| | card | sim days/hr | peak GiB |
+|---|---|---|---|
+| dev box | A100 80GB PCIe | 174.6 | 8.64 |
+| Nautilus | A100 SXM4-80GB | **175.2** | 8.56 |
+
+`t63-echam-rrtmgp`, f32, same pinned rrtmgp — **0.3 % apart**. jcm at this
+size is memory- and launch-bound rather than power-bound (~86 % utilisation
+at well under the card's rating), so the extra 100 W buys nothing. Do not
+spend scheduling flexibility pinning a product without a reason.
+
+The job still records which product it ran on
+(`/reports/<label>/gpu_product.txt`) — cheap, and it means a future
+surprising number can be checked rather than re-litigated. `--gpu-product`
+pins one if a comparison genuinely needs it.
 
 ## Submitting
 
@@ -139,6 +150,14 @@ failed even if Kubernetes says `Completed`.
   running there. `kubectl describe resourcequota a100-limit` shows current
   use; a ninth pod sits `Pending` rather than failing.
 - No H100/H200/GH200 quota (all 0), so those selectors will never schedule.
+
+## Reference point
+
+`t63-echam-rrtmgp`, f32, 30 days, rrtmgp pinned at `848da33` (minor-gas scan
+fix merged), A100-SXM4-80GB: **175.2 sim days/hr** (20.55 s/sim-day,
+11.5 sim-years/day), 8.56 GiB peak, ~86 % utilisation. Chunks converged to
+0.5 %. Image pull plus git clone plus compile took ~6 min before the first
+chunk.
 
 ## Related skills
 
