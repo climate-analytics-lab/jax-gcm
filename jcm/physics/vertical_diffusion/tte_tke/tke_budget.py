@@ -244,56 +244,6 @@ def compute_tke_exchange_coefficient(
 
 
 @jax.jit
-def compute_tke_tendency(
-    state: VDiffState,
-    params: VDiffParameters,
-    exchange_coeff_momentum: jnp.ndarray,
-    exchange_coeff_heat: jnp.ndarray,
-    mixing_length: jnp.ndarray
-) -> jnp.ndarray:
-    """Compute complete TKE tendency from budget equation.
-    
-    d(TKE)/dt = Shear Production + Buoyancy Production - Dissipation + Transport
-    
-    Args:
-        state: Atmospheric state
-        params: Vertical diffusion parameters
-        exchange_coeff_momentum: Momentum exchange coefficient [m²/s] (ncol, nlev)
-        exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        mixing_length: Mixing length [m] (ncol, nlev)
-        
-    Returns:
-        TKE tendency [m²/s³] (ncol, nlev)
-
-    """
-    # Shear production
-    shear_production = compute_shear_production(
-        state.u, state.v, state.height_full, exchange_coeff_momentum
-    )
-    
-    # Buoyancy production
-    buoyancy_production = compute_buoyancy_production(
-        state.temperature, state.height_full, exchange_coeff_heat
-    )
-    
-    # Dissipation
-    dissipation = compute_dissipation(state.tke, mixing_length)
-    
-    # TKE exchange coefficient for transport term
-    compute_tke_exchange_coefficient(state.tke, mixing_length) # FIXME: unused - also calculated in tke diagnostics?
-    
-    # Transport term: ∂/∂z(K_e ∂e/∂z)
-    # For now, we'll compute this as part of the matrix solver
-    # Here we just sum the source terms
-    transport_term = jnp.zeros_like(state.tke)  # Will be handled by matrix solver FIXME: check that is is being handled
-    
-    # Total TKE tendency
-    tke_tendency = (shear_production + buoyancy_production - dissipation + transport_term)
-    
-    return tke_tendency
-
-
-@jax.jit
 def compute_tke_diagnostics(
     state: VDiffState,
     params: VDiffParameters,
@@ -333,21 +283,3 @@ def compute_tke_diagnostics(
     tke_exchange_coeff = compute_tke_exchange_coefficient(state.tke, mixing_length)
     
     return shear_production, buoyancy_production, dissipation, tke_exchange_coeff
-
-
-@jax.jit
-def minimum_tke_constraint(
-    tke: jnp.ndarray,
-    min_tke: float = 1e-6
-) -> jnp.ndarray:
-    """Apply minimum TKE constraint to prevent negative values.
-    
-    Args:
-        tke: Turbulent kinetic energy [m²/s²] (ncol, nlev)
-        min_tke: Minimum TKE value [m²/s²]
-        
-    Returns:
-        Constrained TKE [m²/s²] (ncol, nlev)
-
-    """
-    return jnp.maximum(tke, min_tke)

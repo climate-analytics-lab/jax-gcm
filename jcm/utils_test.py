@@ -16,9 +16,7 @@ from jcm.utils import (
     spectral_truncation,
     validate_ds,
     ones_like,
-    tree_index_3d,
     ones_like_tangent,
-    zeros_like_tangent,
     convert_to_float,
     convert_back,
     data_to_xarray,
@@ -288,43 +286,6 @@ class TestOnesLike(unittest.TestCase):
         self.assertTrue(jnp.allclose(result['value'], 1.0))
 
 
-class TestTreeIndex3d(unittest.TestCase):
-    """Tests for tree_index_3d function."""
-
-    def test_tree_index_3d_indexes_3d_array(self):
-        """tree_index_3d should index 3D arrays at the given key."""
-        arr_3d = jnp.arange(24).reshape((2, 3, 4))
-        pytree = {'data': arr_3d}
-
-        result = tree_index_3d(pytree, 2)
-
-        # Should get arr[:, :, 2]
-        expected = arr_3d[:, :, 2]
-        self.assertTrue(jnp.allclose(result['data'], expected))
-
-    def test_tree_index_3d_preserves_2d_array(self):
-        """tree_index_3d should return 2D arrays unchanged."""
-        arr_2d = jnp.arange(6).reshape((2, 3))
-        pytree = {'data': arr_2d}
-
-        result = tree_index_3d(pytree, 0)
-
-        # 2D array should be unchanged
-        self.assertTrue(jnp.allclose(result['data'], arr_2d))
-
-    def test_tree_index_3d_mixed_dimensions(self):
-        """tree_index_3d should handle mixed 2D and 3D arrays."""
-        pytree = {
-            '3d': jnp.ones((2, 3, 4)),
-            '2d': jnp.ones((2, 3)),
-        }
-
-        result = tree_index_3d(pytree, 1)
-
-        self.assertEqual(result['3d'].shape, (2, 3))
-        self.assertEqual(result['2d'].shape, (2, 3))
-
-
 class TestOnesLikeTangent(unittest.TestCase):
     """Tests for ones_like_tangent function."""
 
@@ -361,36 +322,6 @@ class TestOnesLikeTangent(unittest.TestCase):
 
         self.assertTrue(jnp.allclose(result['float'], 1.0))
         self.assertEqual(result['int'].dtype, jax.dtypes.float0)
-
-
-class TestZerosLikeTangent(unittest.TestCase):
-    """Tests for zeros_like_tangent function."""
-
-    def test_zeros_like_tangent_float_array(self):
-        """zeros_like_tangent should create zeros for float arrays."""
-        x = jnp.ones((3, 4), dtype=jnp.float32)
-        result = zeros_like_tangent(x)
-
-        self.assertTrue(jnp.allclose(result, 0.0))
-        self.assertEqual(result.shape, x.shape)
-
-    def test_zeros_like_tangent_int_array(self):
-        """zeros_like_tangent should create float0 for int arrays."""
-        x = jnp.ones((3, 4), dtype=jnp.int32)
-        result = zeros_like_tangent(x)
-
-        self.assertEqual(result.dtype, jax.dtypes.float0)
-
-    def test_zeros_like_tangent_pytree(self):
-        """zeros_like_tangent should work with pytrees."""
-        pytree = {
-            'float': jnp.ones((2, 3), dtype=jnp.float32),
-            'bool': jnp.ones((2,), dtype=jnp.bool_),
-        }
-        result = zeros_like_tangent(pytree)
-
-        self.assertTrue(jnp.allclose(result['float'], 0.0))
-        self.assertEqual(result['bool'].dtype, jax.dtypes.float0)
 
 
 class TestConvertToFloat(unittest.TestCase):

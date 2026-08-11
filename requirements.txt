@@ -19,3 +19,4 @@ myst-parser  # Markdown source for design/* docs
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
 jax-rrtmgp>=0.2.1  # 0.2.1+ has the per-call sfc_alb/sfc_emis overrides the per-column surface coupling needs (0.2.0: gas-optics gather + shared-table fixes)
+huggingface_hub

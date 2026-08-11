@@ -477,11 +477,11 @@ class PhysicsData:
     surface_flux: SurfaceFluxData
     # Model timestep in seconds. Sourced from
     # ``ComposablePhysics.dt_seconds`` each step via the
-    # ``diagnostics["_dt_seconds"]`` plumbing; consumed by
-    # ``speedy_orographic`` to translate the SPEEDY instantaneous
-    # T/q corrections into per-step tendencies. The shortwave
-    # sub-stepping counter (`mod nstrad`) lives on
-    # :attr:`SWRadiationData.step` and rides the radiation carry slot.
+    # ``diagnostics["_dt_seconds"]`` plumbing, for SPEEDY terms that
+    # need to translate instantaneous corrections into per-step
+    # tendencies. The shortwave sub-stepping counter (`mod nstrad`)
+    # lives on :attr:`SWRadiationData.step` and rides the radiation
+    # carry slot.
     dt_seconds: float
     land_model: LandModelData
     speedy_coords: SpeedyCoords

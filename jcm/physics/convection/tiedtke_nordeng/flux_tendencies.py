@@ -185,48 +185,6 @@ def convective_precip_fluxes(
     return rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj
 
 
-def calculate_cloud_water_ice(
-    temperature: jnp.ndarray,
-    updraft_lw: jnp.ndarray,
-    updraft_mf: jnp.ndarray,
-    downdraft_mf: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Partition cloud condensate into liquid and ice
-    
-    Args:
-        temperature: Temperature profile (K)
-        updraft_lw: Updraft liquid water (kg/kg)
-        updraft_mf: Updraft mass flux (kg/m²/s)
-        downdraft_mf: Downdraft mass flux (kg/m²/s)
-        
-    Returns:
-        Tuple of (cloud_water, cloud_ice) in kg/kg
-
-    """
-    # Temperature thresholds for ice formation
-    t_ice = c.tmelt - 40.0  # All ice below this
-    t_water = c.tmelt       # All water above this
-    
-    # Linear transition between water and ice
-    ice_frac = jnp.clip((t_water - temperature) / (t_water - t_ice), 0.0, 1.0)
-    water_frac = 1.0 - ice_frac
-    
-    # Net vertical mass flux
-    net_mf = updraft_mf + downdraft_mf  # downdraft is negative
-    
-    # Cloud fraction estimate (simplified)
-    cloud_frac = jnp.clip(net_mf / 0.1, 0.0, 1.0)  # 0.1 kg/m²/s for full cloud
-    
-    # In-cloud condensate
-    in_cloud_lw = updraft_lw * updraft_mf / jnp.maximum(net_mf, 1e-10)
-    
-    # Grid-mean cloud water and ice
-    cloud_water = cloud_frac * in_cloud_lw * water_frac
-    cloud_ice = cloud_frac * in_cloud_lw * ice_frac
-    
-    return cloud_water, cloud_ice
-
-
 def calculate_tendencies(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,

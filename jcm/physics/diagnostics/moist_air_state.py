@@ -181,11 +181,21 @@ class MoistAirColumnState(PhysicsTerm):
 
         surface_pressure = state.normalized_surface_pressure * p0  # Pa
         # Hybrid-coordinate pressure: works for pure sigma (a=0) too.
+        #
+        # The vertical coefficients are reshaped against however many
+        # horizontal axes the host actually has. Indexing them as
+        # ``a_full[:, None]`` against ``surface_pressure[None, :]`` hardcodes
+        # exactly one trailing axis, which broadcasts on a column-vectorized
+        # ``(nlev, ncols)`` host and raises on a whole ``(nlev, nlon, nlat)``
+        # grid. See the broadcasting-native convention in CLAUDE.md.
+        vshape = (-1,) + (1,) * surface_pressure.ndim
         pressure_full = (
-            a_full[:, None] + b_full[:, None] * surface_pressure[None, :]
+            a_full.reshape(vshape) + b_full.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
         pressure_half = (
-            a_half[:, None] + b_half[:, None] * surface_pressure[None, :]
+            a_half.reshape(vshape) + b_half.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
 
         height_full = state.geopotential / physical_constants.grav

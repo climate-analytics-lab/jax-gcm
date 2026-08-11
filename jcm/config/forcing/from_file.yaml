@@ -1,6 +1,15 @@
 # Realistic surface forcing loaded from a netCDF boundary file (SST, sea
 # ice, land T, soil moisture, snow cover, albedo). The path must be set at
 # the command line: ``forcing=from_file forcing.file=/path/to/forcing.nc``.
+#
+# Every *_file here (and terrain.file / dycore.terrain_file) also accepts
+# an ``hf://`` path into the project data mirror
+# (huggingface.co/datasets/climate-analytics-lab/jax-gcm-data), e.g.
+#   forcing.file=hf://bundles/t63/forcing_pd.nc
+#   forcing.emissions_file=hf://bundles/t63/emissions_pd.nc
+#   forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc
+# Files download once into the local HF cache (fetch on a node with
+# internet first; compute nodes reuse the cache).
 kind: from_file
 file: ???
 

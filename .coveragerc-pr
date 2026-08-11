@@ -21,6 +21,20 @@ omit =
     # lands the full ECHAM6 sequence (see issue #341).
     jcm/physics/clouds/icon/cloud_microphysics_2m.py
     jcm/physics/clouds/icon/cloud_utils.py
+    # Offline data-mirror builders (also omitted in the base rc): they
+    # stream multi-GB Glade sources CI cannot have.
+    jcm/data/mirror/sso.py
+    jcm/data/mirror/era5_land.py
+    jcm/data/mirror/ozone.py
+    jcm/data/mirror/emissions.py
+    jcm/data/mirror/bundles.py
+    jcm/data/mirror/build_mirror.py
+    # PR-only: shared regridding + HF downloader utilities, thoroughly
+    # covered by the fast co-located test suites; slow integration runs
+    # use packaged/local files and never touch them.
+    jcm/data/regridding.py
+    jcm/data/mirror/registry.py
+    jcm/data/remote.py
     # PR-only: utility / orchestration modules. The fast-test suite
     # exercises these thoroughly; the slow integration tests only
     # touch them through entry-point shims.
