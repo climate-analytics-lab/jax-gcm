@@ -127,6 +127,8 @@ def _op_split_trajectory(
     output_averages: bool = False,
     observe_fn: Callable[[Any, Any], Any] | None = None,
     observer_xs: Any = None,
+    snapshot_stride: int = 0,
+    snapshot_fields: tuple[str, ...] = (),
 ) -> Callable[[Any], tuple[Any, Any, Any, Any]]:
     """Trajectory builder for the operator-split path.
 
@@ -189,6 +191,43 @@ def _op_split_trajectory(
     # ``(x_final, ps_final, preds)`` return are identical, so define them
     # once.
     have_observers = observe_fn is not None
+    # Interval-instantaneous snapshots of selected 2-D diagnostics
+    # (AeroCom 3-hourly output, jax-gcm#586): a strided buffer rides the
+    # inner-scan carry — the scan's ys are structurally one-per-step, so a
+    # cheaper cadence has to accumulate in the carry exactly the way the
+    # interval mean does. Averaged mode only: the snapshot cadence divides
+    # the save interval, and the snapshot-mode path IS already
+    # instantaneous at its own cadence.
+    have_snapshots = snapshot_stride > 0 and len(snapshot_fields) > 0
+    if have_snapshots:
+        if not output_averages:
+            raise ValueError(
+                "snapshot_fields need output_averages=True; the snapshot "
+                "path is already instantaneous at save_interval.")
+        if inner_steps % snapshot_stride:
+            raise ValueError(
+                f"snapshot stride {snapshot_stride} must divide the "
+                f"{inner_steps} inner steps per save interval.")
+        n_snaps = inner_steps // snapshot_stride
+
+        def _resolve_snap(diag, name):
+            if "." in name:
+                head, _, attr = name.partition(".")
+                return getattr(diag[head], attr)
+            return diag[name]
+
+        empty_snaps = {}
+        for name in snapshot_fields:
+            tmpl = _resolve_snap(empty_diagnostics, name)
+            # Horizontal-only fields: flat (ncols,) under vectorized
+            # physics, (nlon, nlat) under grid-layout physics (SPEEDY).
+            if tmpl.ndim not in (1, 2):
+                raise ValueError(
+                    f"snapshot field {name!r} has shape {tmpl.shape}; only "
+                    "2-D horizontal fields are snapshot-able — 3-D fields "
+                    "at 3-hourly cadence belong in a dedicated run.")
+            empty_snaps[name] = jnp.zeros(
+                (n_snaps,) + tmpl.shape, dtype=jnp.result_type(tmpl.dtype, jnp.float32))
 
     # The saved-trajectory physics payload must not carry the per-step
     # ``_sampler_state`` snapshot (state fields the StateSampler term
@@ -203,8 +242,9 @@ def _op_split_trajectory(
 
     def _averaged_outer_step():
         @jax.checkpoint
-        def inner_step(carry, obs_x):
-            x, physics_state, x_sum, diag_sum = carry
+        def inner_step(carry, xs):
+            i_inner, obs_x = xs
+            x, physics_state, x_sum, diag_sum, snaps = carry
             x_next, physics_state_next = step_fn(x, physics_state)
             # Sum POST-step states so that mean(state_1..state_N) matches the
             # snapshot path (which saves state_N at outer steps). Summing
@@ -218,18 +258,34 @@ def _op_split_trajectory(
                 diag_sum, physics_state_next,
             )
             obs = observe_fn(physics_state_next, obs_x) if have_observers else None
-            return (x_next, physics_state_next, x_sum, diag_sum), obs
+            if have_snapshots:
+                # Write the POST-step instantaneous value into its slot on
+                # stride boundaries; off-stride steps rewrite the slot with
+                # its own value (a no-op) so the carry stays branch-free.
+                is_snap = ((i_inner + 1) % snapshot_stride) == 0
+                idx = jnp.clip((i_inner + 1) // snapshot_stride - 1,
+                               0, n_snaps - 1)
+                new_snaps = {}
+                for name in snapshot_fields:
+                    val = _resolve_snap(physics_state_next, name).astype(
+                        snaps[name].dtype)
+                    slot = jnp.where(is_snap, val, snaps[name][idx])
+                    new_snaps[name] = snaps[name].at[idx].set(slot)
+                snaps = new_snaps
+            return (x_next, physics_state_next, x_sum, diag_sum, snaps), obs
 
         def outer_step(carry, obs_x_frame, empty_sum, empty_diag_sum):
             x, physics_state = carry
-            init = (x, physics_state, empty_sum, empty_diag_sum)
-            (x_next, ps_next, x_sum, diag_sum), obs = jax.lax.scan(
-                inner_step, init, obs_x_frame, length=inner_steps,
+            init = (x, physics_state, empty_sum, empty_diag_sum,
+                    empty_snaps if have_snapshots else {})
+            inner_xs = (jnp.arange(inner_steps), obs_x_frame)
+            (x_next, ps_next, x_sum, diag_sum, snaps), obs = jax.lax.scan(
+                inner_step, init, inner_xs, length=inner_steps,
             )
             averaged_state = tree_map(lambda s: s / inner_steps, x_sum)
             preds = post_process_fn(averaged_state, ps_next)
             preds = preds.replace(physics=_strip_sampler(diag_sum))
-            return (x_next, ps_next), (preds, obs)
+            return (x_next, ps_next), (preds, obs, snaps)
 
         return outer_step
 
@@ -252,7 +308,7 @@ def _op_split_trajectory(
             # save time with a freshly-seeded carry would zero out radiation
             # on non-radiation outer steps (default 2-hour
             # ``radiation_interval``).
-            return (x_final, ps_final), (post_process_fn(x_final, ps_final), obs)
+            return (x_final, ps_final), (post_process_fn(x_final, ps_final), obs, {})
 
         return outer_step
 
@@ -287,7 +343,7 @@ def _op_split_trajectory(
                 observer_xs,
             )
 
-        (x_final, ps_final), (preds, observations) = jax.lax.scan(
+        (x_final, ps_final), (preds, observations, snapshots) = jax.lax.scan(
             outer_step,
             (x_initial, initial_physics_state),
             scan_xs, length=outer_steps,
@@ -297,7 +353,12 @@ def _op_split_trajectory(
             observations = tree_map(
                 lambda a: a.reshape((-1,) + a.shape[2:]), observations,
             )
-        return x_final, ps_final, preds, observations
+        if have_snapshots:
+            # (outer, n_snaps, ...) -> (total_snaps, ...).
+            snapshots = tree_map(
+                lambda a: a.reshape((-1,) + a.shape[2:]), snapshots,
+            )
+        return x_final, ps_final, preds, observations, snapshots
 
     return integrate
 
@@ -742,6 +803,8 @@ class Model:
         post_process_fn,
         output_averages,
         observer_xs=(),
+        snapshot_stride=0,
+        snapshot_fields=(),
     ):
         """Integrate-fn builder for the operator-split path.
 
@@ -786,12 +849,14 @@ class Model:
                 output_averages=output_averages,
                 observe_fn=observe_fn,
                 observer_xs=observer_xs if self.observers else None,
+                snapshot_stride=snapshot_stride,
+                snapshot_fields=snapshot_fields,
             )
             return trajectory(state)
 
         return _integrate_fn
 
-    @partial(jax.jit, static_argnums=(0, 4, 5, 6))  # Note: changing fields assumed static won't propagate.
+    @partial(jax.jit, static_argnums=(0, 4, 5, 6, 8, 9))  # Note: changing fields assumed static won't propagate.
     def _run_from_state(self,
                         initial_state,
                         initial_physics_state: Any,
@@ -800,6 +865,8 @@ class Model:
                         total_time=120.0,
                         output_averages=False,
                         observer_xs=(),
+                        snapshot_stride=0,
+                        snapshot_fields=(),
     ):
         """JIT-compiled simulation loop. Returns raw :class:`Predictions` pytree.
 
@@ -832,13 +899,14 @@ class Model:
             ),
             output_averages=output_averages,
             observer_xs=observer_xs,
+            snapshot_stride=snapshot_stride,
+            snapshot_fields=snapshot_fields,
         )
-        final_dycore_state, final_physics_state, predictions, observations = (
-            integrate(initial_state, initial_physics_state)
-        )
+        (final_dycore_state, final_physics_state, predictions, observations,
+         snapshots) = integrate(initial_state, initial_physics_state)
 
         return (final_dycore_state, final_physics_state,
-                predictions.replace(times=times), observations)
+                predictions.replace(times=times), observations, snapshots)
 
     def run_from_state(self,
                        initial_state,
@@ -889,10 +957,32 @@ class Model:
                                   total_time=120.0,
                                   output_averages=False,
                                   initial_physics_state: Any = None,
+                                  snapshot_interval=None,
+                                  snapshot_variables=(),
     ):
-        """Lower-level ``run_from_state`` that exposes the cross-step physics carry."""
+        """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
+
+        ``snapshot_interval`` / ``snapshot_variables`` (jax-gcm#586) add an
+        interval-INSTANTANEOUS output stream of selected 2-D diagnostics
+        alongside the interval-mean fields: e.g. 3-hourly ``clt``/``lwp``
+        snapshots riding a monthly-mean AeroCom run. Averaged mode only;
+        the snapshot interval must divide ``save_interval``. Fields are
+        top-level diagnostics keys or dotted struct fields
+        (``"radiation.toa_sw_up"``); retrieve the stream with
+        :meth:`ModelPredictions.snapshot_dataset`.
+        """
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
+        snapshot_stride = 0
+        if snapshot_interval is not None and snapshot_variables:
+            snap_days = parse_duration_days(snapshot_interval,
+                                            calendar=self.calendar)
+            dt_days = self.dt_si.to(units.day).m
+            snapshot_stride = int(round(snap_days / dt_days))
+            if abs(snapshot_stride * dt_days - snap_days) > 1e-9:
+                raise ValueError(
+                    f"snapshot_interval {snapshot_interval!r} is not a "
+                    f"multiple of the model timestep ({self.dt_si.m} s).")
         if initial_physics_state is None:
             initial_physics_state = self._build_initial_physics_carry()
 
@@ -918,12 +1008,12 @@ class Model:
                 for obs in self.observers
             )
 
-        final_dycore_state, final_physics_state, predictions, observations = (
-            self._run_from_state(
+        (final_dycore_state, final_physics_state, predictions, observations,
+         snapshots) = self._run_from_state(
                 initial_state, initial_physics_state, forcing,
                 save_interval_days, total_time_days,
                 output_averages, observer_xs,
-            )
+                snapshot_stride, tuple(snapshot_variables),
         )
         return (
             final_dycore_state,
@@ -935,6 +1025,11 @@ class Model:
                 observers=self.observers,
                 obs_t0_days=obs_t0_days,
                 obs_dt_seconds=float(self.dt_si.m),
+                snapshots=snapshots,
+                snapshot_variables=tuple(snapshot_variables),
+                snapshot_interval_days=(
+                    snapshot_stride * self.dt_si.to(units.day).m
+                    if snapshot_stride else None),
             ),
         )
 
@@ -943,6 +1038,8 @@ class Model:
                save_interval=10.0,
                total_time=120.0,
                output_averages=False,
+               snapshot_interval=None,
+               snapshot_variables=(),
     ) -> ModelPredictions:
         """Continue from end of previous ``run`` / ``resume``.
 
@@ -965,6 +1062,8 @@ class Model:
             total_time=total_time,
             output_averages=output_averages,
             initial_physics_state=self._final_physics_state,
+            snapshot_interval=snapshot_interval,
+            snapshot_variables=snapshot_variables,
         )
         jax.debug.callback(lambda: logger.info("Run completed."))
         self._final_dycore_state = final_dycore_state
@@ -977,6 +1076,8 @@ class Model:
             save_interval=10.0,
             total_time=120.0,
             output_averages=False,
+            snapshot_interval=None,
+            snapshot_variables=(),
     ) -> ModelPredictions:
         """Set the initial state and run the full simulation forward in time.
 
@@ -991,6 +1092,8 @@ class Model:
         return self.resume(
             forcing=forcing, save_interval=save_interval,
             total_time=total_time, output_averages=output_averages,
+            snapshot_interval=snapshot_interval,
+            snapshot_variables=snapshot_variables,
         )
 
     def bootstrap_state(self, initial_state=None) -> None:
