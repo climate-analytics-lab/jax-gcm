@@ -228,12 +228,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         qqcw_pack: list[tuple[str, int]] = []
         num_pcnst: list[int] = []
         mode_species: list[list[tuple[int, float, float]]] = []
+        # The qqcw side is packed/unpacked only when the population prognoses
+        # a cloud-borne phase (#602); without one the core still receives a
+        # zero qqcw array (its API needs it) but no tendencies are read back.
+        explicit_cb = self.spec.cloud_borne
         for i, mode in enumerate(self.spec.modes):
             q_pack.append((number_name(mode.short), int(data.NUMPTR_AMODE[i])))
-            qqcw_pack.append(
-                (number_name(mode.short, cloud_borne=True),
-                 int(data.NUMPTRCW_AMODE[i]))
-            )
+            if explicit_cb:
+                qqcw_pack.append(
+                    (number_name(mode.short, cloud_borne=True),
+                     int(data.NUMPTRCW_AMODE[i]))
+                )
             num_pcnst.append(int(data.NUMPTR_AMODE[i]))
             types = tuple(data.LSPECTYPE_AMODE[i])
             sp_list: list[tuple[int, float, float]] = []
@@ -242,9 +247,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 midx = int(data.LMASSPTR_AMODE[i][slot])
                 mcidx = int(data.LMASSPTRCW_AMODE[i][slot])
                 q_pack.append((mass_name(sp, mode.short), midx))
-                qqcw_pack.append(
-                    (mass_name(sp, mode.short, cloud_borne=True), mcidx)
-                )
+                if explicit_cb:
+                    qqcw_pack.append(
+                        (mass_name(sp, mode.short, cloud_borne=True), mcidx)
+                    )
                 props = self.spec.species_props(sp)
                 sp_list.append((midx, props.density, props.hygroscopicity))
             mode_species.append(sp_list)

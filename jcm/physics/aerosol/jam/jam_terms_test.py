@@ -34,6 +34,7 @@ class JamFactoryTest(unittest.TestCase):
                 "aerosol_ice_nucleation",
                 "aerosol_sedimentation",
                 "aerosol_drydep",
+                "aerosol_cloud_borne",
                 "aerosol_aqueous_chemistry",
                 "aerosol_wetdep",
             ],

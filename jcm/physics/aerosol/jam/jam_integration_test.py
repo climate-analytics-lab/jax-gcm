@@ -88,6 +88,38 @@ class JamIntegrationTest(unittest.TestCase):
             bool(jnp.any(jnp.isnan(predictions.dynamics.temperature)))
         )
 
+    def test_cloud_borne_mirrors_carried_finite(self):
+        # Default configuration prognoses the cloud-borne mirrors (#602):
+        # they must be seeded, transported and stay finite end-to-end. (A
+        # 3-step cold start carries near-zero aerosol, so this asserts the
+        # plumbing, not a nonzero reservoir; the transfer/resuspension
+        # mechanics are pinned in cloud_borne_test.)
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+
+        _, predictions = self._run()
+        tracers = predictions.dynamics.tracers
+        for key in (
+            number_name(MAM4_SPEC.modes[0].short, cloud_borne=True),
+            mass_name(MAM4_SPEC.modes[0].species[0],
+                      MAM4_SPEC.modes[0].short, cloud_borne=True),
+        ):
+            self.assertIn(key, tracers)
+            self.assertTrue(np.all(np.isfinite(np.asarray(tracers[key]))))
+
+    def test_cloud_borne_off_drops_mirrors_and_runs(self):
+        # The A/B switch (#602): with jam_cloud_borne=False the mirror
+        # tracers are not declared at all — the transported set halves —
+        # and the model still runs finite with the implicit scavenging.
+        _, predictions = self._run(jam_cloud_borne=False)
+        tracers = predictions.dynamics.tracers
+        self.assertFalse(
+            any(k.startswith(("mc_", "nc_")) for k in tracers),
+            "cloud-borne mirrors must not be transported when off",
+        )
+        self.assertFalse(
+            bool(jnp.any(jnp.isnan(predictions.dynamics.temperature)))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

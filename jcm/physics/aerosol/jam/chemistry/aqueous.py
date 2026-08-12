@@ -226,17 +226,16 @@ class AqueousSulfur(PhysicsTerm):
         # Fallback destination for sulfate produced where no cloud-borne
         # number exists: the INTERSTITIAL accumulation mode. HAM assigns this
         # droplet sulfate to the cloud-borne coarse mode (Seinfeld & Pandis
-        # 1998) — but HAM also scavenges cloud-borne aerosol. This chain has
-        # neither an activation transfer populating cloud-borne tracers
-        # (``nc_* ≡ 0`` everywhere today) nor cloud-borne wet scavenging
-        # (``wetdep_term`` is interstitial-only), so the HAM fallback made
-        # ``mc_so4_cor`` a sourced, sink-less reservoir: the first online-
-        # emission ne30 year grew it linearly ~0.7 mg/m²/day with no
-        # equilibrium. Producing into interstitial accumulation instead is
-        # the simpler-HAM "immediate detrainment" treatment — transport,
-        # optics and both deposition pathways all act on it. Revisit when
-        # real cloud-borne cycling (activation transfer + cloud-borne
-        # scavenging) exists.
+        # 1998) — but that is only safe alongside cloud-borne cycling. With
+        # ``spec.cloud_borne`` the cycle now exists (#602: the exchange term
+        # populates ``nc_*`` and wet/dry deposition drain ``mc_*``), so the
+        # HAM number-fraction split above is live and this fallback covers
+        # only spin-up cells; before the cycle existed the HAM assignment
+        # made ``mc_so4_cor`` a sourced, sink-less reservoir (the first
+        # online-emission ne30 year grew it linearly ~0.7 mg/m²/day).
+        # Without a prognostic cloud-borne phase the whole production lands
+        # here — the "immediate detrainment" treatment; transport, optics
+        # and both deposition pathways all act on it.
         self._fallback_interstitial = (
             "acc" if "acc" in self._so4_modes else self._so4_modes[0]
         )
@@ -285,33 +284,48 @@ class AqueousSulfur(PhysicsTerm):
 
         # Distribute the cloud-borne sulfate over the sulfate modes by their
         # cloud-borne number fraction (HAM ms4as/ms4cs split). Where a cell
-        # has no cloud-borne number (spin-up, or — today — everywhere, since
-        # no activation transfer populates the cloud-borne tracers yet) the
-        # production goes to INTERSTITIAL accumulation-mode sulfate instead
-        # (see ``_fallback_interstitial`` in ``__init__`` for why this
-        # deviates from HAM's cloud-borne-coarse assignment). The cloud-borne
-        # fractions plus the fallback branch always sum to 1, so the produced
-        # sulfate exactly matches the SO2 sink.
-        nc = {
-            m: jnp.maximum(
-                state.tracers.get(number_name(m, cloud_borne=True), zeros), 0.0
-            )
-            for m in self._so4_modes
-        }
-        nc_sum = sum(nc.values())
-        has_number = nc_sum > _NC_MIN
-        nc_safe = jnp.maximum(nc_sum, _TINY)
-
+        # has no cloud-borne number (spin-up, or a cloud the exchange term
+        # has not yet populated) the production goes to INTERSTITIAL
+        # accumulation-mode sulfate instead (see ``_fallback_interstitial``
+        # in ``__init__`` for why this deviates from HAM's cloud-borne-coarse
+        # assignment). The cloud-borne fractions plus the fallback branch
+        # always sum to 1, so the produced sulfate exactly matches the SO2
+        # sink. Without a prognostic cloud-borne phase (#602) the whole
+        # production is interstitial by construction — the compose-time
+        # branch below, so no dead ``mc_*`` tendencies are emitted.
         tracer_tends: dict[str, jnp.ndarray] = {"g_so2": so2_rate}
-        for m in self._so4_modes:
-            frac = jnp.where(has_number, nc[m] / nc_safe, 0.0)
-            tracer_tends[mass_name("so4", m, cloud_borne=True)] = so4_rate * frac
-        # Interstitial fallback carries the full production where no droplet
-        # population exists (m_so4_* keys are disjoint from the mc_* ones
-        # above, so this is a fresh entry, not an accumulation).
-        tracer_tends[mass_name("so4", self._fallback_interstitial)] = (
-            jnp.where(has_number, 0.0, so4_rate)
-        )
+        if self._spec.cloud_borne:
+            nc = {
+                m: jnp.maximum(
+                    state.tracers.get(
+                        number_name(m, cloud_borne=True), zeros
+                    ), 0.0,
+                )
+                for m in self._so4_modes
+            }
+            nc_sum = sum(nc.values())
+            has_number = nc_sum > _NC_MIN
+            # Floor at _NC_MIN (1 kg⁻¹), not a tiny epsilon: below the floor
+            # the ``where`` selects the fallback branch anyway, and a tiny
+            # floor reopens the squared-underflow VJP window — the division
+            # cotangent forms nc/nc_safe², which underflows to 0/0 for
+            # 0 < nc_sum < ~1e-19 in float32 (the double-where NaN class).
+            nc_safe = jnp.maximum(nc_sum, _NC_MIN)
+            for m in self._so4_modes:
+                frac = jnp.where(has_number, nc[m] / nc_safe, 0.0)
+                tracer_tends[mass_name("so4", m, cloud_borne=True)] = (
+                    so4_rate * frac
+                )
+            # Interstitial fallback carries the full production where no
+            # droplet population exists (m_so4_* keys are disjoint from the
+            # mc_* ones above, so this is a fresh entry, not an accumulation).
+            tracer_tends[mass_name("so4", self._fallback_interstitial)] = (
+                jnp.where(has_number, 0.0, so4_rate)
+            )
+        else:
+            tracer_tends[mass_name("so4", self._fallback_interstitial)] = (
+                so4_rate
+            )
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

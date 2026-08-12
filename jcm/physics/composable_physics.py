@@ -456,6 +456,10 @@ class ComposablePhysics(nnx.Module, Physics):
         "_echam_params",
         "_echam_coords",
         "_speedy_coords",
+        # Per-mode ARG activated fractions — inter-term plumbing for the
+        # cloud-borne exchange (#602), not an output field (the totals a
+        # user wants are ``activated_cdnc``/``activated_fraction``).
+        "_jam_activation",
         # Running tendency view for diagnostics (see the term loop); an
         # intermediate, not a field anyone wants in the netCDF.
         "_tendency_run",

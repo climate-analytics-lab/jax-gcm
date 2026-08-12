@@ -114,6 +114,16 @@ class SlinnDryDeposition(PhysicsTerm):
             names = [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
             ]
+            # A prognostic cloud-borne phase (#602) deposits too — CAM's
+            # ``aero_model_drydep`` treatment, using the mode's interstitial
+            # deposition velocity (droplet-resolved velocities are a
+            # refinement). Small next to wet removal, but it keeps a
+            # surface-layer cloud from becoming a sink-less corner.
+            if self._spec.cloud_borne:
+                names += [number_name(mode.short, cloud_borne=True)] + [
+                    mass_name(sp, mode.short, cloud_borne=True)
+                    for sp in mode.species
+                ]
             for nm in names:
                 q = state.tracers.get(nm, zeros)
                 tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(

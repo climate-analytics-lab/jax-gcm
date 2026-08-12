@@ -87,9 +87,14 @@ class WetDepTermTest(unittest.TestCase):
         )
         tracers = {}
         for mode in MAM4_SPEC.modes:
-            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
-            for sp in mode.species:
-                tracers[mass_name(sp, mode.short)] = jnp.full((nlev, ncols), 1e-9)
+            for cb in (False, True):
+                tracers[number_name(mode.short, cloud_borne=cb)] = jnp.full(
+                    (nlev, ncols), 1.0e8
+                )
+                for sp in mode.species:
+                    tracers[mass_name(sp, mode.short, cloud_borne=cb)] = (
+                        jnp.full((nlev, ncols), 1e-9)
+                    )
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 275.0),
             tracers=tracers,
@@ -243,6 +248,127 @@ class WetDepTermTest(unittest.TestCase):
         tend, _ = term(state, diagnostics, None, None)
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_cloud_borne_removed_at_full_incloud_rate(self):
+        # Cloud-borne aerosol is entirely in-droplet: its stratiform removal
+        # must not scale with the interstitial activated fraction, and must
+        # be a strict sink wherever condensate converts to precip (#602).
+        state, diagnostics, spec, mass_name = self._setup()
+        from jcm.physics.aerosol.jam import number_name
+
+        term = WetScavenging()
+        tend, _ = term(state, diagnostics, None, None)
+        cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
+                           cloud_borne=True)
+        self.assertIn(cb_key, tend.tracers)
+        self.assertIn(number_name(spec.modes[0].short, cloud_borne=True),
+                      tend.tracers)
+        self.assertTrue(bool(jnp.all(tend.tracers[cb_key] < 0.0)))
+        # Independent of the interstitial activated fraction.
+        diagnostics_af0 = dict(diagnostics)
+        diagnostics_af0["activated_fraction"] = jnp.zeros_like(
+            diagnostics["activated_fraction"]
+        )
+        tend_af0, _ = term(state, diagnostics_af0, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(tend_af0.tracers[cb_key]),
+            np.asarray(tend.tracers[cb_key]),
+        )
+
+    def test_incloud_pathway_moves_with_the_representation(self):
+        # Explicit cloud-borne phase (default MAM4 spec): the interstitial
+        # tracers keep only impaction — the activated fraction no longer
+        # scales their removal. Implicit phase (cloud_borne=False): the
+        # activated fraction does scale removal, and no mirror tendencies
+        # are emitted at all.
+        import dataclasses
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+
+        state, diagnostics, spec, mass_name = self._setup()
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        lo = dict(diagnostics)
+        lo["activated_fraction"] = jnp.full_like(
+            diagnostics["activated_fraction"], 0.1
+        )
+
+        explicit = WetScavenging()
+        t_hi, _ = explicit(state, diagnostics, None, None)   # af = 0.7
+        t_lo, _ = explicit(state, lo, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(t_hi.tracers[key]), np.asarray(t_lo.tracers[key]),
+        )
+
+        implicit = WetScavenging(
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False)
+        )
+        t_hi, _ = implicit(state, diagnostics, None, None)
+        t_lo, _ = implicit(state, lo, None, None)
+        self.assertLess(
+            float(t_hi.tracers[key].sum()), float(t_lo.tracers[key].sum()),
+            "implicit treatment must scavenge more at higher activation",
+        )
+        self.assertFalse(
+            any(nm.startswith(("mc_", "nc_")) for nm in t_hi.tracers),
+            "implicit population must not emit mirror tendencies",
+        )
+
+    def test_equilibrium_removal_matches_between_representations(self):
+        # At exchange equilibrium (q_cb = cf·af·q_tot) the explicit
+        # representation removes rate_ic·q_cb and the implicit one removes
+        # cf·af·rate_ic·q_tot — the SAME mass. Without the cf factor on the
+        # implicit stratiform rate the two disagree by 1/cf (2x here), which
+        # would poison the #602 A/B comparison with a difference that has
+        # nothing to do with the representation. Below-cloud impaction is
+        # switched off and the precip kept light so the exponential update
+        # stays in its linear regime.
+        import dataclasses
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+
+        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-7)
+        cf, af, q_tot = 0.6, 0.7, 1.0e-9
+        diagnostics = dict(diagnostics)
+        diagnostics["activated_fraction"] = jnp.full_like(
+            diagnostics["activated_fraction"], af
+        )
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0),
+            below_coeff=jnp.asarray(0.0),
+            below_radius_ref=jnp.asarray(1.0e-7),
+            conv_scav_ratio=jnp.asarray(0.99),
+        )
+        key_int = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        key_cb = mass_name(spec.modes[0].species[0], spec.modes[0].short,
+                           cloud_borne=True)
+
+        # Explicit: the pair partitioned at the exchange equilibrium.
+        q_cb = cf * af * q_tot
+        tracers = dict(state.tracers)
+        tracers[key_int] = jnp.full_like(tracers[key_int], q_tot - q_cb)
+        tracers[key_cb] = jnp.full_like(tracers[key_cb], q_cb)
+        tend_exp, _ = WetScavenging(params=params)(
+            state.copy(tracers=tracers), diagnostics, None, None,
+        )
+        removed_explicit = -(
+            np.asarray(tend_exp.tracers[key_int])
+            + np.asarray(tend_exp.tracers[key_cb])
+        )
+
+        # Implicit: all of q_tot interstitial, activated-fraction scavenged.
+        tracers = dict(state.tracers)
+        tracers[key_int] = jnp.full_like(tracers[key_int], q_tot)
+        implicit = WetScavenging(
+            params=params,
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+        )
+        tend_imp, _ = implicit(
+            state.copy(tracers=tracers), diagnostics, None, None,
+        )
+        removed_implicit = -np.asarray(tend_imp.tracers[key_int])
+
+        self.assertGreater(float(removed_explicit.max()), 0.0)
+        np.testing.assert_allclose(
+            removed_implicit, removed_explicit, rtol=5e-3,
+        )
 
     def test_grad_through_below_coeff(self):
         state, diagnostics, spec, mass_name = self._setup()
