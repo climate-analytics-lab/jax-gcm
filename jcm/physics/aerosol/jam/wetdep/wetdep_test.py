@@ -22,31 +22,45 @@ class ScavengingFunctionTest(unittest.TestCase):
         # layer releases half, a full-evap layer releases the rest, and
         # nothing reaches the surface. sum(scavenged - reinjected) must
         # equal the surface flux EXACTLY at every column.
-        scavenged = jnp.zeros((1, 3, 1)).at[0, 0, 0].set(2.0)
+        none = jnp.zeros((1, 3, 1))
+        scavenged = none.at[0, 0, 0].set(2.0)
         evap_frac = jnp.array([[0.0], [0.5], [1.0]])
-        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        reinjected, surface = reinjection_budget(none, scavenged, evap_frac)
         np.testing.assert_allclose(np.asarray(reinjected[0, :, 0]),
                                    [0.0, 1.0, 1.0])
         np.testing.assert_allclose(np.asarray(surface), 0.0)
         # Partial evap: the un-released remainder deposits.
         evap_frac = jnp.array([[0.0], [0.25], [0.0]])
-        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        reinjected, surface = reinjection_budget(none, scavenged, evap_frac)
         np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.5)
         np.testing.assert_allclose(
             float(jnp.sum(scavenged - reinjected)), float(surface[0, 0]),
         )
 
-    def test_same_layer_scavenge_and_full_evap_releases_everything(self):
-        # Virga: aerosol impacted out within a fully-evaporating layer must
-        # be released there too, not ride a terminated carrier to the
-        # surface through dry air (the layer's scavenging joins the ledger
-        # BEFORE the release, as in HAMMOZ). The pre-fix ordering deposited
-        # it all.
-        scavenged = jnp.zeros((1, 3, 1)).at[0, 2, 0].set(1.0)
+    def test_virga_releases_same_layer_impaction(self):
+        # Aerosol impacted out of the INCOMING precip within a fully-
+        # evaporating layer must be released there too, not ride a
+        # terminated carrier to the surface through dry air (impaction
+        # joins the ledger before the release, as in HAMMOZ).
+        none = jnp.zeros((1, 3, 1))
+        impacted = none.at[0, 2, 0].set(1.0)
         evap_frac = jnp.zeros((3, 1)).at[2].set(1.0)
-        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        reinjected, surface = reinjection_budget(impacted, none, evap_frac)
         np.testing.assert_allclose(np.asarray(reinjected[0, 2, 0]), 1.0)
         np.testing.assert_allclose(np.asarray(surface), 0.0)
+
+    def test_formation_in_full_evap_layer_still_deposits(self):
+        # Codex P1 on #612: the incoming carrier's evaporation cannot touch
+        # precip NEWLY FORMED in the same layer — both cloud schemes cap
+        # evaporation by the incoming flux and add formation after. Aerosol
+        # scavenged into that new precip must continue downward, not be
+        # released by an evap fraction that belongs to the old carrier.
+        none = jnp.zeros((1, 3, 1))
+        formed = none.at[0, 1, 0].set(1.0)
+        evap_frac = jnp.zeros((3, 1)).at[1].set(1.0)
+        reinjected, surface = reinjection_budget(none, formed, evap_frac)
+        np.testing.assert_allclose(np.asarray(reinjected), 0.0)
+        np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.0)
 
     def test_in_cloud_rate_scales_with_activation(self):
         pf = jnp.full((1, 1), 1.0e-6)
