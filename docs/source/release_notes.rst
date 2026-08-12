@@ -16,6 +16,14 @@ Unreleased — transient AMIP forcing
   required for the AMIP boundary (``tosbcs``) convention to reconstruct
   observed monthly means. Plain ``by_date`` series stay
   piecewise-constant.
+- **ERA5 nudging and initial conditions from config** (#610):
+  ``nudging=era5`` relaxes winds (optionally temperature) toward
+  WeatherBench2's public cloud ERA5, windowed to the run dates,
+  regridded to the model grid and cached locally (``jcm.data.era5``,
+  ``pip install jcm[era5]``); ``init=era5`` starts from the ERA5 state
+  at ``run.start_date``. Nudging is masked off above the WB2 stores'
+  50 hPa top and below ``nudging.pbl_levels``. Prefetch CLI:
+  ``python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>``.
 
 Unreleased — issue-backlog tidy-up
 ----------------------------------

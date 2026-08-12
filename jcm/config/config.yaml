@@ -7,6 +7,7 @@ defaults:
   - init: isothermal
   - terrain: aquaplanet
   - forcing: default
+  - nudging: none
   - diffusion: default
   - override hydra/help: custom_help
 
