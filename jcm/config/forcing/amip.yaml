@@ -1,0 +1,20 @@
+# Transient AMIP forcing from the yearly mirror bundles (issue #610).
+#
+# One file per year: SST + sea ice are PCMDI-AMIP mid-month boundary
+# values (tosbcs — hence ``align: by_date_interp``), land fields repeat
+# the ERA5 climatology, and CO2/CH4/N2O ride along as global-mean annual
+# series. Set the year range and start date together, e.g.:
+#
+#   forcing=amip forcing.years=[1979,1983] run.start_date=1979-01-01 \
+#       grid=echam_t63_l47_hybrid
+#
+# The grid token in the paths below follows the horizontal resolution
+# (t63 or t106) and, for ozone, the vertical (l47/l95) — override the
+# defaults for T106 or L95 runs.
+defaults:
+  - from_file
+
+file: hf://bundles/t63/forcing_amip/{year}.nc
+align: by_date_interp
+years: ???
+ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc

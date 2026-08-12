@@ -1077,5 +1077,137 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         )
 
 
+class TestByDateInterp(unittest.TestCase):
+    """BY_DATE_INTERP: linear interpolation between transient samples (#610)."""
+
+    def _date(self, iso):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        return DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(iso)),
+            calendar='gregorian',
+        )
+
+    def _series(self, isodates, values):
+        import jax_datetime as jdt
+
+        from jcm.date import absolute_seconds_since_epoch
+        from jcm.forcing import BY_DATE_INTERP, make_time_series
+        time_seconds = jnp.asarray([
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
+            for s in isodates
+        ])
+        return make_time_series(jnp.asarray(values), time_seconds,
+                                align_mode=BY_DATE_INTERP)
+
+    def test_midpoint_interpolates_linearly(self):
+        from jcm.forcing import ForcingData
+        ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        got = float(forcing.select(self._date('2000-01-02'),
+                                   calendar='gregorian').co2_vmr)
+        self.assertAlmostEqual(got, 301.0, places=3)
+
+    def test_exact_sample_and_end_clamps(self):
+        from jcm.forcing import ForcingData
+        ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        for iso, expected in [('2000-01-01', 300.0),   # exact sample
+                              ('1999-06-01', 300.0),   # before axis -> clamp
+                              ('2000-02-01', 302.0)]:  # after axis -> clamp
+            got = float(forcing.select(self._date(iso),
+                                       calendar='gregorian').co2_vmr)
+            self.assertAlmostEqual(got, expected, places=3, msg=iso)
+
+    def test_by_date_mode_stays_piecewise_constant(self):
+        # The interp branch must not leak into plain BY_DATE leaves.
+        from jcm.date import absolute_seconds_since_epoch
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        import jax_datetime as jdt
+        time_seconds = jnp.asarray([
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
+            for s in ['2000-01-01', '2000-01-03']
+        ])
+        ts = make_time_series(jnp.asarray([300.0, 302.0]), time_seconds,
+                              align_mode=BY_DATE)
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        got = float(forcing.select(self._date('2000-01-02'),
+                                   calendar='gregorian').co2_vmr)
+        self.assertAlmostEqual(got, 300.0, places=3)
+
+
+class TestYearlyForcingFiles(unittest.TestCase):
+    """Multi-file (yearly-bundle) loading through ``from_file`` (#610)."""
+
+    VALID_SHAPE = (96, 48)  # T31
+
+    def _yearly_ds(self, year, sst_value):
+        import pandas as pd
+        import xarray as xr
+        # 12 mid-month timestamps — the AMIP yearly-bundle layout.
+        times = pd.date_range(f"{year}-01-01", periods=12, freq="MS") \
+            + pd.Timedelta(days=14)
+        shape = (*self.VALID_SHAPE, 12)
+        return xr.Dataset(
+            data_vars={
+                'stl': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'icec': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'sst': (['lon', 'lat', 'time'],
+                        np.full(shape, float(sst_value))),
+                'alb': (['lon', 'lat'], np.zeros(self.VALID_SHAPE)),
+                'soilw_am': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'snowc': (['lon', 'lat', 'time'], np.zeros(shape)),
+            },
+            coords={'time': times},
+        )
+
+    def test_list_of_yearly_files_concatenates_by_date(self):
+        import os
+        import tempfile
+
+        from jcm.forcing import BY_DATE_INTERP, ForcingData
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for year, sst in [(1980, 290.0), (1981, 292.0)]:
+                p = os.path.join(d, f"{year}.nc")
+                self._yearly_ds(year, sst).to_netcdf(p)
+                paths.append(p)
+            forcing = ForcingData.from_file(
+                paths, align_mode="by_date_interp", validate=False)
+        sst_ts = forcing.sea_surface_temperature
+        self.assertEqual(sst_ts.values.shape, (24, *self.VALID_SHAPE))
+        self.assertEqual(int(sst_ts.align_mode), BY_DATE_INTERP)
+        # Mid-1981 lands on the second year's constant value.
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime('1981-07-02')),
+            calendar='gregorian')
+        sliced = forcing.select(date, calendar='gregorian')
+        self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, 292.0))
+
+    def test_single_year_interp_keeps_real_dates(self):
+        # A lone 12-step transient file must NOT be daily-interpolated as a
+        # climatology when by_date_interp is forced: real timestamps and
+        # length-12 axis survive.
+        import os
+        import tempfile
+
+        from jcm.forcing import BY_DATE_INTERP, ForcingData
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "1980.nc")
+            self._yearly_ds(1980, 290.0).to_netcdf(p)
+            forcing = ForcingData.from_file(
+                p, align_mode="by_date_interp", validate=False)
+        sst_ts = forcing.sea_surface_temperature
+        self.assertEqual(sst_ts.values.shape[0], 12)
+        self.assertEqual(int(sst_ts.align_mode), BY_DATE_INTERP)
+
+
 if __name__ == '__main__':
     unittest.main()

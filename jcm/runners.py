@@ -398,6 +398,32 @@ def _resolve_data_path(path):
     return path
 
 
+def _expand_years(file_spec, years):
+    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
+
+    The transient AMIP bundles are one file per year (issue #610:
+    download only what you run, append new years without rewriting
+    history), so config points at a pattern plus an inclusive range:
+    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
+    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
+    than silently running with a literal ``{year}`` path. Non-pattern
+    specs (plain paths, lists, ``None``) pass through untouched even when
+    ``years`` is set — a run may mix yearly SST files with a static dust
+    climatology, all sharing one ``forcing.years`` range.
+    """
+    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
+    if not has_pattern:
+        return file_spec
+    if years is None:
+        raise ValueError(
+            f"forcing file pattern {file_spec!r} contains {{year}} but "
+            "no year range is set — add e.g. forcing.years=[1979,1983]")
+    first, last = int(years[0]), int(years[-1])
+    if last < first:
+        raise ValueError(f"forcing.years range is reversed: {years!r}")
+    return [file_spec.format(year=y) for y in range(first, last + 1)]
+
+
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     terrain_cfg = cfg.terrain
     kind = terrain_cfg.kind
@@ -724,6 +750,21 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
         "plev" in (phys.get("aerocom_groups") or ()))
 
 
+def _resolve_start_date(cfg: DictConfig):
+    """``run.start_date`` (ISO date string) as a ``jax_datetime.Datetime``.
+
+    ``None``/unset keeps ``Model``'s default (2000-01-01). Transient
+    (``BY_DATE``-aligned) forcing samples the file at the absolute model
+    date, so a historical run must set this to place itself on the
+    forcing's calendar (issue #610).
+    """
+    raw = cfg.get("run", {}).get("start_date", None)
+    if raw in (None, "", "null"):
+        return None
+    import jax_datetime as jdt
+    return jdt.to_datetime(str(raw))
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config.
 
@@ -785,6 +826,7 @@ def build_model(cfg: DictConfig) -> Model:
         dycore,
         physics=physics,
         time_step=time_step,
+        start_date=_resolve_start_date(cfg),
         log_level=log_level,
     )
 
@@ -831,7 +873,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
     # No time_step: the Model adopts the dycore's dt_seconds (single source
     # of truth; a conflicting run.time_step would raise).
-    return Model(dycore=dycore, physics=physics, log_level=log_level)
+    return Model(dycore=dycore, physics=physics,
+                 start_date=_resolve_start_date(cfg), log_level=log_level)
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -945,8 +988,10 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         forcing = None
     elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
+        files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None))
         forcing = ForcingData.from_file(
-            _resolve_data_path(forcing_cfg.file), coords=coords)
+            _resolve_data_path(files), coords=coords,
+            align_mode=str(forcing_cfg.get("align", "auto")))
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -1021,8 +1066,11 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    ozone_file = _resolve_data_path(
-        forcing_cfg.get("ozone_file", None))
+    ozone_file = _resolve_data_path(_expand_years(
+        forcing_cfg.get("ozone_file", None),
+        forcing_cfg.get("years", None)))
+    if isinstance(ozone_file, (list, tuple)):
+        ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):
         provenance.record_fact("ozone_source", "analytic (no ozone_file)")
         return forcing
@@ -1088,7 +1136,9 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("emissions_file", None))
+    path = _resolve_data_path(_expand_years(
+        forcing_cfg.get("emissions_file", None),
+        forcing_cfg.get("years", None)))
     if path in (None, "", "null"):
         return forcing
 
