@@ -58,7 +58,9 @@ class ConservativeTest(unittest.TestCase):
     def test_rectilinear_axes_match_flattened_mesh(self):
         # 1-D lon/lat axes with a 2-D area (#533) must build the identical
         # operator as the pre-flattened mesh, for both (lon, lat) and
-        # (lat, lon) area layouts.
+        # (lat, lon) area layouts — and apply directly to native
+        # unflattened fields, e.g. a (time, lat, lon) input4MIPs series.
+        rng = np.random.default_rng(3)
         src_lats = np.linspace(-85.0, 85.0, 18)
         src_lons = np.arange(36) * 10.0
         mlon, mlat = np.meshgrid(src_lons, src_lats, indexing="ij")
@@ -66,11 +68,20 @@ class ConservativeTest(unittest.TestCase):
         lats, lons = gaussian_latlon(8)
         ref = build_regridder(mlon.ravel(), mlat.ravel(), area.ravel(),
                               lons, lats, dst_in_degrees=True)
-        for rect_area in (area, area.T):
+        field = rng.random((3, 36, 18))                  # (time, lon, lat)
+        expect = ref(field.reshape(3, -1))
+        for rect_area, f in ((area, field),
+                             (area.T, np.swapaxes(field, -1, -2))):
             rg = build_regridder(src_lons, src_lats, rect_area,
                                  lons, lats, dst_in_degrees=True)
             np.testing.assert_allclose(rg._matrix.toarray(),
                                        ref._matrix.toarray())
+            # Both trailing layouts are recognized by shape.
+            np.testing.assert_allclose(rg(field), expect)
+            np.testing.assert_allclose(rg(np.swapaxes(field, -1, -2)), expect)
+            np.testing.assert_allclose(rg(f), expect)
+        with self.assertRaisesRegex(ValueError, "trailing spatial"):
+            rg(field[:, :7, :5])
 
     def test_rectilinear_ambiguous_area_shape_raises(self):
         src_lats = np.linspace(-85.0, 85.0, 18)
