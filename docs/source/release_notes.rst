@@ -18,8 +18,12 @@ Unreleased — issue-backlog tidy-up
   in physics (#578).
 - The conservative regridder accepts rectilinear sources (1-D lon/lat
   axes + 2-D area, #533).
-- Optional JAX persistent compilation cache via ``JCM_CACHE_DIR``
-  (#592).
+- **JAX persistent compilation cache on by default** (#592):
+  ``$SCRATCH/jcm-jax-cache`` (else ``~/.cache/jcm/jax``), relocatable
+  via ``JCM_CACHE_DIR``, disable with ``JCM_CACHE_DIR=off``. Entries
+  are keyed on the compiled HLO, so code edits miss rather than
+  wrongly hit; reruns of an already-compiled configuration skip the
+  multi-minute compile entirely.
 - SPEEDY outputs no longer carry the unexplained ``wvi_id`` /
   ``hsg_level`` dimensions (#391); channelized ``units_table.csv``
   entries now say what each channel is (#238); ``Model`` has a

@@ -1228,18 +1228,28 @@ def _validate_oxidant_levels(ds, coords, path):
 # ---------------------------------------------------------------------------
 
 def maybe_enable_compilation_cache() -> None:
-    """Enable JAX's persistent compilation cache when ``JCM_CACHE_DIR`` is set.
+    """Enable JAX's persistent compilation cache (#592) — on by default.
 
-    Opt-in only (#592): JAX keys cache entries on the HLO plus
-    backend/jaxlib, NOT on our editable source trees, so a shared default
-    path could serve stale kernels across code edits. Point
-    ``JCM_CACHE_DIR`` at a per-tree directory; provenance-hash namespacing
-    is the #591 follow-up. Benchmarks should leave it unset — compile time
-    is part of what they measure.
+    Safe to share across code edits: entries are keyed on the compiled HLO
+    plus backend/jaxlib, so a source change that alters the computation
+    *misses* rather than wrongly hits — the failure mode is recompilation,
+    never staleness. Benchmarks discard the compile chunk deliberately, so
+    caching only shortens their spin-up.
+
+    ``JCM_CACHE_DIR`` relocates the cache; set it to ``off`` (or ``0`` /
+    ``none``) to disable. Default: ``$SCRATCH/jcm-jax-cache`` when
+    ``SCRATCH`` is set (fast scratch on HPC), else ``~/.cache/jcm/jax``.
     """
-    cache_dir = os.environ.get("JCM_CACHE_DIR")
-    if not cache_dir:
+    val = os.environ.get("JCM_CACHE_DIR", "")
+    if val.lower() in ("0", "off", "none", "false"):
         return
+    if val:
+        cache_dir = val
+    elif os.environ.get("SCRATCH"):
+        cache_dir = os.path.join(os.environ["SCRATCH"], "jcm-jax-cache")
+    else:
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "jcm",
+                                 "jax")
     jax.config.update("jax_compilation_cache_dir", cache_dir)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)

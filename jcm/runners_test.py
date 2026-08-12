@@ -1257,23 +1257,36 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
 
 
 class CompilationCacheTest(unittest.TestCase):
-    def test_env_gated_enablement(self):
-        # Off unless JCM_CACHE_DIR is set (#592); on, it points JAX's
-        # persistent cache at the given directory.
+    def test_default_on_override_and_off(self):
+        # On by default with a machine-appropriate location (#592);
+        # JCM_CACHE_DIR relocates it, and "off" disables.
         import jax
 
         from jcm.runners import maybe_enable_compilation_cache
         old = jax.config.jax_compilation_cache_dir
+        old_scratch = os.environ.get("SCRATCH")
         try:
             os.environ.pop("JCM_CACHE_DIR", None)
+            os.environ["SCRATCH"] = "/nonexistent/scratch"
             maybe_enable_compilation_cache()
-            self.assertEqual(jax.config.jax_compilation_cache_dir, old)
+            self.assertEqual(jax.config.jax_compilation_cache_dir,
+                             "/nonexistent/scratch/jcm-jax-cache")
+
             os.environ["JCM_CACHE_DIR"] = "/nonexistent/jcm-cache-test"
             maybe_enable_compilation_cache()
             self.assertEqual(jax.config.jax_compilation_cache_dir,
                              "/nonexistent/jcm-cache-test")
+
+            jax.config.update("jax_compilation_cache_dir", old)
+            os.environ["JCM_CACHE_DIR"] = "off"
+            maybe_enable_compilation_cache()
+            self.assertEqual(jax.config.jax_compilation_cache_dir, old)
         finally:
             os.environ.pop("JCM_CACHE_DIR", None)
+            if old_scratch is None:
+                os.environ.pop("SCRATCH", None)
+            else:
+                os.environ["SCRATCH"] = old_scratch
             jax.config.update("jax_compilation_cache_dir", old)
 
 
