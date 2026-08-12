@@ -117,6 +117,111 @@ class NearSurfaceGroupTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(out2["aerocom_wbase"]), 0.0)
 
 
+class PlevOmegaTest(unittest.TestCase):
+    """wap/w500/w700 from the dycore omega provider (jax-gcm#409)."""
+
+    nlev, nx = 12, 6
+
+    def _plev(self, omega=None):
+        term = AerocomDiagnostics(groups=("plev",))
+        nlev, nx = self.nlev, self.nx
+        p_full = (jnp.linspace(20000.0, 99600.0, nlev)[:, None]
+                  * jnp.ones((1, nx)))
+
+        class _State:
+            u_wind = jnp.zeros((nlev, nx))
+            v_wind = jnp.zeros((nlev, nx))
+            temperature = jnp.full((nlev, nx), 280.0)
+
+        diagnostics = {}
+        if omega is not None:
+            diagnostics["_dycore_fields"] = {"omega": omega}
+        return term._plev_group(_State(), diagnostics,
+                                _State.temperature, p_full), p_full
+
+    def test_absent_provider_zero_fills_statically(self):
+        out, p_full = self._plev(omega=None)
+        self.assertEqual(out["aerocom_wap"].shape, (self.nlev, self.nx))
+        self.assertEqual(float(jnp.max(jnp.abs(out["aerocom_wap"]))), 0.0)
+        for key in ("aerocom_w500", "aerocom_w700"):
+            self.assertEqual(out[key].shape, (self.nx,))
+            self.assertEqual(float(jnp.max(jnp.abs(out[key]))), 0.0)
+
+    def test_wap_passthrough_and_slices_exact_in_log_p(self):
+        # An omega linear in log(p) makes the log-linear interpolation
+        # exact, so w500/w700 have closed-form expectations.
+        _, p_full = self._plev(omega=None)
+        alpha = 0.037
+        omega = alpha * jnp.log(p_full)
+        out, _ = self._plev(omega=omega)
+        np.testing.assert_allclose(np.asarray(out["aerocom_wap"]),
+                                   np.asarray(omega))
+        np.testing.assert_allclose(
+            np.asarray(out["aerocom_w500"]),
+            alpha * np.log(50000.0) * np.ones(self.nx), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(out["aerocom_w700"]),
+            alpha * np.log(70000.0) * np.ones(self.nx), rtol=1e-6)
+
+    def test_provider_keys_are_declared(self):
+        for key in ("aerocom_wap", "aerocom_w500", "aerocom_w700"):
+            self.assertIn(key, AerocomDiagnostics.provides)
+
+    def test_runner_defaults_omega_on_for_aerocom_plev(self):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _want_omega
+        plev_cfg = {"physics": {"enable_aerocom": True,
+                                "aerocom_groups": ["cloud", "plev"]}}
+        self.assertTrue(_want_omega(OmegaConf.create(plev_cfg)))
+        self.assertFalse(_want_omega(OmegaConf.create(
+            {"physics": {"enable_aerocom": True,
+                         "aerocom_groups": ["cloud"]}})))
+        self.assertFalse(_want_omega(OmegaConf.create({})))
+        # An explicit dycore.compute_omega always wins, either way.
+        self.assertFalse(_want_omega(OmegaConf.create(
+            {**plev_cfg, "dycore": {"compute_omega": False}})))
+        self.assertTrue(_want_omega(OmegaConf.create(
+            {"dycore": {"compute_omega": True}})))
+        # The shipped yaml null means "decide from the physics config".
+        self.assertTrue(_want_omega(OmegaConf.create(
+            {**plev_cfg, "dycore": {"compute_omega": None}})))
+
+    def test_end_to_end_echam_run_with_the_provider(self):
+        """Probe-vs-step structure and real values through a scanned run.
+
+        The get_empty_data probe runs without dycore-field injection (the
+        zero-fill branch) while the scanned steps see the injected omega;
+        the run only compiles if both produce the same carry structure.
+        """
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.model import Model
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        dycore = DinosaurDycore(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            dt_seconds=900.0, compute_omega=True)
+        model = Model(
+            dycore=dycore, time_step=15.0,
+            physics=echam_physics(radiation_scheme="grey",
+                                  enable_aerocom=True,
+                                  aerocom_groups=("plev",)),
+        )
+        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        for key in ("aerocom_wap", "aerocom_w500", "aerocom_w700"):
+            arr = np.asarray(ds[key])
+            self.assertTrue(np.isfinite(arr).all(), f"{key} not finite")
+        # The balanced-start ECHAM state has real vertical motion within a
+        # few steps; all-zero wap would mean the provider never reached
+        # the term.
+        self.assertGreater(float(np.abs(ds["aerocom_wap"]).max()), 0.0)
+        self.assertLess(float(np.abs(ds["aerocom_wap"]).max()), 1e2)
+
+
 class CodexRound2RegressionTest(unittest.TestCase):
     """Regressions for the Codex findings on PR #604."""
 
@@ -305,14 +410,22 @@ class CmorOmnibusTest(unittest.TestCase):
                                    dims=("lat", "lon")),
             "emi_bb_oc": xr.DataArray(np.full((3, 4), 2e-12),
                                       dims=("lat", "lon")),
+            "aerocom_wap": xr.DataArray(np.full((5, 3, 4), -0.02),
+                                        dims=("level", "lat", "lon")),
+            "aerocom_w500": xr.DataArray(np.full((3, 4), -0.05),
+                                         dims=("lat", "lon")),
         })
         with tempfile.TemporaryDirectory() as td:
             written, skipped = convert(
                 ds, "JCM-t", "all_2000", "2010", "monthly",
                 pathlib.Path(td), na_aliases=True)
         names = "\n".join(written)
-        for var in ("rsutnoa", "rsut_na", "tas", "drybc", "emi_bb_oc"):
+        for var in ("rsutnoa", "rsut_na", "tas", "drybc", "emi_bb_oc",
+                    "wap", "w500"):
             self.assertIn(f"_{var}_", names)
+        # wap goes out on model levels, the slices as 2-D column fields.
+        self.assertIn("_wap_ModelLevel_", names)
+        self.assertIn("_w500_Column_", names)
         self.assertEqual(skipped, [])
 
 

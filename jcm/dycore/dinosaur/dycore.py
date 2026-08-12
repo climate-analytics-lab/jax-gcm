@@ -96,6 +96,7 @@ class DinosaurDycore(DynamicalCore):
         diffusion: DiffusionFilter | None = None,
         tracer_filter: Any | None = None,
         compute_frontogenesis: bool = False,
+        compute_omega: bool = False,
         advection: str = "eulerian",
         sl_options: Mapping[str, Any] | None = None,
     ):
@@ -152,6 +153,12 @@ class DinosaurDycore(DynamicalCore):
         # Off by default: it costs horizontal finite differences of
         # (u, v, theta) every dt, which only the frontal GW term consumes.
         self.compute_frontogenesis = bool(compute_frontogenesis)
+        # Opt-in pressure vertical velocity (omega = Dp/Dt) diagnostic on
+        # the physics grid, for AeroCom's wap/w500/w700 (jax-gcm#409). Off
+        # by default: it re-runs the diagnostic-state projection (a few
+        # modal->nodal transforms) every step, which only output
+        # consumers need.
+        self.compute_omega = bool(compute_omega)
 
         # Physical constants drive both nondimensionalisation and the primitive
         # equations. Default to the *live* module singleton (read here at
@@ -481,11 +488,82 @@ class DinosaurDycore(DynamicalCore):
         return self.coords.with_physics_sharding(physics_state)
 
     def physics_field_names(self) -> tuple[str, ...]:
-        """Declare the frontogenesis field when the provider is enabled."""
-        return ("frontogenesis",) if self.compute_frontogenesis else ()
+        """Declare the enabled per-step dycore-side diagnostic fields."""
+        names = []
+        if self.compute_frontogenesis:
+            names.append("frontogenesis")
+        if self.compute_omega:
+            names.append("omega")
+        return tuple(names)
+
+    def _compute_omega(self, state: State) -> jnp.ndarray:
+        """Pressure vertical velocity omega = Dp/Dt [Pa/s] at level centres.
+
+        Diagnosed from the modal state via dinosaur's own diagnostic-state
+        computation, so the divergence, ``v . grad(ln ps)`` and vertical
+        mass flux are exactly the ones the dynamics integrates. On hybrid
+        levels (p = a + b ps):
+
+            omega_k = b_k ps (v . grad ln ps)_k + b_k (dps/dt)
+                      + (M_{k-1/2} + M_{k+1/2}) / 2
+
+        with ``M = eta_dot dp/deta`` the boundary mass flux and
+        ``dps/dt = -sum_k div(v dp)_k`` from continuity. On pure sigma
+        levels (a = 0, b = sigma, M = sigma_dot ps) the same expression
+        reduces to the classic ``omega = ps (sigma_dot + sigma d ln ps/dt)``,
+        which is what the sigma branch computes directly. Returned
+        dimensionalized, shape ``(nlev, nlon, nlat)``.
+        """
+        to_nodal = self.coords.horizontal.to_nodal
+        vertical = self.coords.vertical
+        # Omega needs no tracers, and under semi-Lagrangian advection the
+        # extra tracers are stored NODAL, so the diagnostic-state helpers'
+        # unconditional to_nodal over state.tracers would both crash (shape
+        # mismatch) and waste one transform per tracer. Strip them.
+        state = state.replace(tracers={})
+        # (1, nlon, nlat); the leading axis broadcasts against (nlev, ...).
+        ps = jnp.exp(to_nodal(state.log_surface_pressure))
+        if isinstance(vertical, HybridCoordinates):
+            # The primitive operator's nondim_coords, not self.coords: the
+            # (a, b) tables must be nondimensionalized consistently with
+            # the state's log_surface_pressure. Under jcm's SI scale the
+            # two coincide numerically, but only nondim_coords is correct
+            # by construction under any scale.
+            ds = primitive_equations.compute_diagnostic_state_hybrid(
+                state, self._primitive.nondim_coords)
+            delta_b = vertical.sigma_thickness[:, jnp.newaxis, jnp.newaxis]
+            b_bounds = jnp.asarray(vertical.b_boundaries)
+            b_full = 0.5 * (b_bounds[:-1] + b_bounds[1:])[
+                :, jnp.newaxis, jnp.newaxis]
+            div_v_dp = (ds.layer_pressure_thickness * ds.divergence
+                        + delta_b * ps * ds.u_dot_grad_log_sp)
+            dps_dt = -jnp.sum(div_v_dp, axis=0, keepdims=True)
+            mass_flux = ds.mass_flux_full  # (nlev+1, ...), zero at both ends
+            omega = (b_full * ps * ds.u_dot_grad_log_sp
+                     + b_full * dps_dt
+                     + 0.5 * (mass_flux[:-1] + mass_flux[1:]))
+        else:
+            ds = primitive_equations.compute_diagnostic_state_sigma(
+                state, self.coords)
+            sigma = jnp.asarray(vertical.centers)[:, jnp.newaxis, jnp.newaxis]
+            thickness = jnp.asarray(vertical.layer_thickness)[
+                :, jnp.newaxis, jnp.newaxis]
+            dlnps_dt = -jnp.sum(
+                thickness * (ds.divergence + ds.u_dot_grad_log_sp),
+                axis=0, keepdims=True)
+            # sigma_dot lives on the nlev-1 inner boundaries; zero at the
+            # top and bottom, centred average to the layer midpoints.
+            sigma_dot = jnp.pad(ds.sigma_dot_full, [(1, 1), (0, 0), (0, 0)])
+            sigma_dot_c = 0.5 * (sigma_dot[:-1] + sigma_dot[1:])
+            omega = ps * (sigma_dot_c
+                          + sigma * (ds.u_dot_grad_log_sp + dlnps_dt))
+        return self._physics_specs.dimensionalize(
+            omega, units.pascal / units.second).m
 
     def physics_fields(self, state, physics_state) -> dict:
-        """Compute the frontogenesis function on the nodal lat-lon grid.
+        """Compute the enabled dycore-side diagnostics on the nodal grid.
+
+        Frontogenesis (when ``compute_frontogenesis``):
 
         Uses the already-projected gridpoint ``physics_state`` (SI units):
         theta = T (p0/p)^kappa with the hybrid/sigma mid-level pressures
@@ -497,29 +575,35 @@ class DinosaurDycore(DynamicalCore):
         owns ``compute_frontogenesis``). A spectral-gradient
         implementation is a possible upgrade — the FD version is
         second-order, and fields are smooth at the truncation scale.
+
+        Omega (when ``compute_omega``): see :meth:`_compute_omega`.
         """
-        if not self.compute_frontogenesis:
+        if not (self.compute_frontogenesis or self.compute_omega):
             return {}
-        from jcm.physics.gravity_waves.spectral.frontogenesis import (
-            frontogenesis_function,
-        )
-        p0 = float(self.constants.p0)
-        ps = physics_state.normalized_surface_pressure * p0
-        a_full = 0.5 * (self._a_half[:-1] + self._a_half[1:])
-        b_full = 0.5 * (self._b_half[:-1] + self._b_half[1:])
-        shape = (-1,) + (1,) * ps.ndim
-        p_full = (a_full.reshape(shape)
-                  + b_full.reshape(shape) * ps[jnp.newaxis])
-        kappa = float(self.constants.akap)
-        theta = physics_state.temperature * (p0 / p_full) ** kappa
-        frontgf = frontogenesis_function(
-            physics_state.u_wind, physics_state.v_wind, theta,
-            lons=jnp.asarray(self.coords.horizontal.longitudes),
-            lats=jnp.asarray(self.coords.horizontal.latitudes),
-        )
-        return {
-            "frontogenesis": frontgf.astype(physics_state.temperature.dtype)
-        }
+        out: dict = {}
+        dtype = physics_state.temperature.dtype
+        if self.compute_frontogenesis:
+            from jcm.physics.gravity_waves.spectral.frontogenesis import (
+                frontogenesis_function,
+            )
+            p0 = float(self.constants.p0)
+            ps = physics_state.normalized_surface_pressure * p0
+            a_full = 0.5 * (self._a_half[:-1] + self._a_half[1:])
+            b_full = 0.5 * (self._b_half[:-1] + self._b_half[1:])
+            shape = (-1,) + (1,) * ps.ndim
+            p_full = (a_full.reshape(shape)
+                      + b_full.reshape(shape) * ps[jnp.newaxis])
+            kappa = float(self.constants.akap)
+            theta = physics_state.temperature * (p0 / p_full) ** kappa
+            frontgf = frontogenesis_function(
+                physics_state.u_wind, physics_state.v_wind, theta,
+                lons=jnp.asarray(self.coords.horizontal.longitudes),
+                lats=jnp.asarray(self.coords.horizontal.latitudes),
+            )
+            out["frontogenesis"] = frontgf.astype(dtype)
+        if self.compute_omega:
+            out["omega"] = self._compute_omega(state).astype(dtype)
+        return out
 
     def step(
         self,

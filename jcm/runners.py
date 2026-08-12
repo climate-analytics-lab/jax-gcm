@@ -695,6 +695,24 @@ def build_tracer_filter(cfg: DictConfig):
     return MassConservingPositivity()
 
 
+def _want_omega(cfg: DictConfig) -> bool:
+    """Resolve the dycore omega provider from the config.
+
+    An explicit ``dycore.compute_omega`` always wins. Left unset, the
+    provider defaults ON when the physics config runs the AeroCom ``plev``
+    group (``enable_aerocom`` with ``plev`` in ``aerocom_groups``):
+    without it that group's wap/w500/w700 are silently zero-filled, which
+    is exactly the kind of valid-looking-but-empty submission file nobody
+    catches until review.
+    """
+    explicit = cfg.get("dycore", {}).get("compute_omega", None)
+    if explicit is not None:
+        return bool(explicit)
+    phys = cfg.get("physics", {})
+    return bool(phys.get("enable_aerocom", False)) and (
+        "plev" in (phys.get("aerocom_groups") or ()))
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config.
 
@@ -748,6 +766,7 @@ def build_model(cfg: DictConfig) -> Model:
         tracer_specs=tracer_specs,
         diffusion=diffusion,
         tracer_filter=tracer_filter,
+        compute_omega=_want_omega(cfg),
         advection=advection,
         sl_options=sl_options,
     )

@@ -424,6 +424,7 @@ class AerocomDiagnostics(PhysicsTerm):
         "aerocom_cdnc3d",
         # plev
         "aerocom_lts", "aerocom_ptp",
+        "aerocom_wap", "aerocom_w500", "aerocom_w700",
         # nearsurface
         "aerocom_tas", "aerocom_uas", "aerocom_vas", "aerocom_dew2",
         "aerocom_psl", "aerocom_prsn", "aerocom_prcr", "aerocom_prcs",
@@ -696,6 +697,28 @@ class AerocomDiagnostics(PhysicsTerm):
         theta700 = t700 * (100000.0 / 70000.0) ** c.akap
         theta_sfc = temperature[-1] * (100000.0 / p_sfc) ** c.akap
         out["aerocom_lts"] = theta700 - theta_sfc
+
+        # Pressure vertical velocity (the wap/w500/w700 request,
+        # jax-gcm#409): supplied by the dycore's omega provider
+        # (DinosaurDycore(compute_omega=True), config key
+        # dycore.compute_omega) as a dycore field, since only the
+        # dynamics knows the mass fluxes consistent with its own
+        # continuity equation. Zero-filled when the provider is off,
+        # which is static per config, so the emitted key set stays
+        # scan-carry-stable. wap is the full model-level field
+        # (leading level axis, the cdnc3d layout); w500/w700 are the
+        # requested pressure-surface slices.
+        omega = (diagnostics.get("_dycore_fields") or {}).get("omega")
+        if omega is not None:
+            out["aerocom_wap"] = omega
+            out["aerocom_w500"] = _interp_to_pressure(omega, p_full, 50000.0)
+            out["aerocom_w700"] = _interp_to_pressure(omega, p_full, 70000.0)
+        else:
+            out["aerocom_wap"] = jnp.zeros(p_full.shape, dtype=p_full.dtype)
+            out["aerocom_w500"] = jnp.zeros(p_full.shape[1:],
+                                            dtype=p_full.dtype)
+            out["aerocom_w700"] = jnp.zeros(p_full.shape[1:],
+                                            dtype=p_full.dtype)
 
         # WMO tropopause pressure (the ptp request): the wmo_tropopause
         # module's finder, on the post-physics temperature. Its default
