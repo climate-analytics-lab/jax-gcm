@@ -99,7 +99,8 @@ class OzoneClimatology:
             path: Path to the netCDF file produced by
                 ``jcm.data.bc.interpolate_ozone``, or a list of yearly
                 transient files sharing one time epoch (concatenated
-                along time; ``ntime > 12`` then routes to ``BY_DATE``).
+                along time and routed to ``BY_DATE_INTERP`` — mid-month
+                monthly means are linearly interpolated in time).
             nlon: Expected number of longitude points (must match file).
             nlat: Expected number of latitude points (must match file).
             nlev: Expected number of vertical levels (must match the
@@ -126,9 +127,11 @@ class OzoneClimatology:
         import xarray as xr
         # Local import: ``jcm.forcing`` already imports this module via
         # ``ForcingData``, so importing it at module top would cycle.
-        from jcm.forcing import BY_DATE, WRAP_YEAR, make_time_series
+        from jcm.forcing import (BY_DATE, BY_DATE_INTERP, WRAP_YEAR,
+                                 make_time_series)
 
-        if isinstance(path, (list, tuple)):
+        from_yearly_list = isinstance(path, (list, tuple))
+        if from_yearly_list:
             # Yearly transient files (issue #610), concatenated along
             # time in the given (ascending-year) order. Raw time values
             # only concatenate meaningfully when every file shares one
@@ -214,10 +217,19 @@ class OzoneClimatology:
         o3_t = np.transpose(o3_ppmv_raw, (0, 1, 3, 2))  # (T, lev, lon, lat)
         o3_cols = o3_t.reshape(ntime, nlev, nlon * nlat)
 
-        # Length-based routing. Anything but 12 is treated as transient
-        # — ``WRAP_YEAR`` would silently sample the wrong absolute date
-        # every loop for a multi-year SSP / historical file.
-        if ntime == 12:
+        # Routing. A yearly-list load is always transient with mid-month
+        # stamps, and gets ``BY_DATE_INTERP``: monthly means stamped
+        # mid-month sampled piecewise-constant would lag by half a month
+        # (Jan 1-14 reading December's mean); linear interpolation
+        # between mid-months is the standard (ECHAM) treatment, with the
+        # runner's ±1-year file padding supplying the boundary brackets.
+        # Single files keep the length-based routing: 12 steps → a
+        # climatology (WRAP_YEAR), anything else → piecewise ``BY_DATE``
+        # (unchanged behaviour for existing transient files).
+        if from_yearly_list:
+            time_seconds = _decode_time_axis_seconds(ds, path)
+            align = BY_DATE_INTERP
+        elif ntime == 12:
             seconds_per_month = 30.4375 * 86400.0  # 365.25/12 days
             time_seconds = jnp.asarray(
                 (np.arange(ntime) + 0.5) * seconds_per_month,

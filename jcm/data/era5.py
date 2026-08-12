@@ -183,12 +183,24 @@ def _to_model_grid(ds: xr.Dataset, coords,
 
 def _window_key(coords, start: str, end: str, freq: str,
                 variables: tuple[str, ...]) -> str:
+    import hashlib
+
     nlon, nlat = coords.horizontal.nodal_shape
-    nlev = (np.asarray(coords.vertical.a_centers).size
-            if hasattr(coords.vertical, "a_centers")
-            else np.asarray(coords.vertical.centers).size)
-    return (f"wb2_{nlon}x{nlat}_l{nlev}_{start}_{end}_{freq}_"
-            f"{'-'.join(variables)}.nc")
+    # Hash the actual coordinate values, not just the dimensions: two
+    # grids with the same shape (e.g. different 8-level sigma
+    # definitions) must not share a cache entry.
+    if hasattr(coords.vertical, "a_centers"):
+        vert = (np.asarray(coords.vertical.a_centers),
+                np.asarray(coords.vertical.b_centers))
+    else:
+        vert = (np.asarray(coords.vertical.centers),)
+    nlev = vert[0].size
+    h = hashlib.sha256()
+    for arr in (np.asarray(coords.horizontal.latitudes),
+                np.asarray(coords.horizontal.longitudes), *vert):
+        h.update(np.ascontiguousarray(arr, dtype=np.float64).tobytes())
+    return (f"wb2_{nlon}x{nlat}_l{nlev}_{h.hexdigest()[:8]}_"
+            f"{start}_{end}_{freq}_{'-'.join(variables)}.nc")
 
 
 def dataset_on_model_grid(coords, start: str, end: str, *,
@@ -222,9 +234,15 @@ def dataset_on_model_grid(coords, start: str, end: str, *,
     out.attrs["source"] = select_store(int(nlon))
     if cache:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp.nc")
-        out.to_netcdf(tmp)
-        tmp.rename(path)
+        # Per-process temp name + atomic replace: concurrent runs may
+        # request the same uncached window, and a shared tmp path would
+        # let their writes interleave (or the second rename fail).
+        tmp = path.with_suffix(f".tmp{os.getpid()}.nc")
+        try:
+            out.to_netcdf(tmp)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
         logger.info("era5: cached %s", path)
     return out
 

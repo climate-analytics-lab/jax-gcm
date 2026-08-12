@@ -125,24 +125,39 @@ class TestToModelGrid(unittest.TestCase):
         self.assertEqual(target.u_wind.values.shape[:2], (2, 8))
 
 
+def _fake_coords(nlon=64, nlat=32, centers=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        horizontal=SimpleNamespace(
+            nodal_shape=(nlon, nlat),
+            latitudes=np.linspace(-1.5, 1.5, nlat),
+            longitudes=np.linspace(0.0, 6.2, nlon)),
+        vertical=SimpleNamespace(
+            centers=np.linspace(0.1, 1.0, 8) if centers is None
+            else centers))
+
+
 class TestCacheKey(unittest.TestCase):
     def test_key_distinguishes_grid_window_freq(self):
-        from types import SimpleNamespace
-        c1 = SimpleNamespace(
-            horizontal=SimpleNamespace(nodal_shape=(64, 32)),
-            vertical=SimpleNamespace(centers=np.zeros(8)))
-        c2 = SimpleNamespace(
-            horizontal=SimpleNamespace(nodal_shape=(192, 96)),
-            vertical=SimpleNamespace(centers=np.zeros(8)))
         keys = {
             era5._window_key(c, s, e, f, v)
-            for c in (c1, c2)
+            for c in (_fake_coords(64, 32), _fake_coords(192, 96))
             for s, e in (("2000-01-01", "2000-02-01"),
                          ("2000-01-01", "2000-03-01"))
             for f in ("6h", "1d")
             for v in (("u", "v", "T"), ("u", "v", "T", "q", "z"))
         }
         self.assertEqual(len(keys), 16)
+
+    def test_key_distinguishes_same_shape_different_levels(self):
+        # Same dims, different sigma definitions must not share a cache
+        # entry (Codex P2 on #611).
+        a = era5._window_key(_fake_coords(), "2000-01-01", "2000-02-01",
+                             "6h", ("u",))
+        b = era5._window_key(
+            _fake_coords(centers=np.linspace(0.05, 0.95, 8)),
+            "2000-01-01", "2000-02-01", "6h", ("u",))
+        self.assertNotEqual(a, b)
 
 
 class TestRunnerWiring(unittest.TestCase):
