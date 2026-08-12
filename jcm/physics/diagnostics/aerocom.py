@@ -47,6 +47,7 @@ from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 import jcm.constants as c
 from jcm.forcing import ForcingData
@@ -697,18 +698,71 @@ class AerocomDiagnostics(PhysicsTerm):
         out["aerocom_lts"] = theta700 - theta_sfc
 
         # WMO tropopause pressure (the ptp request): the wmo_tropopause
-        # module's finder, on the post-physics temperature. Zero-filled
-        # when the height field is unavailable (static per config).
+        # module's finder, on the post-physics temperature. Its default
+        # search indices (13..35) encode the L47 grid; on other grids they
+        # can miss the tropopause entirely (L95: indices 13-34 sit at
+        # 31-501 Pa — Codex review on PR #604). Derive the window from the
+        # column-mean pressures instead: the WMO search belongs between
+        # ~40 hPa and ~550 hPa on any grid. jnp.searchsorted on a traced
+        # mean profile would give traced (unusable) slice bounds, so the
+        # bounds come from a Python-level reduction over the STATIC level
+        # structure: mean pressure per level is computed with lax-free
+        # numpy on the hybrid coefficients when available, else falls back
+        # to the finder's defaults on 47-level grids only.
         z_full = diagnostics.get("height_full")
+        nlev = p_full.shape[0]
         if z_full is not None:
             from jcm.physics.diagnostics.wmo_tropopause import (
                 find_tropopause_level)
-            out["aerocom_ptp"] = find_tropopause_level(
-                temperature.T, p_full.T, z_full.T)
+            ref_p = self._nominal_level_pressures(nlev)
+            if ref_p is not None:
+                ncctop = int(np.searchsorted(ref_p, 4000.0))
+                nccbot = int(np.searchsorted(ref_p, 55000.0))
+                nccbot = max(nccbot, ncctop + 2)
+                out["aerocom_ptp"] = find_tropopause_level(
+                    temperature.T, p_full.T, z_full.T,
+                    ncctop=ncctop, nccbot=nccbot)
+            elif nlev == 47:
+                out["aerocom_ptp"] = find_tropopause_level(
+                    temperature.T, p_full.T, z_full.T)
+            else:
+                # No nominal pressures and not the grid the defaults were
+                # tuned for: a constant-fallback ptp would be misleading.
+                out["aerocom_ptp"] = jnp.zeros(p_full.shape[1:],
+                                               dtype=p_full.dtype)
         else:
             out["aerocom_ptp"] = jnp.zeros(p_full.shape[1:],
                                            dtype=p_full.dtype)
         return out
+
+    def _nominal_level_pressures(self, nlev):
+        """Return static nominal mid-level pressures [Pa], or None.
+
+        Cached from ``cache_coords`` when the model provides a vertical
+        coordinate with sigma centers; used to derive grid-independent
+        tropopause search bounds as PYTHON ints (slice bounds must be
+        static under jit).
+        """
+        ref = getattr(self, "_ref_level_pressures", None)
+        if ref is not None and len(ref) == nlev:
+            return ref
+        return None
+
+    def cache_coords(self, coords) -> None:
+        """Record nominal level pressures for the tropopause window."""
+        try:
+            vertical = coords.vertical
+            # Both forms are dimensionless sigma at level centres; nominal
+            # pressure follows by scaling with the reference surface
+            # pressure (hybrid coordinates fold their (a, b) into the
+            # sigma centres at this reference).
+            if hasattr(vertical, "centers"):
+                sigma = np.asarray(vertical.centers)
+            else:
+                sigma = np.asarray(vertical.get_sigma_centers(101325.0))
+            self._ref_level_pressures = sigma * 101325.0
+        except Exception:  # pragma: no cover - defensive; coords vary
+            self._ref_level_pressures = None
 
     def _nearsurface_group(self, state, diagnostics, terrain,
                            temperature, p_full) -> dict:
@@ -741,7 +795,10 @@ class AerocomDiagnostics(PhysicsTerm):
         q_low = _post_physics(state, diagnostics, "specific_humidity")[-1]
         u_low = _post_physics(state, diagnostics, "u_wind")[-1]
         v_low = _post_physics(state, diagnostics, "v_wind")[-1]
-        p_sfc = p_full[-1]
+        # The ACTUAL surface pressure, not the lowest level-centre pressure:
+        # at L47 the two differ by ~400 Pa even over ocean, which would bias
+        # psl and the dew point directly (Codex review on PR #604).
+        p_sfc = state.normalized_surface_pressure.reshape(ncols_shape) * c.p0
 
         sfc = diagnostics.get("surface")
         t_skin = getattr(sfc, "surface_temperature", None)

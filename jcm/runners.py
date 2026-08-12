@@ -1298,6 +1298,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             save_interval=cfg.run.save_interval,
             total_time=cfg.run.total_time,
             output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
     if cfg.init.kind == "jw":
         inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
@@ -1306,6 +1308,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             save_interval=cfg.run.save_interval,
             total_time=cfg.run.total_time,
             output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
     if cfg.init.kind == "balanced_isothermal":
         inject_balanced_isothermal_profile(model)
@@ -1314,6 +1318,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             save_interval=cfg.run.save_interval,
             total_time=cfg.run.total_time,
             output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
     raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
 
@@ -1501,6 +1507,9 @@ def run_chunked(
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
             )
         elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
             inject_balanced_isothermal_profile(model)
@@ -1509,6 +1518,9 @@ def run_chunked(
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
             )
         elif first_fresh_chunk:
             preds = model.run(
@@ -1516,6 +1528,9 @@ def run_chunked(
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
             )
         else:
             preds = model.resume(
@@ -1523,6 +1538,9 @@ def run_chunked(
                 save_interval=save_interval,
                 total_time=cur_chunk,
                 output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
             )
 
         jax.tree_util.tree_map(
@@ -1542,6 +1560,12 @@ def run_chunked(
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         ds.to_netcdf(nc_path)
         print(f"  Saved {nc_path}")
+        snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
+        if snap_ds is not None:
+            snap_path = (f"{output_prefix}_day{int(elapsed_sim_days)}"
+                         "_snapshots.nc")
+            snap_ds.to_netcdf(snap_path)
+            print(f"  Saved {snap_path}")
 
         # Checkpoint only after a PASSING health check, keeping the previous
         # checkpoint as ``.prev``: an unhealthy chunk must not overwrite the
@@ -1635,3 +1659,11 @@ def save_predictions(predictions, output_path: Path) -> None:
     ds = predictions.to_xarray()
     ds.to_netcdf(str(output_path))
     logger.info("Wrote %s", output_path)
+    # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
+    # file with its own (finer) time axis — folding a second cadence into
+    # the main dataset would force a ragged time dimension.
+    snap_ds = getattr(predictions, "snapshot_dataset", lambda: None)()
+    if snap_ds is not None:
+        snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
+        snap_ds.to_netcdf(str(snap_path))
+        logger.info("Wrote %s", snap_path)
