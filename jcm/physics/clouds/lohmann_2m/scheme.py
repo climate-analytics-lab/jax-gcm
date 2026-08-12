@@ -17,6 +17,7 @@ import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics import thermodynamics
 from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -172,7 +173,8 @@ def cloud_microphysics_2m(
         qc / jnp.maximum(cloud_fraction, params.epsec),
         0.0,
     )
-    cdnc_warm, qc_ic_after_warm, _autoconv_in_cloud, _autoconv_rate, _dcdnc_removal = (
+    (cdnc_warm, qc_ic_after_warm, _autoconv_in_cloud, _autoconv_rate,
+     _dcdnc_removal, autoconv_only, accretion_only) = (
         precip_formation_warm(
             warm_precip_mask,
             autoconv_factor,
@@ -750,6 +752,18 @@ def cloud_microphysics_2m(
     rain_formation_warm = jnp.sum(qr_gain_warm * air_mass) / dt
     rain_from_melt = jnp.sum(psmlt_per_level * air_mass) / dt
 
+    # AeroCom process rates [kg/m^2/s], same column-integral convention.
+    # autoconv and accretn split the warm chain above into its two
+    # pathways (their sum is qr_gain_warm up to the droplet-number
+    # limiter); wbf is the liquid mass converted to ice by the
+    # Wegener-Bergeron-Findeisen process. All are grid-mean, so the
+    # in-cloud WBF increment is weighted by cloud fraction.
+    autoconv_rate_col = jnp.sum(autoconv_only * air_mass) / dt
+    accretion_rate_col = jnp.sum(accretion_only * air_mass) / dt
+    wbf_rate_col = jnp.sum(
+        (in_cloud_liquid_het - in_cloud_liquid_wbf) * cloud_fraction
+        * air_mass) / dt
+
     # Microphysical effective radii (ECHAM preffl/preffi, um) — consumed
     # by the radiation term via the clouds carry (finding 2.36: the
     # radiation-side fabricated r_eff(T)*clip(IWC) saturated at the LUT
@@ -758,8 +772,12 @@ def cloud_microphysics_2m(
     # stacked from the scan ys) go last so existing ``tend, rain, snow,
     # *_`` call sites keep working; their bottom row equals the surface
     # fluxes by construction (same carry values).
+    # NOTE the (nlev,) rain / frozen flux profiles stay LAST: call sites and
+    # tests unpack them positionally from the end (``*_, rain_b, snow_b``),
+    # so new scalars are inserted before them, not appended.
     return tendencies, surface_rain_flux, surface_snow_flux, \
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
+        autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -801,7 +819,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",
     )
-    provides: ClassVar[tuple[str, ...]] = ("clouds",)
+    provides: ClassVar[tuple[str, ...]] = (
+        "autoconv", "accretn", "wbf", "clouds",
+    )
 
     def __init__(self, params: 'CloudParams2M | None' = None):
         """Hold the scheme-native :class:`CloudParams2M`."""
@@ -921,10 +941,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
         (tend_all, surface_rain_flux, surface_snow_flux,
          r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
+         autoconv_all, accretion_all, wbf_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -991,4 +1012,23 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             rain_formation_warm=rain_formation_warm,
             rain_from_melt=rain_from_melt,
         )
+        # Advance the running condensate view so terms downstream (the
+        # satellite simulators and the AeroCom diagnostics) describe the
+        # POST-microphysics atmosphere, matching the tracers saved at the
+        # same timestamp. ``thermo_run`` is a parallel diagnostic view,
+        # never the prognostic state, so this cannot alter the trajectory
+        # (see ``advance_thermo_run``).
+        # AeroCom microphysical process rates [kg/m^2/s], column-integrated
+        # (jax-gcm#585). Published unconditionally so the diagnostics key set
+        # stays static across steps — the dict is part of the scan carry.
+        diagnostics = {**diagnostics,
+                       "autoconv": autoconv_all,
+                       "accretn": accretion_all,
+                       "wbf": wbf_all}
+        diagnostics = advance_thermo_run(
+            diagnostics, dt,
+            d_temperature=tendency.temperature,
+            d_specific_humidity=tendency.specific_humidity,
+            d_qc=tendency.tracers["qc"], d_qi=tendency.tracers["qi"])
+
         return tendency, {**diagnostics, "clouds": clouds_next}

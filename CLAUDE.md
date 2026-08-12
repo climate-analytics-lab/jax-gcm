@@ -181,56 +181,40 @@ pip install -e .
 
 Dependencies are in `requirements.txt`: dinosaur, flax, jax-datetime, tree-math, hydra-core, xarray.
 
-## Running Tests
+## Testing, linting and the PR workflow
+
+**See the `jcm-dev-workflow` skill** — it carries the full loop (atomic
+commits, the local gate, opening a PR linked to its issue, monitoring CI *and*
+the automatic Codex review, and handing back for human review only once
+everything is green), so the details live in one place rather than drifting
+between here and there.
+
+The repo skills live in `.claude/skills/` — before opening any PR, run the
+**`jcm-local-ci`** skill's gates locally; CI must confirm a result you have
+already seen, not discover it:
 
 ```bash
-# Default — run in parallel across ~12 workers (pytest-xdist).
-# Cuts a full sweep from ~15 min to a couple of minutes locally.
-JAX_PLATFORMS=cpu pytest -n 12
-
-# Single-process if you need ordered output or are debugging a flake
-pytest
-
-# Fast tests only (skip slow integration tests >1 min)
-JAX_PLATFORMS=cpu pytest -n 12 -m "not slow"
-
-# Specific test file
-pytest jcm/model_test.py
-
-# With coverage (xdist works with --cov)
-JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90
+ruff check .                     # MUST be clean before EVERY push
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
+    --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
-`-n auto` will pick the number of workers from the visible CPU count;
-`-n 12` is the recommended local default on the dev workstation. Use
-`-n 0` (or just omit `-n`) to fall back to a single process when you
-need deterministic ordering.
+Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
+hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
+`CUDA_ERROR_OUT_OF_MEMORY`). And coverage must be measured at **CI
+dependency parity**: CI installs `pip install -e .` with no extras, so code
+gated behind an optional extra (`jcm[cosp]`, ...) counts as UNCOVERED there
+even when its tests pass locally — uninstall the extra before measuring, or
+the gate you cleared locally fails in CI (PR #582 and #598 both hit
+coverage this way). Every Codex/bot inline comment gets an explicit
+threaded reply ("Confirmed and fixed in <sha>" / "Refuted: <evidence>")
+before handing back — see `jcm-local-ci` for the `gh api` one-liner.
 
-**``JAX_PLATFORMS=cpu`` is required for parallel runs on GPU hosts.**
-Without it, every xdist worker tries to grab the same GPU and you
-get ``CUDA_ERROR_OUT_OF_MEMORY`` / ``dnn_support != nullptr``
-``RET_CHECK`` failures from XLA. The unit tests don't need a GPU —
-they're small column-mode integrations that compile and run faster
-on CPU than they would round-trip through the device anyway.
-
-Test files use the `*_test.py` naming convention and are co-located with their source modules. Tests use `unittest.TestCase` classes run via pytest. The `conftest.py` at root cleans `jcm` module imports between tests to prevent state leakage.
-
-**CI thresholds:**
-- Push: fast tests only, 90% coverage required
-- Pull request: includes slow tests, 80% coverage required
-
-## Linting
-
-```bash
-ruff check .
-```
-
-**Always run `ruff check .` locally and get it clean BEFORE every push.**
-A push with lint errors burns a full CI cycle on a failure ruff reports in
-seconds locally. Treat it like the test suite: part of the definition of
-done for any commit that will be pushed.
-
-Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
+Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
+checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
+module. CI: push runs fast tests at 90% coverage, PRs also run slow tests at
+80%.
 
 ## Key Coding Conventions
 

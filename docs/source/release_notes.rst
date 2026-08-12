@@ -47,7 +47,17 @@ Dynamical cores and grids
   a quasi-monotone limiter — structurally non-negative aerosol transport
   (see the caveat above).
 - ECHAM6 middle-atmosphere ``L95`` vertical table (lid ~0.01 hPa) with
-  T63/T106/T119 grid presets.
+  T63/T106/T119 grid presets, plus a ``pyses_ne30l95`` dycore preset.
+- **The pySES extra now requires ``pyses >= 0.1.3.1``.** Earlier builds
+  lower the spectral-element contractions to one cuBLAS GEMM per grid point
+  on GPU (measured 1.4x slower and 1.8x the device memory at ne30L47) and
+  carry an upstream tracer-hyperviscosity bug that is active on the
+  ``quasi_uniform`` path every canonical ne30 config selects. **ne30 results
+  produced with an older pyses are affected and should be regarded as
+  provisional** (#599).
+- pySES prescribed ozone now uses the flattened column layout
+  ``OzoneClimatology`` documents; previously it reached RRTMGP shaped
+  ``(1, nlev)`` (#594).
 
 Radiation and clouds
 """"""""""""""""""""
@@ -62,6 +72,57 @@ Radiation and clouds
 - CAM spectral frontal gravity-wave drag; ``gw_scheme="both"`` to run it
   alongside Hines.
 - CloudSat COSP warm-rain hook and per-level precipitation flux profiles.
+
+Diagnostics
+"""""""""""
+
+- AeroCom phase-4 diagnostic suite with CMOR post-processing
+  (``tools/aerocom_cmor.py``), plus the CALIPSO and MODIS satellite
+  simulators alongside CloudSat.
+- COSP joint histograms: ``clmodis`` (tau/Reff), LWP+IWP/Reff, the lidar
+  scattering-ratio CFAD and ISCCP.
+- Per-species/mode/spectral aerosol optics and microphysical process-rate
+  and emission-flux diagnostics.
+
+Boundary conditions and emissions: the data mirror
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+All boundary conditions and emissions now come from the Hugging Face
+dataset ``climate-analytics-lab/jax-gcm-data`` (issue #515), buildable
+end-to-end with ``python -m jcm.data.mirror.build_mirror`` and
+reachable from any config path via the ``hf://`` prefix (see
+:doc:`design/data_mirror`). **Runs forced from the mirror
+differ scientifically from the packaged/prepared files** — intended
+corrections, listed here because they change climate:
+
+- ``soilw_am`` and ``snowc`` are computed with the
+  ``jcm.data.bc.compile`` fraction formulas from ERA5 sources. Land
+  means move from 0.161 → 0.54 (soil availability) and 0.019 → 0.115
+  (snow cover): the packaged climatology was systematically dry/
+  snow-poor, consistent with a source-unit mismatch in its original
+  derivation. Expect wetter land, more evaporation and stronger snow
+  albedo.
+- Anthropogenic emissions are sector-resolved: ``elevated_industrial``
+  (CEDS ENE+IND, ~50 m injection — 81 % of anthropogenic SO2) and
+  ``shipping`` are separate channels instead of being emitted at the
+  surface.
+- SSO fields derive from the GMTED2010 30″ DEM with the gradient tensor
+  on 10′ block means (calibrated against the ECHAM T127 reference);
+  the packaged T63 ``orosig`` was ≈0 everywhere, so SSO drag
+  strengthens.
+- Ozone is the CMIP7 FZJ product (real mesospheric decline), oxidants
+  the WACCM CCMI full-lid decade climatologies (real H2O2 and
+  mesospheric values; required for L95), dust erodibility the
+  0.23×0.31° source, and the land mask is fractional (coastal cells and
+  small islands retain orography).
+- PI (1850s; SST/ice = 1870–1879 mean) and PD (2005–2014) eras ship for
+  every product.
+- The native ne30pg3 terrain published as ``bundles/ne30pg3/sso.nc``
+  carried a DEM-validity placeholder ``lsm`` (99.8 % land) instead of a
+  land-sea mask; it is replaced by the assembled
+  ``bundles/ne30pg3/terrain.nc`` (CESM ``LANDFRAC`` land fraction, exact
+  GLL orography), and the pySES ``build_terrain`` now rejects any
+  terrain file averaging >0.9 land as a placeholder (#596).
 
 Infrastructure
 """"""""""""""

@@ -302,6 +302,22 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                 o3 = o3[..., ::-1]
             lon = np.asarray(ds["lon"].values, dtype=float)
         cols = _leaf_to_columns(o3, lon, lat, col_lon, col_lat)
+        # Collapse the backend's (1, ncol) horizontal pair into the single
+        # flattened column axis ``OzoneClimatology`` documents:
+        # ``(ntime, nlev, ncols)``. Ozone is the exception among the leaves
+        # attached here. The others keep (1, ncol) to match the pySES state's
+        # horizontal layout, and their consumers ravel or reshape to the
+        # term's view -- ``oxidant_field_from_vmr`` explicitly reshapes to
+        # ``temperature.shape``, for instance. Ozone's consumers do NOT: the
+        # spectral loader already flattens to (ntime, nlev, nlon*nlat), so
+        # RRTMGP takes ``chemistry.ozone_vmr`` straight to ``lev_to_col``
+        # (a plain ``.T``). ``forcing`` is handed to terms UNFLATTENED by
+        # ``_compute_tendencies_columns``, so a leaf that keeps the extra
+        # axis reaches radiation as (ncol, 1, nlev) and the per-column slice
+        # is (1, nlev) -- which is how an ne30 run died in
+        # ``_to_3d_with_filled_halo`` with "Cannot broadcast to shape with
+        # fewer dimensions: arr_shape=(1, 47) shape=(47,)".
+        cols = np.asarray(cols).reshape(cols.shape[:-2] + (-1,))
         seconds_per_month = 30.4375 * 86400.0            # match from_file
         ts = make_time_series(
             jnp.asarray(cols, dtype=jnp.float32),

@@ -37,9 +37,16 @@ n_sponge: 8
 tracer_substeps: 5
 dyn_substeps_per_tracer: -1
 compute_frontogenesis: false
-# Terrain file on a regular lon/lat grid, bilinearly interpolated onto the
-# columns at build time. Null -> the packaged T63 climatology (marked as a
-# temporary downscale until native ne30 boundary data exists).
+# Terrain source. Null -> the packaged T63 climatology (a downscale).
+# Preferred: the assembled native ne30pg3 terrain bundle (GMTED2010 SSO,
+# CESM LANDFRAC land fraction, exact GLL orography from the topo
+# product's PHIS_gll) —
+#   terrain_file: hf://bundles/ne30pg3/terrain.nc
+# The bundle keeps full pg3 resolution (48,600 cells); pySES's pg2
+# physics columns (21,600) nearest-neighbor sample it, so the logged
+# column-count warning is expected and benign here.
+# Regular lon/lat jcm-canonical terrain files also work (bilinearly
+# interpolated onto the columns). hf:// paths resolve via jcm.data.remote.
 terrain_file: null
 lid_sponge:
   levels: 8

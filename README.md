@@ -103,6 +103,18 @@ python -m jcm.main --cfg job grid=echam_t63_l47_hybrid
 Config groups live under [`jcm/config/`](jcm/config/) (`physics`, `grid`,
 `run`, `init`, `terrain`, `forcing`, and `diffusion`).
 
+Boundary-condition and emissions files can be pulled straight from the
+project data mirror on Hugging Face by prefixing any file path with
+`hf://` (fetch once on a node with internet — afterwards the local cache serves compute nodes offline):
+
+```bash
+python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
+    terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+    forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc
+```
+
+See `docs/source/design/data_mirror.md` for the full bundle catalogue.
+
 ## Physics Packages
 
 **SPEEDY** provides a compact climate-physics package for development,
@@ -190,11 +202,20 @@ work should target the `dev` branch; clean release points are merged to
 If you use JAX-GCM in your research, please cite:
 
 ```bibtex
-@software{jax_gcm,
-  title = {JAX-GCM: A Differentiable General Circulation Model},
-  author = {J. Madan, E. Davenport, et al.},
-  year = {2025},
-  url = {https://github.com/climate-analytics-lab/jax-gcm}
+@article{jcm_gmd_2026,
+  title   = {{JCM} v1.1: a differentiable, intermediate-complexity atmospheric model},
+  author  = {Davenport, Ellen H. and Madan, J. Varan and Gjini, Rebecca and
+             Brzenski, Jared and Ho, Nick and Hsu, Tien-Yiao and Liang, Yueshan and
+             Liu, Zhixing and Manivannan, Veeramakali and Pham, Eric and
+             Vutukuru, Rohith and Williams, Andrew I. L. and Yang, Zhiqi and
+             Yu, Rose and Lutsko, Nicholas J. and Hoyer, Stephan and
+             Watson-Parris, Duncan},
+  journal = {Geoscientific Model Development},
+  volume  = {19},
+  pages   = {6451--6466},
+  year    = {2026},
+  doi     = {10.5194/gmd-19-6451-2026},
+  url     = {https://gmd.copernicus.org/articles/19/6451/2026/}
 }
 ```
 

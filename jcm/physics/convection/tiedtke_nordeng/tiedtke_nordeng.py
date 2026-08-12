@@ -1196,11 +1196,20 @@ class TiedtkeConvection(PhysicsTerm):
         # post-convection state the cloud scheme's saturation balance needs
         # (sequential convection->cloud coupling, see
         # ``jcm.physics.diagnostics.moist_air_state.advance_thermo_run``).
+        # Condensate too, not just T and q: this scheme detrains convective
+        # qc/qi (applied to ``clouds`` just above), so omitting it left
+        # thermo_run's condensate at its PRE-convection value. The 2M scheme
+        # then advanced that stale base by only its own microphysics
+        # tendency, and every consumer of thermo_run qc/qi — the satellite
+        # simulators and the AeroCom cloud diagnostics — lost the convective
+        # detrainment entirely.
         diagnostics = advance_thermo_run(
             diagnostics,
             dt,
             d_temperature=tendency.temperature,
             d_specific_humidity=tendency.specific_humidity,
+            d_qc=tendency.tracers["qc"],
+            d_qi=tendency.tracers["qi"],
         )
 
         return tendency, {

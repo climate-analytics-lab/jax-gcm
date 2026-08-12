@@ -324,3 +324,218 @@ class JamOpticsTermTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpticsDiagnosticsTest(unittest.TestCase):
+    """AeroCom per-species / per-mode / spectral optics (jax-gcm#584)."""
+
+    def _run(self, **kw):
+        state, diagnostics, band, _, _ = _setup(**kw)
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, diagnostics, None, None)
+        return term, out
+
+    def test_off_by_default(self):
+        """The diagnostic pass costs a second Mie sweep, so it must not run
+        unless explicitly enabled.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm()
+        term.cache_band_config(band)
+        _, out = term(state, diagnostics, None, None)
+        self.assertEqual(term.optics_diagnostic_keys(), ())
+        self.assertNotIn("od550aer", out)
+
+    def test_publishes_declared_keys(self):
+        """``optics_diagnostic_keys`` is what the output layer registers, so
+        it must match what ``__call__`` actually emits, exactly.
+        """
+        term, out = self._run()
+        declared = set(term.optics_diagnostic_keys())
+        self.assertTrue(declared)
+        self.assertTrue(declared.issubset(set(out)),
+                        f"missing: {sorted(declared - set(out))}")
+
+    def test_key_set_is_data_independent(self):
+        """The diagnostics dict is part of the ``lax.scan`` carry: a key set
+        that varies with the data changes the carry pytree and the scan
+        rejects it.
+        """
+        _, out_a = self._run()
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        # Same structure, an aerosol-free atmosphere.
+        empty = {k: jnp.zeros_like(v) for k, v in state.tracers.items()}
+        _, out_b = term(state.copy(tracers=empty), diagnostics, None, None)
+        self.assertEqual(sorted(out_a), sorted(out_b))
+
+    def test_species_apportionment_closes(self):
+        """Species are volume-mixed into one effective refractive index
+        BEFORE the Mie call, so the per-species fields are an apportionment,
+        not a decomposition. The one property that must hold exactly is that
+        they add back up to the total — otherwise extinction is being
+        dropped or double counted.
+        """
+        term, out = self._run()
+        species = sorted({sp for m in MAM4_SPEC.modes for sp in m.species}) + ["wat"]
+        tau_sum = sum(out[f"od550_{sp}"] for sp in species)
+        abs_sum = sum(out[f"abs550_{sp}"] for sp in species)
+        np.testing.assert_allclose(np.asarray(tau_sum),
+                                   np.asarray(out["od550aer"]), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(abs_sum),
+                                   np.asarray(out["abs550aer"]), rtol=1e-5)
+
+    def test_mode_decomposition_closes(self):
+        """Per-mode tau IS a true decomposition (each mode gets its own Mie
+        call), so it must close to the total as well.
+        """
+        term, out = self._run()
+        tau_sum = sum(out[f"od550_mode_{m.short}"] for m in MAM4_SPEC.modes)
+        np.testing.assert_allclose(np.asarray(tau_sum),
+                                   np.asarray(out["od550aer"]), rtol=1e-5)
+
+    def test_absorption_bounded_by_extinction(self):
+        term, out = self._run()
+        self.assertTrue(np.all(np.asarray(out["abs550aer"])
+                               <= np.asarray(out["od550aer"]) + 1e-12))
+        ssa = np.asarray(out["ssa440aer"])
+        self.assertTrue(np.all((ssa >= 0.0) & (ssa <= 1.0)))
+
+    def test_angstrom_positive_for_fine_aerosol(self):
+        """The fixture is 0.2 um wet radius — well inside the fine mode, so
+        extinction must fall with wavelength (positive Angstrom exponent).
+        This is the check that the diagnostic wavelengths are being applied
+        in the right order and not silently collapsing to one value.
+        """
+        term, out = self._run()
+        self.assertTrue(np.all(np.asarray(out["od440aer"])
+                               > np.asarray(out["od865aer"])))
+        self.assertTrue(np.all(np.asarray(out["ang4487aer"]) > 0.0))
+        np.testing.assert_allclose(
+            np.asarray(out["aerindex"]),
+            np.asarray(out["od550aer"]) * np.asarray(out["ang4487aer"]), rtol=1e-6)
+
+    def test_clean_column_is_finite_not_nan(self):
+        """Aerosol-free columns hit 0/0 in SSA and log(0/0) in the Angstrom
+        exponent; both must fall back to defined values rather than NaN.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        empty = {k: jnp.zeros_like(v) for k, v in state.tracers.items()}
+        aer0 = diagnostics["_jam_state"]
+        d = {**diagnostics, "_jam_state": aer0.copy(
+            mass=jnp.zeros_like(aer0.mass), number=jnp.zeros_like(aer0.number))}
+        _, out = term(state.copy(tracers=empty), d, None, None)
+        for k in term.optics_diagnostic_keys():
+            self.assertTrue(np.all(np.isfinite(np.asarray(out[k]))), k)
+        np.testing.assert_allclose(np.asarray(out["ssa440aer"]), 1.0)
+        np.testing.assert_allclose(np.asarray(out["ang4487aer"]), 0.0)
+
+    def test_extinction_profile_shape_and_units(self):
+        """ec355aer is a 3-D extinction COEFFICIENT [m-1] = layer tau / dz,
+        so integrating it back over dz must return the column AOD at 355.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, diagnostics, None, None)
+        ec = np.asarray(out["ec355aer"])
+        self.assertEqual(ec.shape, state.temperature.shape)
+        dz = np.asarray(diagnostics["layer_thickness"])
+        np.testing.assert_allclose((ec * dz).sum(axis=0),
+                                   np.asarray(out["od355aer"]), rtol=1e-5)
+
+    def test_bc_dominates_absorption(self):
+        """Absorption is apportioned by the species' contribution to the
+        IMAGINARY index, so soot must carry the absorption even though it is
+        a small volume fraction — the check that the apportionment is
+        k-weighted and not accidentally volume-weighted like extinction.
+        """
+        term, out = self._run()
+        abs_bc = float(np.sum(np.asarray(out["abs550_bc"])))
+        abs_so4 = float(np.sum(np.asarray(out["abs550_so4"])))
+        self.assertGreater(abs_bc, abs_so4)
+        # ... while extinction, apportioned by volume, is comparable between
+        # two species carried at equal mass and similar density.
+        self.assertGreater(float(np.sum(np.asarray(out["od550_so4"]))), 0.0)
+
+    def test_survives_the_radiation_gate(self):
+        """The diagnostics ride in the same carry as the band optics, so both
+        branches of the gate's ``lax.cond`` must produce the identical pytree
+        — a nested diagnostic dict on one side only would fail to trace.
+        """
+        import dataclasses
+
+        state, diagnostics, band, _, _ = _setup()
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        term.configure_radiation_gate(7200.0)
+
+        @dataclasses.dataclass
+        class _Rad:
+            step: jnp.ndarray
+
+        base = {**diagnostics, "_dt_seconds": jnp.asarray(900.0)}
+        # Prime the carry (no cache yet -> unconditional compute).
+        _, out0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))}, None, None)
+        # A replay step must go through lax.cond with the diagnostics present.
+        _, out1 = term(state, {**base, "radiation": _Rad(jnp.int32(3)),
+                               "_jam_band_optics": out0["_jam_band_optics"]},
+                       None, None)
+        for k in term.optics_diagnostic_keys():
+            np.testing.assert_allclose(np.asarray(out1[k]), np.asarray(out0[k]),
+                                       rtol=1e-6, err_msg=k)
+
+    def test_closure_holds_without_strong_absorbers(self):
+        """Absorption is apportioned by V_s*k_s / sum(V_s*k_s). Strip the
+        strong absorbers and that denominator gets very small — a purely
+        scattering sulfate/sea-salt population is the realistic stratospheric
+        case, and the components must still close on the total there rather
+        than falling off the 1/sum guard.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        tr = dict(state.tracers)
+        for name in tr:
+            if "_bc_" in name or "_du_" in name:
+                tr[name] = jnp.zeros_like(tr[name])
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state.copy(tracers=tr), diagnostics, None, None)
+        species = sorted({sp for m in MAM4_SPEC.modes for sp in m.species}) + ["wat"]
+        np.testing.assert_allclose(
+            np.asarray(sum(out[f"od550_{sp}"] for sp in species)),
+            np.asarray(out["od550aer"]), rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(sum(out[f"abs550_{sp}"] for sp in species)),
+            np.asarray(out["abs550aer"]), rtol=1e-4, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(out["abs550_bc"]), 0.0, atol=1e-20)
+
+    def test_angstrom_discriminates_fine_from_coarse(self):
+        """Physical validation of the spectral pass, not just its plumbing.
+
+        The Angstrom exponent is ~2-3 for accumulation-mode aerosol and
+        falls towards ~0 for coarse particles, whose extinction is already
+        in the geometric limit and so nearly wavelength-independent. Getting
+        that ordering right requires the wavelengths, the Mie size parameter
+        and the lognormal quadrature all to be consistent — a sign error or
+        a swapped wavelength pair would still pass the closure tests.
+        """
+        def ang_for(r_wet_m):
+            state, diagnostics, band, _, _ = _setup()
+            aer = diagnostics["_jam_state"]
+            d = {**diagnostics,
+                 "_jam_state": aer.copy(r_wet=jnp.full_like(aer.r_wet, r_wet_m),
+                                        r_dry=jnp.full_like(aer.r_dry, r_wet_m))}
+            term = JamOpticsTerm(optics_diagnostics=True)
+            term.cache_band_config(band)
+            _, out = term(state, d, None, None)
+            return float(np.asarray(out["ang4487aer"]).mean())
+
+        fine = ang_for(0.05e-6)      # accumulation mode
+        coarse = ang_for(2.0e-6)     # coarse mode
+        self.assertGreater(fine, 1.5, f"fine-mode Angstrom too low: {fine}")
+        self.assertLess(coarse, 0.5, f"coarse-mode Angstrom too high: {coarse}")
+        self.assertGreater(fine, coarse)

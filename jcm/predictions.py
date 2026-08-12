@@ -35,12 +35,17 @@ class ModelPredictions:
 
     """
 
-    def __init__(self, predictions: Predictions, coords,  # noqa: D107
-                 physics: Physics, dycore=None):
+    def __init__(self, predictions: Predictions, coords, physics: Physics,  # noqa: D107
+                 dycore=None, observations=None, observers=(),
+                 obs_t0_days=None, obs_dt_seconds=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
         self._dycore = dycore
+        self._observations = observations
+        self._observers = tuple(observers)
+        self._obs_t0_days = obs_t0_days
+        self._obs_dt_seconds = obs_dt_seconds
 
     @property
     def dynamics(self):
@@ -53,6 +58,32 @@ class ModelPredictions:
     @property
     def times(self):
         return self._predictions.times
+
+    @property
+    def observations(self):
+        """Raw per-timestep observer samples (tuple of dicts), or ``None``."""
+        return self._observations
+
+    def observation_datasets(self):
+        """Per-timestep virtual-observation output as xarray Datasets.
+
+        Returns:
+            Dict ``{observer_name: xarray.Dataset}`` — one Dataset per
+            attached :class:`jcm.observers.Observer`, with dims
+            ``(time, point)`` (``(time, level, point)`` in profile mode),
+            a per-``dt`` time axis, and the sampling positions as
+            coordinates. Empty dict when the run had no observers.
+
+        """
+        if not self._observations:
+            return {}
+        samples_host = jax.device_get(self._observations)
+        return {
+            obs.name: obs.to_dataset(
+                samples, self._obs_t0_days, self._obs_dt_seconds,
+            )
+            for obs, samples in zip(self._observers, samples_host)
+        }
 
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
@@ -153,12 +184,12 @@ def _model_predictions_flatten(mp):
     physics are not in aux_data so that ``tree_map`` works across ModelPredictions
     from different Model instances.
     """
-    children = (mp._predictions,)
+    children = (mp._predictions, mp._observations)
     return children, None
 
 
 def _model_predictions_unflatten(aux_data, children):
-    return ModelPredictions(children[0], None, None)
+    return ModelPredictions(children[0], None, None, observations=children[1])
 
 
 jax.tree_util.register_pytree_node(

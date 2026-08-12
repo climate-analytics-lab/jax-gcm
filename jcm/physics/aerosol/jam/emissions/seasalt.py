@@ -29,6 +29,8 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import AerosolMode, ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+    accumulate_emission_fluxes, emission_flux_keys)
 
 # Gong-scheme constants (mo_ham_m7_emi_seasalt.f90).
 _NBIN = 300
@@ -114,7 +116,7 @@ class SeaSaltEmissions(PhysicsTerm):
     name: ClassVar[str] = "jam_seasalt_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
-    provides: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
 
     def __init__(
         self,
@@ -172,4 +174,11 @@ class SeaSaltEmissions(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tracer_tends,
         )
+        # Publish this term's contribution to the AeroCom per-species
+        # emission fluxes (accumulated across all emitting terms).
+        diagnostics = accumulate_emission_fluxes(
+            diagnostics, tracer_tends,
+            diagnostics["air_density"],
+            diagnostics["layer_thickness"])
+
         return tendency, diagnostics

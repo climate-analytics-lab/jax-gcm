@@ -153,6 +153,56 @@ class TestPysesDycoreProtocol(unittest.TestCase):
         self.assertGreater(fmask.max(), 0.5)      # some land columns
         self.assertLess(fmask.min(), 0.5)         # some ocean columns
 
+    def test_build_terrain_native_columns(self):
+        # A file on the dycore's own columns round-trips exactly (identity
+        # nearest-neighbor mapping), and orog_gll feeds the GLL nodes.
+        import tempfile
+
+        import xarray as xr
+
+        dc = self.dycore
+        col_lat = np.degrees(dc.colmap.latitudes)
+        col_lon = np.degrees(dc.colmap.longitudes)
+        gll = np.asarray(dc.h_grid["physical_coords"], dtype=np.float64)
+        gll_lat = np.degrees(gll[..., 0]).reshape(-1)
+        gll_lon = np.degrees(gll[..., 1]).reshape(-1)
+
+        orog = 100.0 + np.abs(col_lat)                  # distinct per column
+        ds = xr.Dataset(
+            {"orog": ("ncol", orog),
+             "lsm": ("ncol", np.full_like(orog, 0.3)),
+             **{name: ("ncol", np.full_like(orog, 0.25))
+                for name in ("orostd", "orosig", "orogam", "orothe",
+                             "oropic", "oroval")},
+             "orog_gll": ("ncol_gll", 50.0 + np.abs(gll_lat)),
+             "lat_gll": ("ncol_gll", gll_lat),
+             "lon_gll": ("ncol_gll", gll_lon)},
+            coords={"lat": ("ncol", col_lat), "lon": ("ncol", col_lon)},
+        )
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".nc") as f:
+                ds.to_netcdf(f.name)
+                terrain = dc.build_terrain(source_file=f.name)
+            np.testing.assert_allclose(
+                np.asarray(terrain.orog).reshape(-1), orog, rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(terrain.fmask).reshape(-1), 0.3, rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(terrain.orosig).reshape(-1), 0.25, rtol=1e-5)
+            np.testing.assert_allclose(
+                np.asarray(dc._orog_gll).reshape(-1),
+                50.0 + np.abs(gll_lat), rtol=1e-5)
+            # a ~all-land lsm is a DEM-validity placeholder, not a mask —
+            # build_terrain must refuse it rather than clip (#596)
+            with tempfile.NamedTemporaryFile(suffix=".nc") as f:
+                ds.assign(lsm=("ncol", np.ones_like(orog))).to_netcdf(f.name)
+                with self.assertRaisesRegex(ValueError, "placeholder"):
+                    dc.build_terrain(source_file=f.name)
+        finally:
+            # build_terrain mutates dycore caches by documented design —
+            # restore the class fixture's real-geography terrain
+            dc.build_terrain(source_file=T63_TERRAIN)
+
     def test_native_upper_sponge_configured(self):
         dc = self.dycore.diffusion_config
         self.assertIn("sponge_layer", dc)
