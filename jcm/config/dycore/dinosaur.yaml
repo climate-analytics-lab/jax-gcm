@@ -2,3 +2,12 @@
 # vertical discretization comes from the ``grid`` group; diffusion from the
 # ``diffusion`` group; the timestep from ``run.time_step`` (minutes).
 name: dinosaur
+
+# Opt-in per-step diagnostic providers on the physics grid.
+# compute_omega: pressure vertical velocity (omega = Dp/Dt, Pa/s) from the
+# core's own diagnostic state, consumed by the AeroCom ``plev`` group as
+# wap/w500/w700 (zero-filled when off). Costs a few modal->nodal
+# transforms per step. ``null`` means "decide from the physics config":
+# on when the AeroCom plev group runs, off otherwise. Set true/false to
+# override either way.
+compute_omega: null

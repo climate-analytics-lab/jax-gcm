@@ -126,6 +126,118 @@ class DinosaurProviderTest(unittest.TestCase):
         np.testing.assert_allclose(got, want, rtol=2e-4, atol=1e-12)
 
 
+class DinosaurOmegaProviderTest(unittest.TestCase):
+    """The omega (Dp/Dt) provider against closed forms (jax-gcm#409).
+
+    A horizontally uniform divergence ``D0`` over flat surface pressure
+    has an exact omega on both verticals: the continuity integrals reduce
+    to sums of constants, so the only error is the spectral round-trip.
+    """
+
+    D0_SI = 1e-5    # 1/s
+    PS_SI = 97000.0  # Pa
+
+    def _dycore(self, coords):
+        return DinosaurDycore(coords=coords,
+                              terrain=TerrainData.aquaplanet(coords),
+                              dt_seconds=600.0, compute_omega=True)
+
+    def _uniform_divergence_state(self, dycore, d0_si, ps_si):
+        from dinosaur.primitive_equations import State
+        from dinosaur.scales import units
+        coords = dycore.coords
+        hor = coords.horizontal
+        nlev = coords.vertical.layers
+        nlon, nlat = hor.nodal_shape
+        specs = dycore.physics_specs
+        d0 = float(specs.nondimensionalize(d0_si / units.second))
+        ps = float(specs.nondimensionalize(ps_si * units.pascal))
+        zeros = np.zeros((nlev, nlon, nlat))
+        return State(
+            vorticity=hor.to_modal(zeros),
+            divergence=hor.to_modal(d0 * np.ones((nlev, nlon, nlat))),
+            temperature_variation=hor.to_modal(zeros),
+            log_surface_pressure=hor.to_modal(
+                np.log(ps) * np.ones((1, nlon, nlat))),
+            tracers={}, sim_time=0.0,
+        )
+
+    def test_declaration(self):
+        coords = _coords()
+        dycore = self._dycore(coords)
+        self.assertEqual(dycore.physics_field_names(), ("omega",))
+
+    def test_rest_state_omega_is_zero(self):
+        coords = _coords()
+        dycore = self._dycore(coords)
+        state = self._uniform_divergence_state(dycore, 0.0, self.PS_SI)
+        omega = np.asarray(dycore._compute_omega(state))
+        self.assertEqual(np.max(np.abs(omega)), 0.0)
+
+    def test_sigma_uniform_divergence_closed_form(self):
+        # On sigma levels with flat ps, uniform D0 gives sigma_dot = 0 and
+        # d ln ps/dt = -D0, so omega(sigma) = -sigma ps D0 exactly.
+        coords = _coords()
+        dycore = self._dycore(coords)
+        state = self._uniform_divergence_state(dycore, self.D0_SI, self.PS_SI)
+        omega = np.asarray(dycore._compute_omega(state))
+        sigma = np.asarray(coords.vertical.centers)
+        want = -sigma[:, None, None] * self.PS_SI * self.D0_SI
+        want = np.broadcast_to(want, omega.shape)
+        # The only error source is the f32 spectral round-trip, which is
+        # absolute (proportional to the field scale), so pair a loose
+        # rtol with an atol at ~1e-4 of the field maximum.
+        np.testing.assert_allclose(omega, want, rtol=1e-4,
+                                   atol=1e-4 * np.abs(want).max())
+
+    def test_omega_ignores_nodal_tracers(self):
+        # Under semi-Lagrangian advection extra tracers are stored NODAL
+        # in state.tracers; the diagnostic-state helpers' unconditional
+        # to_nodal over them crashes on the shape mismatch unless
+        # _compute_omega strips tracers first. Same closed form must come
+        # out with a nodal tracer along for the ride.
+        coords = _coords()
+        dycore = self._dycore(coords)
+        state = self._uniform_divergence_state(dycore, self.D0_SI, self.PS_SI)
+        nlev = coords.vertical.layers
+        nlon, nlat = coords.horizontal.nodal_shape
+        state = state.replace(
+            tracers={"dust": jnp.ones((nlev, nlon, nlat))})
+        omega = np.asarray(dycore._compute_omega(state))
+        sigma = np.asarray(coords.vertical.centers)
+        want = -sigma[:, None, None] * self.PS_SI * self.D0_SI
+        np.testing.assert_allclose(
+            omega, np.broadcast_to(want, omega.shape), rtol=1e-4,
+            atol=1e-4 * np.abs(want).max())
+
+    def test_hybrid_uniform_divergence_matches_numpy_reference(self):
+        # Same setup on the ECHAM L47 hybrid grid, checked against an
+        # independent numpy evaluation of the mass-flux formula from the
+        # (a, b) tables.
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        dycore = self._dycore(coords)
+        state = self._uniform_divergence_state(dycore, self.D0_SI, self.PS_SI)
+        omega = np.asarray(dycore._compute_omega(state))
+
+        a = np.asarray(coords.vertical.a_boundaries)
+        b = np.asarray(coords.vertical.b_boundaries)
+        dp = np.diff(a) + np.diff(b) * self.PS_SI
+        d = dp * self.D0_SI
+        dps_dt = -d.sum()
+        mass_flux = -np.concatenate([[0.0], np.cumsum(d)]) + b * d.sum()
+        b_full = 0.5 * (b[:-1] + b[1:])
+        want = b_full * dps_dt + 0.5 * (mass_flux[:-1] + mass_flux[1:])
+        want = np.broadcast_to(want[:, None, None], omega.shape)
+        np.testing.assert_allclose(omega, want, rtol=1e-4,
+                                   atol=1e-4 * np.abs(want).max())
+        # omega < 0 everywhere: parcels ride their coordinate surface
+        # while uniform divergence drains the column, so the pressure
+        # above each parcel (and hence its own pressure) falls.
+        self.assertLess(omega.max(), 0.0)
+
+
 class InjectionTest(unittest.TestCase):
     def _run(self, output_averages):
         from jcm.physics.held_suarez.held_suarez_physics import (
@@ -189,6 +301,44 @@ class InjectionTest(unittest.TestCase):
         preds = model.run(save_interval=2 * dt_days, total_time=2 * dt_days)
         out = np.asarray(preds.physics["frontgf_plus_ps"])
         self.assertTrue(np.isfinite(out).all())
+
+    def test_omega_injection_reaches_terms_in_a_real_run(self):
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+
+        class _OmegaRecorder(PhysicsTerm):
+            name: ClassVar[str] = "omega_recorder"
+            category: ClassVar[str] = "test"
+            provides: ClassVar[tuple[str, ...]] = ("omega_absmax",)
+            requires_dycore_fields: ClassVar[tuple[str, ...]] = ("omega",)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                fields = diagnostics.get("_dycore_fields", {})
+                omega = fields.get("omega")
+                absmax = (jnp.max(jnp.abs(omega)) if omega is not None
+                          else jnp.asarray(jnp.nan, state.temperature.dtype))
+                diag = absmax * jnp.ones_like(
+                    state.normalized_surface_pressure)
+                tend = PhysicsTendency.zeros(state.temperature.shape)
+                return tend, {**diagnostics, "omega_absmax": diag}
+
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0, compute_omega=True)
+        physics = held_suarez_physics() + _OmegaRecorder()
+        model = Model(dycore=dycore, physics=physics)
+        dt_days = 30.0 / (60.0 * 24.0)
+        preds = model.run(save_interval=2 * dt_days, total_time=4 * dt_days)
+        absmax = np.asarray(preds.physics["omega_absmax"])
+        self.assertTrue(np.isfinite(absmax).all())
+        # A baroclinically forced spun-up-from-rest run develops real
+        # vertical motion within a couple of steps; a provider that
+        # silently returned zeros would fail here.
+        self.assertGreater(float(absmax[-1].max()), 0.0)
+        # Sanity on magnitude: Pa/s, not nondimensional or hPa/day.
+        self.assertLess(float(absmax.max()), 1e3)
 
     def test_frontal_gw_term_runs_end_to_end(self):
         from jcm.physics.held_suarez.held_suarez_physics import (

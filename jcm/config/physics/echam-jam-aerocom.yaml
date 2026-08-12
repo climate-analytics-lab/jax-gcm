@@ -42,6 +42,9 @@ enable_aerocom: true
 # column: water-vapour path, column number, albedo
 # plev: winds on pressure surfaces + LTS
 # aerosol: per-species burdens + N70/N100/PM1/PM10 (needs the JAM module)
+# The plev group's wap/w500/w700 come from the dycore omega provider,
+# which the runner enables automatically for this preset (see
+# dycore.compute_omega; set it false to opt out and zero-fill them).
 aerocom_groups: [cloud, column, plev, aerosol, nearsurface]
 # Should match the radiation scheme's overlap assumption.
 aerocom_overlap: maximum-random

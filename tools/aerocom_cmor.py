@@ -200,6 +200,9 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "aerocom_v200": ("v200", "m s-1", "Column", 1.0, 0.0),
     "aerocom_u700": ("u700", "m s-1", "Column", 1.0, 0.0),
     "aerocom_v700": ("v700", "m s-1", "Column", 1.0, 0.0),
+    "aerocom_w500": ("w500", "Pa s-1", "Column", 1.0, 0.0),
+    "aerocom_w700": ("w700", "Pa s-1", "Column", 1.0, 0.0),
+    "aerocom_wap": ("wap", "Pa s-1", "ModelLevel", 1.0, 0.0),
     "aerocom_N70": ("N70", "m-3", "ModelLevel", 1.0, 0.0),
     "aerocom_N100": ("N100", "m-3", "ModelLevel", 1.0, 0.0),
     "aerocom_PM1": ("PM1", "kg m-3", "ModelLevel", 1.0, 0.0),
@@ -232,6 +235,9 @@ BURDEN_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
 # gets no ``standard_name`` attribute (which is optional) rather than a
 # guessed one that a CF checker would reject.
 CF_STANDARD_NAMES = {
+    "wap": "lagrangian_tendency_of_air_pressure",
+    "w500": "lagrangian_tendency_of_air_pressure",
+    "w700": "lagrangian_tendency_of_air_pressure",
     "ta": "air_temperature",
     "ps": "surface_air_pressure",
     "ts": "surface_temperature",
