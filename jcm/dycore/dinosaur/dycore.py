@@ -16,11 +16,12 @@ import jax.numpy as jnp
 import numpy as np
 
 import dinosaur
-from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur import primitive_equations, primitive_equations_states, time_integration
 from dinosaur.coordinate_systems import CoordinateSystem
 from dinosaur.filtering import horizontal_diffusion_filter
 from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import State
+
 from dinosaur.scales import SI_SCALE, units
 
 import jcm.constants as jcm_constants
@@ -34,6 +35,22 @@ from jcm.dycore.dinosaur.state_bridge import (
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
+
+
+def semi_lagrangian_available() -> bool:
+    """Whether the installed dinosaur provides the semi-Lagrangian core.
+
+    The SL transport (neuralgcm/dinosaur#135) is not in a released
+    dinosaur yet; ``advection="semi_lagrangian"`` requires a build that
+    exposes it.
+    """
+    return (
+        all(hasattr(primitive_equations, name) for name in (
+            "SemiLagrangianPrimitiveEquations",
+            "SemiLagrangianPrimitiveEquationsHybrid",
+        ))
+        and hasattr(time_integration, "semi_lagrangian_crank_nicolson_rk2")
+    )
 
 
 def physics_specs_from_constants(
@@ -125,6 +142,16 @@ class DinosaurDycore(DynamicalCore):
         if advection not in ("eulerian", "semi_lagrangian"):
             raise ValueError(
                 f"advection must be 'eulerian' or 'semi_lagrangian', got {advection!r}"
+            )
+        if advection == "semi_lagrangian" and not semi_lagrangian_available():
+            raise RuntimeError(
+                "advection='semi_lagrangian' needs dinosaur's semi-Lagrangian "
+                "core (neuralgcm/dinosaur#135), which the installed dinosaur "
+                f"{getattr(dinosaur, '__version__', '(unknown version)')} does "
+                "not provide. Install a dinosaur build carrying "
+                "SemiLagrangianPrimitiveEquations, or use "
+                "advection='eulerian' (with diffusion.tracer_positivity=true "
+                "for aerosol runs)."
             )
         self.advection = advection
         self._sl_options = dict(sl_options or {})

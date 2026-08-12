@@ -5,6 +5,12 @@ runs on the semi-Lagrangian dinosaur backend, and the measurements behind
 its settings. Numbers are from 215-day T63L47 real-terrain campaigns on a
 single A100-40GB (July 2026).
 
+> **Dependency status.** The semi-Lagrangian transport this configuration
+> uses is dinosaur PR #135, not yet in a released dinosaur.
+> `advection=semi_lagrangian` raises a clear error on a stock install; the
+> Eulerian fallback (`diffusion.tracer_positivity=true`) runs the same
+> physics with clipped rather than structurally-positive transport.
+
 ## The configuration
 
 ```bash

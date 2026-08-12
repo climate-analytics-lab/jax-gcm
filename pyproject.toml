@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jcm"
-version = "2.1.0b0"
+version = "2.1.0rc1"
 dynamic = ["dependencies"]
 description = "JAX-based General Circulation Model"
 authors = [
