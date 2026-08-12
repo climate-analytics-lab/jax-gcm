@@ -42,10 +42,14 @@ enable_aerocom: true
 # column: water-vapour path, column number, albedo
 # plev: winds on pressure surfaces + LTS
 # aerosol: per-species burdens + N70/N100/PM1/PM10 (needs the JAM module)
-aerocom_groups: [cloud, column, plev, aerosol]
+aerocom_groups: [cloud, column, plev, aerosol, nearsurface]
 # Should match the radiation scheme's overlap assumption.
 aerocom_overlap: maximum-random
 
 # Per-species / per-mode / spectral aerosol optics (jax-gcm#584). Off here;
 # see echam-jam-aerocom-optics.yaml.
 aerocom_optics: false
+# Second aerosol-free radiation solve for the *noa TOA fluxes (#583).
+# Doubles radiation cost on compute steps — the AeroCom experiments ask
+# for it (ERFari), so it is on here; turn off for non-submission runs.
+aerosol_free_radiation: true
