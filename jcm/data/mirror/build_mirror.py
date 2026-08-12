@@ -8,7 +8,9 @@ Reproduces every artifact in the Hugging Face dataset from the sources in
 
 Stages: ``sso``, ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/dust/oxidants via
-``tools/prep_jam_aux_inputs.py``), ``bundles``, ``registry``, ``upload``
+``tools/prep_jam_aux_inputs.py``), ``bundles``, ``amip`` (yearly
+transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
+``registry``, ``upload``
 (push to the HF dataset; needs ``hf auth login`` with write access).
 Outputs land in ``$JCM_MIRROR_ROOT`` (default ``$SCRATCH/hf_mirror``):
 Tier A under ``build/``, the HF-shaped tree under ``upload/``.
@@ -200,6 +202,57 @@ def stage_bundles() -> None:
     print("bundles: done", flush=True)
 
 
+#: Year range for ``--stage amip`` (inclusive); set from ``--years``.
+_AMIP_YEARS: tuple[int, int] = (1950, 2022)
+
+
+def stage_amip() -> None:
+    """Yearly transient AMIP bundles (issue #610).
+
+    Per grid and year: ``forcing_amip/<year>.nc`` (tosbcs/siconcbcs +
+    land climatology + CR GHGs), ``emissions_amip/<year>.nc`` (transient
+    CEDS/BB slices) and ``<grid>_l{47,95}/ozone_amip/<year>.nc`` (FZJ
+    monthly on model levels). Not part of ``--stage all`` — run
+    explicitly with ``--stage amip --years 1950,2022``. Needs the
+    ``era5`` and ``emissions`` stage outputs in ``build/``.
+    """
+    from jcm.data.bc.interpolate_ozone import interpolate_ozone
+    from jcm.data.mirror.amip_yearly import (_TIME_ENC, build_emissions_year,
+                                             build_forcing_year,
+                                             load_ozone_year,
+                                             regrid_ozone_year)
+    from jcm.data.regridding import gaussian_latlon
+
+    first, last = _AMIP_YEARS
+    era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    scratch = BUILD / "ozone_amip"
+    scratch.mkdir(parents=True, exist_ok=True)
+    for grid, nlat in GRIDS.items():
+        lats, lons = gaussian_latlon(nlat)
+        g = UPLOAD / "bundles" / grid
+        (g / "forcing_amip").mkdir(parents=True, exist_ok=True)
+        (g / "emissions_amip").mkdir(parents=True, exist_ok=True)
+        for nlev in (47, 95):
+            (UPLOAD / "bundles" / f"{grid}_l{nlev}"
+             / "ozone_amip").mkdir(parents=True, exist_ok=True)
+        for year in range(first, last + 1):
+            build_forcing_year(str(era5), year, lats, lons,
+                               str(g / "forcing_amip" / f"{year}.nc"))
+            build_emissions_year(str(BUILD / "ceds_anthro.zarr"),
+                                 str(BUILD / "bb4cmip7.zarr"), year, lats,
+                                 lons,
+                                 str(g / "emissions_amip" / f"{year}.nc"))
+            plev = scratch / f"ozone_{grid}_{year}_plev.nc"
+            regrid_ozone_year(load_ozone_year(year), lats,
+                              lons).to_netcdf(plev, encoding=_TIME_ENC)
+            for nlev in (47, 95):
+                interpolate_ozone(
+                    plev,
+                    UPLOAD / "bundles" / f"{grid}_l{nlev}" / "ozone_amip"
+                    / f"{year}.nc", nlev)
+            print("amip:", grid, year, flush=True)
+
+
 def stage_registry() -> None:
     from jcm.data.mirror.registry import write_registry
 
@@ -234,6 +287,14 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
     "aux": ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst",
             "/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone"),
     "bundles": (str(BUILD),),
+    "amip": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+             "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10",
+             "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+             "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0",
+             "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+             "CMIP7/CMIP/CR/CR-CMIP-1-0-0",
+             str(BUILD / "ceds_anthro.zarr"),
+             str(BUILD / "era5_land_climo_2005-2014_0p25.nc")),
     "registry": (str(UPLOAD),),
 }
 
@@ -287,18 +348,28 @@ def stage_upload() -> None:
 
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
-          "bundles": stage_bundles, "registry": stage_registry,
-          "upload": stage_upload}
+          "bundles": stage_bundles, "amip": stage_amip,
+          "registry": stage_registry, "upload": stage_upload}
+
+#: Heavy opt-in stages excluded from ``--stage all``.
+_NOT_IN_ALL = ("amip", "upload")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stage", default="all",
                     help="comma-separated stage list, or 'all' "
-                         f"({', '.join(STAGES)})")
+                         f"({', '.join(STAGES)}; 'all' excludes "
+                         f"{', '.join(_NOT_IN_ALL)})")
+    ap.add_argument("--years", default="1950,2022",
+                    help="inclusive year range for --stage amip, "
+                         "e.g. 1950,2022")
     args = ap.parse_args()
-    names = ([n for n in STAGES if n != "upload"] if args.stage == "all"
-             else args.stage.split(","))
+    global _AMIP_YEARS
+    first, last = (int(y) for y in args.years.split(","))
+    _AMIP_YEARS = (first, last)
+    names = ([n for n in STAGES if n not in _NOT_IN_ALL]
+             if args.stage == "all" else args.stage.split(","))
     unknown = [n for n in names if n not in STAGES]
     if unknown:
         sys.exit(f"Unknown stage(s) {unknown}; valid: {', '.join(STAGES)}")
