@@ -384,6 +384,12 @@ class AerocomDiagnostics(PhysicsTerm):
         Column burdens per aerosol tracer plus ``N70``/``N100`` and
         ``PM1``/``PM10`` from the modal state. Requires the JAM aerosol
         module; silently inactive without it.
+    ``nearsurface``
+        2 m temperature/dew point, 10 m winds (neutral log-profile
+        interpolation, see :meth:`_nearsurface_group`), sea-level
+        pressure, the convective/stratiform x rain/snow precipitation
+        split (``prcr``/``prcs``/``prsn``) and the activation cloud-base
+        updraft ``wbase``.
 
     Everything is emitted as grid-box means, per the protocol Q/A —
     in-cloud values are formed in the analysis, after time-averaging.
@@ -416,13 +422,18 @@ class AerocomDiagnostics(PhysicsTerm):
         "aerocom_prw", "aerocom_cdnum", "aerocom_icnum", "aerocom_albedo",
         "aerocom_cdnc3d",
         # plev
-        "aerocom_lts",
+        "aerocom_lts", "aerocom_ptp",
+        # nearsurface
+        "aerocom_tas", "aerocom_uas", "aerocom_vas", "aerocom_dew2",
+        "aerocom_psl", "aerocom_prsn", "aerocom_prcr", "aerocom_prcs",
+        "aerocom_wbase",
         # aerosol (per-tracer burdens are named from the active tracer set)
         "aerocom_N70", "aerocom_N100", "aerocom_PM1", "aerocom_PM10",
         *(f"aerocom_burden_{sp}" for sp in _BURDEN_SPECIES),
     )
 
-    ALL_GROUPS: ClassVar[tuple[str, ...]] = ("cloud", "column", "plev", "aerosol")
+    ALL_GROUPS: ClassVar[tuple[str, ...]] = (
+        "cloud", "column", "plev", "aerosol", "nearsurface")
 
     def __init__(
         self,
@@ -511,6 +522,9 @@ class AerocomDiagnostics(PhysicsTerm):
             out.update(self._plev_group(state, diagnostics, temperature, p_full))
         if "aerosol" in self.groups:
             out.update(self._aerosol_group(state, diagnostics, p_half))
+        if "nearsurface" in self.groups:
+            out.update(self._nearsurface_group(
+                state, diagnostics, terrain, temperature, p_full))
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
@@ -681,6 +695,124 @@ class AerocomDiagnostics(PhysicsTerm):
         theta700 = t700 * (100000.0 / 70000.0) ** c.akap
         theta_sfc = temperature[-1] * (100000.0 / p_sfc) ** c.akap
         out["aerocom_lts"] = theta700 - theta_sfc
+
+        # WMO tropopause pressure (the ptp request): the wmo_tropopause
+        # module's finder, on the post-physics temperature. Zero-filled
+        # when the height field is unavailable (static per config).
+        z_full = diagnostics.get("height_full")
+        if z_full is not None:
+            from jcm.physics.diagnostics.wmo_tropopause import (
+                find_tropopause_level)
+            out["aerocom_ptp"] = find_tropopause_level(
+                temperature.T, p_full.T, z_full.T)
+        else:
+            out["aerocom_ptp"] = jnp.zeros(p_full.shape[1:],
+                                           dtype=p_full.dtype)
+        return out
+
+    def _nearsurface_group(self, state, diagnostics, terrain,
+                           temperature, p_full) -> dict:
+        """2 m / 10 m diagnostics, sea-level pressure, precipitation split.
+
+        The 2 m temperature and 10 m winds interpolate between the surface
+        and the lowest model level with the NEUTRAL logarithmic profile,
+        using the tile-averaged momentum roughness the surface term
+        publishes (heat roughness = 0.1 z0m, the model's own ratio).
+        Stability corrections are deliberately omitted in this first
+        version: they modify the 2 m values by O(1 K) in strongly
+        stable/unstable layers, which matters for NWP verification but not
+        for the AeroCom context fields — documented so nobody mistakes
+        this for a Monin-Obukhov implementation. ``dew2`` converts the
+        (well-mixed) lowest-level specific humidity to a dew point at
+        surface pressure via the inverted Magnus formula. ``psl`` is the
+        standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is the
+        SAME updraft the 2M activation uses (fact_tke sqrt(2 TKE),
+        lohmann_2m fact_tke = 0.7), sampled at the diagnosed cloud base.
+        Convective precipitation is split rain/snow by the lowest-level
+        temperature (the melt criterion the COSP hook already uses).
+        """
+        clouds = diagnostics["clouds"]
+        z_full = diagnostics.get("height_full")
+        z_half = diagnostics.get("height_half")
+        ncols_shape = state.temperature.shape[1:]
+        out: dict[str, jnp.ndarray] = {}
+
+        t_low = temperature[-1]
+        q_low = _post_physics(state, diagnostics, "specific_humidity")[-1]
+        u_low = _post_physics(state, diagnostics, "u_wind")[-1]
+        v_low = _post_physics(state, diagnostics, "v_wind")[-1]
+        p_sfc = p_full[-1]
+
+        sfc = diagnostics.get("surface")
+        t_skin = getattr(sfc, "surface_temperature", None)
+        z0m = getattr(sfc, "roughness_length", None)
+        if t_skin is None or z0m is None or z_full is None or z_half is None:
+            zero = jnp.zeros(ncols_shape, dtype=temperature.dtype)
+            for k in ("tas", "uas", "vas", "dew2", "wbase"):
+                out[f"aerocom_{k}"] = zero
+        else:
+            z_agl = jnp.maximum(z_full[-1] - z_half[-1], 10.0)
+            z0m = jnp.clip(z0m.reshape(ncols_shape), 1e-5, 2.0)
+            z0h = 0.1 * z0m
+            # Neutral log-profile ratios; winds vanish at z0m, scalars
+            # reach the skin value at z0h.
+            r10 = jnp.log(10.0 / z0m) / jnp.log(z_agl / z0m)
+            r2 = jnp.log(2.0 / z0h) / jnp.log(z_agl / z0h)
+            t_skin = t_skin.reshape(ncols_shape)
+            out["aerocom_tas"] = t_skin + (t_low - t_skin) * jnp.clip(r2, 0.0, 1.0)
+            out["aerocom_uas"] = u_low * jnp.clip(r10, 0.0, 1.0)
+            out["aerocom_vas"] = v_low * jnp.clip(r10, 0.0, 1.0)
+            # Magnus inversion: e = q p / (eps + (1-eps) q); Td from
+            # ln(e/611.2) = 17.62 Td / (Td + 243.12) (Td in Celsius).
+            eps_rd = 0.622
+            e_pa = jnp.maximum(
+                q_low * p_sfc / (eps_rd + (1.0 - eps_rd) * q_low), 1e-3)
+            ln_ratio = jnp.log(e_pa / 611.2)
+            td_c = 243.12 * ln_ratio / (17.62 - ln_ratio)
+            out["aerocom_dew2"] = jnp.minimum(
+                td_c + 273.15, out["aerocom_tas"])
+
+            # Cloud-base updraft from the vdiff TKE (see docstring).
+            vdiff = diagnostics.get("vertical_diffusion")
+            tke = getattr(vdiff, "tke", None)
+            if tke is None:
+                out["aerocom_wbase"] = jnp.zeros(ncols_shape,
+                                                 dtype=temperature.dtype)
+            else:
+                nlev = temperature.shape[0]
+                tke = tke.reshape(-1, nlev).T if tke.shape[0] != nlev                     else tke.reshape(nlev, -1)
+                w_act = 0.7 * jnp.sqrt(jnp.maximum(2.0 * tke, 0.0))
+                cf = clouds.cloud_fraction
+                cloudy = cf > THRES_CLD
+                # Lowest cloudy level, TOA-first: flip, argmax, unflip.
+                rev = cloudy[::-1]
+                k_base = nlev - 1 - jnp.argmax(rev, axis=0)
+                take = jnp.take_along_axis(w_act, k_base[None, ...], axis=0)[0]
+                has_cloud = jnp.any(cloudy, axis=0)
+                out["aerocom_wbase"] = jnp.where(has_cloud, take, 0.0)
+
+        # Sea-level pressure, WMO reduction (T_star at the surface from the
+        # lowest level with the standard 6.5 K/km lapse; mean of T_star and
+        # T at msl in the exponent denominator).
+        orog = jnp.reshape(terrain.orog, ncols_shape) if terrain is not None             else jnp.zeros(ncols_shape)
+        t_star = t_low + 0.0065 * (
+            (z_full[-1] - z_half[-1]) if z_full is not None else 0.0)
+        t_msl = t_star + 0.0065 * orog
+        rd = 287.04
+        out["aerocom_psl"] = p_sfc * jnp.exp(
+            c.grav * orog / (rd * 0.5 * (t_star + t_msl)))
+
+        # Precipitation split: large-scale rain/snow come straight from the
+        # cloud scheme; convective is split by the lowest-level temperature.
+        conv = diagnostics.get("convection")
+        prc = getattr(conv, "precip_conv", None)
+        prc = (prc.reshape(ncols_shape) if prc is not None
+               else jnp.zeros(ncols_shape))
+        frozen = t_low < c.tmelt
+        prcs = jnp.where(frozen, prc, 0.0)
+        out["aerocom_prcr"] = prc - prcs
+        out["aerocom_prcs"] = prcs
+        out["aerocom_prsn"] = clouds.precip_snow.reshape(ncols_shape) + prcs
         return out
 
     def _aerosol_group(self, state, diagnostics, p_half) -> dict:
