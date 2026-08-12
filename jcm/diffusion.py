@@ -9,20 +9,133 @@ suitable for elementwise multiplication against a spectral state of shape
 hyperdiffusion order — del² at TOA, del⁴/⁶/⁸ going down — which keeps the
 stratosphere well-damped without over-smoothing the troposphere.
 
-Known issue: the level-dependent path currently triggers NaN at order >= 4
-under JIT (eager and orders 1-3 are fine). The uniform-order path
-(``level_orders_* = None``) is unaffected. Use the upper sponge layer
-(``jcm.physics.dissipation.UpperSponge``) as an alternative stabiliser
-until the JIT / order=4 interaction is diagnosed.
+:meth:`DiffusionFilter.echam_lmidatm` reproduces those ECHAM ``lmidatm``
+profiles for a ``(truncation, layers)`` grid; see its docstring for how the
+reference tables are indexed and what happens off them.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
+
+# ---------------------------------------------------------------------------
+# ECHAM6 lmidatm hyperdiffusion reference tables
+# ---------------------------------------------------------------------------
+#
+# Base damping timescale ``dampth`` in hours, from ECHAM6.3 ``setdyn.f90``.
+# This is the e-folding time applied at the truncation limit: the damping
+# built below reduces exactly to ``exp(-dt/dampth)`` at ``n = nn`` (see
+# :func:`level_dependent_scaling`), so the table is directly comparable with
+# the SPEEDY-style uniform timescales in :meth:`DiffusionFilter.default`.
+_ECHAM_DAMPTH_HOURS = {31: 12.0, 63: 7.0, 127: 1.5, 255: 0.5}
+
+# Per-level hyperdiffusion orders from ECHAM6.3 ``mo_hdiff.f90::sudif``,
+# keyed by ``(truncation, layers)`` and stored top-first as
+# ``(n_levels, order)`` runs — order 1 is del², 2 del⁴, 3 del⁶, 4 del⁸.
+#
+# These are *level-index* tables in the reference, and they transfer verbatim
+# because jcm's hybrid grids ARE ECHAM's: the pressures our L47/L95 tables put
+# at each transition reproduce the ones ECHAM annotates in ``sudif`` (L47
+# jk=4/7/9 → 0.2315/1.2153/2.9571 hPa vs "~0.23/1.22/2.96"; L95 jk=10/20/25 →
+# 0.1503/0.7680/1.5001 hPa vs "~0.15/0.77/1.50"). A pressure-based rule would
+# be *less* faithful, not more — ECHAM does not place these transitions at the
+# same pressures on L47 and L95, so no single pressure rule reproduces both.
+#
+# Note that the profile depends on truncation as well as level count: on L95
+# ECHAM stops at del⁶ for nn >= 127 but goes to del⁸ at nn = 63. Higher
+# horizontal resolution gets the *lower* maximum order.
+_ECHAM_LMIDATM_ORDERS = {
+    (31, 47): ((4, 1), (3, 2), (2, 3), (2, 4), (36, 5)),
+    (63, 47): ((4, 1), (3, 2), (2, 3), (38, 4)),
+    (63, 95): ((10, 1), (10, 2), (5, 3), (70, 4)),
+    (127, 95): ((10, 1), (15, 2), (70, 3)),
+    (255, 95): ((10, 1), (15, 2), (70, 3)),
+}
+
+#: Level counts for which an ECHAM ``lmidatm`` order profile exists.
+ECHAM_LMIDATM_LAYERS = frozenset(nlev for _, nlev in _ECHAM_LMIDATM_ORDERS)
+
+
+def _check_truncation(truncation: int) -> None:
+    """Reject non-positive truncations before they reach ``math.log``.
+
+    Both selection rules are logarithmic in truncation, so a missing or zero
+    ``grid.spectral_truncation`` would otherwise surface as a bare
+    ``math domain error`` with no indication of which config key was empty.
+    """
+    if truncation <= 0:
+        raise ValueError(
+            f"spectral truncation must be positive to select an ECHAM "
+            f"hyperdiffusion profile, got {truncation!r}; check "
+            "grid.spectral_truncation."
+        )
+
+
+def echam_dampth_hours(truncation: int) -> float:
+    """ECHAM ``dampth`` for ``truncation``, in hours.
+
+    Exact for the truncations ECHAM tabulates (T31/T63/T127/T255); otherwise
+    a power law in truncation fitted to the bracketing pair, which is how the
+    reference values themselves scale (T63→T127 is ``τ ∝ nn**-2.20``). Off
+    the ends of the table the nearest segment's slope is extrapolated.
+
+    Deriving rather than hard-coding is deliberate: the previously hard-coded
+    T85 value (3 h) was an eyeballed extrapolation that did not sit on ECHAM's
+    own T63→T127 slope, and there was nothing at all for T106/T119.
+
+    Raises:
+        ValueError: if ``truncation`` is not positive.
+
+    """
+    _check_truncation(truncation)
+    if truncation in _ECHAM_DAMPTH_HOURS:
+        return _ECHAM_DAMPTH_HOURS[truncation]
+    anchors = sorted(_ECHAM_DAMPTH_HOURS)
+    below = [nn for nn in anchors if nn < truncation]
+    above = [nn for nn in anchors if nn > truncation]
+    if not below:                       # below T31: extrapolate the first leg
+        lo, hi = anchors[0], anchors[1]
+    elif not above:                     # above T255: extrapolate the last leg
+        lo, hi = anchors[-2], anchors[-1]
+    else:
+        lo, hi = below[-1], above[0]
+    exponent = (math.log(_ECHAM_DAMPTH_HOURS[hi] / _ECHAM_DAMPTH_HOURS[lo])
+                / math.log(hi / lo))
+    return _ECHAM_DAMPTH_HOURS[lo] * (truncation / lo) ** exponent
+
+
+def echam_lmidatm_orders(truncation: int, layers: int) -> jnp.ndarray:
+    """Per-level hyperdiffusion orders for ``(truncation, layers)``.
+
+    Truncations ECHAM does not tabulate borrow the profile of the nearest
+    tabulated truncation *in log space* — the natural metric when the tables
+    themselves are spaced by factors of two. That rule keeps T85L47 on the
+    T63L47 profile (as before this function existed) and puts T106L95 and
+    T119L95 on the T127L95 profile.
+
+    Raises:
+        ValueError: if ``truncation`` is not positive, or no ECHAM profile
+            exists for ``layers`` at all.
+
+    """
+    _check_truncation(truncation)
+    candidates = [nn for nn, nlev in _ECHAM_LMIDATM_ORDERS if nlev == layers]
+    if not candidates:
+        raise ValueError(
+            f"No ECHAM lmidatm hyperdiffusion profile for {layers} levels; "
+            f"mo_hdiff.f90::sudif defines profiles for "
+            f"{sorted(ECHAM_LMIDATM_LAYERS)} levels only."
+        )
+    nearest = min(candidates, key=lambda nn: abs(math.log(truncation / nn)))
+    orders = []
+    for count, order in _ECHAM_LMIDATM_ORDERS[(nearest, layers)]:
+        orders.extend([order] * count)
+    return jnp.asarray(orders, dtype=jnp.int32)
 
 
 @tree_math.struct
@@ -64,39 +177,45 @@ class DiffusionFilter:
 
     @classmethod
     def echam_t85_l47(cls):
-        """Level-dependent hyperdiffusion profile tuned for T85 x 47 levels.
+        """ECHAM ``lmidatm`` profile for T85 x 47 levels.
 
-        Based on the ECHAM T63L47 order profile (see mo_hdiff.f90::sudif)
-        extrapolated to T85 by shortening the base timescale from 7 h (T63)
-        toward 3 h (T85 sits between T63 and T127). Levels 1-4 use del²,
-        5-7 del⁴, 8-9 del⁶, 10+ del⁸. Applied equally to div/vor_q/temp.
+        Thin wrapper over :meth:`echam_lmidatm` retained for callers that pin
+        a named profile.
         """
-        return cls._echam_l47(base_tau_h=3.0)
+        return cls.echam_lmidatm(truncation=85, layers=47)
 
     @classmethod
     def echam_t63_l47(cls):
-        """Level-dependent hyperdiffusion profile matching ECHAM6.3 T63 lmidatm.
+        """ECHAM ``lmidatm`` profile for T63 x 47 levels — the tuned target.
 
-        Per ``setdyn.f90``: ``dampth = 7 h`` for ``nn = 63`` selects the base
-        vorticity timescale; the level-order profile from ``mo_hdiff.f90::sudif``
-        for ``(nn = 63, nlev = 47)`` is ``[del², del², del², del², del⁴, del⁴,
-        del⁴, del⁶, del⁶, del⁸, ...]`` (levels 1-4 del², 5-7 del⁴, 8-9 del⁶,
-        10+ del⁸). Equivalent to ``echam_t85_l47()`` but with the T63 7-hour
-        base timescale instead of the T85 3-hour value, and so applied at
-        ``physics=echam`` runs on a T63L47 grid.
+        Thin wrapper over :meth:`echam_lmidatm`. This is the one combination
+        the reference tabulates exactly on both axes (``dampth = 7 h``, orders
+        ``[del²]*4 + [del⁴]*3 + [del⁶]*2 + [del⁸]*38``), so it doubles as the
+        fidelity anchor for the derived cases.
         """
-        return cls._echam_l47(base_tau_h=7.0)
+        return cls.echam_lmidatm(truncation=63, layers=47)
 
     @classmethod
-    def _echam_l47(cls, base_tau_h: float):
-        """Shared constructor for ECHAM lmidatm L47 hyperdiffusion profiles.
+    def echam_lmidatm(cls, truncation: int, layers: int):
+        """ECHAM6.3 ``lmidatm`` level-dependent hyperdiffusion for a grid.
 
-        ``base_tau_h`` is the ECHAM ``dampth`` value in hours (T63→7, T85→3,
-        T127→1.5, T255→0.5; see ``setdyn.f90``).
+        Combines the ``setdyn.f90`` base timescale (:func:`echam_dampth_hours`)
+        with the ``mo_hdiff.f90::sudif`` per-level order profile
+        (:func:`echam_lmidatm_orders`) — del² near the model top grading to
+        del⁶/del⁸ below, which damps the stratosphere hard without
+        over-smoothing the troposphere.
+
+        Args:
+            truncation: spectral truncation (``nn``).
+            layers: number of vertical levels (``nlev``). Must be one of
+                :data:`ECHAM_LMIDATM_LAYERS`.
+
+        Raises:
+            ValueError: if ECHAM defines no profile for ``layers``.
+
         """
-        orders = [1] * 4 + [2] * 3 + [3] * 2 + [4] * 38  # 4+3+2+38 = 47
-        level_orders = jnp.asarray(orders, dtype=jnp.int32)
-        base_tau = base_tau_h * 3600.0
+        level_orders = echam_lmidatm_orders(truncation, layers)
+        base_tau = echam_dampth_hours(truncation) * 3600.0
         return cls(
             # Effective timescale for each variable is ``base_tau * factor``;
             # factors match ECHAM's difvo / difd / dift proportions

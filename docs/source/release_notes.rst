@@ -4,6 +4,26 @@ Release Notes
 Unreleased — issue-backlog tidy-up
 ----------------------------------
 
+- **ECHAM hyperdiffusion now covers every hybrid grid, including L95**
+  (#579). ``diffusion.kind=auto`` matched on ``layers == 47``, so the L95
+  middle-atmosphere grids — which exist precisely to resolve the
+  stratosphere — silently fell back to SPEEDY's uniform del² profile, and
+  pinning an L47 profile on them failed with an opaque broadcast error.
+  The ECHAM6.3 ``mo_hdiff.f90::sudif`` tables are now ported in full
+  (T31L47, T63L47, **T63L95**, T127L95, T255L95) and the ``setdyn.f90``
+  ``dampth`` timescales with them, selected per ``(truncation, layers)``.
+  Truncations ECHAM does not tabulate borrow the nearest tabulated
+  profile in log space and interpolate ``dampth`` along ECHAM's own
+  slope. A hybrid grid that still finds no profile now warns instead of
+  falling back silently, and a length-mismatched pin is rejected at build
+  time with a message naming the config key and the grid.
+
+  **This changes results on T85L47.** Its base timescale was a hard-coded
+  3 h that did not sit on ECHAM's own T63→T127 slope; it is now derived
+  as 3.63 h, so damping is slightly weaker. T63L47 — the tuned and
+  validated target — is bit-identical, as is every SPEEDY and
+  Held-Suarez configuration. T106/T119 at both level counts, and all L95
+  grids, move from the SPEEDY uniform profile to their ECHAM profile.
 - **Run provenance recorded in every output file** (#591): netCDF global
   attributes (``jcm_prov_*``) carry the git SHA/branch/dirty state of
   every imported editable library, precision flags and devices, the

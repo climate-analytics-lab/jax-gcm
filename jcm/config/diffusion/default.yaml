@@ -1,14 +1,19 @@
 # Hyperdiffusion configuration.
 #
-# ``kind: auto`` (default) picks a profile from the grid: L47 hybrid grids
-# get the matching ECHAM ``lmidatm`` level-dependent profile
-# (del² at top 4 levels, ..., del⁸ below); everything else gets SPEEDY's
-# uniform-order default.
+# ``kind: auto`` (default) picks a profile from the grid. Hybrid grids at a
+# level count ECHAM tabulates (L47, L95) get the ECHAM ``lmidatm``
+# level-dependent profile for their (truncation, layers): del² near the model
+# top grading to del⁶/del⁸ below, with the ``setdyn.f90`` base timescale
+# (T63 7 h, T127 1.5 h, interpolated in between). Everything else — SPEEDY
+# T31L8, Held-Suarez — gets SPEEDY's uniform-order default, and a hybrid grid
+# that lands there logs a warning, since it is rarely what was intended.
 #
 # Override with ``kind: default`` (SPEEDY uniform, 24h temp / 12h vor_q
-# / 2h div), ``kind: echam_t63_l47`` (T63 lmidatm 7h base), or
-# ``kind: echam_t85_l47`` (T85 lmidatm 3h base). ``scale`` multiplies
-# the chosen profile's timescales.
+# / 2h div), ``kind: echam_lmidatm`` (force the ECHAM profile for this grid),
+# or ``kind: echam_t63_l47`` / ``echam_t85_l47`` to pin a named profile
+# regardless of grid — pinning one whose level count does not match the grid
+# is rejected at build time. ``scale`` multiplies the chosen profile's
+# timescales.
 kind: auto
 scale: 1.0
 
