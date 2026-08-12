@@ -1640,6 +1640,7 @@ def run_chunked(
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         ds.attrs.update(provenance.attrs())
+        ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
         ds.to_netcdf(nc_path)
         provenance.write_sidecar(nc_path)
         print(f"  Saved {nc_path}")

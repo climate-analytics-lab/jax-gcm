@@ -98,6 +98,9 @@ class RegistryAndHashTest(unittest.TestCase):
         for key, value in attrs.items():
             self.assertTrue(key.startswith("jcm_prov_"), key)
             self.assertIsInstance(value, str)
+        # created (run start) and written (output time) bracket the run.
+        self.assertIn("jcm_prov_created", attrs)
+        self.assertIn("jcm_prov_written", attrs)
         # nested parts round-trip through JSON
         self.assertIn("jcm", json.loads(attrs["jcm_prov_code"]))
 

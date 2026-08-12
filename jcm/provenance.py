@@ -103,7 +103,7 @@ def probe_environment() -> dict:
     import jax
 
     devices = jax.devices()
-    return {
+    env = {
         "python": platform.python_version(),
         "hostname": socket.gethostname(),
         "user": getpass.getuser(),
@@ -113,6 +113,13 @@ def probe_environment() -> dict:
         "device_kind": devices[0].device_kind,
         "device_count": len(devices),
     }
+    try:
+        # On GPU this carries the CUDA runtime/driver versions.
+        env["platform_version"] = (
+            jax.extend.backend.get_backend().platform_version)
+    except Exception:  # noqa: BLE001 — best-effort, backend-dependent
+        pass
+    return env
 
 
 def describe_input(path: str) -> dict:
@@ -227,6 +234,10 @@ def attrs() -> dict:
     prov = collect()
     out = {
         "jcm_prov_created": prov["created"],
+        # attrs() runs at output time, so this stamps the write — with
+        # ``created`` it brackets the run without a separate end hook.
+        "jcm_prov_written": datetime.now(
+            timezone.utc).isoformat(timespec="seconds"),
         "jcm_prov_run_hash": prov["run_hash"],
         "jcm_prov_code": json.dumps(prov["code"], sort_keys=True),
         "jcm_prov_environment": json.dumps(prov["environment"],
