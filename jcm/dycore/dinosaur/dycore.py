@@ -521,8 +521,18 @@ class DinosaurDycore(DynamicalCore):
         # unconditional to_nodal over state.tracers would both crash (shape
         # mismatch) and waste one transform per tracer. Strip them.
         state = state.replace(tracers={})
-        # (1, nlon, nlat); the leading axis broadcasts against (nlev, ...).
+        # Surface pressure in NONDIM PRESSURE units, (1, nlon, nlat) so the
+        # leading axis broadcasts against (nlev, ...). The two coordinate
+        # families store different conventions (see state_bridge): hybrid
+        # keeps ``log(P_s)`` in nondim Pa directly, but sigma keeps the
+        # NORMALIZED ``log(P_s / p0)`` (the sigma dynamics only ever use
+        # grad/d-dt of log ps, which the scale cancels out of), so the
+        # sigma path must restore the p0 factor here or omega comes out
+        # ~1e5 too small (Codex P1 on #606).
         ps = jnp.exp(to_nodal(state.log_surface_pressure))
+        if not isinstance(vertical, HybridCoordinates):
+            ps = ps * self._physics_specs.nondimensionalize(
+                self.constants.p0 * units.pascal)
         if isinstance(vertical, HybridCoordinates):
             # The primitive operator's nondim_coords, not self.coords: the
             # (a, b) tables must be nondimensionalized consistently with

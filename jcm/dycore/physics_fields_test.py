@@ -143,6 +143,7 @@ class DinosaurOmegaProviderTest(unittest.TestCase):
                               dt_seconds=600.0, compute_omega=True)
 
     def _uniform_divergence_state(self, dycore, d0_si, ps_si):
+        from dinosaur.hybrid_coordinates import HybridCoordinates
         from dinosaur.primitive_equations import State
         from dinosaur.scales import units
         coords = dycore.coords
@@ -151,14 +152,23 @@ class DinosaurOmegaProviderTest(unittest.TestCase):
         nlon, nlat = hor.nodal_shape
         specs = dycore.physics_specs
         d0 = float(specs.nondimensionalize(d0_si / units.second))
-        ps = float(specs.nondimensionalize(ps_si * units.pascal))
+        # Each coordinate family's OWN log-ps convention (state_bridge):
+        # hybrid stores log(P_s) in nondim pressure units, sigma stores
+        # the normalized log(P_s / p0). Building the state any other way
+        # validates the math under a convention no real run uses (which
+        # is how the sigma-path p0 factor initially slipped through).
+        if isinstance(coords.vertical, HybridCoordinates):
+            lsp = np.log(float(specs.nondimensionalize(
+                ps_si * units.pascal)))
+        else:
+            lsp = np.log(ps_si / float(dycore.constants.p0))
         zeros = np.zeros((nlev, nlon, nlat))
         return State(
             vorticity=hor.to_modal(zeros),
             divergence=hor.to_modal(d0 * np.ones((nlev, nlon, nlat))),
             temperature_variation=hor.to_modal(zeros),
             log_surface_pressure=hor.to_modal(
-                np.log(ps) * np.ones((1, nlon, nlat))),
+                lsp * np.ones((1, nlon, nlat))),
             tracers={}, sim_time=0.0,
         )
 
