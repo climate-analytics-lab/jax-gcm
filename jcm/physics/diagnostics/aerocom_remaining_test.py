@@ -33,7 +33,11 @@ class NearSurfaceGroupTest(unittest.TestCase):
             pass
         _Terrain.orog = jnp.full((nx,), orog)
 
-        p_full = jnp.linspace(20000.0, 100000.0, nlev)[:, None] * jnp.ones((1, nx))
+        # Lowest level-centre pressure deliberately BELOW the surface
+        # pressure (p0), as in any real hybrid grid — so a psl computed
+        # from p_full[-1] (the Codex #604 P1) cannot pass the sea-level
+        # identity test below.
+        p_full = jnp.linspace(20000.0, 99600.0, nlev)[:, None] * jnp.ones((1, nx))
         z_full = jnp.linspace(15000.0, 50.0, nlev)[:, None] * jnp.ones((1, nx)) + orog
         z_half = jnp.linspace(16000.0, 0.0, nlev + 1)[:, None] * jnp.ones((1, nx)) + orog
         diagnostics = {
@@ -47,6 +51,8 @@ class NearSurfaceGroupTest(unittest.TestCase):
             specific_humidity = jnp.full((nlev, nx), 5e-3)
             u_wind = jnp.full((nlev, nx), 10.0)
             v_wind = jnp.full((nlev, nx), -5.0)
+            # psl/dew2 read the true surface pressure (Codex on #604).
+            normalized_surface_pressure = jnp.ones((nx,))
             tracers: dict = {}
 
         term = AerocomDiagnostics(groups=("nearsurface",))
@@ -73,13 +79,15 @@ class NearSurfaceGroupTest(unittest.TestCase):
                          <= np.asarray(out["aerocom_tas"]) + 1e-6).all())
 
     def test_psl_equals_ps_at_sea_level(self):
+        import jcm.constants as c
         out, _, _ = self._diag(orog=0.0)
-        np.testing.assert_allclose(np.asarray(out["aerocom_psl"]), 100000.0,
+        np.testing.assert_allclose(np.asarray(out["aerocom_psl"]), c.p0,
                                    rtol=1e-6)
 
     def test_psl_exceeds_ps_over_orography(self):
+        import jcm.constants as c
         out, _, _ = self._diag(orog=1500.0)
-        self.assertTrue((np.asarray(out["aerocom_psl"]) > 100000.0).all())
+        self.assertTrue((np.asarray(out["aerocom_psl"]) > c.p0).all())
 
     def test_warm_surface_conv_precip_is_rain(self):
         out, _, _ = self._diag(t_low=290.0, conv_precip=2e-5)
@@ -107,6 +115,62 @@ class NearSurfaceGroupTest(unittest.TestCase):
         out2 = term._nearsurface_group(
             state, diag, None, state.temperature, p_full)
         np.testing.assert_allclose(np.asarray(out2["aerocom_wbase"]), 0.0)
+
+
+class CodexRound2RegressionTest(unittest.TestCase):
+    """Regressions for the Codex findings on PR #604."""
+
+    def test_tropopause_window_derived_from_level_pressures(self):
+        """An L95-like grid must search near 40-550 hPa, not indices 13-35."""
+        term = AerocomDiagnostics(groups=("plev",))
+
+        class _Vert:
+            # 95 sigma centres crowding the stratosphere like the L95 grid.
+            centers = np.concatenate([
+                np.geomspace(3e-6, 0.05, 60), np.linspace(0.06, 0.995, 35)])
+
+        class _Coords:
+            vertical = _Vert()
+
+        term.cache_coords(_Coords())
+        ref = term._nominal_level_pressures(95)
+        self.assertIsNotNone(ref)
+        ncctop = int(np.searchsorted(ref, 4000.0))
+        nccbot = int(np.searchsorted(ref, 55000.0))
+        # The window must cover the real tropopause pressures, far from
+        # the L47-tuned defaults (13..35 sit at 31-501 Pa on this grid).
+        self.assertGreater(ncctop, 35)
+        self.assertGreater(nccbot, ncctop + 2)
+        self.assertLess(ref[ncctop], 5000.0)
+        self.assertGreater(ref[nccbot - 1], 10000.0)
+
+    def test_save_predictions_writes_the_snapshot_file(self):
+        import pathlib
+        import tempfile
+
+        import xarray as xr
+        from jcm.runners import save_predictions
+
+        class _Preds:
+            def to_xarray(self):
+                return xr.Dataset({"t": xr.DataArray(np.zeros(3),
+                                                     dims=("x",))})
+
+            def snapshot_dataset(self):
+                return xr.Dataset({"clt": xr.DataArray(
+                    np.zeros((2, 3)), dims=("snap_time", "x"))})
+
+        with tempfile.TemporaryDirectory() as td:
+            out = pathlib.Path(td) / "run.nc"
+            save_predictions(_Preds(), out)
+            self.assertTrue(out.exists())
+            self.assertTrue((pathlib.Path(td) / "run_snapshots.nc").exists())
+
+    def test_run_config_declares_snapshot_keys(self):
+        import yaml
+        cfg = yaml.safe_load(open("jcm/config/run/default.yaml"))
+        self.assertIn("snapshot_interval", cfg)
+        self.assertIn("snapshot_variables", cfg)
 
 
 class FluxFamilyTest(unittest.TestCase):

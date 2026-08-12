@@ -1094,6 +1094,11 @@ def cloud_microphysics_column_sweep(
         # (kg/kg over dt). Convert to a grid-mean rate (kg/kg/s) for
         # the public ``autoconv_rate`` diagnostic.
         autoconv_rate_diag = cf * zraut / dt
+        # Accretion likewise (Codex on PR #604: the sweep computes zrac1
+        # and, when cauloc > 0, zrac2 — reporting zero misstated an
+        # active pathway). Weights follow the rain-source ledger:
+        # zrpr = cf(zraut + zrac2) + zclcstar·zrac1.
+        accretion_rate_diag = (cf * zrac2 + zclcstar * zrac1) / dt
         # Per-level flux profiles for downstream (COSP/CloudSat)
         # diagnostics: the rain / frozen fluxes LEAVING this layer. The
         # frozen flux adds the sedimenting cloud-ice carry ``zxiflux_out``
@@ -1103,7 +1108,8 @@ def cloud_microphysics_column_sweep(
         # exactly.
         out = (
             dTdt, dqdt, dqcdt, dqidt, rain_source, snow_source,
-            autoconv_rate_diag, zrfl_out, zsfl_out + zxiflux_out,
+            autoconv_rate_diag, accretion_rate_diag,
+            zrfl_out, zsfl_out + zxiflux_out,
         )
         return (zrfl_out, zsfl_out, zclcpre_out, zxiflux_out), out
 
@@ -1120,7 +1126,7 @@ def cloud_microphysics_column_sweep(
         level_inputs,
     )
     (dtedt, dqdt, dqcdt, dqidt, rain_source, snow_source, autoconv_rate,
-     rain_flux, snow_flux) = per_level_out
+     accretion_rate, rain_flux, snow_flux) = per_level_out
 
     tendencies = MicrophysicsTendencies(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
@@ -1142,7 +1148,7 @@ def cloud_microphysics_column_sweep(
         rain_flux=rain_flux, snow_flux=snow_flux,
         rain_source=rain_source, snow_source=snow_source,
         qc_in_cloud=qc_in_cloud, qi_in_cloud=qi_in_cloud,
-        autoconv_rate=autoconv_rate, accretion_rate=jnp.zeros(nlev),
+        autoconv_rate=autoconv_rate, accretion_rate=accretion_rate,
         melting_rate=jnp.zeros(nlev), freezing_rate=jnp.zeros(nlev),
         precip_rain=zrfl_surface, precip_snow=zsfl_surface,
     )
@@ -1290,19 +1296,19 @@ class Echam1MMicrophysics(PhysicsTerm):
         )
 
         # AeroCom process rates (jax-gcm#585 acceptance: both schemes,
-        # zero where a pathway is absent). The 1M scan folds accretion
-        # into its combined warm-rain sink and has no explicit
-        # Wegener-Bergeron-Findeisen transfer, so only autoconversion is
-        # nonzero here; the keys are still published so the diagnostic
-        # set is scheme-independent. autoconv_rate is the grid-mean
-        # in-cloud conversion [kg/kg/s]; dp-weighting gives kg/m^2/s.
+        # zero where a pathway is absent). Autoconversion and accretion
+        # come from the sweep's own per-level rates (grid-mean kg/kg/s,
+        # dp-weighted to kg/m^2/s); WBF stays zero — the 1M scheme has
+        # no explicit Wegener-Bergeron-Findeisen transfer — and the key
+        # is still published so the diagnostic set is scheme-independent.
         # air_density/layer_thickness are (nlev, ncols); the vmapped
         # micro_state fields are (ncols, nlev) — transpose the mass weight.
         dm_col = (air_density * layer_thickness).T
         autoconv_col = jnp.sum(micro_state.autoconv_rate * dm_col, axis=-1)
+        accretn_col = jnp.sum(micro_state.accretion_rate * dm_col, axis=-1)
         zero_col = jnp.zeros_like(autoconv_col)
         diagnostics = {**diagnostics, "autoconv": autoconv_col,
-                       "accretn": zero_col, "wbf": zero_col}
+                       "accretn": accretn_col, "wbf": zero_col}
 
         clouds = clouds.copy(
             precip_rain=micro_state.precip_rain,

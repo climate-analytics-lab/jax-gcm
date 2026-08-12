@@ -20,6 +20,15 @@ sponge:
 chunk_days: 0
 output_prefix: chunked_run
 
+# Interval-instantaneous snapshot stream (jax-gcm#586): with
+# ``output_averages: true``, sample the listed 2-D diagnostics
+# instantaneously every ``snapshot_interval`` (days; must divide
+# save_interval) alongside the interval means. Written to
+# ``<output stem>_snapshots.nc``. Fields are top-level diagnostics keys
+# or dotted struct fields, e.g. [aerocom_clt, "radiation.toa_sw_up"].
+snapshot_interval: null
+snapshot_variables: []
+
 # Checkpointing for preemptible chunked runs. When set, the model state
 # (modal + physics carry) and elapsed sim-day count are saved to this
 # path after each chunk; if the file already exists at startup the run

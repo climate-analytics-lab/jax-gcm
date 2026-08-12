@@ -351,6 +351,36 @@ class TestColumnSweepMicrophysics:
         assert float(state.precip_rain) > 1e-6
         assert float(state.precip_snow) == 0.0
 
+    def test_accretion_rate_diagnosed_when_rain_falls_through_cloud(self):
+        """Rain falling through a cloudy deck must report accretion.
+
+        Regression for the Codex finding on #604: ``accretn`` was
+        published as zero because the per-level accretion rate never
+        left the sweep. A liquid deck spanning several near-saturated
+        levels forms rain aloft that falls through cloud below, so
+        both in-cloud (zrac2) and below-anvil (zrac1) accretion fire.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(280.0, 295.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.95 * qsw
+        qc = jnp.zeros(nlev).at[5:12].set(1e-3)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        assert state.accretion_rate.shape == (nlev,)
+        assert float(jnp.max(state.accretion_rate)) > 0.0
+        # No accretion outside the deck.
+        assert float(jnp.max(state.accretion_rate[:5])) == 0.0
+
     def test_subsaturated_column_evaporates_rain(self):
         """A dry column under a cloud must evaporate falling rain.
 
