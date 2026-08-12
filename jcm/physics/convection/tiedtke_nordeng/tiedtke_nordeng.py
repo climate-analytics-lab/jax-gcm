@@ -106,7 +106,7 @@ def initialize_convection(temperature: jnp.ndarray,
     return ConvectionState(
         tu=tu, qu=qu, lu=lu, uu=uu, vu=vu,
         td=td, qd=qd, ud=ud, vd=vd,
-        mfu=mfu, mfd=mfd,
+        mfu=mfu, mfd=mfd, entr=jnp.zeros_like(temperature),
         ktype=ktype, kbase=kbase, ktop=ktop,
         prate=prate
     )
@@ -878,6 +878,10 @@ def tiedtke_nordeng_convection(
             td=downdraft_state.td, qd=downdraft_state.qd,
             ud=u_wind, vd=v_wind,  # Simplified
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
+            # Fractional entrainment (1/m) is rescale-invariant (a rate,
+            # not a flux); the transport term rebuilds the absolute
+            # entrainment flux against the rescaled mfu.
+            entr=updraft_state.entr,
             ktype=jnp.asarray(conv_type, dtype=jnp.int32),
             kbase=jnp.array(cloud_base),
             ktop=actual_ktop, prate=enhanced_tendencies.precip_conv,
@@ -1147,17 +1151,41 @@ class TiedtkeConvection(PhysicsTerm):
             },
         )
 
-        # Mass-flux / cloud-base/top / CAPE diagnostics aren't populated
-        # by the wrapper today (the scheme returns the per-column state
-        # but we don't reduce or surface it yet) — they stay as zeros
-        # for back-compat with existing xarray field names. The heating /
+        # Cloud-base/top / CAPE diagnostics aren't populated by the
+        # wrapper today (the scheme returns the per-column state but we
+        # don't reduce or surface it yet) — they stay as zeros for
+        # back-compat with existing xarray field names. The heating /
         # moistening rates, by contrast, are the *applied* (post-cap)
         # tendencies returned above, surfaced so downstream analysis (e.g.
         # an RCE convective-vs-radiative heating balance) reads them straight
         # off the trajectory instead of re-running the term.
+        #
+        # Mass fluxes and the absolute entrainment flux (#602) carry the
+        # SAME per-column cap scaling as the tendency ledger, so the
+        # tracer transport they drive stays proportional to the heat and
+        # moisture transport actually applied. ``entr`` is the fractional
+        # rate (1/m); the absolute per-layer entrainment flux is
+        # ``entr_k · mfu_{k+1} · dz_k`` (the plume entrains against the
+        # flux ENTERING the layer from below — updraft.py's ``dmf_entr``).
+        # Custom/test schemes may return no state — zeros then (like
+        # ktype), meaning no convective tracer transport.
+        if _state_all is not None:
+            _mfu = (_state_all.mfu * cap_scale).T          # (nlev, ncols)
+            _mfd = (_state_all.mfd * cap_scale).T
+            _mfu_below = jnp.concatenate(
+                [_mfu[1:], jnp.zeros_like(_mfu[:1])], axis=0
+            )
+            _entrain = (
+                _state_all.entr.T * _mfu_below * layer_thickness
+            )
+        else:
+            _mfu = jnp.zeros_like(pressure_full)
+            _mfd = jnp.zeros_like(pressure_full)
+            _entrain = jnp.zeros_like(pressure_full)
         convection = ConvectionData(
-            mass_flux_up=jnp.zeros_like(pressure_full),
-            mass_flux_down=jnp.zeros_like(pressure_full),
+            mass_flux_up=_mfu,
+            mass_flux_down=_mfd,
+            entrain_up=_entrain,
             cloud_base=jnp.zeros(ncols, dtype=int),
             cloud_top=jnp.zeros(ncols, dtype=int),
             cape=jnp.zeros(ncols),

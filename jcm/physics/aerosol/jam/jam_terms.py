@@ -66,7 +66,15 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
 )
+from jcm.physics.convection.tracer_transport import (
+    ConvectiveTracerTransport,
+    ConvTransportParameters,
+)
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.vertical_diffusion.tracer_diffusion import (
+    TracerDiffusionParameters,
+    TracerVerticalDiffusion,
+)
 
 def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
     """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
@@ -145,6 +153,10 @@ def jam_aerosol_physics(
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
     wetdep: WetDepParameters | None = None,
+    vertical_mixing: bool = True,
+    tracer_diffusion: TracerDiffusionParameters | None = None,
+    convective_transport: bool = True,
+    conv_transport: ConvTransportParameters | None = None,
 ) -> list[PhysicsTerm]:
     """Build the ordered JAM harness term list.
 
@@ -181,9 +193,21 @@ def jam_aerosol_physics(
         ice_scheme: heterogeneous freezing scheme — ``"niemand"`` (default,
             singular/active-site) or ``"lohmann_diehl"`` (ECHAM-HAM number-based);
             ``ice_nucleation_params`` overrides the differentiable defaults.
-        activation/cloud_borne_exchange/sedimentation/drydep/wetdep: optional
-            per-process ``Parameters`` overrides (each ``None`` resolves to
-            its default).
+        activation/cloud_borne_exchange/sedimentation/drydep/wetdep/
+            tracer_diffusion/conv_transport: optional per-process
+            ``Parameters`` overrides (each ``None`` resolves to its
+            default).
+        vertical_mixing: turbulent vertical diffusion of every JAM tracer
+            with the TTE-TKE exchange coefficients (#602 item 2 — ECHAM
+            diffuses all tracers in vdiff; without this the dycore is the
+            sole aerosol transporter). On by default.
+        convective_transport: bulk mass-flux transport of the interstitial
+            aerosol and gas tracers through Tiedtke updrafts with
+            compensating subsidence (ECHAM ``cuxtte`` analogue; #602 item
+            2). Cloud-borne mirrors are deliberately excluded — their
+            updraft processing is entangled with convective scavenging
+            and neither reference model transports a stratiform
+            cloud-borne phase convectively. On by default.
 
     Returns:
         The ordered term list: natural emissions, prescribed oxidants and
@@ -217,12 +241,44 @@ def jam_aerosol_physics(
         from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
             ResetEmissionFluxes)
         emissions = [ResetEmissionFluxes(), *emissions]
-    pre_core = [
-        *emissions,
+    chemistry = [
         # Sulfur chemistry: oxidants → gas-phase DMS/SO2 oxidation, producing
         # the H2SO4/SOAG gas the core condenses + nucleates this same step.
         PrescribedOxidants(params=oxidants),
         SulfurGasChemistry(params=sulfur_gas),
+    ]
+    # Physics-side vertical transport (#602 item 2). The tracer set is
+    # everything the composed JAM terms declare (aerosol in both phases +
+    # gas precursors); ECHAM's vdiff diffuses all of them. Convection
+    # moves the interstitial + gas tracers only (see the docstring).
+    # Placed right after the emitters so the narrative order matches
+    # ECHAM's physc (vdiff -> convection -> chemistry); under operator
+    # splitting the tendencies sum regardless.
+    transport_names: list[str] = []
+    for _t in [core, *emissions, *chemistry]:
+        for _s in _t.required_tracers():
+            if _s.name not in transport_names:
+                transport_names.append(_s.name)
+    transport_terms: list[PhysicsTerm] = []
+    if vertical_mixing:
+        transport_terms.append(
+            TracerVerticalDiffusion(
+                tuple(transport_names), params=tracer_diffusion,
+            )
+        )
+    if convective_transport:
+        interstitial_names = tuple(
+            n for n in transport_names if not n.startswith(("mc_", "nc_"))
+        )
+        transport_terms.append(
+            ConvectiveTracerTransport(
+                interstitial_names, params=conv_transport,
+            )
+        )
+    pre_core = [
+        *emissions,
+        *transport_terms,
+        *chemistry,
     ]
     # Online aerosol direct radiative effect (#495): placed right after the core
     # (needs ``_jam_state``); overwrites the MACv2-SP ``aerosol`` optics.
