@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from omegaconf import DictConfig
 
 from jcm import provenance
-from jcm.diffusion import DiffusionFilter
+from jcm.diffusion import ECHAM_LMIDATM_LAYERS, DiffusionFilter
 from jcm.model import Model, ModelPredictions
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
@@ -426,41 +426,53 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     """Build a ``DiffusionFilter`` honouring ``cfg.diffusion`` + the grid.
 
     Resolution selector: when ``cfg.diffusion.kind`` is ``"auto"`` (the
-    default) and the grid is an L47 hybrid, return the matching
-    ECHAM ``lmidatm`` level-dependent profile (del² at top 4 levels, del⁴
-    at 5-7, del⁶ at 8-9, del⁸ below) — that's the stability stack the
-    grid was tuned for in ECHAM. T63L47 picks the 7-hour base timescale;
-    T85L47 picks 3 h. Set ``cfg.diffusion.kind: default`` to force the
-    uniform SPEEDY del² profile (24h temp / 12h vor_q / 2h div), or
-    ``cfg.diffusion.kind: echam_t63_l47`` / ``echam_t85_l47`` to pin a
-    specific factory regardless of grid. ``cfg.diffusion.scale`` still
-    multiplies the chosen profile's timescales — keep the existing
-    SPEEDY-tuned configs working unchanged.
+    default) and the grid is a hybrid grid with a level count ECHAM
+    tabulates (L47 or L95), return the ECHAM ``lmidatm`` level-dependent
+    profile for that ``(truncation, layers)`` — del² near the model top
+    grading to del⁶/del⁸ below, with the ``setdyn.f90`` base timescale.
+    That's the stability stack these grids were tuned for in ECHAM, and it
+    is what the L95 middle-atmosphere grids exist to exploit. Any other
+    grid — SPEEDY T31L8, Held-Suarez, a hybrid grid at an untabulated level
+    count — gets the uniform SPEEDY del² profile, with a warning in the
+    hybrid case since that is unlikely to be what was intended (#579).
+
+    Set ``cfg.diffusion.kind: default`` to force the uniform SPEEDY profile
+    (24h temp / 12h vor_q / 2h div), ``echam_lmidatm`` to force the ECHAM
+    profile for the configured grid, or ``echam_t63_l47`` / ``echam_t85_l47``
+    to pin a specific named profile regardless of grid.
+    ``cfg.diffusion.scale`` still multiplies the chosen profile's timescales
+    — keep the existing SPEEDY-tuned configs working unchanged.
     """
     diffusion = cfg.get("diffusion", None)
     kind = "auto" if diffusion is None else str(diffusion.get("kind", "auto"))
     scale = 1.0 if diffusion is None else float(diffusion.get("scale", 1.0))
 
+    grid_cfg = cfg.get("grid", None)
+    layers = int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0
+    truncation = int(grid_cfg.get("spectral_truncation", 0)) if grid_cfg is not None else 0
+    vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
+
     if kind == "auto":
-        # Pick by grid: ECHAM lmidatm profile for L47 hybrid grids, SPEEDY
-        # default otherwise. Match on the (vertical=hybrid, layers, truncation)
-        # triple so this fires for both echam_t63_l47_hybrid and
-        # echam_t85_l47_hybrid — and stays inert for SPEEDY T31L8 / Held-Suarez.
-        grid_cfg = cfg.get("grid", None)
-        layers = int(grid_cfg.get("layers", 0)) if grid_cfg is not None else 0
-        truncation = int(grid_cfg.get("spectral_truncation", 0)) if grid_cfg is not None else 0
-        vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
-        if vertical == "hybrid" and layers == 47:
-            if truncation == 63:
-                base = DiffusionFilter.echam_t63_l47()
-            elif truncation == 85:
-                base = DiffusionFilter.echam_t85_l47()
-            else:
-                base = DiffusionFilter.default()
+        # Match on the (vertical=hybrid, layers) pair so this fires for every
+        # ECHAM-family grid at any truncation — and stays inert for SPEEDY
+        # T31L8 / Held-Suarez, which have their own tuned uniform damping.
+        if vertical == "hybrid" and layers in ECHAM_LMIDATM_LAYERS:
+            base = DiffusionFilter.echam_lmidatm(truncation, layers)
         else:
+            if vertical == "hybrid":
+                logger.warning(
+                    "diffusion.kind=auto found no ECHAM lmidatm profile for a "
+                    "hybrid grid with %d levels, so this run uses the uniform "
+                    "SPEEDY profile (24h temp / 12h vor_q / 2h div). ECHAM "
+                    "profiles exist for %s levels. Set diffusion.kind "
+                    "explicitly to silence this.",
+                    layers, sorted(ECHAM_LMIDATM_LAYERS),
+                )
             base = DiffusionFilter.default()
     elif kind == "default":
         base = DiffusionFilter.default()
+    elif kind == "echam_lmidatm":
+        base = DiffusionFilter.echam_lmidatm(truncation, layers)
     elif kind == "echam_t63_l47":
         base = DiffusionFilter.echam_t63_l47()
     elif kind == "echam_t85_l47":
@@ -468,7 +480,21 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     else:
         raise ValueError(
             f"Unknown diffusion.kind={kind!r}; expected one of "
-            "'auto', 'default', 'echam_t63_l47', 'echam_t85_l47'."
+            "'auto', 'default', 'echam_lmidatm', 'echam_t63_l47', "
+            "'echam_t85_l47'."
+        )
+
+    # A level-dependent profile is a per-level array, so pinning one whose
+    # length does not match the grid fails later inside the spectral filter as
+    # an opaque broadcast error ("(95, 213, 108) vs (47,)"). Catch it here,
+    # where the actual mismatch can be named (#579).
+    n_orders = None if base.level_orders_temp is None else len(base.level_orders_temp)
+    if n_orders is not None and layers and n_orders != layers:
+        raise ValueError(
+            f"diffusion.kind={kind!r} builds a {n_orders}-level hyperdiffusion "
+            f"profile but the grid has {layers} levels. Use "
+            "diffusion.kind=auto (or 'echam_lmidatm') to get the profile "
+            "matching this grid, or 'default' for the uniform SPEEDY profile."
         )
 
     if scale == 1.0:

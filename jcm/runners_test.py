@@ -905,27 +905,65 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
             # unlike the uniform SPEEDY default.
             self.assertIsNotNone(diffusion.level_orders_temp)
 
-    def test_build_diffusion_auto_picks_lmidatm_for_l47_hybrid(self):
+    @staticmethod
+    def _grid_cfg(layers, truncation, kind="auto", vertical="hybrid"):
         from omegaconf import OmegaConf
+        return OmegaConf.create({
+            "diffusion": {"kind": kind},
+            "grid": {"vertical": vertical, "layers": layers,
+                     "spectral_truncation": truncation},
+        })
+
+    def test_build_diffusion_auto_picks_lmidatm_for_every_echam_grid(self):
+        """Every shipped hybrid grid must get its ECHAM lmidatm profile.
+
+        Regression for #579: ``auto`` matched on ``layers == 47``, so the L95
+        middle-atmosphere grids — which exist precisely to resolve the
+        stratosphere — silently received SPEEDY's uniform profile instead.
+        """
         from jcm.diffusion import DiffusionFilter
 
-        for truncation, factory in (
-            (63, DiffusionFilter.echam_t63_l47),
-            (85, DiffusionFilter.echam_t85_l47),
-            # An untuned truncation on the L47 grid falls back to default.
-            (42, DiffusionFilter.default),
-        ):
-            cfg = OmegaConf.create({
-                "diffusion": {"kind": "auto"},
-                "grid": {"vertical": "hybrid", "layers": 47,
-                         "spectral_truncation": truncation},
-            })
-            diffusion = build_diffusion(cfg)
-            expected = factory()
-            self.assertEqual(
-                float(diffusion.temp_timescale), float(expected.temp_timescale),
-                f"T{truncation}L47 selected the wrong diffusion profile",
-            )
+        for layers, truncation in ((47, 63), (47, 85), (47, 106), (47, 119),
+                                   (95, 63), (95, 106), (95, 119)):
+            with self.subTest(layers=layers, truncation=truncation):
+                diffusion = build_diffusion(self._grid_cfg(layers, truncation))
+                expected = DiffusionFilter.echam_lmidatm(truncation, layers)
+                self.assertEqual(float(diffusion.temp_timescale),
+                                 float(expected.temp_timescale))
+                self.assertEqual(len(diffusion.level_orders_temp), layers)
+
+    def test_build_diffusion_auto_warns_when_falling_back_on_a_hybrid_grid(self):
+        """The SPEEDY fallback on an ECHAM-family grid must not be silent."""
+        from jcm.diffusion import DiffusionFilter
+
+        with self.assertLogs("jcm.runners", level="WARNING") as captured:
+            diffusion = build_diffusion(self._grid_cfg(layers=31, truncation=63))
+        self.assertEqual(float(diffusion.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+        self.assertIn("no ECHAM lmidatm profile", "\n".join(captured.output))
+
+    def test_build_diffusion_auto_stays_silent_for_non_hybrid_grids(self):
+        """SPEEDY/Held-Suarez sigma grids are tuned for the uniform profile."""
+        import logging
+
+        from jcm.diffusion import DiffusionFilter
+
+        with self.assertNoLogs("jcm.runners", level=logging.WARNING):
+            diffusion = build_diffusion(
+                self._grid_cfg(layers=8, truncation=31, vertical="sigma"))
+        self.assertEqual(float(diffusion.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+
+    def test_build_diffusion_rejects_a_profile_of_the_wrong_length(self):
+        """Pinning an L47 profile on an L95 grid must fail with a clear error.
+
+        Previously this surfaced deep inside the spectral filter as
+        "objects cannot be broadcast to a single shape ... (95, 213, 108)
+        and (47,)", which named neither the config key nor the grid (#579).
+        """
+        cfg = self._grid_cfg(layers=95, truncation=106, kind="echam_t85_l47")
+        with self.assertRaisesRegex(ValueError, r"47-level .* grid has 95 levels"):
+            build_diffusion(cfg)
 
     def test_build_diffusion_unknown_kind_raises(self):
         from omegaconf import OmegaConf
