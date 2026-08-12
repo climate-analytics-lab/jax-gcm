@@ -368,7 +368,27 @@ relaxation timescale.
 The most common pattern is to nudge winds above the boundary layer and
 let everything else evolve freely, so the model gets the right
 synoptic-scale circulation while its physics still has the freedom to
-respond:
+respond.
+
+**From config** the whole setup is one flag: ``nudging=era5`` pulls the
+run window from WeatherBench2's public cloud ERA5 (regridded to the
+model grid and cached locally by :mod:`jcm.data.era5`), and
+``init=era5`` starts the run from the ERA5 state at the same date:
+
+.. code-block:: console
+
+   $ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
+         init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
+
+Prefetch on a login node first when compute nodes lack internet
+(``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start
+2010-01-01 --end 2010-01-31 --init``). The WB2 stores carry 13 pressure
+levels up to 50 hPa, so nudging is automatically masked off above
+``nudging.min_pressure_hpa`` (default 60), and requires internet or a
+warm cache; see ``jcm/config/nudging/era5.yaml`` for the knobs
+(``tau_hours``, ``pbl_levels``, ``nudge_temperature``, ``freq``).
+
+**In code**, wire it manually against any reference dataset:
 
 .. code-block:: python
 

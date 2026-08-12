@@ -36,6 +36,7 @@ omit =
     jcm/data/regridding.py
     jcm/data/mirror/registry.py
     jcm/data/remote.py
+    jcm/data/era5.py
     jcm/provenance.py
     # PR-only: utility / orchestration modules. The fast-test suite
     # exercises these thoroughly; the slow integration tests only
