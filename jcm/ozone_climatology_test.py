@@ -321,8 +321,11 @@ def _write_yearly_ozone(path: Path, year: int, nlon: int, nlat: int,
 class TestYearlyOzoneFiles(unittest.TestCase):
     """Multi-file (yearly transient) ozone loading (#610)."""
 
-    def test_yearly_list_concatenates_to_by_date(self):
-        from jcm.forcing import BY_DATE
+    def test_yearly_list_concatenates_to_by_date_interp(self):
+        # Mid-month monthly means sampled piecewise-constant would lag
+        # by half a month (Jan 1-14 reading December's mean) — yearly
+        # lists therefore route to BY_DATE_INTERP (Codex P1 on #611).
+        from jcm.forcing import BY_DATE_INTERP
         with tempfile.TemporaryDirectory() as tmp:
             p79 = Path(tmp) / "1979.nc"
             p80 = Path(tmp) / "1980.nc"
@@ -332,11 +335,37 @@ class TestYearlyOzoneFiles(unittest.TestCase):
                                               nlev=16)
         ts = clim.o3_ppmv
         self.assertEqual(ts.values.shape, (24, 16, 32))
-        self.assertEqual(int(ts.align_mode), BY_DATE)
+        self.assertEqual(int(ts.align_mode), BY_DATE_INTERP)
         # Second year's slices carry the second year's value (8 ppmv).
         self.assertAlmostEqual(float(ts.values[12:].max()), 8.0, delta=0.1)
         # Time axis is strictly increasing across the file boundary.
         self.assertTrue(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+
+    def test_yearly_interp_blends_across_the_year_boundary(self):
+        # 1980-01-01 sits between 1979-12-15 (4 ppmv) and 1980-01-15
+        # (8 ppmv): the selected value must be strictly between the two,
+        # not December's mean.
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        from jcm.forcing import ForcingData
+        with tempfile.TemporaryDirectory() as tmp:
+            p79 = Path(tmp) / "1979.nc"
+            p80 = Path(tmp) / "1980.nc"
+            _write_yearly_ozone(p79, 1979, 8, 4, 16, 4.0e-6)
+            _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6)
+            clim = OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
+                                              nlev=16)
+        forcing = ForcingData.zeros((8, 4)).copy(ozone_climatology=clim)
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime("1980-01-01")),
+            calendar="gregorian")
+        o3 = np.asarray(
+            forcing.select(date, calendar="gregorian")
+            .ozone_climatology.o3_ppmv)
+        self.assertGreater(float(o3.max()), 5.0)
+        self.assertLess(float(o3.max()), 7.5)
 
     def test_mixed_time_epochs_raise(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -350,10 +379,10 @@ class TestYearlyOzoneFiles(unittest.TestCase):
                                            nlev=16)
 
     def test_noleap_calendar_transient_decodes(self):
-        # The FZJ ozone product uses a 365_day calendar; the BY_DATE
+        # The FZJ ozone product uses a 365_day calendar; the transient
         # decoder must map its cftime dates onto the Gregorian clock
         # rather than crash (or drift by accumulated leap days).
-        from jcm.forcing import BY_DATE
+        from jcm.forcing import BY_DATE_INTERP
         with tempfile.TemporaryDirectory() as tmp:
             p79 = Path(tmp) / "1979.nc"
             p80 = Path(tmp) / "1980.nc"
@@ -364,7 +393,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
             clim = OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
                                               nlev=16)
         ts = clim.o3_ppmv
-        self.assertEqual(int(ts.align_mode), BY_DATE)
+        self.assertEqual(int(ts.align_mode), BY_DATE_INTERP)
         self.assertTrue(np.all(np.isfinite(np.asarray(ts.time_seconds))))
         self.assertTrue(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
 
