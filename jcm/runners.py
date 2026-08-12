@@ -398,7 +398,7 @@ def _resolve_data_path(path):
     return path
 
 
-def _expand_years(file_spec, years):
+def _expand_years(file_spec, years, available=None):
     """Expand a ``{year}`` file pattern into the yearly-bundle file list.
 
     The transient AMIP bundles are one file per year (issue #610:
@@ -410,6 +410,14 @@ def _expand_years(file_spec, years):
     specs (plain paths, lists, ``None``) pass through untouched even when
     ``years`` is set — a run may mix yearly SST files with a static dust
     climatology, all sharing one ``forcing.years`` range.
+
+    ``available`` (``forcing.available_years``, the product's inclusive
+    source coverage) widens the expansion by one year on each side,
+    clipped to that coverage: the yearly files hold *mid-month* samples,
+    so a run starting Jan 1 needs the previous December's sample (and a
+    run ending Dec 31 the next January's) for ``by_date_interp`` to
+    bracket the boundary instead of clamping to the nearest mid-month
+    value for ~half a month.
     """
     has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
     if not has_pattern:
@@ -421,6 +429,9 @@ def _expand_years(file_spec, years):
     first, last = int(years[0]), int(years[-1])
     if last < first:
         raise ValueError(f"forcing.years range is reversed: {years!r}")
+    if available is not None:
+        lo, hi = int(available[0]), int(available[-1])
+        first, last = max(first - 1, lo), min(last + 1, hi)
     return [file_spec.format(year=y) for y in range(first, last + 1)]
 
 
@@ -1014,7 +1025,8 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         forcing = None
     elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
-        files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None))
+        files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
+                              forcing_cfg.get("available_years", None))
         forcing = ForcingData.from_file(
             _resolve_data_path(files), coords=coords,
             align_mode=str(forcing_cfg.get("align", "auto")))
@@ -1094,7 +1106,8 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         return forcing
     ozone_file = _resolve_data_path(_expand_years(
         forcing_cfg.get("ozone_file", None),
-        forcing_cfg.get("years", None)))
+        forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
     if isinstance(ozone_file, (list, tuple)):
         ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):
@@ -1164,7 +1177,8 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         return forcing
     path = _resolve_data_path(_expand_years(
         forcing_cfg.get("emissions_file", None),
-        forcing_cfg.get("years", None)))
+        forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
     if path in (None, "", "null"):
         return forcing
 
