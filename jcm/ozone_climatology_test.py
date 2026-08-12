@@ -295,7 +295,7 @@ def _write_yearly_ozone(path: Path, year: int, nlon: int, nlat: int,
                         nlev: int, value: float,
                         units: str = "days since 1850-01-01",
                         calendar: str = "standard") -> None:
-    """A 12-step transient ozone year with an explicit raw time axis."""
+    """Write a 12-step transient ozone year with an explicit raw time axis."""
     import pandas as pd
     lat = np.linspace(-88.0, 88.0, nlat).astype(np.float64)
     lon = np.linspace(0.0, 360.0, nlon, endpoint=False).astype(np.float64)
