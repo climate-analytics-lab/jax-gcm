@@ -1,38 +1,50 @@
 """``WetScavenging`` — in-cloud and below-cloud aerosol scavenging.
 
-Two removal pathways for aerosol, both differentiable and built
-only from diagnostics the cloud scheme already exposes (so the cloud
-microphysics terms are untouched). With a prognostic cloud-borne phase
-(``spec.cloud_borne``, #602) the stratiform in-cloud pathway acts on the
-cloud-borne tracers at the full condensate→precip conversion rate and the
-interstitial tracers keep impaction + convective processing; without one,
-the in-cloud pathway acts on interstitial aerosol weighted by its activated
-fraction (the implicit M7/TOMAS-style treatment):
+Removal pathways for aerosol, all differentiable, driven by the per-level
+precipitation process rates the cloud microphysics schemes actually
+integrate (``CloudData.precip_formation_rate`` / ``precip_evaporation_rate``,
+#499; the carrier flux is their own cumulative ledger, which deliberately
+excludes the sedimenting cloud-ice flux — see ``__call__``). With a prognostic
+cloud-borne phase (``spec.cloud_borne``, #602) the stratiform in-cloud
+pathway acts on the cloud-borne tracers at the full condensate→precip
+conversion rate and the interstitial tracers keep impaction + convective
+processing; without one, the in-cloud pathway acts on interstitial aerosol
+weighted by its per-mode activated fractions (the implicit M7/TOMAS-style
+treatment):
 
-* **In-cloud nucleation scavenging** — the activated fraction of aerosol is in
-  cloud droplets and is removed at the rate cloud condensate converts to
-  precipitation. As an interim, the per-level precip-formation rate is
-  *reconstructed* by distributing the column surface precip
-  (``CloudData.precip_rain/snow``) across the cloudy column weighted by
-  in-cloud condensate; exposing the true per-level formation (and
-  evaporation) rate from the cloud schemes — and adding re-evaporation
-  re-injection — is tracked in #499.
-* **Below-cloud impaction scavenging** — falling precipitation collects
-  interstitial aerosol in clear air, with a size-dependent (∝ r²) collection
-  efficiency so coarse particles are scavenged far faster than accumulation
-  mode. Driven by stratiform AND convective precipitation — with the
-  convective contribution masked to levels at/below the convective cloud
-  top (diagnosed by pressure from the heating footprint), since rain
-  cannot collect aerosol above where it forms.
+* **In-cloud nucleation scavenging** — aerosol residing in cloud droplets is
+  removed at the local rate cloud condensate converts to precipitation,
+  ``precip_formation_rate / (qc + qi)`` (both grid-mean, so the cloudy-area
+  factor cancels inside the ratio).
+* **Below-cloud impaction scavenging** — precipitation falling through a
+  layer collects aerosol in its clear-air part, with a size-dependent
+  (∝ r²) collection efficiency. The stratiform contribution uses the
+  per-level flux entering each layer, so washout is automatically confined
+  below where precip actually forms; the convective contribution uses the
+  surface convective precip masked to levels at/below the convective cloud
+  top (diagnosed by pressure from the heating footprint).
 * **Convective in-cloud scavenging** — the convective mirror of the
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
   ``precip_formation`` (ECHAM ``pdmfup``) and ``qc_conv``/``qi_conv``;
-  soluble modes only.
+  activatable modes only.
+* **Re-evaporation re-injection** — aerosol scavenged by the stratiform
+  pathways is carried in the falling precip; where that precip evaporates
+  or sublimates, the same fraction of the carried aerosol returns to the
+  INTERSTITIAL phase (a droplet that evaporates releases its aerosol, so
+  cloud-borne-scavenged material also re-enters as interstitial). The
+  aerosol-in-precip flux is integrated top to bottom per tracer, exactly
+  mirroring HAMMOZ ``mo_ham_wetdep``'s re-evaporation ledger; the flux
+  reaching the bottom is the net surface wet deposition. Convectively
+  scavenged aerosol is deposited directly (the convection scheme exposes no
+  evaporation profile yet).
 
 ``ConvectionData`` is read via ``diagnostics.get("convection")`` with a
 zero-precip fallback so the term still composes without a convection
-scheme.
+scheme. A cloud scheme that does not populate the per-level process rates
+(both ECHAM schemes do) yields zero stratiform scavenging altogether — the
+in-cloud rate, the impaction carrier and the re-injection ledger all derive
+from those two fields.
 
 Mirrors ``mo_hammoz_wetdep``.
 """
@@ -41,6 +53,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import tree_math
 from flax import nnx
@@ -51,6 +64,13 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _EPS = 1.0e-30
+# Physical floors for the re-injection budget's divisions. Values below
+# these are dynamically negligible (a 1e-15 1/s removal rate is a ~30 Myr
+# timescale; 1e-12 kg/m²/s is ~1e-4 mm/day), and a *physical* floor — not a
+# tiny epsilon — keeps the guarded-division VJPs clear of the squared-
+# underflow window in float32 (the double-where NaN class).
+_RATE_FLOOR = 1.0e-15   # [1/s]
+_FLUX_FLOOR = 1.0e-12   # [kg/m²/s]
 
 
 @tree_math.struct
@@ -74,24 +94,12 @@ class WetDepParameters:
         )
 
 
-def precip_formation_rate(
-    precip_col: jnp.ndarray,      # (ncols,) surface precip [kg/m²/s]
-    cloud_fraction: jnp.ndarray,  # (nlev, ncols)
-    qc: jnp.ndarray,              # (nlev, ncols)
-    air_density: jnp.ndarray,
-    layer_thickness: jnp.ndarray,
-) -> jnp.ndarray:
-    """Per-level condensate→precip conversion rate [kg/kg/s].
-
-    Distributes the column surface precip across the cloudy column weighted
-    by in-cloud condensate, converting the surface mass flux to a local
-    mixing-ratio sink rate.
-    """
-    weight = cloud_fraction * jnp.maximum(qc, 0.0)
-    w_sum = jnp.sum(weight, axis=0, keepdims=True)
-    frac = weight / jnp.maximum(w_sum, _EPS)
-    local = precip_col[jnp.newaxis, :] / (air_density * layer_thickness)
-    return local * frac
+#: Physical condensate floor for the in-cloud rate [kg/kg]. A cell with less
+#: than this holds no cloud worth scavenging in; it is also what keeps the
+#: division's VJP clear of the float32 squared-underflow window (a 1e-30
+#: epsilon guard here gave a verified NaN gradient in every clear f32 cell:
+#: the cotangent forms p_form/condensate², and 1e-60 flushes to zero).
+_CONDENSATE_FLOOR = 1.0e-12
 
 
 def in_cloud_rate(
@@ -99,18 +107,24 @@ def in_cloud_rate(
     p_form: jnp.ndarray,
     qc: jnp.ndarray,
 ) -> jnp.ndarray:
-    """In-cloud scavenging rate [1/s] applied to interstitial aerosol."""
-    return activated_fraction * p_form / jnp.maximum(qc, _EPS)
+    """In-cloud scavenging rate [1/s] applied to in-droplet aerosol."""
+    rate = activated_fraction * p_form / jnp.maximum(qc, _CONDENSATE_FLOOR)
+    return jnp.where(qc > _CONDENSATE_FLOOR, rate, 0.0)
 
 
 def below_cloud_rate(
-    precip_col: jnp.ndarray,
-    cloud_fraction: jnp.ndarray,
+    precip_flux: jnp.ndarray,     # (nlev, ncols) precip falling through [kg/m²/s]
+    cloud_fraction: jnp.ndarray,  # (nlev, ncols)
     r_wet: jnp.ndarray,
     params: WetDepParameters,
 ) -> jnp.ndarray:
-    """Below-cloud impaction scavenging rate [1/s], size-dependent (∝ r²)."""
-    rain_mmph = precip_col[jnp.newaxis, :] * 3600.0  # kg/m²/s -> mm/h
+    """Below-cloud impaction scavenging rate [1/s], size-dependent (∝ r²).
+
+    ``precip_flux`` is the local flux falling through each layer (per-level
+    profile for stratiform precip; a broadcast surface value is the interim
+    convective treatment).
+    """
+    rain_mmph = precip_flux * 3600.0  # kg/m²/s -> mm/h
     efficiency = (r_wet / params.below_radius_ref) ** 2
     # Clear-sky (below-cloud) fraction, clipped to [0, 1]. The cloud scheme can
     # return cloud_fraction > 1 (e.g. where RH > 1), which would make this
@@ -144,8 +158,50 @@ def conv_in_cloud_rate(
     return jnp.where(conv_condensate > 1.0e-12, rate, 0.0)
 
 
+def reinjection_budget(
+    scavenged_below: jnp.ndarray,   # (K, nlev, ncols) impaction removal [kg/m²/s]
+    scavenged_formed: jnp.ndarray,  # (K, nlev, ncols) in-cloud removal [kg/m²/s]
+    evap_fraction: jnp.ndarray,     # (nlev, ncols) incoming-precip fraction evaporating
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Aerosol-in-precip ledger: re-injected flux per layer + surface flux.
+
+    Integrates the scavenged-aerosol flux top to bottom, honouring the
+    cloud schemes' own flux ordering (evaporation is capped by the
+    INCOMING precip, formation is added after): aerosol impacted out by
+    the falling precip within a layer (``scavenged_below``) joins the
+    incoming carrier BEFORE the release — a fully-evaporating virga layer
+    releases it rather than surface-depositing it through dry air — while
+    aerosol scavenged into precip NEWLY FORMED in the layer
+    (``scavenged_formed``) joins AFTER, because the incoming carrier's
+    evaporation cannot touch precip that is only now forming and heading
+    down. Returns ``(reinjected, surface_flux)`` with ``reinjected``
+    shaped like the inputs and ``surface_flux`` ``(K, ncols)``, satisfying
+    column conservation
+    ``sum_k(scavenged_below + scavenged_formed - reinjected) =
+    surface_flux`` exactly.
+    """
+    def step(carried, xs):
+        s_below_k, s_form_k, e_k = xs        # (K, ncols) x2, (ncols,)
+        incoming = carried + s_below_k
+        released = incoming * e_k[jnp.newaxis, :]
+        carried = incoming - released + s_form_k
+        return carried, released
+
+    k, _, ncols = scavenged_below.shape
+    surface, released = jax.lax.scan(
+        step,
+        jnp.zeros((k, ncols), scavenged_below.dtype),
+        (
+            jnp.moveaxis(scavenged_below, 1, 0),
+            jnp.moveaxis(scavenged_formed, 1, 0),
+            evap_fraction,
+        ),
+    )
+    return jnp.moveaxis(released, 0, 1), surface
+
+
 class WetScavenging(PhysicsTerm):
-    """In-cloud + below-cloud scavenging of interstitial aerosol."""
+    """In-cloud + below-cloud scavenging with re-evaporation re-injection."""
 
     name: ClassVar[str] = "jam_wet_deposition"
     category: ClassVar[str] = "aerosol_wetdep"
@@ -171,19 +227,53 @@ class WetScavenging(PhysicsTerm):
         activated_fraction = diagnostics["activated_fraction"]
         air_density = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]
+        dm = air_density * dz
         # Timestep for the implicit (exponential) scavenging update below.
         dt = diagnostics.get("_dt_seconds", 1800.0)
 
         clouds = diagnostics["clouds"]
-        precip_col = clouds.precip_rain + clouds.precip_snow
         cloud_fraction = clouds.cloud_fraction
-        qc = clouds.qc
+        # Total cloud condensate: the formation ledger spans both the rain
+        # (from qc) and snow (from qc and qi) pathways, so the in-droplet
+        # residence pool is liquid + ice.
+        condensate = jnp.maximum(clouds.qc, 0.0) + jnp.maximum(clouds.qi, 0.0)
+        # Per-level stratiform process rates from the cloud scheme (#499):
+        # the true local condensate→precip conversion and the falling-precip
+        # evaporation. The carrier flux for impaction and the re-evap ledger
+        # is rebuilt as the cumulative (formation − evaporation) integral of
+        # those same rates rather than read from ``clouds.rain_flux +
+        # snow_flux``: the schemes fold the sedimenting cloud-ice flux into
+        # the frozen profile at interior levels, and that ice is not a
+        # scavenging carrier (its sublimation is likewise excluded from
+        # ``precip_evaporation_rate``), so using the profiles directly would
+        # both drive impaction with a non-carrier flux and dilute the
+        # re-evaporation fraction under cirrus. Melt only moves mass between
+        # rain and snow, so the summed ledger is exact for the actual
+        # precip; the floor guards accumulated round-off. Note the
+        # ice-sedimentation flux that reaches the surface as snow therefore
+        # carries no aerosol removal at all — a real missing sink, accepted
+        # with the non-carrier stance.
+        p_form = jnp.maximum(clouds.precip_formation_rate, 0.0)
+        p_evap = jnp.maximum(clouds.precip_evaporation_rate, 0.0)
+        strat_flux = jnp.maximum(
+            jnp.cumsum((p_form - p_evap) * dm, axis=0), 0.0
+        )
+        flux_in = jnp.concatenate(
+            [jnp.zeros_like(strat_flux[:1]), strat_flux[:-1]], axis=0
+        )
+        # Fraction of the precip entering a layer that evaporates within it,
+        # guarded on a physical flux floor (see _FLUX_FLOOR note above).
+        evap_fraction = jnp.where(
+            flux_in > _FLUX_FLOOR,
+            jnp.clip(p_evap * dm / jnp.maximum(flux_in, _FLUX_FLOOR), 0.0, 1.0),
+            0.0,
+        )
 
         # Convective precipitation (Tiedtke). Zero-precip fallback keeps the
         # term composable without a convection scheme (see module docstring).
         conv = diagnostics.get("convection")
         if conv is None:
-            conv_precip = jnp.zeros_like(precip_col)
+            conv_precip = jnp.zeros_like(state.temperature[0])
             rate_conv_incloud = jnp.zeros_like(state.temperature)
             conv_below = jnp.zeros_like(state.temperature)
         else:
@@ -209,58 +299,63 @@ class WetScavenging(PhysicsTerm):
                 # No pressure diagnostic: column-wide washout, not none.
                 conv_below = jnp.ones_like(state.temperature)
 
-        p_form = precip_formation_rate(
-            precip_col, cloud_fraction, qc, air_density, dz,
-        )
         # The implicit stratiform rate is weighted by the cloudy area
-        # fraction: the grid-mean p_form/qc ratio is the IN-CLOUD conversion
-        # rate (cf cancels between them), but only cf·af of the grid-mean
-        # interstitial tracer is in droplets. Without the cf factor broken
-        # cloud (cf ~ 0.3) over-scavenged ~3x, and the implicit and explicit
-        # cloud-borne representations would disagree at exchange equilibrium
-        # for reasons that have nothing to do with the representation (#602).
+        # fraction: the grid-mean p_form/condensate ratio is the IN-CLOUD
+        # conversion rate (cf cancels between them), but only cf·af of the
+        # grid-mean interstitial tracer is in droplets. ``in_cloud_rate`` is
+        # linear in the activated fraction, so keep the unit-fraction base
+        # and apply per-mode, per-quantity fractions below: ARG's number and
+        # mass fractions differ a lot (large particles activate
+        # preferentially) and vary by mode. The aggregate fraction is kept
+        # only as a fallback for standalone composition without ARG
+        # upstream.
         cf_clip = jnp.clip(cloud_fraction, 0.0, 1.0)
-        # ``in_cloud_rate`` is linear in the activated fraction, so keep the
-        # unit-fraction base and apply per-mode, per-quantity fractions
-        # below: ARG's number and mass fractions differ a lot (large
-        # particles activate preferentially) and vary by mode, and using
-        # the aggregate number-weighted fraction for everything biases the
-        # implicit representation away from the explicit one at exchange
-        # equilibrium. The aggregate is kept only as a fallback for
-        # standalone composition without the ARG term upstream.
         rate_ic_unit = params.incloud_scale * cf_clip * in_cloud_rate(
-            jnp.ones_like(state.temperature), p_form, qc,
+            jnp.ones_like(state.temperature), p_form, condensate,
         )
         jam_act = diagnostics.get("_jam_activation")
 
-        # Build a per-tracer scavenging rate and stack with the matching
+        # Build per-tracer scavenging rates and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
-        # than an unrolled tendency per mode×species). ``state.tracers`` is
-        # empty during ``Model.get_empty_data``'s structural probe, so fall
-        # back to zeros there (real runs have every declared tracer seeded).
+        # than an unrolled tendency per mode×species). Stratiform and
+        # convective rates are kept separate: only stratiform-scavenged
+        # aerosol enters the re-evaporation ledger (its carrier's per-level
+        # evaporation is known). ``state.tracers`` is empty during
+        # ``Model.get_empty_data``'s structural probe, so fall back to zeros
+        # there (real runs have every declared tracer seeded).
         zeros = jnp.zeros_like(state.temperature)
         names: list[str] = []
+        # Interstitial destination for each stacked tracer's re-injected
+        # aerosol: itself for interstitial tracers; the interstitial partner
+        # for cloud-borne ones (an evaporated droplet releases its aerosol
+        # to the interstitial phase).
+        reinject_to: list[str] = []
         q_list: list[jnp.ndarray] = []
-        rate_list: list[jnp.ndarray] = []
+        # Stratiform removal splits by carrier relationship (see
+        # ``reinjection_budget``): impaction into the INCOMING precip vs
+        # in-cloud scavenging into precip FORMED here.
+        rate_below_strat: list[jnp.ndarray] = []
+        rate_form_strat: list[jnp.ndarray] = []
+        rate_conv: list[jnp.ndarray] = []
         # With a prognostic cloud-borne phase (``spec.cloud_borne``, #602) the
         # stratiform in-cloud (nucleation) pathway belongs to the cloud-borne
         # tracers, which sit in the droplets by definition: they are removed
         # at the full condensate→precip conversion rate, and the interstitial
         # tracers keep only impaction and convective processing (activated
         # aerosol first transfers via ``CloudBorneExchange``, then rains
-        # out). Without it, the current implicit treatment stands — the
-        # interstitial tracers are scavenged by their activated fraction.
+        # out). Without it, the implicit treatment stands — the interstitial
+        # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
         rate_cb = params.incloud_scale * in_cloud_rate(
-            jnp.ones_like(state.temperature), p_form, qc,
+            jnp.ones_like(state.temperature), p_form, condensate,
         )
         for i, mode in enumerate(self._spec.modes):
-            # Stratiform washout column-wide (interim, #499); convective
-            # only below the convective cloud top.
-            rate_below = below_cloud_rate(
-                precip_col, cloud_fraction, aer.r_wet[i], params,
-            ) + conv_below * below_cloud_rate(
-                conv_precip, cloud_fraction, aer.r_wet[i], params,
+            below_strat = below_cloud_rate(
+                flux_in, cloud_fraction, aer.r_wet[i], params,
+            )
+            below_conv = conv_below * below_cloud_rate(
+                conv_precip[jnp.newaxis, :], cloud_fraction,
+                aer.r_wet[i], params,
             )
             # In-cloud only removes from activatable (soluble) modes — and
             # only implicitly (via the activated fraction) when there is no
@@ -272,33 +367,47 @@ class WetScavenging(PhysicsTerm):
                     frac_mass = jam_act.mass_frac[i]
                 else:
                     frac_num = frac_mass = activated_fraction
-                rate_num = rate_below + rate_conv_incloud + (
-                    frac_num * rate_ic_unit
-                )
-                rate_mass = rate_below + rate_conv_incloud + (
-                    frac_mass * rate_ic_unit
-                )
+                form_num = frac_num * rate_ic_unit
+                form_mass = frac_mass * rate_ic_unit
+                conv_rate = below_conv + rate_conv_incloud
             elif mode.can_activate:
-                rate_num = rate_mass = rate_below + rate_conv_incloud
+                form_num = form_mass = zeros
+                conv_rate = below_conv + rate_conv_incloud
             else:
-                rate_num = rate_mass = rate_below
-            names.append(number_name(mode.short))
-            q_list.append(state.tracers.get(number_name(mode.short), zeros))
-            rate_list.append(rate_num)
-            for nm in [mass_name(sp, mode.short) for sp in mode.species]:
+                form_num = form_mass = zeros
+                conv_rate = below_conv
+            n_nm = number_name(mode.short)
+            names.append(n_nm)
+            reinject_to.append(n_nm)
+            q_list.append(state.tracers.get(n_nm, zeros))
+            rate_below_strat.append(below_strat)
+            rate_form_strat.append(form_num)
+            rate_conv.append(conv_rate)
+            for sp in mode.species:
+                nm = mass_name(sp, mode.short)
                 names.append(nm)
+                reinject_to.append(nm)
                 q_list.append(state.tracers.get(nm, zeros))
-                rate_list.append(rate_mass)
+                rate_below_strat.append(below_strat)
+                rate_form_strat.append(form_mass)
+                rate_conv.append(conv_rate)
             if explicit_cb:
                 # Cloud-borne aerosol is entirely in-droplet: no below-cloud
-                # impaction, no activated-fraction weighting.
-                for nm in [number_name(mode.short, cloud_borne=True)] + [
-                    mass_name(sp, mode.short, cloud_borne=True)
+                # impaction, no activated-fraction weighting, and its
+                # re-injected share returns to the interstitial partner.
+                pairs = [(number_name(mode.short, cloud_borne=True),
+                          number_name(mode.short))] + [
+                    (mass_name(sp, mode.short, cloud_borne=True),
+                     mass_name(sp, mode.short))
                     for sp in mode.species
-                ]:
+                ]
+                for nm, partner in pairs:
                     names.append(nm)
+                    reinject_to.append(partner)
                     q_list.append(state.tracers.get(nm, zeros))
-                    rate_list.append(rate_cb)
+                    rate_below_strat.append(zeros)
+                    rate_form_strat.append(rate_cb)
+                    rate_conv.append(zeros)
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).
         # The first-order-decay rate is unbounded — the in-cloud rate ∝ 1/qc
@@ -312,12 +421,36 @@ class WetScavenging(PhysicsTerm):
         # ``mo_ham_wetdep`` applies the same ``1 - exp(-Λ·Δt)`` removed fraction).
         # Emitted as a per-second tendency so the operator-split sum + dynamics
         # apply exactly ``q·(exp(-rate·dt) - 1)`` over the step.
-        # Clamp the decay rate to ≥0 so the exponential update is always a
+        # Clamp the decay rates to ≥0 so the exponential update is always a
         # bounded removal (a scavenging rate is non-negative by construction).
-        rate_arr = jnp.maximum(jnp.stack(rate_list), 0.0)
+        below_arr = jnp.maximum(jnp.stack(rate_below_strat), 0.0)
+        form_arr = jnp.maximum(jnp.stack(rate_form_strat), 0.0)
+        conv_arr = jnp.maximum(jnp.stack(rate_conv), 0.0)
+        rate_arr = below_arr + form_arr + conv_arr
         removed_frac = -jnp.expm1(-rate_arr * dt)              # 1 - exp(-rate·dt) ∈ [0, 1]
         dq_stack = -(removed_frac * jnp.stack(q_list)) / dt
+
+        # Re-evaporation re-injection (#499): the stratiform shares of each
+        # tracer's removal (proportional attribution among the rate
+        # families) ride the falling precip; ``reinjection_budget``
+        # releases them where the carrier evaporates, with impaction
+        # joining the incoming carrier and in-cloud scavenging the newly
+        # formed one (see its docstring). Convectively scavenged aerosol
+        # deposits directly (no convective evap profile yet).
+        rate_safe = jnp.maximum(rate_arr, _RATE_FLOOR)
+        live = rate_arr > _RATE_FLOOR
+        share_below = jnp.where(live, below_arr / rate_safe, 0.0)
+        share_form = jnp.where(live, form_arr / rate_safe, 0.0)
+        removed_flux = -dq_stack * dm[jnp.newaxis]
+        reinjected, _surface = reinjection_budget(
+            removed_flux * share_below, removed_flux * share_form,
+            evap_fraction,
+        )
+        reinject_tend = reinjected / dm[jnp.newaxis]
+
         tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
+        for k, target in enumerate(reinject_to):
+            tracer_tends[target] = tracer_tends[target] + reinject_tend[k]
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
@@ -326,8 +459,9 @@ class WetScavenging(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tracer_tends,
         )
-        # AeroCom deposition fluxes (jax-gcm#581): this term's removal,
-        # column-integrated, accumulated onto the per-step-reset keys.
+        # AeroCom deposition fluxes (jax-gcm#581): this term's NET removal
+        # (scavenging minus re-injection), column-integrated, accumulated
+        # onto the per-step-reset keys.
         from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
             accumulate_deposition_fluxes)
         diagnostics = accumulate_deposition_fluxes(

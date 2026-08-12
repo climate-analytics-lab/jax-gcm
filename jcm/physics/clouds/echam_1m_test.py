@@ -417,6 +417,52 @@ class TestColumnSweepMicrophysics:
         assert rain_source_total > 0.0, "autoconv didn't fire — adjust q profile"
         assert float(state.precip_rain) < rain_source_total
 
+    def test_rain_evap_flux_closes_the_warm_flux_ledger(self):
+        """The exposed per-level rain evaporation closes the rain-flux ledger.
+
+        On an all-warm column (no snow, no melt) the sweep's flux update is
+        exactly ``rain_flux[k] = rain_flux[k-1] + rain_source[k] -
+        rain_evap_flux[k]``, so the new #499 diagnostic must satisfy that
+        identity level by level, with evaporation active (nonzero) in the
+        sub-saturated layers below the cloud and never exceeding the
+        available flux.
+        """
+        import numpy as np
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 20
+        T = jnp.linspace(280.0, 300.0, nlev)
+        p = jnp.linspace(20000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        # Moist enough below cloud that evap never zeroes the flux (the
+        # ledger clamp stays slack), dry enough that evap is nonzero.
+        cloud_level = 5
+        q = jnp.where(
+            jnp.arange(nlev) == cloud_level, 0.95 * qsw, 0.6 * qsw,
+        )
+        qc = jnp.zeros(nlev).at[cloud_level].set(2e-3)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        _, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
+        )
+        assert float(jnp.sum(state.snow_source)) == 0.0
+        assert float(jnp.max(state.rain_evap_flux)) > 0.0
+        assert float(jnp.min(state.rain_evap_flux)) >= 0.0
+        rain_in = jnp.concatenate([jnp.zeros(1), state.rain_flux[:-1]])
+        # atol covers f32 round-off relative to the ~1e-4 kg/m²/s flux
+        # scale (observed residual ~2.5e-13 where evap consumes ~all of
+        # the inflow).
+        np.testing.assert_allclose(
+            np.asarray(state.rain_flux),
+            np.asarray(rain_in + state.rain_source - state.rain_evap_flux),
+            rtol=1e-6, atol=1e-10,
+        )
+        assert float(state.rain_flux.min()) >= 0.0
+
     def test_snow_above_warm_layer_melts_to_rain(self):
         """Snow flux generated aloft melts as it falls into T>273K layers."""
         cfg = MicrophysicsParameters.default()
