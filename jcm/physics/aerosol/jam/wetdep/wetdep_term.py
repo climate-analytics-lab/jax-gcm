@@ -220,9 +220,18 @@ class WetScavenging(PhysicsTerm):
         # cloud-borne representations would disagree at exchange equilibrium
         # for reasons that have nothing to do with the representation (#602).
         cf_clip = jnp.clip(cloud_fraction, 0.0, 1.0)
-        rate_incloud = params.incloud_scale * cf_clip * in_cloud_rate(
-            activated_fraction, p_form, qc,
-        ) + rate_conv_incloud
+        # ``in_cloud_rate`` is linear in the activated fraction, so keep the
+        # unit-fraction base and apply per-mode, per-quantity fractions
+        # below: ARG's number and mass fractions differ a lot (large
+        # particles activate preferentially) and vary by mode, and using
+        # the aggregate number-weighted fraction for everything biases the
+        # implicit representation away from the explicit one at exchange
+        # equilibrium. The aggregate is kept only as a fallback for
+        # standalone composition without the ARG term upstream.
+        rate_ic_unit = params.incloud_scale * cf_clip * in_cloud_rate(
+            jnp.ones_like(state.temperature), p_form, qc,
+        )
+        jam_act = diagnostics.get("_jam_activation")
 
         # Build a per-tracer scavenging rate and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
@@ -257,18 +266,29 @@ class WetScavenging(PhysicsTerm):
             # only implicitly (via the activated fraction) when there is no
             # explicit cloud-borne phase to carry it. Convective processing
             # always acts on interstitial (updrafts ingest environment air).
-            if mode.can_activate:
-                rate = rate_below + (
-                    rate_conv_incloud if explicit_cb else rate_incloud
+            if mode.can_activate and not explicit_cb:
+                if jam_act is not None:
+                    frac_num = jam_act.number_frac[i]
+                    frac_mass = jam_act.mass_frac[i]
+                else:
+                    frac_num = frac_mass = activated_fraction
+                rate_num = rate_below + rate_conv_incloud + (
+                    frac_num * rate_ic_unit
                 )
+                rate_mass = rate_below + rate_conv_incloud + (
+                    frac_mass * rate_ic_unit
+                )
+            elif mode.can_activate:
+                rate_num = rate_mass = rate_below + rate_conv_incloud
             else:
-                rate = rate_below
-            for nm in [number_name(mode.short)] + [
-                mass_name(sp, mode.short) for sp in mode.species
-            ]:
+                rate_num = rate_mass = rate_below
+            names.append(number_name(mode.short))
+            q_list.append(state.tracers.get(number_name(mode.short), zeros))
+            rate_list.append(rate_num)
+            for nm in [mass_name(sp, mode.short) for sp in mode.species]:
                 names.append(nm)
                 q_list.append(state.tracers.get(nm, zeros))
-                rate_list.append(rate)
+                rate_list.append(rate_mass)
             if explicit_cb:
                 # Cloud-borne aerosol is entirely in-droplet: no below-cloud
                 # impaction, no activated-fraction weighting.
