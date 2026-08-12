@@ -55,6 +55,31 @@ class ConservativeTest(unittest.TestCase):
         tgt_int = (out * w_tgt).sum()
         self.assertAlmostEqual(tgt_int / src_int, 1.0, places=10)
 
+    def test_rectilinear_axes_match_flattened_mesh(self):
+        # 1-D lon/lat axes with a 2-D area (#533) must build the identical
+        # operator as the pre-flattened mesh, for both (lon, lat) and
+        # (lat, lon) area layouts.
+        src_lats = np.linspace(-85.0, 85.0, 18)
+        src_lons = np.arange(36) * 10.0
+        mlon, mlat = np.meshgrid(src_lons, src_lats, indexing="ij")
+        area = np.cos(np.deg2rad(mlat))                  # (nlon, nlat)
+        lats, lons = gaussian_latlon(8)
+        ref = build_regridder(mlon.ravel(), mlat.ravel(), area.ravel(),
+                              lons, lats, dst_in_degrees=True)
+        for rect_area in (area, area.T):
+            rg = build_regridder(src_lons, src_lats, rect_area,
+                                 lons, lats, dst_in_degrees=True)
+            np.testing.assert_allclose(rg._matrix.toarray(),
+                                       ref._matrix.toarray())
+
+    def test_rectilinear_ambiguous_area_shape_raises(self):
+        src_lats = np.linspace(-85.0, 85.0, 18)
+        src_lons = np.arange(36) * 10.0
+        lats, lons = gaussian_latlon(8)
+        with self.assertRaisesRegex(ValueError, "src_area shape"):
+            build_regridder(src_lons, src_lats, np.ones((7, 5)),
+                            lons, lats, dst_in_degrees=True)
+
     def test_matches_bruteforce_binning(self):
         # independent reference: loop-based nearest-center area-weighted mean
         rng = np.random.default_rng(1)

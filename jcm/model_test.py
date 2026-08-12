@@ -512,6 +512,19 @@ class TestModelUnit(unittest.TestCase):
             )
 
 
+class TestModelRepr(unittest.TestCase):
+    def test_repr_summarizes_model(self):
+        # One line naming backend, grid, levels, dt and physics terms (#322).
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        model = Model(coords=get_speedy_coords())
+        r = repr(model)
+        self.assertIn("Model(dycore=DinosaurDycore", r)
+        self.assertIn("grid=", r)
+        self.assertIn("levels=8", r)
+        self.assertIn("physics=[", r)
+
+
 class TestCalendarDurations(unittest.TestCase):
     """Calendar-string save_interval / total_time."""
 

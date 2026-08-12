@@ -1227,6 +1227,25 @@ def _validate_oxidant_levels(ds, coords, path):
 # Run + save
 # ---------------------------------------------------------------------------
 
+def maybe_enable_compilation_cache() -> None:
+    """Enable JAX's persistent compilation cache when ``JCM_CACHE_DIR`` is set.
+
+    Opt-in only (#592): JAX keys cache entries on the HLO plus
+    backend/jaxlib, NOT on our editable source trees, so a shared default
+    path could serve stale kernels across code edits. Point
+    ``JCM_CACHE_DIR`` at a per-tree directory; provenance-hash namespacing
+    is the #591 follow-up. Benchmarks should leave it unset — compile time
+    is part of what they measure.
+    """
+    cache_dir = os.environ.get("JCM_CACHE_DIR")
+    if not cache_dir:
+        return
+    jax.config.update("jax_compilation_cache_dir", cache_dir)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+    logger.info("JAX persistent compilation cache: %s", cache_dir)
+
+
 def run(cfg: DictConfig, model: Model | None = None):
     """Dispatch to the appropriate runtime mode.
 
@@ -1253,6 +1272,7 @@ def run(cfg: DictConfig, model: Model | None = None):
         cfg.get("host_device_count", None)
         or cfg.get("grid", {}).get("host_device_count", None)
     )
+    maybe_enable_compilation_cache()
 
     # Apply any physical-constant overrides BEFORE the model is built, so the
     # dynamical core (which reads the live jcm.constants singleton at

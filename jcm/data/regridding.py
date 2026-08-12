@@ -120,7 +120,22 @@ def build_regridder(
     sl = np.mod(sl, 2.0 * np.pi)
     dl = np.mod(dl, 2.0 * np.pi)
 
-    area = np.asarray(src_area, dtype=np.float64).ravel()
+    area = np.asarray(src_area, dtype=np.float64)
+    if sl.size != area.size:
+        # Rectilinear source: 1-D lon/lat axes with a 2-D area, the common
+        # native layout of input4MIPs products (#533). Expand to the
+        # per-cell mesh this operator is defined on.
+        if area.shape == (sl.size, sb.size):
+            sl, sb = (m.ravel() for m in np.meshgrid(sl, sb, indexing="ij"))
+        elif area.shape == (sb.size, sl.size):
+            area = area.T
+            sl, sb = (m.ravel() for m in np.meshgrid(sl, sb, indexing="ij"))
+        else:
+            raise ValueError(
+                f"src_area shape {area.shape} matches neither the flattened "
+                f"source ({sl.size} cells) nor a (lon, lat)/(lat, lon) "
+                f"rectilinear mesh of the 1-D axes ({sl.size}x{sb.size})")
+    area = area.ravel()
     n_src = area.size
     nlon, nlat = dl.size, db.size
 

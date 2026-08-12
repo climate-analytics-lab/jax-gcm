@@ -320,7 +320,11 @@ def _do_shallower(tdel, qdel, cloud, dp):
     below = jnp.sum(jnp.where(keep_full, lp, 0.0), axis=0)   # = cumsurf[j], >= 0
     lp_b = jnp.sum(jnp.where(at_boundary, lp, 0.0), axis=0)  # boundary (moistening) layer
     # kept precip = below + frac*lp_b == 0  ->  frac = -below/lp_b  (in [0, 1]).
-    frac = jnp.where(jnp.abs(lp_b) > 1e-12, -below / lp_b, 0.0)
+    # Guard the denominator BEFORE dividing: a raw 0/0 in the masked branch
+    # poisons reverse-mode gradients through the where (#558 pattern).
+    has_boundary = jnp.abs(lp_b) > 1e-12
+    frac = jnp.where(has_boundary,
+                     -below / jnp.where(has_boundary, lp_b, 1.0), 0.0)
     scale = jnp.where(keep_full, 1.0, jnp.where(at_boundary, frac, 0.0))
 
     new_tdel = tdel * scale

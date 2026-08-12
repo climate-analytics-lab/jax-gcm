@@ -72,6 +72,11 @@ class TestBettsMillerColumn(unittest.TestCase):
         self.assertAlmostEqual(precip_q, precip_t, places=5)
         self.assertAlmostEqual(precip_q, float(precip), places=5)
 
+    def test_default_flavor_is_shallower(self):
+        # Isca's nominal SIMP default zeroes the shallow branch and is
+        # always overridden in practice (#524).
+        self.assertIs(BettsMillerParameters().shallow, ShallowScheme.SHALLOWER)
+
     def test_all_flavors_finite_and_nonnegative_precip(self):
         for col in (_moist_unstable_column(), _dry_aloft_column()):
             T, q, pfull, phalf = col

@@ -33,3 +33,4 @@ Contents
    api
    design
    developer
+   jax_gotchas

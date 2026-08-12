@@ -493,6 +493,24 @@ class Model:
         # ``run()`` of the combined duration.
         self._final_physics_state = None
 
+    def __repr__(self) -> str:
+        """One-line summary: backend, grid, levels, dt, physics terms (#322)."""
+        horiz = getattr(self.coords, "horizontal", None)
+        shape = getattr(horiz, "nodal_shape", None)
+        grid = f"{shape[0]}x{shape[1]}" if shape is not None else "?"
+        layers = getattr(getattr(self.coords, "vertical", None), "layers", "?")
+        terms = getattr(self.physics, "terms", None)
+        physics = (
+            "[" + ", ".join(getattr(t, "name", type(t).__name__)
+                            for t in terms) + "]"
+            if terms is not None else type(self.physics).__name__
+        )
+        return (
+            f"{type(self).__name__}(dycore={type(self.dycore).__name__}, "
+            f"grid={grid}, levels={layers}, dt={float(self.dt_si.m):g}s, "
+            f"physics={physics})"
+        )
+
     # Historical default model time step; also the ceiling for physics-
     # suggested stable steps (a physics limit can only shrink the default,
     # never silently enlarge it).

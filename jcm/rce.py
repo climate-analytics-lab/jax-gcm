@@ -339,9 +339,11 @@ def rce_column(
     *precipitating* — convection only switches on when the column is moister than
     that reference, which requires ``rhbm < relative_humidity``. With
     ``rhbm == relative_humidity`` the column lands in Betts-Miller's
-    non-precipitating "shallow" branch, which under the default ``SIMP`` flavor
-    returns *zero* tendency: the column then relaxes to pure *radiative*
-    equilibrium (looks equilibrated, OLR fine) with convection doing nothing. So
+    non-precipitating "shallow" branch: under the ``SIMP`` flavor that returns
+    *zero* tendency, and even the default ``SHALLOWER`` flavor only
+    redistributes moisture without precipitating, so the column relaxes to
+    near-*radiative* equilibrium (looks equilibrated, OLR fine) with deep
+    convection doing nothing. So
     ``convective_rh`` defaults to ``relative_humidity − 0.1`` (the working homebrew
     used env 0.7 / rhbm 0.6), and supplying ``convective_rh >= relative_humidity``
     for the default Betts-Miller term is rejected as a no-op misconfiguration.

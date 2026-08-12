@@ -1256,6 +1256,27 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
         )
 
 
+class CompilationCacheTest(unittest.TestCase):
+    def test_env_gated_enablement(self):
+        # Off unless JCM_CACHE_DIR is set (#592); on, it points JAX's
+        # persistent cache at the given directory.
+        import jax
+
+        from jcm.runners import maybe_enable_compilation_cache
+        old = jax.config.jax_compilation_cache_dir
+        try:
+            os.environ.pop("JCM_CACHE_DIR", None)
+            maybe_enable_compilation_cache()
+            self.assertEqual(jax.config.jax_compilation_cache_dir, old)
+            os.environ["JCM_CACHE_DIR"] = "/nonexistent/jcm-cache-test"
+            maybe_enable_compilation_cache()
+            self.assertEqual(jax.config.jax_compilation_cache_dir,
+                             "/nonexistent/jcm-cache-test")
+        finally:
+            os.environ.pop("JCM_CACHE_DIR", None)
+            jax.config.update("jax_compilation_cache_dir", old)
+
+
 class ResolveDataPathTest(unittest.TestCase):
     """hf:// path resolution for boundary-file config values."""
 
