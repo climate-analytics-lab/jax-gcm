@@ -180,14 +180,19 @@ if grep -qiE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log; then
   grep -iE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log | tail -3
   exit 1
 fi
+# `|| true` is load-bearing under `set -euo pipefail`: "no output this
+# attempt" is a state we must INSPECT, but a no-match grep exits 1 and
+# pipefail propagates that out of the command substitution, which would abort
+# the script before the empty-LAST branch below could run — marking a genuine
+# completion-restart as failed. Same for RESUMED.
 LAST=$(grep -oE "_day[0-9]+\\.nc" /tmp/attempt.log | grep -oE "[0-9]+" \\
-       | sort -n | tail -1)
+       | sort -n | tail -1 || true)
 if [ -z "$LAST" ]; then
   # No output this attempt. Distinguish the one benign case — the run was
   # already finished and the pod merely restarted — from a no-op resume,
   # which must NOT look like success.
   RESUMED=$(grep -oE "Resumed from checkpoint .* at sim-day [0-9.]+" \\
-            /tmp/attempt.log | grep -oE "[0-9.]+$" | tail -1)
+            /tmp/attempt.log | grep -oE "[0-9.]+$" | tail -1 || true)
   if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {a.days} ]; then
     echo "=== already complete: checkpoint at day $RESUMED of {a.days}, nothing to do ==="
     exit 0
