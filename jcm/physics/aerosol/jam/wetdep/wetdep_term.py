@@ -159,36 +159,43 @@ def conv_in_cloud_rate(
 
 
 def reinjection_budget(
-    scavenged_flux: jnp.ndarray,  # (K, nlev, ncols) removal into precip [kg/m²/s]
-    evap_fraction: jnp.ndarray,   # (nlev, ncols) precip fraction evaporating
+    scavenged_below: jnp.ndarray,   # (K, nlev, ncols) impaction removal [kg/m²/s]
+    scavenged_formed: jnp.ndarray,  # (K, nlev, ncols) in-cloud removal [kg/m²/s]
+    evap_fraction: jnp.ndarray,     # (nlev, ncols) incoming-precip fraction evaporating
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Aerosol-in-precip ledger: re-injected flux per layer + surface flux.
 
-    Integrates the scavenged-aerosol flux top to bottom: entering each layer,
-    the fraction of the carrier precip that evaporates there releases the
-    same fraction of the carried aerosol (``reinjected``); the layer's own
-    scavenging then joins the flux. Returns ``(reinjected, surface_flux)``
-    with ``reinjected`` shaped like ``scavenged_flux`` and ``surface_flux``
-    ``(K, ncols)``, satisfying column conservation
-    ``sum_k(scavenged - reinjected) = surface_flux`` exactly.
+    Integrates the scavenged-aerosol flux top to bottom, honouring the
+    cloud schemes' own flux ordering (evaporation is capped by the
+    INCOMING precip, formation is added after): aerosol impacted out by
+    the falling precip within a layer (``scavenged_below``) joins the
+    incoming carrier BEFORE the release — a fully-evaporating virga layer
+    releases it rather than surface-depositing it through dry air — while
+    aerosol scavenged into precip NEWLY FORMED in the layer
+    (``scavenged_formed``) joins AFTER, because the incoming carrier's
+    evaporation cannot touch precip that is only now forming and heading
+    down. Returns ``(reinjected, surface_flux)`` with ``reinjected``
+    shaped like the inputs and ``surface_flux`` ``(K, ncols)``, satisfying
+    column conservation
+    ``sum_k(scavenged_below + scavenged_formed - reinjected) =
+    surface_flux`` exactly.
     """
     def step(carried, xs):
-        s_k, e_k = xs                       # (K, ncols), (ncols,)
-        # The layer's own scavenging joins the ledger BEFORE the release,
-        # as in HAMMOZ: in a fully-evaporating (virga) layer everything —
-        # including aerosol impacted out within that layer — is released,
-        # so nothing rides a terminated carrier to the surface through dry
-        # air.
-        total = carried + s_k
-        released = total * e_k[jnp.newaxis, :]
-        carried = total - released
+        s_below_k, s_form_k, e_k = xs        # (K, ncols) x2, (ncols,)
+        incoming = carried + s_below_k
+        released = incoming * e_k[jnp.newaxis, :]
+        carried = incoming - released + s_form_k
         return carried, released
 
-    k, _, ncols = scavenged_flux.shape
+    k, _, ncols = scavenged_below.shape
     surface, released = jax.lax.scan(
         step,
-        jnp.zeros((k, ncols), scavenged_flux.dtype),
-        (jnp.moveaxis(scavenged_flux, 1, 0), evap_fraction),
+        jnp.zeros((k, ncols), scavenged_below.dtype),
+        (
+            jnp.moveaxis(scavenged_below, 1, 0),
+            jnp.moveaxis(scavenged_formed, 1, 0),
+            evap_fraction,
+        ),
     )
     return jnp.moveaxis(released, 0, 1), surface
 
@@ -324,7 +331,11 @@ class WetScavenging(PhysicsTerm):
         # to the interstitial phase).
         reinject_to: list[str] = []
         q_list: list[jnp.ndarray] = []
-        rate_strat: list[jnp.ndarray] = []
+        # Stratiform removal splits by carrier relationship (see
+        # ``reinjection_budget``): impaction into the INCOMING precip vs
+        # in-cloud scavenging into precip FORMED here.
+        rate_below_strat: list[jnp.ndarray] = []
+        rate_form_strat: list[jnp.ndarray] = []
         rate_conv: list[jnp.ndarray] = []
         # With a prognostic cloud-borne phase (``spec.cloud_borne``, #602) the
         # stratiform in-cloud (nucleation) pathway belongs to the cloud-borne
@@ -356,27 +367,29 @@ class WetScavenging(PhysicsTerm):
                     frac_mass = jam_act.mass_frac[i]
                 else:
                     frac_num = frac_mass = activated_fraction
-                strat_num = below_strat + frac_num * rate_ic_unit
-                strat_mass = below_strat + frac_mass * rate_ic_unit
+                form_num = frac_num * rate_ic_unit
+                form_mass = frac_mass * rate_ic_unit
                 conv_rate = below_conv + rate_conv_incloud
             elif mode.can_activate:
-                strat_num = strat_mass = below_strat
+                form_num = form_mass = zeros
                 conv_rate = below_conv + rate_conv_incloud
             else:
-                strat_num = strat_mass = below_strat
+                form_num = form_mass = zeros
                 conv_rate = below_conv
             n_nm = number_name(mode.short)
             names.append(n_nm)
             reinject_to.append(n_nm)
             q_list.append(state.tracers.get(n_nm, zeros))
-            rate_strat.append(strat_num)
+            rate_below_strat.append(below_strat)
+            rate_form_strat.append(form_num)
             rate_conv.append(conv_rate)
             for sp in mode.species:
                 nm = mass_name(sp, mode.short)
                 names.append(nm)
                 reinject_to.append(nm)
                 q_list.append(state.tracers.get(nm, zeros))
-                rate_strat.append(strat_mass)
+                rate_below_strat.append(below_strat)
+                rate_form_strat.append(form_mass)
                 rate_conv.append(conv_rate)
             if explicit_cb:
                 # Cloud-borne aerosol is entirely in-droplet: no below-cloud
@@ -392,7 +405,8 @@ class WetScavenging(PhysicsTerm):
                     names.append(nm)
                     reinject_to.append(partner)
                     q_list.append(state.tracers.get(nm, zeros))
-                    rate_strat.append(rate_cb)
+                    rate_below_strat.append(zeros)
+                    rate_form_strat.append(rate_cb)
                     rate_conv.append(zeros)
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).
@@ -409,25 +423,28 @@ class WetScavenging(PhysicsTerm):
         # apply exactly ``q·(exp(-rate·dt) - 1)`` over the step.
         # Clamp the decay rates to ≥0 so the exponential update is always a
         # bounded removal (a scavenging rate is non-negative by construction).
-        strat_arr = jnp.maximum(jnp.stack(rate_strat), 0.0)
+        below_arr = jnp.maximum(jnp.stack(rate_below_strat), 0.0)
+        form_arr = jnp.maximum(jnp.stack(rate_form_strat), 0.0)
         conv_arr = jnp.maximum(jnp.stack(rate_conv), 0.0)
-        rate_arr = strat_arr + conv_arr
+        rate_arr = below_arr + form_arr + conv_arr
         removed_frac = -jnp.expm1(-rate_arr * dt)              # 1 - exp(-rate·dt) ∈ [0, 1]
         dq_stack = -(removed_frac * jnp.stack(q_list)) / dt
 
-        # Re-evaporation re-injection (#499): the stratiform share of each
-        # tracer's removal (proportional attribution between the two rate
-        # families) rides the falling precip; ``reinjection_budget``
-        # releases it where the carrier evaporates. Convectively scavenged
-        # aerosol deposits directly (no convective evap profile yet).
-        strat_share = jnp.where(
-            rate_arr > _RATE_FLOOR,
-            strat_arr / jnp.maximum(rate_arr, _RATE_FLOOR),
-            0.0,
-        )
-        scavenged_flux = -dq_stack * strat_share * dm[jnp.newaxis]
+        # Re-evaporation re-injection (#499): the stratiform shares of each
+        # tracer's removal (proportional attribution among the rate
+        # families) ride the falling precip; ``reinjection_budget``
+        # releases them where the carrier evaporates, with impaction
+        # joining the incoming carrier and in-cloud scavenging the newly
+        # formed one (see its docstring). Convectively scavenged aerosol
+        # deposits directly (no convective evap profile yet).
+        rate_safe = jnp.maximum(rate_arr, _RATE_FLOOR)
+        live = rate_arr > _RATE_FLOOR
+        share_below = jnp.where(live, below_arr / rate_safe, 0.0)
+        share_form = jnp.where(live, form_arr / rate_safe, 0.0)
+        removed_flux = -dq_stack * dm[jnp.newaxis]
         reinjected, _surface = reinjection_budget(
-            scavenged_flux, evap_fraction,
+            removed_flux * share_below, removed_flux * share_form,
+            evap_fraction,
         )
         reinject_tend = reinjected / dm[jnp.newaxis]
 
