@@ -772,12 +772,25 @@ def cloud_microphysics_2m(
     # stacked from the scan ys) go last so existing ``tend, rain, snow,
     # *_`` call sites keep working; their bottom row equals the surface
     # fluxes by construction (same carry values).
+    # Per-level precip process rates for JAM wet scavenging (#499), grid
+    # mean [kg/kg/s]. Formation is the full condensate→precip ledger the
+    # flux update integrates: the warm chain (KK2000 autoconversion +
+    # accretion, ``qr_gain_warm``), riming (``psacl``) and the cold snow
+    # formation. Evaporation is rain evap + snow sublimation; the falling
+    # cloud-ice sublimation (``ice_sublim``) is deliberately excluded — the
+    # sedimenting ice flux is not a scavenging carrier.
+    precip_formation_rate = (
+        qr_gain_warm + psacl + snow_formation_gridmean
+    ) / dt
+    precip_evaporation_rate = (rain_evap + snow_sublim) / dt
+
     # NOTE the (nlev,) rain / frozen flux profiles stay LAST: call sites and
     # tests unpack them positionally from the end (``*_, rain_b, snow_b``),
-    # so new scalars are inserted before them, not appended.
+    # so new outputs are inserted before them, not appended.
     return tendencies, surface_rain_flux, surface_snow_flux, \
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
+        precip_formation_rate, precip_evaporation_rate, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -942,10 +955,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         (tend_all, surface_rain_flux, surface_snow_flux,
          r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
+         precip_form_all, precip_evap_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -1001,6 +1015,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # CloudData layout, same as the effective radii below.
             rain_flux=rain_flux_all.T,
             snow_flux=snow_flux_all.T,
+            # Per-level precip formation / evaporation rates [kg/kg/s] for
+            # JAM wet scavenging (#499); see cloud_microphysics_2m.
+            precip_formation_rate=precip_form_all.T,
+            precip_evaporation_rate=precip_evap_all.T,
             # Microphysical effective radii (um) for the radiation term
             # (ECHAM preffl/preffi; consumed next step via the carry —
             # same lag as every cross-term diagnostic).
