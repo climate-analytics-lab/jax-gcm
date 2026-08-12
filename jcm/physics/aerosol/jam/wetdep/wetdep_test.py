@@ -324,38 +324,64 @@ class WetDepTermTest(unittest.TestCase):
         import dataclasses
         from jcm.physics.aerosol.jam import MAM4_SPEC
 
-        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-7)
-        cf, af, q_tot = 0.6, 0.7, 1.0e-9
-        diagnostics = dict(diagnostics)
-        diagnostics["activated_fraction"] = jnp.full_like(
-            diagnostics["activated_fraction"], af
+        from jcm.physics.aerosol.jam import MAM4_SPEC as SPEC, number_name
+        from jcm.physics.aerosol.jam.activation.arg_term import (
+            JamActivationData,
         )
+
+        state, diagnostics, spec, mass_name = self._setup(precip=1.0e-7)
+        cf, q_tot, n_tot = 0.6, 1.0e-9, 1.0e8
+        shape = state.temperature.shape
+        # Distinct per-mode AND per-quantity fractions, so using the
+        # aggregate (or the wrong one of the pair, or the wrong mode's)
+        # anywhere breaks the match.
+        n_modes = SPEC.n_modes()
+        can = jnp.asarray(
+            [float(m.can_activate) for m in SPEC.modes]
+        ).reshape(-1, 1, 1)
+        per_mode = can / (1.0 + jnp.arange(n_modes).reshape(-1, 1, 1))
+        act = JamActivationData(
+            number_frac=per_mode * jnp.full((n_modes,) + shape, 0.4),
+            mass_frac=per_mode * jnp.full((n_modes,) + shape, 0.8),
+        )
+        diagnostics = dict(diagnostics)
+        diagnostics["_jam_activation"] = act
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
             below_coeff=jnp.asarray(0.0),
             below_radius_ref=jnp.asarray(1.0e-7),
             conv_scav_ratio=jnp.asarray(0.99),
         )
-        key_int = mass_name(spec.modes[0].species[0], spec.modes[0].short)
-        key_cb = mass_name(spec.modes[0].species[0], spec.modes[0].short,
-                           cloud_borne=True)
 
-        # Explicit: the pair partitioned at the exchange equilibrium.
-        q_cb = cf * af * q_tot
+        # The (interstitial key, cloud-borne key, total, fraction) tuples
+        # under test: mass and number of the first two activatable modes.
+        cases = []
+        for i in (0, 1):
+            mode = SPEC.modes[i]
+            fn = float(act.number_frac[i, 0, 0])
+            fm = float(act.mass_frac[i, 0, 0])
+            cases.append((number_name(mode.short),
+                          number_name(mode.short, cloud_borne=True),
+                          n_tot, fn))
+            cases.append((mass_name(mode.species[0], mode.short),
+                          mass_name(mode.species[0], mode.short,
+                                    cloud_borne=True),
+                          q_tot, fm))
+
+        # Explicit: each pair partitioned at its own exchange equilibrium.
         tracers = dict(state.tracers)
-        tracers[key_int] = jnp.full_like(tracers[key_int], q_tot - q_cb)
-        tracers[key_cb] = jnp.full_like(tracers[key_cb], q_cb)
+        for key_int, key_cb, tot, frac in cases:
+            q_cb = cf * frac * tot
+            tracers[key_int] = jnp.full_like(tracers[key_int], tot - q_cb)
+            tracers[key_cb] = jnp.full_like(tracers[key_cb], q_cb)
         tend_exp, _ = WetScavenging(params=params)(
             state.copy(tracers=tracers), diagnostics, None, None,
         )
-        removed_explicit = -(
-            np.asarray(tend_exp.tracers[key_int])
-            + np.asarray(tend_exp.tracers[key_cb])
-        )
 
-        # Implicit: all of q_tot interstitial, activated-fraction scavenged.
+        # Implicit: everything interstitial, per-mode-fraction scavenged.
         tracers = dict(state.tracers)
-        tracers[key_int] = jnp.full_like(tracers[key_int], q_tot)
+        for key_int, _, tot, _ in cases:
+            tracers[key_int] = jnp.full_like(tracers[key_int], tot)
         implicit = WetScavenging(
             params=params,
             spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
@@ -363,12 +389,18 @@ class WetDepTermTest(unittest.TestCase):
         tend_imp, _ = implicit(
             state.copy(tracers=tracers), diagnostics, None, None,
         )
-        removed_implicit = -np.asarray(tend_imp.tracers[key_int])
 
-        self.assertGreater(float(removed_explicit.max()), 0.0)
-        np.testing.assert_allclose(
-            removed_implicit, removed_explicit, rtol=5e-3,
-        )
+        for key_int, key_cb, tot, frac in cases:
+            removed_explicit = -(
+                np.asarray(tend_exp.tracers[key_int])
+                + np.asarray(tend_exp.tracers[key_cb])
+            )
+            removed_implicit = -np.asarray(tend_imp.tracers[key_int])
+            self.assertGreater(float(removed_explicit.max()), 0.0, key_int)
+            np.testing.assert_allclose(
+                removed_implicit, removed_explicit, rtol=5e-3,
+                err_msg=key_int,
+            )
 
     def test_grad_through_below_coeff(self):
         state, diagnostics, spec, mass_name = self._setup()
