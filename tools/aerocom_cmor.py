@@ -150,6 +150,26 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "emi_du": ("emi_du", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "emi_moa": ("emi_moa", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "emi_dms": ("emi_dms", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    # --- aerosol-free (noa) radiation, jax-gcm#583 ---
+    "radiation.toa_sw_up_noa": ("rsutnoa", "W m-2", "TOA", 1.0, 0.0),
+    "radiation.toa_lw_up_noa": ("rlutnoa", "W m-2", "TOA", 1.0, 0.0),
+    "radiation.toa_sw_up_clear_noa": ("rsutcsnoa", "W m-2", "TOA", 1.0, 0.0),
+    "radiation.toa_lw_up_clear_noa": ("rlutcsnoa", "W m-2", "TOA", 1.0, 0.0),
+    # --- near-surface / column meteorology (jax-gcm#581 residuals) ---
+    "aerocom_tas": ("tas", "K", "Surface", 1.0, 0.0),
+    "aerocom_uas": ("uas", "m s-1", "Surface", 1.0, 0.0),
+    "aerocom_vas": ("vas", "m s-1", "Surface", 1.0, 0.0),
+    "aerocom_dew2": ("dew2", "K", "Surface", 1.0, 0.0),
+    "aerocom_psl": ("psl", "Pa", "Surface", 1.0, 0.0),
+    "aerocom_prsn": ("prsn", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "aerocom_prcr": ("prcr", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "aerocom_prcs": ("prcs", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "aerocom_wbase": ("wbase", "m s-1", "Surface", 1.0, 0.0),
+    "aerocom_ptp": ("ptp", "Pa", "Surface", 1.0, 0.0),
+    # --- biomass-burning emission splits (MMPPE) ---
+    "emi_bb_so2": ("emi_bb_so2", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_bb_bc": ("emi_bb_bc", "kg m-2 s-1", "Surface", 1.0, 0.0),
+    "emi_bb_oc": ("emi_bb_oc", "kg m-2 s-1", "Surface", 1.0, 0.0),
     # --- boundary layer ---
     "vertical_diffusion.pbl_height": ("hdtcbl", "m", "Surface", 1.0, 0.0),
     # --- AerocomDiagnostics term output ---
@@ -185,6 +205,21 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "aerocom_PM1": ("PM1", "kg m-3", "ModelLevel", 1.0, 0.0),
     "aerocom_PM10": ("PM10", "kg m-3", "ModelLevel", 1.0, 0.0),
 }
+
+# Deposition fluxes (dry_* from sedimentation, wet_* from scavenging),
+# written under AeroCom's dry<spec>/wet<spec> convention.
+DEPOSITION_SPECIES = ("so4", "bc", "oc", "poa", "soa", "ss", "du", "moa")
+
+
+def _collect_deposition(ds: xr.Dataset) -> dict[str, xr.DataArray]:
+    out: dict[str, xr.DataArray] = {}
+    for spec in DEPOSITION_SPECIES:
+        for kind in ("dry", "wet"):
+            src = f"{kind}_{spec}"
+            if src in ds.data_vars:
+                out[f"{kind}{spec}"] = ds[src]
+    return out
+
 
 # Column burdens arrive pre-summed per species from AerocomDiagnostics
 # (interstitial + cloud-borne + gas), so the writer only renames them.
@@ -230,6 +265,15 @@ CF_STANDARD_NAMES = {
     "clhcalipso": "cloud_area_fraction_in_atmosphere_layer",
     "cltmodis": "cloud_area_fraction",
     "cltisccp": "cloud_area_fraction",
+    "tas": "air_temperature",
+    "uas": "eastward_wind",
+    "vas": "northward_wind",
+    "dew2": "dew_point_temperature",
+    "psl": "air_pressure_at_mean_sea_level",
+    "prsn": "snowfall_flux",
+    "ptp": "tropopause_air_pressure",
+    "rsutnoa": "toa_outgoing_shortwave_flux",
+    "rlutnoa": "toa_outgoing_longwave_flux",
     "clwmodis": "liquid_water_cloud_area_fraction",
     "climodis": "ice_cloud_area_fraction",
     "tauwmodis": "atmosphere_optical_thickness_due_to_cloud",
@@ -437,6 +481,7 @@ def convert(
     convention: str = "aerocom",
     flip_levels: bool = False,
     dry_run: bool = False,
+    na_aliases: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Write one file per mapped variable; return (written, skipped)."""
     outdir.mkdir(parents=True, exist_ok=True)
@@ -456,6 +501,15 @@ def convert(
     for name, da in optics_vars.items():
         candidates[name] = (da, "1", "Column")
     hist_dsets, hist_srcs = _collect_histograms(ds)
+    for name, da in _collect_deposition(ds).items():
+        candidates[name] = (da, "kg m-2 s-1", "Surface")
+    if na_aliases:
+        # MMPPE names the aerosol-free fluxes *_na where aci/imo2020 use
+        # *noa; same fields, second set of files.
+        for noa, na in (("rsutnoa", "rsut_na"), ("rlutnoa", "rlut_na"),
+                        ("rsutcsnoa", "rsutcs_na"), ("rlutcsnoa", "rlutcs_na")):
+            if noa in candidates:
+                candidates[na] = candidates[noa]
 
     for cmor, (da, units, vert) in sorted(candidates.items()):
         assert vert in VALID_VERT, vert
@@ -497,7 +551,10 @@ def convert(
         written.append(fname)
 
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}
+    dep_srcs = {f"{k}_{sp}" for sp in DEPOSITION_SPECIES
+                for k in ("dry", "wet")}
     skipped = sorted(set(ds.data_vars) - mapped_srcs - optics_srcs - hist_srcs
+                     - dep_srcs
                      - {f"aerocom_burden_{sp}" for sp in BURDEN_SPECIES})
     return written, skipped
 
@@ -517,6 +574,9 @@ def main(argv=None) -> int:
     ap.add_argument("--convention", default="aerocom", choices=["aerocom", "aerocom4"])
     ap.add_argument("--flip-levels", action="store_true",
                     help="write TOA-first instead of JCM's native surface-first")
+    ap.add_argument("--na-aliases", action="store_true",
+                    help="also write the MMPPE *_na names for the "
+                         "aerosol-free fluxes (same data as *noa)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be written without writing")
     args = ap.parse_args(argv)
@@ -526,7 +586,7 @@ def main(argv=None) -> int:
     written, skipped = convert(
         ds, args.model, args.experiment, args.period, args.freq, args.out,
         convention=args.convention, flip_levels=args.flip_levels,
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, na_aliases=args.na_aliases)
 
     print(f"{'would write' if args.dry_run else 'wrote'} {len(written)} "
           f"variable file(s) to {args.out}")
