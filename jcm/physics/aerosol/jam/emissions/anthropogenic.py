@@ -149,6 +149,7 @@ class AnthropogenicEmissions(PhysicsTerm):
             add_mass(number_name(mode.short),
                      flux2d * mode.number_factor / density, weights)
 
+        emi_bb: dict[str, jnp.ndarray] = {}
         for i, sector in enumerate(SUPER_SECTORS):
             weights = gaussian_injection_weights(
                 height_full, dz,
@@ -169,6 +170,10 @@ class AnthropogenicEmissions(PhysicsTerm):
 
             # Primary carbonaceous mass → the population's primary-carbon
             # class(es); OC scaled to POA by OM:OC.
+            if sector == "biomass_burning":
+                # MMPPE emi_bb_*: the open-burning fluxes as emitted
+                # (SO2 as SO2, OC as OC), before speciation/OM scaling.
+                emi_bb = {"so2": so2, "bc": bc, "oc": oc}
             for mode, mode_frac in self._spec.primary_split("bc"):
                 add_aerosol("bc", mode, bc * mode_frac, weights)
             for mode, mode_frac in self._spec.primary_split("poa"):
@@ -187,5 +192,10 @@ class AnthropogenicEmissions(PhysicsTerm):
             diagnostics, tends,
             diagnostics["air_density"],
             diagnostics["layer_thickness"])
+        # Biomass-burning splits ride the same reset-per-step keys.
+        for spc, flux in emi_bb.items():
+            key = f"emi_bb_{spc}"
+            diagnostics = {**diagnostics,
+                           key: diagnostics.get(key, 0.0) + flux}
 
         return tendency, diagnostics

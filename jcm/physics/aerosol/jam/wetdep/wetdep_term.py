@@ -263,4 +263,12 @@ class WetScavenging(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tracer_tends,
         )
+        # AeroCom deposition fluxes (jax-gcm#581): this term's removal,
+        # column-integrated, accumulated onto the per-step-reset keys.
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            accumulate_deposition_fluxes)
+        diagnostics = accumulate_deposition_fluxes(
+            diagnostics, tracer_tends,
+            diagnostics["air_density"], diagnostics["layer_thickness"],
+            kind="wet")
         return tendency, diagnostics
