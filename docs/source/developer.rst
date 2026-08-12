@@ -134,7 +134,7 @@ When writing code for JAX-GCM, keep in mind:
 - **No Python Control Flow**: Use ``jax.lax.cond`` instead of ``if`` in JIT-compiled code
 - **Static Shapes**: Array shapes should be statically known where possible
 
-See ``JAX_gotchas.md`` in the repository for more details.
+See :doc:`jax_gotchas` for more details.
 
 Profiling
 ^^^^^^^^^

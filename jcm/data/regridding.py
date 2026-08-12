@@ -40,13 +40,22 @@ class Regridder:
     """
 
     def __init__(self, matrix: sp.csr_matrix, target_shape: tuple[int, int],
-                 covered_area: np.ndarray):
+                 covered_area: np.ndarray,
+                 source_grid: tuple[int, int] | None = None,
+                 source_latlon: bool = False):
         """Hold the prebuilt remap matrix, target shape, and area normaliser."""
         self._matrix = matrix              # (n_target, n_source), data = src area
         self._target_shape = target_shape  # (nlon, nlat)
         # Σ source-area landing in each target cell; the normaliser that turns
         # accumulated mass back into an (area-weighted mean) flux.
         self._covered_area = covered_area  # (n_target,)
+        # Rectilinear source (#533): fields arrive with the two spatial axes
+        # unflattened. ``source_grid`` is (nlon_src, nlat_src); the matrix
+        # columns are lon-major, so lat-major fields transpose on the way in.
+        # ``source_latlon`` records the layout the src_area was given in — the
+        # tie-breaker for square grids, where shape alone cannot distinguish.
+        self._source_grid = source_grid
+        self._source_latlon = source_latlon
 
     @property
     def target_shape(self) -> tuple[int, int]:
@@ -55,10 +64,29 @@ class Regridder:
     def __call__(self, values: np.ndarray) -> np.ndarray:
         """Regrid ``values`` shaped ``(..., n_source)`` → ``(..., nlon, nlat)``.
 
+        For a rectilinear source, ``values`` instead carries the two spatial
+        axes unflattened — ``(..., nlat_src, nlon_src)`` (the common netCDF
+        layout) or ``(..., nlon_src, nlat_src)``; they are flattened here in
+        the matrix's ordering.
+
         Leading axes (time, level, …) are preserved. Target cells that received
         no source cell (only possible when *refining*) come back as zero.
         """
         values = np.asarray(values, dtype=np.float64)
+        if self._source_grid is not None:
+            nlon_s, nlat_s = self._source_grid
+            trailing = values.shape[-2:] if values.ndim >= 2 else None
+            lat_major = trailing == (nlat_s, nlon_s)
+            if nlat_s == nlon_s:
+                lat_major = self._source_latlon    # shape cannot distinguish
+            if trailing not in ((nlon_s, nlat_s), (nlat_s, nlon_s)):
+                raise ValueError(
+                    f"rectilinear-source regridder expects trailing spatial "
+                    f"axes ({nlat_s}, {nlon_s}) or ({nlon_s}, {nlat_s}), "
+                    f"got {values.shape}")
+            if lat_major:
+                values = np.swapaxes(values, -1, -2)
+            values = values.reshape(*values.shape[:-2], nlon_s * nlat_s)
         lead = values.shape[:-1]
         flat = values.reshape(-1, values.shape[-1])          # (K, n_source)
         mass = flat @ self._matrix.T                          # (K, n_target)
@@ -120,7 +148,27 @@ def build_regridder(
     sl = np.mod(sl, 2.0 * np.pi)
     dl = np.mod(dl, 2.0 * np.pi)
 
-    area = np.asarray(src_area, dtype=np.float64).ravel()
+    area = np.asarray(src_area, dtype=np.float64)
+    source_grid = None
+    source_latlon = False
+    if sl.size != area.size:
+        # Rectilinear source: 1-D lon/lat axes with a 2-D area, the common
+        # native layout of input4MIPs products (#533). Expand to the
+        # per-cell mesh this operator is defined on; the returned Regridder
+        # remembers the layout so fields can be applied unflattened.
+        source_grid = (sl.size, sb.size)
+        if area.shape == (sl.size, sb.size):
+            pass
+        elif area.shape == (sb.size, sl.size):
+            source_latlon = True
+            area = area.T
+        else:
+            raise ValueError(
+                f"src_area shape {area.shape} matches neither the flattened "
+                f"source ({sl.size} cells) nor a (lon, lat)/(lat, lon) "
+                f"rectilinear mesh of the 1-D axes ({sl.size}x{sb.size})")
+        sl, sb = (m.ravel() for m in np.meshgrid(sl, sb, indexing="ij"))
+    area = area.ravel()
     n_src = area.size
     nlon, nlat = dl.size, db.size
 
@@ -134,7 +182,8 @@ def build_regridder(
         shape=(nlon * nlat, n_src),
     ).tocsr()
     covered_area = np.asarray(matrix.sum(axis=1)).ravel()
-    return Regridder(matrix, (nlon, nlat), covered_area)
+    return Regridder(matrix, (nlon, nlat), covered_area,
+                     source_grid=source_grid, source_latlon=source_latlon)
 
 
 def model_grid(coords) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

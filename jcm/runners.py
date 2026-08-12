@@ -1227,6 +1227,35 @@ def _validate_oxidant_levels(ds, coords, path):
 # Run + save
 # ---------------------------------------------------------------------------
 
+def maybe_enable_compilation_cache() -> None:
+    """Enable JAX's persistent compilation cache (#592) — on by default.
+
+    Safe to share across code edits: entries are keyed on the compiled HLO
+    plus backend/jaxlib, so a source change that alters the computation
+    *misses* rather than wrongly hits — the failure mode is recompilation,
+    never staleness. Benchmarks discard the compile chunk deliberately, so
+    caching only shortens their spin-up.
+
+    ``JCM_CACHE_DIR`` relocates the cache; set it to ``off`` (or ``0`` /
+    ``none``) to disable. Default: ``$SCRATCH/jcm-jax-cache`` when
+    ``SCRATCH`` is set (fast scratch on HPC), else ``~/.cache/jcm/jax``.
+    """
+    val = os.environ.get("JCM_CACHE_DIR", "")
+    if val.lower() in ("0", "off", "none", "false"):
+        return
+    if val:
+        cache_dir = val
+    elif os.environ.get("SCRATCH"):
+        cache_dir = os.path.join(os.environ["SCRATCH"], "jcm-jax-cache")
+    else:
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "jcm",
+                                 "jax")
+    jax.config.update("jax_compilation_cache_dir", cache_dir)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+    logger.info("JAX persistent compilation cache: %s", cache_dir)
+
+
 def run(cfg: DictConfig, model: Model | None = None):
     """Dispatch to the appropriate runtime mode.
 
@@ -1253,6 +1282,7 @@ def run(cfg: DictConfig, model: Model | None = None):
         cfg.get("host_device_count", None)
         or cfg.get("grid", {}).get("host_device_count", None)
     )
+    maybe_enable_compilation_cache()
 
     # Apply any physical-constant overrides BEFORE the model is built, so the
     # dynamical core (which reads the live jcm.constants singleton at

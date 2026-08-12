@@ -1,6 +1,35 @@
 Release Notes
 =============
 
+Unreleased — issue-backlog tidy-up
+----------------------------------
+
+- **Betts-Miller default shallow flavor is now ``SHALLOWER``** (was
+  Isca's nominal ``SIMP``, which zeroes the shallow branch and is always
+  overridden in practice — #524). Runs using the default Betts-Miller
+  configuration will now do non-precipitating shallow adjustment. The
+  flip exposed and fixes a latent NaN reverse-mode gradient in the
+  ``SHALLOWER`` boundary-layer division (masked-branch 0/0, the #558
+  pattern), previously hidden by the ``SIMP`` default.
+- Surface albedo/emissivity per surface type are differentiable
+  parameters (``SurfaceOpticsParameters``, #347); defaults unchanged.
+- ``TerrainData.from_file`` ignores SSO fields at a different resolution
+  than the model grid (deriving them instead) rather than crashing later
+  in physics (#578).
+- The conservative regridder accepts rectilinear sources (1-D lon/lat
+  axes + 2-D area, #533).
+- **JAX persistent compilation cache on by default** (#592):
+  ``$SCRATCH/jcm-jax-cache`` (else ``~/.cache/jcm/jax``), relocatable
+  via ``JCM_CACHE_DIR``, disable with ``JCM_CACHE_DIR=off``. Entries
+  are keyed on the compiled HLO, so code edits miss rather than
+  wrongly hit; reruns of an already-compiled configuration skip the
+  multi-minute compile entirely.
+- SPEEDY outputs no longer carry the unexplained ``wvi_id`` /
+  ``hsg_level`` dimensions (#391); channelized ``units_table.csv``
+  entries now say what each channel is (#238); ``Model`` has a
+  ``__repr__`` (#322); the JAX-gotchas guide is part of the Sphinx docs
+  (#157).
+
 Unreleased — boundary-condition and emissions data mirror
 ---------------------------------------------------------
 

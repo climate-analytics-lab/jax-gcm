@@ -463,17 +463,30 @@ class TerrainData:
             phis0 = spectral_truncation(target_grid, phi0)
 
         # Pick the best available SSO source.
-        if src_has_sso:
-            sso = _load_sso_from_file(terrain_file)
-        elif src_lat_n > target_shape[1] and src_lon_n > target_shape[0]:
-            target_lat_deg = target_grid.latitudes * 180.0 / jnp.pi
-            target_lon_deg = target_grid.longitudes * 180.0 / jnp.pi
-            sso = derive_sso_descriptors(
-                src_orog, src_lat, src_lon,
-                target_lat_deg, target_lon_deg,
-            )
-        else:
-            sso = get_simplified_sso_descriptors(orography)
+        sso = _load_sso_from_file(terrain_file) if src_has_sso else None
+        if sso is not None and any(
+            v.shape != target_shape for v in sso.values()
+        ):
+            # File SSO is at a different resolution than the model grid —
+            # using it raw would crash deep inside a vmapped physics call
+            # (#578). Fall through to deriving from the source orography.
+            import logging
+            logging.warning(
+                "terrain file %s carries SSO fields at %s, not the model's "
+                "%s — ignoring them and deriving SSO from the source "
+                "orography instead", terrain_file,
+                next(iter(sso.values())).shape, target_shape)
+            sso = None
+        if sso is None:
+            if src_lat_n > target_shape[1] and src_lon_n > target_shape[0]:
+                target_lat_deg = target_grid.latitudes * 180.0 / jnp.pi
+                target_lon_deg = target_grid.longitudes * 180.0 / jnp.pi
+                sso = derive_sso_descriptors(
+                    src_orog, src_lat, src_lon,
+                    target_lat_deg, target_lon_deg,
+                )
+            else:
+                sso = get_simplified_sso_descriptors(orography)
 
         return cls(orog=orography, phis0=phis0, fmask=fmask,
                    lfluxland=jnp.bool_(lfluxland), **sso)
