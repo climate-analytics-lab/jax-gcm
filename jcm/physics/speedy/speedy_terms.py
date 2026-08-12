@@ -512,12 +512,19 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 # Factory function
 # ---------------------------------------------------------------------------
 
-def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True):
+def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True,
+                   diagnose_omega: bool = False):
     """Create a ComposablePhysics with the standard SPEEDY term ordering.
 
     Args:
         parameters: Optional Parameters struct. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms for memory efficiency.
+        diagnose_omega: Append the :class:`~jcm.physics.diagnostics.omega.
+            OmegaDiagnostic` term, publishing the dycore's pressure
+            vertical velocity [Pa/s] as an ``omega`` output field. Needs
+            ``DinosaurDycore(compute_omega=True)`` (Model construction
+            fails with a pointed error otherwise; the CLI enables the
+            provider automatically).
 
     Returns:
         A ComposablePhysics instance with all SPEEDY terms.
@@ -526,6 +533,11 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
     from jcm.physics.composable_physics import ComposablePhysics
 
     p = parameters or Parameters.default()
+
+    omega_terms = []
+    if diagnose_omega:
+        from jcm.physics.diagnostics.omega import OmegaDiagnostic
+        omega_terms = [OmegaDiagnostic()]
 
     return ComposablePhysics(
         terms=[
@@ -548,6 +560,7 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             ),
             SpeedyUpwardLongwaveRadiation(mod_radcon_params=p.mod_radcon),
             SpeedyVerticalDiffusion(vdiff_params=p.vertical_diffusion),
+            *omega_terms,
         ],
         checkpoint_terms=checkpoint_terms,
     )

@@ -695,19 +695,25 @@ def build_tracer_filter(cfg: DictConfig):
     return MassConservingPositivity()
 
 
-def _want_omega(cfg: DictConfig) -> bool:
-    """Resolve the dycore omega provider from the config.
+def _want_omega(cfg: DictConfig, physics=None) -> bool:
+    """Resolve the dycore omega provider from the config and physics.
 
     An explicit ``dycore.compute_omega`` always wins. Left unset, the
-    provider defaults ON when the physics config runs the AeroCom ``plev``
-    group (``enable_aerocom`` with ``plev`` in ``aerocom_groups``):
-    without it that group's wap/w500/w700 are silently zero-filled, which
-    is exactly the kind of valid-looking-but-empty submission file nobody
-    catches until review.
+    provider defaults ON when either (a) the composed physics REQUIRES
+    the ``omega`` dycore field (e.g. the model-agnostic
+    ``OmegaDiagnostic`` term), so an explicitly requested diagnostic
+    never dies on the construction-time contract check, or (b) the
+    physics config runs the AeroCom ``plev`` group (``enable_aerocom``
+    with ``plev`` in ``aerocom_groups``), whose wap/w500/w700 would
+    otherwise be silently zero-filled: exactly the kind of
+    valid-looking-but-empty submission file nobody catches until review.
     """
     explicit = cfg.get("dycore", {}).get("compute_omega", None)
     if explicit is not None:
         return bool(explicit)
+    if physics is not None and "omega" in tuple(
+            getattr(physics, "required_dycore_fields", lambda: ())()):
+        return True
     phys = cfg.get("physics", {})
     return bool(phys.get("enable_aerocom", False)) and (
         "plev" in (phys.get("aerocom_groups") or ()))
@@ -766,7 +772,7 @@ def build_model(cfg: DictConfig) -> Model:
         tracer_specs=tracer_specs,
         diffusion=diffusion,
         tracer_filter=tracer_filter,
-        compute_omega=_want_omega(cfg),
+        compute_omega=_want_omega(cfg, physics),
         advection=advection,
         sl_options=sl_options,
     )
