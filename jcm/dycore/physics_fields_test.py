@@ -370,6 +370,56 @@ class InjectionTest(unittest.TestCase):
         self.assertTrue(np.isfinite(temp).all())
 
 
+class OmegaDiagnosticTermTest(unittest.TestCase):
+    """The model-agnostic omega output term (jax-gcm#409's original ask)."""
+
+    def test_factories_expose_the_flag(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        self.assertEqual(speedy_physics().required_dycore_fields(), ())
+        physics = speedy_physics(diagnose_omega=True)
+        self.assertEqual(physics.required_dycore_fields(), ("omega",))
+        self.assertEqual(physics.terms[-1].name, "omega_diagnostic")
+
+    def test_echam_factory_keeps_aerocom_terminal(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        physics = echam_physics(radiation_scheme="grey",
+                                diagnose_omega=True, enable_aerocom=True)
+        names = [t.name for t in physics.terms]
+        self.assertIn("omega_diagnostic", names)
+        self.assertEqual(names[-1], "aerocom_diagnostics")
+        # AerocomDiagnostics only consumes opportunistically, so the
+        # requirement comes from the omega term alone.
+        self.assertIn("omega", physics.required_dycore_fields())
+
+    def test_model_validation_fails_without_provider(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = _coords()
+        with self.assertRaisesRegex(ValueError, "omega"):
+            Model(coords=coords,
+                  physics=speedy_physics(diagnose_omega=True))
+
+    def test_speedy_run_emits_omega(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0, compute_omega=True)
+        model = Model(dycore=dycore,
+                      physics=speedy_physics(diagnose_omega=True))
+        dt_days = 30.0 / (60.0 * 24.0)
+        preds = model.run(save_interval=2 * dt_days, total_time=4 * dt_days)
+        omega = np.asarray(preds.physics["omega"])
+        nlev = coords.vertical.layers
+        self.assertIn(nlev, omega.shape)
+        self.assertTrue(np.isfinite(omega).all())
+        # Real vertical motion in Pa/s: nonzero, and nowhere near the
+        # ~1e-5 of a normalized-pressure mistake or the ~1e5 of a
+        # double-scaled one.
+        absmax = float(np.abs(omega[-1]).max())
+        self.assertGreater(absmax, 1e-6)
+        self.assertLess(absmax, 1e3)
+
+
 class EchamFactoryTest(unittest.TestCase):
     def test_gw_scheme_switch(self):
         from jcm.physics.echam.echam_terms import echam_physics

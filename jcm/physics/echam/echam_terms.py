@@ -88,6 +88,7 @@ def echam_physics(
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
     aerocom_optics: bool = False,
+    diagnose_omega: bool = False,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -166,6 +167,11 @@ def echam_physics(
         cosp_ncolumns: Stochastic subcolumns per gridbox for the
             radar simulator (COSP canonical value is 100; fewer
             is cheaper and averages out in climatologies).
+        diagnose_omega: Publish the dycore's pressure vertical velocity
+            [Pa/s] as an ``omega`` output field (needs
+            ``DinosaurDycore(compute_omega=True)``; the CLI enables the
+            provider automatically). Model-agnostic, independent of the
+            AeroCom wap/w500/w700 fields.
         enable_aerocom: Attach the AeroCom phase-4 derived
             diagnostics term (cloud-top sampling, column
             integrals, pressure-level fields, aerosol number
@@ -383,6 +389,11 @@ def echam_physics(
                                    enable_modis=cosp_modis,
                                    enable_isccp=cosp_isccp)]
 
+    omega_terms: list[PhysicsTerm] = []
+    if diagnose_omega:
+        from jcm.physics.diagnostics.omega import OmegaDiagnostic
+        omega_terms = [OmegaDiagnostic()]
+
     aerocom_terms: list[PhysicsTerm] = []
     if enable_aerocom:
         from jcm.physics.diagnostics.aerocom import AerocomDiagnostics
@@ -405,6 +416,7 @@ def echam_physics(
             *jam_post_cloud_terms,
             *nonoro_gw_terms,
             LottMillerSso(params=sso_p),
+            *omega_terms,
             # Terminal: summarises the completed step, so it runs after
             # every term that can still modify the state.
             *aerocom_terms,
