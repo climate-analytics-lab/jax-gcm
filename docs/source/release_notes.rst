@@ -4,6 +4,15 @@ Release Notes
 Unreleased — issue-backlog tidy-up
 ----------------------------------
 
+- **Run provenance recorded in every output file** (#591): netCDF global
+  attributes (``jcm_prov_*``) carry the git SHA/branch/dirty state of
+  every imported editable library, precision flags and devices, the
+  resolved boundary files actually opened (size+mtime; content sha256
+  with ``JCM_HASH_INPUTS=1``), whether ozone was prescribed or analytic,
+  and a single 12-hex run hash for at-a-glance "same setup" checks. A
+  ``<output>.nc.provenance.json`` sidecar holds the fully composed
+  Hydra config, and one log line at startup summarises SHAs / precision
+  / ozone source.
 - **Betts-Miller default shallow flavor is now ``SHALLOWER``** (was
   Isca's nominal ``SIMP``, which zeroes the shallow branch and is always
   overridden in practice — #524). Runs using the default Betts-Miller
