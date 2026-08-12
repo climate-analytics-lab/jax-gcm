@@ -153,7 +153,20 @@ Known Caveats
   calibrated: cloud shortwave forcing is too strong, outgoing longwave is
   low, and the sea-salt source under-emits. See the design note for the
   current numbers.
-- Middle-atmosphere runs above T63 need more than one 40 GB GPU.
+- **The cloud-borne aerosol pathway is not closed** (#602). ARG activation
+  supplies droplet number to the cloud scheme, but nothing transfers aerosol
+  *mass or number* from the interstitial to the cloud-borne population, and
+  there is no resuspension on evaporation and no deposition of cloud-borne
+  mass. The 25 ``mc_*``/``nc_*`` tracers are therefore transported but
+  essentially empty, and aqueous sulfate production falls back to the
+  interstitial accumulation mode everywhere.
+- **No physics-side aerosol vertical transport** (#602). Neither vertical
+  diffusion nor convection mixes aerosol tracers — both emit only ``qc`` and
+  ``qi`` — so the dynamical core's tracer advection is the sole transport for
+  every aerosol species. A fidelity gap against ECHAM-HAM and CAM
+  (``dropmixnuc`` / ``aero_convproc``).
+- Middle-atmosphere runs above T63 need more than one 40 GB GPU. ne30L95
+  does not fit on one 80 GB A100 either (#595).
 
 v2.0.0b1
 --------
