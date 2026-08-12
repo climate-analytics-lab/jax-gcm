@@ -80,7 +80,7 @@ class OzoneClimatology:
     @classmethod
     def from_file(
         cls,
-        path: str | Path,
+        path: str | Path | list,
         nlon: int,
         nlat: int,
         nlev: int,
@@ -97,7 +97,9 @@ class OzoneClimatology:
 
         Args:
             path: Path to the netCDF file produced by
-                ``jcm.data.bc.interpolate_ozone``.
+                ``jcm.data.bc.interpolate_ozone``, or a list of yearly
+                transient files sharing one time epoch (concatenated
+                along time; ``ntime > 12`` then routes to ``BY_DATE``).
             nlon: Expected number of longitude points (must match file).
             nlat: Expected number of latitude points (must match file).
             nlev: Expected number of vertical levels (must match the
@@ -126,10 +128,26 @@ class OzoneClimatology:
         # ``ForcingData``, so importing it at module top would cycle.
         from jcm.forcing import BY_DATE, WRAP_YEAR, make_time_series
 
-        path = Path(path)
-        # ``decode_times=False`` to read the raw values + units; we
-        # decode below only if we end up in the BY_DATE branch.
-        ds = xr.open_dataset(path, decode_times=False)
+        if isinstance(path, (list, tuple)):
+            # Yearly transient files (issue #610), concatenated along
+            # time in the given (ascending-year) order. Raw time values
+            # only concatenate meaningfully when every file shares one
+            # epoch, so heterogeneous units raise rather than silently
+            # producing a scrambled axis.
+            paths = [Path(p) for p in path]
+            dsets = [xr.open_dataset(p, decode_times=False) for p in paths]
+            units = {str(d["time"].attrs.get("units")) for d in dsets}
+            if len(units) > 1:
+                raise ValueError(
+                    f"Yearly ozone files disagree on time units {units}; "
+                    "rebuild them with a common epoch.")
+            ds = xr.concat(dsets, dim="time")
+            path = paths[0]
+        else:
+            path = Path(path)
+            # ``decode_times=False`` to read the raw values + units; we
+            # decode below only if we end up in the BY_DATE branch.
+            ds = xr.open_dataset(path, decode_times=False)
         if var_name not in ds.data_vars:
             raise ValueError(
                 f"Ozone file {path} missing '{var_name}' variable; have "

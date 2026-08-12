@@ -1356,3 +1356,73 @@ class ResolveDataPathTest(unittest.TestCase):
         # a mis-typed mapping must NOT be flattened to its keys
         dc = OmegaConf.create({"so2": "/a.nc"})
         self.assertIs(runners._resolve_data_path(dc), dc)
+
+
+class TestYearExpansionAndStartDate(unittest.TestCase):
+    """{year} pattern expansion + run.start_date threading (#610)."""
+
+    def test_pattern_expands_inclusive_range(self):
+        from jcm import runners
+        out = runners._expand_years("hf://bundles/t63/forcing_amip/{year}.nc",
+                                    [1979, 1981])
+        self.assertEqual(out, [
+            "hf://bundles/t63/forcing_amip/1979.nc",
+            "hf://bundles/t63/forcing_amip/1980.nc",
+            "hf://bundles/t63/forcing_amip/1981.nc",
+        ])
+
+    def test_plain_paths_and_none_pass_through(self):
+        from jcm import runners
+        self.assertEqual(runners._expand_years("/x/forcing.nc", [1979, 1981]),
+                         "/x/forcing.nc")
+        self.assertIsNone(runners._expand_years(None, [1979, 1981]))
+        self.assertEqual(runners._expand_years("/x/forcing.nc", None),
+                         "/x/forcing.nc")
+
+    def test_pattern_without_years_raises(self):
+        from jcm import runners
+        with self.assertRaisesRegex(ValueError, "year range"):
+            runners._expand_years("/x/forcing_{year}.nc", None)
+
+    def test_reversed_range_raises(self):
+        from jcm import runners
+        with self.assertRaisesRegex(ValueError, "reversed"):
+            runners._expand_years("/x/forcing_{year}.nc", [1981, 1979])
+
+    def test_amip_preset_composes(self):
+        cfg = _compose(["forcing=amip", "forcing.years=[1979,1980]",
+                        "run.start_date=1979-01-01"])
+        self.assertEqual(cfg.forcing.kind, "from_file")
+        self.assertEqual(cfg.forcing.align, "by_date_interp")
+        self.assertIn("{year}", cfg.forcing.file)
+        self.assertEqual(list(cfg.forcing.years), [1979, 1980])
+        self.assertEqual(cfg.run.start_date, "1979-01-01")
+
+    def test_start_date_resolves_to_datetime(self):
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({"run": {"start_date": "1979-01-01"}})
+        dt = runners._resolve_start_date(cfg)
+        self.assertIsNotNone(dt)
+        import jax_datetime as jdt
+        self.assertEqual(
+            int((dt - jdt.to_datetime("1979-01-01")).days), 0)
+
+    def test_start_date_null_keeps_model_default(self):
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        self.assertIsNone(runners._resolve_start_date(
+            OmegaConf.create({"run": {}})))
+        self.assertIsNone(runners._resolve_start_date(
+            OmegaConf.create({"run": {"start_date": None}})))
+
+    def test_start_date_threads_into_model(self):
+        from jcm import runners
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8",
+                        "run.time_step=180", "run.start_date=1979-01-01"])
+        model = runners.build_model(cfg)
+        import jax_datetime as jdt
+        self.assertEqual(
+            int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)

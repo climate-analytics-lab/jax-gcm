@@ -2,6 +2,13 @@
 time_step: 10              # minutes
 save_interval: 10          # days
 total_time: 10             # days
+
+# Model start date (ISO string, e.g. "1979-01-01"). Null keeps the
+# default 2000-01-01. Transient (by-date) forcing files are sampled at
+# the absolute model date, so historical/AMIP runs must set this to sit
+# on the forcing calendar (issue #610).
+start_date: null
+
 output_averages: false
 output: model_state.nc
 log_level: CRITICAL
