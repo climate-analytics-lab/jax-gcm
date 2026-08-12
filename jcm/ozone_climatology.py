@@ -283,7 +283,22 @@ def _decode_time_axis_seconds(ds, path: Path) -> jnp.ndarray:
             f"``time`` coordinate."
         )
     time_da = xr.decode_cf(ds[["time"]])["time"]
-    times = pd.DatetimeIndex(np.asarray(time_da.values))
+    vals = np.asarray(time_da.values)
+    if vals.dtype == object:
+        # cftime axis (e.g. the FZJ ozone's 365_day calendar): map each
+        # date by its calendar components onto the Gregorian clock, the
+        # same convention as ``jcm.forcing._time_axis_seconds_from_ds``
+        # (noleap day-counting would drift ~7 days by 2000 against the
+        # model's leap-aware lookup target).
+        import datetime as _dt
+        times = pd.DatetimeIndex([
+            _dt.datetime(d.year, d.month, d.day,
+                         getattr(d, "hour", 0), getattr(d, "minute", 0),
+                         getattr(d, "second", 0))
+            for d in np.ravel(vals)
+        ])
+    else:
+        times = pd.DatetimeIndex(vals)
     epoch = pd.Timestamp("1970-01-01")
     delta_s = (times - epoch).total_seconds().to_numpy()
     return jnp.asarray(delta_s, dtype=jnp.float32)

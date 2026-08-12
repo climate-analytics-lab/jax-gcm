@@ -10,6 +10,7 @@ omit =
     jcm/data/mirror/ozone.py
     jcm/data/mirror/emissions.py
     jcm/data/mirror/bundles.py
+    jcm/data/mirror/amip_yearly.py
     jcm/data/mirror/build_mirror.py
     # Two-moment microphysics process functions are ported but not yet fully
     # wired into the column orchestrator — remove these entries once Phase 5b
