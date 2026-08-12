@@ -37,7 +37,9 @@ class ModelPredictions:
 
     def __init__(self, predictions: Predictions, coords, physics: Physics,  # noqa: D107
                  dycore=None, observations=None, observers=(),
-                 obs_t0_days=None, obs_dt_seconds=None):
+                 obs_t0_days=None, obs_dt_seconds=None,
+                 snapshots=None, snapshot_variables=(),
+                 snapshot_interval_days=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
@@ -46,6 +48,9 @@ class ModelPredictions:
         self._observers = tuple(observers)
         self._obs_t0_days = obs_t0_days
         self._obs_dt_seconds = obs_dt_seconds
+        self._snapshots = snapshots
+        self._snapshot_variables = tuple(snapshot_variables)
+        self._snapshot_interval_days = snapshot_interval_days
 
     @property
     def dynamics(self):
@@ -63,6 +68,43 @@ class ModelPredictions:
     def observations(self):
         """Raw per-timestep observer samples (tuple of dicts), or ``None``."""
         return self._observations
+
+    @property
+    def snapshots(self):
+        """Raw interval-instantaneous snapshot arrays, or ``None``."""
+        return self._snapshots
+
+    def snapshot_dataset(self):
+        """Interval-instantaneous 2-D snapshots as one xarray Dataset.
+
+        The AeroCom 3-hourly stream (jax-gcm#586): each requested variable
+        comes back as ``(snap_time, lon, lat)`` at the snapshot cadence,
+        with ``snap_time`` in days from the window start (first snapshot
+        one interval in, matching the post-step sampling convention).
+        Empty dict semantics: returns ``None`` when the run requested no
+        snapshots.
+        """
+        if not self._snapshots or self._snapshot_interval_days is None:
+            return None
+        import xarray as xr
+
+        snaps = jax.device_get(self._snapshots)
+        nlon, nlat = self._coords.horizontal.nodal_shape
+        first = next(iter(snaps.values()))
+        n = first.shape[0]
+        t = (np.arange(1, n + 1) * self._snapshot_interval_days)
+        data = {}
+        for name, arr in snaps.items():
+            arr = np.asarray(arr).reshape(n, nlon, nlat)
+            data[name.replace(".", "_")] = (("snap_time", "lon", "lat"), arr)
+        lon = self._coords.horizontal.nodal_axes[0] * 180.0 / np.pi
+        lat = np.arcsin(self._coords.horizontal.nodal_axes[1]) * 180.0 / np.pi
+        return xr.Dataset(
+            data,
+            coords={"snap_time": t, "lon": lon, "lat": lat},
+            attrs={"snapshot_interval_days": self._snapshot_interval_days,
+                   "sampling": "instantaneous (post-step)"},
+        )
 
     def observation_datasets(self):
         """Per-timestep virtual-observation output as xarray Datasets.
