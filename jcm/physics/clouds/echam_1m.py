@@ -1189,7 +1189,9 @@ class Echam1MMicrophysics(PhysicsTerm):
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",
     )
-    provides: ClassVar[tuple[str, ...]] = ("clouds",)
+    provides: ClassVar[tuple[str, ...]] = (
+        "autoconv", "accretn", "wbf", "clouds",
+    )
 
     def __init__(self, params: MicrophysicsParameters | None = None):
         """Hold the scheme-native :class:`MicrophysicsParameters`."""
@@ -1286,6 +1288,21 @@ class Echam1MMicrophysics(PhysicsTerm):
                 "qi": micro_tend.dqidt.T,
             },
         )
+
+        # AeroCom process rates (jax-gcm#585 acceptance: both schemes,
+        # zero where a pathway is absent). The 1M scan folds accretion
+        # into its combined warm-rain sink and has no explicit
+        # Wegener-Bergeron-Findeisen transfer, so only autoconversion is
+        # nonzero here; the keys are still published so the diagnostic
+        # set is scheme-independent. autoconv_rate is the grid-mean
+        # in-cloud conversion [kg/kg/s]; dp-weighting gives kg/m^2/s.
+        # air_density/layer_thickness are (nlev, ncols); the vmapped
+        # micro_state fields are (ncols, nlev) — transpose the mass weight.
+        dm_col = (air_density * layer_thickness).T
+        autoconv_col = jnp.sum(micro_state.autoconv_rate * dm_col, axis=-1)
+        zero_col = jnp.zeros_like(autoconv_col)
+        diagnostics = {**diagnostics, "autoconv": autoconv_col,
+                       "accretn": zero_col, "wbf": zero_col}
 
         clouds = clouds.copy(
             precip_rain=micro_state.precip_rain,
