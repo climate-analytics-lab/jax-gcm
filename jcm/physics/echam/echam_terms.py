@@ -83,6 +83,7 @@ def echam_physics(
     cosp_calipso: bool = False,
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
+    aerosol_free_radiation: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -192,8 +193,21 @@ def echam_physics(
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
             ``cltisccp``); see jax-gcm#597.
+        aerosol_free_radiation: Run a SECOND RRTMGP solve per compute
+            step with the aerosol optics zeroed, emitting the AeroCom
+            ``*noa`` TOA fluxes (rsutnoa/rlutnoa and clear-sky
+            variants) for instantaneous-ERFari diagnosis (jax-gcm#583).
+            Roughly doubles the radiation cost on compute steps;
+            RRTMGP only.
 
     """
+    if aerosol_free_radiation and radiation_scheme != "rrtmgp":
+        raise ValueError(
+            "aerosol_free_radiation=True needs radiation_scheme='rrtmgp' — "
+            "the grey and emulated schemes carry no aerosol optics to zero, "
+            f"so radiation_scheme={radiation_scheme!r} would silently emit "
+            "all-zero *noa fluxes.")
+
     convection_p = convection or ConvectionParameters.default()
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
@@ -216,8 +230,10 @@ def echam_physics(
         # compute_cre doubles the RRTMGP work on radiation steps (a second
         # full clear-sky solve) purely for the CRE diagnostic — production
         # throughput runs can turn it off.
-        rad_term = RRTMGPRadiation(params=radiation_p,
-                                   compute_cre=radiation_compute_cre)
+        rad_term = RRTMGPRadiation(
+            params=radiation_p,
+            compute_cre=radiation_compute_cre,
+            aerosol_free_diagnostics=aerosol_free_radiation)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":

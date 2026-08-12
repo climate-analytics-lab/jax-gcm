@@ -574,6 +574,12 @@ def radiation_scheme(
         surface_lw_up=surface_lw_up,
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        # Aerosol-free fluxes are an RRTMGP-only diagnostic (#583); the
+        # grey scheme carries no aerosol optics, so these stay zero.
+        toa_sw_up_noa=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_noa=jnp.zeros_like(toa_lw_up_clear),
+        toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
         # Grey two-stream has no McICA sub-columns; the radiation-view
         # cloud-cover diagnostic is defined as 0 here (see RadiationData).
         total_cloud_cover=jnp.zeros_like(olr),
@@ -835,6 +841,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_sw_down=_column_vector(
                 diagnostics_vmapped.toa_sw_down, ncols,
             ),
+            toa_sw_up_noa=jnp.zeros((ncols,)),
+            toa_lw_up_noa=jnp.zeros((ncols,)),
+            toa_sw_up_clear_noa=jnp.zeros((ncols,)),
+            toa_lw_up_clear_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_sw_up_clear, ncols,
             ),

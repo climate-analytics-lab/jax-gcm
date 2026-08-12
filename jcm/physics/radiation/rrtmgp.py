@@ -447,6 +447,10 @@ def prepare_icon_data(
         # outside the beam-split context.
         toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear=jnp.zeros_like(toa_lw_up),
+        toa_sw_up_noa=jnp.zeros_like(toa_sw_up),
+        toa_lw_up_noa=jnp.zeros_like(toa_sw_up),
+        toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up),
+        toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
         # the standalone scheme emits 0 and the term bumps the counter
@@ -991,6 +995,7 @@ class RRTMGPRadiation(PhysicsTerm):
         params: RadiationParameters | None = None,
         base_seed: int = 0,
         compute_cre: bool = True,
+        aerosol_free_diagnostics: bool = False,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1013,6 +1018,10 @@ class RRTMGPRadiation(PhysicsTerm):
         # without an extra pytree leaf.
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
+        # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
+        # per compute step with the aerosol optics zeroed. Roughly doubles
+        # the (dominant) radiation cost on compute steps, so opt-in only.
+        self._aerosol_free = bool(aerosol_free_diagnostics)
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit
@@ -1232,11 +1241,68 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
         )
 
+        # Aerosol-free companion solve (jax-gcm#583): identical inputs but
+        # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
+        # the cloud field is bit-identical and the difference to the all-sky
+        # fluxes is the instantaneous aerosol radiative effect (ERFari
+        # numerator), not an aerosol-cloud response. Zeroing the optical
+        # depths alone suffices (extinction scales everything), but ssa/asy
+        # are zeroed too so no path reads an unweighted property.
+        if self._aerosol_free:
+            aerosol_noa = cols["aerosol"].copy(
+                aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
+                ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
+                asy_profile=jnp.zeros_like(aerosol_for_vmap.asy_profile),
+                aod_total=jnp.zeros_like(aerosol_for_vmap.aod_total),
+                aod_anthropogenic=jnp.zeros_like(
+                    aerosol_for_vmap.aod_anthropogenic),
+                aod_background=jnp.zeros_like(aerosol_for_vmap.aod_background),
+                aod_sw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_sw_per_band),
+                ssa_sw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_sw_per_band),
+                asy_sw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_sw_per_band),
+                aod_lw_per_band=jnp.zeros_like(aerosol_for_vmap.aod_lw_per_band),
+                ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
+                asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
+            )
+            _, diagnostics_noa = _maybe_chunked_vmap(
+                radiation_scheme_rrtmgp, _in_axes,
+            )(
+                cols["temperature"], cols["specific_humidity"],
+                cols["pressure_full"], cols["pressure_half"],
+                cols["layer_thickness"], cols["air_density"],
+                cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
+                cols["surface_temperature"], cols["surface_albedo_vis"],
+                cols["surface_albedo_nir"], cols["surface_emissivity"],
+                solar, cols["latitudes"], cols["longitudes"],
+                params, aerosol_noa, cols["column_indices"],
+                model_step, base_seed, compute_cre,
+                cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+                cols["n2o_vmr"],
+                cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+            )
+            noa = dict(
+                toa_sw_up_noa=_column_vector_rrtmgp(
+                    diagnostics_noa.toa_sw_up, ncols),
+                toa_lw_up_noa=_column_vector_rrtmgp(
+                    diagnostics_noa.toa_lw_up, ncols),
+                toa_sw_up_clear_noa=_column_vector_rrtmgp(
+                    diagnostics_noa.toa_sw_up_clear, ncols),
+                toa_lw_up_clear_noa=_column_vector_rrtmgp(
+                    diagnostics_noa.toa_lw_up_clear, ncols),
+            )
+        else:
+            zero_col = jnp.zeros((ncols,))
+            noa = dict(
+                toa_sw_up_noa=zero_col, toa_lw_up_noa=zero_col,
+                toa_sw_up_clear_noa=zero_col, toa_lw_up_clear_noa=zero_col,
+            )
+
         # Per-gpoint flux profiles are summed over g-points inside the
         # vmapped per-column compute, so flux arrays are (ncols, nlev+1)
         # — only a transpose is needed (DO NOT use the grey path's
         # transpose+sum, the per-band axis is already gone).
         rad_out = RadiationData(
+            **noa,
             cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
             surface_albedo_vis=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_albedo_vis, ncols,
