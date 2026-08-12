@@ -56,11 +56,14 @@ def tracer_specs(spec: ModalAerosolSpec) -> tuple[TracerSpec, ...]:
     """All ``TracerSpec``s for a population (interstitial + cloud-borne).
 
     Returns one mass spec per (mode, species) and one number spec per mode,
-    each doubled for the cloud-borne mirror.
+    each doubled for the cloud-borne mirror when the population prognoses
+    one (``spec.cloud_borne``); an implicit-in-droplet population declares
+    only the interstitial keys.
     """
+    phases = (False, True) if spec.cloud_borne else (False,)
     out: list[TracerSpec] = []
     for mode in spec.modes:
-        for cb in (False, True):
+        for cb in phases:
             out.append(
                 TracerSpec(
                     number_name(mode.short, cloud_borne=cb),

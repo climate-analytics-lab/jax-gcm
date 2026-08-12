@@ -98,12 +98,12 @@ class AqueousTermTest(unittest.TestCase):
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_sulfur_conserved_without_cloud_borne_number(self):
-        # No cloud-borne number anywhere (today's reality: no activation
-        # transfer populates the cloud-borne tracers). Production must land in
-        # INTERSTITIAL accumulation-mode sulfate — the HAM cloud-borne-coarse
-        # fallback fed a tracer nothing scavenges (wetdep is interstitial-
-        # only), which grew ~0.7 mg/m²/day without equilibrium in the first
-        # online-emission ne30 year — and must still match the SO2 sink.
+        # No cloud-borne number anywhere (spin-up, before the exchange term
+        # has populated the mirrors). Production must land in INTERSTITIAL
+        # accumulation-mode sulfate — the HAM cloud-borne-coarse fallback fed
+        # a tracer nothing scavenged before #602 closed the cycle, which grew
+        # ~0.7 mg/m²/day without equilibrium in the first online-emission
+        # ne30 year — and must still match the SO2 sink.
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
 
@@ -124,6 +124,29 @@ class AqueousTermTest(unittest.TestCase):
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             key = mass_name("so4", m, cloud_borne=True)
             s_rate = s_rate + np.asarray(tend.tracers[key]) / _MW_SO4
+        self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
+
+    def test_implicit_population_emits_no_cloud_borne_keys(self):
+        # With ``spec.cloud_borne = False`` (#602) the whole production is
+        # interstitial by construction: no mirror tendencies at all, and the
+        # sulfur budget still closes against the SO2 sink.
+        import dataclasses
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
+
+        spec = dataclasses.replace(MAM4_SPEC, cloud_borne=False)
+        state, diagnostics = self._setup()
+        tend, _ = AqueousSulfur(spec=spec)(state, diagnostics, None, None)
+        self.assertFalse(
+            any(nm.startswith(("mc_", "nc_")) for nm in tend.tracers)
+        )
+        self.assertGreater(
+            float(tend.tracers[mass_name("so4", "acc")][0, 0]), 0.0,
+        )
+        s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
+        s_rate = s_rate + np.asarray(
+            tend.tracers[mass_name("so4", "acc")]
+        ) / _MW_SO4
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_no_clouds_no_production(self):

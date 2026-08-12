@@ -1,7 +1,8 @@
 """``jam_aerosol_physics()`` factory — the ordered JAM harness term list.
 
 Returns the HAMMOZ-style process chain (emissions → microphysics core →
-activation → sedimentation → dry deposition → wet deposition) as a list of
+activation → sedimentation → dry deposition → cloud-borne exchange →
+aqueous chemistry → wet deposition) as a list of
 ``PhysicsTerm``s, ready to splice into ``echam_physics``. The microphysics
 core is the swap point: pass ``"placeholder"`` (default κ-Köhler equilibrium)
 or any ``ModalMicrophysicsTerm`` instance (e.g. a future MAM4-JAX wrapper,
@@ -11,9 +12,15 @@ on mode/species layout.
 
 from __future__ import annotations
 
+import dataclasses
+
 from jcm.physics.aerosol.jam.activation.arg_term import (
     ArgActivation,
     ArgParameters,
+)
+from jcm.physics.aerosol.jam.cloud_borne import (
+    CloudBorneExchange,
+    CloudBorneExchangeParameters,
 )
 from jcm.physics.aerosol.jam.chemistry.aqueous import (
     AqueousSulfur,
@@ -70,32 +77,54 @@ def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
     return Mam4JaxMicrophysics
 
 
-# Core resolvers. ``placeholder`` is built-in; ``mam4_jax`` is loaded lazily so
-# the optional GPL-3.0 ``mam4-jax`` dependency is only imported when selected.
+# Core resolvers (each takes a spec override, ``None`` for the core default).
+# ``placeholder`` is built-in; ``mam4_jax`` is loaded lazily so the optional
+# GPL-3.0 ``mam4-jax`` dependency is only imported when selected.
 _MICROPHYSICS = {
-    "placeholder": lambda: PlaceholderMicrophysics(),
-    "mam4_jax": lambda: _load_mam4_jax()(),
+    "placeholder": lambda spec: PlaceholderMicrophysics(spec=spec),
+    "mam4_jax": lambda spec: _load_mam4_jax()(spec=spec),
 }
 
 
 def _resolve_microphysics(
     microphysics: ModalMicrophysicsTerm | str,
+    cloud_borne: bool | None = None,
 ) -> ModalMicrophysicsTerm:
     if isinstance(microphysics, ModalMicrophysicsTerm):
+        if (
+            cloud_borne is not None
+            and microphysics.spec.cloud_borne != cloud_borne
+        ):
+            raise ValueError(
+                f"cloud_borne={cloud_borne} conflicts with the supplied "
+                "core's population "
+                f"(spec.cloud_borne={microphysics.spec.cloud_borne}); "
+                "construct the core with a spec carrying the intended flag "
+                "instead."
+            )
         return microphysics
     try:
-        return _MICROPHYSICS[microphysics]()
+        factory = _MICROPHYSICS[microphysics]
     except KeyError:
         raise ValueError(
             f"Unknown aer microphysics {microphysics!r}. "
             f"Choose one of {sorted(_MICROPHYSICS)} or pass a "
             "ModalMicrophysicsTerm instance."
         ) from None
+    core = factory(None)
+    if cloud_borne is not None and core.spec.cloud_borne != cloud_borne:
+        # Rebuild on the same population with the flag flipped; construction
+        # is compose-time only, so the double build costs nothing at run time.
+        core = factory(
+            dataclasses.replace(core.spec, cloud_borne=cloud_borne)
+        )
+    return core
 
 
 def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
+    cloud_borne: bool | None = None,
     arg_variant: str = "arg2000",
     optics: bool = True,
     optics_diagnostics: bool = False,
@@ -112,6 +141,7 @@ def jam_aerosol_physics(
     ice_scheme: str = "niemand",
     ice_nucleation_params: IceNucleationParameters | None = None,
     activation: ArgParameters | None = None,
+    cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
     wetdep: WetDepParameters | None = None,
@@ -121,6 +151,19 @@ def jam_aerosol_physics(
     Args:
         microphysics: the swappable core — ``"placeholder"`` or a
             ``ModalMicrophysicsTerm`` instance.
+        cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
+            ``None`` (default) follows the core population's own
+            ``spec.cloud_borne``; ``True``/``False`` override it for a
+            string-named core (and merely validate an instance core). On:
+            the ``mc_*``/``nc_*`` mirrors are declared and cycled —
+            activation transfer + resuspension (``CloudBorneExchange``),
+            in-droplet wet removal, surface dry deposition, and the aqueous
+            sulfate goes to the cloud-borne modes. Off: the mirrors are not
+            declared at all (halving the aerosol transport bill) and the
+            harness scavenges interstitial aerosol by its activated
+            fraction, the implicit M7/TOMAS-style treatment. Both settings
+            are complete physics, so A/B cost/fidelity comparisons are one
+            flag apart.
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
@@ -138,17 +181,19 @@ def jam_aerosol_physics(
         ice_scheme: heterogeneous freezing scheme — ``"niemand"`` (default,
             singular/active-site) or ``"lohmann_diehl"`` (ECHAM-HAM number-based);
             ``ice_nucleation_params`` overrides the differentiable defaults.
-        activation/sedimentation/drydep/wetdep: optional per-process
-            ``Parameters`` overrides (each ``None`` resolves to its default).
+        activation/cloud_borne_exchange/sedimentation/drydep/wetdep: optional
+            per-process ``Parameters`` overrides (each ``None`` resolves to
+            its default).
 
     Returns:
         The ordered term list: natural emissions, prescribed oxidants and
         gas-phase sulfur chemistry, the microphysics core (optionally followed
-        by online optics), activation, sedimentation, dry deposition, in-cloud
+        by online optics), activation, sedimentation, dry deposition,
+        cloud-borne exchange (when the population prognoses one), in-cloud
         aqueous sulfur chemistry, and wet deposition.
 
     """
-    core = _resolve_microphysics(microphysics)
+    core = _resolve_microphysics(microphysics, cloud_borne)
     spec = core.spec
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec),
@@ -196,6 +241,13 @@ def jam_aerosol_physics(
         ),
         StokesSedimentation(params=sedimentation, spec=spec),
         SlinnDryDeposition(params=drydep, spec=spec),
+        # Cloud-borne cycling (#602): activation transfer + resuspension
+        # against the current step's cloud field, so it runs in the
+        # post-cloud block, before the aqueous chemistry that splits its
+        # product by cloud-borne number and the scavenging that drains the
+        # reservoir. Only composed when the population prognoses the phase.
+        *([CloudBorneExchange(params=cloud_borne_exchange, spec=spec)]
+          if spec.cloud_borne else []),
         # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
         # post-cloud block (needs current clouds), just before wet scavenging.
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),

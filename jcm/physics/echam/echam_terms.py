@@ -73,6 +73,7 @@ def echam_physics(
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
+    jam_cloud_borne: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
@@ -143,6 +144,14 @@ def echam_physics(
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+        jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
+            (#602). ``True`` (default) declares and cycles the ``mc_*`` /
+            ``nc_*`` mirror tracers (activation transfer, resuspension,
+            in-droplet wet removal, dry deposition); ``False`` drops them
+            entirely — about half the aerosol tracer count and most of the
+            dycore tracer-transport bill — and scavenges interstitial
+            aerosol by its activated fraction instead. The A/B
+            cost/fidelity switch.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
@@ -304,7 +313,8 @@ def echam_physics(
     elif aerosol_module == "jam":
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
-            microphysics=jam_microphysics, arg_variant=jam_arg_variant,
+            microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
+            arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,
             anthropogenic=jam_anthropogenic,
@@ -322,7 +332,13 @@ def echam_physics(
         # Aqueous chemistry + wet deposition need the current step's clouds, so
         # they run after the cloud microphysics term; the rest of the JAM chain
         # is the pre-cloud aerosol block.
-        _post_cloud = ("aerosol_wetdep", "aerosol_aqueous_chemistry")
+        # Cloud-borne exchange sits with the other cloud-consuming terms:
+        # it needs the current step's cloud fraction, and must precede the
+        # aqueous split and wet scavenging (order preserved from jam_terms).
+        _post_cloud = (
+            "aerosol_cloud_borne", "aerosol_aqueous_chemistry",
+            "aerosol_wetdep",
+        )
         jam_post_cloud_terms = [
             t for t in jam_terms if t.category in _post_cloud
         ]

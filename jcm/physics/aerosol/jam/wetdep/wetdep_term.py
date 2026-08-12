@@ -1,8 +1,13 @@
 """``WetScavenging`` — in-cloud and below-cloud aerosol scavenging.
 
-Two removal pathways for interstitial aerosol, both differentiable and built
+Two removal pathways for aerosol, both differentiable and built
 only from diagnostics the cloud scheme already exposes (so the cloud
-microphysics terms are untouched):
+microphysics terms are untouched). With a prognostic cloud-borne phase
+(``spec.cloud_borne``, #602) the stratiform in-cloud pathway acts on the
+cloud-borne tracers at the full condensate→precip conversion rate and the
+interstitial tracers keep impaction + convective processing; without one,
+the in-cloud pathway acts on interstitial aerosol weighted by its activated
+fraction (the implicit M7/TOMAS-style treatment):
 
 * **In-cloud nucleation scavenging** — the activated fraction of aerosol is in
   cloud droplets and is removed at the rate cloud condensate converts to
@@ -207,7 +212,15 @@ class WetScavenging(PhysicsTerm):
         p_form = precip_formation_rate(
             precip_col, cloud_fraction, qc, air_density, dz,
         )
-        rate_incloud = params.incloud_scale * in_cloud_rate(
+        # The implicit stratiform rate is weighted by the cloudy area
+        # fraction: the grid-mean p_form/qc ratio is the IN-CLOUD conversion
+        # rate (cf cancels between them), but only cf·af of the grid-mean
+        # interstitial tracer is in droplets. Without the cf factor broken
+        # cloud (cf ~ 0.3) over-scavenged ~3x, and the implicit and explicit
+        # cloud-borne representations would disagree at exchange equilibrium
+        # for reasons that have nothing to do with the representation (#602).
+        cf_clip = jnp.clip(cloud_fraction, 0.0, 1.0)
+        rate_incloud = params.incloud_scale * cf_clip * in_cloud_rate(
             activated_fraction, p_form, qc,
         ) + rate_conv_incloud
 
@@ -220,6 +233,18 @@ class WetScavenging(PhysicsTerm):
         names: list[str] = []
         q_list: list[jnp.ndarray] = []
         rate_list: list[jnp.ndarray] = []
+        # With a prognostic cloud-borne phase (``spec.cloud_borne``, #602) the
+        # stratiform in-cloud (nucleation) pathway belongs to the cloud-borne
+        # tracers, which sit in the droplets by definition: they are removed
+        # at the full condensate→precip conversion rate, and the interstitial
+        # tracers keep only impaction and convective processing (activated
+        # aerosol first transfers via ``CloudBorneExchange``, then rains
+        # out). Without it, the current implicit treatment stands — the
+        # interstitial tracers are scavenged by their activated fraction.
+        explicit_cb = self._spec.cloud_borne
+        rate_cb = params.incloud_scale * in_cloud_rate(
+            jnp.ones_like(state.temperature), p_form, qc,
+        )
         for i, mode in enumerate(self._spec.modes):
             # Stratiform washout column-wide (interim, #499); convective
             # only below the convective cloud top.
@@ -228,14 +253,32 @@ class WetScavenging(PhysicsTerm):
             ) + conv_below * below_cloud_rate(
                 conv_precip, cloud_fraction, aer.r_wet[i], params,
             )
-            # In-cloud only removes from activatable (soluble) modes.
-            rate = rate_below + (rate_incloud if mode.can_activate else 0.0)
+            # In-cloud only removes from activatable (soluble) modes — and
+            # only implicitly (via the activated fraction) when there is no
+            # explicit cloud-borne phase to carry it. Convective processing
+            # always acts on interstitial (updrafts ingest environment air).
+            if mode.can_activate:
+                rate = rate_below + (
+                    rate_conv_incloud if explicit_cb else rate_incloud
+                )
+            else:
+                rate = rate_below
             for nm in [number_name(mode.short)] + [
                 mass_name(sp, mode.short) for sp in mode.species
             ]:
                 names.append(nm)
                 q_list.append(state.tracers.get(nm, zeros))
                 rate_list.append(rate)
+            if explicit_cb:
+                # Cloud-borne aerosol is entirely in-droplet: no below-cloud
+                # impaction, no activated-fraction weighting.
+                for nm in [number_name(mode.short, cloud_borne=True)] + [
+                    mass_name(sp, mode.short, cloud_borne=True)
+                    for sp in mode.species
+                ]:
+                    names.append(nm)
+                    q_list.append(state.tracers.get(nm, zeros))
+                    rate_list.append(rate_cb)
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).
         # The first-order-decay rate is unbounded — the in-cloud rate ∝ 1/qc
