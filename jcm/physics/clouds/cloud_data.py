@@ -40,6 +40,20 @@ class CloudData:
     # bottom level.
     rain_flux: jnp.ndarray           # LS rain flux [kg/m²/s] (nlev, ncols)
     snow_flux: jnp.ndarray           # LS snow(+ice) flux [kg/m²/s] (nlev, ncols)
+    # Per-level precipitation process rates (#499), grid-mean [kg/kg/s]:
+    # the condensate→precip conversion (rain: autoconversion + accretion;
+    # frozen: ice autoconversion + aggregation + riming) and the
+    # evaporation/sublimation of the falling stratiform precip (rain
+    # evaporation + snow sublimation; the sedimenting cloud-ice flux's own
+    # sublimation is not included — it is not a scavenging carrier, which
+    # also means the cirrus ice that reaches the surface as snow removes no
+    # aerosol). These
+    # are the rates the schemes actually integrate, exposed for JAM wet
+    # scavenging (in-cloud nucleation removal at the true local formation
+    # rate; re-injection of scavenged aerosol where precip re-evaporates)
+    # instead of a column reconstruction from the surface fluxes.
+    precip_formation_rate: jnp.ndarray    # (nlev, ncols)
+    precip_evaporation_rate: jnp.ndarray  # (nlev, ncols)
     # Column-integrated rain-source split [kg/m²/s], written by the 2M
     # scheme (zero under 1M, which does not separate the pathways): rain
     # formed by the warm chain (autoconversion + accretion of liquid) and
@@ -90,6 +104,8 @@ class CloudData:
             precip_snow=jnp.zeros(nodal_shape),
             rain_flux=jnp.zeros((nlev,) + nodal_shape),
             snow_flux=jnp.zeros((nlev,) + nodal_shape),
+            precip_formation_rate=jnp.zeros((nlev,) + nodal_shape),
+            precip_evaporation_rate=jnp.zeros((nlev,) + nodal_shape),
             rain_formation_warm=jnp.zeros(nodal_shape),
             rain_from_melt=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
@@ -112,6 +128,8 @@ class CloudData:
             'precip_snow': self.precip_snow,
             'rain_flux': self.rain_flux,
             'snow_flux': self.snow_flux,
+            'precip_formation_rate': self.precip_formation_rate,
+            'precip_evaporation_rate': self.precip_evaporation_rate,
             'rain_formation_warm': self.rain_formation_warm,
             'rain_from_melt': self.rain_from_melt,
             'droplet_number': self.droplet_number,

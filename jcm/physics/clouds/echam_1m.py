@@ -194,6 +194,7 @@ class MicrophysicsState(NamedTuple):
     snow_flux: jnp.ndarray      # Snow(+falling-ice) flux leaving each level
     rain_source: jnp.ndarray    # Per-layer rain production (kg/m²/s)
     snow_source: jnp.ndarray    # Per-layer snow production (kg/m²/s)
+    rain_evap_flux: jnp.ndarray  # Per-layer rain evaporation (kg/m²/s, #499)
 
     # In-cloud values
     qc_in_cloud: jnp.ndarray    # In-cloud liquid water (kg/kg)
@@ -1110,6 +1111,12 @@ def cloud_microphysics_column_sweep(
             dTdt, dqdt, dqcdt, dqidt, rain_source, snow_source,
             autoconv_rate_diag, accretion_rate_diag,
             zrfl_out, zsfl_out + zxiflux_out,
+            # Per-layer rain evaporation flux (#499): the depletion the
+            # flux ledger above already applied, exposed for the JAM
+            # wet-scavenging re-injection budget. The 1M scheme has no
+            # snow sublimation, so this is the whole stratiform
+            # evaporation term.
+            rain_evap_flux,
         )
         return (zrfl_out, zsfl_out, zclcpre_out, zxiflux_out), out
 
@@ -1126,7 +1133,7 @@ def cloud_microphysics_column_sweep(
         level_inputs,
     )
     (dtedt, dqdt, dqcdt, dqidt, rain_source, snow_source, autoconv_rate,
-     accretion_rate, rain_flux, snow_flux) = per_level_out
+     accretion_rate, rain_flux, snow_flux, rain_evap_flux) = per_level_out
 
     tendencies = MicrophysicsTendencies(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
@@ -1147,6 +1154,7 @@ def cloud_microphysics_column_sweep(
     state = MicrophysicsState(
         rain_flux=rain_flux, snow_flux=snow_flux,
         rain_source=rain_source, snow_source=snow_source,
+        rain_evap_flux=rain_evap_flux,
         qc_in_cloud=qc_in_cloud, qi_in_cloud=qi_in_cloud,
         autoconv_rate=autoconv_rate, accretion_rate=accretion_rate,
         melting_rate=jnp.zeros(nlev), freezing_rate=jnp.zeros(nlev),
@@ -1319,6 +1327,17 @@ class Echam1MMicrophysics(PhysicsTerm):
             # CloudData layout, same as the tendency fields above.
             rain_flux=micro_state.rain_flux.T,
             snow_flux=micro_state.snow_flux.T,
+            # Per-level process rates for JAM wet scavenging (#499),
+            # converted from the sweep's per-layer fluxes [kg/m²/s] to
+            # grid-mean mixing-ratio rates [kg/kg/s] with the layer mass.
+            # Formation is the full condensate→precip ledger (rain: autoconv
+            # + accretion; snow: ice autoconv + aggregation + riming);
+            # evaporation is Rotstayn rain evap (the 1M scheme has no snow
+            # sublimation).
+            precip_formation_rate=(
+                micro_state.rain_source + micro_state.snow_source
+            ).T / dm_col.T,
+            precip_evaporation_rate=micro_state.rain_evap_flux.T / dm_col.T,
             droplet_number=cdnc_m3,
         )
 

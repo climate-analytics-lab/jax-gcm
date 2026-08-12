@@ -1452,6 +1452,111 @@ class TestColumnWaterConservation2M:
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
 
+    def test_precip_process_rates_close_the_warm_ledger(self):
+        """The #499 per-level formation/evaporation rates are the true ledger.
+
+        On an all-warm liquid column (no ice, snow or melt) every kg of
+        surface rain was formed minus evaporated on the way down, so the
+        new grid-mean [kg/kg/s] outputs must satisfy
+        ``rain_sfc == sum((formation - evaporation) * rho * dz)`` — a
+        units-and-sign check that also fails if a pathway (accretion,
+        riming) is missing from the formation sum.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(280.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = jnp.where(
+            (jnp.arange(nlev) >= 10) & (jnp.arange(nlev) < 16),
+            0.95 * qsw, 0.7 * qsw,
+        )
+        qc = jnp.zeros(nlev).at[10:16].set(1e-3)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 5e7, 0.0)
+        params = CloudParams2M.default()
+
+        (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
+         form, evap, rain_prof, snow_prof) = cloud_microphysics_2m(
+            T, q, p, qc, jnp.zeros(nlev), qnc, jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        assert form.shape == (nlev,) and evap.shape == (nlev,)
+        assert float(jnp.min(form)) >= 0.0
+        assert float(jnp.min(evap)) >= 0.0
+        assert float(snow_sfc) == 0.0
+        assert float(rain_sfc) > 0.0, "no rain formed — fixture too dry"
+        assert float(jnp.max(evap)) > 0.0, "no evap — fixture too moist"
+        mref = np.asarray(rho * dz)
+        np.testing.assert_allclose(
+            float(rain_sfc),
+            float(np.sum((np.asarray(form) - np.asarray(evap)) * mref)),
+            rtol=1e-5,
+        )
+
+    def test_precip_process_rates_cover_the_cold_chain(self):
+        """The #499 formation rate must use the GRID-MEAN snow-side terms.
+
+        An all-cold ice column (no liquid, no melt) with numerous small
+        crystals (high ICNC → slow sedimentation, so the folded cloud-ice
+        flux is a small correction) forms snow through the cold chain
+        alone. The surface snow must then be bracketed by the
+        (formation − evaporation) column ledger: equal up to the small
+        sedimenting-ice contribution. An implementation that grabbed the
+        IN-CLOUD cold-formation variants instead of the grid-mean ones
+        overshoots by 1/cf ≈ 1.4x and breaks the upper bracket.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T = jnp.linspace(215.0, 262.0, nlev)          # never melts
+        p = jnp.linspace(2e4, 7e5 / 10.0, nlev)
+        rho = p / (287.0 * T)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.9 * qsw
+        qi = jnp.zeros(nlev).at[8:14].set(3e-4)
+        qni = jnp.where(qi > 0, 1e6, 0.0)             # many small crystals
+        cf = jnp.where(qi > 0, 0.7, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        params = CloudParams2M.default()
+
+        (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
+         form, evap, _rp, _sp) = cloud_microphysics_2m(
+            T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
+            jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, params,
+        )
+        mref = np.asarray(rho * dz)
+        ledger = float(np.sum((np.asarray(form) - np.asarray(evap)) * mref))
+        total_sfc = float(rain_sfc + snow_sfc)
+        assert total_sfc > 0.0, "cold chain made no precip — fixture off"
+        assert ledger > 0.0
+        # Ledger ≤ surface (the sedimenting-ice fold adds mass the ledger
+        # deliberately excludes), and covers at least 60% of it (the
+        # crystals are small and slow, so the fold is a minor term). An
+        # in-cloud/grid-mean mixup (~1.4x) breaks the first bound.
+        assert ledger <= total_sfc * (1.0 + 1e-5), (
+            f"ledger {ledger:.3e} exceeds surface {total_sfc:.3e}"
+        )
+        assert ledger >= 0.6 * total_sfc, (
+            f"ledger {ledger:.3e} vs surface {total_sfc:.3e} — cold-chain "
+            "formation missing from the #499 rate"
+        )
+
     def test_cold_supersaturation_is_consumed(self):
         """Sub-cthomi supersaturation must deposit onto diagnosed ICNC.
 
