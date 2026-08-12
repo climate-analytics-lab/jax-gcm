@@ -17,4 +17,9 @@ defaults:
 file: hf://bundles/t63/forcing_amip/{year}.nc
 align: by_date_interp
 years: ???
+# Source coverage of the yearly products: the expansion pads the
+# requested range by one year each side (clipped to this coverage) so
+# by_date_interp has bracketing mid-month samples across the Jan-1 /
+# Dec-31 run boundaries instead of clamping for ~half a month.
+available_years: [1870, 2022]
 ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc
