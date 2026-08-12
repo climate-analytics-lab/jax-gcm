@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 from omegaconf import DictConfig
 
+from jcm import provenance
 from jcm.diffusion import DiffusionFilter
 from jcm.model import Model, ModelPredictions
 from jcm.terrain import TerrainData
@@ -383,13 +384,17 @@ def _resolve_data_path(path):
     """
     if isinstance(path, str) and path.startswith("hf://"):
         from jcm.data.remote import fetch
-        return fetch(path[len("hf://"):])
+        resolved = fetch(path[len("hf://"):])
+        provenance.record_input(path, resolved)
+        return resolved
     if (not isinstance(path, (str, bytes, Mapping))
             and isinstance(path, Iterable)):
         # emissions_file may be a list of paths (incl. Hydra ListConfig).
         # Mappings/bytes pass through untouched — iterating them would
         # silently turn a mis-typed config into a list of keys/ints.
         return [_resolve_data_path(p) for p in path]
+    if isinstance(path, str):
+        provenance.record_input(path)   # no-op unless it is a real file
     return path
 
 
@@ -889,6 +894,10 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
                 ozone_file = None
         elif ozone_file in ("", "null", "none"):
             ozone_file = None
+        provenance.record_fact(
+            "ozone_source",
+            f"prescribed:{ozone_file}" if ozone_file
+            else "analytic (no ozone file)")
 
         file = (_resolve_data_path(cfg.forcing.get("file", None))
                 or _pyses_default_bc("forcing.nc"))
@@ -987,10 +996,13 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     ozone_file = _resolve_data_path(
         forcing_cfg.get("ozone_file", None))
     if ozone_file in (None, "", "null"):
+        provenance.record_fact("ozone_source", "analytic (no ozone_file)")
         return forcing
     if ozone_file == "auto":
         ozone_file = _resolve_auto_ozone(coords)
         if ozone_file is None:
+            provenance.record_fact(
+                "ozone_source", "analytic (auto found no packaged match)")
             logging.warning(
                 "forcing.ozone_file=auto: no packaged jcm/data/bc/*/ozone.nc "
                 "matches this grid — falling back to the ANALYTIC ozone "
@@ -1017,6 +1029,8 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
         lat_deg=lat_deg, lon_deg=lon_deg,
     )
+    provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
+    provenance.record_input(ozone_file)
     if forcing is None:
         forcing = default_forcing(coords.horizontal)
     return forcing.copy(ozone_climatology=climatology)
@@ -1288,6 +1302,11 @@ def run(cfg: DictConfig, model: Model | None = None):
     # dynamical core (which reads the live jcm.constants singleton at
     # construction) and the attribute-access physics both pick them up. Only base
     # fields may be set; derived constants (rd, cvd, rgrav, vtmpc*) follow.
+    # Capture provenance before the model build so every input file the
+    # build resolves lands in the registry (#591); logs the one-line
+    # summary of code SHAs / precision / devices.
+    provenance.start_run(cfg)
+
     constants_overrides = cfg.get("constants", None)
     if constants_overrides:
         import jcm.constants as _jcm_constants
@@ -1588,12 +1607,15 @@ def run_chunked(
         print_report(report)
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
+        ds.attrs.update(provenance.attrs())
         ds.to_netcdf(nc_path)
+        provenance.write_sidecar(nc_path)
         print(f"  Saved {nc_path}")
         snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
             snap_path = (f"{output_prefix}_day{int(elapsed_sim_days)}"
                          "_snapshots.nc")
+            snap_ds.attrs.update(provenance.attrs())
             snap_ds.to_netcdf(snap_path)
             print(f"  Saved {snap_path}")
 
@@ -1687,7 +1709,9 @@ def save_predictions(predictions, output_path: Path) -> None:
         )
         return
     ds = predictions.to_xarray()
+    ds.attrs.update(provenance.attrs())
     ds.to_netcdf(str(output_path))
+    provenance.write_sidecar(output_path)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
     # file with its own (finer) time axis — folding a second cadence into
@@ -1695,5 +1719,6 @@ def save_predictions(predictions, output_path: Path) -> None:
     snap_ds = getattr(predictions, "snapshot_dataset", lambda: None)()
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
+        snap_ds.attrs.update(provenance.attrs())
         snap_ds.to_netcdf(str(snap_path))
         logger.info("Wrote %s", snap_path)
