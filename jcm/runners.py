@@ -838,8 +838,11 @@ def _pyses_default_bc(filename: str) -> str:
     """Resolve the packaged T63 boundary file (temporary downscale)."""
     import jcm
 
-    return str(Path(jcm.__file__).resolve().parent / "data" / "bc" / "t63"
+    path = str(Path(jcm.__file__).resolve().parent / "data" / "bc" / "t63"
                / filename)
+    # A fallback actually opened is provenance like any explicit file.
+    provenance.record_input(path)
+    return path
 
 
 def _pyses_lid_sponge_term(dycore, sponge_cfg):
@@ -1327,9 +1330,10 @@ def run(cfg: DictConfig, model: Model | None = None):
     # dynamical core (which reads the live jcm.constants singleton at
     # construction) and the attribute-access physics both pick them up. Only base
     # fields may be set; derived constants (rd, cvd, rgrav, vtmpc*) follow.
-    # Capture provenance before the model build so every input file the
-    # build resolves lands in the registry (#591); logs the one-line
-    # summary of code SHAs / precision / devices.
+    # Reset the provenance registries before the model build so every
+    # input file the build resolves lands in them (#591); the code/env
+    # probe and the summary log happen after the build, once the
+    # config-selected libraries are actually imported.
     provenance.start_run(cfg)
 
     constants_overrides = cfg.get("constants", None)
@@ -1356,6 +1360,9 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         model = build_model(cfg)
 
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
+    # After model + forcing construction: config-selected libraries are
+    # imported and the ozone source is decided, so the summary is accurate.
+    logger.info("provenance: %s", provenance.summary())
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
     if chunk_days > 0:
         return run_chunked(

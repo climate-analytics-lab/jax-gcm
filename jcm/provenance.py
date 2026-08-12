@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 #: when already imported — an absent entry means "not part of this run".
 _EDITABLE_LIBS = ("jcm", "dinosaur", "rrtmgp", "mam4_jax", "jax_cosp",
                   "pyses")
+#: Module-name -> distribution-name where they differ.
+_DIST_NAMES = {"rrtmgp": "jax-rrtmgp", "mam4_jax": "mam4-jax",
+               "jax_cosp": "jax-cosp"}
 #: Packaged dependencies recorded by version only.
 _VERSION_LIBS = ("jax", "jaxlib", "numpy", "xarray", "flax")
 #: Environment variables that silently change precision or compilation.
@@ -68,10 +71,13 @@ def probe_code() -> dict:
             continue
         path = str(Path(mod.__file__).resolve().parent)
         entry: dict = {"path": path}
-        try:
-            entry["version"] = metadata.version(name.replace("_", "-"))
-        except metadata.PackageNotFoundError:
-            pass
+        # Module and distribution names differ (rrtmgp -> jax-rrtmgp).
+        for dist in (_DIST_NAMES.get(name, name), name.replace("_", "-")):
+            try:
+                entry["version"] = metadata.version(dist)
+                break
+            except metadata.PackageNotFoundError:
+                pass
         top = _git(path, "rev-parse", "--show-toplevel")
         if top:
             entry["sha"] = _git(top, "rev-parse", "HEAD")
@@ -130,7 +136,13 @@ def describe_input(path: str) -> dict:
 
 
 def start_run(cfg=None) -> None:
-    """Capture code/env/config at run start and reset the input registry."""
+    """Reset the registries and capture the config at run start.
+
+    Code and environment are probed lazily (and re-probed on every
+    :func:`collect`): the model build imports configuration-selected
+    libraries (pyses, mam4_jax, …) and can flip the live x64 setting
+    *after* run start, so an eager snapshot here would miss them.
+    """
     config_yaml = None
     if cfg is not None:
         from omegaconf import OmegaConf
@@ -143,13 +155,10 @@ def start_run(cfg=None) -> None:
             config_yaml = OmegaConf.to_yaml(cfg, resolve=False)
     _state["base"] = {
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "code": probe_code(),
-        "environment": probe_environment(),
         "config_yaml": config_yaml,
     }
     _state["inputs"] = {}
     _state["facts"] = {}
-    logger.info("provenance: %s", summary())
 
 
 def record_input(requested, resolved=None) -> None:
@@ -169,14 +178,24 @@ def record_fact(key: str, value) -> None:
 
 
 def collect() -> dict:
-    """Return the full provenance record (captures the base lazily)."""
+    """Return the full provenance record.
+
+    Code and environment are probed fresh each call (a handful of git
+    subprocesses — negligible next to a netCDF write), so libraries the
+    model build imported lazily and any post-start x64 flip are captured.
+    """
     if _state["base"] is None:
         start_run()
     prov = dict(_state["base"])
+    prov["code"] = probe_code()
+    prov["environment"] = probe_environment()
     prov["inputs"] = dict(_state["inputs"])
     prov["facts"] = dict(_state["facts"])
     hash_material = {
-        "code": {k: v.get("sha", v.get("version"))
+        # A dirty tree is a different code state than its HEAD: fold the
+        # working-tree diff fingerprint into the identity.
+        "code": {k: (v.get("sha", v.get("version")),
+                     v.get("dirty_diff_sha"))
                  for k, v in prov["code"].items()},
         "config": prov["config_yaml"],
         "inputs": {k: v.get("sha256", (v.get("size"), v.get("mtime")))
@@ -190,12 +209,12 @@ def collect() -> dict:
 
 
 def summary() -> str:
-    """One log line: SHAs, precision, ozone source."""
-    base = _state["base"] or {}
+    """One log line: SHAs, precision, ozone source (probed fresh)."""
+    code = probe_code()
+    env = probe_environment()
     shas = ", ".join(
         f"{k}={v['sha'][:8]}{'+dirty' if v.get('dirty') else ''}"
-        for k, v in base.get("code", {}).items() if "sha" in v)
-    env = base.get("environment", {})
+        for k, v in code.items() if "sha" in v)
     ozone = _state["facts"].get("ozone_source", "?")
     return (f"{shas or 'no git trees'}; "
             f"x64={env.get('jax_enable_x64')}; "
