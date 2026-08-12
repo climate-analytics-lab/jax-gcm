@@ -5,13 +5,13 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetDepParameters,
     below_cloud_rate,
     in_cloud_rate,
-    precip_formation_rate,
+    reinjection_budget,
 )
 
 __all__ = [
     "WetScavenging",
     "WetDepParameters",
-    "precip_formation_rate",
+    "reinjection_budget",
     "in_cloud_rate",
     "below_cloud_rate",
 ]

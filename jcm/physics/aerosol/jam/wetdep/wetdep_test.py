@@ -12,22 +12,41 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     below_cloud_rate,
     conv_in_cloud_rate,
     in_cloud_rate,
-    precip_formation_rate,
+    reinjection_budget,
 )
 
 
 class ScavengingFunctionTest(unittest.TestCase):
-    def test_precip_formation_distributes_over_condensate(self):
-        precip = jnp.asarray([1.0e-4])           # kg/m²/s
-        cf = jnp.array([[0.0], [0.8], [0.0]])
-        qc = jnp.array([[0.0], [1.0e-3], [0.0]])
-        rho = jnp.ones((3, 1))
-        dz = jnp.full((3, 1), 100.0)
-        pf = precip_formation_rate(precip, cf, qc, rho, dz)
-        # All formation in the single cloudy layer.
-        self.assertGreater(float(pf[1, 0]), 0.0)
-        self.assertAlmostEqual(float(pf[0, 0]), 0.0)
-        self.assertAlmostEqual(float(pf[2, 0]), 0.0)
+    def test_reinjection_budget_conserves_the_column(self):
+        # Aerosol scavenged at the top rides the precip down; a 50%-evap
+        # layer releases half, a full-evap layer releases the rest, and
+        # nothing reaches the surface. sum(scavenged - reinjected) must
+        # equal the surface flux EXACTLY at every column.
+        scavenged = jnp.zeros((1, 3, 1)).at[0, 0, 0].set(2.0)
+        evap_frac = jnp.array([[0.0], [0.5], [1.0]])
+        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        np.testing.assert_allclose(np.asarray(reinjected[0, :, 0]),
+                                   [0.0, 1.0, 1.0])
+        np.testing.assert_allclose(np.asarray(surface), 0.0)
+        # Partial evap: the un-released remainder deposits.
+        evap_frac = jnp.array([[0.0], [0.25], [0.0]])
+        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.5)
+        np.testing.assert_allclose(
+            float(jnp.sum(scavenged - reinjected)), float(surface[0, 0]),
+        )
+
+    def test_same_layer_scavenge_and_full_evap_releases_everything(self):
+        # Virga: aerosol impacted out within a fully-evaporating layer must
+        # be released there too, not ride a terminated carrier to the
+        # surface through dry air (the layer's scavenging joins the ledger
+        # BEFORE the release, as in HAMMOZ). The pre-fix ordering deposited
+        # it all.
+        scavenged = jnp.zeros((1, 3, 1)).at[0, 2, 0].set(1.0)
+        evap_frac = jnp.zeros((3, 1)).at[2].set(1.0)
+        reinjected, surface = reinjection_budget(scavenged, evap_frac)
+        np.testing.assert_allclose(np.asarray(reinjected[0, 2, 0]), 1.0)
+        np.testing.assert_allclose(np.asarray(surface), 0.0)
 
     def test_in_cloud_rate_scales_with_activation(self):
         pf = jnp.full((1, 1), 1.0e-6)
@@ -37,7 +56,7 @@ class ScavengingFunctionTest(unittest.TestCase):
         self.assertGreater(float(hi[0, 0]), float(lo[0, 0]))
 
     def test_below_cloud_size_dependence(self):
-        precip = jnp.asarray([1.0e-4])
+        precip = jnp.full((1, 1), 1.0e-4)
         cf = jnp.zeros((1, 1))
         params = WetDepParameters.default()
         accum = below_cloud_rate(precip, cf, jnp.full((1, 1), 0.1e-6), params)
@@ -47,7 +66,8 @@ class ScavengingFunctionTest(unittest.TestCase):
     def test_no_precip_no_below_cloud(self):
         params = WetDepParameters.default()
         rate = below_cloud_rate(
-            jnp.zeros((1,)), jnp.zeros((1, 1)), jnp.full((1, 1), 1e-6), params,
+            jnp.zeros((1, 1)), jnp.zeros((1, 1)), jnp.full((1, 1), 1e-6),
+            params,
         )
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
 
@@ -99,10 +119,19 @@ class WetDepTermTest(unittest.TestCase):
             temperature=jnp.full((nlev, ncols), 275.0),
             tracers=tracers,
         )
+        # Uniform formation through the column whose integral equals the
+        # surface precip (dm = rho * dz = 200 kg/m² per layer here), with
+        # the matching cumulative rain-flux profile — the per-level fields
+        # the cloud schemes now expose (#499).
+        dm = 1.0 * 200.0
+        form = jnp.full((nlev, ncols), precip / (nlev * dm))
+        rain_flux = jnp.cumsum(form * dm, axis=0)
         clouds = CloudData.zeros((ncols,), nlev).copy(
             cloud_fraction=jnp.full((nlev, ncols), 0.6),
             qc=jnp.full((nlev, ncols), 1.0e-3),
             precip_rain=jnp.full((ncols,), precip),
+            precip_formation_rate=form,
+            rain_flux=rain_flux,
         )
         diagnostics = {
             "_jam_state": aer,
@@ -248,6 +277,130 @@ class WetDepTermTest(unittest.TestCase):
         tend, _ = term(state, diagnostics, None, None)
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_incloud_driven_by_formation_not_surface_precip(self):
+        # The in-cloud pathway must key off the cloud scheme's per-level
+        # formation rate, not a reconstruction from the surface precip: a
+        # stale surface value with zero formation (and no flux profile)
+        # scavenges NOTHING. This fails on the pre-#499 reconstruction.
+        from jcm.physics.clouds.cloud_data import CloudData
+
+        state, diagnostics, spec, mass_name = self._setup()
+        nlev, ncols = state.temperature.shape
+        diagnostics = dict(diagnostics)
+        diagnostics["clouds"] = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full((nlev, ncols), 0.6),
+            qc=jnp.full((nlev, ncols), 1.0e-3),
+            precip_rain=jnp.full((ncols,), 1.0e-3),   # stale, no formation
+        )
+        tend, _ = WetScavenging()(state, diagnostics, None, None)
+        for dq in tend.tracers.values():
+            np.testing.assert_array_equal(np.asarray(dq), 0.0)
+
+    def test_below_cloud_confined_below_formation(self):
+        # Impaction uses the per-level flux entering each layer: levels at
+        # and above the formation level see no falling precip and must not
+        # scavenge; levels below must. Probed with the non-activatable pcm
+        # mode (below-cloud is its only stratiform pathway).
+        from jcm.physics.clouds.cloud_data import CloudData
+
+        state, diagnostics, spec, mass_name = self._setup()
+        nlev, ncols = state.temperature.shape
+        dm = 200.0
+        form = jnp.zeros((nlev, ncols)).at[1].set(1.0e-7)
+        rain_flux = jnp.cumsum(form * dm, axis=0)
+        diagnostics = dict(diagnostics)
+        diagnostics["clouds"] = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full((nlev, ncols), 0.6),
+            qc=jnp.full((nlev, ncols), 1.0e-3),
+            precip_rain=rain_flux[-1],
+            precip_formation_rate=form,
+            rain_flux=rain_flux,
+        )
+        tend, _ = WetScavenging()(state, diagnostics, None, None)
+        pcm = spec.mode("pcm")
+        dq = np.asarray(tend.tracers[mass_name(pcm.species[0], "pcm")])
+        np.testing.assert_array_equal(dq[0], 0.0)   # above formation
+        np.testing.assert_array_equal(dq[1], 0.0)   # the forming layer itself
+        self.assertTrue(np.all(dq[2:] < 0.0))       # washed out below
+
+    def test_reinjection_returns_scavenged_aerosol_where_precip_evaporates(self):
+        # Cloud-borne aerosol scavenged in the cloudy upper levels rides
+        # the rain down; a fully-evaporating layer below must re-inject it
+        # into the INTERSTITIAL phase there, and the term's column budget
+        # (removal + re-injection integrated over dm) must equal the
+        # surviving surface flux exactly.
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.aerosol.jam import number_name
+
+        state, diagnostics, spec, mass_name = self._setup()
+        nlev, ncols = state.temperature.shape
+        # LEVEL-DEPENDENT layer mass: the budget's dm weightings cancel on
+        # a uniform grid (budget(x*dm)/dm == budget(x)), so a misplaced dm
+        # would be invisible there — vary it so it isn't.
+        dz = jnp.array([300.0, 250.0, 200.0, 150.0])[:, None] * jnp.ones(
+            (1, ncols)
+        )
+        dm = 1.0 * dz
+        diagnostics = dict(diagnostics)
+        diagnostics["layer_thickness"] = dz
+        # Rain forms at levels 0-1; level 2's evaporation consumes the
+        # whole accumulated carrier (evap*dm2 == form*(dm0+dm1)); none
+        # below.
+        form = jnp.zeros((nlev, ncols)).at[0].set(1.0e-7).at[1].set(1.0e-7)
+        evap_rate = 1.0e-7 * (300.0 + 250.0) / 200.0
+        evap = jnp.zeros((nlev, ncols)).at[2].set(evap_rate)
+        cf = jnp.zeros((nlev, ncols)).at[0:2].set(0.6)
+        diagnostics["clouds"] = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cf,
+            qc=jnp.zeros((nlev, ncols)).at[0:2].set(1.0e-3),
+            precip_formation_rate=form,
+            precip_evaporation_rate=evap,
+        )
+        # Isolate the in-cloud pathway: no impaction.
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0),
+            below_coeff=jnp.asarray(0.0),
+            below_radius_ref=jnp.asarray(1.0e-7),
+            conv_scav_ratio=jnp.asarray(0.99),
+        )
+        term = WetScavenging(params=params)
+        tend, _ = term(state, diagnostics, None, None)
+
+        mode = spec.modes[0]
+        cb = np.asarray(
+            tend.tracers[mass_name(mode.species[0], mode.short,
+                                   cloud_borne=True)]
+        )
+        it = np.asarray(tend.tracers[mass_name(mode.species[0], mode.short)])
+        # Removal only where condensate converts (levels 0-1), from the
+        # cloud-borne tracer.
+        self.assertTrue(np.all(cb[0:2] < 0.0))
+        np.testing.assert_array_equal(cb[2:], 0.0)
+        # Re-injection lands in the INTERSTITIAL tracer in the evap layer.
+        self.assertTrue(np.all(it[2] > 0.0))
+        np.testing.assert_array_equal(it[[0, 1, 3]], 0.0)
+        # Column budget: everything scavenged was re-released (full evap),
+        # for mass and number alike.
+        dm_np = np.asarray(dm)
+        for pair in (
+            (mass_name(mode.species[0], mode.short, cloud_borne=True),
+             mass_name(mode.species[0], mode.short)),
+            (number_name(mode.short, cloud_borne=True),
+             number_name(mode.short)),
+        ):
+            net = sum(np.asarray(tend.tracers[nm]) * dm_np for nm in pair)
+            # Tolerance relative to the gross removal: the evap fraction
+            # carries f32 round-off from the cumsum/divide, so "everything
+            # re-released" holds to ~1e-6 of what was scavenged, not to
+            # absolute zero on 1e8-scale number tracers.
+            gross = float(
+                np.sum(np.abs(np.asarray(tend.tracers[pair[0]])) * dm_np)
+            )
+            np.testing.assert_allclose(
+                np.sum(net, axis=0), 0.0, atol=max(1e-5 * gross, 1e-20),
+                err_msg=str(pair),
+            )
 
     def test_cloud_borne_removed_at_full_incloud_rate(self):
         # Cloud-borne aerosol is entirely in-droplet: its stratiform removal
