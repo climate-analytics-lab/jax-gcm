@@ -330,6 +330,70 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     )
 
 
+def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
+    """The convection diagnostic carries the updraft ledger (#602 item 2).
+
+    ``mass_flux_up`` / ``entrain_up`` were zero-filled before the
+    convective tracer transport landed; a real convecting column must now
+    publish a physical ledger: non-negative fluxes, nonzero where deep
+    convection is active, and no entrainment where there is no carrying
+    flux entering from below (``entrain_up = entr·mfu_below·dz`` by
+    construction, so the cloud-base supply appears via plume continuity,
+    not as entrainment).
+    """
+    import numpy as np
+    from jcm.physics.convection.saturation import (
+        saturation_specific_humidity,
+    )
+    from jcm.constants import grav, rd
+
+    nlev, ncols = 8, 1
+    # Top-first unstable moist column (the SPEEDY-style moist-adiabat
+    # fixture, reversed to the physics-internal orientation).
+    T = jnp.array([210., 230., 250., 265., 275., 285., 295., 300.])[:, None]
+    p = (jnp.array(
+        [0.025, 0.095, 0.2, 0.34, 0.51, 0.685, 0.835, 0.95]
+    ) * 1e5)[:, None]
+    qs = jax.vmap(
+        lambda pp, tt: saturation_specific_humidity(tt, pp)
+    )(p[:, 0], T[:, 0])[:, None]
+    rh = jnp.array([0.5, 0.7, 0.75, 0.7, 0.65, 0.6, 0.8, 0.85])[:, None]
+    rho = p / (rd * T)
+    dz = jnp.abs(jnp.diff(
+        -rd * T[:, 0] / grav * jnp.log(p[:, 0] / 1e5), append=0.0,
+    ))[:, None] + 500.0
+    state = PhysicsState.zeros(
+        (nlev, ncols), temperature=T, specific_humidity=rh * qs,
+        tracers={"qc": jnp.zeros((nlev, ncols)),
+                 "qi": jnp.zeros((nlev, ncols))},
+    )
+    diagnostics = {
+        "_dt_seconds": 900.0,
+        "pressure_full": p,
+        "layer_thickness": dz,
+        "air_density": rho,
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    _, diagnostics_out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    conv = diagnostics_out["convection"]
+    mfu = np.asarray(conv.mass_flux_up[:, 0])
+    entrain = np.asarray(conv.entrain_up[:, 0])
+
+    assert int(conv.ktype[0]) == 1, "fixture no longer triggers deep conv"
+    assert float(conv.precip_conv[0]) > 0.0
+    assert mfu.min() >= 0.0 and entrain.min() >= 0.0
+    assert mfu.max() > 0.0, "mass_flux_up still zero-filled"
+    # No entrainment without a carrying flux entering from below.
+    mfu_below = np.concatenate([mfu[1:], [0.0]])
+    np.testing.assert_array_equal(entrain[mfu_below == 0.0], 0.0)
+    # Entrainment fires somewhere the plume is active.
+    assert entrain.max() > 0.0
+
+
 class TestMassFluxCFLCap:
     """The cloud-base mass flux must respect the layer-mass / dt CFL cap
     that ECHAM enforces in ``mo_cumastr.f90:582-583``::

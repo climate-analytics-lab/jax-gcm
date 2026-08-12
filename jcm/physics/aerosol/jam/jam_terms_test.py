@@ -26,6 +26,11 @@ class JamFactoryTest(unittest.TestCase):
         self.assertEqual(
             cats[4:],
             [
+                # Physics-side vertical transport (#602 item 2): turbulent
+                # mixing of every JAM tracer, then convective mass-flux
+                # transport of the interstitial + gas set.
+                "tracer_transport",
+                "tracer_transport",
                 "aerosol_oxidants",
                 "aerosol_gas_chemistry",
                 "aerosol_microphysics",

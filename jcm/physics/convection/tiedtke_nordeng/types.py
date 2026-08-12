@@ -138,7 +138,8 @@ class ConvectionState(NamedTuple):
     # Mass fluxes
     mfu: jnp.ndarray         # Updraft mass flux (kg/m²/s)
     mfd: jnp.ndarray         # Downdraft mass flux (kg/m²/s)
-    
+    entr: jnp.ndarray        # Fractional updraft entrainment rate (1/m)
+
     # Convection diagnostics
     ktype: jnp.ndarray       # Convection type (0=none, 1=deep, 2=shallow, 3=mid)
     kbase: jnp.ndarray       # Cloud base level index
@@ -176,13 +177,20 @@ class ConvectionData:
 
     Stored in the diagnostics dict under the ``"convection"`` key (no
     leading underscore — flows to user-facing xarray output as
-    ``convection.<field>``). The ``mass_flux_*`` / ``cloud_base`` /
-    ``cloud_top`` / ``cape`` fields are reserved for the future port of
-    the equivalent ECHAM diagnostics; they are zero-filled today.
+    ``convection.<field>``). The ``cloud_base`` / ``cloud_top`` / ``cape``
+    fields are reserved for the future port of the equivalent ECHAM
+    diagnostics; they are zero-filled today. ``mass_flux_up``/``down`` and
+    ``entrain_up`` are populated (post-rescale, post-cap — the same ledger
+    scaling as the tendencies) for the convective tracer transport
+    (#602): the updraft flux at each layer's TOP interface, and the
+    absolute per-layer entrainment flux; per-layer detrainment follows
+    from plume continuity, so it is not stored separately.
     """
 
     mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)
     mass_flux_down: jnp.ndarray      # Downdraft mass flux [kg/m²/s] (nlev, ncols)
+    entrain_up: jnp.ndarray          # Updraft entrainment flux per layer
+                                     # [kg/m²/s] (nlev, ncols)
     cloud_base: jnp.ndarray          # Cloud base level index (ncols,)
     cloud_top: jnp.ndarray           # Cloud top level index (ncols,)
     cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
@@ -212,6 +220,7 @@ class ConvectionData:
         return cls(
             mass_flux_up=jnp.zeros((nlev,) + nodal_shape),
             mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
+            entrain_up=jnp.zeros((nlev,) + nodal_shape),
             cloud_base=jnp.zeros(nodal_shape, dtype=int),
             cloud_top=jnp.zeros(nodal_shape, dtype=int),
             cape=jnp.zeros(nodal_shape),
