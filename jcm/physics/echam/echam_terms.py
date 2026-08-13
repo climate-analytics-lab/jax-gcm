@@ -74,7 +74,6 @@ def echam_physics(
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
-    jam_cloud_borne_storage: str | None = None,
     jam_optics: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
@@ -147,18 +146,11 @@ def echam_physics(
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
-            (#602). ``True`` (default) declares and cycles the ``mc_*`` /
-            ``nc_*`` mirror tracers (activation transfer, resuspension,
-            in-droplet wet removal, dry deposition); ``False`` drops them
-            entirely — about half the aerosol tracer count and most of the
-            dycore tracer-transport bill — and scavenges interstitial
-            aerosol by its activated fraction instead. The A/B
-            cost/fidelity switch.
-        jam_cloud_borne_storage: EXPERIMENTAL (#602 item 3, not exposed in
-            any yaml preset): where the explicit cloud-borne phase lives —
-            ``None``/"tracers" (dycore-advected) or ``"carry"``
-            (physics-carry fields, no advection). Exists for the
-            tracers-vs-carry A/B; do not use in production configs.
+            (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
+            in the physics carry (activation transfer, resuspension,
+            in-droplet wet removal, dry deposition); ``False`` drops the
+            store and scavenges interstitial aerosol by its activated
+            fraction instead (the implicit M7/TOMAS-style treatment).
         jam_optics: include the online JAM aerosol direct-effect optics
             (#495), which overwrite the MACv2-SP optics that radiation
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
@@ -326,7 +318,6 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            cloud_borne_storage=jam_cloud_borne_storage,
             optics=jam_optics,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,

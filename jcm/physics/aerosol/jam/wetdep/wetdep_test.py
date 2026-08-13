@@ -119,16 +119,22 @@ class WetDepTermTest(unittest.TestCase):
             mass=jnp.full(shape, 1e-9),
             number=jnp.full(shape, 1.0e8),
         )
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+
         tracers = {}
+        carry = {}
         for mode in MAM4_SPEC.modes:
-            for cb in (False, True):
-                tracers[number_name(mode.short, cloud_borne=cb)] = jnp.full(
-                    (nlev, ncols), 1.0e8
+            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), 1.0e8
+            )
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full(
+                    (nlev, ncols), 1e-9
                 )
-                for sp in mode.species:
-                    tracers[mass_name(sp, mode.short, cloud_borne=cb)] = (
-                        jnp.full((nlev, ncols), 1e-9)
-                    )
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = (
+                    jnp.full((nlev, ncols), 1e-9)
+                )
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 275.0),
             tracers=tracers,
@@ -148,6 +154,7 @@ class WetDepTermTest(unittest.TestCase):
             rain_flux=rain_flux,
         )
         diagnostics = {
+            CARRY_KEY: carry,
             "_jam_state": aer,
             "activated_fraction": jnp.full((nlev, ncols), 0.7),
             "air_density": jnp.full((nlev, ncols), 1.0),
@@ -155,6 +162,15 @@ class WetDepTermTest(unittest.TestCase):
             "clouds": clouds,
         }
         return state, diagnostics, MAM4_SPEC, mass_name
+
+    @staticmethod
+    def _cb_rate(diag_in, diag_out, nm, dt=1800.0):
+        """Effective cloud-borne removal rate from the carry update."""
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        return (
+            np.asarray(diag_out[CARRY_KEY][nm])
+            - np.asarray(diag_in[CARRY_KEY][nm])
+        ) / dt
 
     def test_scavenging_is_a_sink(self):
         state, diagnostics, spec, mass_name = self._setup()
@@ -379,12 +395,12 @@ class WetDepTermTest(unittest.TestCase):
             conv_scav_ratio=jnp.asarray(0.99),
         )
         term = WetScavenging(params=params)
-        tend, _ = term(state, diagnostics, None, None)
+        tend, out = term(state, diagnostics, None, None)
 
         mode = spec.modes[0]
-        cb = np.asarray(
-            tend.tracers[mass_name(mode.species[0], mode.short,
-                                   cloud_borne=True)]
+        cb = self._cb_rate(
+            diagnostics, out,
+            mass_name(mode.species[0], mode.short, cloud_borne=True),
         )
         it = np.asarray(tend.tracers[mass_name(mode.species[0], mode.short)])
         # Removal only where condensate converts (levels 0-1), from the
@@ -403,13 +419,17 @@ class WetDepTermTest(unittest.TestCase):
             (number_name(mode.short, cloud_borne=True),
              number_name(mode.short)),
         ):
-            net = sum(np.asarray(tend.tracers[nm]) * dm_np for nm in pair)
+            cb_nm, int_nm = pair
+            net = (
+                self._cb_rate(diagnostics, out, cb_nm) * dm_np
+                + np.asarray(tend.tracers[int_nm]) * dm_np
+            )
             # Tolerance relative to the gross removal: the evap fraction
             # carries f32 round-off from the cumsum/divide, so "everything
             # re-released" holds to ~1e-6 of what was scavenged, not to
             # absolute zero on 1e8-scale number tracers.
             gross = float(
-                np.sum(np.abs(np.asarray(tend.tracers[pair[0]])) * dm_np)
+                np.sum(np.abs(self._cb_rate(diagnostics, out, cb_nm)) * dm_np)
             )
             np.testing.assert_allclose(
                 np.sum(net, axis=0), 0.0, atol=max(1e-5 * gross, 1e-20),
@@ -424,22 +444,25 @@ class WetDepTermTest(unittest.TestCase):
         from jcm.physics.aerosol.jam import number_name
 
         term = WetScavenging()
-        tend, _ = term(state, diagnostics, None, None)
+        _, out = term(state, diagnostics, None, None)
         cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
                            cloud_borne=True)
-        self.assertIn(cb_key, tend.tracers)
-        self.assertIn(number_name(spec.modes[0].short, cloud_borne=True),
-                      tend.tracers)
-        self.assertTrue(bool(jnp.all(tend.tracers[cb_key] < 0.0)))
+        nc_key = number_name(spec.modes[0].short, cloud_borne=True)
+        self.assertTrue(
+            bool((self._cb_rate(diagnostics, out, cb_key) < 0.0).all())
+        )
+        self.assertTrue(
+            bool((self._cb_rate(diagnostics, out, nc_key) < 0.0).all())
+        )
         # Independent of the interstitial activated fraction.
         diagnostics_af0 = dict(diagnostics)
         diagnostics_af0["activated_fraction"] = jnp.zeros_like(
             diagnostics["activated_fraction"]
         )
-        tend_af0, _ = term(state, diagnostics_af0, None, None)
+        _, out_af0 = term(state, diagnostics_af0, None, None)
         np.testing.assert_array_equal(
-            np.asarray(tend_af0.tracers[cb_key]),
-            np.asarray(tend.tracers[cb_key]),
+            self._cb_rate(diagnostics_af0, out_af0, cb_key),
+            self._cb_rate(diagnostics, out, cb_key),
         )
 
     def test_incloud_pathway_moves_with_the_representation(self):
@@ -535,14 +558,18 @@ class WetDepTermTest(unittest.TestCase):
                                     cloud_borne=True),
                           q_tot, fm))
 
-        # Explicit: each pair partitioned at its own exchange equilibrium.
+        # Explicit: each pair partitioned at its own exchange equilibrium
+        # (interstitial in the tracers, cloud-borne in the carry).
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
         tracers = dict(state.tracers)
+        carry = dict(diagnostics[CARRY_KEY])
         for key_int, key_cb, tot, frac in cases:
             q_cb = cf * frac * tot
             tracers[key_int] = jnp.full_like(tracers[key_int], tot - q_cb)
-            tracers[key_cb] = jnp.full_like(tracers[key_cb], q_cb)
-        tend_exp, _ = WetScavenging(params=params)(
-            state.copy(tracers=tracers), diagnostics, None, None,
+            carry[key_cb] = jnp.full_like(carry[key_cb], q_cb)
+        diag_exp = {**diagnostics, CARRY_KEY: carry}
+        tend_exp, out_exp = WetScavenging(params=params)(
+            state.copy(tracers=tracers), diag_exp, None, None,
         )
 
         # Implicit: everything interstitial, per-mode-fraction scavenged.
@@ -560,7 +587,7 @@ class WetDepTermTest(unittest.TestCase):
         for key_int, key_cb, tot, frac in cases:
             removed_explicit = -(
                 np.asarray(tend_exp.tracers[key_int])
-                + np.asarray(tend_exp.tracers[key_cb])
+                + self._cb_rate(diag_exp, out_exp, key_cb)
             )
             removed_implicit = -np.asarray(tend_imp.tracers[key_int])
             self.assertGreater(float(removed_explicit.max()), 0.0, key_int)

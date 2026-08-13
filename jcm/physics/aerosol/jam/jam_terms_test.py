@@ -75,17 +75,14 @@ class JamFactoryTest(unittest.TestCase):
     def test_harness_declares_aerosol_tracers(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, tracer_specs
 
-        # Explicit tracers storage declares the full mirror set...
+        # The interstitial set is declared; cloud-borne names never are
+        # (the phase lives in the physics carry, #602).
         names = set()
-        for t in jam_aerosol_physics(cloud_borne_storage="tracers"):
+        for t in jam_aerosol_physics():
             names |= {s.name for s in t.required_tracers()}
         self.assertTrue(
             {s.name for s in tracer_specs(MAM4_SPEC)}.issubset(names)
         )
-        # ...while the carry default declares interstitial only.
-        names = set()
-        for t in jam_aerosol_physics():
-            names |= {s.name for s in t.required_tracers()}
         self.assertFalse(any(n.startswith(("mc_", "nc_")) for n in names))
 
 

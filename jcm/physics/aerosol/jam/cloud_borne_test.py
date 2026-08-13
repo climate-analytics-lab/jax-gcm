@@ -16,22 +16,13 @@ from jcm.physics.aerosol.jam import (
     tracer_specs,
 )
 from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
+from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 from jcm.physics_interface import PhysicsState
 
 _IMPLICIT_SPEC = dataclasses.replace(MAM4_SPEC, cloud_borne=False)
 
 
 class TracerLayoutSwitchTest(unittest.TestCase):
-    def test_explicit_population_declares_both_phases(self):
-        names = {s.name for s in tracer_specs(MAM4_SPEC)}
-        self.assertIn(number_name("acc"), names)
-        self.assertIn(number_name("acc", cloud_borne=True), names)
-        # One number per mode and one mass per (mode, species), doubled.
-        n_interstitial = MAM4_SPEC.n_modes() + sum(
-            len(m.species) for m in MAM4_SPEC.modes
-        )
-        self.assertEqual(len(names), 2 * n_interstitial)
-
     def test_implicit_population_declares_interstitial_only(self):
         names = {s.name for s in tracer_specs(_IMPLICIT_SPEC)}
         self.assertIn(number_name("acc"), names)
@@ -65,14 +56,15 @@ class CloudBorneExchangeTest(unittest.TestCase):
     ):
         shape = (nlev, ncols)
         tracers = {}
+        carry = {}
         for mode in MAM4_SPEC.modes:
             tracers[number_name(mode.short)] = jnp.full(shape, n_int)
-            tracers[number_name(mode.short, cloud_borne=True)] = jnp.full(
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
                 shape, n_cb
             )
             for sp in mode.species:
                 tracers[mass_name(sp, mode.short)] = jnp.full(shape, q_int)
-                tracers[mass_name(sp, mode.short, cloud_borne=True)] = (
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = (
                     jnp.full(shape, q_cb)
                 )
         state = PhysicsState.zeros(shape).copy(
@@ -92,15 +84,24 @@ class CloudBorneExchangeTest(unittest.TestCase):
             mass_frac=per_mode * jnp.full((n_modes,) + shape, mass_frac),
         )
         diagnostics = {
+            CARRY_KEY: carry,
             "_jam_activation": act,
             "clouds": _Clouds(jnp.full(shape, cloud_fraction)),
             "_dt_seconds": 1800.0,
         }
         return state, diagnostics
 
+    @staticmethod
+    def _cb_rate(diagnostics_in, diagnostics_out, nm, dt=1800.0):
+        """Effective cloud-borne rate from the sequential carry update."""
+        return (
+            np.asarray(diagnostics_out[CARRY_KEY][nm])
+            - np.asarray(diagnostics_in[CARRY_KEY][nm])
+        ) / dt
+
     def test_transfer_conserves_each_pair_exactly(self):
         state, diagnostics = self._setup(q_cb=2.0e-10, n_cb=1.0e7)
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
         for mode in MAM4_SPEC.modes:
             pairs = [(number_name(mode.short),
                       number_name(mode.short, cloud_borne=True))]
@@ -110,17 +111,25 @@ class CloudBorneExchangeTest(unittest.TestCase):
                 for sp in mode.species
             ]
             for int_nm, cb_nm in pairs:
-                np.testing.assert_array_equal(
-                    np.asarray(tend.tracers[int_nm] + tend.tracers[cb_nm]),
-                    0.0,
+                cb_rate = self._cb_rate(diagnostics, out, cb_nm)
+                dq_int = np.asarray(tend.tracers[int_nm])
+                # Tolerance covers the f32 loss in the test's own
+                # (new - old)/dt reconstruction of the carry rate; the
+                # update itself is a single fused add.
+                scale = float(np.abs(dq_int).max())
+                np.testing.assert_allclose(
+                    dq_int + cb_rate, 0.0,
+                    atol=max(1e-4 * scale, 1e-22),
                     err_msg=f"{int_nm}/{cb_nm} exchange must conserve",
                 )
 
     def test_activation_transfer_fills_cloud_borne(self):
         state, diagnostics = self._setup()
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
-        cb = tend.tracers[mass_name("so4", "acc", cloud_borne=True)]
-        self.assertTrue(bool(jnp.all(cb > 0.0)))
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
+        cb = self._cb_rate(
+            diagnostics, out, mass_name("so4", "acc", cloud_borne=True),
+        )
+        self.assertTrue(bool((cb > 0.0).all()))
         # The move is the relaxation fraction of the equilibrium target
         # cf * f_mass * (q_int + q_cb).
         dt = 1800.0
@@ -131,7 +140,9 @@ class CloudBorneExchangeTest(unittest.TestCase):
         )
         # And each mode uses ITS OWN fraction (the fixture halves it for
         # aitken), so a mode-axis misindexing shows up here.
-        cb_ait = tend.tracers[mass_name("so4", "ait", cloud_borne=True)]
+        cb_ait = self._cb_rate(
+            diagnostics, out, mass_name("so4", "ait", cloud_borne=True),
+        )
         np.testing.assert_allclose(
             np.asarray(cb_ait) * dt, 0.5 * target * phi, rtol=1e-6,
         )
@@ -140,24 +151,31 @@ class CloudBorneExchangeTest(unittest.TestCase):
         # Large particles activate preferentially: the mass fraction (0.9)
         # must drive 3x the relative transfer of the number fraction (0.3).
         state, diagnostics = self._setup(q_int=1.0, n_int=1.0)
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
-        m = float(tend.tracers[mass_name("so4", "acc", cloud_borne=True)][0, 0])
-        n = float(tend.tracers[number_name("acc", cloud_borne=True)][0, 0])
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        m = float(self._cb_rate(
+            diagnostics, out, mass_name("so4", "acc", cloud_borne=True),
+        )[0, 0])
+        n = float(self._cb_rate(
+            diagnostics, out, number_name("acc", cloud_borne=True),
+        )[0, 0])
         self.assertAlmostEqual(m / n, 3.0, places=5)
 
     def test_clear_sky_resuspends_to_interstitial(self):
         state, diagnostics = self._setup(
             cloud_fraction=0.0, q_cb=1.0e-9, n_cb=1.0e8,
         )
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
         cb_key = mass_name("so4", "acc", cloud_borne=True)
-        self.assertTrue(bool(jnp.all(tend.tracers[cb_key] < 0.0)))
+        self.assertTrue(
+            bool((self._cb_rate(diagnostics, out, cb_key) < 0.0).all())
+        )
         self.assertTrue(
             bool(jnp.all(tend.tracers[mass_name("so4", "acc")] > 0.0))
         )
-        # Bounded: the reservoir cannot go negative in one step.
-        q_new = 1.0e-9 + np.asarray(tend.tracers[cb_key]) * 1800.0
-        self.assertGreaterEqual(float(q_new.min()), 0.0)
+        # Bounded: the (sequentially updated) reservoir stays non-negative.
+        self.assertGreaterEqual(
+            float(np.asarray(out[CARRY_KEY][cb_key]).min()), 0.0,
+        )
 
     def test_non_activatable_mode_only_resuspends(self):
         # pcm cannot activate (fraction masked to zero), so its cloud-borne
@@ -165,9 +183,11 @@ class CloudBorneExchangeTest(unittest.TestCase):
         state, diagnostics = self._setup(
             cloud_fraction=1.0, q_cb=1.0e-10, n_cb=1.0e7,
         )
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
-        cb = tend.tracers[mass_name("poa", "pcm", cloud_borne=True)]
-        self.assertTrue(bool(jnp.all(cb < 0.0)))
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        cb = self._cb_rate(
+            diagnostics, out, mass_name("poa", "pcm", cloud_borne=True),
+        )
+        self.assertTrue(bool((cb < 0.0).all()))
 
     def test_equilibrium_is_a_fixed_point(self):
         # cf = 1 and q_cb == f * (q_int + q_cb) → target == q_cb → no flux.
@@ -176,24 +196,28 @@ class CloudBorneExchangeTest(unittest.TestCase):
             cloud_fraction=1.0, number_frac=0.5, mass_frac=0.5,
             q_int=1.0e-9, q_cb=1.0e-9, n_int=1.0e8, n_cb=1.0e8,
         )
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
         for key in (mass_name("so4", "acc", cloud_borne=True),
                     number_name("acc", cloud_borne=True)):
             np.testing.assert_allclose(
-                np.asarray(tend.tracers[key]), 0.0, atol=1e-25,
+                self._cb_rate(diagnostics, out, key), 0.0, atol=1e-25,
             )
 
     def test_positivity_preserved_both_phases(self):
         state, diagnostics = self._setup(q_cb=5.0e-10, n_cb=5.0e7)
-        tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
         dt = 1800.0
         for nm, dq in tend.tracers.items():
             q_new = np.asarray(state.tracers[nm]) + np.asarray(dq) * dt
             self.assertGreaterEqual(float(q_new.min()), 0.0, nm)
+        for nm, v in out[CARRY_KEY].items():
+            self.assertGreaterEqual(float(np.asarray(v).min()), 0.0, nm)
 
     def test_empty_probe_state_is_safe(self):
-        # ``Model.get_empty_data`` runs terms with no tracers seeded.
-        state, diagnostics = self._setup()
+        # ``Model.get_empty_data`` runs terms with no tracers seeded (the
+        # store term guarantees the carry exists, so it stays in the
+        # fixture).
+        state, diagnostics = self._setup(q_cb=0.0, n_cb=0.0)
         state = state.copy(tracers={})
         tend, _ = CloudBorneExchange()(state, diagnostics, None, None)
         for dq in tend.tracers.values():
@@ -224,12 +248,13 @@ class CloudBorneExchangeTest(unittest.TestCase):
 
 
 class FactorySwitchTest(unittest.TestCase):
-    def test_default_composes_exchange_and_mirrors(self):
+    def test_default_composes_exchange_and_store(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
-        terms = jam_aerosol_physics(cloud_borne_storage="tracers")
+        terms = jam_aerosol_physics()
         cats = [t.category for t in terms]
         self.assertIn("aerosol_cloud_borne", cats)
+        self.assertIn("aerosol_cloud_borne_store", cats)
         # Exchange sits after drydep and before the aqueous split that
         # distributes by cloud-borne number.
         self.assertLess(
@@ -239,35 +264,19 @@ class FactorySwitchTest(unittest.TestCase):
             cats.index("aerosol_cloud_borne"),
             cats.index("aerosol_aqueous_chemistry"),
         )
+        # Cloud-borne names are never dycore tracers.
         names = set()
         for t in terms:
             names |= {s.name for s in t.required_tracers()}
-        self.assertIn(number_name("acc", cloud_borne=True), names)
+        self.assertNotIn(number_name("acc", cloud_borne=True), names)
 
-    def test_cloud_borne_off_drops_term_and_mirrors(self):
+    def test_cloud_borne_off_drops_terms(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
         terms = jam_aerosol_physics(cloud_borne=False)
-        self.assertNotIn(
-            "aerosol_cloud_borne", [t.category for t in terms],
-        )
-        names = set()
-        for t in terms:
-            names |= {s.name for s in t.required_tracers()}
-        self.assertFalse(
-            any(n.startswith(("mc_", "nc_")) for n in names),
-            "cloud_borne=False must not declare mirror tracers",
-        )
-        # The A/B cost claim: half the aerosol tracers are gone.
-        on = {
-            s.name
-            for t in jam_aerosol_physics(cloud_borne_storage="tracers")
-            for s in t.required_tracers()
-        }
-        self.assertEqual(
-            len([n for n in on if n.startswith(("mc_", "nc_"))]),
-            len([n for n in on if n.startswith(("m_", "n_"))]),
-        )
+        cats = [t.category for t in terms]
+        self.assertNotIn("aerosol_cloud_borne", cats)
+        self.assertNotIn("aerosol_cloud_borne_store", cats)
 
     def test_instance_core_with_conflicting_flag_raises(self):
         from jcm.physics.aerosol.jam import (
@@ -278,11 +287,10 @@ class FactorySwitchTest(unittest.TestCase):
         core = PlaceholderMicrophysics()
         with self.assertRaisesRegex(ValueError, "cloud_borne"):
             jam_aerosol_physics(microphysics=core, cloud_borne=False)
-        # A matching flag merely validates (instance cores follow their
-        # own spec's storage: tracers here).
+        # A matching flag merely validates.
         terms = jam_aerosol_physics(microphysics=core, cloud_borne=True)
         self.assertIn("aerosol_cloud_borne", [t.category for t in terms])
-        self.assertNotIn(
+        self.assertIn(
             "jam_cloud_borne_store", [t.name for t in terms],
         )
 

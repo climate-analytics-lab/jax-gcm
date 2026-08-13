@@ -1,11 +1,11 @@
 """Diagnose physics tendencies from a prescribed atmospheric state series.
 
-.. note:: Carry-resident physics state is NOT threaded here: each evaluated
-   time sees a fresh (zero) cross-step carry, so prognostic carry slots —
-   TTE-TKE turbulence, and the carry-stored cloud-borne aerosol phase
-   (#602 item 3, the default JAM storage) — re-diagnose as their cold-start
-   values. For cloud-borne analysis of a saved run, read the run's own
-   ``jam_cloud_borne.*`` output rather than re-diagnosing.
+.. note:: Carry-resident physics state is NOT threaded here (jax-gcm#623):
+   each evaluated time sees a fresh (zero) cross-step carry, so prognostic
+   carry slots — TTE-TKE turbulence, and the carry-stored cloud-borne
+   aerosol phase (#602 item 3, the JAM storage) — re-diagnose as their
+   cold-start values. For cloud-borne analysis of a saved run, read the
+   run's own ``jam_cloud_borne.*`` output rather than re-diagnosing.
 
 
 ``PrescribedStateModel`` computes physics tendencies for each timestep

@@ -133,29 +133,18 @@ class ModalAerosolSpec:
     modes: tuple[AerosolMode, ...]
     species: tuple[AerosolSpecies, ...]
     family: str = "modal"
-    #: Whether the population prognoses an explicit cloud-borne mirror per
-    #: class (MAM-style ``mc_*``/``nc_*`` tracers alongside the interstitial
-    #: set). This is a property of the population *representation*, not of the
-    #: process harness: MAM keeps in-droplet aerosol as separate constituents,
-    #: while M7 (ECHAM-HAM) and sectional schemes like TOMAS represent it
-    #: implicitly, scavenging the interstitial tracers by their activated
-    #: fraction. ``False`` halves the aerosol tracer count (and the dycore
-    #: transport bill with it); the harness terms fall back to the implicit
-    #: treatment, so both settings are complete, comparable physics (#602).
+    #: Whether the population prognoses an explicit cloud-borne phase per
+    #: class (MAM-style ``mc_*``/``nc_*`` fields alongside the interstitial
+    #: tracers). This is a property of the population *representation*, not
+    #: of the process harness: MAM keeps in-droplet aerosol as separate
+    #: constituents, while M7 (ECHAM-HAM) and sectional schemes like TOMAS
+    #: represent it implicitly, scavenging the interstitial tracers by
+    #: their activated fraction. The explicit phase lives in the cross-step
+    #: physics carry (CAM's ``qqcw``-in-pbuf pattern), never in dycore
+    #: tracers — the measured #602 decision, see ``cloud_borne_store``.
+    #: ``False`` falls back to the implicit treatment; both settings are
+    #: complete, comparable physics.
     cloud_borne: bool = True
-    #: Where the explicit cloud-borne phase LIVES (#602 item 3, CAM's
-    #: ``pbuf`` pattern): ``"tracers"`` (dycore-advected ``mc_*``/``nc_*``
-    #: tracers, the default) or ``"carry"`` (cross-step physics-carry
-    #: fields — no spectral transforms or advection, mixed vertically by
-    #: ``CloudBorneCarryStore``; gives up resolved-scale advection of
-    #: in-droplet aerosol, exactly CAM's ``qqcw`` trade). The SPEC default
-    #: stays "tracers" as the plain data contract, but the
-    #: ``jam_aerosol_physics`` factory resolves its own default to
-    #: "carry": the 30-day T21 A/B measured the advected mirrors ringing
-    #: ~90% of cells negative at 2.2x the cost (see the factory resolver
-    #: comment). "tracers" is retained for FV-dycore re-evaluation.
-    #: Ignored when ``cloud_borne`` is False.
-    cloud_borne_storage: str = "tracers"
     #: Population policy for where freshly-emitted **primary** mass of a species
     #: goes: ``{species: ((mode_short, mass_fraction), ...)}`` with fractions
     #: summing to 1. This centralises the modal (or sectional) assumption with
@@ -169,14 +158,9 @@ class ModalAerosolSpec:
     )
 
     def __post_init__(self) -> None:
-        """Validate the family tag, storage mode, and species references."""
+        """Validate the family tag and species references."""
         if self.family not in ("modal", "sectional", "bulk"):
             raise ValueError(f"Unknown aerosol family {self.family!r}.")
-        if self.cloud_borne_storage not in ("tracers", "carry"):
-            raise ValueError(
-                "cloud_borne_storage must be 'tracers' or 'carry', got "
-                f"{self.cloud_borne_storage!r}."
-            )
         known = {s.name for s in self.species}
         for mode in self.modes:
             missing = set(mode.species) - known

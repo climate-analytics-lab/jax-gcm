@@ -1,50 +1,46 @@
-"""Cloud-borne aerosol storage: dycore tracers or the physics carry.
+"""The cloud-borne aerosol phase: physics-carry fields (CAM's pbuf pattern).
 
-#602 item 3 (CAM's ``pbuf`` pattern): with the cloud-borne cycle closed
-(#602 item 1) and physics-side vertical transport in place (item 2), the
-``mc_*``/``nc_*`` mirrors no longer *need* to be dycore-advected tracers —
-they can live in the cross-step physics carry, skipping the spectral
-transforms and advection entirely (the dominant tracer cost at ne30, #595)
-while the exchange/wet/dry/aqueous cycle runs on them unchanged in physics
-space. What carry storage gives up is resolved-scale advection of
-in-droplet aerosol; CAM accepts exactly that trade for ``qqcw``.
+#602: with the cloud-borne cycle closed (item 1) and physics-side
+vertical transport in place (item 2), the ``mc_*``/``nc_*`` phase lives
+in the cross-step physics carry — never in dycore tracers. The 30-day
+controlled A/B (2026-08-13, figures on #602) settled it: Eulerian-spectral
+advection rang the episodic mirrors ~90%-of-cells negative (global-mean
+mass net-negative) at 2.2x the carry cost, and even against the fair
+semi-Lagrangian baseline (quasi-monotone nodal transport, unreleased
+dinosaur#135) the carry agreed to 3-8% with r(zonal)=0.997 at 2.1x less
+cost. A tracers-storage escape hatch was initially retained for an
+FV-dycore re-check and then REMOVED by decision: pySES is the CAM-SE
+dycore, CAM itself keeps ``qqcw`` in pbuf rather than advecting it, and
+pySES is the configuration most sensitive to tracer count (#595) — there
+is no configuration left where advected mirrors could win.
 
-``ModalAerosolSpec.cloud_borne_storage`` selects the mode ("tracers" |
-"carry"; only meaningful with an explicit cloud-borne phase). Carry is
-the factory default: the 30-day controlled A/B (2026-08-13) measured the
-dycore-advected mirrors being rung ~90%-of-cells negative by spectral
-advection of these episodic fields, at 2.2x the carry cost, while carry
-storage stayed positive-definite and recovered ~85% of the implicit
-mode's saving. "tracers" remains reachable (spec field, factory kwarg,
-``echam_physics(jam_cloud_borne_storage=...)``) for FV-dycore
-re-evaluation, where nothing rings and resolved advection of in-droplet
-aerosol could be measured cleanly.
+What the carry gives up is resolved-scale advection of in-droplet
+aerosol (CAM accepts the same trade); what it keeps is the full explicit
+cycle at ~19% over the implicit treatment instead of ~165%.
 
 One semantic nuance of the sequential carry updates: aerosol the
 exchange transfers into the carry can be scavenged by wetdep within the
-SAME step (the tracers mode only exposes it next step) — an O(dt·rate)
-difference that slightly strengthens wet removal in carry mode.
+SAME step (a tracer-mode accumulator only exposed it next step) — an
+O(dt·rate) strengthening of wet removal.
 
-The two access helpers keep the per-term diffs small:
+The access helpers keep per-term code uniform:
 
-* :func:`tracer_view` — a read view merging ``state.tracers`` with the
-  carry, so every consumer reads mirrors the same way in both modes. In
-  carry mode reads are SEQUENTIAL within the step (each term sees the
-  previous term's update), which bounds each removal by the current
-  content — stronger positivity than the parallel tracer accumulator.
-* :func:`apply_updates` — the write path: in tracers mode the updates are
-  handed back for the ordinary tendency accumulator; in carry mode they
-  are integrated into the carry immediately (backward-compatible
-  ``rate·dt`` semantics, so terms emit rates in both modes).
+* :func:`tracer_view` — read view merging ``state.tracers`` with the
+  carry (identity for implicit populations). Reads are SEQUENTIAL within
+  the step: each term sees the previous term's update, which bounds every
+  removal by current content.
+* :func:`apply_updates` — integrates cloud-borne rate updates into the
+  carry (``rate·dt``).
 
 :class:`CloudBorneCarryStore` owns the carry slot: it declares the
 ``initial_carry_state`` seed, guarantees the key exists with identical
 structure on every step (including the ``get_empty_data`` probe, which
 keeps the scan-carry pytree stable), and applies the turbulent vertical
 mixing of the carry with the same TTE-TKE exchange coefficients and
-implicit solve the tracer-mode mirrors get from
-``TracerVerticalDiffusion`` — without it, carry storage would be exactly
-the column-local frozen reservoir #602 warned about.
+implicit solve ``TracerVerticalDiffusion`` gives the interstitial
+tracers — without it, carry storage would be exactly the column-local
+frozen reservoir #602 warned about. Carry-resident state is not threaded
+by ``PrescribedStateModel`` (#623).
 """
 
 from __future__ import annotations
@@ -80,17 +76,17 @@ def mirror_names(spec: ModalAerosolSpec) -> tuple[str, ...]:
 
 
 def carry_mode(spec: ModalAerosolSpec) -> bool:
-    """Whether this population keeps its cloud-borne phase in the carry."""
-    return spec.cloud_borne and spec.cloud_borne_storage == "carry"
+    """Whether this population carries an explicit cloud-borne phase."""
+    return spec.cloud_borne
 
 
 def tracer_view(spec, state, diagnostics) -> dict:
     """Read view over interstitial tracers plus the cloud-borne store.
 
-    In tracers mode this is just ``state.tracers``; in carry mode the
-    carry entries (when present — the probe may run before the store
-    term) overlay it. Mirrors are absent from ``state.tracers`` in carry
-    mode, so the merge cannot shadow a live tracer.
+    For an implicit population this is just ``state.tracers``; with an
+    explicit phase the carry entries (when present — the probe may run
+    before the store term) overlay it. Cloud-borne names are never dycore
+    tracers, so the merge cannot shadow a live tracer.
     """
     if not carry_mode(spec):
         return state.tracers
@@ -103,13 +99,13 @@ def tracer_view(spec, state, diagnostics) -> dict:
 def apply_updates(
     spec, diagnostics, updates: dict, dt,
 ) -> tuple[dict, dict]:
-    """Route cloud-borne rate updates [.../s] to the active store.
+    """Integrate cloud-borne rate updates [.../s] into the carry.
 
-    Returns ``(diagnostics, passthrough)``: in tracers mode the updates
-    come back as ``passthrough`` for the term's ordinary tendency dict;
-    in carry mode they are integrated into the carry now (sequential
-    semantics) and ``passthrough`` is empty. Callers must use both
-    returns.
+    Returns ``(diagnostics, passthrough)`` where ``passthrough`` is
+    always empty for an explicit population (kept in the signature so
+    call sites read uniformly) and echoes ``updates`` for an implicit
+    one, where no store exists and the caller decides the fate of any
+    stray cloud-borne update (there should be none).
     """
     if not carry_mode(spec):
         return diagnostics, updates
@@ -145,8 +141,8 @@ class CloudBorneCarryStore(PhysicsTerm):
         self._spec = spec or MAM4_SPEC
         if not carry_mode(self._spec):
             raise ValueError(
-                "CloudBorneCarryStore needs spec.cloud_borne_storage='carry' "
-                "(and an explicit cloud-borne phase)."
+                "CloudBorneCarryStore needs a population with an explicit "
+                "cloud-borne phase (spec.cloud_borne=True)."
             )
         self._names = mirror_names(self._spec)
         self._vertical_mixing = bool(vertical_mixing)

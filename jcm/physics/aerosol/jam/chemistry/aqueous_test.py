@@ -13,6 +13,7 @@ from jcm.physics.aerosol.jam.chemistry.aqueous import (
     _CONV_SO2_SO4_MASS,
 )
 from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantField
+from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics_interface import PhysicsState
 
@@ -53,10 +54,13 @@ class AqueousTermTest(unittest.TestCase):
 
         shape = (nlev, ncols)
         tracers = {"g_so2": jnp.full(shape, 1.0e-10)}
+        carry = {}
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             tracers[mass_name("so4", m)] = jnp.full(shape, 1.0e-11)
-            tracers[mass_name("so4", m, cloud_borne=True)] = jnp.full(shape, 1.0e-12)
-            tracers[number_name(m, cloud_borne=True)] = jnp.full(shape, nc)
+            carry[mass_name("so4", m, cloud_borne=True)] = jnp.full(
+                shape, 1.0e-12
+            )
+            carry[number_name(m, cloud_borne=True)] = jnp.full(shape, nc)
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
@@ -65,6 +69,7 @@ class AqueousTermTest(unittest.TestCase):
             o3=jnp.full(shape, 1.0e12), h2o2=jnp.full(shape, 1.0e10),
         )
         diagnostics = {
+            CARRY_KEY: carry,
             "oxidants": ox,
             "clouds": types.SimpleNamespace(
                 cloud_fraction=jnp.full(shape, cloud_fraction),
@@ -75,14 +80,22 @@ class AqueousTermTest(unittest.TestCase):
         }
         return state, diagnostics
 
+    @staticmethod
+    def _cb_rate(diag_in, diag_out, nm, dt=1800.0):
+        """Effective cloud-borne production rate from the carry update."""
+        import numpy as _np
+        return (
+            _np.asarray(diag_out[CARRY_KEY][nm])
+            - _np.asarray(diag_in[CARRY_KEY][nm])
+        ) / dt
+
     def test_produces_cloud_borne_sulfate_and_consumes_so2(self):
         state, diagnostics = self._setup()
-        tend, _ = AqueousSulfur()(state, diagnostics, None, None)
-        self.assertIn(mass_name("so4", "acc", cloud_borne=True), tend.tracers)
-        self.assertGreater(
-            float(tend.tracers[mass_name("so4", "acc", cloud_borne=True)][0, 0]),
-            0.0,
+        tend, out = AqueousSulfur()(state, diagnostics, None, None)
+        cb = self._cb_rate(
+            diagnostics, out, mass_name("so4", "acc", cloud_borne=True),
         )
+        self.assertGreater(float(cb[0, 0]), 0.0)
         self.assertLess(float(tend.tracers["g_so2"][0, 0]), 0.0)
 
     def test_sulfur_conserved(self):
@@ -90,11 +103,11 @@ class AqueousTermTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
 
         state, diagnostics = self._setup()
-        tend, _ = AqueousSulfur()(state, diagnostics, None, None)
+        tend, out = AqueousSulfur()(state, diagnostics, None, None)
         s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             key = mass_name("so4", m, cloud_borne=True)
-            s_rate = s_rate + np.asarray(tend.tracers[key]) / _MW_SO4
+            s_rate = s_rate + self._cb_rate(diagnostics, out, key) / _MW_SO4
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_sulfur_conserved_without_cloud_borne_number(self):
@@ -108,22 +121,19 @@ class AqueousTermTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
 
         state, diagnostics = self._setup(nc=0.0)
-        tend, _ = AqueousSulfur()(state, diagnostics, None, None)
+        tend, out = AqueousSulfur()(state, diagnostics, None, None)
         # All produced sulfate lands in interstitial accumulation mode…
         self.assertGreater(
             float(tend.tracers[mass_name("so4", "acc")][0, 0]), 0.0,
         )
-        # …and none in any cloud-borne tracer.
-        for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
-            np.testing.assert_allclose(
-                np.asarray(tend.tracers[mass_name("so4", m, cloud_borne=True)]),
-                0.0,
-            )
+        # …and none in any cloud-borne field.
         s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
         s_rate = s_rate + np.asarray(tend.tracers[mass_name("so4", "acc")]) / _MW_SO4
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             key = mass_name("so4", m, cloud_borne=True)
-            s_rate = s_rate + np.asarray(tend.tracers[key]) / _MW_SO4
+            cb = self._cb_rate(diagnostics, out, key)
+            np.testing.assert_allclose(cb, 0.0)
+            s_rate = s_rate + cb / _MW_SO4
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_implicit_population_emits_no_cloud_borne_keys(self):
@@ -151,11 +161,11 @@ class AqueousTermTest(unittest.TestCase):
 
     def test_no_clouds_no_production(self):
         state, diagnostics = self._setup(cloud_fraction=0.0)
-        tend, _ = AqueousSulfur()(state, diagnostics, None, None)
-        self.assertAlmostEqual(
-            float(tend.tracers[mass_name("so4", "acc", cloud_borne=True)][0, 0]),
-            0.0,
+        _, out = AqueousSulfur()(state, diagnostics, None, None)
+        cb = self._cb_rate(
+            diagnostics, out, mass_name("so4", "acc", cloud_borne=True),
         )
+        self.assertAlmostEqual(float(cb[0, 0]), 0.0)
 
     def test_grad_through_rate_scale_finite(self):
         from jcm.physics.aerosol.jam.chemistry.aqueous import (
@@ -181,10 +191,13 @@ class SimpleAqueousSchemeTest(unittest.TestCase):
 
         shape = (nlev, ncols)
         tracers = {"g_so2": jnp.full(shape, so2)}
+        carry = {}
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
             tracers[mass_name("so4", m)] = jnp.full(shape, 1.0e-11)
-            tracers[mass_name("so4", m, cloud_borne=True)] = jnp.full(shape, 1.0e-12)
-            tracers[number_name(m, cloud_borne=True)] = jnp.full(shape, 1.0e7)
+            carry[mass_name("so4", m, cloud_borne=True)] = jnp.full(
+                shape, 1.0e-12
+            )
+            carry[number_name(m, cloud_borne=True)] = jnp.full(shape, 1.0e7)
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
@@ -193,6 +206,7 @@ class SimpleAqueousSchemeTest(unittest.TestCase):
             o3=jnp.full(shape, 1.0e12), h2o2=jnp.full(shape, h2o2),
         )
         diagnostics = {
+            CARRY_KEY: carry,
             "oxidants": ox,
             "clouds": types.SimpleNamespace(
                 cloud_fraction=jnp.full(shape, 0.6), qc=jnp.full(shape, 2.0e-4),
@@ -211,25 +225,30 @@ class SimpleAqueousSchemeTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4
 
         state, diagnostics = self._setup()
-        tend, _ = AqueousSulfur(scheme="simple")(state, diagnostics, None, None)
-        self.assertGreater(
-            float(tend.tracers[mass_name("so4", "acc", cloud_borne=True)][0, 0]),
-            0.0,
+        tend, out = AqueousSulfur(scheme="simple")(
+            state, diagnostics, None, None,
         )
+        cb_acc = AqueousTermTest._cb_rate(
+            diagnostics, out, mass_name("so4", "acc", cloud_borne=True),
+        )
+        self.assertGreater(float(cb_acc[0, 0]), 0.0)
         s_rate = np.asarray(tend.tracers["g_so2"]) / _MW_SO2
         for m in (mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species):
-            s_rate = s_rate + np.asarray(
-                tend.tracers[mass_name("so4", m, cloud_borne=True)]
+            s_rate = s_rate + AqueousTermTest._cb_rate(
+                diagnostics, out, mass_name("so4", m, cloud_borne=True),
             ) / _MW_SO4
         self.assertTrue(np.all(np.abs(s_rate) < 1.0e-18))
 
     def test_simple_is_h2o2_limited(self):
         # Scarce H2O2 caps the sulfate produced below the abundant-H2O2 case.
-        lo, _ = AqueousSulfur(scheme="simple")(*self._setup(h2o2=1.0e7)[:2], None, None)
-        hi, _ = AqueousSulfur(scheme="simple")(*self._setup(h2o2=1.0e11)[:2], None, None)
         key = mass_name("so4", "acc", cloud_borne=True)
+        s_lo, d_lo = self._setup(h2o2=1.0e7)
+        _, out_lo = AqueousSulfur(scheme="simple")(s_lo, d_lo, None, None)
+        s_hi, d_hi = self._setup(h2o2=1.0e11)
+        _, out_hi = AqueousSulfur(scheme="simple")(s_hi, d_hi, None, None)
         self.assertLess(
-            float(lo.tracers[key][0, 0]), float(hi.tracers[key][0, 0])
+            float(AqueousTermTest._cb_rate(d_lo, out_lo, key)[0, 0]),
+            float(AqueousTermTest._cb_rate(d_hi, out_hi, key)[0, 0]),
         )
 
 

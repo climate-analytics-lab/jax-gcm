@@ -4,10 +4,10 @@ Aerosol mass and number live as ordinary entries in ``state.tracers`` so the
 dynamical core transports them and the existing diagnostics infrastructure
 works unchanged. The ``<class>`` token below is a per-class short name — a
 mode short for a modal scheme, a bin label for a sectional one — so the same
-conventions serve any population family. The *cloud-borne* mirror keys are
-emitted for cores that prognose an interstitial + cloud-borne population
-(e.g. MAM4); a core without that distinction simply declares only the
-interstitial keys.
+conventions serve any population family. The *cloud-borne* names
+(``mc_*``/``nc_*``) key the physics-carry store rather than dycore
+tracers (see ``cloud_borne_store``); ``tracer_specs`` declares only the
+interstitial set.
 
 Flat key conventions (the ``state.tracers`` API is flat-keyed):
 
@@ -53,34 +53,24 @@ def number_name(mode_short: str, *, cloud_borne: bool = False) -> str:
 
 
 def tracer_specs(spec: ModalAerosolSpec) -> tuple[TracerSpec, ...]:
-    """All ``TracerSpec``s for a population (interstitial + cloud-borne).
+    """All dycore ``TracerSpec``s for a population: the INTERSTITIAL set.
 
-    Returns one mass spec per (mode, species) and one number spec per mode,
-    each doubled for the cloud-borne mirror when the population prognoses
-    one (``spec.cloud_borne``) AND keeps it in the dycore tracers
-    (``cloud_borne_storage == "tracers"``); an implicit-in-droplet
-    population, or one storing the phase in the physics carry (#602 item
-    3), declares only the interstitial keys.
+    One mass spec per (mode, species) and one number spec per mode. The
+    cloud-borne phase (when ``spec.cloud_borne``) is never a dycore
+    tracer: it lives in the physics carry (see ``cloud_borne_store``, the
+    measured #602 decision), keyed by the same ``mc_*``/``nc_*`` naming.
     """
-    explicit_tracers = (
-        spec.cloud_borne and spec.cloud_borne_storage == "tracers"
-    )
-    phases = (False, True) if explicit_tracers else (False,)
     out: list[TracerSpec] = []
     for mode in spec.modes:
-        for cb in phases:
-            out.append(
-                TracerSpec(
-                    number_name(mode.short, cloud_borne=cb),
-                    units="kg^-1",
-                    nondimensionalize=False,
-                )
+        out.append(
+            TracerSpec(
+                number_name(mode.short),
+                units="kg^-1",
+                nondimensionalize=False,
             )
-            for sp in mode.species:
-                out.append(
-                    TracerSpec(
-                        mass_name(sp, mode.short, cloud_borne=cb),
-                        units="kg/kg",
-                    )
-                )
+        )
+        for sp in mode.species:
+            out.append(
+                TracerSpec(mass_name(sp, mode.short), units="kg/kg")
+            )
     return tuple(out)

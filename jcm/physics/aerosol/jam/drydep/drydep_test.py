@@ -58,21 +58,28 @@ class DryDepTermTest(unittest.TestCase):
             mass=jnp.full(shape, 1e-9),
             number=jnp.full(shape, 1.0e8),
         )
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+
         tracers = {}
+        carry = {}
         for mode in MAM4_SPEC.modes:
-            for cb in (False, True):
-                tracers[number_name(mode.short, cloud_borne=cb)] = jnp.full(
-                    (nlev, ncols), 1.0e8
+            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), 1.0e8
+            )
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full(
+                    (nlev, ncols), 1e-9
                 )
-                for sp in mode.species:
-                    tracers[mass_name(sp, mode.short, cloud_borne=cb)] = (
-                        jnp.full((nlev, ncols), 1e-9)
-                    )
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = (
+                    jnp.full((nlev, ncols), 1e-9)
+                )
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 285.0),
             tracers=tracers,
         )
         diagnostics = {
+            CARRY_KEY: carry,
             "_jam_state": aer,
             "air_density": jnp.full((nlev, ncols), 1.2),
             "layer_thickness": jnp.full((nlev, ncols), 100.0),
@@ -91,27 +98,36 @@ class DryDepTermTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(dq[:-1] == 0.0)))
 
     def test_cloud_borne_deposits_only_with_explicit_phase(self):
-        # With the default (explicit cloud-borne) population the mirror
-        # tracers deposit at the surface too (#602); with the implicit
-        # population no mirror tendencies are emitted at all.
+        # With the default (explicit cloud-borne) population the carry
+        # fields deposit at the surface too (#602); with the implicit
+        # population the carry is untouched and no cloud-borne tendencies
+        # are emitted at all.
         import dataclasses
         from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 
         state, diagnostics, spec, mass_name = self._setup()
-        tend, _ = SlinnDryDeposition()(state, diagnostics, None, None)
+        _, out = SlinnDryDeposition()(state, diagnostics, None, None)
         cb_key = mass_name(
             spec.modes[0].species[0], spec.modes[0].short, cloud_borne=True,
         )
-        dq = tend.tracers[cb_key]
-        self.assertLess(float(dq[-1, 0]), 0.0)
-        self.assertTrue(bool(jnp.all(dq[:-1] == 0.0)))
+        delta = (
+            np.asarray(out[CARRY_KEY][cb_key])
+            - np.asarray(diagnostics[CARRY_KEY][cb_key])
+        )
+        self.assertLess(float(delta[-1, 0]), 0.0)
+        self.assertTrue(bool(jnp.all(delta[:-1] == 0.0)))
 
         implicit = SlinnDryDeposition(
             spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False)
         )
-        tend, _ = implicit(state, diagnostics, None, None)
+        tend, out = implicit(state, diagnostics, None, None)
         self.assertFalse(
             any(nm.startswith(("mc_", "nc_")) for nm in tend.tracers)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(out[CARRY_KEY][cb_key]),
+            np.asarray(diagnostics[CARRY_KEY][cb_key]),
         )
 
     def test_uses_vertical_diffusion_ustar_when_present(self):
