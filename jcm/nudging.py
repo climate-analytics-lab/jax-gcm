@@ -164,7 +164,8 @@ class NudgingConfig:
 
 
 def nudging_tendency(state: PhysicsState, target: NudgingTarget,
-                     config: NudgingConfig) -> PhysicsTendency:
+                     config: NudgingConfig,
+                     nodal_shape: tuple | None = None) -> PhysicsTendency:
     """Newtonian relaxation tendency in gridpoint space.
 
     ``dX/dt = inv_tau · (X_ref − X)`` per relaxed variable. Variables with
@@ -202,12 +203,41 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
     def _match(ref, like):
         if ref.shape == like.shape:
             return ref
-        if ref.size == like.size:
+        # ONLY the nodal -> column-vectorised transition is reshaped:
+        # (nlev, nlon, nlat) -> (nlev, nlon*nlat), same leading level axis.
+        # Element count alone is NOT sufficient grounds: a target stored
+        # (nlev, nlat, nlon) has the same size — and the same axis product —
+        # but needs a TRANSPOSE, and a row-major reshape would quietly nudge
+        # every column toward the wrong reference values instead of failing.
+        # Distinguishing the two needs the model's actual (nlon, nlat), which
+        # only ``cache_coords`` knows, so the term passes it in.
+        if like.ndim == 2 and ref.ndim == 3 and ref.shape[0] == like.shape[0]:
+            if nodal_shape is None:
+                raise ValueError(
+                    f"cannot safely flatten a nudging target {ref.shape} onto "
+                    f"a column-vectorised state {like.shape} without the "
+                    "model's nodal shape — the target's horizontal axes could "
+                    "be either (nlon, nlat) or (nlat, nlon) and the two need "
+                    "different treatment. Call cache_coords on the term (the "
+                    "Model does this), or pass nodal_shape explicitly."
+                )
+            if tuple(ref.shape[1:]) != tuple(nodal_shape):
+                hint = (" — the axes are a permutation of the model's, so the "
+                        "target looks TRANSPOSED"
+                        if sorted(ref.shape[1:]) == sorted(nodal_shape) else "")
+                raise ValueError(
+                    f"nudging target horizontal axes {tuple(ref.shape[1:])} "
+                    f"are incompatible with the state: model grid is "
+                    f"{tuple(nodal_shape)}{hint}. Build the target on the "
+                    "model's nodal (nlon, nlat) grid; this code will not "
+                    "guess an axis order."
+                )
             return ref.reshape(like.shape)
         raise ValueError(
             f"nudging target shape {ref.shape} is incompatible with the "
-            f"state's {like.shape} — the target must be built on the same "
-            "grid as the model."
+            f"state's {like.shape}. The target must be on the model's nodal "
+            "grid (nlev, nlon, nlat); the only layout change applied here is "
+            "the nodal -> column flatten ComposablePhysics performs."
         )
 
     u_t = inv_tau_wind * (_match(target.u_wind, state.u_wind) - state.u_wind)
@@ -255,6 +285,14 @@ class NudgingTerm(PhysicsTerm):
     # ``nnx.data`` so flax's pytree machinery traverses it.
     config: NudgingConfig = nnx.data(None)
 
+    def cache_coords(self, coords) -> None:
+        """Remember the model's nodal (nlon, nlat).
+
+        Needed to tell a correctly-oriented target from a transposed one when
+        flattening onto a column-vectorised state — see ``nudging_tendency``.
+        """
+        self._nodal_shape = tuple(coords.horizontal.nodal_shape)
+
     def __init__(self, config: NudgingConfig):
         """Initialise the term with the relaxation timescales."""
         self.config = config
@@ -276,7 +314,10 @@ class NudgingTerm(PhysicsTerm):
                 tracers={name: jnp.zeros_like(t) for name, t in state.tracers.items()},
             )
             return tend, diagnostics
-        return nudging_tendency(state, target, self.config), diagnostics
+        return nudging_tendency(
+            state, target, self.config,
+            nodal_shape=getattr(self, "_nodal_shape", None),
+        ), diagnostics
 
 
 # ---------------------------------------------------------------------------

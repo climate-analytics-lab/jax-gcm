@@ -88,21 +88,37 @@ def _all_terms():
 #: sets it True, so anything usable with both families qualifies.
 LAYOUT_AGNOSTIC = frozenset({
     "AerocomDiagnostics",
+    "MoistAirColumnState",
+    "NudgingTerm",
+    "UpperSponge",
+})
+
+#: Layout-agnostic in principle, but INERT in this synthetic environment —
+#: every tendency zero and no diagnostic written, so a host-vs-host
+#: comparison would prove nothing. Each needs term-specific upstream state
+#: no generic environment supplies: SSO fields (``LottMillerSso`` — the
+#: harness runs aquaplanet terrain), a frontogenesis field
+#: (``FrontalGravityWaveDrag``), populated aerosol tracers
+#: (``Mam4JaxMicrophysics``, ``IceNucleation``), a dycore omega provider
+#: (``OmegaDiagnostic``), or are no-ops by design
+#: (``PlaceholderMicrophysics``).
+#:
+#: Listed rather than quietly "passing": an earlier version of this audit
+#: counted them as covered because the activation guard inspected the
+#: environment's own nonzero seed fields instead of what the term changed.
+#: Move one here to LAYOUT_AGNOSTIC by giving it an ENV_HOOKS entry.
+INERT_IN_HARNESS = frozenset({
     "BettsMillerConvection",
     "FrontalGravityWaveDrag",
     "IceNucleation",
     "LottMillerSso",
     "Mam4JaxMicrophysics",
-    "MoistAirColumnState",
-    "NudgingTerm",
     "OmegaDiagnostic",
     "PlaceholderMicrophysics",
     "ResetEmissionFluxes",
     "SpeedyFlags",
     "StateSampler",
-    "UpperSponge",
 })
-
 #: Terms this audit does not drive, and why. Two kinds:
 #:
 #:   * column-only by construction — they unpack ``nlev, ncols =
@@ -241,19 +257,33 @@ def _instantiate(cls):
     return term
 
 
-def _comparable_arrays(tend, diagnostics):
-    """Numeric leaves to compare: tendencies AND diagnostics the term wrote.
+def _comparable_arrays(tend, diag_out, diag_in):
+    """Tendencies plus the diagnostics the term actually CHANGED.
 
-    Diagnostics matter because several audited terms (``StateSampler``,
-    ``OmegaDiagnostic``, ``AerocomDiagnostics``) emit no tendency at all —
-    comparing only tendencies would pass them on all-zero arrays.
+    Diagnostics matter because some audited terms emit no tendency at all.
+    But only *changed* leaves count: ``_build_env`` seeds the diagnostics
+    with deliberately nonzero pressure/temperature/density, so counting every
+    leaf makes the activation guard trivially true and lets the audit certify
+    a term whose code never ran — the vacuous pass this harness already fell
+    into once, and did again until it compared against the input.
     """
     out = _tendency_arrays(tend)
-    for key, val in sorted(diagnostics.items()):
+    before = {}
+    for key, val in sorted(diag_in.items()):
         if key.startswith("_"):
             continue
         for name, leaf in _numeric_leaves(val):
-            out[f"diagnostics[{key}]{name}"] = leaf
+            before[f"{key}{name}"] = leaf
+    for key, val in sorted(diag_out.items()):
+        if key.startswith("_"):
+            continue
+        for name, leaf in _numeric_leaves(val):
+            tag = f"{key}{name}"
+            prev = before.get(tag)
+            if prev is not None and prev.shape == leaf.shape and np.array_equal(
+                    np.nan_to_num(prev), np.nan_to_num(leaf)):
+                continue          # untouched seed value, not this term's output
+            out[f"diagnostics[{tag}]"] = leaf
     return out
 
 
@@ -319,15 +349,15 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
                 hook = ENV_HOOKS.get(cls.__name__, lambda *a: a[:3])
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    env = _build_env((_NLON, _NLAT))
-                    grid_tend, grid_diag = _instantiate(cls)(
-                        *hook(*env, (_NLON, _NLAT)), _TERRAIN)
-                    env = _build_env((_NCOLS,))
-                    col_tend, col_diag = _instantiate(cls)(
-                        *hook(*env, (_NCOLS,)), _TERRAIN)
+                    genv = hook(*_build_env((_NLON, _NLAT)), (_NLON, _NLAT))
+                    gin = dict(genv[1])
+                    grid_tend, grid_diag = _instantiate(cls)(*genv, _TERRAIN)
+                    cenv = hook(*_build_env((_NCOLS,)), (_NCOLS,))
+                    cin = dict(cenv[1])
+                    col_tend, col_diag = _instantiate(cls)(*cenv, _TERRAIN)
 
-                grid = _comparable_arrays(grid_tend, grid_diag)
-                col = _comparable_arrays(col_tend, col_diag)
+                grid = _comparable_arrays(grid_tend, grid_diag, gin)
+                col = _comparable_arrays(col_tend, col_diag, cin)
                 self.assertEqual(
                     set(grid), set(col),
                     f"{cls.__name__} emits different tendency fields per host",
@@ -337,9 +367,10 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
                 # any of the term's arithmetic (see ENV_HOOKS).
                 self.assertTrue(
                     any(np.any(v != 0) for v in grid.values()),
-                    f"{cls.__name__} produced all-zero tendencies AND "
-                    "diagnostics, so this comparison proves nothing — give it "
-                    "an ENV_HOOKS entry that puts it on its active path.",
+                    f"{cls.__name__} changed nothing: every tendency is zero "
+                    "and it wrote no diagnostic, so comparing the two hosts "
+                    "proves nothing. Add an ENV_HOOKS entry that puts it on "
+                    "its active path, or move it to INERT_IN_HARNESS.",
                 )
                 for key in sorted(grid):
                     a, b = _flatten_horizontal(grid[key]), _flatten_horizontal(col[key])
@@ -361,7 +392,8 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
         ``NOT_AUDITED`` with the category comment explaining why.
         """
         names = {cls.__name__ for cls in _all_terms()}
-        unclassified = sorted(names - LAYOUT_AGNOSTIC - NOT_AUDITED)
+        unclassified = sorted(
+            names - LAYOUT_AGNOSTIC - INERT_IN_HARNESS - NOT_AUDITED)
         self.assertFalse(
             unclassified,
             "new PhysicsTerm(s) are in neither roster in layout_audit_test.py: "
@@ -385,7 +417,8 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
                 f"not: {sorted(unimportable)[:4]}. The unclassified-terms "
                 "assertion above still ran and is the one that matters."
             )
-        stale = sorted((LAYOUT_AGNOSTIC | NOT_AUDITED) - names)
+        stale = sorted(
+            (LAYOUT_AGNOSTIC | INERT_IN_HARNESS | NOT_AUDITED) - names)
         self.assertFalse(stale, f"rosters name terms that no longer exist: {stale}")
 
 
