@@ -47,12 +47,16 @@ Physics first, with a thin structural pre-pass. Rationale:
 
 Housekeeping: the `claude/pr3-radiation-quick-wins` and
 `claude/echam-surface-faithful-wiring` branches were merged via rebase
-(#548 → `1e8808f`, #532 → `748413a`) but each still carries a small
-unmerged residual diff vs `dev` (pr3: ~+308 lines incl. rrtmgp/macv2
-tests; surface: ~+369/−298 in tte_tke + reference regeneration) — triage
-those diffs for leftover value before deleting the branches. The JAM/AIDE
-convergence programme (issue #609, `docs/aide_jcm_convergence_roadmap.md`)
-runs alongside this campaign.
+(#548 → `1e8808f`, #532 → `748413a`), so `git log dev..branch` still shows
+their commits. Both residual diffs were triaged (2026-08-13): every
+addition — code fixes, regression tests, the `rce.py` solar-constant
+recalibration, the `jax-rrtmgp>=0.2.1` bump, the T21L16 reference
+snapshot, the normalized-RMS comparison — is present in `dev`, and the
+branch-only lines are older superseded versions of code `dev` has since
+evolved. **Both branches are fully harvested and safe to delete**, as are
+`claude/pr1-dead-code-cleanup` and `claude/pr2-thermodynamics` (fully
+contained in `dev`). The JAM/AIDE convergence programme (issue #609,
+`docs/aide_jcm_convergence_roadmap.md`) runs alongside this campaign.
 
 All branches base on `dev`. Working conventions: `ruff check .`;
 `JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" -q` must be green; **test-pin
