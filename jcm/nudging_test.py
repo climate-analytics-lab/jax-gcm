@@ -158,3 +158,73 @@ class TestModelRunsNormallyWithoutNudging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNudgingColumnVectorized(unittest.TestCase):
+    """Nudging must work under ``ComposablePhysics(vectorize_columns=True)``.
+
+    The term used to hard-code ``inv_tau[:, None, None]`` and to subtract the
+    nodal-shaped target straight from the state, so a column-vectorised host —
+    which reshapes the state to ``(nlev, nlon*nlat)`` before calling terms —
+    died with "Incompatible shapes for broadcasting: [(47, 192, 96),
+    (47, 18432)]". That is what killed the first nudged cluster run of #583.
+    """
+
+    NLEV, NLON, NLAT = 4, 8, 6
+
+    def _config(self):
+        # Built directly rather than via ``winds_only``, which zeroes the
+        # temperature profile — the layout bug must be exercised on BOTH the
+        # wind and temperature relaxations.
+        inv = 1.0 / (6 * 3600.0)
+        return NudgingConfig(
+            inv_tau_wind=inv * jnp.ones(self.NLEV),
+            inv_tau_temperature=0.5 * inv * jnp.ones(self.NLEV),
+        )
+
+    def _target_and_states(self):
+        nlev, nlon, nlat = self.NLEV, self.NLON, self.NLAT
+        rng = np.random.default_rng(0)
+        grid = lambda: jnp.asarray(  # noqa: E731
+            rng.normal(size=(nlev, nlon, nlat)))
+
+        target = NudgingTarget(
+            u_wind=grid(), v_wind=grid(), temperature=grid() + 280.0)
+        state3d = PhysicsState.zeros(
+            (nlev, nlon, nlat),
+            u_wind=grid(), v_wind=grid(), temperature=grid() + 280.0,
+        )
+        # Same physical state, flattened exactly as ComposablePhysics does.
+        flat = lambda a: a.reshape(nlev, nlon * nlat)  # noqa: E731
+        state_col = PhysicsState.zeros(
+            (nlev, nlon * nlat),
+            u_wind=flat(state3d.u_wind), v_wind=flat(state3d.v_wind),
+            temperature=flat(state3d.temperature),
+        )
+        return target, state3d, state_col
+
+    def test_column_layout_matches_grid_layout(self):
+        target, state3d, state_col = self._target_and_states()
+        cfg = self._config()
+
+        t3d = nudging_tendency(state3d, target, cfg)
+        tcol = nudging_tendency(state_col, target, cfg)
+
+        for name in ("u_wind", "v_wind", "temperature"):
+            with self.subTest(field=name):
+                a = np.asarray(getattr(t3d, name)).reshape(
+                    self.NLEV, self.NLON * self.NLAT)
+                b = np.asarray(getattr(tcol, name))
+                self.assertEqual(b.shape, (self.NLEV, self.NLON * self.NLAT))
+                np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-12)
+
+    def test_genuinely_mismatched_grid_is_rejected(self):
+        target, _, state_col = self._target_and_states()
+        cfg = self._config()
+        wrong = NudgingTarget(
+            u_wind=target.u_wind[:, :, :-1],
+            v_wind=target.v_wind[:, :, :-1],
+            temperature=target.temperature[:, :, :-1],
+        )
+        with self.assertRaisesRegex(ValueError, "incompatible with the state"):
+            nudging_tendency(state_col, wrong, cfg)
