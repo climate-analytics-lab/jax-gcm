@@ -24,12 +24,12 @@ and computes tendencies for every cell with ``vmap``.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import numpy as np
+
+from jcm import column_coordinates
 import tree_math
 from jax import lax
 from jax.tree_util import tree_map
@@ -75,46 +75,23 @@ class SCMPredictions:
 
 
 def _vertical_nlev(vertical) -> int:
-    if hasattr(vertical, "centers"):
-        return int(np.asarray(vertical.centers).shape[0])
-    if hasattr(vertical, "a_boundaries"):
-        return int(np.asarray(vertical.a_boundaries).shape[0]) - 1
-    raise TypeError(
-        f"Unsupported vertical coordinate type {type(vertical).__name__!r}; "
-        "expected SigmaCoordinates or HybridCoordinates."
-    )
+    # Retained as an alias: the implementation moved to
+    # ``column_coordinates`` with the first-class coordinate type.
+    return column_coordinates._vertical_nlev(vertical)
 
 
 def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
-    """Duck-typed ``CoordinateSystem`` analogue at the user's column.
+    """Column coordinates at the user's location.
 
-    The SCM's physics packages only read ``coords.vertical``,
-    ``coords.horizontal.{latitudes, longitudes, nodal_shape}`` and
-    ``coords.nodal_shape`` from whatever they're handed, so a
-    ``SimpleNamespace`` with those attributes is enough — no real
-    horizontal grid needed.
-
-    The horizontal shape is ``(1, 1)``: a single column at the requested
-    ``(lat_deg, lon_deg)``. ICON's term setup (e.g.
-    ``EchamTermBase.cache_coords``) assumes a 3-tuple ``(nlev, nlon, nlat)``
-    nodal shape, so we keep that convention rather than collapsing to
-    ``(nlev, 1)``.
+    Previously a duck-typed ``SimpleNamespace``; now the first-class
+    :class:`jcm.column_coordinates.ColumnCoordinates`, which implements
+    the same consumed surface (``vertical``, ``nodal_shape``,
+    ``horizontal.{latitudes, longitudes, nodal_shape, nodal_axes}``)
+    with a type to test against and explanatory errors for spectral
+    attributes a column cannot provide.
     """
-    nlev = _vertical_nlev(vertical)
-    lat_rad = jnp.asarray([float(np.deg2rad(lat_deg))])
-    lon_rad = jnp.asarray([float(np.deg2rad(lon_deg))])
-    horizontal = SimpleNamespace(
-        nodal_shape=(1, 1),
-        latitudes=lat_rad,
-        longitudes=lon_rad,
-        # ``nodal_axes`` returns (lon, sin(lat)) by convention; included so
-        # any helper that touches it on a stub coord still works.
-        nodal_axes=(lon_rad, jnp.sin(lat_rad)),
-    )
-    return SimpleNamespace(
-        horizontal=horizontal,
-        vertical=vertical,
-        nodal_shape=(nlev, 1, 1),
+    return column_coordinates.ColumnCoordinates.at_location(
+        vertical, lat_deg, lon_deg
     )
 
 
