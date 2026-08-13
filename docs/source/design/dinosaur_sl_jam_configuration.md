@@ -15,19 +15,22 @@ python -m jcm.main \
     forcing=from_file forcing.file=$JCM/data/bc/t63/forcing.nc \
     init=jw init.rh=0.0 \
     run=longrun diffusion.tracer_positivity=true \
-    +advection=semi_lagrangian +sl_off_centering=0.2 \
+    +sl_off_centering=0.2 \
     run.time_step=15
 ```
 
 Load-bearing pieces:
 
-- **`advection=semi_lagrangian`** — nodal tracer transport (no spectral
+- **Semi-Lagrangian transport (now unconditional)** — nodal tracer transport (no spectral
   round-trip for the ~40 JAM tracers) with Bermejo–Staniforth monotone
   limiting: positivity by construction. The Eulerian path requires
   `tracer_positivity` clipping to survive at all and loses ~20 % of
   near-source tracer mass to it by day 10.
 - **`sl_off_centering=0.2`** — required over real orography (`off=0` is
-  unstable even from a good state); validated over 215 days.
+  unstable even from a good state); validated over 215 days. This is now
+  the default everywhere (`DEFAULT_OFF_CENTERING` in the dinosaur dycore,
+  shared by direct construction and the runner), so the explicit override
+  above is documentation rather than a requirement.
 - **`run=longrun`** — carries the calibrated upper sponge (10 levels,
   1.5 h, `target_T_K=250`). Without it the model top refrigerates
   (T_min < 100 K by day ~135).

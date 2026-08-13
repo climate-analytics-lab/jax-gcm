@@ -922,7 +922,7 @@ def build_model(cfg: DictConfig) -> Model:
     resolution and timestep come from the dycore group itself — see
     ``config/dycore/pyses_ne30l47.yaml``).
     """
-    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+    from jcm.dycore.dinosaur.dycore import DEFAULT_OFF_CENTERING, DinosaurDycore
 
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
@@ -961,12 +961,8 @@ def build_model(cfg: DictConfig) -> Model:
     # dycore-side knob.
     time_step = float(cfg.run.time_step)
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
-    # Advection scheme for the dinosaur backend: "eulerian" (default) or
-    # "semi_lagrangian" (dinosaur PR#135; nodal monotone tracers — the #521
-    # fix). Optional top-level keys so existing configs are untouched:
-    #     +advection=semi_lagrangian +sl_off_centering=0.2
-    advection = str(cfg.get("advection", "eulerian"))
-    sl_options = {"off_centering": float(cfg.get("sl_off_centering", 0.2))}
+    sl_options = {"off_centering": float(
+        cfg.get("sl_off_centering", DEFAULT_OFF_CENTERING))}
     dycore = DinosaurDycore(
         coords=coords,
         terrain=terrain,
@@ -975,7 +971,6 @@ def build_model(cfg: DictConfig) -> Model:
         diffusion=diffusion,
         tracer_filter=tracer_filter,
         compute_omega=_want_omega(cfg, physics),
-        advection=advection,
         sl_options=sl_options,
     )
     return Model(
