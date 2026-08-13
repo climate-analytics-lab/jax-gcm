@@ -15,13 +15,13 @@ python -m jcm.main \
     forcing=from_file forcing.file=$JCM/data/bc/t63/forcing.nc \
     init=jw init.rh=0.0 \
     run=longrun diffusion.tracer_positivity=true \
-    +advection=semi_lagrangian +sl_off_centering=0.2 \
+    +sl_off_centering=0.2 \
     run.time_step=15
 ```
 
 Load-bearing pieces:
 
-- **`advection=semi_lagrangian`** — nodal tracer transport (no spectral
+- **Semi-Lagrangian transport (now unconditional)** — nodal tracer transport (no spectral
   round-trip for the ~40 JAM tracers) with Bermejo–Staniforth monotone
   limiting: positivity by construction. The Eulerian path requires
   `tracer_positivity` clipping to survive at all and loses ~20 % of
