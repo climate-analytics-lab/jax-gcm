@@ -88,30 +88,11 @@ class JamIntegrationTest(unittest.TestCase):
             bool(jnp.any(jnp.isnan(predictions.dynamics.temperature)))
         )
 
-    def test_cloud_borne_mirrors_carried_finite(self):
-        # Explicit TRACERS storage prognoses the advected mirrors (#602):
-        # they must be seeded, transported and stay finite end-to-end. (A
-        # 3-step cold start carries near-zero aerosol, so this asserts the
-        # plumbing, not a nonzero reservoir; the transfer/resuspension
-        # mechanics are pinned in cloud_borne_test.)
-        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
-
-        _, predictions = self._run(jam_cloud_borne_storage="tracers")
-        tracers = predictions.dynamics.tracers
-        for key in (
-            number_name(MAM4_SPEC.modes[0].short, cloud_borne=True),
-            mass_name(MAM4_SPEC.modes[0].species[0],
-                      MAM4_SPEC.modes[0].short, cloud_borne=True),
-        ):
-            self.assertIn(key, tracers)
-            self.assertTrue(np.all(np.isfinite(np.asarray(tracers[key]))))
-
     def test_carry_stored_cloud_borne_runs_and_cycles(self):
-        # EXPERIMENTAL carry storage (#602 item 3): the mirrors leave the
-        # dycore tracer set entirely, live in the physics carry, and the
-        # model still runs finite with the carry fields reaching saved
-        # output through the dict flattener.
-        _, predictions = self._run(jam_cloud_borne_storage="carry")
+        # The default (and only) storage (#602 item 3): cloud-borne lives
+        # in the physics carry, never the dycore tracer set, and the model
+        # runs finite with the carry fields reaching saved output.
+        _, predictions = self._run()
         tracers = predictions.dynamics.tracers
         self.assertFalse(
             any(k.startswith(("mc_", "nc_")) for k in tracers),

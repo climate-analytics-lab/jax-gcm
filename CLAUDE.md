@@ -55,6 +55,21 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
 
+## File an issue for everything you find but don't fix
+Any bug, fidelity gap, missing pathway, or future development option encountered during a
+piece of work that will NOT be dealt with in the current PR must become a GitHub issue
+before that PR merges — a docstring note or PR-body mention is not enough, because nothing
+ever comes back to those. This includes findings from adversarial reviews that are
+triaged as "documented follow-up", pathways deliberately excluded from a term's first
+version, and capability regressions accepted as trade-offs.
+
+ - One issue per independent piece of work, titled by the gap (not the PR that found it),
+   with enough context to start cold: what is missing, where the hooks already are, and
+   what reference formulation applies.
+ - Cross-link it from the code comment or docstring that notes the gap, and from the PR.
+ - Deliberately parked/rejected directions don't get an issue — record the decision and
+   its evidence where the decision was made instead.
+
 ## No bespoke run scripts — new configurations go through Hydra
 Every runnable configuration must be expressible as ``python -m jcm.main``
 with Hydra groups/overrides — never as a standalone driver script:

@@ -31,14 +31,14 @@ subsidence:
   budget closes by construction).
 
 Downdraft tracer transport is not included yet (``mass_flux_down`` is
-published for it; the downdraft entrainment ledger is not) — the
-documented follow-up, typically a ~30% correction on the updraft
-circulation. Likewise not included: in-plume scavenging of soluble
-aerosol (ECHAM ``cuscav`` removes a large fraction of what the updraft
-carries before it detrains; here the plume is conservative and the
-convective wet removal lives separately in the JAM wetdep term), so
-expect a high bias in upper-tropospheric soluble aerosol in deep
-convective regions until that lands. Explicit stability: the per-column ledger is scaled so the
+published for it; the downdraft entrainment ledger is not) — tracked in
+jax-gcm#622, typically a ~30% correction on the updraft circulation.
+Likewise not included: in-plume scavenging of soluble aerosol (ECHAM
+``cuscav`` removes a large fraction of what the updraft carries before
+it detrains; here the plume is conservative and the convective wet
+removal lives separately in the JAM wetdep term), tracked in
+jax-gcm#621 — expect a high bias in upper-tropospheric soluble aerosol
+in deep convective regions until it lands. Explicit stability: the per-column ledger is scaled so the
 subsidence Courant number stays ≤ 1 (the scheme's own cloud-base CFL cap
 makes this a no-op in practice).
 

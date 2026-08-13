@@ -24,7 +24,7 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
 )
 from jcm.physics_interface import PhysicsState
 
-_CARRY_SPEC = dataclasses.replace(MAM4_SPEC, cloud_borne_storage="carry")
+_IMPLICIT_SPEC = dataclasses.replace(MAM4_SPEC, cloud_borne=False)
 
 
 class _VDiff:
@@ -33,23 +33,23 @@ class _VDiff:
 
 
 class StoreBasicsTest(unittest.TestCase):
-    def test_carry_spec_declares_no_mirror_tracers(self):
-        names = {s.name for s in tracer_specs(_CARRY_SPEC)}
-        self.assertFalse(any(n.startswith(("mc_", "nc_")) for n in names))
-        # Same interstitial set as the tracers-mode spec.
-        interstitial = {
-            s.name for s in tracer_specs(MAM4_SPEC)
-            if not s.name.startswith(("mc_", "nc_"))
-        }
-        self.assertEqual(names, interstitial)
+    def test_no_mirror_tracers_declared_ever(self):
+        # The cloud-borne phase is carry-only: tracer_specs is the
+        # interstitial set regardless of cloud_borne (the #602 A/B verdict
+        # plus the parked pySES check — CAM-SE keeps qqcw in pbuf too).
+        for spec in (MAM4_SPEC, _IMPLICIT_SPEC):
+            names = {s.name for s in tracer_specs(spec)}
+            self.assertFalse(
+                any(n.startswith(("mc_", "nc_")) for n in names)
+            )
+        n_interstitial = MAM4_SPEC.n_modes() + sum(
+            len(m.species) for m in MAM4_SPEC.modes
+        )
+        self.assertEqual(len(list(tracer_specs(MAM4_SPEC))), n_interstitial)
 
-    def test_invalid_storage_rejected(self):
-        with self.assertRaisesRegex(ValueError, "cloud_borne_storage"):
-            dataclasses.replace(MAM4_SPEC, cloud_borne_storage="pbuf")
-
-    def test_store_term_rejects_tracer_mode_spec(self):
-        with self.assertRaisesRegex(ValueError, "carry"):
-            CloudBorneCarryStore(spec=MAM4_SPEC)
+    def test_store_term_rejects_implicit_spec(self):
+        with self.assertRaisesRegex(ValueError, "cloud_borne"):
+            CloudBorneCarryStore(spec=_IMPLICIT_SPEC)
 
     def test_view_and_apply_roundtrip(self):
         shape = (3, 2)
@@ -59,20 +59,22 @@ class StoreBasicsTest(unittest.TestCase):
         )
         nm = mass_name("so4", "acc", cloud_borne=True)
         diagnostics = {CARRY_KEY: {nm: jnp.full(shape, 2.0e-10)}}
-        view = tracer_view(_CARRY_SPEC, state, diagnostics)
+        view = tracer_view(MAM4_SPEC, state, diagnostics)
         np.testing.assert_allclose(float(view[nm][0, 0]), 2.0e-10)
         np.testing.assert_allclose(float(view["m_so4_acc"][0, 0]), 1.0e-9)
 
         # Carry mode integrates rate·dt now; tracers mode passes through.
         diagnostics2, passthrough = apply_updates(
-            _CARRY_SPEC, diagnostics, {nm: jnp.full(shape, 1.0e-13)}, 1000.0,
+            MAM4_SPEC, diagnostics, {nm: jnp.full(shape, 1.0e-13)}, 1000.0,
         )
         self.assertEqual(passthrough, {})
         np.testing.assert_allclose(
             float(diagnostics2[CARRY_KEY][nm][0, 0]), 3.0e-10, rtol=1e-6,
         )
+        # An implicit population has no store: updates echo back.
         _, passthrough = apply_updates(
-            MAM4_SPEC, diagnostics, {nm: jnp.full(shape, 1.0e-13)}, 1000.0,
+            _IMPLICIT_SPEC, diagnostics,
+            {nm: jnp.full(shape, 1.0e-13)}, 1000.0,
         )
         self.assertIn(nm, passthrough)
 
@@ -85,10 +87,10 @@ class StoreBasicsTest(unittest.TestCase):
             "air_density": jnp.full(shape, 1.0),
             "layer_thickness": jnp.full(shape, 300.0),
         }
-        term = CloudBorneCarryStore(spec=_CARRY_SPEC)
+        term = CloudBorneCarryStore(spec=MAM4_SPEC)
         _, out = term(state, diagnostics, None, None)
         carry = out[CARRY_KEY]
-        self.assertEqual(set(carry), set(mirror_names(_CARRY_SPEC)))
+        self.assertEqual(set(carry), set(mirror_names(MAM4_SPEC)))
         for v in carry.values():
             np.testing.assert_array_equal(np.asarray(v), 0.0)
 
@@ -99,7 +101,7 @@ class StoreBasicsTest(unittest.TestCase):
         )
         nm = mass_name("so4", "acc", cloud_borne=True)
         carry = {
-            n: jnp.zeros(shape) for n in mirror_names(_CARRY_SPEC)
+            n: jnp.zeros(shape) for n in mirror_names(MAM4_SPEC)
         }
         carry[nm] = jnp.zeros(shape).at[2].set(1.0e-9)
         diagnostics = {
@@ -109,7 +111,7 @@ class StoreBasicsTest(unittest.TestCase):
             "vertical_diffusion": _VDiff(jnp.full(shape, 30.0)),
             "_dt_seconds": 1800.0,
         }
-        term = CloudBorneCarryStore(spec=_CARRY_SPEC)
+        term = CloudBorneCarryStore(spec=MAM4_SPEC)
         _, out = term(state, diagnostics, None, None)
         mixed = np.asarray(out[CARRY_KEY][nm])
         self.assertGreater(float(mixed[1, 0]), 0.0)   # spread upward
@@ -139,7 +141,7 @@ class CarryPersistenceTest(unittest.TestCase):
         physics = ComposablePhysics(
             terms=[
                 MoistAirColumnState(),
-                CloudBorneCarryStore(spec=_CARRY_SPEC),
+                CloudBorneCarryStore(spec=MAM4_SPEC),
             ],
             vectorize_columns=True,
         )
@@ -184,16 +186,16 @@ class CarryModeExchangeTest(unittest.TestCase):
     def _setup(self, nlev=3, ncols=2, cf=0.5):
         shape = (nlev, ncols)
         tracers = {}
-        for mode in _CARRY_SPEC.modes:
+        for mode in MAM4_SPEC.modes:
             tracers[number_name(mode.short)] = jnp.full(shape, 1.0e8)
             for sp in mode.species:
                 tracers[mass_name(sp, mode.short)] = jnp.full(shape, 1.0e-9)
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
-        n_modes = _CARRY_SPEC.n_modes()
+        n_modes = MAM4_SPEC.n_modes()
         can = jnp.asarray(
-            [float(m.can_activate) for m in _CARRY_SPEC.modes]
+            [float(m.can_activate) for m in MAM4_SPEC.modes]
         ).reshape(-1, 1, 1)
         act = JamActivationData(
             number_frac=can * jnp.full((n_modes,) + shape, 0.3),
@@ -205,7 +207,7 @@ class CarryModeExchangeTest(unittest.TestCase):
 
         diagnostics = {
             CARRY_KEY: {
-                n: jnp.zeros(shape) for n in mirror_names(_CARRY_SPEC)
+                n: jnp.zeros(shape) for n in mirror_names(MAM4_SPEC)
             },
             "_jam_activation": act,
             "clouds": _Clouds(),
@@ -215,7 +217,7 @@ class CarryModeExchangeTest(unittest.TestCase):
 
     def test_transfer_fills_carry_and_conserves_with_tendency(self):
         state, diagnostics = self._setup()
-        term = CloudBorneExchange(spec=_CARRY_SPEC)
+        term = CloudBorneExchange(spec=MAM4_SPEC)
         tend, out = term(state, diagnostics, None, None)
         nm_int = mass_name("so4", "acc")
         nm_cb = mass_name("so4", "acc", cloud_borne=True)
@@ -235,7 +237,7 @@ class CarryModeExchangeTest(unittest.TestCase):
         diagnostics[CARRY_KEY][nm_cb] = jnp.full(
             state.temperature.shape, 1.0e-9,
         )
-        term = CloudBorneExchange(spec=_CARRY_SPEC)
+        term = CloudBorneExchange(spec=MAM4_SPEC)
         tend, out = term(state, diagnostics, None, None)
         self.assertLess(
             float(np.asarray(out[CARRY_KEY][nm_cb]).max()), 1.0e-9,
@@ -245,21 +247,15 @@ class CarryModeExchangeTest(unittest.TestCase):
         )
 
     def test_mode_flag_helpers(self):
-        self.assertTrue(carry_mode(_CARRY_SPEC))
-        self.assertFalse(carry_mode(MAM4_SPEC))
-        self.assertFalse(
-            carry_mode(dataclasses.replace(
-                MAM4_SPEC, cloud_borne=False,
-                cloud_borne_storage="carry",
-            ))
-        )
+        self.assertTrue(carry_mode(MAM4_SPEC))
+        self.assertFalse(carry_mode(_IMPLICIT_SPEC))
 
 
 class CarryModeFactoryTest(unittest.TestCase):
     def test_factory_composes_store_first_and_drops_mirrors(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
-        terms = jam_aerosol_physics(cloud_borne_storage="carry")
+        terms = jam_aerosol_physics()
         self.assertEqual(terms[0].name, "jam_cloud_borne_store")
         names = set()
         for t in terms:
@@ -270,17 +266,15 @@ class CarryModeFactoryTest(unittest.TestCase):
             "jam_cloud_borne_exchange", [t.name for t in terms],
         )
 
-    def test_tracers_mode_composes_no_store(self):
+    def test_implicit_composes_no_store(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
         self.assertNotIn(
             "jam_cloud_borne_store",
-            [t.name for t in jam_aerosol_physics(
-                cloud_borne_storage="tracers",
-            )],
+            [t.name for t in jam_aerosol_physics(cloud_borne=False)],
         )
 
-    def test_default_storage_is_carry(self):
+    def test_default_composes_store_first(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
         terms = jam_aerosol_physics()

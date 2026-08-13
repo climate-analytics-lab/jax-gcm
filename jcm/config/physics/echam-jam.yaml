@@ -39,14 +39,14 @@ jam_aqueous_scheme: full
 # flip fails loudly (checkpoint pytree mismatch); false -> true cold-starts
 # the mirrors at zero (spin-up).
 #
-# The explicit phase lives in the physics CARRY by default (#602 item 3):
-# the 30-day T21 A/B measured the dycore-advected mc_*/nc_* mirrors going
-# ~90%-of-cells NEGATIVE from spectral ringing on these episodic fields
-# while costing 2.2x the carry run. Deliberately NOT set here — the
-# factory default is the single source of truth. The advected mode
-# remains reachable (jam_cloud_borne_storage: tracers, forwarded to
-# echam_physics like any factory kwarg) for FV-dycore re-evaluation
-# only; do not use it on spectral grids.
+# The explicit phase lives in the physics CARRY (#602 item 3) — there is
+# no advected-tracer alternative. The 30-day T21 A/B measured the
+# dycore-advected mc_*/nc_* mirrors going ~90%-of-cells NEGATIVE from
+# spectral ringing at 2.2x the carry cost (and 2.1x even under
+# semi-Lagrangian transport, with 0.997 pattern agreement); the FV-dycore
+# re-check was parked because pySES is the CAM-SE dycore, CAM itself
+# keeps qqcw in pbuf, and pySES is the most tracer-cost-sensitive
+# configuration (#595). Evidence figures on #602.
 jam_cloud_borne: true
 
 # Prescribed-emission terms (driven by forcing.emissions_file):
