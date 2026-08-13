@@ -48,13 +48,15 @@ def _import_all_physics():
     session happened to import — the audit passed alone and failed in the
     full run, which is precisely the order-dependence it exists to remove.
     """
+    unimportable = []
     for mod in pkgutil.walk_packages(_jcm_pkg.__path__, _jcm_pkg.__name__ + "."):
         if mod.name.split(".")[-1].endswith("_test"):
             continue
         try:
             importlib.import_module(mod.name)
         except Exception:  # optional extras (mam4, cosp, pyses) may be absent
-            pass
+            unimportable.append(mod.name)
+    return unimportable
 
 
 def _all_terms():
@@ -367,6 +369,22 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
             "run them on both the nodal grid and a column-vectorised block "
             "(then this audit checks them), else to NOT_AUDITED.",
         )
+        # Roster rot (a name for a term that no longer exists) is only
+        # decidable when every optional extra is installed. CI runs
+        # `pip install -e .` with none, so terms behind `jcm[mam4]` /
+        # `jcm[cosp]` are simply absent there and would look deleted — this
+        # check failed CI on `Mam4JaxMicrophysics` while passing locally.
+        # Detect the gap by what actually failed to import, not by probing
+        # for package names: a term can be absent because its optional extra
+        # is missing, because an extra's own import raised, or because the
+        # module was stubbed. Only the import result covers all three.
+        unimportable = _import_all_physics()
+        if unimportable:
+            self.skipTest(
+                "roster-rot check needs every module importable; these are "
+                f"not: {sorted(unimportable)[:4]}. The unclassified-terms "
+                "assertion above still ran and is the one that matters."
+            )
         stale = sorted((LAYOUT_AGNOSTIC | NOT_AUDITED) - names)
         self.assertFalse(stale, f"rosters name terms that no longer exist: {stale}")
 
