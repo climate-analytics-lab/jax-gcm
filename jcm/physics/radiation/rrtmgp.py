@@ -997,6 +997,7 @@ class RRTMGPRadiation(PhysicsTerm):
         compute_cre: bool = True,
         aerosol_free_diagnostics: bool = False,
         aerosol_free_alternate: bool = False,
+        aerosol_free_interval: int = 1,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1027,6 +1028,23 @@ class RRTMGPRadiation(PhysicsTerm):
         # instead of paying for a second one. Removes the *noa cost entirely
         # but perturbs the physics — see ``_compute_full``.
         self._aerosol_free_alternate = bool(aerosol_free_alternate)
+        # Run the aerosol-free companion only every Nth radiation step, but
+        # PAIRED with the all-sky solve at that same step, so the two fluxes
+        # always describe the same atmospheric state. Between companions the
+        # aerosol EFFECT is held, not the raw aerosol-free flux: the effect
+        # varies slowly, the flux does not, and holding the flux would leave
+        # rsut and rsutnoa sampling different step sets (measured at
+        # 0.04-0.14 W/m2 for a 2x subsample — the same size as the error this
+        # is meant to avoid). Cost is (1 + 1/N) solves instead of 2.
+        self._aerosol_free_interval = max(1, int(aerosol_free_interval))
+        if aerosol_free_interval > 1 and aerosol_free_alternate:
+            raise ValueError(
+                "aerosol_free_interval>1 and aerosol_free_alternate are "
+                "different strategies for the same cost problem; pick one. "
+                "Alternate splits the flavours across steps (cheapest, but "
+                "the two fluxes then describe different states); interval "
+                "keeps them paired and just does it less often."
+            )
         if aerosol_free_alternate and not aerosol_free_diagnostics:
             raise ValueError(
                 "aerosol_free_alternate=True requires "
@@ -1338,32 +1356,63 @@ class RRTMGPRadiation(PhysicsTerm):
                 ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
                 asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
             )
-            _, diagnostics_noa = _maybe_chunked_vmap(
-                radiation_scheme_rrtmgp, _in_axes,
-            )(
-                cols["temperature"], cols["specific_humidity"],
-                cols["pressure_full"], cols["pressure_half"],
-                cols["layer_thickness"], cols["air_density"],
-                cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
-                cols["surface_temperature"], cols["surface_albedo_vis"],
-                cols["surface_albedo_nir"], cols["surface_emissivity"],
-                solar, cols["latitudes"], cols["longitudes"],
-                params, aerosol_noa, cols["column_indices"],
-                model_step, base_seed, compute_cre,
-                cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
-                cols["n2o_vmr"],
-                cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-            )
-            noa = dict(
-                toa_sw_up_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_sw_up, ncols),
-                toa_lw_up_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_lw_up, ncols),
-                toa_sw_up_clear_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_sw_up_clear, ncols),
-                toa_lw_up_clear_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_lw_up_clear, ncols),
-            )
+            def _solve_aerosol_free():
+                _, dnoa = _maybe_chunked_vmap(
+                    radiation_scheme_rrtmgp, _in_axes,
+                )(
+                    cols["temperature"], cols["specific_humidity"],
+                    cols["pressure_full"], cols["pressure_half"],
+                    cols["layer_thickness"], cols["air_density"],
+                    cols["cloud_water"], cols["cloud_ice"],
+                    cols["cloud_fraction"],
+                    cols["surface_temperature"], cols["surface_albedo_vis"],
+                    cols["surface_albedo_nir"], cols["surface_emissivity"],
+                    solar, cols["latitudes"], cols["longitudes"],
+                    params, aerosol_noa, cols["column_indices"],
+                    model_step, base_seed, compute_cre,
+                    cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+                    cols["n2o_vmr"],
+                    cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+                )
+                return (
+                    _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_lw_up, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_sw_up_clear, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
+                )
+
+            _KEYS = ("toa_sw_up", "toa_lw_up",
+                     "toa_sw_up_clear", "toa_lw_up_clear")
+
+            if self._aerosol_free_interval > 1:
+                # Pay for the companion only every Nth radiation step. Between
+                # companions carry the aerosol EFFECT forward and subtract it
+                # from the FRESH all-sky flux, so the pair always refers to the
+                # same state and rsut/rsutnoa never sample different step sets.
+                # The effect is carried implicitly as the difference of the two
+                # slots already on the carry, so no schema change is needed.
+                dt_s = diagnostics["_dt_seconds"]
+                spc = jnp.where(
+                    params.radiation_interval > 0,
+                    jnp.int32(jnp.round(params.radiation_interval / dt_s)),
+                    jnp.int32(1),
+                )
+                rad_call = model_step // spc
+                fresh = tuple(_fresh_toa[k] for k in _KEYS)
+                prev_rad = diagnostics["radiation"]
+                held_effect = tuple(
+                    getattr(prev_rad, k) - getattr(prev_rad, f"{k}_noa")
+                    for k in _KEYS
+                )
+                noa_vals = jax.lax.cond(
+                    jnp.mod(rad_call, self._aerosol_free_interval) == 0,
+                    _solve_aerosol_free,
+                    lambda: tuple(f - d for f, d in zip(fresh, held_effect)),
+                )
+            else:
+                noa_vals = _solve_aerosol_free()
+
+            noa = {f"{k}_noa": v for k, v in zip(_KEYS, noa_vals)}
         else:
             all_sky = _fresh_toa
             zero_col = jnp.zeros((ncols,))

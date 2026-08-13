@@ -67,6 +67,43 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 
+#: Semi-Lagrangian transport classes jcm requires from dinosaur. They live in
+#: neuralgcm/dinosaur#135 and are not in a released dinosaur yet, so until that
+#: lands the backend needs the fork (``shoyer/dinosaur`` @ ``semi-lagrangian``)
+#: on the path. Pin a minimum dinosaur here once it ships.
+_SL_CLASSES = (
+    "SemiLagrangianPrimitiveEquations",
+    "SemiLagrangianPrimitiveEquationsHybrid",
+)
+
+
+def semi_lagrangian_available() -> bool:
+    """Return True when the installed dinosaur provides the SL transport."""
+    return all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
+
+
+def _require_semi_lagrangian() -> None:
+    """Fail with an actionable message when the SL core is missing.
+
+    jcm transports tracers semi-Lagrangian only — the Eulerian spectral
+    transport it replaced rang negative on sharp emission sources and NaN'd
+    the aerosol microphysics (#521), so there is no fallback to offer.
+    """
+    if semi_lagrangian_available():
+        return
+    missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
+    raise RuntimeError(
+        "the installed dinosaur has no semi-Lagrangian transport "
+        f"({', '.join(missing)} missing), and jcm's dinosaur backend now "
+        "requires it — the Eulerian path has been removed because it rang "
+        "negative on sharp sources and NaN'd aerosol microphysics (#521). "
+        "Install the fork until neuralgcm/dinosaur#135 is released:\n"
+        "    pip install 'dinosaur @ git+https://github.com/shoyer/dinosaur"
+        "@semi-lagrangian'\n"
+        "or put a clone of that branch on PYTHONPATH."
+    )
+
+
 class DinosaurDycore(DynamicalCore):
     """Spectral dynamical core backed by the ``dinosaur`` package.
 
@@ -97,37 +134,36 @@ class DinosaurDycore(DynamicalCore):
         tracer_filter: Any | None = None,
         compute_frontogenesis: bool = False,
         compute_omega: bool = False,
-        advection: str = "eulerian",
         sl_options: Mapping[str, Any] | None = None,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics.
 
-        ``advection`` selects the transport formulation:
+        Transport is dinosaur's semi-Lagrangian core
+        (neuralgcm/dinosaur#135) — departure-point transport with the
+        Bermejo-Staniforth quasi-monotone limiter, integrated with
+        ``semi_lagrangian_crank_nicolson_rk2`` (self-starting, so jcm's
+        chunk/resume structure needs no special first step). Every jcm
+        extra tracer (aerosol mass/number, gases, cloud condensate — all
+        of ``tracer_specs``) is carried as a NODAL tracer: it never
+        round-trips through the spectral basis, which removes the
+        per-step Gibbs ringing that made sharp emission sources go
+        negative and NaN the aerosol microphysics (#521), and makes the
+        limiter's non-negativity exact. ``specific_humidity`` stays
+        modal (it participates in the implicit q<->Tv coupling).
 
-        * ``"eulerian"`` (default) — the classic spectral-transform core
-          (IMEX-RK SIL3), unchanged.
-        * ``"semi_lagrangian"`` — dinosaur's semi-Lagrangian core
-          (neuralgcm/dinosaur#135): departure-point transport with the
-          Bermejo–Staniforth quasi-monotone limiter, integrated with
-          ``semi_lagrangian_crank_nicolson_rk2`` (self-starting, so jcm's
-          chunk/resume structure needs no special first step). Every jcm
-          extra tracer (aerosol mass/number, gases, cloud condensate — all
-          of ``tracer_specs``) is carried as a NODAL tracer: it never
-          round-trips through the spectral basis, which removes the
-          per-step Gibbs ringing that made sharp emission sources go
-          negative and NaN the aerosol microphysics (#521), and makes the
-          limiter's non-negativity exact. ``specific_humidity`` stays
-          modal (it participates in the implicit q↔Tv coupling).
-          ``sl_options`` forwards extras: ``interpolation_order``
-          ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
-          (1), ``off_centering`` (0.0), ``vertical_interpolation_order``
-          ('linear').
+        There is no Eulerian option. The classic spectral-transform
+        transport rang negative on sharp sources and was the documented
+        cause of aerosol blow-ups, so keeping it selectable only offered
+        a way to run a configuration nobody should choose; it was also
+        the silent default, which is how whole investigations ended up
+        run on it by accident.
+
+        ``sl_options`` forwards extras: ``interpolation_order``
+        ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
+        (1), ``off_centering`` (0.0), ``vertical_interpolation_order``
+        ('linear').
         """
-        if advection not in ("eulerian", "semi_lagrangian"):
-            raise ValueError(
-                f"advection must be 'eulerian' or 'semi_lagrangian', got {advection!r}"
-            )
-        self.advection = advection
+        _require_semi_lagrangian()
         self._sl_options = dict(sl_options or {})
         self.coords = coords
         self.terrain = terrain
@@ -191,56 +227,37 @@ class DinosaurDycore(DynamicalCore):
         # Every jcm extra tracer rides nodally under semi-Lagrangian
         # transport (see the constructor docstring); the Eulerian core has
         # no nodal tracers.
-        self._nodal_tracers = (
-            tuple(self.tracer_specs) if advection == "semi_lagrangian" else ()
-        )
+        self._nodal_tracers = tuple(self.tracer_specs)
 
-        # Dispatch on (advection, vertical-coordinate family). Hybrid coords
-        # carry ``a_boundaries`` in Pa; tell the dycore to interpret
+        # Dispatch on the vertical-coordinate family. Hybrid coords carry
+        # ``a_boundaries`` in Pa; tell the dycore to interpret
         # ``hpa_quantity`` accordingly. Hybrid is the only family that
-        # currently accepts a ``humidity_key`` (q ↔ Tv coupling).
-        if advection == "semi_lagrangian":
-            sl_kwargs = dict(
-                interpolation_order=self._sl_options.get("interpolation_order", "cubic"),
-                monotone_tracers=self._sl_options.get("monotone_tracers", True),
-                nodal_tracers=self._nodal_tracers,
-                departure_iterations=self._sl_options.get("departure_iterations", 1),
-                vertical_interpolation_order=self._sl_options.get(
-                    "vertical_interpolation_order", "linear"),
-            )
-            if isinstance(self.coords.vertical, HybridCoordinates):
-                self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
-                    reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
-                    orography=self._truncated_orography,
-                    coords=self.coords,
-                    physics_specs=self._physics_specs,
-                    hpa_quantity=units.pascal,
-                    humidity_key='specific_humidity',
-                    **sl_kwargs,
-                )
-            else:
-                self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
-                    reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
-                    orography=self._truncated_orography,
-                    coords=self.coords,
-                    physics_specs=self._physics_specs,
-                    **sl_kwargs,
-                )
-        elif isinstance(self.coords.vertical, HybridCoordinates):
-            self._primitive = primitive_equations.PrimitiveEquationsHybrid(
+        # currently accepts a ``humidity_key`` (q <-> Tv coupling).
+        sl_kwargs = dict(
+            interpolation_order=self._sl_options.get("interpolation_order", "cubic"),
+            monotone_tracers=self._sl_options.get("monotone_tracers", True),
+            nodal_tracers=self._nodal_tracers,
+            departure_iterations=self._sl_options.get("departure_iterations", 1),
+            vertical_interpolation_order=self._sl_options.get(
+                "vertical_interpolation_order", "linear"),
+        )
+        if isinstance(self.coords.vertical, HybridCoordinates):
+            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
                 reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
                 hpa_quantity=units.pascal,
                 humidity_key='specific_humidity',
+                **sl_kwargs,
             )
         else:
-            self._primitive = primitive_equations.PrimitiveEquations(
+            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
                 reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
+                **sl_kwargs,
             )
 
         self._filters = self._build_filters()
@@ -383,12 +400,10 @@ class DinosaurDycore(DynamicalCore):
         cross-step departure memory, so jcm's chunked ``lax.scan`` /
         checkpoint-resume structure works unchanged.
         """
-        if self.advection == "semi_lagrangian":
-            return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
-                self._primitive, self._dt,
-                off_centering=self._sl_options.get("off_centering", 0.0),
-            )
-        return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
+        return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
+            self._primitive, self._dt,
+            off_centering=self._sl_options.get("off_centering", 0.0),
+        )
 
     # ------------------------------------------------------------------
     # DynamicalCore protocol implementation

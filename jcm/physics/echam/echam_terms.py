@@ -86,6 +86,7 @@ def echam_physics(
     cosp_isccp: bool = False,
     aerosol_free_radiation: bool = False,
     aerosol_free_alternate: bool = False,
+    aerosol_free_interval: int = 1,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -224,6 +225,14 @@ def echam_physics(
             the on/off fluxes are sampled one radiation interval apart
             rather than simultaneously. Requires
             ``aerosol_free_radiation=True``.
+        aerosol_free_interval: run the aerosol-free companion only every
+            Nth radiation step, PAIRED with the all-sky solve at that same
+            step. Costs (1 + 1/N) solves instead of 2, keeps the physics
+            bit-identical, and — unlike ``aerosol_free_alternate`` — the two
+            fluxes always describe the same atmospheric state. Between
+            companions the aerosol effect is held and subtracted from the
+            fresh all-sky flux, so the pair never samples different step
+            sets. Default 1 (companion every radiation step).
 
     """
     if aerosol_free_alternate and not aerosol_free_radiation:
@@ -263,7 +272,8 @@ def echam_physics(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
             aerosol_free_diagnostics=aerosol_free_radiation,
-            aerosol_free_alternate=aerosol_free_alternate)
+            aerosol_free_alternate=aerosol_free_alternate,
+            aerosol_free_interval=aerosol_free_interval)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":

@@ -1,4 +1,13 @@
-dinosaur
+# jcm's dinosaur backend transports tracers semi-Lagrangian ONLY — the
+# Eulerian spectral path was removed because it rang negative on sharp
+# emission sources and NaN'd the aerosol microphysics (#521). The SL core
+# lives in neuralgcm/dinosaur#135 and is not in a released dinosaur yet, so
+# until it ships we install the branch it was developed on.
+#
+# BEFORE RELEASE: replace with a pinned released version, e.g.
+# ``dinosaur>=X.Y`` — a VCS requirement cannot be published to PyPI and
+# makes the wheel uninstallable for downstream users (see #577).
+dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian
 flax>=0.12.0
 jax-datetime
 tree-math
