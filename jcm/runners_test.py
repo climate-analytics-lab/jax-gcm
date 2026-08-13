@@ -323,6 +323,17 @@ class TestEmissionsConfig(unittest.TestCase):
         self.assertIn("jam_anthropogenic_emissions", names)
         self.assertIn("jam_prescribed_aerosol_emissions", names)
 
+    def test_unknown_physics_key_raises(self):
+        # A typo'd factory kwarg must fail loudly, not silently fall back
+        # to the default it was trying to override (Codex on #624).
+        from omegaconf import open_dict
+        from jcm.runners import build_physics
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        with open_dict(cfg):
+            cfg.physics.cloud_sheme = "2m"      # sic
+        with self.assertRaisesRegex(ValueError, "cloud_sheme"):
+            build_physics(cfg)
+
     def test_unknown_builder_raises(self):
         from jcm.runners import build_physics
         cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
