@@ -23,6 +23,26 @@ climatology arrays alongside the transient series.
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
 `emissions_{pi,pd}.nc`, `dms.nc`, `dust.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
+
+**Yearly transient AMIP bundles** (issue #610) sit alongside the era
+climatologies as one file per calendar year — download only the years
+you run; a new year appends without rewriting history:
+`forcing_amip/<year>.nc` (PCMDI-AMIP `tosbcs`/`siconcbcs` mid-month
+SST/ice + repeated ERA5 land climatology + CR-CMIP global-annual-mean
+CO2/CH4/N2O in ppmv), `emissions_amip/<year>.nc` (transient monthly
+CEDS + BB4CMIP7), and `<grid>_l{47,95}/ozone_amip/<year>.nc` (FZJ
+monthly ozone on model levels). Config uses a `{year}` pattern plus an
+inclusive range, and mid-month boundary values need linear time
+interpolation and an on-calendar start date:
+
+```bash
+python -m jcm.main forcing=amip forcing.years=[1979,1983] \
+    run.start_date=1979-01-01 grid=echam_t63_l47_hybrid ...
+```
+
+Built with `python -m jcm.data.mirror.build_mirror --stage amip
+--years 1950,2022` (source coverage 1870–2022; excluded from
+`--stage all`).
 Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
 `terrain.nc` only — the pySES path interpolates the Gaussian forcing
 files and uses the native CESM CEDS emissions product). The ne30pg3

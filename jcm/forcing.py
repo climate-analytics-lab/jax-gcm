@@ -116,6 +116,10 @@ def _validate_bc_fields(ds) -> None:
 # struct stays a clean JAX pytree (string fields can't ride through `jit`).
 WRAP_YEAR = 0   # index by `floor(date.tyear * n_time) % n_time` — climatology mode
 BY_DATE = 1     # index by absolute time, using `time_seconds` as the lookup axis
+BY_DATE_INTERP = 2  # as BY_DATE, but linearly interpolate between samples.
+                    # The right mode for AMIP mid-month boundary values
+                    # (PCMDI ``tosbcs`` is constructed so that linear
+                    # interpolation reconstructs the observed monthly means).
 
 # Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
 # 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
@@ -350,18 +354,28 @@ class ForcingData:
         )
 
     @classmethod
-    def from_file(cls, filename: str, coords: CoordinateSystem = None,
+    def from_file(cls, filename, coords: CoordinateSystem = None,
                   align_mode: str = "auto", validate: bool = True):
-        """Initialize forcing data from a netCDF file.
+        """Initialize forcing data from one or more netCDF files.
 
         Thin wrapper around `from_dataset`: opens `filename` with xarray
-        and delegates. See `from_dataset` for argument semantics. The
-        ``validate`` flag forwards to `from_dataset` (default ``True``;
+        and delegates. A list/tuple of paths (e.g. the yearly transient
+        AMIP bundles, issue #610) is concatenated along ``time`` in
+        chronological order; the merged span then drives the ``auto``
+        alignment detection, so a multi-year sequence aligns ``by_date``.
+        The ``validate`` flag forwards to `from_dataset` (default ``True``;
         pass ``False`` to bypass the BC sanity check, e.g. for synthetic
         test fixtures).
         """
         import xarray as xr
-        return cls.from_dataset(xr.open_dataset(filename), coords=coords,
+        if isinstance(filename, (list, tuple)):
+            ds = xr.open_mfdataset(
+                [str(f) for f in filename], combine="by_coords",
+                data_vars="minimal", coords="minimal", compat="override",
+            ).sortby("time").load()
+        else:
+            ds = xr.open_dataset(filename)
+        return cls.from_dataset(ds, coords=coords,
                                 align_mode=align_mode, validate=validate)
 
     @classmethod
@@ -379,10 +393,13 @@ class ForcingData:
                 native nodal shape is used.
             align_mode: "auto" (default) chooses `wrap_year` for files that
                 cover at most one calendar year and `by_date` for longer
-                spans; pass `"wrap_year"` or `"by_date"` to force the
-                choice. `wrap_year` indexes the time axis by fraction of
-                year (climatology mode); `by_date` aligns by absolute
-                model date.
+                spans; pass `"wrap_year"`, `"by_date"` or
+                `"by_date_interp"` to force the choice. `wrap_year` indexes
+                the time axis by fraction of year (climatology mode);
+                `by_date` aligns by absolute model date (piecewise
+                constant); `by_date_interp` additionally interpolates
+                linearly between samples — required for AMIP mid-month
+                boundary values (``tosbcs``) to reconstruct monthly means.
 
         """
         expected_structure = {
@@ -407,6 +424,15 @@ class ForcingData:
         # the spectral resolution is total wavenumbers - 2
         target_resolution = coords.horizontal.total_wavenumbers - 2 if coords is not None else None
 
+        # Resolve the alignment mode from the *raw* time axis, before any
+        # monthly -> daily interpolation: a single-year transient file (12
+        # mid-month steps, ``align_mode="by_date_interp"``) must keep its
+        # real dates — ``interpolate_to_daily`` is a climatology transform
+        # and only applies when the file actually wraps the year.
+        resolved_align_mode = _resolve_align_mode(align_mode, ds)
+        is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
+                                and _is_monthly_climatology(ds))
+
         if target_resolution is None:
             ix, il, n_times = ds['stl'].shape
             if (ix, il) not in VALID_NODAL_SHAPES:
@@ -423,16 +449,15 @@ class ForcingData:
             # multi-year axes are passed through to the TimeSeries/BY_DATE
             # alignment unchanged (interpolate_to_daily requires exactly 12
             # monthly timestamps and would otherwise raise).
-            if _is_monthly_climatology(ds):
+            if is_wrap_year_monthly:
                 ds = interpolate_to_daily(ds)
         else:
-            base = interpolate_to_daily(ds) if _is_monthly_climatology(ds) else ds
+            base = interpolate_to_daily(ds) if is_wrap_year_monthly else ds
             ds = upsample_forcings_ds(base, grid=coords.horizontal)
 
         # Build the shared time axis (seconds since MODEL_EPOCH) for every
-        # time-varying variable in this file, plus the alignment mode.
+        # time-varying variable in this file.
         time_seconds = _time_axis_seconds_from_ds(ds)
-        resolved_align_mode = _resolve_align_mode(align_mode, ds)
 
         def _ts(values):
             """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
@@ -638,9 +663,12 @@ def _resolve_align_mode(align_mode: str, ds) -> int:
         return WRAP_YEAR
     if align_mode == "by_date":
         return BY_DATE
+    if align_mode == "by_date_interp":
+        return BY_DATE_INTERP
     if align_mode != "auto":
         raise ValueError(
-            f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', or 'by_date'"
+            f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', "
+            "'by_date', or 'by_date_interp'"
         )
     # Auto-detect: if the time axis spans <= ~1.05 years, treat as climatology.
     # Reuse the calendar-aware seconds conversion so non-standard (cftime)
@@ -676,13 +704,28 @@ def _select_time_series(ts: TimeSeries, date: DateData, calendar: str) -> jnp.nd
         # Defensive — shouldn't happen, but a 0-length axis would NaN downstream
         return ts.values
 
-    # Both branches have to produce the same shape, which they do (scalar idx).
+    # Every branch has to produce the same shape, which they do (scalar idx).
     idx_wrap = _wrap_year_index(n_time, date, calendar=calendar)
     idx_date = _by_date_index(ts.time_seconds, date)
 
-    idx = jnp.where(ts.align_mode == BY_DATE, idx_date, idx_wrap)
+    idx = jnp.where(ts.align_mode == WRAP_YEAR, idx_wrap, idx_date)
     idx = jnp.clip(idx, 0, n_time - 1)
-    return jnp.take(ts.values, idx, axis=0)
+    stepped = jnp.take(ts.values, idx, axis=0)
+    if n_time < 2:
+        return stepped
+
+    # BY_DATE_INTERP: linear interpolation between the bracketing samples,
+    # clamped to the end values outside the axis. `align_mode` is traced, so
+    # both the stepped and interpolated values are computed and selected with
+    # `where` (cheap: one extra gather + fma per leaf per step).
+    lo = jnp.clip(idx_date, 0, n_time - 2)
+    t_lo = jnp.take(ts.time_seconds, lo)
+    t_hi = jnp.take(ts.time_seconds, lo + 1)
+    target = absolute_seconds_since_epoch(date.dt)
+    frac = jnp.clip((target - t_lo) / jnp.maximum(t_hi - t_lo, 1e-9), 0.0, 1.0)
+    interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
+              + frac * jnp.take(ts.values, lo + 1, axis=0))
+    return jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
 
 
 def _wrap_year_index(n_time: int, date: DateData, calendar: str) -> jnp.ndarray:

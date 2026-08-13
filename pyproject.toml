@@ -47,6 +47,13 @@ mam4 = [
 cosp = [
     "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git",
 ]
+# WeatherBench2 cloud ERA5 access (jcm.data.era5): nudging targets and
+# initial conditions from the public GCS zarr stores (#610).
+# Install with `pip install jcm[era5]`.
+era5 = [
+    "gcsfs",
+    "zarr",
+]
 
 # pySES CAM-SE spectral-element dynamical core (jcm/dycore/pyses).
 # Floor is 0.1.3.1: earlier builds lower the SE contractions to per-gridpoint

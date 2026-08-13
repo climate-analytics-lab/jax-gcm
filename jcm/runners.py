@@ -369,6 +369,84 @@ def maybe_add_sponge(physics, cfg: DictConfig):
     )
 
 
+def _nudging_inv_tau(nudging_cfg, vertical):
+    """Per-level inverse-timescale profiles from the ``nudging`` config.
+
+    One ``1/tau`` value masked to zero (a) in the bottom ``pbl_levels``
+    layers, and (b) above ``min_pressure_hpa`` — the WB2 ERA5 stores
+    stop at 50 hPa, and values above that clamp, so relaxing the
+    stratosphere toward them would drag it to 50-hPa winds.
+    """
+    import numpy as np
+    if hasattr(vertical, "a_centers"):
+        p_ref = (np.asarray(vertical.a_centers)
+                 + np.asarray(vertical.b_centers) * 101325.0)
+    else:
+        p_ref = np.asarray(vertical.centers) * 101325.0
+    nlev = p_ref.size
+    mask = np.ones(nlev)
+    mask[p_ref < float(nudging_cfg.get("min_pressure_hpa", 60.0)) * 100.0] = 0.0
+    pbl = int(nudging_cfg.get("pbl_levels", 0))
+    if pbl > 0:
+        mask[nlev - pbl:] = 0.0
+    inv_tau = mask / (float(nudging_cfg.get("tau_hours", 6.0)) * 3600.0)
+    return inv_tau, nlev
+
+
+def maybe_add_nudging(physics, cfg: DictConfig, coords):
+    """Append a ``NudgingTerm`` when ``cfg.nudging.enabled`` (#610).
+
+    Timescale config only — the ERA5 reference target is attached to
+    forcing at run time (``_maybe_attach_nudging_target``), windowed to
+    ``run.start_date + run.total_time``.
+    """
+    nudging_cfg = cfg.get("nudging", None)
+    if nudging_cfg is None or not nudging_cfg.get("enabled", False):
+        return physics
+    import jax.numpy as jnp
+
+    from jcm.nudging import NudgingConfig, with_nudging
+    inv_tau, nlev = _nudging_inv_tau(nudging_cfg, coords.vertical)
+    config = NudgingConfig(
+        inv_tau_wind=jnp.asarray(inv_tau),
+        inv_tau_temperature=(jnp.asarray(inv_tau)
+                             if nudging_cfg.get("nudge_temperature", False)
+                             else jnp.zeros(nlev)),
+    )
+    return with_nudging(physics, config)
+
+
+def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
+    """Attach the windowed ERA5 nudging target to forcing (#610).
+
+    The window is ``[run.start_date, start + total_time]`` padded by a
+    day each side. Requires internet (or a warm ``jcm.data.era5``
+    cache — prefetch on a login node for compute-node runs).
+    """
+    nudging_cfg = cfg.get("nudging", None)
+    if nudging_cfg is None or not nudging_cfg.get("enabled", False):
+        return forcing
+    if nudging_cfg.get("source", "era5") != "era5":
+        raise ValueError(
+            f"Unknown nudging.source={nudging_cfg.get('source')!r} — "
+            "only 'era5' (WeatherBench2) is implemented.")
+    import datetime as _dt
+
+    from jcm.data import era5
+    start_raw = cfg.get("run", {}).get("start_date", None) or "2000-01-01"
+    start = _dt.date.fromisoformat(str(start_raw)[:10])
+    days = float(cfg.run.total_time)
+    window = (str(start - _dt.timedelta(days=1)),
+              str(start + _dt.timedelta(days=int(days) + 2)))
+    target = era5.nudging_target(
+        model.coords, *window, freq=str(nudging_cfg.get("freq", "6h")))
+    forcing = _ensure_parent_forcing(forcing, model.coords)
+    provenance.record_fact(
+        "nudging", f"era5 {window[0]}..{window[1]} "
+                   f"tau={nudging_cfg.get('tau_hours', 6.0)}h")
+    return forcing.copy(nudging_target=target)
+
+
 # ---------------------------------------------------------------------------
 # Terrain
 # ---------------------------------------------------------------------------
@@ -396,6 +474,43 @@ def _resolve_data_path(path):
     if isinstance(path, str):
         provenance.record_input(path)   # no-op unless it is a real file
     return path
+
+
+def _expand_years(file_spec, years, available=None):
+    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
+
+    The transient AMIP bundles are one file per year (issue #610:
+    download only what you run, append new years without rewriting
+    history), so config points at a pattern plus an inclusive range:
+    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
+    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
+    than silently running with a literal ``{year}`` path. Non-pattern
+    specs (plain paths, lists, ``None``) pass through untouched even when
+    ``years`` is set — a run may mix yearly SST files with a static dust
+    climatology, all sharing one ``forcing.years`` range.
+
+    ``available`` (``forcing.available_years``, the product's inclusive
+    source coverage) widens the expansion by one year on each side,
+    clipped to that coverage: the yearly files hold *mid-month* samples,
+    so a run starting Jan 1 needs the previous December's sample (and a
+    run ending Dec 31 the next January's) for ``by_date_interp`` to
+    bracket the boundary instead of clamping to the nearest mid-month
+    value for ~half a month.
+    """
+    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
+    if not has_pattern:
+        return file_spec
+    if years is None:
+        raise ValueError(
+            f"forcing file pattern {file_spec!r} contains {{year}} but "
+            "no year range is set — add e.g. forcing.years=[1979,1983]")
+    first, last = int(years[0]), int(years[-1])
+    if last < first:
+        raise ValueError(f"forcing.years range is reversed: {years!r}")
+    if available is not None:
+        lo, hi = int(available[0]), int(available[-1])
+        first, last = max(first - 1, lo), min(last + 1, hi)
+    return [file_spec.format(year=y) for y in range(first, last + 1)]
 
 
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
@@ -687,6 +802,26 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     model._final_dycore_state = state
 
 
+def inject_era5_state(model: Model, cfg: DictConfig) -> None:
+    """Seed the model from ERA5 (WeatherBench2) at the run start date.
+
+    ``init.date`` overrides; otherwise ``run.start_date`` (else the
+    2000-01-01 default) — matching the calendar the run integrates on.
+    The regridded slice comes from :mod:`jcm.data.era5` (cached; needs
+    internet or a prefetched cache). Mutates
+    ``model._final_dycore_state`` — follow with ``model.resume(...)``.
+    """
+    from jcm.data.era5 import initial_state
+
+    date = (cfg.get("init", {}).get("date", None)
+            or cfg.get("run", {}).get("start_date", None)
+            or "2000-01-01")
+    state = initial_state(model.coords, str(date))
+    provenance.record_fact("initial_condition", f"era5:{date}")
+    model._final_dycore_state = model._prepare_initial_dycore_state(
+        physics_state=state)
+
+
 # ---------------------------------------------------------------------------
 # Top-level model construction
 # ---------------------------------------------------------------------------
@@ -750,6 +885,21 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
         "plev" in (phys.get("aerocom_groups") or ()))
 
 
+def _resolve_start_date(cfg: DictConfig):
+    """``run.start_date`` (ISO date string) as a ``jax_datetime.Datetime``.
+
+    ``None``/unset keeps ``Model``'s default (2000-01-01). Transient
+    (``BY_DATE``-aligned) forcing samples the file at the absolute model
+    date, so a historical run must set this to place itself on the
+    forcing's calendar (issue #610).
+    """
+    raw = cfg.get("run", {}).get("start_date", None)
+    if raw in (None, "", "null"):
+        return None
+    import jax_datetime as jdt
+    return jdt.to_datetime(str(raw))
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config.
 
@@ -769,6 +919,12 @@ def build_model(cfg: DictConfig) -> Model:
                 "initializes from its own resting USSA-1976 state (keep the "
                 "default init=isothermal)."
             )
+        if cfg.get("nudging", {}).get("enabled", False):
+            raise ValueError(
+                "nudging is dinosaur-only for now: the relaxation "
+                "broadcasts over a 2-D lon/lat horizontal layout, not "
+                "pySES physics columns."
+            )
         return _build_pyses_model(cfg)
     if dycore_name != "dinosaur":
         raise ValueError(
@@ -779,6 +935,7 @@ def build_model(cfg: DictConfig) -> Model:
     coords = build_coords(cfg)
     physics = build_physics(cfg)
     physics = maybe_add_sponge(physics, cfg)
+    physics = maybe_add_nudging(physics, cfg, coords)
     terrain = build_terrain(cfg, coords)
     diffusion = build_diffusion(cfg)
     tracer_filter = build_tracer_filter(cfg)
@@ -811,6 +968,7 @@ def build_model(cfg: DictConfig) -> Model:
         dycore,
         physics=physics,
         time_step=time_step,
+        start_date=_resolve_start_date(cfg),
         log_level=log_level,
     )
 
@@ -857,7 +1015,8 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
     # No time_step: the Model adopts the dycore's dt_seconds (single source
     # of truth; a conflicting run.time_step would raise).
-    return Model(dycore=dycore, physics=physics, log_level=log_level)
+    return Model(dycore=dycore, physics=physics,
+                 start_date=_resolve_start_date(cfg), log_level=log_level)
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -971,8 +1130,11 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         forcing = None
     elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
+        files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
+                              forcing_cfg.get("available_years", None))
         forcing = ForcingData.from_file(
-            _resolve_data_path(forcing_cfg.file), coords=coords)
+            _resolve_data_path(files), coords=coords,
+            align_mode=str(forcing_cfg.get("align", "auto")))
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -1047,8 +1209,12 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    ozone_file = _resolve_data_path(
-        forcing_cfg.get("ozone_file", None))
+    ozone_file = _resolve_data_path(_expand_years(
+        forcing_cfg.get("ozone_file", None),
+        forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
+    if isinstance(ozone_file, (list, tuple)):
+        ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):
         provenance.record_fact("ozone_source", "analytic (no ozone_file)")
         return forcing
@@ -1114,7 +1280,10 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("emissions_file", None))
+    path = _resolve_data_path(_expand_years(
+        forcing_cfg.get("emissions_file", None),
+        forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
     if path in (None, "", "null"):
         return forcing
 
@@ -1386,6 +1555,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         model = build_model(cfg)
 
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
+    forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -1420,6 +1590,16 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
     if cfg.init.kind == "balanced_isothermal":
         inject_balanced_isothermal_profile(model)
+        return model.resume(
+            forcing=forcing,
+            save_interval=cfg.run.save_interval,
+            total_time=cfg.run.total_time,
+            output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        )
+    if cfg.init.kind == "era5":
+        inject_era5_state(model, cfg)
         return model.resume(
             forcing=forcing,
             save_interval=cfg.run.save_interval,

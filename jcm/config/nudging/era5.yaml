@@ -1,0 +1,32 @@
+# Newtonian relaxation toward ERA5 reanalysis (WeatherBench2 cloud
+# store, #610). Adds a NudgingTerm to the physics and attaches a
+# time-varying target windowed to [run.start_date, start + total_time].
+# Requires internet or a warm cache — prefetch on a login node:
+#   python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>
+#
+# Example:
+#   python -m jcm.main nudging=era5 run.start_date=2010-01-01 \
+#       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam-rrtmgp
+#
+# Memory: the target stays resident — ~15 GB per 6-hourly year at
+# T63L47; use freq: 1d (~2.5 GB/year) for long windows.
+enabled: true
+source: era5
+
+# Relaxation timescale (hours). 6 h is the common analysis-nudging value.
+tau_hours: 6.0
+
+# Bottom levels excluded from nudging (let the PBL respond freely).
+pbl_levels: 2
+
+# Nudge temperature as well as winds (winds-only is the default,
+# ECHAM-style).
+nudge_temperature: false
+
+# Levels with reference pressure below this are never nudged: the WB2
+# 13-level stores stop at 50 hPa and clamp above it — relaxing the
+# stratosphere toward clamped values would be wrong.
+min_pressure_hpa: 60.0
+
+# Target sampling: 6h (native), 12h, or 1d.
+freq: 6h

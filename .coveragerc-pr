@@ -28,6 +28,7 @@ omit =
     jcm/data/mirror/ozone.py
     jcm/data/mirror/emissions.py
     jcm/data/mirror/bundles.py
+    jcm/data/mirror/amip_yearly.py
     jcm/data/mirror/build_mirror.py
     # PR-only: shared regridding + HF downloader utilities, thoroughly
     # covered by the fast co-located test suites; slow integration runs
@@ -35,6 +36,7 @@ omit =
     jcm/data/regridding.py
     jcm/data/mirror/registry.py
     jcm/data/remote.py
+    jcm/data/era5.py
     jcm/provenance.py
     # PR-only: utility / orchestration modules. The fast-test suite
     # exercises these thoroughly; the slow integration tests only

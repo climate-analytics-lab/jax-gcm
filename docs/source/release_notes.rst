@@ -1,6 +1,30 @@
 Release Notes
 =============
 
+Unreleased — transient AMIP forcing
+-----------------------------------
+
+- **Historical (AMIP-style) runs from config** (#610): yearly transient
+  bundles on the data mirror (``bundles/<grid>/forcing_amip/<year>.nc``
+  with PCMDI-AMIP mid-month SST/sea-ice, ERA5 land climatology and
+  CR-CMIP global-mean GHGs; matching ``emissions_amip`` and
+  ``ozone_amip`` files), a ``forcing=amip`` preset
+  (``forcing.years=[first,last]`` expands ``{year}`` patterns and
+  concatenates along time), a ``run.start_date`` key so the model
+  calendar lands on the forcing dates, and a ``by_date_interp``
+  time-alignment mode that linearly interpolates between samples —
+  required for the AMIP boundary (``tosbcs``) convention to reconstruct
+  observed monthly means. Plain ``by_date`` series stay
+  piecewise-constant.
+- **ERA5 nudging and initial conditions from config** (#610):
+  ``nudging=era5`` relaxes winds (optionally temperature) toward
+  WeatherBench2's public cloud ERA5, windowed to the run dates,
+  regridded to the model grid and cached locally (``jcm.data.era5``,
+  ``pip install jcm[era5]``); ``init=era5`` starts from the ERA5 state
+  at ``run.start_date``. Nudging is masked off above the WB2 stores'
+  50 hPa top and below ``nudging.pbl_levels``. Prefetch CLI:
+  ``python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>``.
+
 Unreleased — issue-backlog tidy-up
 ----------------------------------
 

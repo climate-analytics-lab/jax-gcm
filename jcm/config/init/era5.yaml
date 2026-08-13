@@ -1,0 +1,11 @@
+# ERA5 (WeatherBench2 cloud store) initial condition (#610): u/v/T/q/z/ps
+# regridded to the model grid at the run start date. Requires internet or
+# a warm cache — prefetch on a login node with
+#   python -m jcm.data.era5 --grid <grid> --start <date> --end <date> --init
+# Pairs naturally with run.start_date (and forcing=amip) so the model
+# calendar, initial state, and boundary forcing agree.
+kind: era5
+
+# ISO date of the ERA5 sample (nearest at-or-before 6-hourly slot).
+# Null uses run.start_date.
+date: null

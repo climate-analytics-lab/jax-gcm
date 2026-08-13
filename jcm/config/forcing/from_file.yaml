@@ -13,6 +13,24 @@
 kind: from_file
 file: ???
 
+# Yearly transient bundles (issue #610): any *_file here may be a {year}
+# pattern, expanded over the inclusive range below and concatenated along
+# time, e.g. ``file=hf://bundles/t63/forcing_amip/{year}.nc`` with
+# ``years=[1979,1983]``. Plain paths ignore ``years``. When
+# ``available_years`` gives the product's source coverage, the expansion
+# pads the range by one year each side (clipped to coverage) so
+# mid-month samples bracket the run's first/last dates under
+# ``by_date_interp``.
+years: null
+available_years: null
+
+# Time alignment for ``file``: auto (default; climatology span → wrap_year,
+# longer → by_date), or force wrap_year / by_date / by_date_interp.
+# ``by_date_interp`` linearly interpolates between samples — the correct
+# mode for AMIP mid-month boundary values (tosbcs), which are constructed
+# so linear interpolation reconstructs observed monthly means.
+align: auto
+
 # Ozone climatology netCDF, pre-interpolated to model levels (see
 # ``jcm.data.bc.interpolate_ozone``). ``auto`` (default) resolves the
 # packaged ``jcm/data/bc/<grid>/ozone.nc``, warning and falling back to
