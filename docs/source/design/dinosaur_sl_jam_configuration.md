@@ -27,7 +27,10 @@ Load-bearing pieces:
   `tracer_positivity` clipping to survive at all and loses ~20 % of
   near-source tracer mass to it by day 10.
 - **`sl_off_centering=0.2`** — required over real orography (`off=0` is
-  unstable even from a good state); validated over 215 days.
+  unstable even from a good state); validated over 215 days. This is now
+  the default everywhere (`DEFAULT_OFF_CENTERING` in the dinosaur dycore,
+  shared by direct construction and the runner), so the explicit override
+  above is documentation rather than a requirement.
 - **`run=longrun`** — carries the calibrated upper sponge (10 levels,
   1.5 h, `target_T_K=250`). Without it the model top refrigerates
   (T_min < 100 K by day ~135).

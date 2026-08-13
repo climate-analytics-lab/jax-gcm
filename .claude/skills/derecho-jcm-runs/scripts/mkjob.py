@@ -116,9 +116,9 @@ def build_overrides(a) -> list[str]:
     ov += ["init=jw", "init.rh=0.0", "run=longrun"]
     if a.physics.endswith("jam"):
         ov.append("diffusion.tracer_positivity=true")
-    if a.advection == "semi_lagrangian":
-        ov += ["+advection=semi_lagrangian",
-               f"+sl_off_centering={a.off_centering}"]
+    # Transport is always semi-Lagrangian (the Eulerian path was removed);
+    # only the off-centering remains tunable.
+    ov.append(f"+sl_off_centering={a.off_centering}")
     if a.gpus > 1:
         if a.gpus % 2 == 0:
             default_mesh = f"[{a.gpus // 2},2,1]"
@@ -170,8 +170,6 @@ def main() -> None:
     p.add_argument("--microphysics", default="mam4_jax")
     p.add_argument("--radiation", default=None,
                    help="override radiation_scheme, e.g. grey")
-    p.add_argument("--advection", default="semi_lagrangian",
-                   choices=["semi_lagrangian", "eulerian"])
     p.add_argument("--off-centering", type=float, default=0.2)
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--mesh", default=None, help="explicit spmd_mesh, e.g. [2,2,1]")

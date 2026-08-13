@@ -151,9 +151,12 @@ def _ma_preset(trunc: str, levels: int) -> list[str]:
         "init=jw", "init.rh=0.0",
         "terrain=from_file", f"terrain.file={_TERRAIN[trunc]}",
         "run=longrun", "run.time_step=12",
-        # The semi-Lagrangian core the original sweep used; needs the SL
-        # dinosaur on PYTHONPATH (--pythonpath), else the dycore raises.
-        "+advection=semi_lagrangian", "+sl_off_centering=0.2",
+        # Transport is always semi-Lagrangian now (the Eulerian path was
+        # removed); the SL dinosaur must be importable (--pythonpath or the
+        # requirements install), else the dycore raises. The off-centering
+        # matches the constructor/runner default — kept explicit so the
+        # recorded config documents the value the sweep ran with.
+        "+sl_off_centering=0.2",
     ]
     if trunc in _MIRROR_GRIDS:
         ov += [
@@ -182,8 +185,8 @@ def _pyses_preset(levels: int) -> list[str]:
     * no ``grid=`` — the group is IGNORED by this backend; resolution comes
       from nx/npt/nlev in the dycore config;
     * no ``run.time_step`` — the Model adopts the dycore's dt_seconds (900 s);
-    * no ``+advection=semi_lagrangian`` — that is a dinosaur option; pySES
-      does its own tracer sub-cycling (tracer_substeps=5);
+    * no ``+sl_off_centering`` — that tunes the dinosaur SL integrator;
+      pySES does its own tracer sub-cycling (tracer_substeps=5);
     * no ``init=jw`` — that is dinosaur-specific and pySES REJECTS it; this
       backend initializes from its own resting USSA-1976 state, so the
       default ``init=isothermal`` is required. (Carried over from the
@@ -234,53 +237,14 @@ PRESETS: dict[str, list[str]] = {
     "t63-echam-jam-aerocom-optics": [
         "physics=echam-jam-aerocom-optics", *_T63_COMMON],
     # Middle-atmosphere resolution sweep (T63/T106/T119 x L47/L95).
+    # The historical ``*-eulerian`` presets are gone with the Eulerian
+    # path itself: the released-dinosaur variants would now fail the SL
+    # availability guard, and any that ran would silently execute
+    # semi-Lagrangian transport under an "eulerian" label. The 2026-07
+    # advection-comparison numbers they produced live in
+    # docs/source/design/dinosaur_sl_jam_configuration.md.
     **{f"ma-{t}-l{lv}": _ma_preset(t, lv)
        for t in ("t63", "t106", "t119") for lv in (47, 95)},
-    # Released-dinosaur (Eulerian) counterpart to ma-t106-l47, for the
-    # dycore comparison. Run WITHOUT the dinosaur-sl worktree on
-    # --pythonpath so the packaged release is what gets imported; the
-    # semi-Lagrangian core needs dinosaur PR #135, and the documented
-    # fallback for a release without it is Eulerian advection plus tracer
-    # positivity (spectral advection of near-zero tracer fields otherwise
-    # leaves negatives that the JAM optics cannot take).
-    "ma-t106-l47-eulerian": [
-        "physics=echam-jam",
-        "grid=echam_t106_l47_hybrid",
-        "init=jw", "init.rh=0.0",
-        "terrain=from_file", f"terrain.file={_TERRAIN['t106']}",
-        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-        f"forcing.ozone_file={_BC}/t106_ozone_l47.nc",
-        "run=longrun", "run.time_step=12",
-        "diffusion.tracer_positivity=true",
-    ],
-    # T63L47 Eulerian pair. Eulerian at T106L47 OOMs (>80 GiB, against
-    # 34 GiB for the same config under semi-Lagrangian), so the
-    # advection-scheme comparison is done at T63L47 where both fit —
-    # SL needs 17.9 GiB there.
-    **{f"ma-t63-l47-{tag}eulerian": [
-        "physics=echam-jam",
-        "grid=echam_t63_l47_hybrid",
-        "init=jw", "init.rh=0.0",
-        "terrain=from_file", f"terrain.file={_TERRAIN['t63']}",
-        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-        "run=longrun", "run.time_step=12",
-        "diffusion.tracer_positivity=true",
-    ] for tag in ("", "sltree-")},
-    # Disambiguator: the SL dinosaur TREE but Eulerian advection. Run with
-    # dinosaur-sl on --pythonpath, so the only difference from
-    # ma-t106-l47 is the advection scheme. Pairs with
-    # ma-t106-l47-eulerian (released tree + Eulerian) to separate "the
-    # scheme is unstable" from "the released version is missing a fix".
-    "ma-t106-l47-sltree-eulerian": [
-        "physics=echam-jam",
-        "grid=echam_t106_l47_hybrid",
-        "init=jw", "init.rh=0.0",
-        "terrain=from_file", f"terrain.file={_TERRAIN['t106']}",
-        "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-        f"forcing.ozone_file={_BC}/t106_ozone_l47.nc",
-        "run=longrun", "run.time_step=12",
-        "diffusion.tracer_positivity=true",
-    ],
     # pySES CAM-SE ne30, same physics, for the dycore comparison.
     **{f"ma-ne30-l{lv}": _pyses_preset(lv) for lv in (47, 95)},
 }

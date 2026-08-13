@@ -82,6 +82,14 @@ def semi_lagrangian_available() -> bool:
     return all(hasattr(primitive_equations, name) for name in _SL_CLASSES)
 
 
+#: Default off-centering for the semi-Lagrangian Crank–Nicolson step. A
+#: centred step (0.0) is neutrally damped and goes unstable over real
+#: orography in long runs; 0.2 is the production-validated value (see
+#: docs/source/design/dinosaur_sl_jam_configuration.md). Single source of
+#: truth for both direct construction and the Hydra runner.
+DEFAULT_OFF_CENTERING = 0.2
+
+
 def _require_semi_lagrangian() -> None:
     """Fail with an actionable message when the SL core is missing.
 
@@ -160,8 +168,8 @@ class DinosaurDycore(DynamicalCore):
 
         ``sl_options`` forwards extras: ``interpolation_order``
         ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
-        (1), ``off_centering`` (0.0), ``vertical_interpolation_order``
-        ('linear').
+        (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
+        ``vertical_interpolation_order`` ('linear').
         """
         _require_semi_lagrangian()
         self._sl_options = dict(sl_options or {})
@@ -183,7 +191,7 @@ class DinosaurDycore(DynamicalCore):
             sigma_b = jnp.asarray(self.coords.vertical.boundaries)
             self._a_half = jnp.zeros_like(sigma_b)
             self._b_half = sigma_b
-        self.tracer_specs = dict(tracer_specs) if tracer_specs else {}
+        self._tracer_specs = dict(tracer_specs) if tracer_specs else {}
         # Opt-in per-step frontogenesis diagnostic for the spectral frontal
         # GW source (CAM computes the analogous field inside its SE dycore).
         # Off by default: it costs horizontal finite differences of
@@ -217,6 +225,7 @@ class DinosaurDycore(DynamicalCore):
             p0=self.constants.p0 * units.pascal,
             p1=0.01 * self.constants.p0 * units.pascal,
         )
+        self._reference_temperature = aux_features[dinosaur.xarray_utils.REF_TEMP_KEY]
 
         # Orography is truncated against the spectral basis here — the SE
         # backend (pyses) will project against its own basis instead.
@@ -224,10 +233,20 @@ class DinosaurDycore(DynamicalCore):
             self.terrain.orog, self.coords, wavenumbers_to_clip=2,
         )
 
+        self._build_transport()
+
+    def _build_transport(self) -> None:
+        """(Re)build the tracer-dependent transport machinery.
+
+        The SL primitive registers every extra tracer as NODAL at
+        construction, and the modal filters wrap around that registration,
+        so the primitive, filters and step function must all be rebuilt
+        whenever the tracer *set* changes — see the ``tracer_specs``
+        setter, which :class:`jcm.model.Model` drives after construction.
+        """
         # Every jcm extra tracer rides nodally under semi-Lagrangian
-        # transport (see the constructor docstring); the Eulerian core has
-        # no nodal tracers.
-        self._nodal_tracers = tuple(self.tracer_specs)
+        # transport (see the constructor docstring).
+        self._nodal_tracers = tuple(self._tracer_specs)
 
         # Dispatch on the vertical-coordinate family. Hybrid coords carry
         # ``a_boundaries`` in Pa; tell the dycore to interpret
@@ -243,7 +262,7 @@ class DinosaurDycore(DynamicalCore):
         )
         if isinstance(self.coords.vertical, HybridCoordinates):
             self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
-                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
@@ -253,7 +272,7 @@ class DinosaurDycore(DynamicalCore):
             )
         else:
             self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
-                reference_temperature=aux_features[dinosaur.xarray_utils.REF_TEMP_KEY],
+                reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
                 physics_specs=self._physics_specs,
@@ -292,6 +311,36 @@ class DinosaurDycore(DynamicalCore):
     def dt_si(self):
         """Dimensional timestep as a pint quantity (seconds)."""
         return self._dt_si
+
+    @property
+    def off_centering(self) -> float:
+        """Off-centering of the SL step (``sl_options`` override or the default)."""
+        return float(self._sl_options.get("off_centering", DEFAULT_OFF_CENTERING))
+
+    @property
+    def tracer_specs(self) -> dict:
+        """Mapping ``name -> TracerSpec`` for every tracer the physics declares.
+
+        Assignable: :class:`jcm.model.Model` writes it after construction to
+        synchronise the dycore with the attached physics. The SL primitive,
+        the filters and the step function all bake in the NODAL registration
+        of these tracers, so a write that changes the tracer *set* rebuilds
+        them — otherwise tracers registered late would silently fall back to
+        modal (spectral) transport, reintroducing the ringing the SL core
+        exists to remove.
+        """
+        return self._tracer_specs
+
+    @tracer_specs.setter
+    def tracer_specs(self, specs) -> None:
+        specs = dict(specs) if specs else {}
+        # Spec *values* (initial_value, nondimensionalize) are read live from
+        # self._tracer_specs by initial_state/state-bridge calls; only the
+        # name set is baked into the transport, so only that forces a rebuild.
+        rebuild = tuple(specs) != self._nodal_tracers
+        self._tracer_specs = specs
+        if rebuild:
+            self._build_transport()
 
     # ------------------------------------------------------------------
     # Filter construction (lifted from Model._make_diffusion_fn)
@@ -402,7 +451,7 @@ class DinosaurDycore(DynamicalCore):
         """
         return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
             self._primitive, self._dt,
-            off_centering=self._sl_options.get("off_centering", 0.0),
+            off_centering=self.off_centering,
         )
 
     # ------------------------------------------------------------------
