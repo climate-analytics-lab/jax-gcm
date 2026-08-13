@@ -86,5 +86,21 @@ off=$(stat -c%s "$L")
 printf 'Saved predictions to run_day365.nc\n' >> "$L"
 check "recovered-from NaN in earlier attempt" 0 "$(run_gate "$off")"
 
+# 8. The Hydra config echo must not read as a health failure. Every run
+#    prints `bail_on_unhealthy: true` at INFO, and a bare "unhealthy" pattern
+#    matched it — so a run with 3 of 3 days complete and 0 NaN was marked
+#    Failed. Regression for that false positive.
+printf 'run:\n  bail_on_unhealthy: true\nSaved predictions to run_day365.nc\n' > "$L"
+check "config echo of bail_on_unhealthy is not a failure" 0 "$(run_gate 0)"
+
+# 9. ...nor is the non-bailing continuation message, which names the flag
+#    but reports that the run carried on.
+printf 'Saved predictions to run_day365.nc\nContinuing (bail_on_unhealthy=False).\n' > "$L"
+check "bail_on_unhealthy=False notice is not a failure" 0 "$(run_gate 0)"
+
+# 10. The other real emission: a chunk whose checkpoint was withheld.
+printf 'Saved predictions to run_day365.nc\n  Checkpoint NOT updated (unhealthy chunk) - restart from\n' > "$L"
+check "unhealthy chunk is still caught" 1 "$(run_gate 0)"
+
 if [ "$fails" -eq 0 ]; then echo "all gate tests passed"; else
   echo "$fails gate test(s) failed"; exit 1; fi

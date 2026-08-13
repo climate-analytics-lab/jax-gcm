@@ -175,9 +175,16 @@ tail -c +$((ATTEMPT_START + 1)) "{rundir}/run.log" > /tmp/attempt.log
 # at the first bad chunk. Without this check Kubernetes marks a 365-day Job
 # Complete after 30 days of output — the worst kind of failure, because it
 # looks like success. Verify the health verdict and the day count.
-if grep -qiE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log; then
+#
+# Match the messages runners.py actually EMITS on a bad chunk ("atmosphere
+# unhealthy at ...", "(unhealthy chunk)"), not a bare "unhealthy". The bare
+# pattern also matched the Hydra config echo `bail_on_unhealthy: true`, which
+# every run prints at INFO, so a perfectly healthy run failed its own gate —
+# observed on the first nudged run, where 3 of 3 days completed with 0 NaN
+# and the Job was still marked Failed.
+if grep -qiE "atmosphere unhealthy|unhealthy chunk|NaN vars: *[1-9]" /tmp/attempt.log; then
   echo "FATAL: health gate tripped — run stopped early, not complete"
-  grep -iE "unhealthy|NaN vars: *[1-9]" /tmp/attempt.log | tail -3
+  grep -iE "atmosphere unhealthy|unhealthy chunk|NaN vars: *[1-9]" /tmp/attempt.log | tail -3
   exit 1
 fi
 # `|| true` is load-bearing under `set -euo pipefail`: "no output this
@@ -234,6 +241,15 @@ exit $RC
                             {"name": "NODE_NAME", "valueFrom": {"fieldRef": {
                                 "fieldPath": "spec.nodeName"}}},
                             {"name": "JAX_PLATFORMS", "value": "cuda,cpu"},
+                            # ERA5 nudging targets are pulled from GCS and
+                            # regridded to the model grid at startup — GBs of
+                            # download and minutes of work for a multi-month
+                            # window. Cache on the runs PVC, not the pod's
+                            # ephemeral disk, so an eviction retry and a
+                            # sibling run in the same sweep reuse it instead
+                            # of repeating the fetch on every attempt.
+                            {"name": "JCM_ERA5_CACHE",
+                             "value": "/runs/_era5-cache"},
                         ],
                         "resources": {
                             "limits": {S["gpu_resource"]: a.gpus,
