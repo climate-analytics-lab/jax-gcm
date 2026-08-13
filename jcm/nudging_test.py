@@ -208,7 +208,8 @@ class TestNudgingColumnVectorized(unittest.TestCase):
         cfg = self._config()
 
         t3d = nudging_tendency(state3d, target, cfg)
-        tcol = nudging_tendency(state_col, target, cfg)
+        tcol = nudging_tendency(state_col, target, cfg,
+                                nodal_shape=(self.NLON, self.NLAT))
 
         for name in ("u_wind", "v_wind", "temperature"):
             with self.subTest(field=name):
@@ -217,6 +218,30 @@ class TestNudgingColumnVectorized(unittest.TestCase):
                 b = np.asarray(getattr(tcol, name))
                 self.assertEqual(b.shape, (self.NLEV, self.NLON * self.NLAT))
                 np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-12)
+
+    def test_transposed_grid_is_rejected_not_silently_reshaped(self):
+        """Equal element count is NOT sufficient grounds to reshape.
+
+        A target stored (nlev, nlat, nlon) has the same size as the state's
+        (nlev, nlon, nlat) but needs a transpose. Reshaping it row-major
+        would nudge every column toward the wrong reference values and
+        corrupt the experiment silently, which is worse than crashing.
+        """
+        from jcm.nudging import nudging_tendency
+
+        _, _, state_col = self._target_and_states()
+        cfg = self._config()
+        rng = np.random.default_rng(1)
+        # (nlev, nlat, nlon) — axes swapped, same number of elements.
+        swapped = lambda: jnp.asarray(  # noqa: E731
+            rng.normal(size=(self.NLEV, self.NLAT, self.NLON)))
+        target = NudgingTarget(
+            u_wind=swapped(), v_wind=swapped(), temperature=swapped())
+        # Same size as the column state, so the old size-only check accepted it.
+        self.assertEqual(target.u_wind.size, state_col.u_wind.size)
+        with self.assertRaisesRegex(ValueError, "looks TRANSPOSED"):
+            nudging_tendency(state_col, target, cfg,
+                             nodal_shape=(self.NLON, self.NLAT))
 
     def test_genuinely_mismatched_grid_is_rejected(self):
         target, _, state_col = self._target_and_states()
@@ -227,4 +252,5 @@ class TestNudgingColumnVectorized(unittest.TestCase):
             temperature=target.temperature[:, :, :-1],
         )
         with self.assertRaisesRegex(ValueError, "incompatible with the state"):
-            nudging_tendency(state_col, wrong, cfg)
+            nudging_tendency(state_col, wrong, cfg,
+                             nodal_shape=(self.NLON, self.NLAT))
