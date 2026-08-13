@@ -39,19 +39,20 @@ Physics first, with a thin structural pre-pass. Rationale:
 |---|---|---|---|
 | 1 | `claude/pr1-dead-code-cleanup` | structural, zero behavior change | **merged** (landed via #569, `chore/dead-code`) |
 | 2 | `claude/pr2-thermodynamics` | structural+physics | **merged** (branch fully contained in `dev`) |
-| 3 | `claude/pr3-radiation-quick-wins` | physics | **implemented, in review** (insolation µ0², surface BC, halo, gas-optics water, Twomey) |
-| 4 | convection ledger | physics | not started |
-| 5 | 1M/2M microphysics ledgers | physics | not started |
-| 6 | MACv2-SP fidelity + 2M param threading | physics+structural | not started |
-| 7 | module splits, vmap hoisting, smoothing (Part B) | structural | not started |
+| 3 | `claude/pr3-radiation-quick-wins` | physics | **merged** (#548, landed as `1e8808f`: insolation µ0², surface BC, halo, gas-optics water, Twomey) |
+| 4 | convection ledger | physics | not started as a unit — but later merges already fixed parts of its scope; **re-scope against current `dev` first** |
+| 5 | 1M/2M microphysics ledgers | physics | not started; re-scope first (#558 NaN hardening overlaps) |
+| 6 | MACv2-SP fidelity + 2M param threading | physics+structural | not started; re-scope against post-JAM `macv2_sp.py` (Twomey dNovrN already landed with PR 3) |
+| 7 | module splits, vmap hoisting, smoothing (Part B) | structural | partially landed via #556 (differentiable smoothing, term ordering, structural splits); re-scope the remainder |
 
-Related but outside this sequence: `claude/echam-surface-faithful-wiring`
-(surface wiring + T21L16 reference-snapshot regeneration via CI) is in
-flight and touches the same ECHAM test references — coordinate merges.
-The JAM/AIDE convergence programme (issue #609,
-`docs/aide_jcm_convergence_roadmap.md`) runs alongside; PR 6's MACv2-SP
-work should be re-scoped against post-JAM `macv2_sp.py` before starting,
-as parts of the review may already be addressed.
+Housekeeping: the `claude/pr3-radiation-quick-wins` and
+`claude/echam-surface-faithful-wiring` branches were merged via rebase
+(#548 → `1e8808f`, #532 → `748413a`) but each still carries a small
+unmerged residual diff vs `dev` (pr3: ~+308 lines incl. rrtmgp/macv2
+tests; surface: ~+369/−298 in tte_tke + reference regeneration) — triage
+those diffs for leftover value before deleting the branches. The JAM/AIDE
+convergence programme (issue #609, `docs/aide_jcm_convergence_roadmap.md`)
+runs alongside this campaign.
 
 All branches base on `dev`. Working conventions: `ruff check .`;
 `JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" -q` must be green; **test-pin
@@ -230,13 +231,14 @@ cptop 100→10 hPa, ice-presence-conditional saturation switch.
 
 ## How to resume
 
-PRs 1–2 are merged; the working branch for the campaign is now
-`claude/pr3-radiation-quick-wins` (open a PR against `dev` if one is not
-already up), then PRs 4–7 in sequence, each freshly branched from `dev`.
-Standard gates throughout: `ruff check .` and
+PRs 1–3 are merged. Before picking up any of PRs 4–7: **re-audit that PR's
+finding list against current `dev`** — substantial overlapping work has
+merged since the review (e.g. #548 radiation, #556 smoothing/splits, #558
+NaN hardening, the coupled surface-flux solve, JAM) — and convert the
+findings that are still open into GitHub issues so tracking survives the
+review branch's retirement. Each PR branches fresh from `dev`. Standard
+gates throughout: `ruff check .` and
 `JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" -q` green; test-pin
 discipline (changed pins justified old→new against the corrected physics);
 per-scheme conservation + parameter-gradient tests added as each scheme is
-touched (see "Working conventions" above). Before starting PR 4+, convert
-that PR's still-open review findings into GitHub issues so tracking
-survives the review branch's retirement.
+touched (see "Working conventions" above).
