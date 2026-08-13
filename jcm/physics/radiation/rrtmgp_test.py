@@ -936,3 +936,85 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
         assert not np.allclose(
             np.asarray(t0.temperature), np.asarray(t2.temperature),
         ), "heating identical on/off — the alternation is not reaching the model"
+
+
+class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
+    """Paired aerosol-free companion every Nth radiation step (jax-gcm#583).
+
+    The point of this mode versus ``aerosol_free_alternate`` is that the
+    all-sky and aerosol-free fluxes always come from the SAME solve step, so
+    ERFari is unbiased by construction; only its refresh rate drops.
+    """
+
+    def _term(self, **kw):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        base, state, diagnostics, forcing = self._term_and_inputs()
+        t = RRTMGPRadiation(params=base.params.get_value(), compute_cre=False,
+                            aerosol_free_diagnostics=True, **kw)
+        t._lats, t._lons = base._lats, base._lons
+        aer = diagnostics["aerosol"]
+        nlev, ncols = self.NLEV, self.NCOLS
+        diagnostics = {**diagnostics, "aerosol": aer.copy(
+            aod_profile=jnp.full((nlev, ncols), 0.05),
+            ssa_profile=jnp.full((nlev, ncols), 0.9),
+            asy_profile=jnp.full((nlev, ncols), 0.7),
+            aod_sw_per_band=jnp.full((14, nlev, ncols), 0.05),
+            ssa_sw_per_band=jnp.full((14, nlev, ncols), 0.9),
+            asy_sw_per_band=jnp.full((14, nlev, ncols), 0.7),
+            # LW optics too: both harness columns can be in darkness, so an
+            # SW-only aerosol gives a zero effect and the hold test below
+            # would pass vacuously. LW is sun-independent.
+            aod_lw_per_band=jnp.full((16, nlev, ncols), 0.04),
+            ssa_lw_per_band=jnp.full((16, nlev, ncols), 0.4),
+            asy_lw_per_band=jnp.full((16, nlev, ncols), 0.5),
+        )}
+        return t, state, diagnostics, forcing
+
+    def test_interval_one_matches_the_companion_every_step(self):
+        """N=1 must be the existing behaviour, exactly."""
+        t1, s, d, f = self._term(aerosol_free_interval=1)
+        t0, _, _, _ = self._term()
+        _, d1 = t1(s, d, f, None)
+        _, d0 = t0(s, d, f, None)
+        for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(d1["radiation"], name)),
+                np.asarray(getattr(d0["radiation"], name)),
+                err_msg=f"interval=1 changed {name}",
+            )
+
+    def test_skipped_steps_hold_the_effect_not_the_raw_flux(self):
+        """Between companions, rsutnoa must track the FRESH all-sky flux.
+
+        Holding the raw aerosol-free flux instead would leave rsut and
+        rsutnoa averaging over different step sets — the sampling mismatch
+        this mode exists to avoid. So on a skipped step the aerosol EFFECT
+        (all-sky minus aerosol-free) must be preserved from the last
+        companion, even though the all-sky flux itself has moved.
+        """
+        term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
+        # radiation_interval is 2*dt in this harness, so every call to the
+        # term with an even step counter is a radiation step.
+        _, d0 = term(state, diagnostics, forcing, None)        # companion runs
+        r0 = d0["radiation"]
+        effect0 = np.asarray(r0.toa_lw_up) - np.asarray(r0.toa_lw_up_noa)
+        assert np.any(effect0 != 0), "aerosol had no LW effect to hold"
+
+        _, d1 = term(state, d0, forcing, None)                 # cached substep
+        # Perturb so the fresh all-sky flux genuinely moves on the next
+        # radiation step, which is a SKIP step for the companion.
+        warmer = state.copy(temperature=state.temperature + 4.0)
+        _, d2 = term(warmer, d1, forcing, None)
+        r2 = d2["radiation"]
+        effect2 = np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)
+        np.testing.assert_allclose(
+            effect2, effect0, rtol=1e-5, atol=1e-6,
+            err_msg="the held aerosol effect changed on a skipped step",
+        )
+
+    def test_interval_and_alternate_are_mutually_exclusive(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        with pytest.raises(ValueError, match="pick one"):
+            RRTMGPRadiation(aerosol_free_diagnostics=True,
+                            aerosol_free_alternate=True,
+                            aerosol_free_interval=4)
