@@ -65,3 +65,8 @@ aerosol_free_radiation: true
 # interval apart rather than simultaneously. Off until the 1-year nudged
 # comparison quantifies both errors (#583).
 aerosol_free_alternate: false
+# Middle ground: keep the two solves PAIRED (same state, so ERFari is
+# unbiased by construction) but only do them every Nth radiation step,
+# holding the aerosol effect in between. Cost (1 + 1/N) solves — ~+14% at
+# N=4 against +55% for a companion every step. 1 = companion every step.
+aerosol_free_interval: 1
