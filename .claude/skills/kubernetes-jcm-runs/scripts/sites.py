@@ -53,7 +53,13 @@ NAUTILUS = {
     # a jcm requirement with the data mirror (#590), which is NEWER than the
     # release baked into the image, so the image does not carry it and every
     # non-packaged grid would fail at the first fetch without it.
-    "extra_pip": ["diffrax>=0.7", "matplotlib", "huggingface_hub"],
+    # gcsfs+zarr are the ``jcm[era5]`` extra, which ``nudging=era5`` needs to
+    # read the WeatherBench2 ERA5 store off GCS. Deliberately installed in
+    # the pod rather than on a workstation: gcsfs pulls a newer fsspec, and
+    # upgrading fsspec in a shared conda env risks the ``hf://`` mirror path
+    # huggingface_hub resolves. A pod env is disposable; a shared one is not.
+    "extra_pip": ["diffrax>=0.7", "matplotlib", "huggingface_hub",
+                  "gcsfs", "zarr"],
 }
 
 # A new site must supply every key above. The ones most likely to differ:
