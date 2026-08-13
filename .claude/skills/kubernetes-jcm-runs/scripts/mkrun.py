@@ -234,6 +234,15 @@ exit $RC
                             {"name": "NODE_NAME", "valueFrom": {"fieldRef": {
                                 "fieldPath": "spec.nodeName"}}},
                             {"name": "JAX_PLATFORMS", "value": "cuda,cpu"},
+                            # ERA5 nudging targets are pulled from GCS and
+                            # regridded to the model grid at startup — GBs of
+                            # download and minutes of work for a multi-month
+                            # window. Cache on the runs PVC, not the pod's
+                            # ephemeral disk, so an eviction retry and a
+                            # sibling run in the same sweep reuse it instead
+                            # of repeating the fetch on every attempt.
+                            {"name": "JCM_ERA5_CACHE",
+                             "value": "/runs/_era5-cache"},
                         ],
                         "resources": {
                             "limits": {S["gpu_resource"]: a.gpus,
