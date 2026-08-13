@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import jcm.constants as c
-import jcm.physics as _physics_pkg
+import jcm as _jcm_pkg
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -40,16 +40,21 @@ from jcm.terrain import TerrainData
 
 
 def _import_all_physics():
-    """Import every physics module so ``__subclasses__`` is complete."""
-    for mod in pkgutil.walk_packages(
-            _physics_pkg.__path__, _physics_pkg.__name__ + "."):
-        if mod.name.endswith("_test"):
+    """Import every shipped ``jcm`` module so ``__subclasses__`` is complete.
+
+    Walks the whole package, not just ``jcm.physics``: terms live outside it
+    too (``jcm.nudging.NudgingTerm``, ``jcm.rce._ClearSky``). Walking only
+    the physics subtree made the roster depend on what the rest of the test
+    session happened to import — the audit passed alone and failed in the
+    full run, which is precisely the order-dependence it exists to remove.
+    """
+    for mod in pkgutil.walk_packages(_jcm_pkg.__path__, _jcm_pkg.__name__ + "."):
+        if mod.name.split(".")[-1].endswith("_test"):
             continue
         try:
             importlib.import_module(mod.name)
-        except Exception:  # optional extras (mam4, cosp) may be absent
+        except Exception:  # optional extras (mam4, cosp, pyses) may be absent
             pass
-    importlib.import_module("jcm.nudging")
 
 
 def _all_terms():
@@ -121,6 +126,7 @@ NOT_AUDITED = frozenset({
     "SpeedyLargeScaleCondensation", "SpeedyShortwaveRadiation",
     "SpeedySurfaceFlux", "SpeedyTermBase", "SpeedyUpwardLongwaveRadiation",
     "SpeedyVerticalDiffusion", "StokesSedimentation", "SulfurGasChemistry",
+    "_ClearSky",
     "SundqvistCloudFraction", "TiedtkeConvection", "TracerVerticalDiffusion",
     "TteTkeVerticalDiffusion", "UpperTemperatureRelaxation", "WetScavenging",
 })
