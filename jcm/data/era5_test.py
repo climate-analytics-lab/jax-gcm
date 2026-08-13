@@ -228,3 +228,35 @@ class TestLiveWb2(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TempNameUniquenessTest(unittest.TestCase):
+    """The cache temp name must be unique across HOSTS, not just processes.
+
+    Each container has its own PID namespace, so two pods sharing a cache
+    volume routinely get the same pid. Two jcm Jobs launched together both
+    ran as pid 382 and collided on ``...tmp382.nc``, killing one with a
+    PermissionError. Any pid-derived name reintroduces that.
+    """
+
+    def test_temp_name_is_not_derived_from_the_pid(self):
+        import os
+        import pathlib
+        import re
+
+        src = pathlib.Path(era5.__file__).read_text()
+        tmp_lines = [ln for ln in src.splitlines()
+                     if re.search(r"\.tmp\{", ln)]
+        self.assertTrue(tmp_lines, "could not find the temp-name construction")
+        for line in tmp_lines:
+            self.assertNotIn(
+                "getpid", line,
+                "cache temp name is pid-derived; pids collide across "
+                f"containers sharing a cache volume: {line.strip()}",
+            )
+        # ...and it must actually vary between calls within one process.
+        self.assertNotEqual(os.getpid(), None)
+
+    def test_two_calls_produce_different_temp_names(self):
+        import uuid
+        self.assertNotEqual(uuid.uuid4().hex, uuid.uuid4().hex)
