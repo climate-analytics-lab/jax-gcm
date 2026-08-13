@@ -157,7 +157,12 @@ class StokesSedimentation(PhysicsTerm):
                 mass_name(sp, mode.short) for sp in mode.species
             ]:
                 names.append(nm)
-                q_list.append(state.tracers.get(nm, zeros))
+                # Floored at 0: donor-cell settling of a negative
+                # (ringing) value transports negative mass downward and
+                # deposits it (see the wetdep note).
+                q_list.append(
+                    jnp.maximum(state.tracers.get(nm, zeros), 0.0)
+                )
                 v_list.append(v)
 
         q_stack = jnp.stack(q_list)            # (K, nlev, ncols)

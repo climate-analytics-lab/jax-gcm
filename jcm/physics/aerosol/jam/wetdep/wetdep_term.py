@@ -58,6 +58,13 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CARRY_KEY,
+    apply_updates,
+    carry_mode,
+    mirror_names,
+    tracer_view,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
@@ -220,6 +227,12 @@ class WetScavenging(PhysicsTerm):
         """Hold params and the population."""
         self.params = nnx.Param(params or WetDepParameters.default())
         self._spec = spec or MAM4_SPEC
+        if carry_mode(self._spec):
+            # In carry mode the store term must run upstream each step
+            # (name-set fixing + vertical mixing); requiring its key makes
+            # _validate_ordering enforce that, instead of apply_updates
+            # silently seeding an unmixed, unmanaged dict.
+            self.requires = (*type(self).requires, CARRY_KEY)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -324,6 +337,12 @@ class WetScavenging(PhysicsTerm):
         # ``Model.get_empty_data``'s structural probe, so fall back to zeros
         # there (real runs have every declared tracer seeded).
         zeros = jnp.zeros_like(state.temperature)
+        view = tracer_view(self._spec, state, diagnostics)
+        # Removal reads are floored at 0: spectral ringing leaves negative
+        # lobes on near-zero tracers, and a removal rate applied to a
+        # negative value INJECTS mass — the 30-day storage A/B measured
+        # the advected cloud-borne fields being pumped net-negative by
+        # exactly this interaction.
         names: list[str] = []
         # Interstitial destination for each stacked tracer's re-injected
         # aerosol: itself for interstitial tracers; the interstitial partner
@@ -379,7 +398,7 @@ class WetScavenging(PhysicsTerm):
             n_nm = number_name(mode.short)
             names.append(n_nm)
             reinject_to.append(n_nm)
-            q_list.append(state.tracers.get(n_nm, zeros))
+            q_list.append(jnp.maximum(view.get(n_nm, zeros), 0.0))
             rate_below_strat.append(below_strat)
             rate_form_strat.append(form_num)
             rate_conv.append(conv_rate)
@@ -387,7 +406,7 @@ class WetScavenging(PhysicsTerm):
                 nm = mass_name(sp, mode.short)
                 names.append(nm)
                 reinject_to.append(nm)
-                q_list.append(state.tracers.get(nm, zeros))
+                q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
                 rate_below_strat.append(below_strat)
                 rate_form_strat.append(form_mass)
                 rate_conv.append(conv_rate)
@@ -404,7 +423,7 @@ class WetScavenging(PhysicsTerm):
                 for nm, partner in pairs:
                     names.append(nm)
                     reinject_to.append(partner)
-                    q_list.append(state.tracers.get(nm, zeros))
+                    q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
                     rate_below_strat.append(zeros)
                     rate_form_strat.append(rate_cb)
                     rate_conv.append(zeros)
@@ -448,9 +467,28 @@ class WetScavenging(PhysicsTerm):
         )
         reinject_tend = reinjected / dm[jnp.newaxis]
 
-        tracer_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
+        all_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
         for k, target in enumerate(reinject_to):
-            tracer_tends[target] = tracer_tends[target] + reinject_tend[k]
+            # Targets are always interstitial (cloud-borne re-injects to
+            # its partner), so this never touches a cloud-borne entry.
+            all_tends[target] = all_tends[target] + reinject_tend[k]
+
+        # Cloud-borne removals go to the active store; in carry mode they
+        # integrate sequentially, in tracers mode they rejoin the tendency
+        # dict unchanged.
+        if carry_mode(self._spec):
+            cb_updates = {
+                nm: all_tends.pop(nm)
+                for nm in mirror_names(self._spec) if nm in all_tends
+            }
+            diagnostics, passthrough = apply_updates(
+                self._spec, diagnostics, cb_updates, dt,
+            )
+            tracer_tends = {**all_tends, **passthrough}
+            flux_tends = {**tracer_tends, **cb_updates}
+        else:
+            tracer_tends = all_tends
+            flux_tends = all_tends
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
@@ -465,7 +503,7 @@ class WetScavenging(PhysicsTerm):
         from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
             accumulate_deposition_fluxes)
         diagnostics = accumulate_deposition_fluxes(
-            diagnostics, tracer_tends,
+            diagnostics, flux_tends,
             diagnostics["air_density"], diagnostics["layer_thickness"],
             kind="wet")
         return tendency, diagnostics

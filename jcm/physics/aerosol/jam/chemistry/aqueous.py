@@ -47,6 +47,13 @@ import tree_math
 from flax import nnx
 
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CARRY_KEY,
+    apply_updates,
+    carry_mode,
+    mirror_names,
+    tracer_view,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.species import SPECIES
@@ -239,6 +246,12 @@ class AqueousSulfur(PhysicsTerm):
         self._fallback_interstitial = (
             "acc" if "acc" in self._so4_modes else self._so4_modes[0]
         )
+        if carry_mode(self._spec):
+            # In carry mode the store term must run upstream each step
+            # (name-set fixing + vertical mixing); requiring its key makes
+            # _validate_ordering enforce that, instead of apply_updates
+            # silently seeding an unmixed, unmanaged dict.
+            self.requires = (*type(self).requires, CARRY_KEY)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -254,9 +267,10 @@ class AqueousSulfur(PhysicsTerm):
         lwc_incloud = jnp.maximum(clouds.qc, 0.0) / cf_safe
         active = (cloud_fraction > 0.0) & (lwc_incloud > _ZLWCMIN)
 
-        so2 = state.tracers.get("g_so2", zeros)
+        view = tracer_view(self._spec, state, diagnostics)
+        so2 = view.get("g_so2", zeros)
         so4_total = sum(
-            state.tracers.get(mass_name("so4", m), zeros)
+            view.get(mass_name("so4", m), zeros)
             for m in self._so4_modes
         )
 
@@ -297,9 +311,7 @@ class AqueousSulfur(PhysicsTerm):
         if self._spec.cloud_borne:
             nc = {
                 m: jnp.maximum(
-                    state.tracers.get(
-                        number_name(m, cloud_borne=True), zeros
-                    ), 0.0,
+                    view.get(number_name(m, cloud_borne=True), zeros), 0.0,
                 )
                 for m in self._so4_modes
             }
@@ -326,6 +338,16 @@ class AqueousSulfur(PhysicsTerm):
             tracer_tends[mass_name("so4", self._fallback_interstitial)] = (
                 so4_rate
             )
+
+        if carry_mode(self._spec):
+            cb_updates = {
+                nm: tracer_tends.pop(nm)
+                for nm in mirror_names(self._spec) if nm in tracer_tends
+            }
+            diagnostics, passthrough = apply_updates(
+                self._spec, diagnostics, cb_updates, dt,
+            )
+            tracer_tends.update(passthrough)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

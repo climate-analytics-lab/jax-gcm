@@ -10,13 +10,15 @@ class JamFactoryTest(unittest.TestCase):
         terms = jam_aerosol_physics()
         cats = [t.category for t in terms]
         names = [t.name for t in terms]
-        # The emi_* accumulator reset MUST precede every emitter (the
-        # diagnostics dict is threaded back from the previous step, so
-        # without it emission fluxes accumulate across the whole run), then
-        # the natural-emission schemes, then the core + processes.
-        self.assertEqual(names[0], "reset_emission_fluxes")
+        # Default storage is CARRY (#602 item 3 A/B): the store term owns
+        # the carry slot and runs first. Then the emi_* accumulator reset
+        # (which must precede every emitter — the diagnostics dict is
+        # threaded back from the previous step), the natural-emission
+        # schemes, then the core + processes.
+        self.assertEqual(names[0], "jam_cloud_borne_store")
+        self.assertEqual(names[1], "reset_emission_fluxes")
         self.assertEqual(
-            names[1:4],
+            names[2:5],
             [
                 "jam_seasalt_emissions",
                 "jam_dms_emissions",
@@ -24,7 +26,7 @@ class JamFactoryTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            cats[4:],
+            cats[5:],
             [
                 # Physics-side vertical transport (#602 item 2): turbulent
                 # mixing of every JAM tracer, then convective mass-flux
@@ -46,7 +48,7 @@ class JamFactoryTest(unittest.TestCase):
         )
         # The reset shares the emitters' category — it is part of that
         # block, not a separate stage.
-        self.assertTrue(all(c == "aerosol_emissions" for c in cats[:4]))
+        self.assertTrue(all(c == "aerosol_emissions" for c in cats[1:5]))
 
     def test_activation_precedes_deposition(self):
         # wetdep requires activated_fraction, so ARG must come first.
@@ -73,12 +75,18 @@ class JamFactoryTest(unittest.TestCase):
     def test_harness_declares_aerosol_tracers(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, tracer_specs
 
+        # Explicit tracers storage declares the full mirror set...
         names = set()
-        for t in jam_aerosol_physics():
+        for t in jam_aerosol_physics(cloud_borne_storage="tracers"):
             names |= {s.name for s in t.required_tracers()}
         self.assertTrue(
             {s.name for s in tracer_specs(MAM4_SPEC)}.issubset(names)
         )
+        # ...while the carry default declares interstitial only.
+        names = set()
+        for t in jam_aerosol_physics():
+            names |= {s.name for s in t.required_tracers()}
+        self.assertFalse(any(n.startswith(("mc_", "nc_")) for n in names))
 
 
 class EchamPhysicsWiringTest(unittest.TestCase):

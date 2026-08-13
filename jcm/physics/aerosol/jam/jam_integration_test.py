@@ -89,14 +89,14 @@ class JamIntegrationTest(unittest.TestCase):
         )
 
     def test_cloud_borne_mirrors_carried_finite(self):
-        # Default configuration prognoses the cloud-borne mirrors (#602):
+        # Explicit TRACERS storage prognoses the advected mirrors (#602):
         # they must be seeded, transported and stay finite end-to-end. (A
         # 3-step cold start carries near-zero aerosol, so this asserts the
         # plumbing, not a nonzero reservoir; the transfer/resuspension
         # mechanics are pinned in cloud_borne_test.)
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
 
-        _, predictions = self._run()
+        _, predictions = self._run(jam_cloud_borne_storage="tracers")
         tracers = predictions.dynamics.tracers
         for key in (
             number_name(MAM4_SPEC.modes[0].short, cloud_borne=True),
@@ -105,6 +105,26 @@ class JamIntegrationTest(unittest.TestCase):
         ):
             self.assertIn(key, tracers)
             self.assertTrue(np.all(np.isfinite(np.asarray(tracers[key]))))
+
+    def test_carry_stored_cloud_borne_runs_and_cycles(self):
+        # EXPERIMENTAL carry storage (#602 item 3): the mirrors leave the
+        # dycore tracer set entirely, live in the physics carry, and the
+        # model still runs finite with the carry fields reaching saved
+        # output through the dict flattener.
+        _, predictions = self._run(jam_cloud_borne_storage="carry")
+        tracers = predictions.dynamics.tracers
+        self.assertFalse(
+            any(k.startswith(("mc_", "nc_")) for k in tracers),
+            "carry mode must not declare mirror tracers",
+        )
+        self.assertFalse(
+            bool(jnp.any(jnp.isnan(predictions.dynamics.temperature)))
+        )
+        carry = predictions.physics.get("_jam_cloud_borne")
+        self.assertIsNotNone(carry, "carry store missing from diagnostics")
+        self.assertTrue(carry, "carry store empty")
+        for k, v in carry.items():
+            self.assertTrue(np.all(np.isfinite(np.asarray(v))), k)
 
     def test_cloud_borne_off_drops_mirrors_and_runs(self):
         # The A/B switch (#602): with jam_cloud_borne=False the mirror

@@ -74,6 +74,8 @@ def echam_physics(
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
+    jam_cloud_borne_storage: str | None = None,
+    jam_optics: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
@@ -152,6 +154,16 @@ def echam_physics(
             dycore tracer-transport bill — and scavenges interstitial
             aerosol by its activated fraction instead. The A/B
             cost/fidelity switch.
+        jam_cloud_borne_storage: EXPERIMENTAL (#602 item 3, not exposed in
+            any yaml preset): where the explicit cloud-borne phase lives —
+            ``None``/"tracers" (dycore-advected) or ``"carry"``
+            (physics-carry fields, no advection). Exists for the
+            tracers-vs-carry A/B; do not use in production configs.
+        jam_optics: include the online JAM aerosol direct-effect optics
+            (#495), which overwrite the MACv2-SP optics that radiation
+            reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
+            the JAM aerosol radiatively passive, which controlled A/B
+            experiments rely on).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
@@ -314,6 +326,8 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
+            cloud_borne_storage=jam_cloud_borne_storage,
+            optics=jam_optics,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,

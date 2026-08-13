@@ -22,6 +22,10 @@ from jcm.physics.aerosol.jam.cloud_borne import (
     CloudBorneExchange,
     CloudBorneExchangeParameters,
 )
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CloudBorneCarryStore,
+    carry_mode,
+)
 from jcm.physics.aerosol.jam.chemistry.aqueous import (
     AqueousSulfur,
     AqueousSulfurParameters,
@@ -97,18 +101,26 @@ _MICROPHYSICS = {
 def _resolve_microphysics(
     microphysics: ModalMicrophysicsTerm | str,
     cloud_borne: bool | None = None,
+    cloud_borne_storage: str | None = None,
 ) -> ModalMicrophysicsTerm:
     if isinstance(microphysics, ModalMicrophysicsTerm):
-        if (
-            cloud_borne is not None
-            and microphysics.spec.cloud_borne != cloud_borne
-        ):
+        spec = microphysics.spec
+        if cloud_borne is not None and spec.cloud_borne != cloud_borne:
             raise ValueError(
                 f"cloud_borne={cloud_borne} conflicts with the supplied "
                 "core's population "
-                f"(spec.cloud_borne={microphysics.spec.cloud_borne}); "
+                f"(spec.cloud_borne={spec.cloud_borne}); "
                 "construct the core with a spec carrying the intended flag "
                 "instead."
+            )
+        if (
+            cloud_borne_storage is not None
+            and spec.cloud_borne_storage != cloud_borne_storage
+        ):
+            raise ValueError(
+                f"cloud_borne_storage={cloud_borne_storage!r} conflicts "
+                "with the supplied core's population "
+                f"(spec.cloud_borne_storage={spec.cloud_borne_storage!r})."
             )
         return microphysics
     try:
@@ -120,12 +132,18 @@ def _resolve_microphysics(
             "ModalMicrophysicsTerm instance."
         ) from None
     core = factory(None)
+    overrides = {}
     if cloud_borne is not None and core.spec.cloud_borne != cloud_borne:
-        # Rebuild on the same population with the flag flipped; construction
+        overrides["cloud_borne"] = cloud_borne
+    if (
+        cloud_borne_storage is not None
+        and core.spec.cloud_borne_storage != cloud_borne_storage
+    ):
+        overrides["cloud_borne_storage"] = cloud_borne_storage
+    if overrides:
+        # Rebuild on the same population with the flags applied; construction
         # is compose-time only, so the double build costs nothing at run time.
-        core = factory(
-            dataclasses.replace(core.spec, cloud_borne=cloud_borne)
-        )
+        core = factory(dataclasses.replace(core.spec, **overrides))
     return core
 
 
@@ -133,6 +151,7 @@ def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
     cloud_borne: bool | None = None,
+    cloud_borne_storage: str | None = None,
     arg_variant: str = "arg2000",
     optics: bool = True,
     optics_diagnostics: bool = False,
@@ -176,6 +195,15 @@ def jam_aerosol_physics(
             fraction, the implicit M7/TOMAS-style treatment. Both settings
             are complete physics, so A/B cost/fidelity comparisons are one
             flag apart.
+        cloud_borne_storage: where the explicit phase lives (#602 item
+            3) — ``"carry"`` (physics-carry fields: no spectral
+            transforms or advection, mixed vertically by
+            ``CloudBorneCarryStore``; the measured default, see the
+            resolver comment) or ``"tracers"`` (dycore-advected
+            ``mc_*``/``nc_*`` mirrors; rings pathologically on spectral
+            grids, retained for FV-dycore re-evaluation). ``None`` =
+            ``"carry"`` for string-named cores, the spec's own setting
+            for instance cores.
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
@@ -217,7 +245,19 @@ def jam_aerosol_physics(
         aqueous sulfur chemistry, and wet deposition.
 
     """
-    core = _resolve_microphysics(microphysics, cloud_borne)
+    if isinstance(microphysics, str) and cloud_borne_storage is None:
+        # Measured default (#602 item 3 A/B, 2026-08-13): on the spectral
+        # grid the advected mirrors ring on the episodic cloud-borne
+        # fields until ~90% of cells are NEGATIVE at day 30 while costing
+        # 2.2x the carry run; carry storage is positive-definite, keeps
+        # the explicit cycle, and recovers ~85% of the implicit mode's
+        # saving. "tracers" remains reachable explicitly for FV-dycore
+        # re-evaluation (resolved advection of in-droplet aerosol is the
+        # one thing carry gives up).
+        cloud_borne_storage = "carry"
+    core = _resolve_microphysics(
+        microphysics, cloud_borne, cloud_borne_storage,
+    )
     spec = core.spec
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec),
@@ -275,7 +315,17 @@ def jam_aerosol_physics(
                 interstitial_names, params=conv_transport,
             )
         )
+    # Carry-stored cloud-borne phase (#602 item 3, EXPERIMENTAL — see
+    # cloud_borne_store): the store term runs first so every consumer this
+    # step sees a well-formed store, and applies the carry's turbulent
+    # vertical mixing (its mirrors are not in state.tracers, so
+    # TracerVerticalDiffusion above never sees them).
+    store_terms = (
+        [CloudBorneCarryStore(spec=spec, vertical_mixing=vertical_mixing)]
+        if carry_mode(spec) else []
+    )
     pre_core = [
+        *store_terms,
         *emissions,
         *transport_terms,
         *chemistry,

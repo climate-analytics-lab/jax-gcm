@@ -40,13 +40,15 @@ the (interstitial-only) aerosol optics, whereas the implicit treatment
 keeps it in ``m_*`` where the optics see it.
 
 Boundedness: each of this term's two directions is bounded by its donor
-phase in isolation, but jcm's parallel operator splitting sums this
-tendency with wet/dry deposition computed from the same start-of-step
-state, so a decaying, still-precipitating cloud can transiently overdraw
-``mc_*`` below zero. The excursion self-heals (both removal tendencies
-scale with the tracer and flip sign with it) and every consumer floors at
-0 on read; it is the same additivity every pair of bounded sinks in the
-chain already accepts.
+phase in isolation. In carry mode the updates are sequential, so the
+overdraw question does not arise. In tracers mode, parallel operator
+splitting sums this tendency with wet/dry deposition computed from the
+same start-of-step state, so a decaying, still-precipitating cloud can
+transiently overdraw ``mc_*`` below zero; every consumer floors at 0 on
+read (removal terms deliberately treat negative values as empty rather
+than pumping them — the storage A/B measured that pumping driving the
+advected mirrors net-negative), so a negative excursion is inert until
+transport or the next transfer refills the cell.
 """
 
 from __future__ import annotations
@@ -57,6 +59,12 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CARRY_KEY,
+    apply_updates,
+    carry_mode,
+    tracer_view,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
@@ -112,6 +120,12 @@ class CloudBorneExchange(PhysicsTerm):
                 "phase (use the implicit activated-fraction scavenging "
                 "instead)."
             )
+        if carry_mode(self._spec):
+            # In carry mode the store term must run upstream each step
+            # (name-set fixing + vertical mixing); requiring its key makes
+            # _validate_ordering enforce that, instead of apply_updates
+            # silently seeding an unmixed, unmanaged dict.
+            self.requires = (*type(self).requires, CARRY_KEY)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -128,6 +142,7 @@ class CloudBorneExchange(PhysicsTerm):
         # small negative mass/number on near-zero fields (Gibbs ringing),
         # and a negative donor would flip the transfer's sign.
         zeros = jnp.zeros_like(state.temperature)
+        view = tracer_view(self._spec, state, diagnostics)
         int_names: list[str] = []
         cb_names: list[str] = []
         q_int: list[jnp.ndarray] = []
@@ -146,10 +161,8 @@ class CloudBorneExchange(PhysicsTerm):
             for int_nm, cb_nm, frac in pairs:
                 int_names.append(int_nm)
                 cb_names.append(cb_nm)
-                q_int.append(
-                    jnp.maximum(state.tracers.get(int_nm, zeros), 0.0)
-                )
-                q_cb.append(jnp.maximum(state.tracers.get(cb_nm, zeros), 0.0))
+                q_int.append(jnp.maximum(view.get(int_nm, zeros), 0.0))
+                q_cb.append(jnp.maximum(view.get(cb_nm, zeros), 0.0))
                 fracs.append(frac)
 
         q_int_arr = jnp.stack(q_int)
@@ -165,7 +178,13 @@ class CloudBorneExchange(PhysicsTerm):
         phi = -jnp.expm1(-dt / jnp.maximum(tau, 1.0))
         transfer = (target - q_cb_arr) * phi / dt   # [.../s], + toward cloud-borne
 
-        tracer_tends = {nm: transfer[k] for k, nm in enumerate(cb_names)}
+        # Cloud-borne side to the active store (carry mode integrates it
+        # now, sequentially); interstitial side through the ordinary
+        # tendency accumulator in both modes.
+        diagnostics, tracer_tends = apply_updates(
+            self._spec, diagnostics,
+            {nm: transfer[k] for k, nm in enumerate(cb_names)}, dt,
+        )
         for k, nm in enumerate(int_names):
             tracer_tends[nm] = -transfer[k]
 

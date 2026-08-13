@@ -59,6 +59,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CARRY_KEY,
+    apply_updates,
+    carry_mode,
+    tracer_view,
+)
 from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
@@ -270,6 +276,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self._ntot = int(data.NTOT_AMODE)
         self._dgnum = np.asarray(data.DGNUM_AMODE, np.float64)
         self._initialized = True
+        if carry_mode(self.spec):
+            # In carry mode the store term must run upstream each step
+            # (name-set fixing + vertical mixing); requiring its key makes
+            # _validate_ordering enforce that, instead of apply_updates
+            # silently seeding an unmixed, unmanaged dict.
+            self.requires = (*type(self).requires, CARRY_KEY)
 
     def _jam_state(self, q_new, dgncur_a, dgncur_awet, wetdens, out_dtype):
         """Build ``_jam_state`` from the post-step core fields (mode axis 0)."""
@@ -315,6 +327,8 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         zeros_c = jnp.zeros(shape, cdt)
         dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
 
+        view = tracer_view(self.spec, state, diagnostics)
+
         def fetch(name):
             # Floor gas/aerosol tracers at 0. Spectral advection of the JAM
             # tracers leaves small NEGATIVE mass/number on the near-zero field
@@ -325,7 +339,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             # _mam_coag_1subarea). The core floors qaer/qnum internally but not
             # wetdens, so guard at the boundary where the tracers enter.
             return jnp.maximum(
-                jnp.asarray(state.tracers.get(name, jnp.zeros(shape)), cdt),
+                jnp.asarray(view.get(name, jnp.zeros(shape)), cdt),
                 0.0,
             )
 
@@ -403,10 +417,19 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             tracer_tends[name] = (
                 (q_new[..., idx] - q[..., idx]) / dt
             ).astype(out_dtype)
+        cb_updates: dict[str, jnp.ndarray] = {}
         for name, idx in self._qqcw_pack:
-            tracer_tends[name] = (
+            cb_updates[name] = (
                 (qqcw_new[..., idx] - qqcw[..., idx]) / dt
             ).astype(out_dtype)
+        if carry_mode(self.spec):
+            diagnostics, passthrough = apply_updates(
+                self.spec, diagnostics,
+                cb_updates, jnp.asarray(dt, out_dtype),
+            )
+            tracer_tends.update(passthrough)
+        else:
+            tracer_tends.update(cb_updates)
 
         jam_state = self._jam_state(
             q_new, out["dgncur_a"], out["dgncur_awet"], out["wetdens"],

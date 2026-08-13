@@ -901,6 +901,14 @@ class AerocomDiagnostics(PhysicsTerm):
         dm = _layer_mass(p_half)
         # Per-tracer burdens: every aerosol mass tracer the state carries.
         tracers = getattr(state, "tracers", None) or {}
+        # Carry-stored cloud-borne aerosol (#602 item 3): when the JAM
+        # population keeps its mc_*/nc_* phase in the physics carry rather
+        # than the dycore tracers, the burden must still count it. Carry
+        # fields are already post-physics (updated sequentially within the
+        # step), so they join AFTER the _post_physics_tracer adjustment
+        # below rather than through it.
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        cb_carry = diagnostics.get(CARRY_KEY) or {}
         # MAM4-JAX splits aerosol mass between interstitial (``m_*``) and
         # cloud-borne (``mc_*``) populations; the AeroCom species burden is
         # the TOTAL, so both are summed here (omitting the cloud-borne half
@@ -920,6 +928,10 @@ class AerocomDiagnostics(PhysicsTerm):
                     # and wet scavenging.
                     field = _post_physics_tracer(state, diagnostics, tname)
                     contrib = jnp.sum(field * dm, axis=0)
+                    total = contrib if total is None else total + contrib
+            for tname, raw in cb_carry.items():
+                if tname.startswith(f"mc_{spec}_"):
+                    contrib = jnp.sum(raw * dm, axis=0)
                     total = contrib if total is None else total + contrib
             out[f"aerocom_burden_{spec}"] = zero_col if total is None else total
 
