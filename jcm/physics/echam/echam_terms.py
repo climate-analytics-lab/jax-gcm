@@ -85,6 +85,7 @@ def echam_physics(
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
     aerosol_free_radiation: bool = False,
+    aerosol_free_alternate: bool = False,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -214,8 +215,21 @@ def echam_physics(
             variants) for instantaneous-ERFari diagnosis (jax-gcm#583).
             Roughly doubles the radiation cost on compute steps;
             RRTMGP only.
+        aerosol_free_alternate: Produce those ``*noa`` fluxes by
+            ALTERNATING the single radiation solve between aerosol-on
+            and aerosol-off instead of adding a second solve. Removes
+            the extra cost entirely, but the model then feels
+            aerosol-free heating on every other radiation step (the
+            aerosol direct effect enters with a 50 % duty cycle) and
+            the on/off fluxes are sampled one radiation interval apart
+            rather than simultaneously. Requires
+            ``aerosol_free_radiation=True``.
 
     """
+    if aerosol_free_alternate and not aerosol_free_radiation:
+        raise ValueError(
+            "aerosol_free_alternate=True requires aerosol_free_radiation=True "
+            "— alternating the solve is a way of producing the *noa fluxes.")
     if aerosol_free_radiation and radiation_scheme != "rrtmgp":
         raise ValueError(
             "aerosol_free_radiation=True needs radiation_scheme='rrtmgp' — "
@@ -248,7 +262,8 @@ def echam_physics(
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_diagnostics=aerosol_free_radiation)
+            aerosol_free_diagnostics=aerosol_free_radiation,
+            aerosol_free_alternate=aerosol_free_alternate)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":

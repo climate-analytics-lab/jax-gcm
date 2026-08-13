@@ -996,6 +996,7 @@ class RRTMGPRadiation(PhysicsTerm):
         base_seed: int = 0,
         compute_cre: bool = True,
         aerosol_free_diagnostics: bool = False,
+        aerosol_free_alternate: bool = False,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1022,6 +1023,16 @@ class RRTMGPRadiation(PhysicsTerm):
         # per compute step with the aerosol optics zeroed. Roughly doubles
         # the (dominant) radiation cost on compute steps, so opt-in only.
         self._aerosol_free = bool(aerosol_free_diagnostics)
+        # Alternate the SINGLE solve between aerosol-on and aerosol-off
+        # instead of paying for a second one. Removes the *noa cost entirely
+        # but perturbs the physics — see ``_compute_full``.
+        self._aerosol_free_alternate = bool(aerosol_free_alternate)
+        if aerosol_free_alternate and not aerosol_free_diagnostics:
+            raise ValueError(
+                "aerosol_free_alternate=True requires "
+                "aerosol_free_diagnostics=True — alternating the solve is a "
+                "way of producing the *noa fluxes, not a standalone mode."
+            )
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit
@@ -1184,6 +1195,43 @@ class RRTMGPRadiation(PhysicsTerm):
             return a.T
 
         aerosol_col = aerosol_for_vmap.copy(Nccn=aerosol_in.Nccn.reshape(ncols))
+
+        # Alternating aerosol-free mode (jax-gcm#583 cost experiment): rather
+        # than a SECOND solve per radiation step, alternate the single solve
+        # between aerosol-on and aerosol-off. The *noa fluxes then cost
+        # nothing, but the model genuinely feels aerosol-free radiative
+        # heating on every other radiation step, so the aerosol direct effect
+        # enters the energy budget with a 50 % duty cycle. That is the
+        # approximation this mode exists to quantify — it is NOT free.
+        aerosol_on = jnp.asarray(True)
+        if self._aerosol_free_alternate:
+            dt = diagnostics["_dt_seconds"]
+            interval = params.radiation_interval
+            steps_per_call = jnp.where(
+                interval > 0,
+                jnp.int32(jnp.round(interval / dt)),
+                jnp.int32(1),
+            )
+            # ``_compute_full`` only runs on radiation steps, so the radiation
+            # call index is model_step // steps_per_call; alternate on its
+            # parity. Zeroing the optics (not cdnc_factor/Nccn) keeps the
+            # cloud field identical, so this isolates the direct effect.
+            aerosol_on = jnp.mod(model_step // steps_per_call, 2) == 0
+            keep = aerosol_on.astype(aerosol_col.aod_profile.dtype)
+            aerosol_col = aerosol_col.copy(
+                aod_profile=aerosol_col.aod_profile * keep,
+                ssa_profile=aerosol_col.ssa_profile * keep,
+                asy_profile=aerosol_col.asy_profile * keep,
+                aod_total=aerosol_col.aod_total * keep,
+                aod_anthropogenic=aerosol_col.aod_anthropogenic * keep,
+                aod_background=aerosol_col.aod_background * keep,
+                aod_sw_per_band=aerosol_col.aod_sw_per_band * keep,
+                ssa_sw_per_band=aerosol_col.ssa_sw_per_band * keep,
+                asy_sw_per_band=aerosol_col.asy_sw_per_band * keep,
+                aod_lw_per_band=aerosol_col.aod_lw_per_band * keep,
+                ssa_lw_per_band=aerosol_col.ssa_lw_per_band * keep,
+                asy_lw_per_band=aerosol_col.asy_lw_per_band * keep,
+            )
         cols = dict(
             temperature=lev_to_col(state.temperature),
             specific_humidity=lev_to_col(state.specific_humidity),
@@ -1241,6 +1289,31 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
         )
 
+        _fresh_toa = dict(
+            toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
+            toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
+            toa_sw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_sw_up_clear, ncols),
+            toa_lw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_lw_up_clear, ncols),
+        )
+
+        if self._aerosol_free_alternate:
+            # The single solve above was aerosol-on or aerosol-off depending
+            # on ``aerosol_on``; route its TOA fluxes to the matching slots
+            # and hold the other flavour from the previous radiation step.
+            # Everything else on the carry (heating profiles, surface fluxes)
+            # stays FRESH: it is what the model actually applied this step.
+            prev = diagnostics["radiation"]
+            all_sky = {
+                k: jnp.where(aerosol_on, v, getattr(prev, k))
+                for k, v in _fresh_toa.items()
+            }
+            noa = {
+                f"{k}_noa": jnp.where(
+                    aerosol_on, getattr(prev, f"{k}_noa"), v)
+                for k, v in _fresh_toa.items()
+            }
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
         # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
         # the cloud field is bit-identical and the difference to the all-sky
@@ -1248,7 +1321,8 @@ class RRTMGPRadiation(PhysicsTerm):
         # numerator), not an aerosol-cloud response. Zeroing the optical
         # depths alone suffices (extinction scales everything), but ssa/asy
         # are zeroed too so no path reads an unweighted property.
-        if self._aerosol_free:
+        elif self._aerosol_free:
+            all_sky = _fresh_toa
             aerosol_noa = cols["aerosol"].copy(
                 aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
                 ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
@@ -1291,6 +1365,7 @@ class RRTMGPRadiation(PhysicsTerm):
                     diagnostics_noa.toa_lw_up_clear, ncols),
             )
         else:
+            all_sky = _fresh_toa
             zero_col = jnp.zeros((ncols,))
             noa = dict(
                 toa_sw_up_noa=zero_col, toa_lw_up_noa=zero_col,
@@ -1331,16 +1406,9 @@ class RRTMGPRadiation(PhysicsTerm):
             surface_lw_up=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_lw_up, ncols,
             ),
-            toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
-            toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
+            **all_sky,
             toa_sw_down=_column_vector_rrtmgp(
                 diagnostics_vmapped.toa_sw_down, ncols,
-            ),
-            toa_sw_up_clear=_column_vector_rrtmgp(
-                diagnostics_vmapped.toa_sw_up_clear, ncols,
-            ),
-            toa_lw_up_clear=_column_vector_rrtmgp(
-                diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
