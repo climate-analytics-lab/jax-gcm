@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -234,10 +235,17 @@ def dataset_on_model_grid(coords, start: str, end: str, *,
     out.attrs["source"] = select_store(int(nlon))
     if cache:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Per-process temp name + atomic replace: concurrent runs may
-        # request the same uncached window, and a shared tmp path would
-        # let their writes interleave (or the second rename fail).
-        tmp = path.with_suffix(f".tmp{os.getpid()}.nc")
+        # Globally-unique temp name + atomic replace: concurrent runs may
+        # request the same uncached window, and a shared tmp path would let
+        # their writes interleave (or the second rename fail).
+        #
+        # NOT os.getpid(): each container gets its own PID namespace, so two
+        # pods sharing a cache PVC routinely land on the SAME pid and collide
+        # on the temp file. That is not hypothetical — two jcm Jobs launched
+        # together both got pid 382 and one died with
+        # "PermissionError: .../wb2_..._6h_u-v-T.tmp382.nc". uuid4 is unique
+        # across hosts, which pid is not.
+        tmp = path.with_suffix(f".tmp{uuid.uuid4().hex}.nc")
         try:
             out.to_netcdf(tmp)
             tmp.replace(path)
