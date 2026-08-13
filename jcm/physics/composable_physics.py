@@ -360,12 +360,15 @@ class ComposablePhysics(nnx.Module, Physics):
         cross-step slots, so we union it with this structural template
         (zero values, used only for shape).
 
-        Implementation: runs ``compute_tendencies`` once at Model
-        construction time with a non-zero isothermal probe state
-        (288 K, q=0, etc.) so radiation terms don't hit 0/0=NaN.
-        The result is *only ever used as a zero-filled template* —
-        never as live cross-step physics state. (Mis-using its
-        output as live state was the architectural bug `#470
+        Implementation: traces ``compute_tendencies`` once with
+        ``jax.eval_shape`` at Model construction time — only the output
+        pytree structure and shapes/dtypes are consumed, so nothing is
+        compiled or executed (eagerly running the full physics stack
+        un-jitted here cost tens of seconds per Model for the big ECHAM
+        compositions, twice per construction). The result is *only ever
+        used as a zero-filled template* — never as live cross-step
+        physics state. (Mis-using its output as live state was the
+        architectural bug `#470
         <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
         tracks; the operator-split refactor in `#471` moved live
         state to ``initial_carry_state``.)
@@ -373,12 +376,10 @@ class ComposablePhysics(nnx.Module, Physics):
         """
         from jax.tree_util import tree_map
 
-        # Probe at a well-conditioned isothermal state. Using
-        # ``PhysicsState.zeros`` here produces 0/0 = NaN in radiation
-        # terms; the non-zero T=288 K probe walks the same code paths
-        # without the division-by-zero. We zero the output anyway
-        # so the probe values themselves don't matter — only the
-        # pytree structure / shapes do.
+        # The probe defines the input pytree STRUCTURE (which tracers
+        # exist, which forcing fields are present); its values are never
+        # computed with — eval_shape traces abstractly, so even 0/0
+        # paths in radiation cannot produce NaNs here.
         nodal_shape = coords.horizontal.nodal_shape
         nlev = coords.nodal_shape[0]
         shape_3d = (nlev,) + nodal_shape
@@ -401,10 +402,12 @@ class ComposablePhysics(nnx.Module, Physics):
         probe_forcing = ForcingData.zeros(nodal_shape)
         probe_terrain = TerrainData.aquaplanet(coords)
 
-        _, diagnostics = self.compute_tendencies(
+        diagnostics = jax.eval_shape(
+            lambda s, f, t: self.compute_tendencies(s, f, t)[1],
             probe_state, probe_forcing, probe_terrain,
         )
-        return tree_map(jnp.zeros_like, diagnostics)
+        return tree_map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
+                        diagnostics)
 
     def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
         """Aggregate per-term cross-step carry-state slots.
