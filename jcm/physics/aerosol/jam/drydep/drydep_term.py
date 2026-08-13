@@ -24,6 +24,13 @@ import tree_math
 from flax import nnx
 
 from jcm.physics.aerosol.jam.drydep.resistances import deposition_velocity
+from jcm.physics.aerosol.jam.cloud_borne_store import (
+    CARRY_KEY,
+    apply_updates,
+    carry_mode,
+    mirror_names,
+    tracer_view,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.sedimentation.sedi_term import stokes_velocity
@@ -68,6 +75,12 @@ class SlinnDryDeposition(PhysicsTerm):
         """Hold params and the population."""
         self.params = nnx.Param(params or DryDepParameters.default())
         self._spec = spec or MAM4_SPEC
+        if carry_mode(self._spec):
+            # In carry mode the store term must run upstream each step
+            # (name-set fixing + vertical mixing); requiring its key makes
+            # _validate_ordering enforce that, instead of apply_updates
+            # silently seeding an unmixed, unmanaged dict.
+            self.requires = (*type(self).requires, CARRY_KEY)
 
     def _u_star(self, diagnostics, ncols, params):
         if "vertical_diffusion" in diagnostics:
@@ -94,6 +107,7 @@ class SlinnDryDeposition(PhysicsTerm):
         # structural probe; fall back to zeros there (real runs have every
         # declared tracer seeded).
         zeros = jnp.zeros_like(state.temperature)
+        view = tracer_view(self._spec, state, diagnostics)
         tracer_tends: dict[str, jnp.ndarray] = {}
         for i, mode in enumerate(self._spec.modes):
             r_sfc = aer.r_wet[i, -1]
@@ -125,10 +139,22 @@ class SlinnDryDeposition(PhysicsTerm):
                     for sp in mode.species
                 ]
             for nm in names:
-                q = state.tracers.get(nm, zeros)
+                # Floored at 0: removal on a negative (ringing) value
+                # would inject mass (see the wetdep note).
+                q = jnp.maximum(view.get(nm, zeros), 0.0)
                 tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(
                     -(removed_frac * q[-1]) / dt
                 )
+
+        if carry_mode(self._spec):
+            cb_updates = {
+                nm: tracer_tends.pop(nm)
+                for nm in mirror_names(self._spec) if nm in tracer_tends
+            }
+            diagnostics, passthrough = apply_updates(
+                self._spec, diagnostics, cb_updates, dt,
+            )
+            tracer_tends.update(passthrough)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

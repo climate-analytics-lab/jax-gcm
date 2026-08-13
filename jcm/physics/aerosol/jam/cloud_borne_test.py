@@ -227,7 +227,7 @@ class FactorySwitchTest(unittest.TestCase):
     def test_default_composes_exchange_and_mirrors(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
-        terms = jam_aerosol_physics()
+        terms = jam_aerosol_physics(cloud_borne_storage="tracers")
         cats = [t.category for t in terms]
         self.assertIn("aerosol_cloud_borne", cats)
         # Exchange sits after drydep and before the aqueous split that
@@ -261,7 +261,7 @@ class FactorySwitchTest(unittest.TestCase):
         # The A/B cost claim: half the aerosol tracers are gone.
         on = {
             s.name
-            for t in jam_aerosol_physics()
+            for t in jam_aerosol_physics(cloud_borne_storage="tracers")
             for s in t.required_tracers()
         }
         self.assertEqual(
@@ -278,9 +278,13 @@ class FactorySwitchTest(unittest.TestCase):
         core = PlaceholderMicrophysics()
         with self.assertRaisesRegex(ValueError, "cloud_borne"):
             jam_aerosol_physics(microphysics=core, cloud_borne=False)
-        # A matching flag merely validates.
+        # A matching flag merely validates (instance cores follow their
+        # own spec's storage: tracers here).
         terms = jam_aerosol_physics(microphysics=core, cloud_borne=True)
         self.assertIn("aerosol_cloud_borne", [t.category for t in terms])
+        self.assertNotIn(
+            "jam_cloud_borne_store", [t.name for t in terms],
+        )
 
 
 if __name__ == "__main__":

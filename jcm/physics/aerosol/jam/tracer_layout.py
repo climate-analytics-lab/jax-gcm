@@ -57,10 +57,15 @@ def tracer_specs(spec: ModalAerosolSpec) -> tuple[TracerSpec, ...]:
 
     Returns one mass spec per (mode, species) and one number spec per mode,
     each doubled for the cloud-borne mirror when the population prognoses
-    one (``spec.cloud_borne``); an implicit-in-droplet population declares
-    only the interstitial keys.
+    one (``spec.cloud_borne``) AND keeps it in the dycore tracers
+    (``cloud_borne_storage == "tracers"``); an implicit-in-droplet
+    population, or one storing the phase in the physics carry (#602 item
+    3), declares only the interstitial keys.
     """
-    phases = (False, True) if spec.cloud_borne else (False,)
+    explicit_tracers = (
+        spec.cloud_borne and spec.cloud_borne_storage == "tracers"
+    )
+    phases = (False, True) if explicit_tracers else (False,)
     out: list[TracerSpec] = []
     for mode in spec.modes:
         for cb in phases:

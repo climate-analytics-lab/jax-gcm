@@ -75,7 +75,11 @@ class IceNucleation(PhysicsTerm):
         pressure = diagnostics["pressure_full"]
         t = state.temperature
 
-        pops = in_populations(self._spec, state.tracers, rho, p.frac_du_soluble)
+        from jcm.physics.aerosol.jam.cloud_borne_store import tracer_view
+        pops = in_populations(
+            self._spec, tracer_view(self._spec, state, diagnostics),
+            rho, p.frac_du_soluble,
+        )
         qsat_ice = saturation_specific_humidity(t, pressure, phase="ice")
         s_ice = state.specific_humidity / jnp.maximum(qsat_ice, 1.0e-30)
 

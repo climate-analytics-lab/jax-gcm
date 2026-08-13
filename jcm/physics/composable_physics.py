@@ -460,9 +460,22 @@ class ComposablePhysics(nnx.Module, Physics):
         # cloud-borne exchange (#602), not an output field (the totals a
         # user wants are ``activated_cdnc``/``activated_fraction``).
         "_jam_activation",
+        # Running post-physics thermodynamic view (advance_thermo_run):
+        # an intermediate that duplicates the state fields; became
+        # exportable once plain dicts flatten, so exclude it by name.
+        "thermo_run",
         # Running tendency view for diagnostics (see the term loop); an
         # intermediate, not a field anyone wants in the netCDF.
         "_tendency_run",
+    })
+
+    # Dict-valued diagnostics that must NOT flatten into user output.
+    # ``_sampler_state`` duplicates the whole state for the observer path
+    # and is stripped at the model level for the ordinary output routes;
+    # it cannot go into ``_INTERNAL_DIAGNOSTIC_KEYS`` because observers
+    # read it from the returned dict post-step.
+    _UNFLATTENED_DICTS: ClassVar[frozenset[str]] = frozenset({
+        "_sampler_state",
     })
 
     # Sub-struct fields that survive the flatten step but should be dropped
@@ -511,6 +524,15 @@ class ComposablePhysics(nnx.Module, Physics):
                 continue
             if isinstance(v, jax.Array):
                 items[out_key] = v
+            elif isinstance(v, dict) and k not in self._UNFLATTENED_DICTS:
+                # Plain dict-of-arrays diagnostic (e.g. the carry-stored
+                # cloud-borne fields ``_jam_cloud_borne``, #602 item 3):
+                # flatten one level with the same separator convention as
+                # typed sub-structs. Zero-size entries (empty band tables
+                # and the like) have no xarray shape and are skipped.
+                for sk, sv in v.items():
+                    if isinstance(sv, jax.Array) and sv.size:
+                        items[f"{out_key}{sep}{sk}"] = sv
             elif hasattr(v, "__dict__") and v.__dict__:
                 # Typed sub-struct (e.g. PhysicsData.radiation). Flatten via
                 # the parent recursive helper; skip if it raises (sub-structs
