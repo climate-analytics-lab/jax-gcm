@@ -53,12 +53,26 @@ def _import_all_physics():
 
 
 def _all_terms():
+    """Every SHIPPED concrete ``PhysicsTerm``.
+
+    Filtered to production modules on purpose: ``__subclasses__`` is global,
+    so once the rest of the suite has imported, it also returns the throwaway
+    terms other test modules define (``LinearHeating``, ``CarryingTerm``, ...).
+    Those are not shipped and must not land in the roster — without this the
+    audit passes standalone and fails in the full run, which is a worse
+    failure than no audit at all.
+    """
     def subs(cls):
         for s in cls.__subclasses__():
             yield s
             yield from subs(s)
     _import_all_physics()
-    return sorted({s for s in subs(PhysicsTerm)}, key=lambda x: x.__name__)
+    return sorted(
+        {s for s in subs(PhysicsTerm)
+         if s.__module__.startswith("jcm.")
+         and not s.__module__.split(".")[-1].endswith("_test")},
+        key=lambda x: x.__name__,
+    )
 
 
 #: Terms that must run in BOTH hosts and give the same answer. A term
