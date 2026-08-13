@@ -28,3 +28,11 @@ tracer_vars: null
 column:
   lat_deg: 0.0
   lon_deg: 0.0
+
+# Simulation start date (YYYY-MM-DD), or null for the model default.
+# Present in EVERY run group, not just ``default``: Hydra groups replace
+# rather than merge, and ``runners`` reads ``run.start_date`` generically
+# to window ERA5 nudging targets, select transient AMIP forcing years and
+# seed the init date. A group missing it makes ``run.start_date=...`` a
+# hard Hydra error, which is how a nudged cluster run failed at startup.
+start_date: null

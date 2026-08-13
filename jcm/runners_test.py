@@ -1447,3 +1447,29 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         import jax_datetime as jdt
         self.assertEqual(
             int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+
+
+class TestRunGroupsExposeStartDate(unittest.TestCase):
+    """``run.start_date`` must be settable on EVERY run group.
+
+    Hydra config groups replace rather than merge, so a key present only in
+    ``run/default.yaml`` is absent under ``run=longrun``. ``runners`` reads
+    ``run.start_date`` generically — to window ERA5 nudging targets, pick
+    transient AMIP forcing years, and seed the init date — so a group missing
+    it turns ``run.start_date=...`` into a hard Hydra error at startup. That
+    is exactly how a nudged cluster job died before integrating a step.
+    """
+
+    def test_every_run_group_accepts_a_start_date_override(self):
+        import glob
+        import os
+
+        groups = sorted(
+            os.path.splitext(os.path.basename(p))[0]
+            for p in glob.glob(os.path.join(CONFIG_DIR, "run", "*.yaml"))
+        )
+        self.assertIn("longrun", groups, "run group discovery failed")
+        for grp in groups:
+            with self.subTest(run_group=grp):
+                cfg = _compose([f"run={grp}", "run.start_date=2010-01-01"])
+                self.assertEqual(str(cfg.run.start_date), "2010-01-01")
