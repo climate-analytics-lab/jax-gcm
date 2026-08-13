@@ -306,12 +306,18 @@ def _physics_factories():
     return {"echam_physics": echam_physics}
 
 
+#: Yaml keys consumed by the runner itself, not the physics factory.
+_CONFIG_ONLY_PHYSICS_KEYS = frozenset({
+    "builder", "radiation_chunk_size", "defaults",
+})
+
 def _build_physics_from_factory(physics_cfg):
     """Build physics by delegating to a factory named by ``physics.builder``.
 
-    Only the factory keyword args present in the YAML are forwarded (filtered
-    against the factory signature), so config-only keys consumed elsewhere
-    (``builder``, ``radiation_chunk_size``) are ignored here.
+    The factory keyword args present in the YAML are forwarded; keys the
+    runner itself consumes (``_CONFIG_ONLY_PHYSICS_KEYS``) are skipped.
+    Anything else is an ERROR — a typo'd or removed key silently falling
+    back to defaults invalidates the experiment that set it.
     """
     import inspect
 
@@ -327,6 +333,14 @@ def _build_physics_from_factory(physics_cfg):
         )
     cfg_dict = OmegaConf.to_container(physics_cfg, resolve=True) or {}
     accepted = set(inspect.signature(factory).parameters)
+    unknown = set(cfg_dict) - accepted - _CONFIG_ONLY_PHYSICS_KEYS
+    if unknown:
+        raise ValueError(
+            f"physics config keys not accepted by {builder}: "
+            f"{sorted(unknown)}. Fix or delete them — a typo'd or "
+            "removed key silently falling back to the default would "
+            "invalidate the experiment that set it."
+        )
     kwargs = {k: v for k, v in cfg_dict.items()
               if k in accepted and v is not None}
     return factory(**kwargs)
