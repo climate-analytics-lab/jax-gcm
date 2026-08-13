@@ -842,3 +842,97 @@ class TestRRTMGPVerticalOrientation:
             f"SW heating peak below mid-column (upper {upper}, lower "
             f"{lower}) — ozone profile entering gas optics upside down"
         )
+
+
+class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
+    """Alternating aerosol-on/aerosol-off single solve (jax-gcm#583).
+
+    Inherits the column harness from ``TestRRTMGPTermComputeAndCache`` and
+    re-drives it with ``aerosol_free_alternate=True``. The contract:
+    on even radiation calls the solve carries aerosol and refreshes the
+    all-sky TOA slots (``*noa`` held); on odd radiation calls it drops the
+    aerosol optics and refreshes the ``*noa`` slots (all-sky held).
+    """
+
+    def _alternating_term_and_inputs(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        alt = RRTMGPRadiation(
+            params=term.params.get_value(),
+            compute_cre=False,
+            aerosol_free_diagnostics=True,
+            aerosol_free_alternate=True,
+        )
+        alt._lats, alt._lons = term._lats, term._lons
+
+        # A visibly dusty column — with zero aerosol the on/off solves would
+        # be identical and the test could not tell the branches apart.
+        aer = diagnostics["aerosol"]
+        nlev, ncols = self.NLEV, self.NCOLS
+        diagnostics = {**diagnostics, "aerosol": aer.copy(
+            aod_profile=jnp.full((nlev, ncols), 0.05),
+            ssa_profile=jnp.full((nlev, ncols), 0.9),
+            asy_profile=jnp.full((nlev, ncols), 0.7),
+            aod_total=jnp.full((ncols,), 0.4),
+            aod_sw_per_band=jnp.full((14, nlev, ncols), 0.05),
+            ssa_sw_per_band=jnp.full((14, nlev, ncols), 0.9),
+            asy_sw_per_band=jnp.full((14, nlev, ncols), 0.7),
+            aod_lw_per_band=jnp.full((16, nlev, ncols), 0.02),
+            ssa_lw_per_band=jnp.full((16, nlev, ncols), 0.5),
+            asy_lw_per_band=jnp.full((16, nlev, ncols), 0.5),
+        )}
+        return alt, state, diagnostics, forcing
+
+    def test_alternate_requires_the_diagnostic_to_be_on(self):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        with pytest.raises(ValueError, match="aerosol_free_diagnostics"):
+            RRTMGPRadiation(aerosol_free_alternate=True)
+
+    def test_slots_alternate_between_aerosol_on_and_off(self):
+        term, state, diagnostics, forcing = self._alternating_term_and_inputs()
+
+        # --- radiation call 0 (even): aerosol ON.
+        _, d0 = term(state, diagnostics, forcing, None)
+        r0 = d0["radiation"]
+        assert np.all(np.asarray(r0.toa_lw_up) > 100.0), "all-sky must be fresh"
+        # *noa still holds its initial (zero) value — no aerosol-off solve ran.
+        np.testing.assert_array_equal(np.asarray(r0.toa_lw_up_noa), 0.0)
+        np.testing.assert_array_equal(np.asarray(r0.toa_sw_up_noa), 0.0)
+
+        # --- call 1: sub-step, cached replay (interval = 2 x dt).
+        _, d1 = term(state, d0, forcing, None)
+
+        # --- radiation call 2 (odd): aerosol OFF.
+        _, d2 = term(state, d1, forcing, None)
+        r2 = d2["radiation"]
+        # All-sky is HELD from call 0 — this step's solve had no aerosol.
+        np.testing.assert_array_equal(
+            np.asarray(r2.toa_lw_up), np.asarray(r0.toa_lw_up),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(r2.toa_sw_up), np.asarray(r0.toa_sw_up),
+        )
+        # *noa is now populated by the aerosol-free solve.
+        noa = np.asarray(r2.toa_lw_up_noa)
+        assert np.all(noa > 100.0), f"aerosol-free OLR not populated: {noa}"
+        # ...and it differs from the all-sky value, i.e. the aerosol really
+        # was removed rather than the same solve being copied across.
+        assert not np.allclose(noa, np.asarray(r0.toa_lw_up)), (
+            "aerosol-off OLR identical to aerosol-on — optics were not zeroed"
+        )
+
+    def test_model_feels_aerosol_free_heating_on_odd_calls(self):
+        """The whole point of the approximation: heating alternates too.
+
+        On the aerosol-off call the tendency handed back to the model is the
+        aerosol-free one, so the direct effect enters with a 50 % duty cycle.
+        """
+        term, state, diagnostics, forcing = self._alternating_term_and_inputs()
+        t0, d0 = term(state, diagnostics, forcing, None)      # aerosol ON
+        _, d1 = term(state, d0, forcing, None)                # cached
+        t2, d2 = term(state, d1, forcing, None)               # aerosol OFF
+
+        assert not np.allclose(
+            np.asarray(t0.temperature), np.asarray(t2.temperature),
+        ), "heating identical on/off — the alternation is not reaching the model"

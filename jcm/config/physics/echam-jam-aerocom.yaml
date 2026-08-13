@@ -56,3 +56,12 @@ aerocom_optics: false
 # Doubles radiation cost on compute steps — the AeroCom experiments ask
 # for it (ERFari), so it is on here; turn off for non-submission runs.
 aerosol_free_radiation: true
+# Produce those *noa fluxes by ALTERNATING the single radiation solve
+# between aerosol-on and aerosol-off, instead of adding a second solve.
+# Removes the extra cost entirely (measured +43 % -> +0 % at T63L47), but
+# it is NOT free: the model then feels aerosol-free heating on every other
+# radiation step, so the aerosol direct effect enters the energy budget
+# with a 50 % duty cycle, and rsut/rsutnoa are sampled one radiation
+# interval apart rather than simultaneously. Off until the 1-year nudged
+# comparison quantifies both errors (#583).
+aerosol_free_alternate: false
