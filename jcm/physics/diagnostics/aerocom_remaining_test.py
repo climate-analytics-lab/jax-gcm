@@ -453,32 +453,50 @@ import pytest  # noqa: E402
 
 @pytest.mark.slow
 class AerosolFreeRadiationSlowTest(unittest.TestCase):
-    """One real RRTMGP step: noa differs from all-sky iff aerosol is present."""
+    """One real RRTMGP step: noa differs from all-sky iff aerosol is present.
+
+    Runs the full ECHAM composition (RRTMGP + 2M clouds + MACv2-SP with
+    ``aerosol_free_radiation=True``) in the single-column host rather than
+    a T21 ``Model``: the claim under test — the second, aerosol-free
+    RRTMGP solve and its published ``*_noa`` fluxes — is per-column
+    physics, and running 2048 spectral columns through the most expensive
+    double-compile in the suite bought only wall clock (#627, ~7 min of
+    every PR gate). The column sits in the East-Asian MACv2-SP plume
+    (30°N, 117°E) and is sunlit at the default start time, so the
+    anthropogenic AOD is nonzero and the SW must respond.
+    """
 
     def test_noa_fluxes_differ_with_aerosol_and_match_without(self):
-        from jcm.model import Model
+        import jax.numpy as jnp
+
         from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics
-        from jcm.runners import inject_jw_profile
-        from jcm.terrain import TerrainData
-        from jcm.utils import get_coords
+        from jcm.rce import rce_initial_state
+        from jcm.single_column_model import SingleColumnModel
 
-        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         physics = echam_physics(
             radiation_scheme="rrtmgp", cloud_scheme="2m",
             aerosol_module="macv2sp", aerosol_free_radiation=True,
             checkpoint_terms=False)
-        model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
-                      physics=physics, time_step=12.0)
-        inject_jw_profile(model, rh=0.6)
-        dt_days = 12.0 / 1440.0
-        preds = model.resume(save_interval=dt_days, total_time=dt_days)
-        rad = preds.physics["radiation"]
+        vertical = get_echam_levels(47)
+        scm = SingleColumnModel(
+            physics=physics, vertical=vertical,
+            lat_deg=30.0, lon_deg=117.0, dt_seconds=720.0)
+        column = rce_initial_state(vertical, sst=300.0)
+        # Seed every tracer the composition declares (the 2M scheme carries
+        # number concentrations beyond rce_initial_state's qc/qi).
+        column = column.copy(tracers={
+            spec.name: jnp.zeros(47) for spec in physics.required_tracers()})
+        preds = scm.run([column])
+        rad = preds.physics_data["radiation"]
+        # Guard the geometry assumption explicitly: a dark column would make
+        # the SW assertion below fail for the wrong reason.
+        self.assertGreater(float(np.asarray(rad.cos_zenith).max()), 0.0)
         sw_noa = np.asarray(jax.device_get(rad.toa_sw_up_noa))
         sw_all = np.asarray(jax.device_get(rad.toa_sw_up))
         self.assertTrue(np.isfinite(sw_noa).all())
         # MACv2-SP puts nonzero anthropogenic AOD in 2005 defaults, so the
-        # aerosol-free SW must differ measurably somewhere sunlit...
+        # aerosol-free SW must differ measurably in this sunlit plume column...
         self.assertGreater(np.abs(sw_noa - sw_all).max(), 1e-3)
         # ...while the LW (MACv2-SP models SW effects only) stays equal.
         lw_noa = np.asarray(jax.device_get(rad.toa_lw_up_noa))
