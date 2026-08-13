@@ -289,6 +289,20 @@ def _flatten_horizontal(arr):
 
 class LayoutAgnosticTermsTest(unittest.TestCase):
 
+    def setUp(self):
+        """Contain the process-wide float64 flip some terms trigger.
+
+        ``mam4_jax/__init__.py`` sets ``jax_enable_x64=True`` at import
+        (unless ``MAM4_JAX_ENABLE_X64=0``), and several audited terms import
+        it lazily on construction. Left alone that leaks into every later
+        test in the session and silently shifts their numerics — it made two
+        unrelated SPEEDY shortwave tests fail only when this module ran
+        first. Snapshot and restore so the audit cannot poison the suite.
+        """
+        import jax
+        was = bool(jax.config.jax_enable_x64)
+        self.addCleanup(jax.config.update, "jax_enable_x64", was)
+
     def test_grid_and_column_hosts_agree(self):
         for cls in _all_terms():
             if cls.__name__ not in LAYOUT_AGNOSTIC:
