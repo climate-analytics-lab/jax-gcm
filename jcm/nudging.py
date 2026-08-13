@@ -184,12 +184,36 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
         representation if needed.
 
     """
-    inv_tau_wind = config.inv_tau_wind[:, jnp.newaxis, jnp.newaxis]
-    inv_tau_temp = config.inv_tau_temperature[:, jnp.newaxis, jnp.newaxis]
+    # Broadcasting-native, per the column-physics convention: level profile on
+    # axis 0, with as many trailing singleton axes as the state has horizontal
+    # axes. A hard-coded ``[:, None, None]`` assumes a (nlev, nlon, nlat) host
+    # and fails the moment ``ComposablePhysics`` runs with
+    # ``vectorize_columns=True`` and hands this term (nlev, ncols).
+    def _profile(p):
+        return p.reshape((-1,) + (1,) * (state.temperature.ndim - 1))
 
-    u_t = inv_tau_wind * (target.u_wind - state.u_wind)
-    v_t = inv_tau_wind * (target.v_wind - state.v_wind)
-    T_t = inv_tau_temp * (target.temperature - state.temperature)
+    inv_tau_wind = _profile(config.inv_tau_wind)
+    inv_tau_temp = _profile(config.inv_tau_temperature)
+
+    # The target is assembled on the dycore's nodal (nlev, nlon, nlat) grid,
+    # but under column vectorisation the state arriving here has already been
+    # flattened to (nlev, nlon*nlat) by the same row-major reshape
+    # ``ComposablePhysics`` applies, so one target serves either host.
+    def _match(ref, like):
+        if ref.shape == like.shape:
+            return ref
+        if ref.size == like.size:
+            return ref.reshape(like.shape)
+        raise ValueError(
+            f"nudging target shape {ref.shape} is incompatible with the "
+            f"state's {like.shape} — the target must be built on the same "
+            "grid as the model."
+        )
+
+    u_t = inv_tau_wind * (_match(target.u_wind, state.u_wind) - state.u_wind)
+    v_t = inv_tau_wind * (_match(target.v_wind, state.v_wind) - state.v_wind)
+    T_t = inv_tau_temp * (
+        _match(target.temperature, state.temperature) - state.temperature)
     q_zeros = jnp.zeros_like(state.specific_humidity)
     tracer_zeros = {name: jnp.zeros_like(t) for name, t in state.tracers.items()}
 
