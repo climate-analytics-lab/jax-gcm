@@ -55,20 +55,22 @@ jobs:
       matrix:
         python-version: ["3.11"]
 
-    # Job-local JAX/XLA compilation cache (nothing is uploaded or persisted
-    # — the dir dies with the runner). In today's single-process pytest run
-    # JAX's in-memory dedup already reuses identical modules, so this is
-    # mostly insurance: it keeps that reuse if the suite is ever split
-    # across processes (pytest-xdist) or a step restarts, at zero cost.
-    # NOTE deliberately NOT actions/cache'd across runs: entries are
-    # native code and the cache key does not include CPU features, while
-    # this runner pool is CPU-heterogeneous — a cross-machine hit could
-    # be an illegal-instruction crash, not just a miss.
-    env:
-      JAX_COMPILATION_CACHE_DIR: ${{ runner.temp }}/jax-cache
-
     steps:
       - uses: actions/checkout@v3
+
+      # Job-local JAX/XLA compilation cache (nothing is uploaded or persisted
+      # — the dir dies with the runner). In today's single-process pytest run
+      # JAX's in-memory dedup already reuses identical modules, so this is
+      # mostly insurance: it keeps that reuse if the suite is ever split
+      # across processes (pytest-xdist) or a step restarts, at zero cost.
+      # Set via $GITHUB_ENV because the `runner` context is not available in
+      # job-level `env` (the workflow fails validation there).
+      # NOTE deliberately NOT actions/cache'd across runs: entries are
+      # native code and the cache key does not include CPU features, while
+      # this runner pool is CPU-heterogeneous — a cross-machine hit could
+      # be an illegal-instruction crash, not just a miss.
+      - name: Enable job-local JAX compilation cache
+        run: echo "JAX_COMPILATION_CACHE_DIR=$RUNNER_TEMP/jax-cache" >> "$GITHUB_ENV"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
