@@ -6,7 +6,7 @@
 #
 # Example:
 #   python -m jcm.main nudging=era5 run.start_date=2010-01-01 \
-#       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam-rrtmgp
+#       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam
 #
 # Memory: the target stays resident — ~15 GB per 6-hourly year at
 # T63L47; use freq: 1d (~2.5 GB/year) for long windows.

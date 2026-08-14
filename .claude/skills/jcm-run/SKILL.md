@@ -42,7 +42,7 @@ PY=/home/dwatsonparris/micromamba/envs/jcm/bin/python
 REPO=/data/dwatsonparris/jax-gcm
 TS=$(date +%y%m%d_%H%M%S)
 
-COMMON="physics=echam-rrtmgp \
+COMMON="physics=echam \
         grid=echam_t63_l47_hybrid \
         init=jw init.rh=0.0 \
         terrain=from_file terrain.file=$REPO/jcm/data/bc/t63/terrain.nc \

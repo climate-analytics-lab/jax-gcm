@@ -10,7 +10,7 @@
 #     python -m jcm.main physics=echam \
 #         +physics.terms.tiedtke_convection.params.entrpen=4e-4
 #
-# Swap a term entirely from a curated preset (see ``echam-rrtmgp.yaml``)
+# Swap a term entirely from a curated preset (see ``echam-rrtmgp-2m.yaml``)
 # or inline at the CLI by overriding ``_target_`` and the param block.
 
 vectorize_columns: true
@@ -34,9 +34,9 @@ terms:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
   # RRTMGP is the supported ECHAM radiation (grey is a SPEEDY/debug
   # scheme; an ECHAM run composed with grey is an unsupported hybrid and
-  # was never validated). Swap to grey explicitly for cheap A/B tests:
-  #     python -m jcm.main physics=echam-rrtmgp radiation=grey  (or edit
-  #     the term _target_ inline).
+  # was never validated). For a cheap grey A/B use the Python factory,
+  # ``echam_physics(radiation_scheme="grey")`` — there is deliberately
+  # no supported CLI route to a grey-ECHAM composition.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
   # ECHAM physc ordering: vdiff (with the surface exchange in its
