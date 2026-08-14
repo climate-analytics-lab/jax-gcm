@@ -988,9 +988,14 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
 
         Holding the raw aerosol-free flux instead would leave rsut and
         rsutnoa averaging over different step sets — the sampling mismatch
-        this mode exists to avoid. So on a skipped step the aerosol EFFECT
-        (all-sky minus aerosol-free) must be preserved from the last
-        companion, even though the all-sky flux itself has moved.
+        this mode exists to avoid. So on a skipped step the aerosol effect
+        must be preserved from the last companion, even though the all-sky
+        flux itself has moved.
+
+        The effect is held as a FRACTION of the all-sky flux: an absolute
+        hold works in the LW but fails in the SW, where the effect tracks
+        the solar cycle and holding it into darkness subtracts a daytime
+        effect from a zero flux (measured -0.077 W/m2 over a year).
         """
         term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
         # radiation_interval is 2*dt in this harness, so every call to the
@@ -1006,10 +1011,33 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         warmer = state.copy(temperature=state.temperature + 4.0)
         _, d2 = term(warmer, d1, forcing, None)
         r2 = d2["radiation"]
-        effect2 = np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)
+        # Fractional, so compare the ratio rather than the absolute effect.
+        frac0 = effect0 / np.asarray(r0.toa_lw_up)
+        frac2 = (np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)) \
+            / np.asarray(r2.toa_lw_up)
         np.testing.assert_allclose(
-            effect2, effect0, rtol=1e-5, atol=1e-6,
-            err_msg="the held aerosol effect changed on a skipped step",
+            frac2, frac0, rtol=1e-5, atol=1e-9,
+            err_msg="the held aerosol fraction changed on a skipped step",
+        )
+
+    def test_dark_columns_reconstruct_to_zero_not_a_stale_daytime_effect(self):
+        """A zero all-sky SW flux must give a zero aerosol-free SW flux.
+
+        With an absolute hold, night-side columns subtract a stale daytime
+        effect from zero and invent a negative reflected flux. The fractional
+        hold is scale-free, so darkness reconstructs to darkness.
+        """
+        term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
+        _, d0 = term(state, diagnostics, forcing, None)
+        _, d1 = term(state, d0, forcing, None)
+        _, d2 = term(state, d1, forcing, None)      # skipped companion
+        sw, sw_noa = (np.asarray(d2["radiation"].toa_sw_up),
+                      np.asarray(d2["radiation"].toa_sw_up_noa))
+        dark = sw == 0.0
+        assert dark.any(), "harness has no dark column to test"
+        np.testing.assert_allclose(
+            sw_noa[dark], 0.0, atol=1e-10,
+            err_msg="dark column reconstructed a non-zero aerosol-free SW flux",
         )
 
     def test_interval_and_alternate_are_mutually_exclusive(self):
