@@ -343,6 +343,10 @@ class ConvectiveTracerTransport(PhysicsTerm):
         zeros = jnp.zeros_like(state.temperature)
         if conv is None:
             tracer_tends = {nm: zeros for nm in self._tracer_names}
+            scav_flux = jnp.zeros(
+                (len(self._tracer_names),) + state.temperature.shape[1:],
+                dtype=state.temperature.dtype,
+            )
         else:
             dt = diagnostics.get("_dt_seconds", 1800.0)
             q = jnp.stack([
@@ -373,18 +377,22 @@ class ConvectiveTracerTransport(PhysicsTerm):
             tracer_tends = {
                 nm: dq[k] for k, nm in enumerate(self._tracer_names)
             }
-            if self._scav_weights is not None:
-                # Per-tracer surface deposition of in-plume scavenged mass
-                # [kg/m²/s], for downstream wet-deposition bookkeeping
-                # (the JAM wetdep term folds these into the AeroCom
-                # ``wet_*`` fluxes). Underscore key: internal handoff,
-                # not a user-facing output field.
-                diagnostics = dict(diagnostics)
-                diagnostics["_conv_scav_flux"] = {
-                    nm: scav_flux[k]
-                    for k, nm in enumerate(self._tracer_names)
-                    if self._scav_weights[k] > 0.0
-                }
+        if self._scav_weights is not None:
+            # Per-tracer surface deposition of in-plume scavenged mass
+            # [kg/m²/s], for downstream wet-deposition bookkeeping (the
+            # JAM wetdep term folds these into the AeroCom ``wet_*``
+            # fluxes). Underscore key: internal handoff, not a
+            # user-facing output field. Published UNCONDITIONALLY (zeros
+            # without a convection diagnostic): the diagnostics dict is a
+            # ``lax.scan`` carry, so its key set must not depend on
+            # whether the step had convection composed — the structural
+            # probe runs without it and the carry structures must match.
+            diagnostics = dict(diagnostics)
+            diagnostics["_conv_scav_flux"] = {
+                nm: scav_flux[k]
+                for k, nm in enumerate(self._tracer_names)
+                if self._scav_weights[k] > 0.0
+            }
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

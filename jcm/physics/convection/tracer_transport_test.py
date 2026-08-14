@@ -408,6 +408,18 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         net = float(np.sum(np.asarray(tend.tracers["m_so4_acc"])) * 400.0)
         self.assertLessEqual(abs(net + float(flux[0])), 1e-6 * float(flux[0]))
 
+    def test_scav_flux_published_without_convection_too(self):
+        # The diagnostics dict is a lax.scan carry: the key set must be
+        # identical whether or not convection ran this step, or the
+        # structural probe's carry mismatches the stepped one (the
+        # aerocom end-to-end repro: 73- vs 74-child carry TypeError).
+        state, diagnostics = self._setup(with_conv=False)
+        term = ConvectiveTracerTransport(("m_so4_acc",), scav_weights=(1.0,))
+        _, diag_out = term(state, diagnostics, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(diag_out["_conv_scav_flux"]["m_so4_acc"]), 0.0,
+        )
+
     def test_unweighted_tracer_not_in_scav_flux(self):
         state, diagnostics = self._setup(with_scav=True)
         state = state.copy(tracers={
