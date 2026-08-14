@@ -32,8 +32,13 @@ terms:
     _target_: jcm.physics.chemistry.SimpleChemistry
   sundqvist_cloud_fraction:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
-  grey_two_stream_radiation:
-    _target_: jcm.physics.radiation.grey_two_stream.GreyTwoStreamRadiation
+  # RRTMGP is the supported ECHAM radiation (grey is a SPEEDY/debug
+  # scheme; an ECHAM run composed with grey is an unsupported hybrid and
+  # was never validated). Swap to grey explicitly for cheap A/B tests:
+  #     python -m jcm.main physics=echam-rrtmgp radiation=grey  (or edit
+  #     the term _target_ inline).
+  rrtmgp_radiation:
+    _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered
