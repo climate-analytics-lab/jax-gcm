@@ -97,6 +97,12 @@ replying — Codex has been right (forcing unit conventions) and wrong
   repo's documented mechanism, see the header comment there.
 - `JAX_PLATFORMS=cpu` is mandatory on GPU nodes (xdist workers
   otherwise fight over the GPU).
+- `local_ci.sh` exports `JAX_COMPILATION_CACHE_DIR` (default
+  `$SCRATCH/jcm-jax-cache`) so xdist workers and successive gate runs
+  share XLA compiles of identical jitted modules instead of each
+  recompiling. Only the XLA-compile share is saved — tracing reruns —
+  and only for bit-identical whole model steps. Safe: a miss just
+  recompiles.
 - The repo pins `ruff` in CI; run the pinned version (`pip show ruff`
   vs `.github/workflows/run_linter.yaml`) before trusting a clean pass.
 - GPU-gated slow tests skip on CPU exactly as they do in CI — a local

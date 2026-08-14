@@ -8,6 +8,13 @@ ACCOUNT=${PBS_ACCOUNT:-UCSD0085}
 source "$VENV/bin/activate"
 cd "$REPO"
 
+# Share XLA compiles across the pytest-xdist workers (and successive gate
+# runs on this machine): bit-identical jitted modules hit the on-disk JAX
+# cache instead of recompiling once per worker. Derecho nodes are
+# homogeneous so a persistent dir is safe; a miss just recompiles. Same
+# location as jcm.runners.maybe_enable_compilation_cache uses for runs.
+export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-${SCRATCH:-$HOME/.cache/jcm}/jcm-jax-cache}
+
 echo "=== lint ==="
 ruff check . || { echo "LINT FAILED"; exit 1; }
 
@@ -32,6 +39,7 @@ set -uo pipefail
 source $VENV/bin/activate
 cd $REPO
 export JAX_PLATFORMS=cpu
+export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
 pytest -v -s -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80 2>&1 | tail -40
 echo SLOW_EXIT=\${PIPESTATUS[0]}
 EOF
