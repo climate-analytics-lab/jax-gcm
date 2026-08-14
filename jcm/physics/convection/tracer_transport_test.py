@@ -343,6 +343,23 @@ class ScavengingTest(unittest.TestCase):
                 1e-6 * max(float(jnp.sum(jnp.abs(dq[k]) * dm)), 1e-30),
             )
 
+    def test_bare_column_matches_ncols_one(self):
+        # Broadcasting-native: (K, nlev) column inputs must agree with the
+        # same column as a (K, nlev, 1) block (the SCM driver shape).
+        q, mfu, entrain, rho, dz, cond, pf = self._setup()
+        args3 = dict(scav_weights=jnp.asarray([1.0, 0.5]),
+                     precip_formation=pf, plume_condensate=cond)
+        dq3, scav3 = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0, **args3)
+        dq1, scav1 = convective_tracer_tendency(
+            q[..., 0], mfu[:, 0], entrain[:, 0], rho[:, 0], dz[:, 0],
+            1800.0, scav_weights=jnp.asarray([1.0, 0.5]),
+            precip_formation=pf[:, 0], plume_condensate=cond[:, 0])
+        np.testing.assert_allclose(np.asarray(dq1), np.asarray(dq3[..., 0]),
+                                   rtol=1e-6, atol=1e-30)
+        np.testing.assert_allclose(np.asarray(scav1),
+                                   np.asarray(scav3[:, 0]), rtol=1e-6)
+
     def test_dry_plume_scavenges_nothing(self):
         # No condensate (below CAM's clw_cut) -> gate closed everywhere.
         q, mfu, entrain, rho, dz, _, pf = self._setup()

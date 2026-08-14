@@ -5,6 +5,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.diagnostics.aerocom import (
     OVERLAP_MAXIMUM,
@@ -561,6 +562,41 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
             key = f"aerocom_burden_{spec}"
             self.assertIn(key, ds.data_vars)
             self.assertTrue(np.isfinite(np.asarray(ds[key])).all(), key)
+
+
+class PerBandOpticsSerializationTest(unittest.TestCase):
+    """JAM's per-band optics fields must survive ``to_xarray``.
+
+    Regression: ``*_sw_per_band`` / ``*_lw_per_band`` are
+    ``(band, level, lon, lat)`` and the shape→dims lookup had no band
+    coordinate, so the FIRST full-output echam-jam+RRTMGP run after
+    jax-gcm#584 crashed at output conversion (grey-radiation
+    compositions never build the per-band fields, which is how CI
+    missed it).
+    """
+
+    @pytest.mark.slow
+    def test_jam_rrtmgp_per_band_output_serializes(self):
+        from jcm.model import Model
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=900.0,
+            physics=echam_physics(cloud_scheme="2m", aerosol_module="jam",
+                                  radiation_scheme="rrtmgp"),
+        )
+        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        sw = "jam_band_optics.aod_sw_per_band"
+        lw = "jam_band_optics.aod_lw_per_band"
+        self.assertIn(sw, ds.data_vars)
+        self.assertEqual(ds[sw].dims[1], "sw_band")
+        self.assertIn(lw, ds.data_vars)
+        self.assertEqual(ds[lw].dims[1], "lw_band")
 
 
 class AerocomOpticsConfigTest(unittest.TestCase):

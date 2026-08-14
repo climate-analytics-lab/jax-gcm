@@ -243,9 +243,11 @@ def convective_tracer_tendency(
         # concentration would INJECT plume mass and drive the wet_*
         # ledger negative (same floor WetScavenging applies to its
         # removal reads). Transport of the signed value is untouched.
+        # ``w`` reshapes against q_mix's rank so a bare (K, nlev) column
+        # works the same as a (K, nlev, ncols) block.
         removed = (
-            w[:, jnp.newaxis] * frac_k[jnp.newaxis]
-            * jnp.maximum(q_mix, 0.0)
+            w.reshape((-1,) + (1,) * (q_mix.ndim - 1))
+            * frac_k[jnp.newaxis] * jnp.maximum(q_mix, 0.0)
         )
         q_up_k = q_mix - removed
         r_k = m_up_k[jnp.newaxis] * removed           # (K, ncols) flux
