@@ -321,6 +321,28 @@ class ScavengingTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(dq1), np.asarray(dq0))
         np.testing.assert_array_equal(np.asarray(scav), 0.0)
 
+    def test_negative_lobe_never_scavenged(self):
+        # Spectral ringing leaves negative lobes on near-zero tracers;
+        # scavenging a negative in-plume concentration would inject mass
+        # and turn the deposition flux negative (Codex P1 on #636). The
+        # flux must stay >= 0 and the budget must still close to it.
+        q, mfu, entrain, rho, dz, cond, pf = self._setup()
+        q = q.at[0].set(-1.0e-10)                 # all-negative tracer 0
+        dq, scav = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0,
+            scav_weights=jnp.ones(2),
+            precip_formation=pf, plume_condensate=cond,
+        )
+        self.assertGreaterEqual(float(scav.min()), 0.0)
+        np.testing.assert_array_equal(np.asarray(scav[0]), 0.0)
+        dm = rho * dz
+        for k in range(2):
+            net = float(jnp.sum(dq[k] * dm))
+            self.assertLessEqual(
+                abs(net + float(scav[k, 0])),
+                1e-6 * max(float(jnp.sum(jnp.abs(dq[k]) * dm)), 1e-30),
+            )
+
     def test_dry_plume_scavenges_nothing(self):
         # No condensate (below CAM's clw_cut) -> gate closed everywhere.
         q, mfu, entrain, rho, dz, _, pf = self._setup()

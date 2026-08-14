@@ -238,7 +238,15 @@ def convective_tracer_tendency(
             / jnp.maximum(denom, _MF_FLOOR)[jnp.newaxis],
             q_k,
         )
-        removed = w[:, jnp.newaxis] * frac_k[jnp.newaxis] * q_mix
+        # Scavenge only the nonnegative part: spectral ringing leaves
+        # negative lobes on near-zero tracers, and removing a negative
+        # concentration would INJECT plume mass and drive the wet_*
+        # ledger negative (same floor WetScavenging applies to its
+        # removal reads). Transport of the signed value is untouched.
+        removed = (
+            w[:, jnp.newaxis] * frac_k[jnp.newaxis]
+            * jnp.maximum(q_mix, 0.0)
+        )
         q_up_k = q_mix - removed
         r_k = m_up_k[jnp.newaxis] * removed           # (K, ncols) flux
         return q_up_k, (q_up_k, r_k)
