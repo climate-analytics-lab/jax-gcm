@@ -20,7 +20,7 @@ The v2.0 release focus is the ECHAM T63L47 hybrid-coordinate stack with
 RRTMGP radiation:
 
 ```bash
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
+python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun
 ```
 
 ## Highlights
@@ -85,14 +85,11 @@ Most production runs use the Hydra CLI:
 # Default 10-day SPEEDY aquaplanet
 python -m jcm.main
 
-# ECHAM T63L47 with production RRTMGP radiation
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
-
-# Cheaper ECHAM development run with grey two-stream radiation
+# ECHAM T63L47 with the production RRTMGP radiation
 python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
 
 # Chunked, resumable long run
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun \
+python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun \
     run.checkpoint_path=/scratch/$JOB_ID.ckpt
 
 # Inspect available config groups and the composed config
@@ -158,14 +155,14 @@ Build the CUDA-enabled image locally:
 
 ```bash
 docker build -t jcm .
-docker run --rm --gpus all jcm physics=echam-rrtmgp grid=echam_t63_l47_hybrid
+docker run --rm --gpus all jcm physics=echam grid=echam_t63_l47_hybrid
 ```
 
 Mount `/app/outputs` to persist Hydra output directories:
 
 ```bash
 docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
-    physics=echam-rrtmgp grid=echam_t63_l47_hybrid run.total_time=30
+    physics=echam grid=echam_t63_l47_hybrid run.total_time=30
 ```
 
 Kubernetes examples for the NRP Nautilus cluster are in

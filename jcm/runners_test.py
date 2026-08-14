@@ -158,10 +158,12 @@ class TestBuilders(unittest.TestCase):
         )
 
     def test_build_physics_swap_radiation_via_preset(self):
-        # The echam-rrtmgp preset replaces grey_two_stream_radiation
-        # with rrtmgp_radiation in the same logical slot.
+        # The echam-rrtmgp-2m preset composes rrtmgp_radiation in the
+        # same logical slot as the base echam preset (the standalone
+        # echam-rrtmgp preset was removed once physics=echam became
+        # identical to it).
         cfg = _compose([
-            "physics=echam-rrtmgp",
+            "physics=echam-rrtmgp-2m",
             "grid=echam_t42_l8_sigma",
         ])
         physics = build_physics(cfg)

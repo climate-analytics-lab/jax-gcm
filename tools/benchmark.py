@@ -230,7 +230,7 @@ def _pyses_preset(levels: int) -> list[str]:
 
 
 PRESETS: dict[str, list[str]] = {
-    "t63-echam-rrtmgp": ["physics=echam-rrtmgp", *_T63_COMMON],
+    "t63-echam-rrtmgp": ["physics=echam", *_T63_COMMON],
     "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
     "t63-echam-jam": ["physics=echam-jam", *_T63_COMMON],
     "t63-echam-jam-aerocom": ["physics=echam-jam-aerocom", *_T63_COMMON],
