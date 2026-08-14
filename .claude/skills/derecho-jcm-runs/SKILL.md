@@ -37,7 +37,7 @@ Common flags (see `python scripts/mkjob.py --help` for all):
 | `--hours` | 6 | walltime |
 | `--grid` | `echam_t63_l47_hybrid` | any `jcm/config/grid/*.yaml` stem |
 | `--dt` | 15 | minutes |
-| `--advection` | `semi_lagrangian` | needs the SL dinosaur (see §3) |
+| `--off-centering` | `0.2` | SL off-centering; transport is always semi-Lagrangian |
 | `--physics` | `echam-jam` | `echam-rrtmgp-2m` for no aerosol |
 | `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
 | `--aquaplanet` | off | skips terrain/forcing files |
@@ -83,9 +83,10 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93   # 0.85 when ngpus>1 — 0.93 starve
 Overridable site paths: `JCM_REPO`, `JCM_VENV`, `JCM_DINOSAUR`, `JAM_INPUTS`,
 `JCM_EMISSIONS`, `PBS_ACCOUNT`, `SCRATCH`.
 
-`advection=semi_lagrangian` requires a dinosaur carrying PR #135 (`JCM_DINOSAUR`,
-`~/dinosaur-sl` by default). Without it the dycore raises a clear error; use
-Eulerian plus `diffusion.tracer_positivity=true` instead.
+Transport is always semi-Lagrangian (the Eulerian path was removed) and
+requires a dinosaur carrying PR #135 (`JCM_DINOSAUR`, `~/dinosaur-sl` by
+default). Without it the dycore raises a clear install-instruction error;
+there is no fallback.
 
 ## 4. Input data
 

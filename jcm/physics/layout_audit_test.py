@@ -132,7 +132,8 @@ INERT_IN_HARNESS = frozenset({
 #: below fails if a term is in neither set.
 NOT_AUDITED = frozenset({
     "AnthropogenicEmissions", "AqueousSulfur", "ArgActivation",
-    "CloudBorneExchange", "CloudsatCosp", "ConvectiveTracerTransport",
+    "CloudBorneCarryStore", "CloudBorneExchange", "CloudsatCosp",
+    "ConvectiveTracerTransport",
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
     "EchamBoundaryConditions", "EchamSurface", "GreyTwoStreamRadiation",
     "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",

@@ -967,10 +967,22 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
+        # Semi-Lagrangian transport (the only transport jcm has) splits the
+        # tracer representations, so equal shapes are NOT the invariant:
+        # ``specific_humidity`` stays MODAL because it participates in the
+        # implicit q<->Tv coupling, while every declared extra tracer is
+        # carried NODAL so it never round-trips through the spectral basis
+        # (that round-trip is what rang sharp emission sources negative and
+        # NaN'd the aerosol microphysics, #521). Pin both sides.
+        coords = model.dycore.coords
+        nodal = tuple(coords.horizontal.nodal_shape)
+        modal = tuple(coords.horizontal.modal_shape)
+        nlev = coords.vertical.layers
+        for name in ("qc", "qnc"):
+            with self.subTest(tracer=name):
+                self.assertEqual(state.tracers[name].shape, (nlev,) + nodal)
         self.assertEqual(
-            state.tracers["qc"].shape,
-            state.tracers["specific_humidity"].shape,
-        )
+            state.tracers["specific_humidity"].shape, (nlev,) + modal)
 
 
 if __name__ == "__main__":
