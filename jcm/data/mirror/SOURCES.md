@@ -34,3 +34,12 @@ read `tosbcs`/`siconcbcs` from the PCMDI-AMIP-1-1-10 tree above
 chunks (1850–2022), and CR-CMIP-1-0-0 global-annual-mean GHGs:
 `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/CR/CR-CMIP-1-0-0/atmos/yr/
 {co2,ch4,n2o}/gm/v20250228/` (1750–2022, ppm/ppb).
+
+Yearly transient ERA5 bundles (`--stage era5-transient`, issue #629)
+read the ERA5 6-hourly surface analyses
+`/glade/campaign/collections/rda/data/d633000/e5.oper.an.sfc` (`sstk`,
+`ci`; 1940–present, also the land-field fallback for years outside the
+monthly-mean product), the d633001 monthly means above (1979–2022), and
+the CR-CMIP GHGs (trend-extrapolated past 2022, stamped in file attrs).
+ERA5 is Copernicus-licensed; derived redistributions carry attribution
+in the file attributes.

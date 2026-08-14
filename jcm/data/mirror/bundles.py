@@ -83,6 +83,26 @@ def _to_lonlat(da2d: xr.DataArray) -> tuple:
     return dims, da2d.transpose(*dims).values
 
 
+def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
+    """ERA5 land fields -> jcm ``stl``/``soilw_am``/``snowc`` (module
+    docstring formulas). The single translation point for climatological
+    and transient builders, so the products cannot drift apart.
+
+    ``permanent_snow`` (bool, no time axis) marks cells whose snow never
+    melts (ice sheets): their high albedo lives in ``alb`` and blending
+    toward fresh-snow albedo would darken them, so ``snowc`` is zeroed
+    there. Compute it from a fixed multi-year climatology — a per-year
+    minimum flickers with snowy winters and would make ice sheets blink
+    in and out of a transient product (#629).
+    """
+    veg = (era5.cvh + 0.8 * era5.cvl).clip(0.0, 1.0)
+    soilw = ((era5.swvl1 + veg * 3.0 * (era5.swvl2 - swwil).clip(min=0.0))
+             / (swcap + 3.0 * (swcap - swwil))).clip(0.0, 1.0)
+    snowc = (era5.sd * 1000.0 / sd2sc).clip(0.0, 1.0).where(
+        ~permanent_snow, 0.0)
+    return {"stl": era5.stl1, "soilw_am": soilw, "snowc": snowc}
+
+
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
@@ -163,24 +183,16 @@ def build_forcing(era5_path: str, era: str, lats, lons,
     icec_c = _monthly_clim(sic, era) / 100.0
     icec_da = icec_c.fillna(0.0)
 
-    # SPEEDY soil availability (jcm.data.bc.compile formula): ERA5 layer
-    # depths (7, 21 cm) match the 1:3 weighting; veg gates the deep layer.
-    veg = (era5.cvh + 0.8 * era5.cvl).clip(0.0, 1.0)
-    soilw = ((era5.swvl1 + veg * 3.0 * (era5.swvl2 - swwil).clip(min=0.0))
-             / (swcap + 3.0 * (swcap - swwil))).clip(0.0, 1.0)
-
-    # snow-cover fraction; permanent snow (ice sheets) is excluded — its
-    # albedo lives in alb, and ECHAM's SN climatology does the same
-    sd_mm = era5.sd * 1000.0
-    snowc = (sd_mm / sd2sc).clip(0.0, 1.0).where(
-        era5.sd.min("time") < 0.1, 0.0)
+    # For a climatology the ice-sheet mask comes from its own window (a
+    # fixed multi-year period, as translate_land requires).
+    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
 
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": interp_to(era5.stl1, lats, lons),
-        "soilw_am": interp_to(soilw, lats, lons).clip(0.0, 1.0),
-        "snowc": interp_to(snowc, lats, lons).clip(0.0, 1.0),
+        "stl": interp_to(land["stl"], lats, lons),
+        "soilw_am": interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0),
+        "snowc": interp_to(land["snowc"], lats, lons).clip(0.0, 1.0),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
