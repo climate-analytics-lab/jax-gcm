@@ -1,0 +1,36 @@
+# Transient all-ERA5 forcing from the yearly mirror bundles (issue #629).
+#
+# Every surface field (SST, sea ice, land temperature, soil moisture,
+# snow cover) comes from ERA5 on one land-sea mask — use this for
+# internally consistent transient runs (e.g. calibration against real
+# land temperature) and for years past PCMDI-AMIP's 2022 endpoint. Use
+# ``forcing=amip`` instead when a protocol mandates PCMDI SSTs (AeroCom,
+# CMIP-facing AMIP): the two SST constructions differ (~0.16 K RMS) and
+# must not be mixed within one experiment. Set the year range and start
+# date together, e.g.:
+#
+#   forcing=era5 forcing.years=[2000,2004] run.start_date=2000-01-01 \
+#       grid=echam_t63_l47_hybrid
+#
+# The grid token in the paths below follows the horizontal resolution
+# (t63 or t106) and, for ozone, the vertical (l47/l95) — override the
+# defaults for T106 or L95 runs.
+defaults:
+  - from_file
+
+file: hf://bundles/t63/forcing_era5/{year}.nc
+# The files hold month-start boundary values (AIMIP centred-window
+# construction, stamped in the file attrs) — by_date_interp's linear
+# interpolation between them is the intended reconstruction.
+align: by_date_interp
+years: ???
+available_years: [1979, 2024]
+ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc
+# The FZJ ozone product ends in 2022, before this preset's forcing
+# coverage: its own expansion window stops there so runs near or past
+# the boundary do not request files that were never built. For 2023-24
+# run dates the time lookup clamps to the last (Dec 2022) sample —
+# reasonable for slowly-evolving ozone; override ozone_file with a
+# non-pattern path (e.g. hf://bundles/t63_l47/ozone_pd.nc) to use a
+# climatology instead.
+ozone_available_years: [1850, 2022]

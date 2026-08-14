@@ -28,8 +28,8 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
-                                     _EMIS_SPECIES, _to_lonlat, sd2sc, swcap,
-                                     swwil)
+                                     _EMIS_SPECIES, _to_lonlat,
+                                     translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -109,15 +109,11 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
                                   "lon": tos.lon})
     icec_da = (sic / 100.0).fillna(0.0)
 
-    # Land fields: identical formulas to the climatology builder
-    # (jcm.data.mirror.bundles.build_forcing), re-stamped on this year's
-    # time axis (months align 1:1).
-    veg = (era5.cvh + 0.8 * era5.cvl).clip(0.0, 1.0)
-    soilw = ((era5.swvl1 + veg * 3.0 * (era5.swvl2 - swwil).clip(min=0.0))
-             / (swcap + 3.0 * (swcap - swwil))).clip(0.0, 1.0)
-    sd_mm = era5.sd * 1000.0
-    snowc = (sd_mm / sd2sc).clip(0.0, 1.0).where(
-        era5.sd.min("time") < 0.1, 0.0)
+    # Land fields: the shared translation (bundles.translate_land),
+    # re-stamped on this year's time axis (months align 1:1). The input
+    # is the climatology, so its own window doubles as the fixed
+    # ice-sheet-mask window.
+    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
 
     def _on_year_axis(da):
         return da.assign_coords(time=times)
@@ -125,11 +121,11 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": _on_year_axis(interp_to(era5.stl1, lats, lons)),
+        "stl": _on_year_axis(interp_to(land["stl"], lats, lons)),
         "soilw_am": _on_year_axis(
-            interp_to(soilw, lats, lons).clip(0.0, 1.0)),
+            interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0)),
         "snowc": _on_year_axis(
-            interp_to(snowc, lats, lons).clip(0.0, 1.0)),
+            interp_to(land["snowc"], lats, lons).clip(0.0, 1.0)),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})

@@ -10,7 +10,8 @@ Stages: ``sso``, ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/dust/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
-``registry``, ``upload``
+``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
+issue #629), ``registry``, ``upload``
 (push to the HF dataset; needs ``hf auth login`` with write access).
 Outputs land in ``$JCM_MIRROR_ROOT`` (default ``$SCRATCH/hf_mirror``):
 Tier A under ``build/``, the HF-shaped tree under ``upload/``.
@@ -253,6 +254,55 @@ def stage_amip() -> None:
             print("amip:", grid, year, flush=True)
 
 
+def stage_era5_transient() -> None:
+    """Yearly all-ERA5 transient bundles (issue #629).
+
+    Per year: Tier A intermediates under ``build/`` — the 6-hourly
+    SST/ice reduction (``era5_sstice/<year>.nc``, the expensive part:
+    ~80 GB streamed per year) and the 13-month land means
+    (``era5_land_transient/<year>.nc``) — then per grid
+    ``bundles/<grid>/forcing_era5/<year>.nc``. Intermediates are
+    written atomically and reused, so a killed job resumes where it
+    stopped. Not part of ``--stage all``; run explicitly, e.g.
+    ``--stage era5-transient --years 1979,2024``. Needs the ``era5``
+    stage climatology in ``build/``.
+    """
+    import xarray as xr
+
+    from jcm.data.mirror.era5_yearly import (build_forcing_year,
+                                             build_land_year,
+                                             build_sstice_year)
+    from jcm.data.regridding import gaussian_latlon
+
+    first, last = _AMIP_YEARS
+    clim = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    tiers = {"era5_sstice": build_sstice_year,
+             "era5_land_transient": build_land_year}
+    for name, builder in tiers.items():
+        (BUILD / name).mkdir(parents=True, exist_ok=True)
+    for year in range(first, last + 1):
+        for name, builder in tiers.items():
+            path = BUILD / name / f"{year}.nc"
+            if path.exists():
+                continue
+            ds = builder(year)
+            enc = {v: {"zlib": True, "complevel": 4} for v in ds.data_vars}
+            tmp = path.with_suffix(".tmp.nc")
+            ds.to_netcdf(tmp, encoding=enc)
+            tmp.rename(path)
+            print("era5-transient:", name, year, flush=True)
+    for grid, nlat in GRIDS.items():
+        lats, lons = gaussian_latlon(nlat)
+        g = UPLOAD / "bundles" / grid / "forcing_era5"
+        g.mkdir(parents=True, exist_ok=True)
+        for year in range(first, last + 1):
+            build_forcing_year(
+                str(clim), str(BUILD / "era5_sstice" / f"{year}.nc"),
+                year, lats, lons, str(g / f"{year}.nc"),
+                land=xr.open_dataset(
+                    BUILD / "era5_land_transient" / f"{year}.nc"))
+
+
 def stage_registry() -> None:
     from jcm.data.mirror.registry import write_registry
 
@@ -295,6 +345,12 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
              "CMIP7/CMIP/CR/CR-CMIP-1-0-0",
              str(BUILD / "ceds_anthro.zarr"),
              str(BUILD / "era5_land_climo_2005-2014_0p25.nc")),
+    "era5-transient": (
+        "/glade/campaign/collections/rda/data/d633000/e5.oper.an.sfc",
+        "/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc",
+        "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
+        "CMIP7/CMIP/CR/CR-CMIP-1-0-0",
+        str(BUILD / "era5_land_climo_2005-2014_0p25.nc")),
     "registry": (str(UPLOAD),),
 }
 
@@ -349,10 +405,11 @@ def stage_upload() -> None:
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
           "bundles": stage_bundles, "amip": stage_amip,
+          "era5-transient": stage_era5_transient,
           "registry": stage_registry, "upload": stage_upload}
 
 #: Heavy opt-in stages excluded from ``--stage all``.
-_NOT_IN_ALL = ("amip", "upload")
+_NOT_IN_ALL = ("amip", "era5-transient", "upload")
 
 
 def main() -> None:

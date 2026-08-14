@@ -43,6 +43,25 @@ python -m jcm.main forcing=amip forcing.years=[1979,1983] \
 Built with `python -m jcm.data.mirror.build_mirror --stage amip
 --years 1950,2022` (source coverage 1870–2022; excluded from
 `--stage all`).
+
+**Yearly transient ERA5 bundles** (issue #629): `forcing_era5/<year>.nc`
+prescribes *every* surface field — SST, sea ice, land temperature, soil
+moisture, snow cover — from ERA5 on one land-sea mask, so land carries
+real interannual variability and trend instead of the repeated
+climatology in `forcing_amip`. Use `forcing=era5` for internally
+consistent transient runs (land-aware calibration, AIMIP-style
+integrations) and for years past PCMDI's 2022 endpoint; keep
+`forcing=amip` where a protocol mandates PCMDI SSTs. SST/ice are
+month-start boundary values built from 6-hourly analyses with the AIMIP
+centred-window construction (which linear interpolation does *not*
+reconstruct into exact monthly means — unlike PCMDI `tosbcs`; the
+construction is stamped in the file attrs). Land monthly means are
+blended `0.5·(prev+cur)` onto the same month-start axis; the `snowc`
+ice-sheet mask and background albedo stay climatological so ice sheets
+cannot flicker year-to-year. Built with `--stage era5-transient
+--years 1979,2024` (buildable from 1941; land monthly means are reduced
+from 6-hourly analyses outside the 1979–2022 pre-computed range; GHGs
+are trend-extrapolated past 2022, stamped in the attrs).
 Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
 `terrain.nc` only — the pySES path interpolates the Gaussian forcing
 files and uses the native CESM CEDS emissions product). The ne30pg3
