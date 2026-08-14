@@ -1400,14 +1400,25 @@ class RRTMGPRadiation(PhysicsTerm):
                 rad_call = model_step // spc
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
                 prev_rad = diagnostics["radiation"]
-                held_effect = tuple(
-                    getattr(prev_rad, k) - getattr(prev_rad, f"{k}_noa")
-                    for k in _KEYS
-                )
+                # Hold the effect as a FRACTION of the all-sky flux, not as an
+                # absolute W/m2. The absolute aerosol effect is only slowly
+                # varying in the LW; in the SW it tracks the solar cycle, and
+                # holding it across the dark side subtracts a daytime effect
+                # from a zero flux — fabricating an aerosol-free flux out of
+                # darkness. Measured: absolute-hold at N=4 gave an exact LW
+                # match but a -0.077 W/m2 (8.8 %) SW error over a year.
+                # A fraction is scale-free, so night reconstructs to zero.
+                def _frac(k):
+                    allsky = getattr(prev_rad, k)
+                    noa = getattr(prev_rad, f"{k}_noa")
+                    return jnp.where(
+                        jnp.abs(allsky) > 1e-6, (allsky - noa) / allsky, 0.0)
+
+                held_frac = tuple(_frac(k) for k in _KEYS)
                 noa_vals = jax.lax.cond(
                     jnp.mod(rad_call, self._aerosol_free_interval) == 0,
                     _solve_aerosol_free,
-                    lambda: tuple(f - d for f, d in zip(fresh, held_effect)),
+                    lambda: tuple(f * (1.0 - r) for f, r in zip(fresh, held_frac)),
                 )
             else:
                 noa_vals = _solve_aerosol_free()
