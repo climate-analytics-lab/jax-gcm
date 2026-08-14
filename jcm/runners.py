@@ -524,7 +524,25 @@ def _expand_years(file_spec, years, available=None):
     if available is not None:
         lo, hi = int(available[0]), int(available[-1])
         first, last = max(first - 1, lo), min(last + 1, hi)
+        # A requested range entirely outside coverage would invert here
+        # and expand to nothing; clamp to the nearest edge file instead
+        # (the time lookup then clamps to its first/last sample).
+        first, last = min(first, hi), max(last, lo)
     return [file_spec.format(year=y) for y in range(first, last + 1)]
+
+
+def _product_available_years(forcing_cfg, key: str):
+    """Per-product source coverage, falling back to ``available_years``.
+
+    A preset can mix yearly products with different coverages (e.g.
+    ``forcing_era5`` runs to 2024 while the FZJ ozone product ends in
+    2022); a per-product override keeps each pattern's expansion inside
+    the files that actually exist — for run dates beyond it, the time
+    lookup clamps to the last sample.
+    """
+    avail = forcing_cfg.get(key, None)
+    return avail if avail is not None else forcing_cfg.get(
+        "available_years", None)
 
 
 def build_terrain(cfg: DictConfig, coords) -> TerrainData:
@@ -1221,7 +1239,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     ozone_file = _resolve_data_path(_expand_years(
         forcing_cfg.get("ozone_file", None),
         forcing_cfg.get("years", None),
-        forcing_cfg.get("available_years", None)))
+        _product_available_years(forcing_cfg, "ozone_available_years")))
     if isinstance(ozone_file, (list, tuple)):
         ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):

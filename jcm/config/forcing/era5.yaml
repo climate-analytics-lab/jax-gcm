@@ -25,6 +25,12 @@ file: hf://bundles/t63/forcing_era5/{year}.nc
 align: by_date_interp
 years: ???
 available_years: [1979, 2024]
-# FZJ ozone ends in 2022; for later years override with a non-pattern
-# path (ignores ``years``), e.g. ozone_file=hf://bundles/t63_l47/ozone_pd.nc
 ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc
+# The FZJ ozone product ends in 2022, before this preset's forcing
+# coverage: its own expansion window stops there so runs near or past
+# the boundary do not request files that were never built. For 2023-24
+# run dates the time lookup clamps to the last (Dec 2022) sample —
+# reasonable for slowly-evolving ozone; override ozone_file with a
+# non-pattern path (e.g. hf://bundles/t63_l47/ozone_pd.nc) to use a
+# climatology instead.
+ozone_available_years: [1850, 2022]

@@ -1430,6 +1430,47 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         self.assertEqual(list(cfg.forcing.years), [1979, 1980])
         self.assertEqual(cfg.run.start_date, "1979-01-01")
 
+    def test_ozone_coverage_falls_back_and_overrides(self):
+        # Per-product coverage (Codex P1 on #633): the era5 preset's
+        # forcing runs to 2024 but its FZJ ozone product ends in 2022 —
+        # without the override, forcing.years=[2022,2022] would expand
+        # the ozone pattern to a 2023 file that was never built.
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({"available_years": [1979, 2024],
+                                "ozone_available_years": [1850, 2022]})
+        self.assertEqual(
+            runners._expand_years(
+                "/o3/{year}.nc", [2022, 2022],
+                runners._product_available_years(
+                    cfg, "ozone_available_years")),
+            ["/o3/2021.nc", "/o3/2022.nc"])
+        self.assertEqual(
+            runners._expand_years(
+                "/o3/{year}.nc", [2023, 2024],
+                runners._product_available_years(
+                    cfg, "ozone_available_years")),
+            ["/o3/2022.nc"])
+        # A range entirely past coverage clamps to the last edge file
+        # rather than inverting into an empty expansion.
+        self.assertEqual(
+            runners._expand_years("/o3/{year}.nc", [2024, 2024],
+                                  available=[1850, 2022]),
+            ["/o3/2022.nc"])
+        fallback = OmegaConf.create({"available_years": [1979, 2024]})
+        self.assertEqual(
+            runners._product_available_years(
+                fallback, "ozone_available_years"),
+            fallback.available_years)
+
+    def test_era5_preset_composes(self):
+        cfg = _compose(["forcing=era5", "forcing.years=[2023,2024]",
+                        "run.start_date=2023-01-01"])
+        self.assertEqual(cfg.forcing.align, "by_date_interp")
+        self.assertIn("forcing_era5", cfg.forcing.file)
+        self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
+
     def test_start_date_resolves_to_datetime(self):
         from omegaconf import OmegaConf
 

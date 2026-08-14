@@ -23,6 +23,11 @@ file: ???
 # ``by_date_interp``.
 years: null
 available_years: null
+# Per-product coverage override for the ozone pattern, when its yearly
+# product spans a different range than the main file (falls back to
+# ``available_years``). Run dates beyond the expanded files clamp to
+# the last sample.
+ozone_available_years: null
 
 # Time alignment for ``file``: auto (default; climatology span → wrap_year,
 # longer → by_date), or force wrap_year / by_date / by_date_interp.
