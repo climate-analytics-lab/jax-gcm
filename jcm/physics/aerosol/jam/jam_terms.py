@@ -205,12 +205,17 @@ def jam_aerosol_physics(
             diffuses all tracers in vdiff; without this the dycore is the
             sole aerosol transporter). On by default.
         convective_transport: bulk mass-flux transport of the interstitial
-            aerosol and gas tracers through Tiedtke updrafts with
-            compensating subsidence (ECHAM ``cuxtte`` analogue; #602 item
-            2). Cloud-borne mirrors are deliberately excluded — their
-            updraft processing is entangled with convective scavenging
-            and neither reference model transports a stratiform
-            cloud-borne phase convectively. On by default.
+            aerosol and gas tracers through Tiedtke updrafts and
+            downdrafts with compensating subsidence (ECHAM ``cuxtte``
+            analogue; #602 item 2, #622), including CAM
+            ``aero_convproc``-style in-plume scavenging of the soluble
+            (activatable-mode) tracers (#621) — which moves the
+            convective in-cloud wet-removal pathway out of
+            ``WetScavenging`` (``in_plume_convective``). Cloud-borne
+            mirrors are deliberately excluded — their updraft processing
+            is entangled with convective scavenging and neither reference
+            model transports a stratiform cloud-borne phase convectively.
+            On by default.
 
     Returns:
         The ordered term list: natural emissions, prescribed oxidants and
