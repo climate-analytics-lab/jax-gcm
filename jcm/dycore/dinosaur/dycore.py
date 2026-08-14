@@ -251,8 +251,10 @@ class DinosaurDycore(DynamicalCore):
             ),
             level_orders=self.diffusion.level_orders_temp,
         )
+        # NOTE: global-mean surface-pressure conservation is applied explicitly
+        # in ``step`` (against the post-physics state), not as a filter here, so
+        # a physics mass source/sink is retained. See ``step``.
         return [
-            self._conserve_global_mean_ps,
             diffuse_div,
             diffuse_vor_q,
             diffuse_temp,
@@ -350,6 +352,13 @@ class DinosaurDycore(DynamicalCore):
         state_next = state_after_dyn
         for f in self._filters:
             state_next = f(state, state_next)
+        # Conserve the global-mean surface pressure relative to the POST-physics
+        # state, not the pre-physics state. This removes spectral-dynamics mass
+        # drift while RETAINING a physics mass source/sink (e.g. Mars CO2
+        # condensation) carried in ``physics_tendency.log_surface_pressure``.
+        # For dry-mass-conserving physics the two references are identical, so
+        # behaviour is unchanged.
+        state_next = self._conserve_global_mean_ps(state_after_physics, state_next)
         return state_next
 
     def sim_time(self, state: State) -> jnp.ndarray:

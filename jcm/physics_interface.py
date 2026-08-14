@@ -132,42 +132,55 @@ class PhysicsTendency:
     temperature: jnp.ndarray
     specific_humidity: jnp.ndarray
     tracers: Dict[str, jnp.ndarray]  # Tendencies for additional tracers
+    # Tendency of log(surface pressure), 1/s, on the horizontal grid (ix, il).
+    # Non-zero only for physics that change the atmospheric column mass, e.g.
+    # CO2 condensation/sublimation on Mars. Defaults to 0.0 so dry-mass-
+    # conserving physics is unchanged. Appended last for backward compatibility.
+    log_surface_pressure: jnp.ndarray
 
-    def __init__(self, u_wind, v_wind, temperature, specific_humidity, tracers=None):
+    def __init__(self, u_wind, v_wind, temperature, specific_humidity, tracers=None,
+                 log_surface_pressure=0.0):
         """Initialize PhysicsTendency with tendency fields."""
         self.u_wind = u_wind
         self.v_wind = v_wind
         self.temperature = temperature
         self.specific_humidity = specific_humidity
         self.tracers = tracers if tracers is not None else {}
+        self.log_surface_pressure = log_surface_pressure
 
     @classmethod
-    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, tracers=None):
+    def zeros(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None,
+              tracers=None, log_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.zeros(shape),
             v_wind if v_wind is not None else jnp.zeros(shape),
             temperature if temperature is not None else jnp.zeros(shape),
             specific_humidity if specific_humidity is not None else jnp.zeros(shape),
-            tracers if tracers is not None else {}
+            tracers if tracers is not None else {},
+            log_surface_pressure if log_surface_pressure is not None else 0.0,
         )
 
     @classmethod
-    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, tracers=None):
+    def ones(cls, shape, u_wind=None, v_wind=None, temperature=None, specific_humidity=None,
+             tracers=None, log_surface_pressure=None):
         return cls(
             u_wind if u_wind is not None else jnp.ones(shape),
             v_wind if v_wind is not None else jnp.ones(shape),
             temperature if temperature is not None else jnp.ones(shape),
             specific_humidity if specific_humidity is not None else jnp.ones(shape),
-            tracers if tracers is not None else {}
+            tracers if tracers is not None else {},
+            log_surface_pressure if log_surface_pressure is not None else 0.0,
         )
 
-    def copy(self, u_wind=None, v_wind=None, temperature=None, specific_humidity=None, tracers=None):
+    def copy(self, u_wind=None, v_wind=None, temperature=None, specific_humidity=None,
+             tracers=None, log_surface_pressure=None):
         return PhysicsTendency(
             u_wind if u_wind is not None else self.u_wind,
             v_wind if v_wind is not None else self.v_wind,
             temperature if temperature is not None else self.temperature,
             specific_humidity if specific_humidity is not None else self.specific_humidity,
             tracers if tracers is not None else self.tracers,
+            log_surface_pressure if log_surface_pressure is not None else self.log_surface_pressure,
         )
 
 

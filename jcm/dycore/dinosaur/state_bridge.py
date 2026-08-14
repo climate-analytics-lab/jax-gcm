@@ -214,7 +214,24 @@ def physics_tendency_to_dynamics_tendency(
     # n_lon_modes)`` (a leading vertical axis of size 1 for broadcasting). The
     # op-split path adds the tendency directly to the state via tree_math,
     # which requires *exact* shape matches — keep the leading axis.
-    log_sp_tend_modal = jnp.zeros_like(t_tend_modal[:1, ...])
+    #
+    # ``physics_tendency.log_surface_pressure`` is a scalar global-mean
+    # d(log P_s)/dt in 1/s. It is non-zero only for physics that change the
+    # atmospheric column mass (e.g. Mars CO2 condensation/sublimation) and 0.0
+    # for dry-mass-conserving physics. A spatially uniform log-pressure tendency
+    # transforms to the (0,0) spectral mode only, i.e. it moves the global-mean
+    # surface pressure. The dycore's ``_conserve_global_mean_ps`` filter is
+    # patched to pin that mode to the *post-physics* state, so this source is
+    # retained while spectral-dynamics drift is still removed.
+    # Multiply by the unit (tracer * Unit is supported; tracer / Unit is not).
+    dlogsp_nd = dynamics.physics_specs.nondimensionalize(
+        physics_tendency.log_surface_pressure * (units.second ** -1)
+    )
+    uniform_nodal = dlogsp_nd * jnp.ones(
+        (1,) + tuple(dynamics.coords.horizontal.nodal_shape),
+        dtype=t_tend_modal.dtype,
+    )
+    log_sp_tend_modal = dynamics.coords.horizontal.to_modal(uniform_nodal)
 
     tracers_tend_modal = {'specific_humidity': q_tend_modal}
     for tracer_name, tracer_tend in physics_tendency.tracers.items():
