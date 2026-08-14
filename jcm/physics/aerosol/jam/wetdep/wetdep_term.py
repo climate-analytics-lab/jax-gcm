@@ -27,7 +27,11 @@ treatment):
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
   ``precip_formation`` (ECHAM ``pdmfup``) and ``qc_conv``/``qi_conv``;
-  activatable modes only.
+  activatable modes only. With ``in_plume_convective=True`` this
+  environment-profile pathway is retired: the composed
+  ``ConvectiveTracerTransport`` scavenges inside the updraft instead
+  (jax-gcm#621, CAM ``aero_convproc``-style) and this term only folds
+  the transport term's surface fluxes into the ``wet_*`` ledger.
 * **Re-evaporation re-injection** — aerosol scavenged by the stratiform
   pathways is carried in the falling precip; where that precip evaporates
   or sublimates, the same fraction of the carried aerosol returns to the
@@ -223,9 +227,20 @@ class WetScavenging(PhysicsTerm):
         params: WetDepParameters | None = None,
         *,
         spec: ModalAerosolSpec | None = None,
+        in_plume_convective: bool = False,
     ):
-        """Hold params and the population."""
+        """Hold params and the population.
+
+        ``in_plume_convective``: the composed ``ConvectiveTracerTransport``
+        scavenges soluble aerosol inside the updraft (jax-gcm#621), so
+        this term drops its own environment-profile convective in-cloud
+        pathway (``conv_in_cloud_rate``) to avoid double counting —
+        keeping convective below-cloud washout, which is a distinct
+        (impaction) pathway — and folds the transport term's published
+        surface fluxes into the AeroCom ``wet_*`` ledger.
+        """
         self.params = nnx.Param(params or WetDepParameters.default())
+        self._in_plume_convective = in_plume_convective
         self._spec = spec or MAM4_SPEC
         if carry_mode(self._spec):
             # In carry mode the store term must run upstream each step
@@ -292,10 +307,15 @@ class WetScavenging(PhysicsTerm):
         else:
             conv_precip = conv.precip_conv
             conv_condensate = conv.qc_conv + conv.qi_conv
-            rate_conv_incloud = conv_in_cloud_rate(
-                conv.precip_formation, conv_condensate,
-                air_density, dz, params,
-            )
+            if self._in_plume_convective:
+                # Retired here: the transport term removes inside the
+                # ascent scan (see __init__ docstring).
+                rate_conv_incloud = jnp.zeros_like(state.temperature)
+            else:
+                rate_conv_incloud = conv_in_cloud_rate(
+                    conv.precip_formation, conv_condensate,
+                    air_density, dz, params,
+                )
             # Convective washout acts only at/below the convective cloud
             # top — rain cannot collect aerosol above where it forms. The
             # top is the lowest-pressure level with in-updraft condensate
@@ -501,9 +521,22 @@ class WetScavenging(PhysicsTerm):
         # (scavenging minus re-injection), column-integrated, accumulated
         # onto the per-step-reset keys.
         from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
-            accumulate_deposition_fluxes)
+            DEPOSITED_SPECIES, _species_of, accumulate_deposition_fluxes)
         diagnostics = accumulate_deposition_fluxes(
             diagnostics, flux_tends,
             diagnostics["air_density"], diagnostics["layer_thickness"],
             kind="wet")
+        # In-plume convective scavenging (jax-gcm#621) removes mass in the
+        # transport term, whose tendencies never pass through this
+        # accumulator — fold its published surface fluxes in here so the
+        # ``wet_*`` ledger stays the complete wet sink. The keys all exist
+        # after the accumulate call above.
+        conv_scav = diagnostics.get("_conv_scav_flux")
+        if self._in_plume_convective and conv_scav:
+            diagnostics = dict(diagnostics)
+            for nm, flx in conv_scav.items():
+                species = _species_of(nm)
+                if species in DEPOSITED_SPECIES:
+                    key = f"wet_{species}"
+                    diagnostics[key] = diagnostics[key] + flx
         return tendency, diagnostics

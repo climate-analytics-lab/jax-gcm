@@ -70,6 +70,7 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
 )
+from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.convection.tracer_transport import (
     ConvectiveTracerTransport,
     ConvTransportParameters,
@@ -272,9 +273,24 @@ def jam_aerosol_physics(
         interstitial_names = tuple(
             n for n in transport_names if not n.startswith(("mc_", "nc_"))
         )
+        # In-plume scavenging weights (jax-gcm#621): soluble = the
+        # activatable modes' interstitial tracers; insoluble aerosol and
+        # the gas precursors ride the plume unscavenged. WetScavenging
+        # retires its own environment-profile convective pathway in turn
+        # (``in_plume_convective`` below).
+        soluble = set()
+        for mode in spec.modes:
+            if mode.can_activate:
+                soluble.add(number_name(mode.short))
+                soluble.update(
+                    mass_name(sp, mode.short) for sp in mode.species
+                )
         transport_terms.append(
             ConvectiveTracerTransport(
                 interstitial_names, params=conv_transport,
+                scav_weights=tuple(
+                    1.0 if n in soluble else 0.0 for n in interstitial_names
+                ),
             )
         )
     # Carry-stored cloud-borne phase (#602 item 3, the measured decision
@@ -320,7 +336,8 @@ def jam_aerosol_physics(
         # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
         # post-cloud block (needs current clouds), just before wet scavenging.
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
-        WetScavenging(params=wetdep, spec=spec),
+        WetScavenging(params=wetdep, spec=spec,
+                      in_plume_convective=convective_transport),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms

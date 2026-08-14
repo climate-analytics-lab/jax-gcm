@@ -40,6 +40,7 @@ from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.downdraft import (
     calculate_downdraft,
+    downdraft_entrainment_ledger,
 )
 
 
@@ -230,6 +231,51 @@ class TestDowndraftTemperature(unittest.TestCase):
             f"td(surface)={td[last]:.2f} should exceed td(LFS)={td[first]:.2f} "
             "via adiabatic compression."
         )
+
+
+class TestDowndraftEntrainmentLedger(unittest.TestCase):
+    """The #622 export: cuddraf's zentr = entrdd·|mfd_in|·dz per layer."""
+
+    def test_bulk_taper_and_lfs_masking(self):
+        nlev, entrdd, dz_val = 10, 2.0e-4, 400.0
+        lev = jnp.arange(nlev)[:, None]
+        # LFS at 4, bulk to nlev-3, cuddraf taper below.
+        mfd = jnp.where((lev >= 4) & (lev < nlev - 2), -0.02, 0.0)
+        mfd = mfd.at[nlev - 2].set(-0.01)
+        dz = jnp.full((nlev, 1), dz_val)
+        ledger = np.asarray(downdraft_entrainment_ledger(mfd, dz, entrdd))
+        # Zero at and above the LFS (no inflow from above yet).
+        np.testing.assert_array_equal(ledger[:5, 0], 0.0)
+        # Bulk: entrdd·|mfd_in|·dz.
+        np.testing.assert_allclose(
+            ledger[5:nlev - 2, 0], entrdd * 0.02 * dz_val, rtol=1e-6,
+        )
+        # Surface taper: entrainment shut off (Fortran itopde).
+        np.testing.assert_array_equal(ledger[nlev - 2:, 0], 0.0)
+
+    def test_dead_downdraft_has_zero_ledger(self):
+        # Buoyancy shut-off (mfd == 0 with inflow above): no entrainment,
+        # so plume continuity dumps the arriving flux as detrainment.
+        lev = jnp.arange(10)[:, None]
+        mfd = jnp.where((lev >= 3) & (lev <= 5), -0.02, 0.0)
+        ledger = np.asarray(downdraft_entrainment_ledger(
+            mfd, jnp.full((10, 1), 400.0), 2.0e-4,
+        ))
+        self.assertEqual(float(ledger[6, 0]), 0.0)
+
+    def test_column_and_block_shapes_agree(self):
+        # Broadcasting-native: a (nlev,) column and a (nlev, ncols) block
+        # must agree per column.
+        lev = jnp.arange(10)
+        mfd_col = jnp.where((lev >= 4) & (lev < 8), -0.02, 0.0)
+        dz_col = jnp.full(10, 400.0)
+        col = np.asarray(downdraft_entrainment_ledger(mfd_col, dz_col, 2e-4))
+        block = np.asarray(downdraft_entrainment_ledger(
+            mfd_col[:, None] * jnp.ones((1, 3)),
+            dz_col[:, None] * jnp.ones((1, 3)), 2e-4,
+        ))
+        for c in range(3):
+            np.testing.assert_allclose(block[:, c], col)
 
 
 if __name__ == "__main__":
