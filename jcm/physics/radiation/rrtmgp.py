@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 import warnings
 
+import logging
+
 import jax
 import jax.numpy as jnp
 
@@ -62,6 +64,9 @@ _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 # Module-level RRTMGP instance (created once at import time)
 # ---------------------------------------------------------------------------
 _GLOBAL_RRTMGP_INSTANCE = None
+
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_rrtmgp():
@@ -1037,6 +1042,27 @@ class RRTMGPRadiation(PhysicsTerm):
         # 0.04-0.14 W/m2 for a 2x subsample — the same size as the error this
         # is meant to avoid). Cost is (1 + 1/N) solves instead of 2.
         self._aerosol_free_interval = max(1, int(aerosol_free_interval))
+        if aerosol_free_diagnostics:
+            # State the chosen point on the cost/fidelity dial once, at
+            # construction. Which *noa scheme is running changes both runtime
+            # and whether the simulation is perturbed, and neither is obvious
+            # from the output files afterwards.
+            if aerosol_free_alternate:
+                logger.warning(
+                    "*noa via ALTERNATE solve: the model feels aerosol-free "
+                    "heating every other radiation step, so this run's "
+                    "physics is perturbed and its ERFari cannot be compared "
+                    "against a reference without an ensemble. A larger "
+                    "aerosol_free_interval costs almost as little without "
+                    "touching the physics (jax-gcm#630).")
+            elif self._aerosol_free_interval > 1:
+                logger.info(
+                    "*noa via PAIRED companion every %d radiation steps "
+                    "(physics bit-identical; ERFari should match "
+                    "aerosol_free_interval=1)", self._aerosol_free_interval)
+            else:
+                logger.info("*noa via PAIRED companion every radiation step "
+                            "(reference; ~+55% runtime)")
         if aerosol_free_interval > 1 and aerosol_free_alternate:
             raise ValueError(
                 "aerosol_free_interval>1 and aerosol_free_alternate are "

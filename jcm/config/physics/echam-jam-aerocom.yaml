@@ -52,21 +52,46 @@ aerocom_overlap: maximum-random
 # Per-species / per-mode / spectral aerosol optics (jax-gcm#584). Off here;
 # see echam-jam-aerocom-optics.yaml.
 aerocom_optics: false
-# Second aerosol-free radiation solve for the *noa TOA fluxes (#583).
-# Doubles radiation cost on compute steps — the AeroCom experiments ask
-# for it (ERFari), so it is on here; turn off for non-submission runs.
+# Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
+#
+# TWO knobs, deliberately not one. ``aerosol_free_interval`` is the
+# cost/fidelity dial; ``aerosol_free_alternate`` is a different scheme that
+# happens to be cheap, and folding it into the dial would make the dial
+# non-monotonic in cost AND silently change whether the physics is
+# perturbed. Measured at T63L47:
+#
+#   interval=1   47.02 s/sim-day  +55 %   companion every radiation step
+#   interval=4   32.47 s/sim-day  + 7 %
+#   alternate    30.30 s/sim-day  + 0 %   <- but perturbs the model
+#   (no *noa)    30.32 s/sim-day    —
+#
+# so "N=1, 2, 4" with N=2 meaning alternate would run 47 -> 30 -> 32: the
+# dial gets cheaper then dearer, and only the middle setting changes the
+# simulation. Keep them separate.
 aerosol_free_radiation: true
-# Produce those *noa fluxes by ALTERNATING the single radiation solve
-# between aerosol-on and aerosol-off, instead of adding a second solve.
-# Removes the extra cost entirely (measured +43 % -> +0 % at T63L47), but
-# it is NOT free: the model then feels aerosol-free heating on every other
-# radiation step, so the aerosol direct effect enters the energy budget
-# with a 50 % duty cycle, and rsut/rsutnoa are sampled one radiation
-# interval apart rather than simultaneously. Off until the 1-year nudged
-# comparison quantifies both errors (#583).
-aerosol_free_alternate: false
-# Middle ground: keep the two solves PAIRED (same state, so ERFari is
-# unbiased by construction) but only do them every Nth radiation step,
-# holding the aerosol effect in between. Cost (1 + 1/N) solves — ~+14% at
-# N=4 against +55% for a companion every step. 1 = companion every step.
+
+# THE dial. N = radiation steps between aerosol-free samples, always PAIRED
+# with the all-sky solve at that step:
+#
+#   N=1  companion every radiation step — the reference, exact ERFari
+#   N=4  companion every 4th step       — measured +7 % instead of +55 %
+#   N=8, 16, ...                        — cheaper still, ERFari refreshed
+#                                         less often
+#
+# Physics is bit-identical at every N (the model always sees aerosol), so
+# ERFari has a *predicted* value — it should match N=1 — and any deviation
+# is a bug rather than something needing an ensemble to bound. Between
+# companions the aerosol effect is held as a FRACTION of the all-sky flux;
+# holding it as an absolute W/m2 breaks the SW at night (see #630).
 aerosol_free_interval: 1
+
+# NOT RECOMMENDED. Steals every other radiation call for the aerosol-free
+# solve instead of adding one, so the *noa fluxes are free — but the model
+# then feels aerosol-free heating half the time. That perturbs the
+# simulation, so its ERFari cannot be compared against a reference without
+# an ensemble: a full nudged year differed by 1.5 % while a zero-aerosol
+# control put the scheme's intrinsic artefact at only ~0.001 W/m2, i.e.
+# nearly all of the measured difference was chaotic divergence. Prefer a
+# larger ``aerosol_free_interval``, which approaches the same cost without
+# touching the physics (#630).
+aerosol_free_alternate: false
