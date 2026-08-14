@@ -62,6 +62,16 @@ def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
 
     """
 
+    # Variables without a full lat/lon grid — e.g. the yearly bundles'
+    # global-mean GHG series co2/ch4/n2o (time,) — must bypass the
+    # spatial pipeline: the pole padding's expand_dims would broadcast
+    # them onto the grid, which downstream consumers then read as a
+    # corrupt spatial field (#634).
+    non_spatial = [v for v in ds.data_vars
+                   if not {"lat", "lon"} <= set(ds[v].dims)]
+    passthrough = ds[non_spatial]
+    ds = ds.drop_vars(non_spatial)
+
     # Pad latitude with extra rows at poles so data can be interpolated to higher latitudes than exist in T30 grid
     south_pole = ds.isel(lat=0).mean(dim="lon", keep_attrs=True)
     north_pole = ds.isel(lat=-1).mean(dim="lon", keep_attrs=True)
@@ -86,7 +96,7 @@ def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
         method="linear"
     )
 
-    return ds_interp
+    return xr.merge([ds_interp, passthrough])
 
 def upsample_forcings_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
     f"""Upsample forcing data to target resolution with physical constraints.
