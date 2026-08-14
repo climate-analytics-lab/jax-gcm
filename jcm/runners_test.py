@@ -81,8 +81,10 @@ class TestConfigComposition(unittest.TestCase):
             "physics=echam",
             "grid=echam_t42_l8_sigma",
         ])
-        # The default radiation slot in the echam preset is grey two-stream.
-        self.assertIn("grey_two_stream_radiation", cfg.physics.terms)
+        # The echam preset composes the supported ECHAM radiation (RRTMGP);
+        # grey is a SPEEDY/debug scheme and must not be an ECHAM default.
+        self.assertIn("rrtmgp_radiation", cfg.physics.terms)
+        self.assertNotIn("grey_two_stream_radiation", cfg.physics.terms)
         self.assertIn("tiedtke_convection", cfg.physics.terms)
         self.assertEqual(cfg.grid.vertical, "sigma")
 
