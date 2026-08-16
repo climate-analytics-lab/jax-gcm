@@ -263,6 +263,68 @@ class Mam4JaxAdapterTest(unittest.TestCase):
 
 
 @pytest.mark.slow
+class SulfurConservationTest(unittest.TestCase):
+    """The core must not create sulfur (jax-gcm#642).
+
+    mam4-jax carries CAM driver.F90:1248's "other-process" H2SO4
+    production stub (1e-16 mol/mol/s); jcm zeroes it via
+    configure_gas_netprod at term construction — a soft hasattr guard
+    once skipped this silently on a pre-hook core and every JAM run
+    created ~10x the emitted sulfur. These pin the contract.
+    """
+
+    def setUp(self):
+        self._x64 = jax.config.read("jax_enable_x64")
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._x64)
+
+    def test_netprod_zeroed_at_construction(self):
+        from mam4_jax.processes import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+        Mam4JaxMicrophysics()
+        self.assertEqual(_amicphys._GAS_NETPROD["h2so4"], 0.0)
+        self.assertEqual(_amicphys._GAS_NETPROD["soa"], 0.0)
+
+    def test_per_cell_sulfur_closure(self):
+        # Every grid cell independently: the S-weighted sum of the core's
+        # gas + interstitial + cloud-borne sulfur tendencies is zero —
+        # condensation/nucleation MOVE sulfur, they never make it.
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        state, diagnostics = _column_state()
+        term = Mam4JaxMicrophysics()
+        tend, _ = term(state, diagnostics, None, None)
+
+        m_s = 32.06
+        ds = np.asarray(tend.tracers["g_h2so4"], dtype=np.float64) * (
+            m_s / 98.08)
+        gross = np.abs(ds)
+        so4_frac = m_s / 115.0        # MW_SO4A_HOST (NH4HSO4 convention)
+        for mode in MAM4_SPEC.modes:
+            if "so4" not in mode.species:
+                continue
+            for cb in (False, True):
+                k = mass_name("so4", mode.short, cloud_borne=cb)
+                if k in tend.tracers:
+                    t = np.asarray(tend.tracers[k], dtype=np.float64)
+                    ds = ds + t * so4_frac
+                    gross = gross + np.abs(t) * so4_frac
+        scale = np.maximum(gross, 1e-30)
+        # Tolerance: the core's per-cell closure residual is ~2.5e-4 of
+        # gross turnover (nucleation mass adjustment numerics — #642
+        # follow-up); the disabled production stub sits orders above this,
+        # so 1e-3 cleanly separates "numerics" from "stub active".
+        self.assertLess(float(np.max(np.abs(ds) / scale)), 1e-3,
+                        "per-cell sulfur created/destroyed by the core")
+
+
 class Mam4JaxModelTest(unittest.TestCase):
     """End-to-end: the MAM4-JAX core runs inside the full ECHAM GCM.
 

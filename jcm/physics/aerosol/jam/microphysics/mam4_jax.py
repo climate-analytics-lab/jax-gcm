@@ -195,16 +195,24 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         self._condensation_backend = str(condensation_backend)
         self._n_substeps = int(n_substeps)
 
-        # Disable the core's hard-coded "other-process" H2SO4 production stub
-        # (driver.F90:1248, 1e-16 mol/mol/s). jcm seeds the gas-phase tracers to
-        # zero and does not yet feed prognostic sulfur chemistry into the core,
-        # so that stub is a spurious, non-conservative H2SO4 source that drives
-        # runaway binary nucleation. Zero it here; revisit when jcm couples its
-        # gas-phase sulfur (jam_sulfur_gas_chemistry) into the core's gas slots.
-        # Guarded on the capability so jcm still runs against a mam4_jax build
-        # without configure_gas_netprod (the currently pinned release).
-        if hasattr(_amicphys, "configure_gas_netprod"):
-            _amicphys.configure_gas_netprod(h2so4=0.0)
+        # Disable the core's hard-coded "other-process" gas production stub
+        # (driver.F90:1248, 1e-16 mol/mol/s on H2SO4). jcm supplies its own
+        # sulfur via jam_sulfur_gas_chemistry, so the stub is a spurious
+        # sulfur source: left on, it creates ~1e-7 kg-S/m²/day per column —
+        # ~10× the emitted sulfur globally — and drove the unbounded
+        # secondary-aerosol growth of jax-gcm#642 (a previous soft hasattr
+        # guard skipped silently on cores that predate the hook, which is
+        # how a full corrupted model year shipped). A core without the hook
+        # cannot conserve sulfur, so REFUSE it rather than run.
+        if not hasattr(_amicphys, "configure_gas_netprod"):
+            raise ImportError(
+                "The installed mam4-jax has no configure_gas_netprod, so its "
+                "hard-coded H2SO4 production stub (1e-16 mol/mol/s, "
+                "driver.F90:1248) cannot be disabled and every JAM run "
+                "creates sulfur mass without bound (jax-gcm#642). Install "
+                "the pinned version: pip install 'jcm[mam4]'."
+            )
+        _amicphys.configure_gas_netprod(h2so4=0.0, soa=0.0)
 
         # Precision — applied during construction so the dycore state built
         # afterwards (in bootstrap/run) inherits it; toggling it later would
