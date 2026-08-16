@@ -1178,14 +1178,23 @@ class TiedtkeConvection(PhysicsTerm):
             _entrain = (
                 _state_all.entr.T * _mfu_below * layer_thickness
             )
+            # Downdraft ledger (#622): linear in mfd, so the cap scaling
+            # already applied to ``_mfd`` carries through exactly.
+            # Function-level import: downdraft.py imports from this module.
+            from .downdraft import downdraft_entrainment_ledger
+            _entrain_dn = downdraft_entrainment_ledger(
+                _mfd, layer_thickness, params.entrdd,
+            )
         else:
             _mfu = jnp.zeros_like(pressure_full)
             _mfd = jnp.zeros_like(pressure_full)
             _entrain = jnp.zeros_like(pressure_full)
+            _entrain_dn = jnp.zeros_like(pressure_full)
         convection = ConvectionData(
             mass_flux_up=_mfu,
             mass_flux_down=_mfd,
             entrain_up=_entrain,
+            entrain_down=_entrain_dn,
             cloud_base=jnp.zeros(ncols, dtype=int),
             cloud_top=jnp.zeros(ncols, dtype=int),
             cape=jnp.zeros(ncols),

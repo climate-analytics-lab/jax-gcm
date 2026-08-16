@@ -191,6 +191,24 @@ class ModelPredictions:
                     )
                 additional_coords['mode'] = np.asarray(_mode_shorts)
                 break
+        # Spectral-band coordinates for the JAM per-band optics fields
+        # (#584): ``*_sw_per_band`` / ``*_lw_per_band`` are
+        # ``(time, band, level, lon, lat)`` and need a named band dim or
+        # the shape→dims lookup fails (first hit by the first full-output
+        # echam-jam run after #584). Lengths come from the arrays
+        # themselves (RRTMGP: 14 SW / 16 LW); the additional_coords
+        # collision check still guards a band count equal to the layer
+        # count.
+        # Band count 1 (grey radiation) is skipped: a length-1 coord here
+        # would shadow the existing ``(1, ...)`` surface-axis mappings for
+        # every other field; those fields already serialize via that axis.
+        for _key, _val in physics_preds_dict.items():
+            for _suffix, _dim in (('_sw_per_band', 'sw_band'),
+                                  ('_lw_per_band', 'lw_band')):
+                if (_key.endswith(_suffix) and _dim not in additional_coords
+                        and getattr(_val, 'ndim', 0) >= 2
+                        and _val.shape[1] > 1):
+                    additional_coords[_dim] = np.arange(_val.shape[1])
 
         pred_ds = data_to_xarray(
             dynamics_predictions.asdict() | physics_preds_dict,

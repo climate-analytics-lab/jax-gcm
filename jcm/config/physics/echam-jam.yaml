@@ -52,3 +52,8 @@ jam_cloud_borne: true
 # Prescribed-emission terms (driven by forcing.emissions_file):
 jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
 jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+
+# Convective tracer transport + in-plume scavenging (#621/#622). false is
+# the reconciliation A/B: WetScavenging then reverts to its environment-
+# profile convective in-cloud pathway (the pre-#621 sink).
+jam_convective_transport: true

@@ -308,6 +308,49 @@ class WetDepTermTest(unittest.TestCase):
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
 
+    def test_in_plume_flag_retires_env_conv_incloud(self):
+        # With in-plume scavenging in the transport term (jax-gcm#621),
+        # this term must drop its environment-profile convective in-cloud
+        # removal (weaker sink than the default under convective precip)
+        # while keeping the below-cloud convective washout (stronger sink
+        # than with no convection at all).
+        state, diagnostics, spec, mass_name = self._setup(precip=0.0)
+        diag_conv = self._attach_convection(diagnostics, 4, 2)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        both = WetScavenging()(state, diag_conv, None, None)[0]
+        plume = WetScavenging(in_plume_convective=True)(
+            state, diag_conv, None, None,
+        )[0]
+        none = WetScavenging(in_plume_convective=True)(
+            state, diagnostics, None, None,
+        )[0]
+        self.assertGreater(                       # sums are ≤ 0: less removal
+            float(plume.tracers[key].sum()), float(both.tracers[key].sum()),
+        )
+        self.assertLess(                          # washout pathway retained
+            float(plume.tracers[key].sum()), float(none.tracers[key].sum()),
+        )
+
+    def test_conv_scav_flux_folds_into_wet_ledger(self):
+        # The transport term's published surface fluxes must appear in the
+        # AeroCom ``wet_*`` keys — but only when the in-plume pathway owns
+        # convective scavenging.
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            _species_of)
+        state, diagnostics, spec, mass_name = self._setup()
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        diagnostics = dict(diagnostics)
+        diagnostics["_conv_scav_flux"] = {key: jnp.full((2,), 3.0e-12)}
+        _, d_on = WetScavenging(in_plume_convective=True)(
+            state, diagnostics, None, None,
+        )
+        _, d_off = WetScavenging()(state, diagnostics, None, None)
+        wet_key = f"wet_{_species_of(key)}"
+        np.testing.assert_allclose(
+            np.asarray(d_on[wet_key]) - np.asarray(d_off[wet_key]),
+            3.0e-12, rtol=1e-4,     # float32 accumulation roundoff
+        )
+
     def test_incloud_driven_by_formation_not_surface_precip(self):
         # The in-cloud pathway must key off the cloud scheme's per-level
         # formation rate, not a reconstruction from the surface precip: a

@@ -180,16 +180,20 @@ class ConvectionData:
     ``convection.<field>``). The ``cloud_base`` / ``cloud_top`` / ``cape``
     fields are reserved for the future port of the equivalent ECHAM
     diagnostics; they are zero-filled today. ``mass_flux_up``/``down`` and
-    ``entrain_up`` are populated (post-rescale, post-cap — the same ledger
-    scaling as the tendencies) for the convective tracer transport
-    (#602): the updraft flux at each layer's TOP interface, and the
-    absolute per-layer entrainment flux; per-layer detrainment follows
-    from plume continuity, so it is not stored separately.
+    ``entrain_up``/``entrain_down`` are populated (post-rescale, post-cap —
+    the same ledger scaling as the tendencies) for the convective tracer
+    transport (#602, #622): the updraft flux at each layer's TOP
+    interface, the downdraft flux at each layer's BOTTOM interface (the
+    downdraft scan's convention), and the absolute per-layer entrainment
+    fluxes; per-layer detrainment follows from plume continuity, so it is
+    not stored separately.
     """
 
     mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)
     mass_flux_down: jnp.ndarray      # Downdraft mass flux [kg/m²/s] (nlev, ncols)
     entrain_up: jnp.ndarray          # Updraft entrainment flux per layer
+                                     # [kg/m²/s] (nlev, ncols)
+    entrain_down: jnp.ndarray        # Downdraft entrainment flux per layer
                                      # [kg/m²/s] (nlev, ncols)
     cloud_base: jnp.ndarray          # Cloud base level index (ncols,)
     cloud_top: jnp.ndarray           # Cloud top level index (ncols,)
@@ -221,6 +225,7 @@ class ConvectionData:
             mass_flux_up=jnp.zeros((nlev,) + nodal_shape),
             mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
             entrain_up=jnp.zeros((nlev,) + nodal_shape),
+            entrain_down=jnp.zeros((nlev,) + nodal_shape),
             cloud_base=jnp.zeros(nodal_shape, dtype=int),
             cloud_top=jnp.zeros(nodal_shape, dtype=int),
             cape=jnp.zeros(nodal_shape),

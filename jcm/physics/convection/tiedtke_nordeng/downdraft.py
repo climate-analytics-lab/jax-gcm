@@ -172,6 +172,38 @@ def find_lfs(
     return lfs_level, lfs_found
 
 
+def downdraft_entrainment_ledger(
+    mfd: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    entrdd: float,
+) -> jnp.ndarray:
+    """Absolute per-layer downdraft entrainment flux [kg/m²/s] (#622).
+
+    ECHAM ``cuddraf`` entrains ``zentr = entrdd·|mfd(k-1)|·dz`` into each
+    descent layer (matched by an equal detrainment in the bulk, so
+    |mfd| is conserved going down); entrainment is shut off in the two
+    surface-taper layers. ``mfd[k]`` is the flux leaving layer k through
+    its BOTTOM interface, so the flux entering from above is
+    ``mfd[k-1]`` — zero at and above the LFS, which zeroes the ledger
+    there without an explicit LFS index. Where the downdraft died
+    mid-descent (``mfd[k] == 0`` with inflow above), the ledger is also
+    zero so plume continuity dumps the arriving flux as pure
+    detrainment, matching the Fortran's buoyancy shut-off.
+
+    Vertical on axis 0; trailing axes broadcast (a ``(nlev,)`` column and
+    a ``(nlev, ncols)`` block agree per column).
+    """
+    nlev = mfd.shape[0]
+    mfd_in = jnp.concatenate(
+        [jnp.zeros_like(mfd[:1]), mfd[:-1]], axis=0
+    )
+    levels = jnp.arange(nlev).reshape((nlev,) + (1,) * (mfd.ndim - 1))
+    in_bulk = (mfd < 0.0) & (levels < nlev - 2)
+    return jnp.where(
+        in_bulk, entrdd * jnp.abs(mfd_in) * layer_thickness, 0.0
+    )
+
+
 def downdraft_step(
     carry_and_rain: Tuple,
     level_inputs: Tuple

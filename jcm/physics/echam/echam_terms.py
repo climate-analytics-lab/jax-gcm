@@ -80,6 +80,7 @@ def echam_physics(
     jam_ice_scheme: str = "niemand",
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
+    jam_convective_transport: bool = True,
     enable_cosp: bool = False,
     cosp_ncolumns: int = 40,
     cosp_calipso: bool = False,
@@ -324,6 +325,7 @@ def echam_physics(
             ice_scheme=jam_ice_scheme,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
+            convective_transport=jam_convective_transport,
             optics_diagnostics=aerocom_optics,
         )
         # The per-band Mie optics are only consumed by the interval-gated

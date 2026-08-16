@@ -4,15 +4,16 @@ ECHAM transports every tracer through Tiedtke convection (the
 ``cuxtte``/``mo_cuascn`` xt budgeting) and CAM's ``convtran`` does the
 same for constituents; jcm applied the convective mass fluxes only to
 heat, moisture and momentum (#602 item 2). This term closes that gap for
-an explicit tracer list using the profiles the Tiedtke term now publishes
+an explicit tracer list using the profiles the Tiedtke term publishes
 in ``ConvectionData``: the updraft mass flux at each layer's top
-interface (``mass_flux_up``) and the absolute per-layer entrainment flux
-(``entrain_up``), both carrying the scheme's rescale + cap ledger
-scaling, so tracer transport is proportional to the heat and moisture
-transport actually applied.
+interface (``mass_flux_up``), the downdraft mass flux at each layer's
+bottom interface (``mass_flux_down``), and the absolute per-layer
+entrainment fluxes (``entrain_up``/``entrain_down``), all carrying the
+scheme's rescale + cap ledger scaling, so tracer transport is
+proportional to the heat and moisture transport actually applied.
 
 The scheme is a bulk entraining/detraining plume with compensating
-subsidence:
+subsidence, plus the mirrored downdraft leg (jax-gcm#622):
 
 * Per-layer detrainment is derived from plume continuity,
   ``D_k = max(E_raw_k − (M_k − M_{k+1}), 0)`` with the effective
@@ -24,21 +25,44 @@ subsidence:
   ``q_up_k = (M_{k+1}·q_up_{k+1} + E_k·q_k) / (M_{k+1} + E_k)`` — a
   convex mix, so the plume concentration is bounded by the environment
   profile it entrained.
+* The downdraft (ECHAM ``cudlfs``/``cuddraf``, CAM ``convtran``'s
+  ``cond`` loop) is the mirror image: the same continuity derivation on
+  the downdraft profile turns the level-of-free-sinking seed into
+  entrainment of that layer's air and the surface taper into sub-cloud
+  detrainment, and a downward scan carries the in-downdraft
+  concentration. Deviation from the Fortran: ``cudlfs`` seeds the
+  downdraft with a 50/50 updraft/wet-bulb-environment mix, which moves
+  plume-processed air across without a matching debit in the updraft
+  budget; entraining environment air instead keeps the column budget
+  telescoping exactly (CAM's downdraft does the same — environment
+  entrainment only, "no transformation or removal is applied in the
+  downdraft").
 * Environment tendency in flux form: detrainment source, entrainment
-  sink, and compensating subsidence between (downward advection of
-  environment air at the interface updraft flux). Column tracer mass is
-  conserved exactly (the subsidence fluxes telescope; the plume's own
-  budget closes by construction).
+  sink, and the compensating advection between (downward at the updraft
+  interface flux, upward at the downdraft interface flux). Column tracer
+  mass is conserved exactly up to the scavenging sink (all flux sums
+  telescope; each plume's own budget closes by construction).
 
-Downdraft tracer transport is not included yet (``mass_flux_down`` is
-published for it; the downdraft entrainment ledger is not) — tracked in
-jax-gcm#622, typically a ~30% correction on the updraft circulation.
-Likewise not included: in-plume scavenging of soluble aerosol (ECHAM
-``cuscav`` removes a large fraction of what the updraft carries before
-it detrains; here the plume is conservative and the convective wet
-removal lives separately in the JAM wetdep term), tracked in
-jax-gcm#621 — expect a high bias in upper-tropospheric soluble aerosol
-in deep convective regions until it lands. Explicit stability: the per-column ledger is scaled so the
+In-plume scavenging (jax-gcm#621) follows CAM's ``aero_convproc``
+(mirage2 form): the fraction of the plume's condensate converted to
+precipitation in a layer sets a first-order removal,
+``cdt = pdmfup / (M_u·q_cond)`` and removed fraction
+``w·(1 − exp(−cdt))``, applied to the in-plume concentration inside the
+ascent scan after entrainment mixing — so aerosol scavenged low in the
+plume never detrains aloft. The updraft-area fraction cancels in
+``cdt`` (CAM's Note1: the cam5 variant needs the unknown updraft
+fraction; the mirage2 form does not). ``w`` is a per-tracer weight
+(soluble/activatable modes only) times the differentiable
+``scav_ratio``; the removed flux deposits at the surface (like CAM's
+``dconudt_wetdep``; per-tracer surface fluxes are published under
+``_conv_scav_flux`` for the JAM wetdep ledger, which retires its own
+environment-profile convective in-cloud pathway when this one is
+active — jax-gcm#621's double-counting reconciliation). Aerosol
+resuspension by evaporating convective precip is not modelled (CAM's
+``dcondt_prevap``) — the removed flux goes straight to the surface,
+matching the existing wetdep treatment of convective scavenging.
+
+Explicit stability: the per-column ledger is scaled so the combined
 subsidence Courant number stays ≤ 1 (the scheme's own cloud-base CFL cap
 makes this a no-op in practice).
 
@@ -65,27 +89,54 @@ from jcm.physics_interface import PhysicsTendency
 #: squared-underflow window.
 _MF_FLOOR = 1.0e-10
 
+#: In-plume condensate threshold for scavenging [kg/kg] — CAM
+#: ``aero_convproc`` ``clw_cut``: below this the updraft is effectively
+#: precipitation-free and the removal-rate division is unreliable.
+_CLW_CUT = 1.0e-6
+
 
 @tree_math.struct
 class ConvTransportParameters:
-    """Tunable knob for convective tracer transport (differentiable)."""
+    """Tunable knobs for convective tracer transport (differentiable)."""
 
     transport_scale: jnp.ndarray   # multiplies the mass-flux ledger
+    scav_ratio: jnp.ndarray        # in-plume scavenging ratio for soluble
+                                   # tracers [-] (CAM ``aqfrac`` analogue)
 
     @classmethod
     def default(cls) -> "ConvTransportParameters":
-        return cls(transport_scale=jnp.asarray(1.0))
+        # scav_ratio mirrors the JAM wetdep ``conv_scav_ratio`` default it
+        # supersedes for transported species.
+        return cls(
+            transport_scale=jnp.asarray(1.0),
+            scav_ratio=jnp.asarray(0.99),
+        )
 
 
 def convective_tracer_tendency(
     q: jnp.ndarray,        # (K, nlev, ncols) tracer stack
     mfu: jnp.ndarray,      # (nlev, ncols) updraft flux at layer TOP [kg/m²/s]
-    entrain: jnp.ndarray,  # (nlev, ncols) per-layer entrainment flux [kg/m²/s]
+    entrain: jnp.ndarray,  # (nlev, ncols) per-layer updraft entrainment [kg/m²/s]
     air_density: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     dt: jnp.ndarray,
-) -> jnp.ndarray:
-    """Bulk-plume + compensating-subsidence tracer tendency [.../s]."""
+    mfd: jnp.ndarray | None = None,          # (nlev, ncols) downdraft flux at
+                                             # layer BOTTOM [kg/m²/s], ≤ 0
+    entrain_down: jnp.ndarray | None = None,  # (nlev, ncols) per-layer
+                                              # downdraft entrainment [kg/m²/s]
+    scav_weights: jnp.ndarray | None = None,  # (K,) per-tracer removal weight
+    precip_formation: jnp.ndarray | None = None,  # (nlev, ncols) updraft
+                                                  # precip generation [kg/m²/s]
+    plume_condensate: jnp.ndarray | None = None,  # (nlev, ncols) in-updraft
+                                                  # qc+qi [kg/kg]
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Bulk-plume + subsidence tracer tendency and scavenged surface flux.
+
+    Returns ``(dq, scav_flux)``: the environment tendency [.../s] shaped
+    like ``q``, and the per-tracer scavenged surface flux
+    ``(K, ncols)`` [tracer·kg/m²/s] satisfying
+    ``sum_k(dq·dm) = −scav_flux`` exactly (zero without scavenging).
+    """
     dm = air_density * layer_thickness
     mfu = jnp.maximum(mfu, 0.0)
     # No flux through the model top: a residual plume reaching the top
@@ -104,9 +155,9 @@ def convective_tracer_tendency(
     # (mfu + E) per layer never forms. With thin layers aloft (generic in
     # hybrid coordinates) the wrong guard let the sink exceed 1 and drove
     # detrainment-layer tracers negative (adversarial review, confirmed
-    # repro). All four ledger arrays are positively homogeneous in
-    # (mfu, entrain), so scaling AFTER the derivation is exactly linear
-    # and preserves continuity and column conservation.
+    # repro). All ledger arrays are positively homogeneous in the mass
+    # fluxes, so scaling AFTER the derivation is exactly linear and
+    # preserves continuity and column conservation.
     mfu_below = jnp.concatenate(
         [mfu[1:], jnp.zeros_like(mfu[:1])], axis=0
     )
@@ -114,18 +165,72 @@ def convective_tracer_tendency(
     detrain = jnp.maximum(entrain - delta, 0.0)
     entrain_eff = detrain + delta                     # >= 0 by construction
 
+    # Downdraft ledger (jax-gcm#622), mirrored: ``mfd[k]`` is the flux
+    # leaving layer k through its BOTTOM interface (the downdraft scan's
+    # convention — the taper halves then land in the two lowest layers
+    # exactly as cuddraf's ``itopde`` split), so the flux entering from
+    # above is ``mfd[k-1]``. Magnitudes throughout; the bottom layer's
+    # outflow is forced to zero (no flux through the surface — a residual
+    # detrains there via continuity, mirroring the model-top handling).
+    if mfd is not None:
+        md_out = jnp.maximum(-mfd, 0.0)
+        md_out = md_out.at[-1].set(0.0)
+        md_in = jnp.concatenate(
+            [jnp.zeros_like(md_out[:1]), md_out[:-1]], axis=0
+        )
+        e_dn_raw = (
+            jnp.maximum(entrain_down, 0.0)
+            if entrain_down is not None else jnp.zeros_like(md_out)
+        )
+        delta_dn = md_out - md_in                     # E − D per layer
+        detrain_dn = jnp.maximum(e_dn_raw - delta_dn, 0.0)
+        entrain_dn = detrain_dn + delta_dn            # >= 0 by construction
+    else:
+        md_out = md_in = detrain_dn = entrain_dn = jnp.zeros_like(mfu)
+
+    # Combined Courant guard: both legs remove environment air from layer
+    # k at (E_up_eff + mfu_below) + (E_dn_eff + md_in); one shared scale
+    # keeps the two circulations proportional.
     courant = jnp.max(
-        (entrain_eff + mfu_below) * dt / dm, axis=0, keepdims=True,
+        (entrain_eff + mfu_below + entrain_dn + md_in) * dt / dm,
+        axis=0, keepdims=True,
     )
     scale = jnp.minimum(1.0, 1.0 / jnp.maximum(courant, 1.0))
     mfu = mfu * scale
     mfu_below = mfu_below * scale
     detrain = detrain * scale
     entrain_eff = entrain_eff * scale
+    md_out = md_out * scale
+    md_in = md_in * scale
+    detrain_dn = detrain_dn * scale
+    entrain_dn = entrain_dn * scale
 
-    # Upward plume scan for the in-plume concentration (surface -> top).
+    # In-plume scavenging profile (jax-gcm#621, CAM aero_convproc
+    # mirage2 form): cdt = precip formed / plume condensate flux is the
+    # first-order removal exponent over the layer transit — the updraft
+    # area fraction cancels. Gated exactly like CAM: only where the
+    # plume holds condensate and precip actually forms.
+    m_up = mfu_below + entrain_eff                    # post-mix plume flux
+    if scav_weights is not None:
+        pf = jnp.maximum(precip_formation, 0.0)
+        cond_flux = m_up * jnp.maximum(plume_condensate, 0.0)
+        cdt = jnp.where(
+            (pf > 0.0) & (plume_condensate > _CLW_CUT) & (m_up > _MF_FLOOR),
+            pf / jnp.maximum(cond_flux, _MF_FLOOR * _CLW_CUT),
+            0.0,
+        )
+        base_frac = -jnp.expm1(-cdt)                  # ∈ [0, 1)
+        w = jnp.clip(scav_weights, 0.0, 1.0)
+    else:
+        base_frac = jnp.zeros_like(m_up)
+        w = jnp.zeros(q.shape[0], dtype=q.dtype)
+
+    # Upward plume scan for the in-plume concentration (surface -> top),
+    # removing the scavenged share right after entrainment mixing (CAM
+    # applies dconudt_wetdep to conu inside the same ascent loop) so what
+    # detrains aloft is the already-scavenged concentration.
     def ascend(q_up_below, xs):
-        m_below_k, e_k, q_k = xs                      # (ncols,), (ncols,), (K, ncols)
+        m_below_k, e_k, q_k, m_up_k, frac_k = xs
         denom = m_below_k + e_k
         q_mix = jnp.where(
             (denom > _MF_FLOOR)[jnp.newaxis],
@@ -133,34 +238,77 @@ def convective_tracer_tendency(
             / jnp.maximum(denom, _MF_FLOOR)[jnp.newaxis],
             q_k,
         )
-        return q_mix, q_mix
+        # Scavenge only the nonnegative part: spectral ringing leaves
+        # negative lobes on near-zero tracers, and removing a negative
+        # concentration would INJECT plume mass and drive the wet_*
+        # ledger negative (same floor WetScavenging applies to its
+        # removal reads). Transport of the signed value is untouched.
+        # ``w`` reshapes against q_mix's rank so a bare (K, nlev) column
+        # works the same as a (K, nlev, ncols) block.
+        removed = (
+            w.reshape((-1,) + (1,) * (q_mix.ndim - 1))
+            * frac_k[jnp.newaxis] * jnp.maximum(q_mix, 0.0)
+        )
+        q_up_k = q_mix - removed
+        r_k = m_up_k[jnp.newaxis] * removed           # (K, ncols) flux
+        return q_up_k, (q_up_k, r_k)
 
     q_lev = jnp.moveaxis(q, 1, 0)                     # (nlev, K, ncols)
-    _, q_up_rev = jax.lax.scan(
+    _, (q_up_rev, r_rev) = jax.lax.scan(
         ascend,
         q_lev[-1],                                    # seeded, overwritten at base
-        (mfu_below, entrain_eff, q_lev),
+        (mfu_below, entrain_eff, q_lev, m_up, base_frac),
         reverse=True,
     )
     q_up = jnp.moveaxis(q_up_rev, 0, 1)               # (K, nlev, ncols)
+    scav_flux = jnp.sum(r_rev, axis=0)                # (K, ncols)
 
-    # Compensating subsidence: environment air enters each layer from
+    # Downward plume scan for the in-downdraft concentration (top ->
+    # surface) — cuddraf's tracer budget: mix the arriving flux with the
+    # layer's entrained environment air; detrainment leaves at the mixed
+    # concentration, so the plume budget closes exactly like the updraft.
+    def descend(q_dn_above, xs):
+        m_in_k, e_k, q_k = xs
+        denom = m_in_k + e_k
+        q_mix = jnp.where(
+            (denom > _MF_FLOOR)[jnp.newaxis],
+            (m_in_k[jnp.newaxis] * q_dn_above + e_k[jnp.newaxis] * q_k)
+            / jnp.maximum(denom, _MF_FLOOR)[jnp.newaxis],
+            q_k,
+        )
+        return q_mix, q_mix
+
+    _, q_dn_lev = jax.lax.scan(
+        descend,
+        q_lev[0],                                     # seeded, overwritten at LFS
+        (md_in, entrain_dn, q_lev),
+    )
+    q_dn = jnp.moveaxis(q_dn_lev, 0, 1)               # (K, nlev, ncols)
+
+    # Compensating advection: environment air enters each layer from
     # above at the layer-top updraft flux and leaves to the layer below
-    # at the layer-bottom flux. The top layer's "from above" is itself
-    # (no flux through the model top), which keeps the telescoping sum —
-    # and hence column conservation — exact.
+    # at the layer-bottom flux; the downdraft drives the mirror-image
+    # upward environment flow through its own interface fluxes. The top
+    # layer's "from above" is itself (no flux through the model top) and
+    # the bottom pads are dead (md_out[-1] = 0), which keeps the
+    # telescoping sums — and hence column conservation — exact.
     q_above = jnp.concatenate([q[:, :1], q[:, :-1]], axis=1)
+    q_below = jnp.concatenate([q[:, 1:], q[:, -1:]], axis=1)
     dq = (
         detrain[jnp.newaxis] * q_up
         - entrain_eff[jnp.newaxis] * q
         + mfu[jnp.newaxis] * q_above
         - mfu_below[jnp.newaxis] * q
+        + detrain_dn[jnp.newaxis] * q_dn
+        - entrain_dn[jnp.newaxis] * q
+        + md_out[jnp.newaxis] * q_below
+        - md_in[jnp.newaxis] * q
     ) / dm[jnp.newaxis]
-    return dq
+    return dq, scav_flux
 
 
 class ConvectiveTracerTransport(PhysicsTerm):
-    """Updraft + compensating-subsidence transport of an explicit tracer list."""
+    """Updraft + downdraft + subsidence transport of an explicit tracer list."""
 
     name: ClassVar[str] = "convective_tracer_transport"
     category: ClassVar[str] = "tracer_transport"
@@ -173,13 +321,30 @@ class ConvectiveTracerTransport(PhysicsTerm):
         self,
         tracer_names: tuple[str, ...],
         params: ConvTransportParameters | None = None,
+        scav_weights: tuple[float, ...] | None = None,
     ):
-        """Hold the tracer list and params."""
+        """Hold the tracer list, params and per-tracer scavenging weights.
+
+        ``scav_weights`` (aligned with ``tracer_names``) selects which
+        tracers the in-plume scavenging acts on — 1 for soluble aerosol,
+        0 for insoluble aerosol and gases; ``None`` disables scavenging
+        entirely. The static mask multiplies the differentiable
+        ``params.scav_ratio``.
+        """
         if not tracer_names:
             raise ValueError(
                 "ConvectiveTracerTransport needs a non-empty tracer list."
             )
+        if scav_weights is not None and len(scav_weights) != len(tracer_names):
+            raise ValueError(
+                "scav_weights must align with tracer_names: got "
+                f"{len(scav_weights)} weights for {len(tracer_names)} tracers."
+            )
         self._tracer_names = tuple(tracer_names)
+        self._scav_weights = (
+            tuple(float(x) for x in scav_weights)
+            if scav_weights is not None else None
+        )
         self.params = nnx.Param(params or ConvTransportParameters.default())
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -188,21 +353,55 @@ class ConvectiveTracerTransport(PhysicsTerm):
         zeros = jnp.zeros_like(state.temperature)
         if conv is None:
             tracer_tends = {nm: zeros for nm in self._tracer_names}
+            scav_flux = jnp.zeros(
+                (len(self._tracer_names),) + state.temperature.shape[1:],
+                dtype=state.temperature.dtype,
+            )
         else:
             dt = diagnostics.get("_dt_seconds", 1800.0)
             q = jnp.stack([
                 state.tracers.get(nm, zeros) for nm in self._tracer_names
             ])
-            dq = convective_tracer_tendency(
+            if self._scav_weights is not None:
+                scav_kwargs = dict(
+                    scav_weights=(
+                        jnp.asarray(self._scav_weights, dtype=q.dtype)
+                        * params.scav_ratio
+                    ),
+                    precip_formation=conv.precip_formation,
+                    plume_condensate=conv.qc_conv + conv.qi_conv,
+                )
+            else:
+                scav_kwargs = {}
+            dq, scav_flux = convective_tracer_tendency(
                 q,
                 params.transport_scale * conv.mass_flux_up,
                 params.transport_scale * conv.entrain_up,
                 diagnostics["air_density"],
                 diagnostics["layer_thickness"],
                 dt,
+                mfd=params.transport_scale * conv.mass_flux_down,
+                entrain_down=params.transport_scale * conv.entrain_down,
+                **scav_kwargs,
             )
             tracer_tends = {
                 nm: dq[k] for k, nm in enumerate(self._tracer_names)
+            }
+        if self._scav_weights is not None:
+            # Per-tracer surface deposition of in-plume scavenged mass
+            # [kg/m²/s], for downstream wet-deposition bookkeeping (the
+            # JAM wetdep term folds these into the AeroCom ``wet_*``
+            # fluxes). Underscore key: internal handoff, not a
+            # user-facing output field. Published UNCONDITIONALLY (zeros
+            # without a convection diagnostic): the diagnostics dict is a
+            # ``lax.scan`` carry, so its key set must not depend on
+            # whether the step had convection composed — the structural
+            # probe runs without it and the carry structures must match.
+            diagnostics = dict(diagnostics)
+            diagnostics["_conv_scav_flux"] = {
+                nm: scav_flux[k]
+                for k, nm in enumerate(self._tracer_names)
+                if self._scav_weights[k] > 0.0
             }
 
         tendency = PhysicsTendency(
