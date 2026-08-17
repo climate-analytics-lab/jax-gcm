@@ -1,0 +1,10 @@
+# Warm start from a saved model state — e.g. the hosted equilibrated init
+# states under hf://bundles/<grid>_<levels>/init_states/ — skipping the
+# ~9-month from-cold spin-up (#638). The full dycore + physics state is
+# restored but the clock starts at zero / run.start_date; this differs
+# from run.checkpoint_path, which resumes a run's OWN day counter (and
+# still works alongside this: a preempted from_state run resumes from its
+# own checkpoint as usual). The file's pytree must match the composed
+# model (grid, levels, physics tracer set) — mismatches fail loudly.
+kind: from_state
+file: ???

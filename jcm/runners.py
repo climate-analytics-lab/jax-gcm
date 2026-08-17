@@ -834,6 +834,32 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     model._final_dycore_state = state
 
 
+def inject_state_file(model: Model, cfg: DictConfig) -> None:
+    """Warm-start: load a saved model state as the initial condition.
+
+    ``init.file`` takes a local or ``hf://`` path to a state written by
+    :func:`jcm.checkpoint.save_checkpoint` (e.g. the hosted equilibrated
+    states under ``bundles/<grid>_<levels>/init_states/``). Unlike a
+    ``run.checkpoint_path`` resume, the recorded elapsed-day count is
+    DISCARDED — the clock starts at zero / ``run.start_date`` — so a
+    hosted state skips the ~9-month from-cold spin-up (#638) without
+    inheriting the donor run's calendar. The state's pytree must match
+    the composed model (grid, levels, physics tracer set);
+    ``load_checkpoint`` fails loudly on any mismatch.
+    """
+    from jcm.checkpoint import load_checkpoint
+
+    path = _resolve_data_path(cfg.init.file)
+    model.bootstrap_state()
+    if model._final_physics_state is None:
+        model._final_physics_state = model._build_initial_physics_carry()
+    days = load_checkpoint(model, path)
+    logger.info(
+        "init=from_state: loaded %s (donor state carried %.0f sim-days); "
+        "clock reset to 0", path, days,
+    )
+
+
 def inject_era5_state(model: Model, cfg: DictConfig) -> None:
     """Seed the model from ERA5 (WeatherBench2) at the run start date.
 
@@ -1625,6 +1651,16 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
+    if cfg.init.kind == "from_state":
+        inject_state_file(model, cfg)
+        return model.resume(
+            forcing=forcing,
+            save_interval=cfg.run.save_interval,
+            total_time=cfg.run.total_time,
+            output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        )
     if cfg.init.kind == "era5":
         inject_era5_state(model, cfg)
         return model.resume(
@@ -1827,6 +1863,17 @@ def run_chunked(
             )
         elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
             inject_balanced_isothermal_profile(model)
+            preds = model.resume(
+                forcing=forcing,
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
+            )
+        elif first_fresh_chunk and cfg.init.kind == "from_state":
+            inject_state_file(model, cfg)
             preds = model.resume(
                 forcing=forcing,
                 save_interval=save_interval,
