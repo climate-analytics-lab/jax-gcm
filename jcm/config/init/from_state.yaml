@@ -2,9 +2,14 @@
 # states under hf://bundles/<grid>_<levels>/init_states/ — skipping the
 # ~9-month from-cold spin-up (#638). The full dycore + physics state is
 # restored but the clock starts at zero / run.start_date; this differs
-# from run.checkpoint_path, which resumes a run's OWN day counter (and
-# still works alongside this: a preempted from_state run resumes from its
-# own checkpoint as usual). The file's pytree must match the composed
-# model (grid, levels, physics tracer set) — mismatches fail loudly.
+# from run.checkpoint_path, which resumes a run's OWN day counter. With
+# run.chunk_days > 0 the two compose (a preempted from_state run resumes
+# from its own checkpoint); non-chunked runs never write checkpoints.
+# The file's pytree must match the composed model (grid, levels, physics
+# tracer set) — load_checkpoint validates every leaf shape and fails
+# loudly naming the file. Small caveat: the restored physics carry keeps
+# the donor's cached radiation fluxes until the first radiation_interval
+# (default 2 h) elapses, so the very first hours mix donor-date insolation
+# into the new calendar — negligible against the spin-up it avoids.
 kind: from_state
 file: ???
