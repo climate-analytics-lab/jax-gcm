@@ -70,6 +70,15 @@ output is affected, not just the `*noa` fluxes. Its ERFari therefore cannot
 be compared against a reference without an ensemble, because the two runs
 have genuinely diverged.
 
+It has a second, less obvious problem: on aerosol-off steps the held TOA
+*upward* fluxes are reported alongside a **fresh** `toa_sw_down` and fresh
+surface fluxes, so the TOA budget straddles one radiation interval of solar
+geometry — near sunrise, a locally 100 %-wrong planetary albedo. That means
+`rsut` and `rsutnoa` always sample states one radiation step apart, which is
+exactly the error `paired` was designed to avoid. Tracked as jax-gcm#651,
+which also weighs simply removing the mode: it saves ~17 percentage points
+over `paired` N=4 in exchange for perturbing every field in the run.
+
 ## What we measured
 
 Four runs, **same commit**, T63L47 with semi-Lagrangian transport, ERA5
@@ -151,6 +160,11 @@ The fraction is now carried explicitly on `RadiationData` rather than
 re-derived, is only updated from a companion whose flux is large enough for
 the ratio to mean anything, and uses a safe denominator. Each fix has a
 regression test verified to fail against the old form.
+
+One related gap is left open: a `paired` run **resumed** at a step where the
+companion gate does not fire starts from a zero fraction, so its first few
+radiation calls report an ERFari of zero. Forcing a companion on the first
+compute after a restart is jax-gcm#650.
 
 **Consequently the −0.095 W m⁻² above is stale** — a plausible upper bound
 rather than a measurement of the current scheme. A further confound

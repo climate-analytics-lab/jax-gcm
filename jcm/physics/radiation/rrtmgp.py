@@ -1380,6 +1380,10 @@ class RRTMGPRadiation(PhysicsTerm):
             # `alternating` holds whole fluxes rather than a fraction, so
             # the fraction slots stay at zero — but they must still be
             # supplied, since RadiationData requires every field.
+            # KNOWN GAP (jax-gcm#651): the held TOA up-fluxes are paired
+            # with a FRESH toa_sw_down and fresh surface fluxes, so the
+            # reported budget straddles one radiation interval of solar
+            # geometry. Near sunrise that is a locally 100 %-wrong albedo.
             noa.update({f"noa_frac_{k}": jnp.zeros((ncols,))
                         for k in NOA_KEYS})
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
