@@ -713,7 +713,11 @@ class DinosaurDycore(DynamicalCore):
         return state.sim_time
 
     def with_sim_time(self, state: State, sim_time) -> State:
-        return State(**state.asdict(), sim_time=sim_time)
+        # ``state`` already carries sim_time, so merge into the dict rather
+        # than passing both (duplicate-kwarg TypeError otherwise).
+        d = state.asdict()
+        d["sim_time"] = sim_time
+        return State(**d)
 
     # ------------------------------------------------------------------
     # Output & terrain (Phase-1 thin shims; full relocation in a follow-up)

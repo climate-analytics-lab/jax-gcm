@@ -854,6 +854,14 @@ def inject_state_file(model: Model, cfg: DictConfig) -> None:
     if model._final_physics_state is None:
         model._final_physics_state = model._build_initial_physics_carry()
     days = load_checkpoint(model, path)
+    # The checkpoint's dycore state carries the donor's sim_time, and dates,
+    # forcing time-interpolation and output timestamps all derive from it
+    # (Model._date_from_sim_time) — without this reset a day-730 donor would
+    # run with forcing at start_date + 730 d (codex review on the PR).
+    model._final_dycore_state = model.dycore.with_sim_time(
+        model._final_dycore_state,
+        jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
+    )
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,

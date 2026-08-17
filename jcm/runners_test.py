@@ -749,6 +749,13 @@ class TestModeDispatch(unittest.TestCase):
             d_cold = float(np.abs(cold.temperature.values
                                   - donor_end.temperature.values).mean())
             self.assertLess(d_warm, d_cold)
+            # The dycore sim_time must reset too: dates/forcing/output
+            # timestamps derive from it, not from the chunk counter. The
+            # warm run's output must be stamped ~day 1, EARLIER than the
+            # donor's day-2 file — without the with_sim_time reset it
+            # inherits the donor clock and stamps ~day 3.
+            self.assertLess(float(np.asarray(warm.time.max())),
+                            float(np.asarray(donor_end.time.max())))
 
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
