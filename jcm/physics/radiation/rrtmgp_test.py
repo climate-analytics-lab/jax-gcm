@@ -974,9 +974,12 @@ class TestRRTMGPAerosolFreeAlternate(_RRTMGPTermFixture):
     aerosol optics and refreshes the ``*noa`` slots (all-sky held).
     """
 
-    # All four *noa slots must be live, so the clear-sky pair is
-    # computed here even though the base fixture skips it (jax-gcm#649).
-    COMPUTE_CRE = True
+    # The clear-sky pair is a SECOND RRTMGP call per radiation step, so it
+    # is opt-in per test (``self._term(compute_cre=True, ...)``) rather
+    # than on class-wide — only the tests asserting on all four *noa slots
+    # need it, and enabling it for the whole class doubled the fast gate
+    # (jax-gcm#649).
+    COMPUTE_CRE = False
 
     def _alternating_term_and_inputs(self):
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
@@ -1058,15 +1061,19 @@ class TestRRTMGPAerosolFreeInterval(_RRTMGPTermFixture):
     ERFari is unbiased by construction; only its refresh rate drops.
     """
 
-    # All four *noa slots must be live, so the clear-sky pair is
-    # computed here even though the base fixture skips it (jax-gcm#649).
-    COMPUTE_CRE = True
+    # The clear-sky pair is a SECOND RRTMGP call per radiation step, so it
+    # is opt-in per test (``self._term(compute_cre=True, ...)``) rather
+    # than on class-wide — only the tests asserting on all four *noa slots
+    # need it, and enabling it for the whole class doubled the fast gate
+    # (jax-gcm#649).
+    COMPUTE_CRE = False
 
     def _term(self, **kw):
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
         base, state, diagnostics, forcing = self._term_and_inputs()
+        compute_cre = kw.pop("compute_cre", self.COMPUTE_CRE)
         t = RRTMGPRadiation(params=base.params.get_value(),
-                            compute_cre=self.COMPUTE_CRE, **kw)
+                            compute_cre=compute_cre, **kw)
         t._lats, t._lons = base._lats, base._lons
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
         return t, state, diagnostics, forcing
@@ -1247,7 +1254,7 @@ class TestRRTMGPAerosolFreeInterval(_RRTMGPTermFixture):
         """
         from jcm.physics.radiation.aerosol_free import NOA_KEYS
 
-        term, state, diagnostics, forcing = self._term(
+        term, state, diagnostics, forcing = self._term(compute_cre=True, 
             aerosol_free="paired", aerosol_free_interval=2)
         _, d0 = term(state, diagnostics, forcing, None)   # companion
         _, d1 = term(state, d0, forcing, None)            # cached
@@ -1415,7 +1422,7 @@ class TestRRTMGPAerosolFreeInterval(_RRTMGPTermFixture):
         """
         from jcm.physics.radiation.aerosol_free import NOA_KEYS
 
-        term, state, diagnostics, forcing = self._term(
+        term, state, diagnostics, forcing = self._term(compute_cre=True, 
             aerosol_free=mode, **kw)
         for _ in range(calls):
             _, out = term(state, diagnostics, forcing, None)
@@ -1450,7 +1457,7 @@ class TestRRTMGPAerosolFreeInterval(_RRTMGPTermFixture):
         """
         from jcm.physics.radiation.aerosol_free import NOA_KEYS
 
-        term, state, diagnostics, forcing = self._term(aerosol_free="exact")
+        term, state, diagnostics, forcing = self._term(compute_cre=True, aerosol_free="exact")
         _, out = term(state, diagnostics, forcing, None)
         rad = out["radiation"]
         effects = [float(np.asarray(getattr(rad, k))[0]
