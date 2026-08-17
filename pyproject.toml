@@ -39,7 +39,9 @@ jcm = [
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
 # tagged release. Install with `pip install jcm[mam4]`.
 mam4 = [
-    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@v0.2.0-beta.1",
+    # Pinned to the main SHA carrying configure_gas_netprod (#642) until
+    # the requested upstream release is tagged — then flip to the version.
+    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@5ed465661dcd1b4a858ed92524ac58fc37696cfd",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.
