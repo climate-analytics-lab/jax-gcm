@@ -2,11 +2,12 @@
 
     python tools/release_validation/launch.py --repo . [--members a,b] [--submit]
 
-Each member of ``matrix.yaml`` becomes a PBS job running a full-output
-year on one A100. Per-grid inputs resolve automatically inside jcm
-(``terrain=auto``, ``forcing.ozone_file=auto`` — see
-``runners._resolve_auto_terrain``/``_resolve_auto_ozone``); JAM members
-additionally need the aux inputs staged per
+Each member of ``matrix.yaml`` references a validated preset in
+``tools/benchmark.py``'s ``PRESETS`` (the single home of known-good
+override sets) and becomes a PBS job running a full-output year on one
+A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
+``forcing.ozone_file=auto``); JAM members additionally need the aux
+inputs staged per
 ``jcm/data/mirror/SOURCES.md`` (dms/dust/oxidants + emissions on the
 model grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment.
 Health-check finished runs with ``health.py``; run ``scm_check.py`` for
@@ -17,10 +18,14 @@ import os
 import subprocess
 from pathlib import Path
 
+import sys
+
 import yaml
 
 HERE = Path(__file__).parent
 HOME = os.environ["HOME"]
+sys.path.insert(0, str(HERE.parent))
+from benchmark import PRESETS  # noqa: E402
 
 
 def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
@@ -49,39 +54,21 @@ def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
 
 
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
-    grid = m["grid"]
-    # SPEEDY has no SSO scheme, so interpolated t63 terrain is fine (and
-    # neither the package nor the mirror carries native t31 terrain —
-    # terrain=auto would raise). ECHAM members need native terrain: auto.
-    terrain = (
-        ["terrain=from_file", "terrain.file=jcm/data/bc/t63/terrain.nc"]
-        if m.get("profile") == "speedy" else ["terrain=auto"]
-    )
-    base = [
-        f"physics={m['physics']}", f"grid={grid}",
-        *terrain, "forcing=from_file",
-        "forcing.file=jcm/data/bc/t63/forcing.nc",
-        f"run.time_step={d['time_step_min']}",
-        f"run.total_time={d['days']}.0",
-        f"run.save_interval={d['save_interval']}",
-        f"run.chunk_days={d['chunk_days']}",
-        "run.output_averages=true", "run.log_level=INFO",
-        f"run.output={name}.nc",
-        f"run.output_prefix={rundir}/{name}",
-        f"run.checkpoint_path={rundir}/checkpoint.msgpack",
-    ]
-    if m.get("profile") != "speedy":
-        # ECHAM year-run profile: dry JW spin-up + the longrun sponge
-        # (all keys under the DEFAULT run group, hence no '+' prefixes
-        # except the group-replacing longrun's own additions).
-        base = ["init=jw", "init.rh=0.0", "run=longrun",
-                "+advection=semi_lagrangian", "+sl_off_centering=0.2"] + [
-            o.replace("run.chunk_days", "run.chunk_days")
-            for o in base if not o.startswith(("run.checkpoint",))
-        ] + [f"+run.checkpoint_path={rundir}/checkpoint.msgpack"]
+    preset = PRESETS[m["preset"]]
+    grid = next(o.split("=", 1)[1] for o in preset if o.startswith("grid="))
+    ovs = [*preset,
+           f"run.total_time={d['days']}.0",
+           f"run.save_interval={d['save_interval']}",
+           f"run.chunk_days={d['chunk_days']}",
+           "run.output_averages=true", "run.log_level=INFO",
+           f"run.output={name}.nc",
+           f"run.output_prefix={rundir}/{name}",
+           # ++: defined by some run groups but not others (benchmark.py's
+           # bail_on_unhealthy note) — same for checkpoint_path.
+           f"++run.checkpoint_path={rundir}/checkpoint.msgpack"]
     if m.get("jam_inputs"):
-        base += jam_aux(".", grid, m["jam_inputs"])
-    return base
+        ovs += jam_aux(".", grid, m["jam_inputs"])
+    return ovs
 
 
 PBS = """#!/bin/bash

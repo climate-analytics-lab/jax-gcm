@@ -229,7 +229,46 @@ def _pyses_preset(levels: int) -> list[str]:
     ]
 
 
+def _macsp_preset(trunc: str, physics: str) -> list[str]:
+    """MACv2-SP configuration on a mirror grid (release matrix members).
+
+    Same validated profile as ``_T63_COMMON`` (JW-dry init + the longrun
+    sponge) with per-grid inputs auto-resolved: ``terrain=auto`` and the
+    shipped ``forcing.ozone_file: auto`` fall back to the data mirror
+    (jcm.runners), so this needs no hand-managed per-grid paths.
+    """
+    return [
+        f"physics={physics}",
+        f"grid=echam_{trunc}_l47_hybrid",
+        "init=jw", "init.rh=0.0",
+        "terrain=auto",
+        "forcing=from_file",
+        f"forcing.file=hf://bundles/{trunc}/forcing_{_ERA}.nc",
+        "run=longrun", "run.time_step=12",
+        "+sl_off_centering=0.2",
+    ]
+
+
+# SPEEDY takes the DEFAULT run group and init: run=longrun's 10-level
+# sponge spans the entire L8 atmosphere and the dry JW init is an ECHAM
+# spin-up device — both NaN SPEEDY within a chunk (first matrix sweep).
+# Interpolated t63 terrain is fine (SPEEDY composes no SSO scheme); no
+# native t31 terrain exists in the package or on the mirror.
+_SPEEDY_T31 = [
+    "physics=speedy", "grid=speedy_t31_l8",
+    "terrain=from_file", f"terrain.file={REPO}/jcm/data/bc/t63/terrain.nc",
+    "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
+    "run.time_step=15",
+]
+
+
 PRESETS: dict[str, list[str]] = {
+    "speedy-t31": _SPEEDY_T31,
+    # Release-matrix MACv2-SP members (#638). t63-echam-rrtmgp below is the
+    # historical benchmark id for the same 1m-T63 configuration.
+    **{f"{t}-echam-{v}": _macsp_preset(t, p)
+       for t in ("t63", "t106")
+       for v, p in (("1m", "echam"), ("2m", "echam-rrtmgp-2m"))},
     "t63-echam-rrtmgp": ["physics=echam", *_T63_COMMON],
     "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
     "t63-echam-jam": ["physics=echam-jam", *_T63_COMMON],

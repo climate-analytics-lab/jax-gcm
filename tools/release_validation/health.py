@@ -21,9 +21,22 @@ import argparse
 import glob
 import re
 import sys
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
+
+# Shared burden/weighting machinery lives in tools/jam_burden_report.py —
+# one implementation for the report and the gates (it also handles the
+# pressure_half level-orientation dance and cloud-borne tracers, which the
+# first version of this file reimplemented without).
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from jam_burden_report import _SPECIES, _area_weights, _wmean, burden  # noqa: E402
+
+#: Gate slack: the release gate is the climatological anchor range from
+#: the shared species table widened by this factor each way — a "did the
+#: model produce a plausible planetary loading" gate, not a tuning target.
+_BURDEN_SLACK = 3.0
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -36,27 +49,18 @@ RANGES = {
     "aod_550": (0.02, 0.35),
 }
 
-# Global-mean column burdens [mg/m2] per species, JAM runs only (summed
-# over the interstitial modes; cloud-borne lives in the carry, not the
-# saved tracers). Very loose gates around AeroCom-model ranges — the
-# check is "does each species hold a plausible planetary loading", not
-# a tuning target. From-zero spin-up: score with --last-n.
+# Burden gates derive from the shared anchor table (see _BURDEN_SLACK).
 BURDEN_RANGES = {
-    "so4": (0.5, 8.0),
-    "bc": (0.05, 1.0),
-    "poa": (0.2, 4.0),
-    "soa": (0.2, 6.0),
-    "ss": (2.0, 30.0),
-    "du": (3.0, 60.0),
+    sp: (lo / _BURDEN_SLACK, hi * _BURDEN_SLACK)
+    for sp, (_modes, (lo, hi)) in _SPECIES.items()
 }
 
 
-def wmean(da, lat):
-    w = np.cos(np.deg2rad(lat))
-    w = xr.DataArray(w, dims=["lat"], coords={"lat": lat})
-    return float(da.weighted(w).mean(
-        [d for d in da.dims if d != "time"]).mean("time")
-        if "time" in da.dims else da.weighted(w).mean())
+def wmean(da, weights):
+    """Time-mean, area-weighted global mean (shared _wmean over horiz dims)."""
+    if "time" in da.dims:
+        da = da.mean("time")
+    return _wmean(da, weights)
 
 
 def main():
@@ -75,7 +79,7 @@ def main():
     if a.last_n:
         files = files[-a.last_n:]
     ds = xr.open_mfdataset(files, combine="by_coords")
-    lat = ds.lat.values
+    weights = _area_weights(ds)
 
     ok = True
 
@@ -83,7 +87,7 @@ def main():
         nonlocal ok
         good = lo <= value <= hi
         print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.2f} "
-              f"(expected [{lo}, {hi}])")
+              f"(expected [{lo:g}, {hi:g}])")
         ok = ok and good
 
     # NaN scan over everything saved.
@@ -108,7 +112,7 @@ def main():
     else:
         toa = (ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"]
                - ds["radiation.toa_lw_up"])
-    check("toa_net_wm2", wmean(toa, lat), *RANGES["toa_net_wm2"])
+    check("toa_net_wm2", wmean(toa, weights), *RANGES["toa_net_wm2"])
 
     if speedy:
         # SPEEDY precls/precnv are g/m²/s → ×86.4 for mm/day.
@@ -118,18 +122,18 @@ def main():
         precip = (ds.get("clouds.precip_rain", 0)
                   + ds.get("clouds.precip_snow", 0)
                   + ds.get("convection.precip_conv", 0)) * 86400.0
-    check("precip_mm_day", wmean(precip, lat), *RANGES["precip_mm_day"])
+    check("precip_mm_day", wmean(precip, weights), *RANGES["precip_mm_day"])
 
     if speedy:
         cf = ds["shortwave_rad.cloudc"]
     else:
         cf = ds["clouds.cloud_fraction"].max("level")
-    check("cloud_cover", wmean(cf, lat), *RANGES["cloud_cover"])
+    check("cloud_cover", wmean(cf, weights), *RANGES["cloud_cover"])
 
     # Lowest model level (level index orientation: take the max-pressure end;
     # jcm output has level index 0 = lowest layer).
     t_low = ds["temperature"].isel(level=0)
-    check("near_surface_T", wmean(t_low, lat), *RANGES["near_surface_T"])
+    check("near_surface_T", wmean(t_low, weights), *RANGES["near_surface_T"])
 
     # 550 nm AOD — JAM publishes jam_band_optics.aod_550, MACv2-SP runs
     # publish aerosol.aod_total; whichever is present is the scheme's AOD.
@@ -139,33 +143,21 @@ def main():
             aod = ds[key]
             break
     if aod is not None:
-        check("aod_550", wmean(aod, lat), *RANGES["aod_550"])
+        check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
     else:
         print("NOTE  no AOD field found (aod_550/aod_total); skipping")
 
-    # Per-species global burdens (JAM only): column-integrate the
-    # interstitial mass tracers m_<species>_<mode> with the saved
-    # air_density × layer_thickness air mass.
-    mass_keys = [v for v in ds.data_vars if re.fullmatch(r"m_\w+_\w+", v)]
-    if mass_keys:
-        if "air_density" in ds and "layer_thickness" in ds:
-            dm_air = ds["air_density"] * ds["layer_thickness"]
-        else:
-            dm_air = None
-            print("NOTE  air_density/layer_thickness not saved; "
-                  "skipping burdens")
-        if dm_air is not None:
-            by_species = {}
-            for v in mass_keys:
-                sp = v.split("_")[1]
-                by_species.setdefault(sp, []).append(ds[v])
-            for sp, (lo, hi) in BURDEN_RANGES.items():
-                if sp not in by_species:
-                    print(f"NOTE  no {sp} mass tracers; skipping burden")
-                    continue
-                total = sum(by_species[sp])
-                burden = (total.clip(min=0) * dm_air).sum("level") * 1e6
-                check(f"burden_{sp}_mg_m2", wmean(burden, lat), lo, hi)
+    # Per-species global burdens (JAM runs): the shared ``burden`` sums
+    # interstitial + cloud-borne mass over the species' modes and
+    # integrates q·Δp/g from the file's own pressure_half.
+    if any(re.fullmatch(r"m_\w+_\w+", v) for v in ds.data_vars):
+        for sp, (lo, hi) in BURDEN_RANGES.items():
+            col = burden(ds, sp, _SPECIES[sp][0])
+            if col is None:
+                print(f"NOTE  no {sp} mass tracers; skipping burden")
+                continue
+            check(f"burden_{sp}_mg_m2", _wmean(col.compute(), weights),
+                  lo, hi)
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())

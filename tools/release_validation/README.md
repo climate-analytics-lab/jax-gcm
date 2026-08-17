@@ -36,8 +36,11 @@ scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 dialects. Post the table to the release issue; compare settled sim-days/hr
 against the baselines in #638 (>15% drop = runtime regression).
 
-Per-grid inputs resolve automatically (`terrain=auto`,
-`forcing.ozone_file=auto` fall back to the data mirror), so T106/L95
-members need no hand overrides. Known profile facts encoded in
-`matrix.yaml`: SPEEDY takes the default run group (the longrun sponge
-spans the whole L8 atmosphere) and the default init.
+Lean by construction: `matrix.yaml` members reference the validated
+preset table in `tools/benchmark.py` (`PRESETS` — the single home of
+known-good override sets), `health.py`'s burden gates derive from
+`tools/jam_burden_report.py`'s shared species/anchor table (anchor
+range × slack 3), and per-grid inputs resolve automatically
+(`terrain=auto`, `forcing.ozone_file=auto` fall back to the mirror).
+SPEEDY profile facts (default run group + init; the longrun sponge
+spans the whole L8 atmosphere) live with its preset in benchmark.py.
