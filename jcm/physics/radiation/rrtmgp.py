@@ -963,20 +963,18 @@ def _maybe_chunked_vmap(fn, in_axes):
     return run
 
 
-# The mode vocabulary and its validation live in ``aerosol_free`` so that
-# echam_physics() can validate them for grey/emulated configs too, without
-# importing this module and its RRTMGP tables. Re-exported here because
-# this is where callers expect to find them.
+# The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
+# validate the setting for grey/emulated configs too, without importing
+# this module and its RRTMGP tables.
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
-    AEROSOL_FREE_MODES,
-    MODE_EVIDENCE,
     NOA_KEYS,
+    SUBSAMPLING_CAVEAT,
     hold_all,
-    resolve_aerosol_free,
+    resolve_aerosol_free_interval,
     update_effect_fraction,
 )
 
-__all__ = ["RRTMGPRadiation", "AEROSOL_FREE_MODES"]
+__all__ = ["RRTMGPRadiation"]
 
 
 class RRTMGPRadiation(PhysicsTerm):
@@ -1020,7 +1018,6 @@ class RRTMGPRadiation(PhysicsTerm):
         params: RadiationParameters | None = None,
         base_seed: int = 0,
         compute_cre: bool = True,
-        aerosol_free: str = "off",
         aerosol_free_interval: int | None = None,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
@@ -1036,17 +1033,18 @@ class RRTMGPRadiation(PhysicsTerm):
                 ``toa_{sw,lw}_up_clear`` for the cloud radiative
                 effect diagnostic. Set False for the 1× McICA-only
                 cost when CRE isn't needed.
-            aerosol_free: one of :data:`AEROSOL_FREE_MODES`, selecting how
-                the AeroCom ``*noa`` fluxes are produced. Defaults to
-                ``"off"``; ``"exact"`` is the reference. The two cheap modes
-                are both measurably wrong (~30-40x the run-to-run
-                reproducibility floor) and log a warning quoting by how
-                much, so a run never quietly reports an approximate ERFari
-                as the real one.
-            aerosol_free_interval: radiation steps between companion solves.
-                Required by — and only meaningful for — ``aerosol_free=
-                "paired"``; passing it with any other mode is an error
-                rather than a silently ignored argument.
+            aerosol_free_interval: radiation steps between aerosol-free
+                companion solves, producing the AeroCom ``*noa`` fluxes
+                that ERFari is diagnosed from (jax-gcm#583). ``None``
+                (default) means no ``*noa`` fluxes at all; ``1`` is the
+                exact reference, costing ~+64 % runtime because radiation
+                dominates the step; ``N > 1`` runs the companion every Nth
+                step and holds the aerosol effect in between — a monotonic
+                dial, cheaper and less accurate as N grows. The SIMULATION
+                is bit-identical at every N: only the diagnostic is
+                approximated. N > 1 logs a warning quoting the measured
+                error, since the choice is not recoverable from the output
+                files afterwards.
 
         """
         self.params = nnx.Param(params or RadiationParameters.default())
@@ -1056,46 +1054,36 @@ class RRTMGPRadiation(PhysicsTerm):
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
-        # per compute step with the aerosol optics zeroed. Roughly doubles
-        # the (dominant) radiation cost on compute steps, so opt-in only.
-        # Single source of truth for the vocabulary and the mode/interval
-        # contract; echam_physics() calls the same validator so a grey or
-        # emulated config is held to it too.
-        interval = resolve_aerosol_free(aerosol_free, aerosol_free_interval)
-        self._aerosol_free_mode = aerosol_free
-        self._aerosol_free = aerosol_free != "off"
-        # Alternate the SINGLE solve between aerosol-on and aerosol-off
-        # instead of paying for a second one. Removes the *noa cost entirely
-        # but perturbs the physics — see ``_compute_full``.
-        self._aerosol_free_alternate = aerosol_free == "alternating"
-        # Run the aerosol-free companion only every Nth radiation step, but
-        # paired with the all-sky solve at that same step, so the two fluxes
-        # always describe the same atmospheric state. Between companions the
-        # aerosol EFFECT is held, not the raw aerosol-free flux: the effect
-        # varies slowly, the flux does not, and holding the flux would leave
-        # rsut and rsutnoa sampling different step sets (measured at
-        # 0.04-0.14 W/m2 for a 2x subsample — the same size as the error this
-        # is meant to avoid). Cost is (1 + 1/N) solves instead of 2.
-        self._aerosol_free_interval = interval
-        # State the chosen mode once, at construction, and for the two
-        # approximate modes quote the MEASURED error rather than just naming
-        # the scheme. The mode is also stamped into the output as
-        # ``jcm_prov_aerosol_free`` (see runners), because this log line is
-        # long gone by the time anyone reads the netCDF.
-        if aerosol_free == "exact":
-            # Say EXACT, not "paired": `paired` is a DIFFERENT mode in the
-            # same vocabulary with a known error, and a log reader who saw
-            # the same word for both could not tell a reference run from an
-            # approximate one — which is the whole point of logging it.
+        # per compute step with the aerosol optics zeroed. Radiation
+        # dominates the step, so this is opt-in only.
+        #
+        # Validated through the shared helper, which echam_physics() also
+        # calls so a grey or emulated config is held to the same contract
+        # rather than silently ignoring the argument.
+        interval = resolve_aerosol_free_interval(aerosol_free_interval)
+        self._aerosol_free = interval is not None
+        # Between companions the aerosol EFFECT is held, not the raw
+        # aerosol-free flux: the effect varies slowly, the flux does not,
+        # and holding the flux would leave rsut and rsutnoa sampling
+        # different step sets (measured at 0.04-0.14 W/m2 for a 2x
+        # subsample — the same size as the error this is meant to avoid).
+        # Cost is (1 + 1/N) solves instead of 2.
+        self._aerosol_free_interval = interval or 1
+        # State the choice once, at construction, and at N > 1 quote the
+        # MEASURED error rather than just the number. The setting is also
+        # stamped into the output as ``jcm_prov_aerosol_free_interval``
+        # (see runners), because this log line is long gone by the time
+        # anyone reads the netCDF.
+        if interval == 1:
             logger.info(
-                "*noa via EXACT companion solve every radiation step "
-                "(reference ERFari; ~+64 % runtime)")
-        elif aerosol_free in MODE_EVIDENCE:
+                "*noa companion solve every radiation step "
+                "(exact ERFari; ~+64 % runtime)")
+        elif interval is not None:
             logger.warning(
-                "*noa via %s: APPROXIMATE ERFari — %s. Use "
-                "aerosol_free='exact' for a reference-quality figure "
-                "(jax-gcm#630).",
-                aerosol_free.upper(), MODE_EVIDENCE[aerosol_free])
+                "*noa companion only every %d radiation steps: APPROXIMATE "
+                "ERFari — %s. Use aerosol_free_interval=1 for a "
+                "reference-quality figure (jax-gcm#630).",
+                interval, SUBSAMPLING_CAVEAT)
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit
@@ -1259,42 +1247,6 @@ class RRTMGPRadiation(PhysicsTerm):
 
         aerosol_col = aerosol_for_vmap.copy(Nccn=aerosol_in.Nccn.reshape(ncols))
 
-        # Alternating aerosol-free mode (jax-gcm#583 cost experiment): rather
-        # than a SECOND solve per radiation step, alternate the single solve
-        # between aerosol-on and aerosol-off. The *noa fluxes then cost
-        # nothing, but the model genuinely feels aerosol-free radiative
-        # heating on every other radiation step, so the aerosol direct effect
-        # enters the energy budget with a 50 % duty cycle. That is the
-        # approximation this mode exists to quantify — it is NOT free.
-        aerosol_on = jnp.asarray(True)
-        if self._aerosol_free_alternate:
-            dt = diagnostics["_dt_seconds"]
-            interval = params.radiation_interval
-            steps_per_call = jnp.where(
-                interval > 0,
-                jnp.int32(jnp.round(interval / dt)),
-                jnp.int32(1),
-            )
-            # ``_compute_full`` only runs on radiation steps, so the radiation
-            # call index is model_step // steps_per_call; alternate on its
-            # parity. Zeroing the optics (not cdnc_factor/Nccn) keeps the
-            # cloud field identical, so this isolates the direct effect.
-            aerosol_on = jnp.mod(model_step // steps_per_call, 2) == 0
-            keep = aerosol_on.astype(aerosol_col.aod_profile.dtype)
-            aerosol_col = aerosol_col.copy(
-                aod_profile=aerosol_col.aod_profile * keep,
-                ssa_profile=aerosol_col.ssa_profile * keep,
-                asy_profile=aerosol_col.asy_profile * keep,
-                aod_total=aerosol_col.aod_total * keep,
-                aod_anthropogenic=aerosol_col.aod_anthropogenic * keep,
-                aod_background=aerosol_col.aod_background * keep,
-                aod_sw_per_band=aerosol_col.aod_sw_per_band * keep,
-                ssa_sw_per_band=aerosol_col.ssa_sw_per_band * keep,
-                asy_sw_per_band=aerosol_col.asy_sw_per_band * keep,
-                aod_lw_per_band=aerosol_col.aod_lw_per_band * keep,
-                ssa_lw_per_band=aerosol_col.ssa_lw_per_band * keep,
-                asy_lw_per_band=aerosol_col.asy_lw_per_band * keep,
-            )
         cols = dict(
             temperature=lev_to_col(state.temperature),
             specific_humidity=lev_to_col(state.specific_humidity),
@@ -1361,31 +1313,6 @@ class RRTMGPRadiation(PhysicsTerm):
                 diagnostics_vmapped.toa_lw_up_clear, ncols),
         )
 
-        if self._aerosol_free_alternate:
-            # The single solve above was aerosol-on or aerosol-off depending
-            # on ``aerosol_on``; route its TOA fluxes to the matching slots
-            # and hold the other flavour from the previous radiation step.
-            # Everything else on the carry (heating profiles, surface fluxes)
-            # stays FRESH: it is what the model actually applied this step.
-            prev = diagnostics["radiation"]
-            all_sky = {
-                k: jnp.where(aerosol_on, v, getattr(prev, k))
-                for k, v in _fresh_toa.items()
-            }
-            noa = {
-                f"{k}_noa": jnp.where(
-                    aerosol_on, getattr(prev, f"{k}_noa"), v)
-                for k, v in _fresh_toa.items()
-            }
-            # `alternating` holds whole fluxes rather than a fraction, so
-            # the fraction slots stay at zero — but they must still be
-            # supplied, since RadiationData requires every field.
-            # KNOWN GAP (jax-gcm#651): the held TOA up-fluxes are paired
-            # with a FRESH toa_sw_down and fresh surface fluxes, so the
-            # reported budget straddles one radiation interval of solar
-            # geometry. Near sunrise that is a locally 100 %-wrong albedo.
-            noa.update({f"noa_frac_{k}": jnp.zeros((ncols,))
-                        for k in NOA_KEYS})
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
         # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
         # the cloud field is bit-identical and the difference to the all-sky
@@ -1393,7 +1320,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # numerator), not an aerosol-cloud response. Zeroing the optical
         # depths alone suffices (extinction scales everything), but ssa/asy
         # are zeroed too so no path reads an unweighted property.
-        elif self._aerosol_free:
+        if self._aerosol_free:
             all_sky = _fresh_toa
             aerosol_noa = cols["aerosol"].copy(
                 aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),

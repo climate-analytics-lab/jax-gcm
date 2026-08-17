@@ -62,78 +62,59 @@ aerocom_overlap: maximum-random
 aerocom_optics: false
 # Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
 #
-# ONE knob with four named settings. `aerosol_free_interval` below is the
-# parameter of `paired` only, and passing it with any other mode is an
-# error rather than being silently ignored.
+# ONE knob: how many radiation steps between aerosol-free companion
+# solves.
+#
+#   null   no *noa fluxes, no ERFari, no extra cost
+#   1      companion every radiation step — the exact reference
+#   N > 1  companion every Nth step, aerosol effect held in between
+#
+# Monotonic in both directions: cost falls and error grows with N. The
+# SIMULATION is bit-identical at every N — the model always sees aerosol,
+# and only the diagnostic is approximated.
 #
 # COST — measured wall-clock, T63L47 semi-Lagrangian, A100, steady-state
 # chunks only (chunk 0 AND chunk 1 are compile-contaminated):
 #
-#   off          no *noa fluxes            30.9 s/sim-day    —      (no ERFari)
-#   exact        companion every rad step  50.8 s/sim-day   +64 %   reference
-#   paired N=4   companion every Nth step  36.2 s/sim-day   +17 %
-#   alternating  no companion; alternate   30.9 s/sim-day    +0 %
+#   null   30.9 s/sim-day    —      (no ERFari)
+#   N=1    50.8 s/sim-day   +64 %   exact
+#   N=4    36.2 s/sim-day   +17 %
 #
 # Earlier revisions of this file quoted +55 % and +7 %. Those were measured
-# on the now-removed EULERIAN dycore (#625) and do not apply; the numbers
-# above are semi-Lagrangian. Absolute s/sim-day are kept so the percentages
-# stay checkable.
+# on the now-removed EULERIAN dycore (#625) and do not apply. Absolute
+# s/sim-day are kept so the percentages stay checkable.
 #
-# FIDELITY — a 155-day ERA5-nudged T63L47 SL run (#630), all four runs on
-# the same commit, reference ERFari -0.766 W/m2:
+# FIDELITY — a 155-day ERA5-nudged T63L47 SL run (#630), same commit,
+# reference ERFari -0.766 W/m2 at N=1:
 #
-#                     ERFari error       vs floor
-#   exact                  0             (reference)
-#   paired (N=4)      -0.095 W/m2  12 %     ~40x   << STALE, see below
-#   alternating       +0.067 W/m2   9 %     ~30x
+#   N=4   -0.095 W/m2   12 %   ~40x the reproducibility floor   << STALE
 #
-# STALE: the `paired` figure was measured BEFORE three bugs in the hold
-# were fixed — a companion landing on a dark column erased the held
-# fraction (zero aerosol effect for the rest of the interval, including
-# after sunrise); a near-terminator companion could adopt a ratio that
-# fabricated a ~150 W/m2 effect when re-applied to a sunlit column; and
-# the division NaN'd reverse-mode gradients. All three pushed the error in
-# the measured direction, and the first two are plausibly most of it. Treat
-# -0.095 as a stale upper bound; #648 re-measures.
+# STALE: measured BEFORE three bugs in the hold were fixed — a companion
+# landing on a dark column erased the held fraction (zero aerosol effect
+# for the rest of the interval, including after sunrise); a near-terminator
+# companion could adopt a ratio that fabricated a ~150 W/m2 effect when
+# re-applied to a sunlit column; and the division NaN'd reverse-mode
+# gradients. All three pushed the error in the measured direction, and the
+# first two are plausibly most of it. Treat -0.095 as a stale upper bound;
+# #648 re-measures, with an N=2 arm.
 #
-# The floor is 0.0023 W/m2: a SECOND run of `exact` itself, differing only
-# in node and A100 variant (SXM4 vs PCIe). Read it as an order-of-magnitude
-# yardstick, not a significance test — it is a single pair, so the "~40x"
-# moves between 41 and 43 depending on rounding. Nudging also suppresses
-# internal variability by design, so this floor bounds run-to-run
-# reproducibility, not climate noise. What survives all that: both
-# approximations are ~1.5 orders of magnitude above it, at ~10 % of the
-# signal. If the ERFari number matters, pay for `exact`.
+# The floor is 0.0023 W/m2: a SECOND run at N=1, differing only in node and
+# A100 variant (SXM4 vs PCIe). An order-of-magnitude yardstick, not a
+# significance test — a single pair, so "~40x" moves between 41 and 43
+# depending on rounding. Nudging also suppresses internal variability by
+# design, so it bounds run-to-run reproducibility, not climate noise.
 #
-# The two approximations differ in KIND, which matters more than their
-# sizes. `paired` leaves the simulation bit-identical to `exact` (the model
-# always sees aerosol) and approximates only the diagnostic, by holding the
-# aerosol effect as a FRACTION of the all-sky flux between companions.
-# `alternating` makes the model feel aerosol-free heating half the time, so
-# the SIMULATION differs and EVERY output is affected, not just the *noa
-# fluxes. That also weakens its entry in the table above: a
-# physics-perturbing scheme's ERFari is not cleanly separable from
-# trajectory divergence in a single realisation, even nudged. `paired`'s
-# entry has no such caveat, which is why it is the recommended
-# approximation despite the larger number.
+# Between companions the aerosol effect is held as a FRACTION of the
+# all-sky flux; holding it as an absolute W/m2 fabricates a reflected flux
+# out of darkness on the night side, which cost a year-long run.
 #
-# The tension that led to finding those bugs: `paired` is bit-identical in
-# physics, so its error should be a pure diagnostic artefact — yet it
-# measured LARGER than the physics-perturbing scheme's, and an offline
-# 6-day test found `paired` N=4 bit-identical to `exact` with zero ERFari
-# difference. That mismatch was the clue. Three of the four runs also
-# resumed from day-20 checkpoints while the twin ran fresh, which #648
-# also eliminates. See docs/source/design/aerocom_erfari_sampling.md.
+# REMOVED: an `alternating` mode produced the *noa fluxes for free by
+# stealing every other radiation call instead of adding one. It made the
+# model feel aerosol-free heating half the time — a DIAGNOSTIC changing
+# the simulated state, affecting every output rather than just the *noa
+# fields — and it made this knob non-monotonic, since it was cheaper than
+# N=4 while being the only setting that perturbed the physics. Dropped in
+# favour of the single dial above (#651).
 #
-# Untested middle ground: paired with N=2 should halve the extrapolation
-# gap; its cost is a DERIVED estimate of ~+30 %, not a measurement. Check
-# it in the offline harness before spending cluster time.
-aerosol_free: exact
-
-# Companion spacing for `aerosol_free: paired`. Unused (and rejected) for
-# every other mode; N=1 is spelled `aerosol_free: exact`. Declared as null
-# rather than commented out so that switching modes is a plain override —
-#     physics.aerosol_free=paired physics.aerosol_free_interval=4
-# without Hydra's `+` prefix, which a commented-out key would require.
-# A null is dropped before the factory call, so it stays "unset".
-aerosol_free_interval: null
+# See docs/source/design/aerocom_erfari_sampling.md.
+aerosol_free_interval: 1

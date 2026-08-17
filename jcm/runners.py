@@ -302,16 +302,15 @@ def build_physics(cfg: DictConfig):
 
 
 def _record_aerosol_free_provenance(physics) -> None:
-    """Stamp which ``*noa`` scheme ran into the output's global attributes.
+    """Stamp the ``*noa`` companion spacing into the output's attributes.
 
-    ERFari computed from a subsampled aerosol-free solve is measurably
-    different from the reference (29-42x the internal-variability noise
-    floor — see ``docs/source/design/aerocom_erfari_sampling.md``), and
-    nothing in the saved fields distinguishes the two. A startup log line
-    is not enough: it is gone by the time anyone reads the netCDF. Reading
-    the mode off the built term rather than the YAML also covers physics
-    assembled by a ``terms`` list, where the flag reaches the term
-    directly.
+    ERFari from a subsampled aerosol-free solve is measurably different
+    from the N=1 reference (see
+    ``docs/source/design/aerocom_erfari_sampling.md``), and nothing in the
+    saved fields distinguishes the two. A startup log line is not enough:
+    it is gone by the time anyone reads the netCDF. Reading the interval
+    off the built term rather than the YAML also covers physics assembled
+    by a ``terms`` list, where the setting reaches the term directly.
 
     Matched on the attribute rather than ``isinstance(term,
     RRTMGPRadiation)`` so this never imports the optional RRTMGP backend:
@@ -319,12 +318,10 @@ def _record_aerosol_free_provenance(physics) -> None:
     unconditional import would make a provenance nicety a hard dependency.
     """
     for term in physics.terms:
-        mode = getattr(term, "_aerosol_free_mode", None)
-        if mode is None or mode == "off":
+        if not getattr(term, "_aerosol_free", False):
             continue
-        detail = (f"paired:N={term._aerosol_free_interval}"
-                  if mode == "paired" else mode)
-        provenance.record_fact("aerosol_free", detail)
+        provenance.record_fact("aerosol_free_interval",
+                               term._aerosol_free_interval)
         return
 
 

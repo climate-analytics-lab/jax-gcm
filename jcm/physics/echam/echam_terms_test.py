@@ -239,22 +239,17 @@ class TestAerosolFreeValidation(unittest.TestCase):
         self.echam_physics = echam_physics
 
     def test_interval_is_rejected_on_non_rrtmgp_schemes(self):
-        echam_physics = self.echam_physics
         for scheme in ("grey", "emulated"):
             with self.assertRaises(ValueError) as cm:
-                echam_physics(radiation_scheme=scheme,
-                              aerosol_free_interval=4)
-            self.assertIn("only applies to", str(cm.exception))
+                self.echam_physics(radiation_scheme=scheme,
+                                   aerosol_free_interval=1)
+            self.assertIn("radiation_scheme='rrtmgp'", str(cm.exception))
 
-    def test_unknown_mode_is_rejected_before_the_scheme_check(self):
-        # A typo must name the vocabulary rather than complain about the
-        # radiation scheme, which would send the reader down a blind alley.
+    def test_nonsensical_interval_is_rejected_before_the_scheme_check(self):
+        # A meaningless spacing must name the real problem rather than
+        # complain about the radiation scheme, which would send the reader
+        # down a blind alley.
         with self.assertRaises(ValueError) as cm:
             self.echam_physics(radiation_scheme="grey",
-                               aerosol_free="alternate")
-        self.assertIn("not one of", str(cm.exception))
-
-    def test_aerosol_free_needs_rrtmgp(self):
-        with self.assertRaises(ValueError) as cm:
-            self.echam_physics(radiation_scheme="grey", aerosol_free="exact")
-        self.assertIn("radiation_scheme='rrtmgp'", str(cm.exception))
+                               aerosol_free_interval=0)
+        self.assertIn("must be >= 1", str(cm.exception))

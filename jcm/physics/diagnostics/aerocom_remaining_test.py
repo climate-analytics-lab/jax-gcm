@@ -440,10 +440,10 @@ class AerosolFreeRadiationTest(unittest.TestCase):
         from jcm.physics.echam.echam_terms import echam_physics
         with self.assertRaises(ValueError):
             echam_physics(radiation_scheme="grey",
-                          aerosol_free="exact")
+                          aerosol_free_interval=1)
 
-    def test_aerosol_free_flag_reaches_the_radiation_term(self):
-        """The factory flag must actually configure the built term.
+    def test_aerosol_free_interval_reaches_the_radiation_term(self):
+        """The factory setting must actually configure the built term.
 
         Replaces a test that constructed ``RadiationData.zeros(...)`` and
         asserted it was zero — true by definition, and it never touched the
@@ -455,20 +455,16 @@ class AerosolFreeRadiationTest(unittest.TestCase):
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
-        def mode_of(**kw):
+        def setting_of(**kw):
             physics = echam_physics(radiation_scheme="rrtmgp", **kw)
             rad = [t for t in physics.terms
                    if isinstance(t, RRTMGPRadiation)]
             self.assertEqual(len(rad), 1, "expected exactly one RRTMGP term")
-            return rad[0]._aerosol_free_mode, rad[0]._aerosol_free_interval
+            return rad[0]._aerosol_free, rad[0]._aerosol_free_interval
 
-        self.assertEqual(mode_of(), ("off", 1))
-        self.assertEqual(mode_of(aerosol_free="exact"), ("exact", 1))
-        self.assertEqual(
-            mode_of(aerosol_free="paired", aerosol_free_interval=4),
-            ("paired", 4))
-        self.assertEqual(mode_of(aerosol_free="alternating"),
-                         ("alternating", 1))
+        self.assertEqual(setting_of(), (False, 1))
+        self.assertEqual(setting_of(aerosol_free_interval=1), (True, 1))
+        self.assertEqual(setting_of(aerosol_free_interval=4), (True, 4))
 
 
 import pytest  # noqa: E402
@@ -479,7 +475,7 @@ class AerosolFreeRadiationSlowTest(unittest.TestCase):
     """One real RRTMGP step: noa differs from all-sky iff aerosol is present.
 
     Runs the full ECHAM composition (RRTMGP + 2M clouds + MACv2-SP with
-    ``aerosol_free="exact"``) in the single-column host rather than
+    ``aerosol_free_interval=1``) in the single-column host rather than
     a T21 ``Model``: the claim under test — the second, aerosol-free
     RRTMGP solve and its published ``*_noa`` fluxes — is per-column
     physics, and running 2048 spectral columns through the most expensive
@@ -499,7 +495,7 @@ class AerosolFreeRadiationSlowTest(unittest.TestCase):
 
         physics = echam_physics(
             radiation_scheme="rrtmgp", cloud_scheme="2m",
-            aerosol_module="macv2sp", aerosol_free="exact",
+            aerosol_module="macv2sp", aerosol_free_interval=1,
             checkpoint_terms=False)
         vertical = get_echam_levels(47)
         scm = SingleColumnModel(
