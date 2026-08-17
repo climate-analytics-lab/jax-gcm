@@ -84,8 +84,17 @@ aerocom_optics: false
 #
 #                     ERFari error       vs floor
 #   exact                  0             (reference)
-#   paired (N=4)      -0.095 W/m2  12 %     ~40x
+#   paired (N=4)      -0.095 W/m2  12 %     ~40x   << STALE, see below
 #   alternating       +0.067 W/m2   9 %     ~30x
+#
+# STALE: the `paired` figure was measured BEFORE three bugs in the hold
+# were fixed — a companion landing on a dark column erased the held
+# fraction (zero aerosol effect for the rest of the interval, including
+# after sunrise); a near-terminator companion could adopt a ratio that
+# fabricated a ~150 W/m2 effect when re-applied to a sunlit column; and
+# the division NaN'd reverse-mode gradients. All three pushed the error in
+# the measured direction, and the first two are plausibly most of it. Treat
+# -0.095 as a stale upper bound; #648 re-measures.
 #
 # The floor is 0.0023 W/m2: a SECOND run of `exact` itself, differing only
 # in node and A100 variant (SXM4 vs PCIe). Read it as an order-of-magnitude
@@ -108,13 +117,13 @@ aerocom_optics: false
 # entry has no such caveat, which is why it is the recommended
 # approximation despite the larger number.
 #
-# UNRESOLVED: `paired` is bit-identical in physics, so its error should be
-# a pure diagnostic artefact — yet it measures LARGER than the
-# physics-perturbing scheme's, and an offline 6-day test found `paired` N=4
-# bit-identical to `exact` with zero ERFari difference. Three of the four
-# runs also resumed from day-20 checkpoints while the twin ran fresh. The
-# sign of the conclusion is robust; the ranking of the two approximations
-# is not. See docs/source/design/aerocom_erfari_sampling.md.
+# The tension that led to finding those bugs: `paired` is bit-identical in
+# physics, so its error should be a pure diagnostic artefact — yet it
+# measured LARGER than the physics-perturbing scheme's, and an offline
+# 6-day test found `paired` N=4 bit-identical to `exact` with zero ERFari
+# difference. That mismatch was the clue. Three of the four runs also
+# resumed from day-20 checkpoints while the twin ran fresh, which #648
+# also eliminates. See docs/source/design/aerocom_erfari_sampling.md.
 #
 # Untested middle ground: paired with N=2 should halve the extrapolation
 # gap; its cost is a DERIVED estimate of ~+30 %, not a measurement. Check

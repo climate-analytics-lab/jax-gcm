@@ -455,6 +455,7 @@ def prepare_icon_data(
         toa_sw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_lw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up),
+        noa_effect_frac=jnp.zeros((4,) + toa_sw_up.shape),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
@@ -966,7 +967,9 @@ def _maybe_chunked_vmap(fn, in_axes):
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     AEROSOL_FREE_MODES,
     MODE_EVIDENCE,
+    hold_all,
     resolve_aerosol_free,
+    update_effect_fraction,
 )
 
 __all__ = ["RRTMGPRadiation", "AEROSOL_FREE_MODES"]
@@ -1082,7 +1085,7 @@ class RRTMGPRadiation(PhysicsTerm):
             # approximate one — which is the whole point of logging it.
             logger.info(
                 "*noa via EXACT companion solve every radiation step "
-                "(reference ERFari; ~+64 %% runtime)")
+                "(reference ERFari; ~+64 % runtime)")
         elif aerosol_free in MODE_EVIDENCE:
             logger.warning(
                 "*noa via %s: APPROXIMATE ERFari — %s. Use "
@@ -1370,6 +1373,10 @@ class RRTMGPRadiation(PhysicsTerm):
                     aerosol_on, getattr(prev, f"{k}_noa"), v)
                 for k, v in _fresh_toa.items()
             }
+            # `alternating` holds whole fluxes rather than a fraction, so
+            # the fraction slot stays at zero — but it must still be
+            # supplied, since RadiationData requires every field.
+            noa["noa_effect_frac"] = jnp.zeros((4, ncols))
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
         # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
         # the cloud field is bit-identical and the difference to the all-sky
@@ -1424,11 +1431,9 @@ class RRTMGPRadiation(PhysicsTerm):
 
             if self._aerosol_free_interval > 1:
                 # Pay for the companion only every Nth radiation step. Between
-                # companions carry the aerosol EFFECT forward and subtract it
-                # from the FRESH all-sky flux, so the pair always refers to the
+                # companions carry the aerosol EFFECT forward and apply it to
+                # the FRESH all-sky flux, so the pair always refers to the
                 # same state and rsut/rsutnoa never sample different step sets.
-                # The effect is carried implicitly as the difference of the two
-                # slots already on the carry, so no schema change is needed.
                 dt_s = diagnostics["_dt_seconds"]
                 spc = jnp.where(
                     params.radiation_interval > 0,
@@ -1437,42 +1442,49 @@ class RRTMGPRadiation(PhysicsTerm):
                 )
                 rad_call = model_step // spc
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
-                prev_rad = diagnostics["radiation"]
-                # Hold the effect as a FRACTION of the all-sky flux, not as an
-                # absolute W/m2. The absolute aerosol effect is only slowly
-                # varying in the LW; in the SW it tracks the solar cycle, and
-                # holding it across the dark side subtracts a daytime effect
-                # from a zero flux — fabricating an aerosol-free flux out of
-                # darkness. A fraction is scale-free, so night reconstructs
-                # to zero; that is the reason for the change, and it is
-                # pinned by test_dark_columns_reconstruct_to_zero_*.
-                # (An absolute hold at N=4 also measured -0.077 W/m2 of SW
-                # error over a year, but do NOT read that against the
-                # 0.095 W/m2 quoted for the fraction hold in MODE_EVIDENCE:
-                # different runs on different dynamical cores, so the two
-                # numbers are not comparable.)
-                def _frac(k):
-                    allsky = getattr(prev_rad, k)
-                    noa = getattr(prev_rad, f"{k}_noa")
-                    return jnp.where(
-                        jnp.abs(allsky) > 1e-6, (allsky - noa) / allsky, 0.0)
+                prev_frac = diagnostics["radiation"].noa_effect_frac
 
-                held_frac = tuple(_frac(k) for k in _KEYS)
-                noa_vals = jax.lax.cond(
+                def _companion():
+                    """Solve, and refresh the stored effect fraction."""
+                    vals = _solve_aerosol_free()
+                    fracs = [
+                        update_effect_fraction(_fresh_toa[k], noa_v,
+                                               prev_frac[i])
+                        for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
+                    ]
+                    return vals, jnp.stack(fracs)
+
+                def _held():
+                    """Re-apply the stored fraction to the fresh all-sky flux.
+
+                    The fraction passes through untouched, which is why it is
+                    carried explicitly: deriving it back out of the flux slots
+                    fails once those slots are zero, and a companion landing
+                    on a dark column would then report no aerosol effect for
+                    the rest of the interval — including after sunrise.
+                    """
+                    return hold_all(fresh, prev_frac), prev_frac
+
+                noa_vals, new_frac = jax.lax.cond(
                     jnp.mod(rad_call, self._aerosol_free_interval) == 0,
-                    _solve_aerosol_free,
-                    lambda: tuple(f * (1.0 - r) for f, r in zip(fresh, held_frac)),
+                    _companion,
+                    _held,
                 )
             else:
                 noa_vals = _solve_aerosol_free()
+                # Only `paired` carries a fraction; every other
+                # mode solves fresh, so leave the slot at zero.
+                new_frac = jnp.zeros((4, ncols))
 
             noa = {f"{k}_noa": v for k, v in zip(_KEYS, noa_vals)}
+            noa["noa_effect_frac"] = new_frac
         else:
             all_sky = _fresh_toa
             zero_col = jnp.zeros((ncols,))
             noa = dict(
                 toa_sw_up_noa=zero_col, toa_lw_up_noa=zero_col,
                 toa_sw_up_clear_noa=zero_col, toa_lw_up_clear_noa=zero_col,
+                noa_effect_frac=jnp.zeros((4, ncols)),
             )
 
         # Per-gpoint flux profiles are summed over g-points inside the

@@ -172,6 +172,7 @@ def radiation_scheme_emulated(
         toa_sw_up_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_sw_up_clear_noa=jnp.zeros_like(sw_flux_up[0]),
+        noa_effect_frac=jnp.zeros((4,) + sw_flux_up[0].shape),
         toa_lw_up_clear_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear=jnp.zeros_like(lw_flux_up[0]),
         # No sub-column machinery in the emulator: McICA cloud cover is 0.
@@ -407,6 +408,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             toa_sw_up_noa=jnp.zeros((ncols,)),
             toa_lw_up_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear_noa=jnp.zeros((ncols,)),
+            noa_effect_frac=jnp.zeros((4, ncols)),
             toa_lw_up_clear_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear=_column_vector_emulated(
                 diagnostics_vmapped.toa_sw_up_clear, ncols,

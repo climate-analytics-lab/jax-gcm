@@ -579,6 +579,7 @@ def radiation_scheme(
         toa_sw_up_noa=jnp.zeros_like(toa_sw_up_clear),
         toa_lw_up_noa=jnp.zeros_like(toa_lw_up_clear),
         toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up_clear),
+        noa_effect_frac=jnp.zeros((4,) + toa_sw_up_clear.shape),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
         # Grey two-stream has no McICA sub-columns; the radiation-view
         # cloud-cover diagnostic is defined as 0 here (see RadiationData).
@@ -844,6 +845,7 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_sw_up_noa=jnp.zeros((ncols,)),
             toa_lw_up_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear_noa=jnp.zeros((ncols,)),
+            noa_effect_frac=jnp.zeros((4, ncols)),
             toa_lw_up_clear_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_sw_up_clear, ncols,

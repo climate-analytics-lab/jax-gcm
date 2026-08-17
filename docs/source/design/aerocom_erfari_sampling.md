@@ -113,12 +113,12 @@ divergence even under nudging, so its 0.0668 should be read as an upper
 bound on a scheme error rather than a measurement of one. `paired`'s entry
 carries no such caveat.
 
-## An unresolved tension
+## The tension that turned out to be three bugs
 
-`paired` leaves the physics bit-identical, so its error is purely the
-extrapolation between companions — and yet it is measured here as
-*larger* than the physics-perturbing `alternating` scheme's. Two
-observations sharpen the puzzle rather than resolving it:
+`paired` leaves the physics bit-identical, so its error should be purely
+the extrapolation between companions — and yet it measured *larger* than
+the physics-perturbing `alternating` scheme's. Two observations sharpened
+the puzzle:
 
 - An offline, un-nudged, same-node test found `paired` N=4
   **bit-identical** to `exact` over 6 days, with an ERFari difference of
@@ -128,17 +128,40 @@ observations sharpen the puzzle rather than resolving it:
   absolute terms, which is the right order of magnitude but not a
   demonstration.
 
-A second confound is that three of the four runs resumed from day-20
-checkpoints written by earlier jobs on different nodes, while the twin ran
-180 days fresh — so the floor and the departures were not produced by
-identical procedures.
+Chasing that mismatch found **three real bugs in the hold**, all of which
+pushed the error in the measured direction:
 
-The honest summary is that the *sign* of the conclusion is robust (both
-approximations are well outside the floor) while the precise ranking of the
-two is not yet established. Anyone tempted to prefer `alternating` on the
-strength of its smaller number here should first repeat the experiment with
-all four runs started fresh — tracked as jax-gcm#648, which also adds an
-N=2 arm to test the extrapolation hypothesis directly.
+1. **A dark companion erased the held fraction.** The fraction used to be
+   re-derived from the two flux slots on the carry each step. That
+   round-trip is exact only while the all-sky flux is non-zero, so a
+   companion landing on a night-side column returned "no aerosol effect",
+   wrote `noa == allsky` into the carry, and re-derived zero from it for
+   every remaining skip step — *including after sunrise*.
+2. **A twilight companion could fabricate a huge effect.** Near the
+   terminator the TOA upward SW can be ~10⁻³ W m⁻², where the aerosol
+   slant path dominates and the ratio approaches 1. Real for that flux,
+   catastrophic re-applied to a sunlit one: a held ratio of 0.9 turns a
+   +1.4 W m⁻² effect into +150.
+3. **The division NaN'd reverse-mode gradients.** A single `where` around
+   a division leaves a NaN primal in the masked branch whose VJP returns
+   0/0 — the jax-gcm#558/#559 pattern. Dark columns always exist, so every
+   gradient through `paired` was poisoned.
+
+The fraction is now carried explicitly on `RadiationData` rather than
+re-derived, is only updated from a companion whose flux is large enough for
+the ratio to mean anything, and uses a safe denominator. Each fix has a
+regression test verified to fail against the old form.
+
+**Consequently the −0.095 W m⁻² above is stale** — a plausible upper bound
+rather than a measurement of the current scheme. A further confound
+remains: three of the four runs resumed from day-20 checkpoints while the
+twin ran fresh. Re-measurement with all runs started fresh, plus an N=2
+arm, is jax-gcm#648.
+
+What survives: `alternating` is genuinely outside the floor, and `paired`
+is structurally the safer approximation because it does not touch the
+simulation. What does not survive: any claim about `paired`'s numerical
+accuracy, or the ranking of the two.
 
 ## Practical guidance
 

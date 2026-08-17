@@ -7,6 +7,7 @@ Date: 2025-08-01
 """
 
 import pytest
+import jax
 import numpy as np
 import jax.numpy as jnp
 import jax_datetime as jdt
@@ -890,7 +891,7 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
         name the alternatives — this is the error a user hits first.
         """
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
-        with pytest.raises(ValueError, match="not one of"):
+        with pytest.raises(ValueError, match=r"not one of.*alternating"):
             RRTMGPRadiation(aerosol_free="alternate")   # near-miss spelling
 
     def test_slots_alternate_between_aerosol_on_and_off(self):
@@ -1002,11 +1003,19 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         ERFari cannot quietly publish a plausible-looking one.
         """
         t, s, d, f = self._term()
+        # Seed the incoming carry with a sentinel: asserting 0.0 against a
+        # slot that is ALREADY 0.0 cannot tell an explicit zero from a term
+        # that simply passed the carry through.
+        rad = d["radiation"]
+        d = d | {"radiation": rad.copy(
+            toa_sw_up_noa=jnp.full((self.NCOLS,), 999.0),
+            toa_lw_up_noa=jnp.full((self.NCOLS,), 999.0),
+        )}
         _, out = t(s, d, f, None)
         for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
             np.testing.assert_array_equal(
                 np.asarray(getattr(out["radiation"], name)), 0.0,
-                err_msg=f"aerosol_free='off' populated {name}")
+                err_msg=f"aerosol_free='off' did not zero {name}")
 
     def test_skipped_steps_hold_the_effect_not_the_raw_flux(self):
         """Between companions, rsutnoa must track the FRESH all-sky flux.
@@ -1051,6 +1060,16 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         With an absolute hold, night-side columns subtract a stale daytime
         effect from zero and invent a negative reflected flux. The fractional
         hold is scale-free, so darkness reconstructs to darkness.
+        
+
+        LIMITATION (adversarial review, jax-gcm#649): this test is WEAK.
+        The fixture's solar geometry is dark in every column, so every
+        shortwave assertion here is 0 == 0 and the test survives the very
+        absolute-hold bug it was written to catch. The dark and twilight
+        behaviour is really pinned by the unit tests on
+        ``update_effect_fraction`` / ``apply_effect_fraction`` above, which
+        are verified to fail against the old forms. Making this one bite
+        needs a sunlit fixture — tracked in #649.
         """
         term, state, diagnostics, forcing = self._term(aerosol_free="paired", aerosol_free_interval=2)
         _, d0 = term(state, diagnostics, forcing, None)
@@ -1086,6 +1105,9 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
             exact_line = caplog.text
         assert "EXACT" in exact_line
         assert "PAIRED" not in exact_line
+        # logging only %-formats when args are passed; this call has none,
+        # so a doubled %% would be emitted verbatim.
+        assert "%%" not in exact_line, f"literal %% in log: {exact_line}"
 
         for mode, kw in (("paired", {"aerosol_free_interval": 4}),
                          ("alternating", {})):
@@ -1097,6 +1119,106 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
             assert "APPROXIMATE" in line
             assert "W/m2" in line
             assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_dark_companion_does_not_erase_the_held_fraction(self):
+        """A companion landing at night must not zero the aerosol effect.
+
+        Regression: the fraction used to be re-derived from the two flux
+        slots each step. That round-trip is exact only while the all-sky
+        flux is non-zero, so a companion on a dark column returned "no
+        aerosol effect", wrote noa == allsky into the carry, and re-derived
+        zero from it for every following skip step — including after
+        sunrise. Verified to fail if the retain-previous branch is removed.
+        """
+        from jcm.physics.radiation.aerosol_free import update_effect_fraction
+
+        prev = jnp.full((3,), 0.10)          # a real daytime effect
+        allsky = jnp.array([0.0, 0.0, 200.0])  # two dark columns, one lit
+        noa = jnp.array([0.0, 0.0, 198.0])
+        got = np.asarray(update_effect_fraction(allsky, noa, prev))
+        np.testing.assert_allclose(got[:2], 0.10, rtol=1e-6,
+                                   err_msg="dark column erased the fraction")
+        np.testing.assert_allclose(got[2], 0.01, rtol=1e-5)
+
+    def test_twilight_companion_cannot_fabricate_a_huge_effect(self):
+        """A near-terminator ratio must not be adopted or re-applied.
+
+        At the terminator the TOA upward SW can be ~1e-3 W/m2, where the
+        aerosol slant path dominates and the ratio approaches 1. Real for
+        that flux, catastrophic applied to a sunlit one: measured turning a
+        +1.4 W/m2 effect into +150.
+        """
+        from jcm.physics.radiation.aerosol_free import (
+            apply_effect_fraction,
+            update_effect_fraction,
+        )
+
+        prev = jnp.full((2,), 0.0084)                 # the honest daytime value
+        allsky = jnp.array([1e-3, 1e-2])              # twilight
+        noa = jnp.array([1e-4, 2e-3])                 # ratio 0.9 / 0.8
+        frac = update_effect_fraction(allsky, noa, prev)
+        np.testing.assert_allclose(np.asarray(frac), 0.0084, rtol=1e-5,
+                                   err_msg="adopted a twilight ratio")
+        # Applied to a sunlit flux the effect stays physical (~1.4 W/m2),
+        # not the ~150 W/m2 the unguarded ratio produced.
+        effect = 166.2 - np.asarray(apply_effect_fraction(166.2, frac))
+        assert np.all(effect < 5.0), f"fabricated effect {effect}"
+
+    def test_effect_fraction_has_finite_gradients(self):
+        """The hold must not poison reverse-mode AD.
+
+        A single `where` around the division leaves a NaN primal in the
+        masked branch whose VJP returns 0/0 even with a zero incoming
+        cotangent — the jax-gcm#558/#559 failure mode. Dark columns are
+        always present, so a NaN here breaks every gradient through
+        `paired`. Verified to fail against the single-`where` form.
+        """
+        from jcm.physics.radiation.aerosol_free import (
+            apply_effect_fraction,
+            update_effect_fraction,
+        )
+
+        prev = jnp.zeros((2,))
+        fresh = jnp.array([10.0, 166.2])
+
+        def loss(allsky, noa):
+            frac = update_effect_fraction(allsky, noa, prev)
+            return jnp.sum(apply_effect_fraction(fresh, frac))
+
+        g = jax.grad(loss, argnums=(0, 1))(
+            jnp.array([0.0, 166.2]), jnp.array([0.0, 164.8]))
+        for name, grad in zip(("allsky", "noa"), g):
+            assert np.all(np.isfinite(np.asarray(grad))), (
+                f"non-finite gradient wrt {name}: {np.asarray(grad)}")
+
+    def test_paired_carries_the_fraction_across_a_step(self):
+        """The fraction must survive on the carry through a real step.
+
+        Integration counterpart to the unit tests above: pins that the slot
+        is actually threaded through RadiationData rather than recomputed.
+        """
+        term, state, diagnostics, forcing = self._term(
+            aerosol_free="paired", aerosol_free_interval=4)
+        _, out = term(state, diagnostics, forcing, None)
+        frac = np.asarray(out["radiation"].noa_effect_frac)
+        assert frac.shape == (4, self.NCOLS), frac.shape
+        assert np.all(np.isfinite(frac)) and np.all(np.abs(frac) <= 1.0)
+
+    def test_each_noa_key_uses_its_own_held_fraction(self):
+        """Slot i must use fraction i — no key crossing.
+
+        The shortwave slots are identically zero under the fixture's solar
+        geometry, so an integration test cannot see this: a mutation making
+        every slot hold the longwave fraction (corrupting rsutnoa,
+        rsutcsnoa and rlutcsnoa in every `paired` run) passed the whole
+        suite. Pinned here on the pairing function directly.
+        """
+        from jcm.physics.radiation.aerosol_free import hold_all
+
+        fresh = (100.0, 200.0, 400.0, 800.0)
+        frac = jnp.array([0.01, 0.02, 0.04, 0.08])
+        got = [float(v) for v in hold_all(fresh, frac)]
+        assert got == [99.0, 196.0, 384.0, 736.0], got
 
     def test_interval_is_bound_to_the_paired_mode(self):
         """The interval is `paired`'s parameter, not a free-floating knob.
