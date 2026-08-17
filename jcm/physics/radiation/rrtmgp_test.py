@@ -327,14 +327,15 @@ class TestColumnVectorHelper:
         assert jnp.allclose(out, jnp.arange(6.0))
 
 
-class TestRRTMGPTermComputeAndCache:
-    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+class _RRTMGPTermFixture:
+    """Shared column fixture for the term-level RRTMGP test classes.
 
-    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
-    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
-    with ``radiation_interval = 2 x dt``, so the first call must run the
-    full scheme and the second call must replay the cached heating rates
-    (while still bumping the radiation step counter).
+    Deliberately carries NO tests. The aerosol-free classes used to
+    *subclass* the test class, which re-ran its whole suite — including a
+    parametrised case — three times over, at the doubled cost of the
+    clear-sky companion the aerosol-free classes enable. Sharing the
+    fixture through a mixin keeps the setup in one place without
+    multiplying the work.
     """
 
     NLEV = 8
@@ -462,6 +463,17 @@ class TestRRTMGPTermComputeAndCache:
             "qi": jnp.full((nlev, ncols), 5e-6),
         })
         return diagnostics, state
+
+
+class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
+    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+
+    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
+    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
+    with ``radiation_interval = 2 x dt``, so the first call must run the
+    full scheme and the second call must replay the cached heating rates
+    (while still bumping the radiation step counter).
+    """
 
     def test_compute_then_cache_cycle(self):
         term, state, diagnostics, forcing = self._term_and_inputs()
@@ -952,7 +964,7 @@ class TestRRTMGPVerticalOrientation:
         )
 
 
-class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
+class TestRRTMGPAerosolFreeAlternate(_RRTMGPTermFixture):
     """Alternating aerosol-on/aerosol-off single solve (jax-gcm#583).
 
     Inherits the column harness from ``TestRRTMGPTermComputeAndCache`` and
@@ -1038,7 +1050,7 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
         ), "heating identical on/off — the alternation is not reaching the model"
 
 
-class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
+class TestRRTMGPAerosolFreeInterval(_RRTMGPTermFixture):
     """Paired aerosol-free companion every Nth radiation step (jax-gcm#583).
 
     The point of this mode versus ``aerosol_free="alternating"`` is that the
