@@ -1030,6 +1030,12 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
                 np.asarray(getattr(out["radiation"], name)), 0.0,
                 err_msg=f"aerosol_free_interval=None did not zero {name}")
 
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
     def test_skipped_steps_hold_the_effect_not_the_raw_flux(self):
         """Between companions, rsutnoa must track the FRESH all-sky flux.
 
@@ -1067,6 +1073,12 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
             err_msg="the held aerosol fraction changed on a skipped step",
         )
 
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
     def test_dark_columns_reconstruct_to_zero_not_a_stale_daytime_effect(self):
         """A zero all-sky SW flux must give a zero aerosol-free SW flux.
 
@@ -1104,6 +1116,12 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
             err_msg="dark column reconstructed a non-zero aerosol-free SW flux",
         )
 
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
     def test_sunset_between_companions_reconstructs_to_zero(self):
         """The case the fractional hold actually exists for.
 
@@ -1150,6 +1168,12 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
             err_msg="a stale daytime effect was applied across sunset — "
                     "aerosol-free SW reconstructed out of darkness")
 
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
     def test_held_step_applies_each_keys_own_fraction(self):
         """On a SKIPPED companion, key i must use fraction i.
 
@@ -1307,6 +1331,12 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
             assert np.all(np.abs(frac) <= 1.0), key
 
     @pytest.mark.parametrize("interval", [1, 2, 4])
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
     def test_every_interval_populates_all_four_noa_slots(self, interval):
         """Every companion spacing must fill all four published slots.
 
