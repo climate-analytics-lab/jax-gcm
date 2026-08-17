@@ -456,7 +456,7 @@ class AerosolFreeRadiationSlowTest(unittest.TestCase):
     """One real RRTMGP step: noa differs from all-sky iff aerosol is present.
 
     Runs the full ECHAM composition (RRTMGP + 2M clouds + MACv2-SP with
-    ``aerosol_free_radiation=True``) in the single-column host rather than
+    ``aerosol_free="exact"``) in the single-column host rather than
     a T21 ``Model``: the claim under test — the second, aerosol-free
     RRTMGP solve and its published ``*_noa`` fluxes — is per-column
     physics, and running 2048 spectral columns through the most expensive

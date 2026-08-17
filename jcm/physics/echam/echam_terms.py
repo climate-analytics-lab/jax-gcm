@@ -43,6 +43,7 @@ from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+from jcm.physics.radiation.aerosol_free import resolve_aerosol_free
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
@@ -237,14 +238,23 @@ def echam_physics(
                 differs and every output is affected — not just ``*noa``.
                 ~9 % ERFari error.
 
-            Both approximate modes were measured at 29-42x the
-            internal-variability + hardware noise floor on a 155-day nudged
-            year, so neither is free; see jax-gcm#630 and the
-            ``echam-jam-aerocom`` config for the full table.
+            Both approximate modes measured ~30-40x the run-to-run
+            reproducibility floor (0.0023 W/m2, from a second run of
+            ``exact`` on different hardware) over a 155-day nudged run, so
+            neither is free. See ``docs/source/design/
+            aerocom_erfari_sampling.md`` for the numbers and their caveats,
+            and the ``echam-jam-aerocom`` config for the cost table.
         aerosol_free_interval: companion spacing N, required by (and only
             valid for) ``aerosol_free="paired"``.
 
     """
+    # Validate the mode/interval pair for EVERY radiation scheme, not just
+    # RRTMGP. The grey and emulated branches never construct
+    # RRTMGPRadiation, so leaving this to the term's own constructor let
+    # `echam_physics(radiation_scheme="grey", aerosol_free_interval=4)`
+    # through in silence — the exact class of silently-ignored argument
+    # this vocabulary exists to abolish.
+    resolve_aerosol_free(aerosol_free, aerosol_free_interval)
     if aerosol_free != "off" and radiation_scheme != "rrtmgp":
         raise ValueError(
             f"aerosol_free={aerosol_free!r} needs radiation_scheme='rrtmgp' — "

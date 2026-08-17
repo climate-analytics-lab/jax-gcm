@@ -1065,6 +1065,39 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
             err_msg="dark column reconstructed a non-zero aerosol-free SW flux",
         )
 
+    def test_startup_log_names_the_mode_distinguishably(self, caplog):
+        """`exact` must not log the word used by a different mode.
+
+        The log exists so a reader can tell a reference run from an
+        approximate one. An earlier version printed "PAIRED" for `exact`,
+        which collides with the separate `paired` mode and destroys exactly
+        the distinction the line is for. The approximations must also warn
+        (not info) and quote their error, since a warning is what survives
+        a filtered log.
+        """
+        import logging
+
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        logger_name = "jcm.physics.radiation.rrtmgp"
+        with caplog.at_level(logging.INFO, logger=logger_name):
+            caplog.clear()
+            RRTMGPRadiation(aerosol_free="exact")
+            exact_line = caplog.text
+        assert "EXACT" in exact_line
+        assert "PAIRED" not in exact_line
+
+        for mode, kw in (("paired", {"aerosol_free_interval": 4}),
+                         ("alternating", {})):
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                caplog.clear()
+                RRTMGPRadiation(aerosol_free=mode, **kw)
+                line = caplog.text
+            assert mode.upper() in line
+            assert "APPROXIMATE" in line
+            assert "W/m2" in line
+            assert any(r.levelname == "WARNING" for r in caplog.records)
+
     def test_interval_is_bound_to_the_paired_mode(self):
         """The interval is `paired`'s parameter, not a free-floating knob.
 

@@ -179,7 +179,8 @@ class RadiationData:
     # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): a second
     # radiation call with the aerosol OPTICS zeroed but the cloud state
     # untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
-    # All-zero unless RRTMGPRadiation(aerosol_free_diagnostics=True).
+    # All-zero unless RRTMGPRadiation(aerosol_free=...) is other than
+    # "off"; see AEROSOL_FREE_MODES in rrtmgp.py for what each mode costs.
     toa_sw_up_noa: jnp.ndarray       # Aerosol-free TOA upward SW [W/m²] (ncols,)
     toa_lw_up_noa: jnp.ndarray       # Aerosol-free TOA OLR [W/m²] (ncols,)
     toa_sw_up_clear_noa: jnp.ndarray  # Aerosol-free clear-sky TOA SW up (ncols,)

@@ -17,7 +17,12 @@
 #   plev                           +3.0 %
 #   aerosol                        +3.2 %
 #   cloud+column+plev              +4.4 %
-#   cloud+column+plev+aerosol      +9.4 %   <-- this preset
+#   cloud+column+plev+aerosol      +9.4 %   <-- this preset's DIAGNOSTIC cost
+#
+# That +9.4 % is the diagnostic groups only. This preset also sets
+# `aerosol_free: exact` below, which is a further ~+64 %, so the preset as
+# shipped costs roughly +80 % over a bare echam-jam run. The two are gated
+# separately because they are separable choices.
 #
 # Most of a single group's ~3 % is the term's fixed per-step overhead, so
 # the groups are much cheaper together than their sum; the aerosol group is
@@ -26,8 +31,11 @@
 # does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
 #
 # The aerosol-free (*noa) radiation diagnostic needs a second radiation
-# call, and radiation is ~87 % of the step, so it costs ~+64 % on its own.
-# It has its own knob further down (`aerosol_free`) — see jax-gcm#583.
+# call. Radiation is ~87 % of a *radiation* step but only runs one step in
+# N, so the whole-run overhead depends on the radiation gate as well as on
+# the solve — which is why it is quoted below as a measured wall-clock
+# number rather than derived from the 87 %. It has its own knob further
+# down (`aerosol_free`) — see jax-gcm#583.
 #
 # Also gated separately: the per-species / per-mode / spectral aerosol
 # optics (#584), which need a second Mie sweep — use the
@@ -58,40 +66,65 @@ aerocom_optics: false
 # parameter of `paired` only, and passing it with any other mode is an
 # error rather than being silently ignored.
 #
-#   off          no *noa fluxes            +0 %    (no ERFari)
-#   exact        companion every rad step  +64 %   reference
-#   paired       companion every Nth step  +17 %   at N=4
-#   alternating  no companion; alternate   +0 %
+# COST — measured wall-clock, T63L47 semi-Lagrangian, A100, steady-state
+# chunks only (chunk 0 AND chunk 1 are compile-contaminated):
 #
-# FIDELITY — measured on a 155-day ERA5-nudged T63L47 SL year (#630), all
-# four runs on the same commit, reference ERFari -0.766 W/m2:
+#   off          no *noa fluxes            30.9 s/sim-day    —      (no ERFari)
+#   exact        companion every rad step  50.8 s/sim-day   +64 %   reference
+#   paired N=4   companion every Nth step  36.2 s/sim-day   +17 %
+#   alternating  no companion; alternate   30.9 s/sim-day    +0 %
 #
-#                     ERFari error   vs noise floor
-#   exact                  0            (reference)
-#   paired (N=4)      -0.095 W/m2  12 %      42x
-#   alternating       +0.067 W/m2   9 %      29x
+# Earlier revisions of this file quoted +55 % and +7 %. Those were measured
+# on the now-removed EULERIAN dycore (#625) and do not apply; the numbers
+# above are semi-Lagrangian. Absolute s/sim-day are kept so the percentages
+# stay checkable.
 #
-# The noise floor is 0.0023 W/m2 — two runs of the SAME scheme on
-# different nodes and different A100 variants (SXM4 vs PCIe). So BOTH
-# approximations are 29-42x internal variability plus hardware: they are
-# real scheme error, not sampling, and neither is a free lunch. If the
-# ERFari number matters, pay for `exact`.
+# FIDELITY — a 155-day ERA5-nudged T63L47 SL run (#630), all four runs on
+# the same commit, reference ERFari -0.766 W/m2:
+#
+#                     ERFari error       vs floor
+#   exact                  0             (reference)
+#   paired (N=4)      -0.095 W/m2  12 %     ~40x
+#   alternating       +0.067 W/m2   9 %     ~30x
+#
+# The floor is 0.0023 W/m2: a SECOND run of `exact` itself, differing only
+# in node and A100 variant (SXM4 vs PCIe). Read it as an order-of-magnitude
+# yardstick, not a significance test — it is a single pair, so the "~40x"
+# moves between 41 and 43 depending on rounding. Nudging also suppresses
+# internal variability by design, so this floor bounds run-to-run
+# reproducibility, not climate noise. What survives all that: both
+# approximations are ~1.5 orders of magnitude above it, at ~10 % of the
+# signal. If the ERFari number matters, pay for `exact`.
 #
 # The two approximations differ in KIND, which matters more than their
 # sizes. `paired` leaves the simulation bit-identical to `exact` (the model
 # always sees aerosol) and approximates only the diagnostic, by holding the
-# aerosol effect as a FRACTION of the all-sky flux between companions —
-# holding it as an absolute W/m2 instead breaks the SW at night, which cost
-# a year-long run. `alternating` makes the model feel aerosol-free heating
-# half the time, so the SIMULATION differs and EVERY output is affected,
-# not just the *noa fluxes; its ERFari therefore cannot be compared against
-# a reference without an ensemble.
+# aerosol effect as a FRACTION of the all-sky flux between companions.
+# `alternating` makes the model feel aerosol-free heating half the time, so
+# the SIMULATION differs and EVERY output is affected, not just the *noa
+# fluxes. That also weakens its entry in the table above: a
+# physics-perturbing scheme's ERFari is not cleanly separable from
+# trajectory divergence in a single realisation, even nudged. `paired`'s
+# entry has no such caveat, which is why it is the recommended
+# approximation despite the larger number.
 #
-# Untested middle ground: paired with N=2, which halves the extrapolation
-# gap for ~+30 %. Check it in the offline harness before spending cluster
-# time.
+# UNRESOLVED: `paired` is bit-identical in physics, so its error should be
+# a pure diagnostic artefact — yet it measures LARGER than the
+# physics-perturbing scheme's, and an offline 6-day test found `paired` N=4
+# bit-identical to `exact` with zero ERFari difference. Three of the four
+# runs also resumed from day-20 checkpoints while the twin ran fresh. The
+# sign of the conclusion is robust; the ranking of the two approximations
+# is not. See docs/source/design/aerocom_erfari_sampling.md.
+#
+# Untested middle ground: paired with N=2 should halve the extrapolation
+# gap; its cost is a DERIVED estimate of ~+30 %, not a measurement. Check
+# it in the offline harness before spending cluster time.
 aerosol_free: exact
 
 # Companion spacing for `aerosol_free: paired`. Unused (and rejected) for
-# every other mode; N=1 is spelled `aerosol_free: exact`.
-# aerosol_free_interval: 4
+# every other mode; N=1 is spelled `aerosol_free: exact`. Declared as null
+# rather than commented out so that switching modes is a plain override —
+#     physics.aerosol_free=paired physics.aerosol_free_interval=4
+# without Hydra's `+` prefix, which a commented-out key would require.
+# A null is dropped before the factory call, so it stays "unset".
+aerosol_free_interval: null

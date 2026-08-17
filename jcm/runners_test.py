@@ -126,6 +126,43 @@ class TestBuilders(unittest.TestCase):
         physics = build_physics(cfg)
         self.assertIsNotNone(physics)
 
+    def test_aerosol_free_mode_is_stamped_into_provenance(self):
+        """The *noa scheme must survive into the output's global attrs.
+
+        An approximate ERFari is otherwise indistinguishable from the
+        reference once the run's log is gone, and the two differ by far
+        more than the noise floor (see the aerocom_erfari_sampling design
+        doc). Asserts the recorded value, not merely its presence, so a
+        stamp that loses the interval would fail.
+        """
+        from jcm import provenance
+        from jcm.runners import _record_aerosol_free_provenance
+
+        class _Rad:
+            def __init__(self, mode, interval=1):
+                self._aerosol_free_mode = mode
+                self._aerosol_free_interval = interval
+
+        class _Physics:
+            def __init__(self, terms):
+                self.terms = terms
+
+        for mode, interval, expected in (
+                ("exact", 1, "exact"),
+                ("paired", 4, "paired:N=4"),
+                ("alternating", 1, "alternating"),
+        ):
+            provenance.start_run()
+            _record_aerosol_free_provenance(_Physics([_Rad(mode, interval)]))
+            self.assertEqual(
+                provenance.attrs().get("jcm_prov_aerosol_free"), expected)
+
+        # 'off' and non-radiation physics must leave no stamp at all, so a
+        # run without the diagnostic is not labelled as having one.
+        provenance.start_run()
+        _record_aerosol_free_provenance(_Physics([_Rad("off"), object()]))
+        self.assertNotIn("jcm_prov_aerosol_free", provenance.attrs())
+
     def test_build_physics_param_overrides(self):
         # Override a per-term parameter via the new
         # ``physics.terms.<term>.params.<field>=...`` CLI path.

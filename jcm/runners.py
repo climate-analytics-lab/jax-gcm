@@ -269,7 +269,9 @@ def build_physics(cfg: DictConfig):
     # (notably the JAM aerosol chain, which is split around the cloud term) are
     # configured without re-expressing that ordering as flat YAML.
     if physics_cfg.get("builder", None) is not None:
-        return _build_physics_from_factory(physics_cfg)
+        physics = _build_physics_from_factory(physics_cfg)
+        _record_aerosol_free_provenance(physics)
+        return physics
 
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
@@ -289,12 +291,41 @@ def build_physics(cfg: DictConfig):
             continue
         terms.append(_build_term(term_name, term_entry))
 
-    return ComposablePhysics(
+    physics = ComposablePhysics(
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
         band_config=_band_config_for_terms(terms),
     )
+    _record_aerosol_free_provenance(physics)
+    return physics
+
+
+def _record_aerosol_free_provenance(physics) -> None:
+    """Stamp which ``*noa`` scheme ran into the output's global attributes.
+
+    ERFari computed from a subsampled aerosol-free solve is measurably
+    different from the reference (29-42x the internal-variability noise
+    floor — see ``docs/source/design/aerocom_erfari_sampling.md``), and
+    nothing in the saved fields distinguishes the two. A startup log line
+    is not enough: it is gone by the time anyone reads the netCDF. Reading
+    the mode off the built term rather than the YAML also covers physics
+    assembled by a ``terms`` list, where the flag reaches the term
+    directly.
+
+    Matched on the attribute rather than ``isinstance(term,
+    RRTMGPRadiation)`` so this never imports the optional RRTMGP backend:
+    the factory path reaches here for grey-radiation configs too, and an
+    unconditional import would make a provenance nicety a hard dependency.
+    """
+    for term in physics.terms:
+        mode = getattr(term, "_aerosol_free_mode", None)
+        if mode is None or mode == "off":
+            continue
+        detail = (f"paired:N={term._aerosol_free_interval}"
+                  if mode == "paired" else mode)
+        provenance.record_fact("aerosol_free", detail)
+        return
 
 
 #: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``
