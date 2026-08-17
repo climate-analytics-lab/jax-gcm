@@ -514,7 +514,10 @@ class DinosaurDycore(DynamicalCore):
                     * jnp.ones_like(state.tracers['specific_humidity'])
                 )
 
-        return State(**state.asdict(), sim_time=sim_time)
+        # replace(), not State(**state.asdict(), sim_time=...): asdict()
+        # keeps the sim_time key whenever it is non-None, and the splat
+        # form then raises duplicate-kwarg (same hazard as with_sim_time).
+        return state.replace(sim_time=sim_time)
 
     def to_physics_state(self, state: State) -> PhysicsState:
         physics_state = dynamics_state_to_physics_state(
@@ -713,7 +716,11 @@ class DinosaurDycore(DynamicalCore):
         return state.sim_time
 
     def with_sim_time(self, state: State, sim_time) -> State:
-        return State(**state.asdict(), sim_time=sim_time)
+        # replace() rather than State(**state.asdict(), ...): the state
+        # already carries a sim_time key, so the splat form raises
+        # duplicate-kwarg once sim_time is non-None (asdict only drops it
+        # when None).
+        return state.replace(sim_time=jnp.asarray(sim_time))
 
     # ------------------------------------------------------------------
     # Output & terrain (Phase-1 thin shims; full relocation in a follow-up)

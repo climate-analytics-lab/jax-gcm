@@ -697,6 +697,66 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports2), 1)
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
+    def test_from_state_warm_start(self):
+        """init=from_state loads a donor checkpoint with the clock reset.
+
+        Donor: 2 sim-days of chunked Held-Suarez (checkpoint carries
+        elapsed_days=2). A from_state run then integrates 1 day: it must
+        run exactly one fresh chunk (clock reset — a checkpoint RESUME
+        with total_time=1 would run nothing, since 2 > 1) and start from
+        the donor's fields, not the cold-start profile.
+        """
+        import tempfile
+
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_ckpt = f"{tmpdir}/donor.ckpt"
+            common = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+            ]
+            run(_compose(common + [
+                "init=balanced_isothermal",
+                "run.total_time=2",
+                f"run.output_prefix={tmpdir}/donor",
+                f"run.checkpoint_path={donor_ckpt}",
+            ]))
+            self.assertTrue(Path(donor_ckpt).exists())
+
+            reports = run(_compose(common + [
+                "init=from_state",
+                f"init.file={donor_ckpt}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+            ]))
+            # Clock reset: one 1-day chunk ran, ending at elapsed day 1.
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 1.0, places=5)
+
+            import xarray as xr
+            donor_end = xr.open_dataset(f"{tmpdir}/donor_day2.nc")
+            warm = xr.open_dataset(f"{tmpdir}/warm_day1.nc")
+            cold = xr.open_dataset(f"{tmpdir}/donor_day1.nc")
+            # The warm run's day-1 mean is far closer to the donor's
+            # evolved day-2 state than to the cold start's day-1 (the
+            # donor fields, one further day evolved).
+            d_warm = float(np.abs(warm.temperature.values
+                                  - donor_end.temperature.values).mean())
+            d_cold = float(np.abs(cold.temperature.values
+                                  - donor_end.temperature.values).mean())
+            self.assertLess(d_warm, d_cold)
+            # The dycore sim_time must reset too: dates/forcing/output
+            # timestamps derive from it, not from the chunk counter. The
+            # warm run's output must be stamped ~day 1, EARLIER than the
+            # donor's day-2 file — without the with_sim_time reset it
+            # inherits the donor clock and stamps ~day 3.
+            self.assertLess(float(np.asarray(warm.time.max())),
+                            float(np.asarray(donor_end.time.max())))
+
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
         # have a JCM-shaped state to load.

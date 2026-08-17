@@ -101,6 +101,20 @@ def load_checkpoint(model, path) -> float:
     }
     payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
 
+    # from_bytes validates structure (leaf count) but not leaf shapes: a
+    # same-composition state for the WRONG grid/levels deserializes cleanly
+    # and only explodes later inside the jitted step, far from the cause.
+    # Check every leaf against the template so the error names the file.
+    for group, tmpl in (("dycore_leaves", dycore_leaves_template),
+                        ("physics_leaves", physics_leaves_template)):
+        for i, (got, want) in enumerate(zip(payload[group], tmpl)):
+            if hasattr(want, "shape") and got.shape != want.shape:
+                raise ValueError(
+                    f"Checkpoint {path} does not match the composed model: "
+                    f"{group}[{i}] has shape {got.shape}, model expects "
+                    f"{want.shape} (wrong grid/levels/physics for this file)."
+                )
+
     _, dycore_treedef = jax.tree_util.tree_flatten(model._final_dycore_state)
     _, physics_treedef = jax.tree_util.tree_flatten(model._final_physics_state)
     model._final_dycore_state = jax.tree_util.tree_unflatten(

@@ -834,6 +834,47 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     model._final_dycore_state = state
 
 
+def inject_state_file(model: Model, cfg: DictConfig) -> None:
+    """Warm-start: load a saved model state as the initial condition.
+
+    ``init.file`` takes a local or ``hf://`` path to a state written by
+    :func:`jcm.checkpoint.save_checkpoint` (e.g. the hosted equilibrated
+    states under ``bundles/<grid>_<levels>/init_states/``). Unlike a
+    ``run.checkpoint_path`` resume, the recorded elapsed-day count is
+    DISCARDED — the clock starts at zero / ``run.start_date`` — so a
+    hosted state skips the ~9-month from-cold spin-up (#638) without
+    inheriting the donor run's calendar. The state's pytree must match
+    the composed model (grid, levels, physics tracer set);
+    ``load_checkpoint`` fails loudly on any mismatch.
+    """
+    from jcm.checkpoint import load_checkpoint
+
+    path = _resolve_data_path(cfg.init.file)
+    ckpt = cfg.run.get("checkpoint_path", None)
+    if ckpt and Path(ckpt).resolve() == Path(path).resolve():
+        raise ValueError(
+            "init.file and run.checkpoint_path point at the same file: the "
+            "first chunk checkpoint would overwrite the donor init state. "
+            "Give the run its own checkpoint_path."
+        )
+    # bootstrap_state builds both state pytrees, which load_checkpoint
+    # needs as deserialization templates (their values are overwritten).
+    model.bootstrap_state()
+    days = load_checkpoint(model, path)
+    # The checkpoint's dycore state carries the donor's sim_time, and dates,
+    # forcing time-interpolation and output timestamps all derive from it
+    # (Model._date_from_sim_time) — without this reset a day-730 donor
+    # would run with forcing at start_date + 730 d.
+    model._final_dycore_state = model.dycore.with_sim_time(
+        model._final_dycore_state,
+        jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
+    )
+    logger.info(
+        "init=from_state: loaded %s (donor state carried %.0f sim-days); "
+        "clock reset to 0", path, days,
+    )
+
+
 def inject_era5_state(model: Model, cfg: DictConfig) -> None:
     """Seed the model from ERA5 (WeatherBench2) at the run start date.
 
@@ -945,11 +986,11 @@ def build_model(cfg: DictConfig) -> Model:
     dycore_name = cfg.get("dycore", {}).get("name", "dinosaur")
     if dycore_name == "pyses":
         init_kind = cfg.get("init", {}).get("kind", "isothermal")
-        if init_kind not in ("isothermal",):
+        if init_kind not in ("isothermal", "from_state"):
             raise ValueError(
                 f"init={init_kind!r} is dinosaur-specific; the pySES backend "
-                "initializes from its own resting USSA-1976 state (keep the "
-                "default init=isothermal)."
+                "initializes from its resting USSA-1976 state (init="
+                "isothermal) or a saved pySES state (init=from_state)."
             )
         if cfg.get("nudging", {}).get("enabled", False):
             raise ValueError(
@@ -1558,6 +1599,16 @@ def run(cfg: DictConfig, model: Model | None = None):
     # config-selected libraries are actually imported.
     provenance.start_run(cfg)
 
+    if cfg.init.kind == "from_state":
+        # Resolve before the (minutes-scale at high resolution) model build
+        # so a typo'd path fails immediately and names the config key.
+        _p = _resolve_data_path(cfg.init.file)
+        if not str(_p).startswith("hf://") and not Path(_p).exists():
+            raise FileNotFoundError(
+                f"init.file={cfg.init.file!r} resolved to {_p}, which does "
+                "not exist."
+            )
+
     constants_overrides = cfg.get("constants", None)
     if constants_overrides:
         import jcm.constants as _jcm_constants
@@ -1617,6 +1668,16 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         )
     if cfg.init.kind == "balanced_isothermal":
         inject_balanced_isothermal_profile(model)
+        return model.resume(
+            forcing=forcing,
+            save_interval=cfg.run.save_interval,
+            total_time=cfg.run.total_time,
+            output_averages=cfg.run.output_averages,
+            snapshot_interval=cfg.run.get("snapshot_interval"),
+            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+        )
+    if cfg.init.kind == "from_state":
+        inject_state_file(model, cfg)
         return model.resume(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
@@ -1827,6 +1888,30 @@ def run_chunked(
             )
         elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
             inject_balanced_isothermal_profile(model)
+            preds = model.resume(
+                forcing=forcing,
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
+            )
+        elif first_fresh_chunk and cfg.init.kind == "era5":
+            # Without this branch a chunked run silently ignored init=era5
+            # (the chunked dispatch returns before _run_full's init ladder).
+            inject_era5_state(model, cfg)
+            preds = model.resume(
+                forcing=forcing,
+                save_interval=save_interval,
+                total_time=cur_chunk,
+                output_averages=cfg.run.output_averages,
+                snapshot_interval=cfg.run.get("snapshot_interval"),
+                snapshot_variables=tuple(
+                    cfg.run.get("snapshot_variables") or ()),
+            )
+        elif first_fresh_chunk and cfg.init.kind == "from_state":
+            inject_state_file(model, cfg)
             preds = model.resume(
                 forcing=forcing,
                 save_interval=save_interval,
