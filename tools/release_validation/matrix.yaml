@@ -1,0 +1,42 @@
+# The supported-configuration matrix (issue #638). One entry per member;
+# `overrides` are Hydra args appended to the standard year-run set.
+# Radiation pairings are fixed policy: grey-for-SPEEDY, RRTMGP-for-ECHAM.
+# All members run on ONE A100 (verified 2026-08-16; the pre-carry-mode
+# 4-GPU guidance for T106 is obsolete at L47).
+defaults:
+  days: 365
+  time_step_min: 15
+  chunk_days: 5
+  save_interval: 5
+  hours: 10
+
+members:
+  speedy-t31:
+    physics: speedy
+    grid: speedy_t31_l8
+    hours: 2
+    # SPEEDY takes the DEFAULT run group and init: run=longrun's 10-level
+    # sponge is the whole atmosphere at L8 and the dry JW init is an
+    # ECHAM spin-up device — both NaN SPEEDY within a chunk.
+    profile: speedy
+  echam-1m-t63:
+    physics: echam
+    grid: echam_t63_l47_hybrid
+  echam-1m-t106:
+    physics: echam
+    grid: echam_t106_l47_hybrid
+  echam-2m-t63:
+    physics: echam-rrtmgp-2m
+    grid: echam_t63_l47_hybrid
+  echam-2m-t106:
+    physics: echam-rrtmgp-2m
+    grid: echam_t106_l47_hybrid
+  echam-jam-t63-l47:
+    physics: echam-jam
+    grid: echam_t63_l47_hybrid
+    jam_inputs: l47
+  echam-jam-t63-l95:
+    physics: echam-jam
+    grid: echam_t63_l95_hybrid
+    hours: 12
+    jam_inputs: l95

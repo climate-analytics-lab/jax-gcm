@@ -1373,6 +1373,52 @@ class ResolveDataPathTest(unittest.TestCase):
         self.assertIs(runners._resolve_data_path(dc), dc)
 
 
+class TestAutoInputResolution(unittest.TestCase):
+    """Per-grid auto-resolution of ozone/terrain (#638 matrix rot)."""
+
+    def _coords(self, truncation=63, layers=47):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        return get_coords(get_echam_levels(layers),
+                          spectral_truncation=truncation)
+
+    def test_packaged_t63_wins_without_fetch(self):
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone, _resolve_auto_terrain
+        coords = self._coords(63)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=AssertionError("fetch must not be hit")):
+            self.assertIn("t63", _resolve_auto_ozone(coords))
+            self.assertIn("t63", _resolve_auto_terrain(coords))
+
+    def test_mirror_fallback_paths(self):
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone, _resolve_auto_terrain
+        coords = self._coords(21, layers=47)   # t21 not packaged
+        with mock.patch("jcm.data.remote.fetch",
+                        return_value="/cached/file.nc") as f:
+            self.assertEqual(_resolve_auto_ozone(coords), "/cached/file.nc")
+            f.assert_called_with("bundles/t21_l47/ozone_pd.nc")
+            self.assertEqual(_resolve_auto_terrain(coords), "/cached/file.nc")
+            f.assert_called_with("bundles/t21/terrain.nc")
+
+    def test_terrain_auto_raises_loudly_when_unresolvable(self):
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_terrain
+        coords = self._coords(21)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=OSError("offline")):
+            with self.assertRaises(FileNotFoundError):
+                _resolve_auto_terrain(coords)
+
+    def test_terrain_auto_composes(self):
+        cfg = _compose(["terrain=auto", "physics=speedy"])
+        self.assertEqual(cfg.terrain.kind, "auto")
+
+
 class TestYearExpansionAndStartDate(unittest.TestCase):
     """{year} pattern expansion + run.start_date threading (#610)."""
 

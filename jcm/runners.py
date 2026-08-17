@@ -550,6 +550,10 @@ def build_terrain(cfg: DictConfig, coords) -> TerrainData:
     kind = terrain_cfg.kind
     if kind == "aquaplanet":
         return TerrainData.aquaplanet(coords)
+    if kind == "auto":
+        return TerrainData.from_coords(
+            coords, terrain_file=_resolve_auto_terrain(coords),
+        )
     if kind == "from_file":
         return TerrainData.from_coords(
             coords,
@@ -1193,12 +1197,31 @@ def _ensure_parent_forcing(forcing, coords):
     return default_forcing(coords.horizontal)
 
 
-def _resolve_auto_ozone(coords):
-    """Find a packaged ``jcm/data/bc/*/ozone.nc`` matching the model grid.
+#: Gaussian-grid longitude count -> spectral-truncation token, for
+#: resolving per-grid files on the data mirror (``bundles/<tXX>/...``).
+_NLON_TO_GRID_TOKEN = {
+    64: "t21", 96: "t31", 128: "t42", 192: "t63", 256: "t85",
+    320: "t106", 360: "t119", 512: "t170", 640: "t213",
+}
 
-    Shape-based discovery (nlev, nlat, nlon); grid identity is then fully
-    validated by ``OzoneClimatology.from_file``. Returns ``None`` when no
-    packaged file fits — the caller warns and falls back to the analytic
+
+def _grid_token(coords) -> str | None:
+    """Mirror grid token (``"t63"``) for the model's horizontal grid."""
+    nlon = int(coords.horizontal.nodal_shape[0])
+    return _NLON_TO_GRID_TOKEN.get(nlon)
+
+
+def _resolve_auto_ozone(coords):
+    """Find an ozone climatology matching the model grid.
+
+    Two-stage discovery: (1) a packaged ``jcm/data/bc/*/ozone.nc`` whose
+    (nlev, nlat, nlon) match; (2) the data mirror's per-grid file
+    ``bundles/<grid>_l<nlev>/ozone_pd.nc`` (cache-first fetch — works
+    offline once cached; the first T106 matrix run failed precisely
+    because only stage 1 existed and the loader rejects any grid
+    mismatch). Grid identity is then fully validated by
+    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage
+    finds a file — the caller warns and falls back to the analytic
     profile, whose ~7.6× tropospheric ozone column biases clear-sky OLR
     ~12 W/m² low.
     """
@@ -1215,7 +1238,54 @@ def _resolve_auto_ozone(coords):
             if (sizes.get("level") == nlev and sizes.get("lat") == nlat
                     and sizes.get("lon") == nlon):
                 return str(cand)
+    token = _grid_token(coords)
+    if token is not None:
+        from jcm.data.remote import fetch
+        try:
+            return str(fetch(f"bundles/{token}_l{nlev}/ozone_pd.nc"))
+        except Exception as e:  # noqa: BLE001 — degrade, caller warns
+            logger.info(
+                "auto-ozone: no mirror file bundles/%s_l%d/ozone_pd.nc (%s)",
+                token, nlev, e,
+            )
     return None
+
+
+def _resolve_auto_terrain(coords):
+    """Native-grid terrain path for ``terrain.kind: auto``.
+
+    Terrain must be NATIVE to the model grid: horizontal interpolation of
+    a coarser file silently breaks the Lott-Miller SSO fields (shape
+    mismatch inside the column vmap — the first T106 matrix run). Stages:
+    packaged ``jcm/data/bc/*/terrain.nc`` shape-matched on (nlat, nlon),
+    then the mirror's ``bundles/<grid>/terrain.nc``. Raises when neither
+    exists — silent degradation is exactly the failure this replaces.
+    """
+    from importlib import resources
+
+    import xarray as xr
+
+    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
+    bc_root = Path(str(resources.files("jcm"))) / "data" / "bc"
+    for cand in sorted(bc_root.glob("*/terrain.nc")):
+        with xr.open_dataset(cand) as ds:
+            if (ds.sizes.get("lat") == nlat and ds.sizes.get("lon") == nlon):
+                return str(cand)
+    token = _grid_token(coords)
+    if token is not None:
+        from jcm.data.remote import fetch
+        try:
+            return str(fetch(f"bundles/{token}/terrain.nc"))
+        except Exception as e:  # noqa: BLE001
+            raise FileNotFoundError(
+                f"terrain.kind=auto: no packaged terrain matches "
+                f"({nlon}x{nlat}) and the mirror fetch of "
+                f"bundles/{token}/terrain.nc failed: {e}"
+            ) from e
+    raise FileNotFoundError(
+        f"terrain.kind=auto: no packaged terrain matches ({nlon}x{nlat}) "
+        "and the grid has no mirror token; pass terrain.file explicitly."
+    )
 
 
 def _attach_ozone(forcing, forcing_cfg, coords):

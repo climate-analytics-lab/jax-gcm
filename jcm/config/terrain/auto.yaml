@@ -1,0 +1,5 @@
+# Native-grid terrain, auto-resolved: packaged jcm/data/bc/<grid>/terrain.nc
+# when the shapes match, else the data mirror's bundles/<grid>/terrain.nc
+# (cache-first fetch). Terrain must be native — horizontal interpolation
+# breaks the SSO sub-grid orography fields (see _resolve_auto_terrain).
+kind: auto
