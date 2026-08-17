@@ -1197,12 +1197,16 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         Integration counterpart to the unit tests above: pins that the slot
         is actually threaded through RadiationData rather than recomputed.
         """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+
         term, state, diagnostics, forcing = self._term(
             aerosol_free="paired", aerosol_free_interval=4)
         _, out = term(state, diagnostics, forcing, None)
-        frac = np.asarray(out["radiation"].noa_effect_frac)
-        assert frac.shape == (4, self.NCOLS), frac.shape
-        assert np.all(np.isfinite(frac)) and np.all(np.abs(frac) <= 1.0)
+        for key in NOA_KEYS:
+            frac = np.asarray(getattr(out["radiation"], f"noa_frac_{key}"))
+            assert frac.shape == (self.NCOLS,), (key, frac.shape)
+            assert np.all(np.isfinite(frac)), key
+            assert np.all(np.abs(frac) <= 1.0), key
 
     def test_each_noa_key_uses_its_own_held_fraction(self):
         """Slot i must use fraction i — no key crossing.

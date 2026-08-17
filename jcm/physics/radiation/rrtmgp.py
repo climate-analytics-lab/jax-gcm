@@ -455,7 +455,10 @@ def prepare_icon_data(
         toa_sw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_lw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up),
-        noa_effect_frac=jnp.zeros((4,) + toa_sw_up.shape),
+        noa_frac_toa_sw_up=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_lw_up=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
@@ -967,6 +970,7 @@ def _maybe_chunked_vmap(fn, in_axes):
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     AEROSOL_FREE_MODES,
     MODE_EVIDENCE,
+    NOA_KEYS,
     hold_all,
     resolve_aerosol_free,
     update_effect_fraction,
@@ -1374,9 +1378,10 @@ class RRTMGPRadiation(PhysicsTerm):
                 for k, v in _fresh_toa.items()
             }
             # `alternating` holds whole fluxes rather than a fraction, so
-            # the fraction slot stays at zero — but it must still be
+            # the fraction slots stay at zero — but they must still be
             # supplied, since RadiationData requires every field.
-            noa["noa_effect_frac"] = jnp.zeros((4, ncols))
+            noa.update({f"noa_frac_{k}": jnp.zeros((ncols,))
+                        for k in NOA_KEYS})
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
         # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
         # the cloud field is bit-identical and the difference to the all-sky
@@ -1426,8 +1431,8 @@ class RRTMGPRadiation(PhysicsTerm):
                     _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
                 )
 
-            _KEYS = ("toa_sw_up", "toa_lw_up",
-                     "toa_sw_up_clear", "toa_lw_up_clear")
+            _KEYS = NOA_KEYS
+            _FRAC_FIELDS = tuple(f"noa_frac_{k}" for k in _KEYS)
 
             if self._aerosol_free_interval > 1:
                 # Pay for the companion only every Nth radiation step. Between
@@ -1442,7 +1447,8 @@ class RRTMGPRadiation(PhysicsTerm):
                 )
                 rad_call = model_step // spc
                 fresh = tuple(_fresh_toa[k] for k in _KEYS)
-                prev_frac = diagnostics["radiation"].noa_effect_frac
+                prev_frac = tuple(getattr(diagnostics["radiation"], f)
+                                  for f in _FRAC_FIELDS)
 
                 def _companion():
                     """Solve, and refresh the stored effect fraction."""
@@ -1452,7 +1458,7 @@ class RRTMGPRadiation(PhysicsTerm):
                                                prev_frac[i])
                         for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
                     ]
-                    return vals, jnp.stack(fracs)
+                    return vals, tuple(fracs)
 
                 def _held():
                     """Re-apply the stored fraction to the fresh all-sky flux.
@@ -1470,21 +1476,23 @@ class RRTMGPRadiation(PhysicsTerm):
                     _companion,
                     _held,
                 )
+                frac_out = dict(zip(_FRAC_FIELDS, new_frac))
             else:
                 noa_vals = _solve_aerosol_free()
-                # Only `paired` carries a fraction; every other
-                # mode solves fresh, so leave the slot at zero.
-                new_frac = jnp.zeros((4, ncols))
+                # Only `paired` carries a fraction; every other mode
+                # solves fresh, so leave the slots at zero.
+                frac_out = {f: jnp.zeros((ncols,))
+                            for f in (f"noa_frac_{k}" for k in NOA_KEYS)}
 
             noa = {f"{k}_noa": v for k, v in zip(_KEYS, noa_vals)}
-            noa["noa_effect_frac"] = new_frac
+            noa.update(frac_out)
         else:
             all_sky = _fresh_toa
             zero_col = jnp.zeros((ncols,))
             noa = dict(
                 toa_sw_up_noa=zero_col, toa_lw_up_noa=zero_col,
                 toa_sw_up_clear_noa=zero_col, toa_lw_up_clear_noa=zero_col,
-                noa_effect_frac=jnp.zeros((4, ncols)),
+                **{f"noa_frac_{k}": zero_col for k in NOA_KEYS},
             )
 
         # Per-gpoint flux profiles are summed over g-points inside the

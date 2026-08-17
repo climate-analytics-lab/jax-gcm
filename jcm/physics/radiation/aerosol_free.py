@@ -131,12 +131,16 @@ def apply_effect_fraction(fresh, frac):
     return fresh * (1.0 - frac)
 
 
+#: The four aerosol-free keys, in the canonical order used by every tuple
+#: in this module and by ``RadiationData.noa_frac_*``.
+NOA_KEYS = ("toa_sw_up", "toa_lw_up", "toa_sw_up_clear", "toa_lw_up_clear")
+
+
 def hold_all(fresh, frac):
     """Apply each key's own held fraction to that key's fresh flux.
 
-    ``fresh`` is one value per ``*noa`` key in the canonical order
-    (toa_sw_up, toa_lw_up, toa_sw_up_clear, toa_lw_up_clear); ``frac`` is
-    the matching leading axis of ``RadiationData.noa_effect_frac``.
+    ``fresh`` and ``frac`` are both one value per ``*noa`` key in the
+    canonical order :data:`NOA_KEYS`.
 
     Trivial, but it exists as a named function so the key-to-fraction
     pairing is testable on its own: an adversarial review showed that
