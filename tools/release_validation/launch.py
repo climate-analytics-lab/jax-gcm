@@ -16,9 +16,8 @@ the SCM member (CPU, no PBS needed).
 import argparse
 import os
 import subprocess
-from pathlib import Path
-
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -28,7 +27,7 @@ sys.path.insert(0, str(HERE.parent))
 from benchmark import PRESETS  # noqa: E402
 
 
-def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
+def jam_aux(grid: str, levels: str) -> list[str]:
     inputs = os.environ.get(
         "JAM_INPUTS", "/glade/derecho/scratch/" + os.environ.get("USER", "")
         + "/jam_inputs")
@@ -38,13 +37,24 @@ def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
     emis = os.environ.get(
         "JCM_EMISSIONS",
         f"{HOME}/jax-gcm/runs/emissions_echam_{token}_l47_hybrid_2014.nc")
+    # The oxidant source (cam/waccm) is the preparer's choice —
+    # prep_jam_aux_inputs recommends waccm at L95 — so match any source
+    # rather than hardcoding one.
+    ox = sorted(Path(inputs).glob(
+        f"oxidants_*_echam_{levels}_2014_{token}.nc"))
     ov = [
         f"forcing.emissions_file={emis}",
         f"forcing.dms_file={inputs}/dms_lana2011_climo_{token}.nc",
         f"forcing.dust_file={inputs}/dust_erodibility_cam_f05_{token}.nc",
-        f"forcing.oxidants_file={inputs}/oxidants_cam_echam_{levels}_2014_{token}.nc",
     ]
-    for o in ov:
+    if ox:
+        ov.append(f"forcing.oxidants_file={ox[-1]}")
+    else:
+        raise SystemExit(
+            f"no oxidants_*_echam_{levels}_2014_{token}.nc under {inputs} — "
+            "regenerate per jcm/data/mirror/SOURCES.md (scratch is "
+            "purge-eligible)")
+    for o in ov[:3]:
         path = o.split("=", 1)[1]
         if not Path(path).exists():
             raise SystemExit(
@@ -54,8 +64,18 @@ def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
 
 
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
-    preset = PRESETS[m["preset"]]
-    grid = next(o.split("=", 1)[1] for o in preset if o.startswith("grid="))
+    # Presets may carry their own output plumbing (the pyses ones set
+    # run.checkpoint_path); ours must win, so strip conflicting keys
+    # rather than duplicating the override on the CLI.
+    preset = [o for o in PRESETS[m["preset"]]
+              if not o.startswith(("run.checkpoint_path", "run.output",
+                                   "hydra.run.dir"))]
+    grid = next((o.split("=", 1)[1] for o in preset
+                 if o.startswith("grid=")), None)
+    if m.get("jam_inputs") and grid is None:
+        raise SystemExit(
+            f"preset {m['preset']} declares no grid= override; JAM aux "
+            "input resolution needs one.")
     ovs = [*preset,
            f"run.total_time={d['days']}.0",
            f"run.save_interval={d['save_interval']}",
@@ -67,7 +87,7 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            # bail_on_unhealthy note) — same for checkpoint_path.
            f"++run.checkpoint_path={rundir}/checkpoint.msgpack"]
     if m.get("jam_inputs"):
-        ovs += jam_aux(".", grid, m["jam_inputs"])
+        ovs += jam_aux(grid, m["jam_inputs"])
     return ovs
 
 

@@ -21,10 +21,9 @@ import jax.numpy as jnp
 import numpy as np
 from jax.tree_util import tree_map
 
-from jcm.physics.convection.saturation import saturation_specific_humidity  # noqa: F401 (import check)
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.physics_interface import PhysicsState
+from jcm.rce import rce_initial_state
 from jcm.single_column_model import SingleColumnModel
 
 DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
@@ -40,30 +39,18 @@ scm = SingleColumnModel(
     dt_seconds=DT,
 )
 
-# Tropical sounding on the (1,1)-column pressure profile.
-ps = 101325.0
-p = np.asarray(scm.coords.vertical.centers) * ps if hasattr(
-    scm.coords.vertical, "centers") else None
-if p is None:
-    a = np.asarray(vertical.a_boundaries) if hasattr(vertical, "a_boundaries") else None
-    b = np.asarray(vertical.b_boundaries)
-    ph = (a if a is not None else 0.0) + b * ps
-    p = 0.5 * (ph[:-1] + ph[1:])
-z = -8400.0 * np.log(p / ps)
-T = np.maximum(302.0 - 6.5e-3 * z, 200.0)
-es = 611.2 * np.exp(17.67 * (T - 273.15) / (T - 29.65))
-qs = 0.622 * es / np.maximum(p - 0.378 * es, 1.0)
-q = 0.8 * qs * np.clip(p / 50000.0, 0.0, 1.0)
+# Warm tropical column via the shared RCE builder (same saturation
+# closure the model uses), with a light background wind.
+state = rce_initial_state(vertical, sst=302.0, relative_humidity=0.8)
+state = state.copy(u_wind=jnp.full(NLEV, 3.0))
 
-state = PhysicsState(
-    u_wind=jnp.full(NLEV, 3.0),
-    v_wind=jnp.zeros(NLEV),
-    temperature=jnp.asarray(T, dtype=jnp.float32),
-    specific_humidity=jnp.asarray(q, dtype=jnp.float32),
-    geopotential=jnp.asarray(9.81 * z, dtype=jnp.float32),
-    normalized_surface_pressure=jnp.asarray(1.0),
-    tracers={"qc": jnp.zeros(NLEV), "qi": jnp.zeros(NLEV)},
-)
+# Pressure centers for the level masks below.
+ps = 101325.0
+a_b = np.asarray(getattr(vertical, "a_boundaries", np.zeros(NLEV + 1)))
+b_b = np.asarray(getattr(vertical, "b_boundaries", np.linspace(0, 1, NLEV + 1)))
+ph = a_b + b_b * ps
+p = 0.5 * (ph[:-1] + ph[1:])
+
 states = tree_map(lambda x: jnp.broadcast_to(x, (N,) + jnp.shape(x)), state)
 
 # Seed every declared JAM tracer at ~0; load the BL (lowest 5 levels)
@@ -97,7 +84,7 @@ finite = all(np.isfinite(v).all() for v in tr.values())
 check("all tracers finite", finite)
 so4, pom = tr.get("m_so4_acc"), tr.get("m_poa_pcm")
 dmw = np.asarray(p) * 0 + 1.0  # equal weights; qualitative profile checks
-ft = slice(10, 30)                     # free troposphere ~100-600 hPa
+ft = (p > 150e2) & (p < 600e2)         # free troposphere, 150-600 hPa
 so4_ft0, so4_ftN = so4[0][ft].mean(), so4[-1][ft].mean()
 pom_ft0, pom_ftN = pom[0][ft].mean(), pom[-1][ft].mean()
 check("convective transport lofts insoluble aerosol",

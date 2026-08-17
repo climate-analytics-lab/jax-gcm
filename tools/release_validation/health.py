@@ -27,9 +27,9 @@ import numpy as np
 import xarray as xr
 
 # Shared burden/weighting machinery lives in tools/jam_burden_report.py —
-# one implementation for the report and the gates (it also handles the
-# pressure_half level-orientation dance and cloud-borne tracers, which the
-# first version of this file reimplemented without).
+# one implementation for the report and the gates (it handles the
+# pressure_half level-orientation dance and includes cloud-borne
+# tracers).
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from jam_burden_report import _SPECIES, _area_weights, _wmean, burden  # noqa: E402
 
@@ -90,11 +90,12 @@ def main():
               f"(expected [{lo:g}, {hi:g}])")
         ok = ok and good
 
-    # NaN scan over everything saved.
+    # NaN scan over everything saved, across the WHOLE opened window —
+    # a run that NaN'd mid-year and was restarted can end on a finite
+    # chunk, so the last time step alone is not evidence of health.
     bad = []
     for v in ds.data_vars:
-        arr = ds[v].isel(time=-1).values
-        if not np.all(np.isfinite(arr)):
+        if not bool(np.isfinite(ds[v].values).all()):
             bad.append(v)
     print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
           f"{len(bad)}/{len(ds.data_vars)} variables non-finite "
@@ -103,11 +104,9 @@ def main():
 
     speedy = "longwave_rad.ftop" in ds       # SPEEDY field dialect
     if speedy:
-        # shortwave_rad.ftop = net downward SW at TOA; longwave_rad.ftop
-        # = OUTGOING LW at TOA (speedy_longwave.py docstring; verified on
-        # a full model year: global mean +219 W/m², everywhere positive —
-        # the units_table's "net downward" row for it is a copy-paste of
-        # the shortwave description). Net TOA = SW_net_down − OLR.
+        # shortwave_rad.ftop is the net downward SW at TOA and
+        # longwave_rad.ftop the OUTGOING LW (see speedy_longwave.py), so
+        # net TOA = SW_net_down − OLR.
         toa = ds["shortwave_rad.ftop"] - ds["longwave_rad.ftop"]
     else:
         toa = (ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"]
@@ -161,12 +160,17 @@ def main():
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())
-        if len(walls) >= 2:
+        # Chunk length from the day-numbered filenames themselves, not a
+        # constant that can drift from the run's actual chunk_days.
+        day_nums = sorted(int(re.search(r"day(\d+)", f).group(1))
+                          for f in files)
+        spacings = {b - a_ for a_, b in zip(day_nums, day_nums[1:])}
+        if len(walls) >= 2 and len(spacings) == 1:
             w = float(walls[-1])
-            chunk_days = 5.0
+            chunk_days = spacings.pop()
             print(f"INFO  settled rate ~ {chunk_days * 3600 / w:.0f} "
-                  f"sim-days/hr (last chunk {w:.0f}s; compare vs the "
-                  "derecho-jcm-runs reference points)")
+                  f"sim-days/hr (last chunk {w:.0f}s, {chunk_days}-day "
+                  "chunks; compare vs the recorded baselines)")
 
     print("OVERALL:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

@@ -1,7 +1,7 @@
 # The supported-configuration matrix (issue #638). Each member references a
 # validated preset in tools/benchmark.py's PRESETS — the single home of
 # known-good override sets — plus the walltime and (for JAM) which aux-input
-# level set to stage. All members run on ONE A100 (verified 2026-08-16).
+# level set to stage. Every member runs on one A100.
 defaults:
   days: 365
   chunk_days: 5

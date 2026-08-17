@@ -28,6 +28,12 @@ python tools/release_validation/health.py $SCRATCH/jam_runs/mx_<member> \
     --last-n 40 --log runs/mx_<member>.log
 ```
 
+A FAIL is a recorded verdict, not necessarily a blocker: members with
+known characteristics (the 1m bright-cloud TOA, SPEEDY's wet bias, the
+JAM soa/ss calibration items tracked in JEM-Cal#4) fail their gates by
+design until fixed or the matrix declares them expected. Post the table
+as-is.
+
 Gates: NaN scan on every saved variable; TOA net |≤10| W/m²; precip
 2–4 mm/day; cloud cover 0.4–0.8; near-surface T 278–295 K; AOD₅₅₀
 0.02–0.35; JAM per-species burdens vs loose AeroCom ranges. `--last-n 40`

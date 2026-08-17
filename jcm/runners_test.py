@@ -1400,9 +1400,10 @@ class TestAutoInputResolution(unittest.TestCase):
         with mock.patch("jcm.data.remote.fetch",
                         return_value="/cached/file.nc") as f:
             self.assertEqual(_resolve_auto_ozone(coords), "/cached/file.nc")
-            f.assert_called_with("bundles/t21_l47/ozone_pd.nc")
+            self.assertEqual(f.call_args.args[0],
+                             "bundles/t21_l47/ozone_pd.nc")
             self.assertEqual(_resolve_auto_terrain(coords), "/cached/file.nc")
-            f.assert_called_with("bundles/t21/terrain.nc")
+            self.assertEqual(f.call_args.args[0], "bundles/t21/terrain.nc")
 
     def test_terrain_auto_raises_loudly_when_unresolvable(self):
         from unittest import mock
