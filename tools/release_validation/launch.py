@@ -50,9 +50,16 @@ def jam_aux(repo: str, grid: str, levels: str) -> list[str]:
 
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     grid = m["grid"]
+    # SPEEDY has no SSO scheme, so interpolated t63 terrain is fine (and
+    # neither the package nor the mirror carries native t31 terrain —
+    # terrain=auto would raise). ECHAM members need native terrain: auto.
+    terrain = (
+        ["terrain=from_file", "terrain.file=jcm/data/bc/t63/terrain.nc"]
+        if m.get("profile") == "speedy" else ["terrain=auto"]
+    )
     base = [
         f"physics={m['physics']}", f"grid={grid}",
-        "terrain=auto", "forcing=from_file",
+        *terrain, "forcing=from_file",
         "forcing.file=jcm/data/bc/t63/forcing.nc",
         f"run.time_step={d['time_step_min']}",
         f"run.total_time={d['days']}.0",

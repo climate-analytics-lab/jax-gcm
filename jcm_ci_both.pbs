@@ -1,0 +1,21 @@
+#!/bin/bash
+#PBS -N jcm_ci_644
+#PBS -A UCSD0085
+#PBS -q develop
+#PBS -l select=1:ncpus=16:mem=160GB
+#PBS -l walltime=02:00:00
+#PBS -m abe
+#PBS -j oe
+#PBS -o /glade/derecho/scratch/duncanwp/tmp/relval-tools/jcm_ci_both.log
+set -uo pipefail
+source /glade/u/home/duncanwp/.venvs/jaxgcm/bin/activate
+cd /glade/derecho/scratch/duncanwp/tmp/relval-tools
+export JAX_PLATFORMS=cpu
+export PYTHONPATH=/glade/u/home/duncanwp/dinosaur-sl:/glade/derecho/scratch/duncanwp/tmp/relval-tools
+export JAX_COMPILATION_CACHE_DIR=${SCRATCH}/jcm-jax-cache
+echo "=== fast gate ==="
+pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90 -q 2>&1 | tail -20
+echo FAST_EXIT=${PIPESTATUS[0]}
+echo "=== slow gate ==="
+pytest -n 4 -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80 -q 2>&1 | tail -20
+echo SLOW_EXIT=${PIPESTATUS[0]}

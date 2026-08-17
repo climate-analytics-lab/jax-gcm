@@ -99,8 +99,11 @@ def main():
 
     speedy = "longwave_rad.ftop" in ds       # SPEEDY field dialect
     if speedy:
-        # SPEEDY units table: shortwave_rad.ftop = net downward SW at TOA,
-        # longwave_rad.ftop = outgoing LW at TOA (both W/m²).
+        # shortwave_rad.ftop = net downward SW at TOA; longwave_rad.ftop
+        # = OUTGOING LW at TOA (speedy_longwave.py docstring; verified on
+        # a full model year: global mean +219 W/m², everywhere positive —
+        # the units_table's "net downward" row for it is a copy-paste of
+        # the shortwave description). Net TOA = SW_net_down − OLR.
         toa = ds["shortwave_rad.ftop"] - ds["longwave_rad.ftop"]
     else:
         toa = (ds["radiation.toa_sw_down"] - ds["radiation.toa_sw_up"]
