@@ -440,7 +440,7 @@ class AerosolFreeRadiationTest(unittest.TestCase):
         from jcm.physics.echam.echam_terms import echam_physics
         with self.assertRaises(ValueError):
             echam_physics(radiation_scheme="grey",
-                          aerosol_free_radiation=True)
+                          aerosol_free="exact")
 
     def test_flag_off_leaves_noa_fields_zero(self):
         from jcm.physics.radiation.radiation_types import RadiationData
@@ -476,7 +476,7 @@ class AerosolFreeRadiationSlowTest(unittest.TestCase):
 
         physics = echam_physics(
             radiation_scheme="rrtmgp", cloud_scheme="2m",
-            aerosol_module="macv2sp", aerosol_free_radiation=True,
+            aerosol_module="macv2sp", aerosol_free="exact",
             checkpoint_terms=False)
         vertical = get_echam_levels(47)
         scm = SingleColumnModel(

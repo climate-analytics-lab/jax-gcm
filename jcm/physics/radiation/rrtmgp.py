@@ -959,6 +959,39 @@ def _maybe_chunked_vmap(fn, in_axes):
     return run
 
 
+#: How the aerosol-free (``*noa``) TOA fluxes for AeroCom ERFari are produced.
+#: ONE name per behaviour. The previous API spelled this as three independent
+#: flags (an on/off bool, an ``alternate`` bool and an integer interval),
+#: which made two thirds of the combinations illegal and needed explicit
+#: guards to reject them — a closed vocabulary makes those states
+#: unrepresentable instead of merely rejected.
+#:
+#:   ``off``          no ``*noa`` fluxes, no ERFari, no extra cost
+#:   ``exact``        companion solve every radiation step — the reference
+#:   ``paired``       companion every ``aerosol_free_interval`` steps
+#:   ``alternating``  no companion; alternate the single solve instead
+AEROSOL_FREE_MODES = ("off", "exact", "paired", "alternating")
+
+#: What each approximation actually costs you, measured on a 155-day
+#: ERA5-nudged T63L47 semi-Lagrangian year (jax-gcm#630) against a reference
+#: ERFari of -0.766 W/m2. The yardstick is a noise floor of 0.0023 W/m2 —
+#: two runs of the SAME scheme on different nodes and different A100
+#: variants — so these departures are 29-42x internal variability plus
+#: hardware, i.e. real scheme error and not sampling.
+_MODE_EVIDENCE = {
+    "paired": (
+        "+17 % runtime; ERFari off by 0.095 W/m2 (12 %, 42x the noise floor) "
+        "at N=4, essentially all of it shortwave. The SIMULATION stays "
+        "bit-identical to 'exact' — only the diagnostic is approximated, by "
+        "holding the aerosol effect between companion solves"),
+    "alternating": (
+        "+0 % runtime; ERFari off by 0.067 W/m2 (9 %, 29x the noise floor) "
+        "AND the model feels aerosol-free heating half the time, so the "
+        "SIMULATION itself differs — every output is affected, not just the "
+        "*noa fluxes"),
+}
+
+
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
@@ -1000,9 +1033,8 @@ class RRTMGPRadiation(PhysicsTerm):
         params: RadiationParameters | None = None,
         base_seed: int = 0,
         compute_cre: bool = True,
-        aerosol_free_diagnostics: bool = False,
-        aerosol_free_alternate: bool = False,
-        aerosol_free_interval: int = 1,
+        aerosol_free: str = "off",
+        aerosol_free_interval: int | None = None,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1017,6 +1049,16 @@ class RRTMGPRadiation(PhysicsTerm):
                 ``toa_{sw,lw}_up_clear`` for the cloud radiative
                 effect diagnostic. Set False for the 1× McICA-only
                 cost when CRE isn't needed.
+            aerosol_free: one of :data:`AEROSOL_FREE_MODES`, selecting how
+                the AeroCom ``*noa`` fluxes are produced. Defaults to
+                ``"off"``; ``"exact"`` is the reference. The two cheap modes
+                are both measurably wrong (29-42x the internal-variability
+                noise floor) and log a warning quoting by how much, so a run
+                never quietly reports an approximate ERFari as the real one.
+            aerosol_free_interval: radiation steps between companion solves.
+                Required by — and only meaningful for — ``aerosol_free=
+                "paired"``; passing it with any other mode is an error
+                rather than a silently ignored argument.
 
         """
         self.params = nnx.Param(params or RadiationParameters.default())
@@ -1028,11 +1070,37 @@ class RRTMGPRadiation(PhysicsTerm):
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
         # per compute step with the aerosol optics zeroed. Roughly doubles
         # the (dominant) radiation cost on compute steps, so opt-in only.
-        self._aerosol_free = bool(aerosol_free_diagnostics)
+        if aerosol_free not in AEROSOL_FREE_MODES:
+            raise ValueError(
+                f"aerosol_free={aerosol_free!r} is not one of "
+                f"{AEROSOL_FREE_MODES}. Use 'exact' for the reference "
+                "ERFari, 'paired' + aerosol_free_interval=N to trade "
+                "fidelity for runtime, or 'off' for no *noa fluxes.")
+        # The interval is subordinate to the mode: it is the parameter of
+        # 'paired' and meaningless elsewhere. Requiring it exactly when it
+        # applies means neither "paired but I forgot N" nor "N set on a mode
+        # that ignores it" can reach a run silently.
+        if aerosol_free == "paired":
+            if aerosol_free_interval is None:
+                raise ValueError(
+                    "aerosol_free='paired' needs aerosol_free_interval=N "
+                    "(radiation steps between companion solves). For N=1 use "
+                    "aerosol_free='exact' — that is the same scheme, named "
+                    "for what it is.")
+            if int(aerosol_free_interval) < 2:
+                raise ValueError(
+                    "aerosol_free_interval must be >= 2 for 'paired'; "
+                    "interval 1 IS aerosol_free='exact'.")
+        elif aerosol_free_interval is not None:
+            raise ValueError(
+                f"aerosol_free_interval only applies to "
+                f"aerosol_free='paired', not {aerosol_free!r}.")
+        self._aerosol_free_mode = aerosol_free
+        self._aerosol_free = aerosol_free != "off"
         # Alternate the SINGLE solve between aerosol-on and aerosol-off
         # instead of paying for a second one. Removes the *noa cost entirely
         # but perturbs the physics — see ``_compute_full``.
-        self._aerosol_free_alternate = bool(aerosol_free_alternate)
+        self._aerosol_free_alternate = aerosol_free == "alternating"
         # Run the aerosol-free companion only every Nth radiation step, but
         # PAIRED with the all-sky solve at that same step, so the two fluxes
         # always describe the same atmospheric state. Between companions the
@@ -1041,42 +1109,23 @@ class RRTMGPRadiation(PhysicsTerm):
         # rsut and rsutnoa sampling different step sets (measured at
         # 0.04-0.14 W/m2 for a 2x subsample — the same size as the error this
         # is meant to avoid). Cost is (1 + 1/N) solves instead of 2.
-        self._aerosol_free_interval = max(1, int(aerosol_free_interval))
-        if aerosol_free_diagnostics:
-            # State the chosen point on the cost/fidelity dial once, at
-            # construction. Which *noa scheme is running changes both runtime
-            # and whether the simulation is perturbed, and neither is obvious
-            # from the output files afterwards.
-            if aerosol_free_alternate:
-                logger.warning(
-                    "*noa via ALTERNATE solve: the model feels aerosol-free "
-                    "heating every other radiation step, so this run's "
-                    "physics is perturbed and its ERFari cannot be compared "
-                    "against a reference without an ensemble. A larger "
-                    "aerosol_free_interval costs almost as little without "
-                    "touching the physics (jax-gcm#630).")
-            elif self._aerosol_free_interval > 1:
-                logger.info(
-                    "*noa via PAIRED companion every %d radiation steps "
-                    "(physics bit-identical; ERFari should match "
-                    "aerosol_free_interval=1)", self._aerosol_free_interval)
-            else:
-                logger.info("*noa via PAIRED companion every radiation step "
-                            "(reference; ~+55% runtime)")
-        if aerosol_free_interval > 1 and aerosol_free_alternate:
-            raise ValueError(
-                "aerosol_free_interval>1 and aerosol_free_alternate are "
-                "different strategies for the same cost problem; pick one. "
-                "Alternate splits the flavours across steps (cheapest, but "
-                "the two fluxes then describe different states); interval "
-                "keeps them paired and just does it less often."
-            )
-        if aerosol_free_alternate and not aerosol_free_diagnostics:
-            raise ValueError(
-                "aerosol_free_alternate=True requires "
-                "aerosol_free_diagnostics=True — alternating the solve is a "
-                "way of producing the *noa fluxes, not a standalone mode."
-            )
+        self._aerosol_free_interval = (
+            int(aerosol_free_interval) if aerosol_free == "paired" else 1)
+        # State the chosen mode once, at construction, and for the two
+        # approximate modes quote the MEASURED error rather than just naming
+        # the scheme. Neither the mode nor its error is recoverable from the
+        # output files afterwards, so a run that quietly used an approximate
+        # ERFari would be indistinguishable from the reference downstream.
+        if aerosol_free == "exact":
+            logger.info(
+                "*noa via PAIRED companion every radiation step "
+                "(reference ERFari; ~+64 %% runtime)")
+        elif aerosol_free in _MODE_EVIDENCE:
+            logger.warning(
+                "*noa via %s: APPROXIMATE ERFari — %s. Use "
+                "aerosol_free='exact' for a reference-quality figure "
+                "(jax-gcm#630).",
+                aerosol_free.upper(), _MODE_EVIDENCE[aerosol_free])
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit

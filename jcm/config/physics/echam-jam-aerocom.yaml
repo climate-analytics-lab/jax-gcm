@@ -25,9 +25,9 @@
 # per-mode lognormal integrals. Drop `aerosol` from the list below if a run
 # does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
 #
-# NOT included here because it roughly DOUBLES runtime: the aerosol-free
-# (*noa) radiation diagnostic needs a second radiation call, and radiation
-# is ~87 % of the step. It is gated separately — see jax-gcm#583.
+# The aerosol-free (*noa) radiation diagnostic needs a second radiation
+# call, and radiation is ~87 % of the step, so it costs ~+64 % on its own.
+# It has its own knob further down (`aerosol_free`) — see jax-gcm#583.
 #
 # Also gated separately: the per-species / per-mode / spectral aerosol
 # optics (#584), which need a second Mie sweep — use the
@@ -54,44 +54,44 @@ aerocom_overlap: maximum-random
 aerocom_optics: false
 # Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
 #
-# TWO knobs, deliberately not one. ``aerosol_free_interval`` is the
-# cost/fidelity dial; ``aerosol_free_alternate`` is a different scheme that
-# happens to be cheap, and folding it into the dial would make the dial
-# non-monotonic in cost AND silently change whether the physics is
-# perturbed. Measured at T63L47:
+# ONE knob with four named settings. `aerosol_free_interval` below is the
+# parameter of `paired` only, and passing it with any other mode is an
+# error rather than being silently ignored.
 #
-#   interval=1   47.02 s/sim-day  +55 %   companion every radiation step
-#   interval=4   32.47 s/sim-day  + 7 %
-#   alternate    30.30 s/sim-day  + 0 %   <- but perturbs the model
-#   (no *noa)    30.32 s/sim-day    —
+#   off          no *noa fluxes            +0 %    (no ERFari)
+#   exact        companion every rad step  +64 %   reference
+#   paired       companion every Nth step  +17 %   at N=4
+#   alternating  no companion; alternate   +0 %
 #
-# so "N=1, 2, 4" with N=2 meaning alternate would run 47 -> 30 -> 32: the
-# dial gets cheaper then dearer, and only the middle setting changes the
-# simulation. Keep them separate.
-aerosol_free_radiation: true
+# FIDELITY — measured on a 155-day ERA5-nudged T63L47 SL year (#630), all
+# four runs on the same commit, reference ERFari -0.766 W/m2:
+#
+#                     ERFari error   vs noise floor
+#   exact                  0            (reference)
+#   paired (N=4)      -0.095 W/m2  12 %      42x
+#   alternating       +0.067 W/m2   9 %      29x
+#
+# The noise floor is 0.0023 W/m2 — two runs of the SAME scheme on
+# different nodes and different A100 variants (SXM4 vs PCIe). So BOTH
+# approximations are 29-42x internal variability plus hardware: they are
+# real scheme error, not sampling, and neither is a free lunch. If the
+# ERFari number matters, pay for `exact`.
+#
+# The two approximations differ in KIND, which matters more than their
+# sizes. `paired` leaves the simulation bit-identical to `exact` (the model
+# always sees aerosol) and approximates only the diagnostic, by holding the
+# aerosol effect as a FRACTION of the all-sky flux between companions —
+# holding it as an absolute W/m2 instead breaks the SW at night, which cost
+# a year-long run. `alternating` makes the model feel aerosol-free heating
+# half the time, so the SIMULATION differs and EVERY output is affected,
+# not just the *noa fluxes; its ERFari therefore cannot be compared against
+# a reference without an ensemble.
+#
+# Untested middle ground: paired with N=2, which halves the extrapolation
+# gap for ~+30 %. Check it in the offline harness before spending cluster
+# time.
+aerosol_free: exact
 
-# THE dial. N = radiation steps between aerosol-free samples, always PAIRED
-# with the all-sky solve at that step:
-#
-#   N=1  companion every radiation step — the reference, exact ERFari
-#   N=4  companion every 4th step       — measured +7 % instead of +55 %
-#   N=8, 16, ...                        — cheaper still, ERFari refreshed
-#                                         less often
-#
-# Physics is bit-identical at every N (the model always sees aerosol), so
-# ERFari has a *predicted* value — it should match N=1 — and any deviation
-# is a bug rather than something needing an ensemble to bound. Between
-# companions the aerosol effect is held as a FRACTION of the all-sky flux;
-# holding it as an absolute W/m2 breaks the SW at night (see #630).
-aerosol_free_interval: 1
-
-# NOT RECOMMENDED. Steals every other radiation call for the aerosol-free
-# solve instead of adding one, so the *noa fluxes are free — but the model
-# then feels aerosol-free heating half the time. That perturbs the
-# simulation, so its ERFari cannot be compared against a reference without
-# an ensemble: a full nudged year differed by 1.5 % while a zero-aerosol
-# control put the scheme's intrinsic artefact at only ~0.001 W/m2, i.e.
-# nearly all of the measured difference was chaotic divergence. Prefer a
-# larger ``aerosol_free_interval``, which approaches the same cost without
-# touching the physics (#630).
-aerosol_free_alternate: false
+# Companion spacing for `aerosol_free: paired`. Unused (and rejected) for
+# every other mode; N=1 is spelled `aerosol_free: exact`.
+# aerosol_free_interval: 4

@@ -86,9 +86,8 @@ def echam_physics(
     cosp_calipso: bool = False,
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
-    aerosol_free_radiation: bool = False,
-    aerosol_free_alternate: bool = False,
-    aerosol_free_interval: int = 1,
+    aerosol_free: str = "off",
+    aerosol_free_interval: int | None = None,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -215,38 +214,40 @@ def echam_physics(
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
             ``cltisccp``); see jax-gcm#597.
-        aerosol_free_radiation: Run a SECOND RRTMGP solve per compute
-            step with the aerosol optics zeroed, emitting the AeroCom
-            ``*noa`` TOA fluxes (rsutnoa/rlutnoa and clear-sky
-            variants) for instantaneous-ERFari diagnosis (jax-gcm#583).
-            Roughly doubles the radiation cost on compute steps;
-            RRTMGP only.
-        aerosol_free_alternate: Produce those ``*noa`` fluxes by
-            ALTERNATING the single radiation solve between aerosol-on
-            and aerosol-off instead of adding a second solve. Removes
-            the extra cost entirely, but the model then feels
-            aerosol-free heating on every other radiation step (the
-            aerosol direct effect enters with a 50 % duty cycle) and
-            the on/off fluxes are sampled one radiation interval apart
-            rather than simultaneously. Requires
-            ``aerosol_free_radiation=True``.
-        aerosol_free_interval: run the aerosol-free companion only every
-            Nth radiation step, PAIRED with the all-sky solve at that same
-            step. Costs (1 + 1/N) solves instead of 2, keeps the physics
-            bit-identical, and — unlike ``aerosol_free_alternate`` — the two
-            fluxes always describe the same atmospheric state. Between
-            companions the aerosol effect is held and subtracted from the
-            fresh all-sky flux, so the pair never samples different step
-            sets. Default 1 (companion every radiation step).
+        aerosol_free: how to produce the AeroCom ``*noa`` TOA fluxes
+            (rsutnoa/rlutnoa and clear-sky variants) that ERFari is
+            diagnosed from (jax-gcm#583). RRTMGP only. One of:
+
+            ``"off"`` (default)
+                No ``*noa`` fluxes and no extra cost.
+            ``"exact"``
+                A SECOND RRTMGP solve per compute step with the aerosol
+                optics zeroed. The reference: ERFari is exact. Costs
+                ~+64 % runtime, radiation being ~87 % of the step.
+            ``"paired"``
+                That companion solve only every ``aerosol_free_interval``
+                steps, holding the aerosol EFFECT (as a fraction of the
+                all-sky flux) in between. The simulation stays
+                bit-identical to ``"exact"`` — only the diagnostic is
+                approximated. ~+17 % at N=4, for 12 % ERFari error.
+            ``"alternating"``
+                No companion at all: alternate the single solve between
+                aerosol-on and aerosol-off. Free, but the model then feels
+                aerosol-free heating half the time, so the SIMULATION
+                differs and every output is affected — not just ``*noa``.
+                ~9 % ERFari error.
+
+            Both approximate modes were measured at 29-42x the
+            internal-variability + hardware noise floor on a 155-day nudged
+            year, so neither is free; see jax-gcm#630 and the
+            ``echam-jam-aerocom`` config for the full table.
+        aerosol_free_interval: companion spacing N, required by (and only
+            valid for) ``aerosol_free="paired"``.
 
     """
-    if aerosol_free_alternate and not aerosol_free_radiation:
+    if aerosol_free != "off" and radiation_scheme != "rrtmgp":
         raise ValueError(
-            "aerosol_free_alternate=True requires aerosol_free_radiation=True "
-            "— alternating the solve is a way of producing the *noa fluxes.")
-    if aerosol_free_radiation and radiation_scheme != "rrtmgp":
-        raise ValueError(
-            "aerosol_free_radiation=True needs radiation_scheme='rrtmgp' — "
+            f"aerosol_free={aerosol_free!r} needs radiation_scheme='rrtmgp' — "
             "the grey and emulated schemes carry no aerosol optics to zero, "
             f"so radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
@@ -276,8 +277,7 @@ def echam_physics(
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_diagnostics=aerosol_free_radiation,
-            aerosol_free_alternate=aerosol_free_alternate,
+            aerosol_free=aerosol_free,
             aerosol_free_interval=aerosol_free_interval)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)

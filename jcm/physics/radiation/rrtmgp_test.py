@@ -848,7 +848,7 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
     """Alternating aerosol-on/aerosol-off single solve (jax-gcm#583).
 
     Inherits the column harness from ``TestRRTMGPTermComputeAndCache`` and
-    re-drives it with ``aerosol_free_alternate=True``. The contract:
+    re-drives it with ``aerosol_free="alternating"``. The contract:
     on even radiation calls the solve carries aerosol and refreshes the
     all-sky TOA slots (``*noa`` held); on odd radiation calls it drops the
     aerosol optics and refreshes the ``*noa`` slots (all-sky held).
@@ -861,8 +861,7 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
         alt = RRTMGPRadiation(
             params=term.params.get_value(),
             compute_cre=False,
-            aerosol_free_diagnostics=True,
-            aerosol_free_alternate=True,
+            aerosol_free="alternating",
         )
         alt._lats, alt._lons = term._lats, term._lons
 
@@ -884,10 +883,15 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
         )}
         return alt, state, diagnostics, forcing
 
-    def test_alternate_requires_the_diagnostic_to_be_on(self):
+    def test_unknown_mode_is_rejected_with_the_vocabulary(self):
+        """A typo must not fall back to a silent default.
+
+        The mode name is the whole API now, so an unrecognised one has to
+        name the alternatives — this is the error a user hits first.
+        """
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
-        with pytest.raises(ValueError, match="aerosol_free_diagnostics"):
-            RRTMGPRadiation(aerosol_free_alternate=True)
+        with pytest.raises(ValueError, match="not one of"):
+            RRTMGPRadiation(aerosol_free="alternate")   # near-miss spelling
 
     def test_slots_alternate_between_aerosol_on_and_off(self):
         term, state, diagnostics, forcing = self._alternating_term_and_inputs()
@@ -941,7 +945,7 @@ class TestRRTMGPAerosolFreeAlternate(TestRRTMGPTermComputeAndCache):
 class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
     """Paired aerosol-free companion every Nth radiation step (jax-gcm#583).
 
-    The point of this mode versus ``aerosol_free_alternate`` is that the
+    The point of this mode versus ``aerosol_free="alternating"`` is that the
     all-sky and aerosol-free fluxes always come from the SAME solve step, so
     ERFari is unbiased by construction; only its refresh rate drops.
     """
@@ -950,7 +954,7 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
         base, state, diagnostics, forcing = self._term_and_inputs()
         t = RRTMGPRadiation(params=base.params.get_value(), compute_cre=False,
-                            aerosol_free_diagnostics=True, **kw)
+                            **kw)
         t._lats, t._lons = base._lats, base._lons
         aer = diagnostics["aerosol"]
         nlev, ncols = self.NLEV, self.NCOLS
@@ -970,18 +974,39 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         )}
         return t, state, diagnostics, forcing
 
-    def test_interval_one_matches_the_companion_every_step(self):
-        """N=1 must be the existing behaviour, exactly."""
-        t1, s, d, f = self._term(aerosol_free_interval=1)
-        t0, _, _, _ = self._term()
-        _, d1 = t1(s, d, f, None)
-        _, d0 = t0(s, d, f, None)
+    def test_paired_matches_exact_on_a_companion_step(self):
+        """On a step that runs the companion, `paired` IS `exact`.
+
+        Radiation call 0 is a companion step for any N, so the two modes
+        must agree bit-for-bit there. A difference would mean the `paired`
+        path perturbs the solve itself rather than only holding the effect
+        between companions — and holding-only is precisely what lets
+        `paired` keep the simulation bit-identical to `exact`.
+        """
+        tn, s, d, f = self._term(aerosol_free="paired",
+                                 aerosol_free_interval=4)
+        te, _, _, _ = self._term(aerosol_free="exact")
+        _, dn = tn(s, d, f, None)
+        _, de = te(s, d, f, None)
         for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
             np.testing.assert_array_equal(
-                np.asarray(getattr(d1["radiation"], name)),
-                np.asarray(getattr(d0["radiation"], name)),
-                err_msg=f"interval=1 changed {name}",
+                np.asarray(getattr(dn["radiation"], name)),
+                np.asarray(getattr(de["radiation"], name)),
+                err_msg=f"paired N=4 differs from exact at call 0 in {name}",
             )
+
+    def test_off_emits_no_aerosol_free_fluxes(self):
+        """`off` must leave the *noa slots at their zero default.
+
+        This is what makes `off` a safe default: a run that never asked for
+        ERFari cannot quietly publish a plausible-looking one.
+        """
+        t, s, d, f = self._term()
+        _, out = t(s, d, f, None)
+        for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(out["radiation"], name)), 0.0,
+                err_msg=f"aerosol_free='off' populated {name}")
 
     def test_skipped_steps_hold_the_effect_not_the_raw_flux(self):
         """Between companions, rsutnoa must track the FRESH all-sky flux.
@@ -997,7 +1022,7 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         the solar cycle and holding it into darkness subtracts a daytime
         effect from a zero flux (measured -0.077 W/m2 over a year).
         """
-        term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
+        term, state, diagnostics, forcing = self._term(aerosol_free="paired", aerosol_free_interval=2)
         # radiation_interval is 2*dt in this harness, so every call to the
         # term with an even step counter is a radiation step.
         _, d0 = term(state, diagnostics, forcing, None)        # companion runs
@@ -1027,7 +1052,7 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
         effect from zero and invent a negative reflected flux. The fractional
         hold is scale-free, so darkness reconstructs to darkness.
         """
-        term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
+        term, state, diagnostics, forcing = self._term(aerosol_free="paired", aerosol_free_interval=2)
         _, d0 = term(state, diagnostics, forcing, None)
         _, d1 = term(state, d0, forcing, None)
         _, d2 = term(state, d1, forcing, None)      # skipped companion
@@ -1040,9 +1065,18 @@ class TestRRTMGPAerosolFreeInterval(TestRRTMGPTermComputeAndCache):
             err_msg="dark column reconstructed a non-zero aerosol-free SW flux",
         )
 
-    def test_interval_and_alternate_are_mutually_exclusive(self):
+    def test_interval_is_bound_to_the_paired_mode(self):
+        """The interval is `paired`'s parameter, not a free-floating knob.
+
+        Both directions are errors, so neither "paired but no N" nor "N set
+        on a mode that ignores it" can reach a run silently.
+        """
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
-        with pytest.raises(ValueError, match="pick one"):
-            RRTMGPRadiation(aerosol_free_diagnostics=True,
-                            aerosol_free_alternate=True,
+        with pytest.raises(ValueError, match="only applies to"):
+            RRTMGPRadiation(aerosol_free="alternating",
                             aerosol_free_interval=4)
+        with pytest.raises(ValueError, match="needs aerosol_free_interval"):
+            RRTMGPRadiation(aerosol_free="paired")
+        # N=1 is 'exact' under another name; refuse the duplicate spelling.
+        with pytest.raises(ValueError, match="IS aerosol_free='exact'"):
+            RRTMGPRadiation(aerosol_free="paired", aerosol_free_interval=1)
