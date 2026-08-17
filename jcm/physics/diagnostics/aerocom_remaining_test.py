@@ -442,10 +442,33 @@ class AerosolFreeRadiationTest(unittest.TestCase):
             echam_physics(radiation_scheme="grey",
                           aerosol_free="exact")
 
-    def test_flag_off_leaves_noa_fields_zero(self):
-        from jcm.physics.radiation.radiation_types import RadiationData
-        r = RadiationData.zeros((8,), 5)
-        np.testing.assert_allclose(np.asarray(r.toa_sw_up_noa), 0.0)
+    def test_aerosol_free_flag_reaches_the_radiation_term(self):
+        """The factory flag must actually configure the built term.
+
+        Replaces a test that constructed ``RadiationData.zeros(...)`` and
+        asserted it was zero — true by definition, and it never touched the
+        radiation term, so it would have passed no matter what the flag
+        did (jax-gcm#649). The term's own zeroing behaviour is pinned in
+        rrtmgp_test with a sentinel; what is worth checking *here* is the
+        wiring from echam_physics() through to the term.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        def mode_of(**kw):
+            physics = echam_physics(radiation_scheme="rrtmgp", **kw)
+            rad = [t for t in physics.terms
+                   if isinstance(t, RRTMGPRadiation)]
+            self.assertEqual(len(rad), 1, "expected exactly one RRTMGP term")
+            return rad[0]._aerosol_free_mode, rad[0]._aerosol_free_interval
+
+        self.assertEqual(mode_of(), ("off", 1))
+        self.assertEqual(mode_of(aerosol_free="exact"), ("exact", 1))
+        self.assertEqual(
+            mode_of(aerosol_free="paired", aerosol_free_interval=4),
+            ("paired", 4))
+        self.assertEqual(mode_of(aerosol_free="alternating"),
+                         ("alternating", 1))
 
 
 import pytest  # noqa: E402
