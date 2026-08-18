@@ -269,9 +269,7 @@ def build_physics(cfg: DictConfig):
     # (notably the JAM aerosol chain, which is split around the cloud term) are
     # configured without re-expressing that ordering as flat YAML.
     if physics_cfg.get("builder", None) is not None:
-        physics = _build_physics_from_factory(physics_cfg)
-        _record_aerosol_free_provenance(physics)
-        return physics
+        return _build_physics_from_factory(physics_cfg)
 
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
@@ -297,32 +295,7 @@ def build_physics(cfg: DictConfig):
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
         band_config=_band_config_for_terms(terms),
     )
-    _record_aerosol_free_provenance(physics)
     return physics
-
-
-def _record_aerosol_free_provenance(physics) -> None:
-    """Stamp the ``*noa`` companion spacing into the output's attributes.
-
-    ERFari from a subsampled aerosol-free solve is measurably different
-    from the N=1 reference (see
-    ``docs/source/design/aerocom_erfari_sampling.md``), and nothing in the
-    saved fields distinguishes the two. A startup log line is not enough:
-    it is gone by the time anyone reads the netCDF. Reading the interval
-    off the built term rather than the YAML also covers physics assembled
-    by a ``terms`` list, where the setting reaches the term directly.
-
-    Matched on the attribute rather than ``isinstance(term,
-    RRTMGPRadiation)`` so this never imports the optional RRTMGP backend:
-    the factory path reaches here for grey-radiation configs too, and an
-    unconditional import would make a provenance nicety a hard dependency.
-    """
-    for term in getattr(physics, "terms", ()) or ():
-        if not getattr(term, "_aerosol_free", False):
-            continue
-        provenance.record_fact("aerosol_free_interval",
-                               term._aerosol_free_interval)
-        return
 
 
 #: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``
@@ -1585,13 +1558,6 @@ def run(cfg: DictConfig, model: Model | None = None):
     # probe and the summary log happen after the build, once the
     # config-selected libraries are actually imported.
     provenance.start_run(cfg)
-    # ``start_run`` clears the fact registry, and a caller-supplied model
-    # skips ``build_model``/``build_physics`` — so nothing would re-stamp
-    # the *noa spacing on this path and a subsampled ERFari would be
-    # indistinguishable from the reference in the output (Codex review on
-    # PR #652). Re-record it from the model we were handed.
-    if model is not None:
-        _record_aerosol_free_provenance(getattr(model, "physics", None))
 
     constants_overrides = cfg.get("constants", None)
     if constants_overrides:
