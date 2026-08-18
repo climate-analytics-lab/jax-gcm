@@ -57,7 +57,7 @@ surface_flux.vstr.1,N/m²,vstr,v-stress over sea
 mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term (component 1 of 2)
 convection.iptop,model level index,itop,Top of convection (layer index)
 surface_flux.vstr.2,N/m²,vstr,v-stress grid-box mean (fmask-weighted)
-longwave_rad.ftop,W/m²,ftop,Net downward flux at top of atmosphere
+longwave_rad.ftop,W/m²,ftop,Outgoing flux of long-wave radiation at the top of the atmosphere
 shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
 surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation at the surface
 mod_radcon.flux.0,W/m²,flux,Radiative flux in spectral band 1 of 4

@@ -29,6 +29,7 @@ _SPECIES = {
     "du": (("acc", "cor"), (5.0, 20.0)),
     "ss": (("acc", "ait", "cor"), (10.0, 20.0)),
     "poa": (("acc", "cor", "pcm"), (1.0, 3.0)),
+    "soa": (("acc", "ait", "cor"), (0.5, 3.0)),
 }
 
 # Emission channels are speciated as SO2/BC/OC; map each burden species to
