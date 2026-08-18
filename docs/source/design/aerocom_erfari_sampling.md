@@ -54,30 +54,6 @@ fraction hold was adopted because it makes the dark column reconstruct to
 zero by construction — a property now pinned by a regression test — not
 because it scored a smaller annual mean.
 
-## The mode that was removed
-
-An earlier version offered `alternating`, which produced the `*noa` fluxes
-for **free** by stealing every other radiation call rather than adding one.
-It was measured at +0 % runtime and an ERFari error of 0.067 W m⁻² — both
-better than N=4 on the numbers.
-
-It was removed anyway, and the reason is worth recording because the
-numbers argued the other way. A diagnostic should not change the thing it
-is measuring. `alternating` made the model feel aerosol-free heating half
-the time, so the aerosol direct effect entered the energy budget with a
-50 % duty cycle: **every** output was affected, not just the `*noa` fields,
-and its ERFari could not be compared against a reference without an
-ensemble because the two runs had genuinely diverged. It also had a subtler
-defect — the held TOA upward fluxes were reported against a *fresh*
-`toa_sw_down`, so the TOA budget straddled one radiation interval of solar
-geometry, a locally 100 %-wrong albedo near sunrise.
-
-Removing it is also what allows the API to be a single integer. While it
-existed the dial was non-monotonic — `alternating` was cheaper than N=4 yet
-was the only setting that perturbed the physics — so the spacing and the
-scheme had to be two separate settings, with the attendant illegal
-combinations. See jax-gcm#651.
-
 ## What we measured
 
 Four runs, **same commit**, T63L47 with semi-Lagrangian transport, ERA5
@@ -99,13 +75,11 @@ larger.
 | N=1 | −0.8202 | +0.0547 | −0.7655 |
 | N=1 (twin) | −0.8177 | +0.0545 | −0.7633 |
 | N=4 | −0.9150 | +0.0544 | −0.8607 |
-| `alternating` (removed) | −0.7562 | +0.0575 | −0.6987 |
 
 | difference from N=1 | total | vs floor |
 |---|---|---|
 | twin | +0.0023 | 1× (this *is* the floor) |
 | N=4 | −0.0952 | ~40× |
-| `alternating` (removed) | +0.0668 | ~30× |
 
 Read those multiples as an order-of-magnitude yardstick, not a significance
 test: the floor is a single pair of runs, so "~40×" moves between 41 and 43
@@ -115,18 +89,11 @@ depending on how the inputs are rounded.
 −0.766 W m⁻² signal, neither is a free lunch; if the ERFari number is the
 point of the run, `exact` is the only mode that earns the name.
 
-One caveat on the `alternating` row: because it perturbed the physics, its
-difference from the reference was not cleanly separable from trajectory
-divergence even under nudging. N=4's entry carries no such caveat — which
-is exactly why the two were not interchangeable on the strength of their
-numbers, and why the smaller one was the one removed.
-
 ## The tension that turned out to be three bugs
 
-Subsampling leaves the physics bit-identical, so its error should be purely
-the extrapolation between companions — and yet N=4 measured *larger* than
-the physics-perturbing `alternating`. Two observations sharpened the
-puzzle:
+Subsampling leaves the physics bit-identical, so N=4's error should be
+purely the extrapolation between companions. −0.095 W m⁻² is far too large
+for that, and two observations sharpened the puzzle:
 
 - An offline, un-nudged, same-node test found N=4 **bit-identical** to N=1
   over 6 days, with an ERFari difference of exactly zero.
@@ -193,5 +160,4 @@ consumer should tell that the all-zero `*noa` fields in such a file are
 placeholders rather than data (jax-gcm#647).
 
 See jax-gcm#583 (the diagnostic), #630 (the sampling experiment), #648
-(the unresolved magnitude), #647 (the CMOR hazard) and #651 (removing
-`alternating`).
+(the unresolved magnitude) and #647 (the CMOR hazard).

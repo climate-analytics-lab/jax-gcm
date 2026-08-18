@@ -317,7 +317,7 @@ def _record_aerosol_free_provenance(physics) -> None:
     the factory path reaches here for grey-radiation configs too, and an
     unconditional import would make a provenance nicety a hard dependency.
     """
-    for term in physics.terms:
+    for term in getattr(physics, "terms", ()) or ():
         if not getattr(term, "_aerosol_free", False):
             continue
         provenance.record_fact("aerosol_free_interval",
@@ -1585,6 +1585,13 @@ def run(cfg: DictConfig, model: Model | None = None):
     # probe and the summary log happen after the build, once the
     # config-selected libraries are actually imported.
     provenance.start_run(cfg)
+    # ``start_run`` clears the fact registry, and a caller-supplied model
+    # skips ``build_model``/``build_physics`` — so nothing would re-stamp
+    # the *noa spacing on this path and a subsampled ERFari would be
+    # indistinguishable from the reference in the output (Codex review on
+    # PR #652). Re-record it from the model we were handed.
+    if model is not None:
+        _record_aerosol_free_provenance(getattr(model, "physics", None))
 
     constants_overrides = cfg.get("constants", None)
     if constants_overrides:

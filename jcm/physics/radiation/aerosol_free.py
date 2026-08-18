@@ -16,16 +16,6 @@ The whole API is ONE integer, ``aerosol_free_interval``:
              between. A monotonic cost/fidelity dial: cost falls and
              error grows with N.
 ===========  =========================================================
-
-An earlier version of this module also offered an ``alternating`` mode
-that produced the ``*noa`` fluxes for free by stealing every other
-radiation call rather than adding one. It was removed: it made the model
-feel aerosol-free heating half the time, so a *diagnostic* changed the
-simulated state and every output was affected, not just the ``*noa``
-fields. That also made the knob non-monotonic (alternating was cheaper
-than N=4 but perturbed the physics), which is why the spacing and the
-scheme used to be two separate settings. With it gone, one integer says
-everything.
 """
 
 

@@ -108,13 +108,5 @@ aerocom_optics: false
 # all-sky flux; holding it as an absolute W/m2 fabricates a reflected flux
 # out of darkness on the night side, which cost a year-long run.
 #
-# REMOVED: an `alternating` mode produced the *noa fluxes for free by
-# stealing every other radiation call instead of adding one. It made the
-# model feel aerosol-free heating half the time — a DIAGNOSTIC changing
-# the simulated state, affecting every output rather than just the *noa
-# fields — and it made this knob non-monotonic, since it was cheaper than
-# N=4 while being the only setting that perturbed the physics. Dropped in
-# favour of the single dial above (#651).
-#
 # See docs/source/design/aerocom_erfari_sampling.md.
 aerosol_free_interval: 1

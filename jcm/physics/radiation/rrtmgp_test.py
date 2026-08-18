@@ -1425,3 +1425,16 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         for bad in (0, -1, -4):
             with pytest.raises(ValueError, match="must be >= 1"):
                 RRTMGPRadiation(aerosol_free_interval=bad)
+        # A fractional cadence must be rejected, not truncated: 2.9 would
+        # silently become 2, changing both cost and diagnostic.
+        for bad in (2.9, 1.5, 0.5):
+            with pytest.raises(ValueError, match="whole number"):
+                RRTMGPRadiation(aerosol_free_interval=bad)
+        # A bool is an int in Python, and the PREVIOUS API spelled this as
+        # `aerosol_free_radiation: true` — so this is a live migration typo
+        # that would otherwise mean N=1 (an exact, +64 % run).
+        for bad in (True, False):
+            with pytest.raises(ValueError, match="not a flag"):
+                RRTMGPRadiation(aerosol_free_interval=bad)
+        # Integral floats are fine — YAML happily produces them.
+        RRTMGPRadiation(aerosol_free_interval=2.0)

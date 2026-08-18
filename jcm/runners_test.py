@@ -126,6 +126,63 @@ class TestBuilders(unittest.TestCase):
         physics = build_physics(cfg)
         self.assertIsNotNone(physics)
 
+    def test_prebuilt_model_still_stamps_the_interval(self):
+        """`run(cfg, model=...)` must not lose the *noa provenance.
+
+        ``run`` calls ``provenance.start_run``, which clears the fact
+        registry, and a caller-supplied model skips
+        ``build_model``/``build_physics`` — so nothing re-stamped the
+        spacing on that path and a subsampled ERFari was indistinguishable
+        from the reference in the output (Codex review on PR #652).
+        """
+        from jcm import provenance
+        from jcm.runners import _record_aerosol_free_provenance
+
+        class _Rad:
+            _aerosol_free = True
+            _aerosol_free_interval = 4
+
+        class _Physics:
+            terms = [_Rad()]
+
+        class _Model:
+            physics = _Physics()
+
+        # Drive the real `run()` with a prebuilt model, so this fails if
+        # the call site is removed — asserting on the helper alone would
+        # pass with the wiring gone, which is exactly the regression.
+        import jcm.runners as runners
+
+        class _Stop(Exception):
+            pass
+
+        seen = []
+        real_record = runners._record_aerosol_free_provenance
+
+        def spy(physics):
+            seen.append(physics)
+            return real_record(physics)
+
+        def boom(cfg, model=None):
+            raise _Stop
+
+        cfg = _compose()
+        with mock.patch.object(runners, "_record_aerosol_free_provenance",
+                               spy), \
+             mock.patch.object(runners, "_run_full", boom):
+            with self.assertRaises(_Stop):
+                runners.run(cfg, model=_Model())
+
+        self.assertTrue(seen, "run() never stamped the prebuilt model")
+        self.assertEqual(
+            provenance.attrs().get("jcm_prov_aerosol_free_interval"), "4")
+
+        # A model without a physics attribute must not raise — the helper
+        # runs on every path, including backends that have no terms.
+        provenance.start_run()
+        _record_aerosol_free_provenance(None)
+        self.assertNotIn("jcm_prov_aerosol_free_interval", provenance.attrs())
+
     def test_aerosol_free_interval_is_stamped_into_provenance(self):
         """The *noa spacing must survive into the output's global attrs.
 
