@@ -97,27 +97,6 @@ def check_cadence_precesses(interval, radiation_interval_seconds):
         f"number of days, e.g. {interval - 1} or {interval + 1}.")
 
 
-#: What subsampling costs you, for the startup warning at N > 1. Measured
-#: on a 155-day ERA5-nudged T63L47 semi-Lagrangian run (jax-gcm#630)
-#: against a reference ERFari of -0.766 W/m2, with a floor of 0.0023 W/m2
-#: from a second run of N=1 differing only in node and A100 variant.
-#:
-#: STALE: the 0.095 W/m2 was measured before three bugs in the hold were
-#: fixed (a dark companion erased the held fraction, a twilight ratio could
-#: fabricate a ~150 W/m2 effect, and the division NaN'd gradients), all of
-#: which pushed the error in that direction. Treat it as an upper bound
-#: until jax-gcm#648 re-measures. Full context:
-#: ``docs/source/design/aerocom_erfari_sampling.md``.
-SUBSAMPLING_CAVEAT = (
-    "the aerosol effect is held between companion solves, so ERFari is "
-    "approximate. At N=4 the error measured 0.095 W/m2 (12 % of the "
-    "signal, ~40x the run-to-run reproducibility floor) — though that "
-    "figure predates three fixes to the hold and is a stale upper bound "
-    "(jax-gcm#648). The SIMULATION is bit-identical to N=1 either way: "
-    "only the diagnostic is approximated"
-)
-
-
 #: Smallest all-sky TOA flux [W/m2] from which the held aerosol-effect
 #: FRACTION may be derived. Below this the ratio is dominated by the
 #: near-terminator geometry that produced it and is meaningless when

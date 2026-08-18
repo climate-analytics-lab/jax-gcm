@@ -1244,38 +1244,6 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         with pytest.raises(ValueError, match="solar day"):
             RRTMGPRadiation(aerosol_free_interval=12)
 
-    def test_startup_log_distinguishes_exact_from_subsampled(self, caplog):
-        """The log must say whether this run's ERFari is the reference.
-
-        The setting is not recoverable from the output files, so a reader
-        needs the log to tell an exact run from a subsampled one. N > 1
-        must WARN (not info) and quote its measured error, since a warning
-        is what survives a filtered log.
-        """
-        import logging
-
-        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
-
-        logger_name = "jcm.physics.radiation.rrtmgp"
-        with caplog.at_level(logging.INFO, logger=logger_name):
-            caplog.clear()
-            RRTMGPRadiation(aerosol_free_interval=1)
-            exact_line = caplog.text
-        assert "exact" in exact_line.lower()
-        # logging only %-formats when args are passed, so a doubled %%
-        # would be emitted verbatim.
-        assert "%%" not in exact_line, f"literal %% in log: {exact_line}"
-
-        for n in (2, 4):
-            with caplog.at_level(logging.WARNING, logger=logger_name):
-                caplog.clear()
-                RRTMGPRadiation(aerosol_free_interval=n)
-                line = caplog.text
-            assert f"every {n} radiation steps" in line
-            assert "APPROXIMATE" in line
-            assert "W/m2" in line
-            assert any(r.levelname == "WARNING" for r in caplog.records)
-
     def test_dark_companion_does_not_erase_the_held_fraction(self):
         """A companion landing at night must not zero the aerosol effect.
 

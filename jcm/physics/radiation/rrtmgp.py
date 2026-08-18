@@ -968,7 +968,6 @@ def _maybe_chunked_vmap(fn, in_axes):
 # this module and its RRTMGP tables.
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     NOA_KEYS,
-    SUBSAMPLING_CAVEAT,
     check_cadence_precesses,
     hold_all,
     resolve_aerosol_free_interval,
@@ -1075,21 +1074,6 @@ class RRTMGPRadiation(PhysicsTerm):
         # subsample — the same size as the error this is meant to avoid).
         # Cost is (1 + 1/N) solves instead of 2.
         self._aerosol_free_interval = interval or 1
-        # State the choice once, at construction, and at N > 1 quote the
-        # MEASURED error rather than just the number. The setting is also
-        # stamped into the output as ``jcm_prov_aerosol_free_interval``
-        # (see runners), because this log line is long gone by the time
-        # anyone reads the netCDF.
-        if interval == 1:
-            logger.info(
-                "*noa companion solve every radiation step "
-                "(exact ERFari; ~+64 % runtime)")
-        elif interval is not None:
-            logger.warning(
-                "*noa companion only every %d radiation steps: APPROXIMATE "
-                "ERFari — %s. Use aerosol_free_interval=1 for a "
-                "reference-quality figure (jax-gcm#630).",
-                interval, SUBSAMPLING_CAVEAT)
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit
