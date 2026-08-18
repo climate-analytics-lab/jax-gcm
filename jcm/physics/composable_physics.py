@@ -87,6 +87,11 @@ class ComposablePhysics(nnx.Module, Physics):
 
         """
         self.terms = nnx.List(terms)
+        # Fields a term's struct carries but this configuration never
+        # fills; withheld from output so their zero default cannot be read
+        # as data (see _term_withheld_keys).
+        self._term_withheld_keys = frozenset(
+            key for t in terms for key in t.withheld_output_keys())
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
@@ -495,7 +500,22 @@ class ComposablePhysics(nnx.Module, Physics):
         "aerosol.aod_lw_per_band",
         "aerosol.ssa_lw_per_band",
         "aerosol.asy_lw_per_band",
+        # Internal carry state for the subsampled aerosol-free companion,
+        # not a diagnostic: the last companion's aerosol effect as a
+        # fraction of the all-sky flux. Never of interest in output.
+        "radiation.noa_frac_toa_sw_up",
+        "radiation.noa_frac_toa_lw_up",
+        "radiation.noa_frac_toa_sw_up_clear",
+        "radiation.noa_frac_toa_lw_up_clear",
     })
+
+    #: ``<struct>.<field>`` keys a TERM asks to withhold for this run —
+    #: fields its struct always carries but which this configuration never
+    #: populates. Publishing them would put a zero default in the output
+    #: that is indistinguishable from real data: an aerosol-free TOA flux
+    #: of 0 turns downstream ERFari (``rsut - rsutnoa``) into the whole
+    #: all-sky flux, ~240 W/m2 instead of ~-1 (jax-gcm#647).
+    _term_withheld_keys: frozenset[str] = frozenset()
 
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
@@ -546,7 +566,8 @@ class ComposablePhysics(nnx.Module, Physics):
                     continue
                 for sk, sv in sub.items():
                     full_key = f"{out_key}{sep}{sk}"
-                    if full_key in self._EXCLUDED_OUTPUT_KEYS:
+                    if (full_key in self._EXCLUDED_OUTPUT_KEYS
+                            or full_key in self._term_withheld_keys):
                         continue
                     items[full_key] = sv
 

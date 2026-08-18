@@ -1084,6 +1084,20 @@ class RRTMGPRadiation(PhysicsTerm):
         # forces a single non-traced load at term-construction time.
         _ensure_rrtmgp()
 
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """Hide the ``*noa`` fluxes when no companion solve runs.
+
+        ``RadiationData`` carries the four aerosol-free slots in every
+        configuration. With the diagnostic off they stay at their zero
+        default, and publishing that turns a downstream ERFari
+        (``rsut - rsutnoa``) into the entire all-sky flux — ~240 W/m2
+        rather than ~-1 — in a file that otherwise looks valid
+        (jax-gcm#647). Absent is honest; present-and-zero is not.
+        """
+        if self._aerosol_free:
+            return ()
+        return tuple(f"radiation.{k}_noa" for k in NOA_KEYS)
+
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
         lat, lon = column_lat_lon(coords.horizontal)
