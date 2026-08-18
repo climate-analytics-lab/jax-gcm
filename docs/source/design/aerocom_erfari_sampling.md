@@ -85,8 +85,16 @@ point of the run, `exact` is the only mode that earns the name.
   tolerable: N=4 is defensible *because it does not touch the simulation* —
   every other field remains reference-quality.
 - The untested middle ground is N=2, which should halve the extrapolation
-  gap for a derived ~+30 %. Check it in the offline harness before spending
-  cluster time; jax-gcm#648 adds it as an arm.
+  gap for a derived ~+30 %.
 
-See jax-gcm#583 (the diagnostic), #630 (the sampling experiment), #648
-(the unresolved magnitude) and #647 (the CMOR hazard).
+Re-measuring any of this is cheap, and cheaper than the numbers above
+suggest. Because the physics is bit-identical across N, two runs differing
+only in cadence follow the *same* trajectory — verified directly:
+temperature, winds, surface pressure, humidity and the all-sky TOA fluxes
+all match bit-for-bit, and only the `*noa` fields move. So the reference is
+exact, the noise floor is zero by construction, and neither nudging nor an
+ensemble is needed — which is what the original experiment used them for,
+back when a mode existed that perturbed the model.
+
+See jax-gcm#583 (the diagnostic), #630 (the sampling experiment) and #647
+(the CMOR hazard).

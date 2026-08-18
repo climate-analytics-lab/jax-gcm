@@ -232,8 +232,8 @@ def echam_physics(
                 EFFECT (as a fraction of the all-sky flux) in between. A
                 monotonic cost/fidelity dial: ~+17 % at N=4, for a
                 measured ERFari error of ~12 % — though that figure
-                predates three fixes to the hold and is a stale upper
-                bound (jax-gcm#648).
+                predates three fixes to the hold and should be read as a
+                stale upper bound rather than this scheme's error.
 
             The simulation is bit-identical at every N; only the diagnostic
             is approximated. See ``docs/source/design/
