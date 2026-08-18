@@ -38,7 +38,7 @@ def test_echam_physics_default_kwargs():
     convection_term = next(
         t for t in physics.terms if t.category == "convection"
     )
-    assert abs(float(convection_term.params.value.entrpen) - 1.0e-4) < 1e-7
+    assert abs(float(convection_term.params.get_value().entrpen) - 1.0e-4) < 1e-7
 
 
 def test_echam_physics_per_scheme_kwargs():
@@ -50,13 +50,13 @@ def test_echam_physics_per_scheme_kwargs():
     convection_term = next(
         t for t in physics.terms if t.category == "convection"
     )
-    assert abs(float(convection_term.params.value.entrpen) - 5.0e-4) < 1e-7
+    assert abs(float(convection_term.params.get_value().entrpen) - 5.0e-4) < 1e-7
 
     # Untouched terms still see their defaults.
     cloud_fraction_term = next(
         t for t in physics.terms if t.category == "cloud_fraction"
     )
-    assert abs(float(cloud_fraction_term.params.value.crt) - 0.75) < 1e-7
+    assert abs(float(cloud_fraction_term.params.get_value().crt) - 0.75) < 1e-7
 
 
 def test_physics_terms_compute_tendencies():
