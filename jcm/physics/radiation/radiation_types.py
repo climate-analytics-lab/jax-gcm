@@ -179,11 +179,32 @@ class RadiationData:
     # Aerosol-free TOA fluxes (AeroCom *noa / *_na, jax-gcm#583): a second
     # radiation call with the aerosol OPTICS zeroed but the cloud state
     # untouched (cdnc_factor kept, so ERFari is isolated from ERFaci).
-    # All-zero unless RRTMGPRadiation(aerosol_free_diagnostics=True).
+    # Populated only when RRTMGPRadiation(aerosol_free_interval=N) is
+    # set; otherwise the term withholds them from output entirely rather
+    # than publishing this zero default, which a consumer could not tell
+    # from real data (see withheld_output_keys, jax-gcm#647).
     toa_sw_up_noa: jnp.ndarray       # Aerosol-free TOA upward SW [W/m²] (ncols,)
     toa_lw_up_noa: jnp.ndarray       # Aerosol-free TOA OLR [W/m²] (ncols,)
     toa_sw_up_clear_noa: jnp.ndarray  # Aerosol-free clear-sky TOA SW up (ncols,)
     toa_lw_up_clear_noa: jnp.ndarray  # Aerosol-free clear-sky TOA OLR (ncols,)
+    # Last companion solve's aerosol effect, as a FRACTION of the matching
+    # all-sky flux. Only used when ``aerosol_free_interval > 1``;
+    # otherwise they stay at zero.
+    #
+    # Stored EXPLICITLY rather than re-derived from the flux slots each
+    # step: the ratio is unrecoverable once the all-sky flux is zero, so a
+    # companion landing on a dark column used to erase the fraction and
+    # report a zero aerosol effect for the rest of the interval —
+    # including after sunrise.
+    #
+    # Four separate nodal-shaped fields rather than one stacked (4, ...)
+    # array: every field on this struct is written to the output netCDF,
+    # and a leading axis of 4 has no entry in the writer's shape->dims
+    # table (jcm/utils.py).
+    noa_frac_toa_sw_up: jnp.ndarray
+    noa_frac_toa_lw_up: jnp.ndarray
+    noa_frac_toa_sw_up_clear: jnp.ndarray
+    noa_frac_toa_lw_up_clear: jnp.ndarray
 
     # Total (2-D) cloud cover as the radiation sees it: fraction of McICA
     # g-point sub-columns (pooled LW+SW draws) with ≥1 cloudy layer, under
@@ -226,6 +247,10 @@ class RadiationData:
             toa_lw_up_noa=jnp.zeros(nodal_shape),
             toa_sw_up_clear_noa=jnp.zeros(nodal_shape),
             toa_lw_up_clear_noa=jnp.zeros(nodal_shape),
+            noa_frac_toa_sw_up=jnp.zeros(nodal_shape),
+            noa_frac_toa_lw_up=jnp.zeros(nodal_shape),
+            noa_frac_toa_sw_up_clear=jnp.zeros(nodal_shape),
+            noa_frac_toa_lw_up_clear=jnp.zeros(nodal_shape),
             total_cloud_cover=jnp.zeros(nodal_shape),
             step=jnp.int32(0),
         )
@@ -255,6 +280,10 @@ class RadiationData:
             'toa_lw_up_noa': self.toa_lw_up_noa,
             'toa_sw_up_clear_noa': self.toa_sw_up_clear_noa,
             'toa_lw_up_clear_noa': self.toa_lw_up_clear_noa,
+            'noa_frac_toa_sw_up': self.noa_frac_toa_sw_up,
+            'noa_frac_toa_lw_up': self.noa_frac_toa_lw_up,
+            'noa_frac_toa_sw_up_clear': self.noa_frac_toa_sw_up_clear,
+            'noa_frac_toa_lw_up_clear': self.noa_frac_toa_lw_up_clear,
             'total_cloud_cover': self.total_cloud_cover,
             'step': self.step,
         }

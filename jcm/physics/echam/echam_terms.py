@@ -43,6 +43,9 @@ from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+from jcm.physics.radiation.aerosol_free import (
+    resolve_aerosol_free_interval,
+)
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
@@ -86,7 +89,7 @@ def echam_physics(
     cosp_calipso: bool = False,
     cosp_modis: bool = False,
     cosp_isccp: bool = False,
-    aerosol_free_radiation: bool = False,
+    aerosol_free_interval: int | None = None,
     enable_aerocom: bool = False,
     aerocom_groups: tuple[str, ...] = ("cloud", "column"),
     aerocom_overlap: str = "maximum-random",
@@ -213,17 +216,41 @@ def echam_physics(
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
             ``cltisccp``); see jax-gcm#597.
-        aerosol_free_radiation: Run a SECOND RRTMGP solve per compute
-            step with the aerosol optics zeroed, emitting the AeroCom
-            ``*noa`` TOA fluxes (rsutnoa/rlutnoa and clear-sky
-            variants) for instantaneous-ERFari diagnosis (jax-gcm#583).
-            Roughly doubles the radiation cost on compute steps;
-            RRTMGP only.
+        aerosol_free_interval: radiation steps between aerosol-free
+            companion solves, which produce the AeroCom ``*noa`` TOA fluxes
+            (rsutnoa/rlutnoa and clear-sky variants) that ERFari is
+            diagnosed from (jax-gcm#583). RRTMGP only.
+
+            ``None`` (default)
+                No ``*noa`` fluxes and no extra cost.
+            ``1``
+                A SECOND RRTMGP solve per compute step with the aerosol
+                optics zeroed. The exact reference. ~+64 % runtime,
+                radiation being the dominant cost of a step.
+            ``N > 1``
+                That companion only every Nth step, holding the aerosol
+                EFFECT (as a fraction of the all-sky flux) in between. A
+                monotonic cost/fidelity dial: ~+17 % at N=4, for a
+                measured ERFari error of ~12 % — though that figure
+                predates three fixes to the hold and is a stale upper
+                bound (jax-gcm#648).
+
+            The simulation is bit-identical at every N; only the diagnostic
+            is approximated. See ``docs/source/design/
+            aerocom_erfari_sampling.md``.
 
     """
-    if aerosol_free_radiation and radiation_scheme != "rrtmgp":
+    # Validate for EVERY radiation scheme, not just RRTMGP. The grey and
+    # emulated branches never construct RRTMGPRadiation, so leaving this to
+    # the term's own constructor let
+    # `echam_physics(radiation_scheme="grey", aerosol_free_interval=0)`
+    # through in silence — exactly the class of silently-ignored argument
+    # this knob is meant to abolish.
+    resolve_aerosol_free_interval(aerosol_free_interval)
+    if aerosol_free_interval is not None and radiation_scheme != "rrtmgp":
         raise ValueError(
-            "aerosol_free_radiation=True needs radiation_scheme='rrtmgp' — "
+            f"aerosol_free_interval={aerosol_free_interval!r} needs "
+            "radiation_scheme='rrtmgp' — "
             "the grey and emulated schemes carry no aerosol optics to zero, "
             f"so radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
@@ -253,7 +280,7 @@ def echam_physics(
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_diagnostics=aerosol_free_radiation)
+            aerosol_free_interval=aerosol_free_interval)
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":

@@ -7,6 +7,7 @@ Date: 2025-08-01
 """
 
 import pytest
+import jax
 import numpy as np
 import jax.numpy as jnp
 import jax_datetime as jdt
@@ -70,6 +71,50 @@ def _make_inputs(nlev=10):
         aerosol_data=aerosol,
         ozone_vmr=None,
         co2_vmr=400e-6,
+    )
+
+
+def _solstice_solar(hour):
+    """June-solstice solar geometry at a given UTC hour."""
+    from datetime import datetime
+
+    import jax_datetime as jdt
+    from jax_solar import OrbitalTime
+
+    from jcm.forcing import SolarGeometry
+
+    ot = OrbitalTime.from_datetime(
+        jdt.Datetime.from_pydatetime(datetime(2024, 6, 21, hour, 0)))
+    return SolarGeometry(
+        tyear=jnp.asarray(ot.orbital_phase / (2.0 * jnp.pi),
+                          dtype=jnp.float32),
+        orbital_phase=jnp.asarray(ot.orbital_phase, dtype=jnp.float32),
+        synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
+    )
+
+
+def _solstice_noon_solar():
+    """June-solstice, 12:00 UTC solar geometry.
+
+    At this instant longitude 0 is local noon and longitude 180 is local
+    midnight, so a fixture placing columns at those two longitudes gets one
+    genuinely sunlit and one genuinely dark column — the condition the
+    shortwave paths need in order to be exercised at all.
+    """
+    from datetime import datetime
+
+    import jax_datetime as jdt
+    from jax_solar import OrbitalTime
+
+    from jcm.forcing import SolarGeometry
+
+    ot = OrbitalTime.from_datetime(
+        jdt.Datetime.from_pydatetime(datetime(2024, 6, 21, 12, 0)))
+    return SolarGeometry(
+        tyear=jnp.asarray(ot.orbital_phase / (2.0 * jnp.pi),
+                          dtype=jnp.float32),
+        orbital_phase=jnp.asarray(ot.orbital_phase, dtype=jnp.float32),
+        synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
     )
 
 
@@ -282,18 +327,23 @@ class TestColumnVectorHelper:
         assert jnp.allclose(out, jnp.arange(6.0))
 
 
-class TestRRTMGPTermComputeAndCache:
-    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+class _RRTMGPTermFixture:
+    """Shared column fixture for the term-level RRTMGP test classes.
 
-    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
-    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
-    with ``radiation_interval = 2 x dt``, so the first call must run the
-    full scheme and the second call must replay the cached heating rates
-    (while still bumping the radiation step counter).
+    Deliberately carries NO tests. The aerosol-free classes used to
+    *subclass* the test class, which re-ran its whole suite — including a
+    parametrised case — three times over, at the doubled cost of the
+    clear-sky companion the aerosol-free classes enable. Sharing the
+    fixture through a mixin keeps the setup in one place without
+    multiplying the work.
     """
 
     NLEV = 8
     NCOLS = 2
+    # The clear-sky companion solve. Off in the base class (it is a second
+    # RRTMGP call), on in the aerosol-free subclasses so that
+    # toa_*_up_clear_noa are non-zero and therefore actually testable.
+    COMPUTE_CRE = False
     DT = 1800.0
 
     def _term_and_inputs(self):
@@ -312,11 +362,22 @@ class TestRRTMGPTermComputeAndCache:
 
         # Recompute every 2nd step: interval = 2 x dt.
         params = RadiationParameters.default(radiation_interval=2 * self.DT)
-        term = RRTMGPRadiation(params=params, compute_cre=False)
-        # Per-column lat/lon normally cached from the model coords; two
-        # columns (equator, mid-latitude) are enough here.
+        term = RRTMGPRadiation(params=params,
+                               compute_cre=self.COMPUTE_CRE)
+        # Per-column lat/lon normally cached from the model coords. The two
+        # columns straddle the terminator ON PURPOSE: at the solstice noon
+        # below, longitude 0 is local noon (sunlit) and longitude 180 is
+        # local midnight (dark).
+        #
+        # This matters more than it looks. The fixture used to pass
+        # ForcingData.zeros() with no solar geometry, which left EVERY
+        # column dark at every step: toa_sw_down == 0, toa_sw_up == 0. The
+        # shortwave half of the radiation term — and three of the four
+        # published *noa fields — then had no non-zero coverage anywhere,
+        # so a mutation making all four slots hold the LONGWAVE fraction
+        # passed the entire suite (jax-gcm#649).
         term._lats = nnx.Variable(jnp.array([0.0, 45.0]))
-        term._lons = nnx.Variable(jnp.array([0.0, 90.0]))
+        term._lons = nnx.Variable(jnp.array([0.0, 180.0]))
 
         # A plausible TOA-first clear-sky column, broadcast to 2 columns.
         col = lambda profile: jnp.broadcast_to(  # noqa: E731
@@ -352,8 +413,67 @@ class TestRRTMGPTermComputeAndCache:
             "aerosol": AerosolData.zeros((ncols,), nlev),
             "clouds": CloudData.zeros((ncols,), nlev),
         }
-        forcing = ForcingData.zeros((ncols,))
+        forcing = ForcingData.zeros((ncols,), solar=_solstice_noon_solar())
         return term, state, diagnostics, forcing
+
+    def assert_sunlit_and_dark(self, rad):
+        """Anti-vacuity guard: the fixture must actually see the sun.
+
+        Every shortwave assertion in this class is `0 == 0` if the solar
+        geometry is degenerate, so tests that depend on a live shortwave
+        call this first rather than trusting the fixture (jax-gcm#649).
+        """
+        down = np.asarray(rad.toa_sw_down)
+        assert down.max() > 1.0, f"no sunlit column: toa_sw_down={down}"
+        assert down.min() < 1.0, f"no dark column: toa_sw_down={down}"
+
+
+    def _seed_aerosol_and_cloud(self, diagnostics, state):
+        """Give the fixture a visibly dusty AND partly cloudy atmosphere.
+
+        Two independent anti-vacuity requirements (jax-gcm#649):
+
+        * With zero aerosol the aerosol-on and aerosol-off solves are
+          identical, so no test could tell the branches apart.
+        * With zero cloud the clear-sky fluxes equal the all-sky fluxes, so
+          a crossing between ``toa_sw_up`` and ``toa_sw_up_clear`` would be
+          invisible. Seeding cloud makes all four ``*noa`` keys distinct.
+        """
+        nlev, ncols = self.NLEV, self.NCOLS
+        aer = diagnostics["aerosol"]
+        clouds = diagnostics["clouds"]
+        diagnostics = {**diagnostics, "aerosol": aer.copy(
+            aod_profile=jnp.full((nlev, ncols), 0.05),
+            ssa_profile=jnp.full((nlev, ncols), 0.9),
+            asy_profile=jnp.full((nlev, ncols), 0.7),
+            aod_total=jnp.full((ncols,), 0.4),
+            aod_sw_per_band=jnp.full((14, nlev, ncols), 0.05),
+            ssa_sw_per_band=jnp.full((14, nlev, ncols), 0.9),
+            asy_sw_per_band=jnp.full((14, nlev, ncols), 0.7),
+            aod_lw_per_band=jnp.full((16, nlev, ncols), 0.02),
+            ssa_lw_per_band=jnp.full((16, nlev, ncols), 0.5),
+            asy_lw_per_band=jnp.full((16, nlev, ncols), 0.5),
+        ), "clouds": clouds.copy(
+            cloud_fraction=jnp.full((nlev, ncols), 0.5),
+        )}
+        # Condensate lives on the state tracers, not on CloudData.
+        state = state.copy(tracers={
+            **state.tracers,
+            "qc": jnp.full((nlev, ncols), 2e-5),
+            "qi": jnp.full((nlev, ncols), 5e-6),
+        })
+        return diagnostics, state
+
+
+class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
+    """Term-level ``__call__``: full compute, sub-step caching, carry wiring.
+
+    Drives ``RRTMGPRadiation`` exactly the way ``ComposablePhysics`` does —
+    a column-vectorised ``PhysicsState`` plus the shared diagnostics dict —
+    with ``radiation_interval = 2 x dt``, so the first call must run the
+    full scheme and the second call must replay the cached heating rates
+    (while still bumping the radiation step counter).
+    """
 
     def test_compute_then_cache_cycle(self):
         term, state, diagnostics, forcing = self._term_and_inputs()
@@ -842,3 +962,484 @@ class TestRRTMGPVerticalOrientation:
             f"SW heating peak below mid-column (upper {upper}, lower "
             f"{lower}) — ozone profile entering gas optics upside down"
         )
+
+
+class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
+    """The aerosol-free companion solve every Nth radiation step (#583).
+
+    The companion is always PAIRED with the all-sky solve at the same step,
+    so the two fluxes describe the same atmospheric state and ERFari is
+    unbiased by construction; only its refresh rate drops with N.
+    """
+
+    # The clear-sky pair is a SECOND RRTMGP call per radiation step, so it
+    # is opt-in per test (``self._term(compute_cre=True, ...)``) rather
+    # than on class-wide — only the tests asserting on all four *noa slots
+    # need it, and enabling it for the whole class doubled the fast gate
+    # (jax-gcm#649).
+    COMPUTE_CRE = False
+
+    def _term(self, **kw):
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        base, state, diagnostics, forcing = self._term_and_inputs()
+        compute_cre = kw.pop("compute_cre", self.COMPUTE_CRE)
+        t = RRTMGPRadiation(params=base.params.get_value(),
+                            compute_cre=compute_cre, **kw)
+        t._lats, t._lons = base._lats, base._lons
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        return t, state, diagnostics, forcing
+
+    # Two full terms and two solves on the sunlit fixture; slow for
+    # the same memory reason as the others (jax-gcm#649).
+    @pytest.mark.slow
+    def test_n4_matches_n1_on_a_companion_step(self):
+        """On a step that runs the companion, N=4 IS N=1.
+
+        Radiation call 0 is a companion step for any N, so the two must
+        agree bit-for-bit there. A difference would mean subsampling
+        perturbs the solve itself rather than only holding the effect
+        between companions — and holding-only is what keeps the simulation
+        bit-identical across N.
+        """
+        tn, s, d, f = self._term(aerosol_free_interval=4)
+        te, _, _, _ = self._term(aerosol_free_interval=1)
+        _, dn = tn(s, d, f, None)
+        _, de = te(s, d, f, None)
+        for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(dn["radiation"], name)),
+                np.asarray(getattr(de["radiation"], name)),
+                err_msg=f"N=4 differs from N=1 at call 0 in {name}",
+            )
+
+    def test_unset_emits_no_aerosol_free_fluxes(self):
+        """An unset interval must leave the *noa slots at zero.
+
+        This is what makes ``None`` a safe default: a run that never asked
+        for ERFari cannot quietly publish a plausible-looking one.
+        """
+        t, s, d, f = self._term()
+        # Seed the incoming carry with a sentinel: asserting 0.0 against a
+        # slot that is ALREADY 0.0 cannot tell an explicit zero from a term
+        # that simply passed the carry through.
+        rad = d["radiation"]
+        d = d | {"radiation": rad.copy(
+            toa_sw_up_noa=jnp.full((self.NCOLS,), 999.0),
+            toa_lw_up_noa=jnp.full((self.NCOLS,), 999.0),
+        )}
+        _, out = t(s, d, f, None)
+        for name in ("toa_sw_up_noa", "toa_lw_up_noa"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(out["radiation"], name)), 0.0,
+                err_msg=f"aerosol_free_interval=None did not zero {name}")
+
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
+    def test_skipped_steps_hold_the_effect_not_the_raw_flux(self):
+        """Between companions, rsutnoa must track the FRESH all-sky flux.
+
+        Holding the raw aerosol-free flux instead would leave rsut and
+        rsutnoa averaging over different step sets — the sampling mismatch
+        this mode exists to avoid. So on a skipped step the aerosol effect
+        must be preserved from the last companion, even though the all-sky
+        flux itself has moved.
+
+        The effect is held as a FRACTION of the all-sky flux: an absolute
+        hold works in the LW but fails in the SW, where the effect tracks
+        the solar cycle and holding it into darkness subtracts a daytime
+        effect from a zero flux (measured -0.077 W/m2 over a year).
+        """
+        term, state, diagnostics, forcing = self._term(aerosol_free_interval=2)
+        # radiation_interval is 2*dt in this harness, so every call to the
+        # term with an even step counter is a radiation step.
+        _, d0 = term(state, diagnostics, forcing, None)        # companion runs
+        r0 = d0["radiation"]
+        effect0 = np.asarray(r0.toa_lw_up) - np.asarray(r0.toa_lw_up_noa)
+        assert np.any(effect0 != 0), "aerosol had no LW effect to hold"
+
+        _, d1 = term(state, d0, forcing, None)                 # cached substep
+        # Perturb so the fresh all-sky flux genuinely moves on the next
+        # radiation step, which is a SKIP step for the companion.
+        warmer = state.copy(temperature=state.temperature + 4.0)
+        _, d2 = term(warmer, d1, forcing, None)
+        r2 = d2["radiation"]
+        # Fractional, so compare the ratio rather than the absolute effect.
+        frac0 = effect0 / np.asarray(r0.toa_lw_up)
+        frac2 = (np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)) \
+            / np.asarray(r2.toa_lw_up)
+        np.testing.assert_allclose(
+            frac2, frac0, rtol=1e-5, atol=1e-9,
+            err_msg="the held aerosol fraction changed on a skipped step",
+        )
+
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
+    def test_dark_columns_reconstruct_to_zero_not_a_stale_daytime_effect(self):
+        """A zero all-sky SW flux must give a zero aerosol-free SW flux.
+
+        With an absolute hold, night-side columns subtract a stale daytime
+        effect from zero and invent a reflected flux out of darkness. The
+        fractional hold is scale-free, so darkness reconstructs to darkness.
+
+        This test used to be VACUOUS: the fixture was dark in every column,
+        so both sides were 0 == 0 and it survived the very absolute-hold
+        bug it was written to catch. It now runs against a fixture with one
+        sunlit and one dark column (jax-gcm#649), and the sunlit column is
+        asserted to carry a real effect so the dark assertion cannot pass
+        by the whole field being zero.
+        """
+        term, state, diagnostics, forcing = self._term(
+            aerosol_free_interval=2)
+        _, d0 = term(state, diagnostics, forcing, None)
+        _, d1 = term(state, d0, forcing, None)
+        _, d2 = term(state, d1, forcing, None)      # skipped companion
+        rad = d2["radiation"]
+        self.assert_sunlit_and_dark(rad)
+        sw = np.asarray(rad.toa_sw_up)
+        sw_noa = np.asarray(rad.toa_sw_up_noa)
+
+        dark = sw == 0.0
+        lit = ~dark
+        assert dark.any(), "harness has no dark column to test"
+        # Anti-vacuity: without a live effect on the lit column, the dark
+        # assertion below is satisfied by the field being uniformly zero.
+        assert lit.any() and np.any(np.abs(sw[lit] - sw_noa[lit]) > 1e-3), (
+            "no aerosol effect on the sunlit column — the dark-column "
+            "assertion would pass vacuously")
+        np.testing.assert_allclose(
+            sw_noa[dark], 0.0, atol=1e-10,
+            err_msg="dark column reconstructed a non-zero aerosol-free SW flux",
+        )
+
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
+    def test_sunset_between_companions_reconstructs_to_zero(self):
+        """The case the fractional hold actually exists for.
+
+        A column LIT at the companion step stores a real, non-zero effect
+        fraction; if it is DARK at the following skip step, an absolute
+        hold subtracts that stale daytime effect from a zero flux and
+        invents a reflected flux out of darkness. That is the bug which
+        cost a year-long run.
+
+        The plain dark-column test cannot see this: a column dark at the
+        companion step never stores a non-zero fraction in the first place
+        (``update_effect_fraction`` retains the previous value below the
+        flux threshold), so absolute and fractional holds agree there. Only
+        a lit->dark transition discriminates them, which needs the solar
+        geometry to advance between calls.
+        """
+        from jcm.forcing import ForcingData
+
+        term, state, diagnostics, forcing = self._term(
+            aerosol_free_interval=2)
+        ncols = self.NCOLS
+        # Call 0 (companion) at local noon: column 0 is lit, so it stores a
+        # genuine effect fraction.
+        _, d0 = term(state, diagnostics, forcing, None)
+        rad0 = d0["radiation"]
+        assert float(np.asarray(rad0.toa_sw_up)[0]) > 1.0, (
+            "column 0 was not lit at the companion step")
+        assert abs(float(np.asarray(rad0.noa_frac_toa_sw_up)[0])) > 1e-6, (
+            "companion stored no shortwave effect fraction to carry")
+
+        # Radiation recomputes every 2nd call here, so call 1 is a cached
+        # pass-through; call 2 is the next COMPUTE step and, at
+        # aerosol_free_interval=2, the one that SKIPS the companion.
+        _, d1 = term(state, d0, forcing, None)
+        # Twelve hours on, column 0 is in night and must reconstruct to
+        # exactly zero using the fraction stored while it was lit.
+        night = ForcingData.zeros((ncols,), solar=_solstice_solar(0))
+        _, d2 = term(state, d1, night, None)
+        sw = np.asarray(d2["radiation"].toa_sw_up)
+        sw_noa = np.asarray(d2["radiation"].toa_sw_up_noa)
+        assert sw[0] == 0.0, f"column 0 should be dark after sunset, got {sw[0]}"
+        np.testing.assert_allclose(
+            sw_noa[0], 0.0, atol=1e-10,
+            err_msg="a stale daytime effect was applied across sunset — "
+                    "aerosol-free SW reconstructed out of darkness")
+
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
+    def test_held_step_applies_each_keys_own_fraction(self):
+        """On a SKIPPED companion, key i must use fraction i.
+
+        The other integration tests all land on a companion step, where the
+        stored fraction is not read at all — so a crossing between keys is
+        invisible to them. This drives a real skip step and checks each
+        key's reconstructed ratio against that key's own stored fraction.
+
+        The fixture is cloudy and sunlit precisely so the four fractions
+        are distinct (jax-gcm#649); a mutation making every slot hold the
+        longwave fraction changes three of the four here.
+        """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+
+        term, state, diagnostics, forcing = self._term(compute_cre=True, 
+            aerosol_free_interval=2)
+        _, d0 = term(state, diagnostics, forcing, None)   # companion
+        _, d1 = term(state, d0, forcing, None)            # cached
+        _, d2 = term(state, d1, forcing, None)            # companion SKIPPED
+        rad = d2["radiation"]
+
+        fracs = {k: float(np.asarray(getattr(rad, f"noa_frac_{k}"))[0])
+                 for k in NOA_KEYS}
+        assert len(set(round(v, 6) for v in fracs.values())) == len(NOA_KEYS), (
+            f"stored fractions are not distinct, so a crossing would be "
+            f"invisible: {fracs}")
+
+        for key in NOA_KEYS:
+            allsky = float(np.asarray(getattr(rad, key))[0])
+            noa = float(np.asarray(getattr(rad, f"{key}_noa"))[0])
+            assert abs(allsky) > 1e-3, f"{key}: no flux on the lit column"
+            ratio = (allsky - noa) / allsky
+            assert abs(ratio - fracs[key]) < 1e-5, (
+                f"{key}: held ratio {ratio:.6f} does not match its own "
+                f"stored fraction {fracs[key]:.6f} — key crossing")
+
+    def test_day_locked_cadence_is_rejected(self):
+        """A companion cadence of a whole solar day must not be accepted.
+
+        The companion gate is global, so a cadence of exactly N days always
+        lands at the same local solar time. Columns dark at that time never
+        produce a usable fraction, keep their zero initial value, and then
+        report ``toa_sw_up_noa == toa_sw_up`` on every daylight held step —
+        a silent, indefinite zero shortwave ERFari over a band of
+        longitudes (Codex review on PR #652; jax-gcm#653).
+        """
+        from jcm.physics.radiation.aerosol_free import check_cadence_precesses
+
+        # 2 h radiation is the default, so N=12 is exactly 24 h and N=24 is
+        # 48 h — both lock to the same local time.
+        for bad in (12, 24):
+            with pytest.raises(ValueError, match="solar day"):
+                check_cadence_precesses(bad, 7200.0)
+        # Neighbouring cadences precess through local time and are fine.
+        for good in (11, 13, 2, 4, 6):
+            check_cadence_precesses(good, 7200.0)
+        # N=1 samples every radiation step, so it cannot miss a column, and
+        # an unset interval has no companion at all.
+        check_cadence_precesses(1, 7200.0)
+        check_cadence_precesses(None, 7200.0)
+
+    def test_day_locked_cadence_is_rejected_at_construction(self):
+        """The guard must fire when building the term, not only in theory."""
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        with pytest.raises(ValueError, match="solar day"):
+            RRTMGPRadiation(aerosol_free_interval=12)
+
+    def test_dark_companion_does_not_erase_the_held_fraction(self):
+        """A companion landing at night must not zero the aerosol effect.
+
+        Regression: the fraction used to be re-derived from the two flux
+        slots each step. That round-trip is exact only while the all-sky
+        flux is non-zero, so a companion on a dark column returned "no
+        aerosol effect", wrote noa == allsky into the carry, and re-derived
+        zero from it for every following skip step — including after
+        sunrise. Verified to fail if the retain-previous branch is removed.
+        """
+        from jcm.physics.radiation.aerosol_free import update_effect_fraction
+
+        prev = jnp.full((3,), 0.10)          # a real daytime effect
+        allsky = jnp.array([0.0, 0.0, 200.0])  # two dark columns, one lit
+        noa = jnp.array([0.0, 0.0, 198.0])
+        got = np.asarray(update_effect_fraction(allsky, noa, prev))
+        np.testing.assert_allclose(got[:2], 0.10, rtol=1e-6,
+                                   err_msg="dark column erased the fraction")
+        np.testing.assert_allclose(got[2], 0.01, rtol=1e-5)
+
+    def test_twilight_companion_cannot_fabricate_a_huge_effect(self):
+        """A near-terminator ratio must not be adopted or re-applied.
+
+        At the terminator the TOA upward SW can be ~1e-3 W/m2, where the
+        aerosol slant path dominates and the ratio approaches 1. Real for
+        that flux, catastrophic applied to a sunlit one: measured turning a
+        +1.4 W/m2 effect into +150.
+        """
+        from jcm.physics.radiation.aerosol_free import (
+            apply_effect_fraction,
+            update_effect_fraction,
+        )
+
+        prev = jnp.full((2,), 0.0084)                 # the honest daytime value
+        allsky = jnp.array([1e-3, 1e-2])              # twilight
+        noa = jnp.array([1e-4, 2e-3])                 # ratio 0.9 / 0.8
+        frac = update_effect_fraction(allsky, noa, prev)
+        np.testing.assert_allclose(np.asarray(frac), 0.0084, rtol=1e-5,
+                                   err_msg="adopted a twilight ratio")
+        # Applied to a sunlit flux the effect stays physical (~1.4 W/m2),
+        # not the ~150 W/m2 the unguarded ratio produced.
+        effect = 166.2 - np.asarray(apply_effect_fraction(166.2, frac))
+        assert np.all(effect < 5.0), f"fabricated effect {effect}"
+
+    def test_effect_fraction_has_finite_gradients(self):
+        """The hold must not poison reverse-mode AD.
+
+        A single `where` around the division leaves a NaN primal in the
+        masked branch whose VJP returns 0/0 even with a zero incoming
+        cotangent — the jax-gcm#558/#559 failure mode. Dark columns are
+        always present, so a NaN here breaks every gradient through
+        `paired`. Verified to fail against the single-`where` form.
+        """
+        from jcm.physics.radiation.aerosol_free import (
+            apply_effect_fraction,
+            update_effect_fraction,
+        )
+
+        prev = jnp.zeros((2,))
+        fresh = jnp.array([10.0, 166.2])
+
+        def loss(allsky, noa):
+            frac = update_effect_fraction(allsky, noa, prev)
+            return jnp.sum(apply_effect_fraction(fresh, frac))
+
+        g = jax.grad(loss, argnums=(0, 1))(
+            jnp.array([0.0, 166.2]), jnp.array([0.0, 164.8]))
+        for name, grad in zip(("allsky", "noa"), g):
+            assert np.all(np.isfinite(np.asarray(grad))), (
+                f"non-finite gradient wrt {name}: {np.asarray(grad)}")
+
+    def test_paired_carries_the_fraction_across_a_step(self):
+        """The fraction must survive on the carry through a real step.
+
+        Integration counterpart to the unit tests above: pins that the slot
+        is actually threaded through RadiationData rather than recomputed.
+        """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+
+        term, state, diagnostics, forcing = self._term(
+            aerosol_free_interval=4)
+        _, out = term(state, diagnostics, forcing, None)
+        for key in NOA_KEYS:
+            frac = np.asarray(getattr(out["radiation"], f"noa_frac_{key}"))
+            assert frac.shape == (self.NCOLS,), (key, frac.shape)
+            assert np.all(np.isfinite(frac)), key
+            assert np.all(np.abs(frac) <= 1.0), key
+
+    @pytest.mark.parametrize("interval", [1, 2, 4])
+    # Drives several full RRTMGP solves on the sunlit, cloudy
+    # fixture. Marked slow so the fast gate does not run it at
+    # -n 12: the aerosol-free tests became heavy enough with a live
+    # shortwave to lose xdist workers to memory pressure, and the
+    # PR job runs slow tests at -n 4 where they fit.
+    @pytest.mark.slow
+    def test_every_interval_populates_all_four_noa_slots(self, interval):
+        """Every companion spacing must fill all four published slots.
+
+        Regression for jax-gcm#649: only ``toa_lw_up_noa`` was ever
+        non-zero in this suite, because the fixture was dark in every
+        column and the clear-sky pair was switched off. Three of the four
+        AeroCom fields — rsutnoa, rsutcsnoa, rlutcsnoa — had no coverage at
+        all, and a mutation making every slot hold the LONGWAVE fraction
+        passed the entire suite.
+
+        Asserts a genuinely non-zero aerosol effect in every slot, on the
+        sunlit column for shortwave and on both for longwave.
+        """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+
+        term, state, diagnostics, forcing = self._term(
+            compute_cre=True, aerosol_free_interval=interval)
+        _, out = term(state, diagnostics, forcing, None)
+        rad = out["radiation"]
+        self.assert_sunlit_and_dark(rad)
+
+        for key in NOA_KEYS:
+            allsky = np.asarray(getattr(rad, key))
+            noa = np.asarray(getattr(rad, f"{key}_noa"))
+            assert np.all(np.isfinite(noa)), f"N={interval}/{key}: non-finite"
+            # Column 0 is sunlit, so every key has a live aerosol effect
+            # there — shortwave included.
+            effect = allsky[0] - noa[0]
+            assert abs(effect) > 1e-3, (
+                f"N={interval}/{key}: no aerosol effect on the sunlit column "
+                f"(allsky={allsky[0]}, noa={noa[0]})")
+            # The dark column must have zero SHORTWAVE aerosol-free flux:
+            # there is no sunlight to reflect, with or without aerosol.
+            if key.startswith("toa_sw"):
+                assert noa[1] == 0.0, (
+                    f"N={interval}/{key}: non-zero aerosol-free SW in "
+                    f"darkness ({noa[1]})")
+
+    # Two full terms and two solves on the sunlit fixture; slow for
+    # the same memory reason as the others (jax-gcm#649).
+    @pytest.mark.slow
+    def test_noa_effects_differ_between_the_four_keys(self):
+        """The four slots must not be copies of one another.
+
+        With no cloud the clear-sky fluxes equal the all-sky ones, and with
+        no sunlight the shortwave pair is zero — either degeneracy lets a
+        key-crossing bug hide. The seeded fixture has both cloud and sun,
+        so all four aerosol effects are distinct; this pins that.
+        """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+
+        term, state, diagnostics, forcing = self._term(compute_cre=True, aerosol_free_interval=1)
+        _, out = term(state, diagnostics, forcing, None)
+        rad = out["radiation"]
+        effects = [float(np.asarray(getattr(rad, k))[0]
+                         - np.asarray(getattr(rad, f"{k}_noa"))[0])
+                   for k in NOA_KEYS]
+        for a in range(len(effects)):
+            for b in range(a + 1, len(effects)):
+                assert abs(effects[a] - effects[b]) > 1e-3, (
+                    f"{NOA_KEYS[a]} and {NOA_KEYS[b]} have indistinguishable "
+                    f"aerosol effects ({effects[a]} vs {effects[b]}) — a "
+                    "crossing between them would be invisible")
+
+    def test_each_noa_key_uses_its_own_held_fraction(self):
+        """Slot i must use fraction i — no key crossing.
+
+        The shortwave slots are identically zero under the fixture's solar
+        geometry, so an integration test cannot see this: a mutation making
+        every slot hold the longwave fraction (corrupting rsutnoa,
+        rsutcsnoa and rlutcsnoa in every `paired` run) passed the whole
+        suite. Pinned here on the pairing function directly.
+        """
+        from jcm.physics.radiation.aerosol_free import hold_all
+
+        fresh = (100.0, 200.0, 400.0, 800.0)
+        frac = jnp.array([0.01, 0.02, 0.04, 0.08])
+        got = [float(v) for v in hold_all(fresh, frac)]
+        assert got == [99.0, 196.0, 384.0, 736.0], got
+
+    def test_nonsensical_intervals_are_rejected(self):
+        """A meaningless spacing must fail loudly, not be coerced.
+
+        0 and negatives have no reading as "every Nth step"; silently
+        clamping them to 1 would hand back an exact ERFari to someone who
+        asked for something else.
+        """
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        for bad in (0, -1, -4):
+            with pytest.raises(ValueError, match="must be >= 1"):
+                RRTMGPRadiation(aerosol_free_interval=bad)
+        # A fractional cadence must be rejected, not truncated: 2.9 would
+        # silently become 2, changing both cost and diagnostic.
+        for bad in (2.9, 1.5, 0.5):
+            with pytest.raises(ValueError, match="whole number"):
+                RRTMGPRadiation(aerosol_free_interval=bad)
+        # A bool is an int in Python, and the PREVIOUS API spelled this as
+        # `aerosol_free_radiation: true` — so this is a live migration typo
+        # that would otherwise mean N=1 (an exact, +64 % run).
+        for bad in (True, False):
+            with pytest.raises(ValueError, match="not a flag"):
+                RRTMGPRadiation(aerosol_free_interval=bad)
+        # Integral floats are fine — YAML happily produces them.
+        RRTMGPRadiation(aerosol_free_interval=2.0)

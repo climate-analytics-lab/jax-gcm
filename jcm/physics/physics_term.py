@@ -86,6 +86,18 @@ class PhysicsTerm(nnx.Module):
     # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """``<struct>.<field>`` keys this configuration never populates.
+
+        A term's carry struct has a fixed set of fields, but a given
+        configuration may not fill all of them — and the unfilled ones hold
+        a zero default that is indistinguishable from real data once
+        written to netCDF. Declaring them here keeps them out of the
+        output entirely, so a consumer sees a variable that is *absent*
+        rather than one that is present and wrong (jax-gcm#647).
+        """
+        return ()
     # Diagnostic fields this term needs the DYCORE (or an upstream term)
     # to supply each step — e.g. the frontogenesis function, a
     # horizontal-gradient quantity only the dynamical core can compute

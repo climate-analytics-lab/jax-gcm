@@ -289,12 +289,13 @@ def build_physics(cfg: DictConfig):
             continue
         terms.append(_build_term(term_name, term_entry))
 
-    return ComposablePhysics(
+    physics = ComposablePhysics(
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
         band_config=_band_config_for_terms(terms),
     )
+    return physics
 
 
 #: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``

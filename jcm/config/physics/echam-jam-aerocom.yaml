@@ -17,7 +17,12 @@
 #   plev                           +3.0 %
 #   aerosol                        +3.2 %
 #   cloud+column+plev              +4.4 %
-#   cloud+column+plev+aerosol      +9.4 %   <-- this preset
+#   cloud+column+plev+aerosol      +9.4 %   <-- this preset's DIAGNOSTIC cost
+#
+# That +9.4 % is the diagnostic groups only. This preset also sets
+# `aerosol_free: exact` below, which is a further ~+64 %, so the preset as
+# shipped costs roughly +80 % over a bare echam-jam run. The two are gated
+# separately because they are separable choices.
 #
 # Most of a single group's ~3 % is the term's fixed per-step overhead, so
 # the groups are much cheaper together than their sum; the aerosol group is
@@ -25,9 +30,12 @@
 # per-mode lognormal integrals. Drop `aerosol` from the list below if a run
 # does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
 #
-# NOT included here because it roughly DOUBLES runtime: the aerosol-free
-# (*noa) radiation diagnostic needs a second radiation call, and radiation
-# is ~87 % of the step. It is gated separately — see jax-gcm#583.
+# The aerosol-free (*noa) radiation diagnostic needs a second radiation
+# call. Radiation is ~87 % of a *radiation* step but only runs one step in
+# N, so the whole-run overhead depends on the radiation gate as well as on
+# the solve — which is why it is quoted below as a measured wall-clock
+# number rather than derived from the 87 %. It has its own knob further
+# down (`aerosol_free`) — see jax-gcm#583.
 #
 # Also gated separately: the per-species / per-mode / spectral aerosol
 # optics (#584), which need a second Mie sweep — use the
@@ -52,7 +60,11 @@ aerocom_overlap: maximum-random
 # Per-species / per-mode / spectral aerosol optics (jax-gcm#584). Off here;
 # see echam-jam-aerocom-optics.yaml.
 aerocom_optics: false
-# Second aerosol-free radiation solve for the *noa TOA fluxes (#583).
-# Doubles radiation cost on compute steps — the AeroCom experiments ask
-# for it (ERFari), so it is on here; turn off for non-submission runs.
-aerosol_free_radiation: true
+# Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
+#
+#   null   no *noa fluxes, no ERFari, no extra cost
+#   1      companion every radiation step — the exact reference
+#   N > 1  companion every Nth step, aerosol effect held in between
+#
+# See docs/source/design/aerocom_erfari_sampling.md.
+aerosol_free_interval: 1

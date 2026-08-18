@@ -223,3 +223,33 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAerosolFreeValidation(unittest.TestCase):
+    """The mode/interval contract must hold for every radiation scheme.
+
+    Regression for a hole found in adversarial review: the guard used to
+    live only in ``RRTMGPRadiation.__init__``, which the grey and emulated
+    branches never construct — so a nonsensical interval was accepted in
+    silence on exactly the paths that cannot produce *noa fluxes at all.
+    """
+
+    def setUp(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        self.echam_physics = echam_physics
+
+    def test_interval_is_rejected_on_non_rrtmgp_schemes(self):
+        for scheme in ("grey", "emulated"):
+            with self.assertRaises(ValueError) as cm:
+                self.echam_physics(radiation_scheme=scheme,
+                                   aerosol_free_interval=1)
+            self.assertIn("radiation_scheme='rrtmgp'", str(cm.exception))
+
+    def test_nonsensical_interval_is_rejected_before_the_scheme_check(self):
+        # A meaningless spacing must name the real problem rather than
+        # complain about the radiation scheme, which would send the reader
+        # down a blind alley.
+        with self.assertRaises(ValueError) as cm:
+            self.echam_physics(radiation_scheme="grey",
+                               aerosol_free_interval=0)
+        self.assertIn("must be >= 1", str(cm.exception))

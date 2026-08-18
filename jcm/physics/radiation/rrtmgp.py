@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Tuple, Optional
 import warnings
 
+import logging
+
 import jax
 import jax.numpy as jnp
 
@@ -62,6 +64,9 @@ _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 # Module-level RRTMGP instance (created once at import time)
 # ---------------------------------------------------------------------------
 _GLOBAL_RRTMGP_INSTANCE = None
+
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_rrtmgp():
@@ -450,6 +455,10 @@ def prepare_icon_data(
         toa_sw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_lw_up_noa=jnp.zeros_like(toa_sw_up),
         toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_sw_up=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_lw_up=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up),
+        noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_sw_up),
         total_cloud_cover=jnp.zeros_like(toa_sw_up),
         # ``step`` is owned by the enclosing ``RRTMGPRadiation`` carry —
@@ -954,6 +963,20 @@ def _maybe_chunked_vmap(fn, in_axes):
     return run
 
 
+# The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
+# validate the setting for grey/emulated configs too, without importing
+# this module and its RRTMGP tables.
+from jcm.physics.radiation.aerosol_free import (  # noqa: E402
+    NOA_KEYS,
+    check_cadence_precesses,
+    hold_all,
+    resolve_aerosol_free_interval,
+    update_effect_fraction,
+)
+
+__all__ = ["RRTMGPRadiation"]
+
+
 class RRTMGPRadiation(PhysicsTerm):
     """RRTMGP full-spectrum radiation as a composable PhysicsTerm.
 
@@ -995,7 +1018,7 @@ class RRTMGPRadiation(PhysicsTerm):
         params: RadiationParameters | None = None,
         base_seed: int = 0,
         compute_cre: bool = True,
-        aerosol_free_diagnostics: bool = False,
+        aerosol_free_interval: int | None = None,
     ):
         """Hold the scheme-native :class:`RadiationParameters`.
 
@@ -1010,6 +1033,18 @@ class RRTMGPRadiation(PhysicsTerm):
                 ``toa_{sw,lw}_up_clear`` for the cloud radiative
                 effect diagnostic. Set False for the 1× McICA-only
                 cost when CRE isn't needed.
+            aerosol_free_interval: radiation steps between aerosol-free
+                companion solves, producing the AeroCom ``*noa`` fluxes
+                that ERFari is diagnosed from (jax-gcm#583). ``None``
+                (default) means no ``*noa`` fluxes at all; ``1`` is the
+                exact reference, costing ~+64 % runtime because radiation
+                dominates the step; ``N > 1`` runs the companion every Nth
+                step and holds the aerosol effect in between — a monotonic
+                dial, cheaper and less accurate as N grows. The SIMULATION
+                is bit-identical at every N: only the diagnostic is
+                approximated. N > 1 logs a warning quoting the measured
+                error, since the choice is not recoverable from the output
+                files afterwards.
 
         """
         self.params = nnx.Param(params or RadiationParameters.default())
@@ -1019,9 +1054,26 @@ class RRTMGPRadiation(PhysicsTerm):
         self._base_seed = int(base_seed)
         self._compute_cre = bool(compute_cre)
         # AeroCom *noa fluxes (jax-gcm#583): a SECOND full radiation solve
-        # per compute step with the aerosol optics zeroed. Roughly doubles
-        # the (dominant) radiation cost on compute steps, so opt-in only.
-        self._aerosol_free = bool(aerosol_free_diagnostics)
+        # per compute step with the aerosol optics zeroed. Radiation
+        # dominates the step, so this is opt-in only.
+        #
+        # Validated through the shared helper, which echam_physics() also
+        # calls so a grey or emulated config is held to the same contract
+        # rather than silently ignoring the argument.
+        interval = resolve_aerosol_free_interval(aerosol_free_interval)
+        # A cadence locked to the solar day never samples some columns in
+        # daylight; see check_cadence_precesses.
+        check_cadence_precesses(
+            interval, (params or RadiationParameters.default())
+            .radiation_interval)
+        self._aerosol_free = interval is not None
+        # Between companions the aerosol EFFECT is held, not the raw
+        # aerosol-free flux: the effect varies slowly, the flux does not,
+        # and holding the flux would leave rsut and rsutnoa sampling
+        # different step sets (measured at 0.04-0.14 W/m2 for a 2x
+        # subsample — the same size as the error this is meant to avoid).
+        # Cost is (1 + 1/N) solves instead of 2.
+        self._aerosol_free_interval = interval or 1
         self._coords_cached = False
         # Eagerly create the global RRTMGP instance now (loads netCDF
         # gas-optics + cloud-optics tables). Otherwise the first jit
@@ -1031,6 +1083,20 @@ class RRTMGPRadiation(PhysicsTerm):
         # ``output_averages=True`` runs in particular. Doing it here
         # forces a single non-traced load at term-construction time.
         _ensure_rrtmgp()
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """Hide the ``*noa`` fluxes when no companion solve runs.
+
+        ``RadiationData`` carries the four aerosol-free slots in every
+        configuration. With the diagnostic off they stay at their zero
+        default, and publishing that turns a downstream ERFari
+        (``rsut - rsutnoa``) into the entire all-sky flux — ~240 W/m2
+        rather than ~-1 — in a file that otherwise looks valid
+        (jax-gcm#647). Absent is honest; present-and-zero is not.
+        """
+        if self._aerosol_free:
+            return ()
+        return tuple(f"radiation.{k}_noa" for k in NOA_KEYS)
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
@@ -1184,6 +1250,7 @@ class RRTMGPRadiation(PhysicsTerm):
             return a.T
 
         aerosol_col = aerosol_for_vmap.copy(Nccn=aerosol_in.Nccn.reshape(ncols))
+
         cols = dict(
             temperature=lev_to_col(state.temperature),
             specific_humidity=lev_to_col(state.specific_humidity),
@@ -1241,6 +1308,15 @@ class RRTMGPRadiation(PhysicsTerm):
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
         )
 
+        _fresh_toa = dict(
+            toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
+            toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
+            toa_sw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_sw_up_clear, ncols),
+            toa_lw_up_clear=_column_vector_rrtmgp(
+                diagnostics_vmapped.toa_lw_up_clear, ncols),
+        )
+
         # Aerosol-free companion solve (jax-gcm#583): identical inputs but
         # with the aerosol OPTICS zeroed — cdnc_factor and Nccn are kept so
         # the cloud field is bit-identical and the difference to the all-sky
@@ -1249,6 +1325,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # depths alone suffices (extinction scales everything), but ssa/asy
         # are zeroed too so no path reads an unweighted property.
         if self._aerosol_free:
+            all_sky = _fresh_toa
             aerosol_noa = cols["aerosol"].copy(
                 aod_profile=jnp.zeros_like(aerosol_for_vmap.aod_profile),
                 ssa_profile=jnp.zeros_like(aerosol_for_vmap.ssa_profile),
@@ -1264,37 +1341,93 @@ class RRTMGPRadiation(PhysicsTerm):
                 ssa_lw_per_band=jnp.zeros_like(aerosol_for_vmap.ssa_lw_per_band),
                 asy_lw_per_band=jnp.zeros_like(aerosol_for_vmap.asy_lw_per_band),
             )
-            _, diagnostics_noa = _maybe_chunked_vmap(
-                radiation_scheme_rrtmgp, _in_axes,
-            )(
-                cols["temperature"], cols["specific_humidity"],
-                cols["pressure_full"], cols["pressure_half"],
-                cols["layer_thickness"], cols["air_density"],
-                cols["cloud_water"], cols["cloud_ice"], cols["cloud_fraction"],
-                cols["surface_temperature"], cols["surface_albedo_vis"],
-                cols["surface_albedo_nir"], cols["surface_emissivity"],
-                solar, cols["latitudes"], cols["longitudes"],
-                params, aerosol_noa, cols["column_indices"],
-                model_step, base_seed, compute_cre,
-                cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
-                cols["n2o_vmr"],
-                cols["r_eff_liq_um"], cols["r_eff_ice_um"],
-            )
-            noa = dict(
-                toa_sw_up_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_sw_up, ncols),
-                toa_lw_up_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_lw_up, ncols),
-                toa_sw_up_clear_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_sw_up_clear, ncols),
-                toa_lw_up_clear_noa=_column_vector_rrtmgp(
-                    diagnostics_noa.toa_lw_up_clear, ncols),
-            )
+            def _solve_aerosol_free():
+                _, dnoa = _maybe_chunked_vmap(
+                    radiation_scheme_rrtmgp, _in_axes,
+                )(
+                    cols["temperature"], cols["specific_humidity"],
+                    cols["pressure_full"], cols["pressure_half"],
+                    cols["layer_thickness"], cols["air_density"],
+                    cols["cloud_water"], cols["cloud_ice"],
+                    cols["cloud_fraction"],
+                    cols["surface_temperature"], cols["surface_albedo_vis"],
+                    cols["surface_albedo_nir"], cols["surface_emissivity"],
+                    solar, cols["latitudes"], cols["longitudes"],
+                    params, aerosol_noa, cols["column_indices"],
+                    model_step, base_seed, compute_cre,
+                    cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
+                    cols["n2o_vmr"],
+                    cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+                )
+                return (
+                    _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_lw_up, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_sw_up_clear, ncols),
+                    _column_vector_rrtmgp(dnoa.toa_lw_up_clear, ncols),
+                )
+
+            _KEYS = NOA_KEYS
+            _FRAC_FIELDS = tuple(f"noa_frac_{k}" for k in _KEYS)
+
+            if self._aerosol_free_interval > 1:
+                # Pay for the companion only every Nth radiation step. Between
+                # companions carry the aerosol EFFECT forward and apply it to
+                # the FRESH all-sky flux, so the pair always refers to the
+                # same state and rsut/rsutnoa never sample different step sets.
+                dt_s = diagnostics["_dt_seconds"]
+                spc = jnp.where(
+                    params.radiation_interval > 0,
+                    jnp.int32(jnp.round(params.radiation_interval / dt_s)),
+                    jnp.int32(1),
+                )
+                rad_call = model_step // spc
+                fresh = tuple(_fresh_toa[k] for k in _KEYS)
+                prev_frac = tuple(getattr(diagnostics["radiation"], f)
+                                  for f in _FRAC_FIELDS)
+
+                def _companion():
+                    """Solve, and refresh the stored effect fraction."""
+                    vals = _solve_aerosol_free()
+                    fracs = [
+                        update_effect_fraction(_fresh_toa[k], noa_v,
+                                               prev_frac[i])
+                        for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
+                    ]
+                    return vals, tuple(fracs)
+
+                def _held():
+                    """Re-apply the stored fraction to the fresh all-sky flux.
+
+                    The fraction passes through untouched, which is why it is
+                    carried explicitly: deriving it back out of the flux slots
+                    fails once those slots are zero, and a companion landing
+                    on a dark column would then report no aerosol effect for
+                    the rest of the interval — including after sunrise.
+                    """
+                    return hold_all(fresh, prev_frac), prev_frac
+
+                noa_vals, new_frac = jax.lax.cond(
+                    jnp.mod(rad_call, self._aerosol_free_interval) == 0,
+                    _companion,
+                    _held,
+                )
+                frac_out = dict(zip(_FRAC_FIELDS, new_frac))
+            else:
+                noa_vals = _solve_aerosol_free()
+                # Only `paired` carries a fraction; every other mode
+                # solves fresh, so leave the slots at zero.
+                frac_out = {f: jnp.zeros((ncols,))
+                            for f in (f"noa_frac_{k}" for k in NOA_KEYS)}
+
+            noa = {f"{k}_noa": v for k, v in zip(_KEYS, noa_vals)}
+            noa.update(frac_out)
         else:
+            all_sky = _fresh_toa
             zero_col = jnp.zeros((ncols,))
             noa = dict(
                 toa_sw_up_noa=zero_col, toa_lw_up_noa=zero_col,
                 toa_sw_up_clear_noa=zero_col, toa_lw_up_clear_noa=zero_col,
+                **{f"noa_frac_{k}": zero_col for k in NOA_KEYS},
             )
 
         # Per-gpoint flux profiles are summed over g-points inside the
@@ -1331,16 +1464,9 @@ class RRTMGPRadiation(PhysicsTerm):
             surface_lw_up=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_lw_up, ncols,
             ),
-            toa_sw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_sw_up, ncols),
-            toa_lw_up=_column_vector_rrtmgp(diagnostics_vmapped.toa_lw_up, ncols),
+            **all_sky,
             toa_sw_down=_column_vector_rrtmgp(
                 diagnostics_vmapped.toa_sw_down, ncols,
-            ),
-            toa_sw_up_clear=_column_vector_rrtmgp(
-                diagnostics_vmapped.toa_sw_up_clear, ncols,
-            ),
-            toa_lw_up_clear=_column_vector_rrtmgp(
-                diagnostics_vmapped.toa_lw_up_clear, ncols,
             ),
             total_cloud_cover=_column_vector_rrtmgp(
                 diagnostics_vmapped.total_cloud_cover, ncols,
