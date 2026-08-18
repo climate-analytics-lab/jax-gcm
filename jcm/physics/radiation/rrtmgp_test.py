@@ -989,6 +989,9 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
         return t, state, diagnostics, forcing
 
+    # Two full terms and two solves on the sunlit fixture; slow for
+    # the same memory reason as the others (jax-gcm#649).
+    @pytest.mark.slow
     def test_n4_matches_n1_on_a_companion_step(self):
         """On a step that runs the companion, N=4 IS N=1.
 
@@ -1210,6 +1213,37 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
                 f"{key}: held ratio {ratio:.6f} does not match its own "
                 f"stored fraction {fracs[key]:.6f} — key crossing")
 
+    def test_day_locked_cadence_is_rejected(self):
+        """A companion cadence of a whole solar day must not be accepted.
+
+        The companion gate is global, so a cadence of exactly N days always
+        lands at the same local solar time. Columns dark at that time never
+        produce a usable fraction, keep their zero initial value, and then
+        report ``toa_sw_up_noa == toa_sw_up`` on every daylight held step —
+        a silent, indefinite zero shortwave ERFari over a band of
+        longitudes (Codex review on PR #652; jax-gcm#653).
+        """
+        from jcm.physics.radiation.aerosol_free import check_cadence_precesses
+
+        # 2 h radiation is the default, so N=12 is exactly 24 h and N=24 is
+        # 48 h — both lock to the same local time.
+        for bad in (12, 24):
+            with pytest.raises(ValueError, match="solar day"):
+                check_cadence_precesses(bad, 7200.0)
+        # Neighbouring cadences precess through local time and are fine.
+        for good in (11, 13, 2, 4, 6):
+            check_cadence_precesses(good, 7200.0)
+        # N=1 samples every radiation step, so it cannot miss a column, and
+        # an unset interval has no companion at all.
+        check_cadence_precesses(1, 7200.0)
+        check_cadence_precesses(None, 7200.0)
+
+    def test_day_locked_cadence_is_rejected_at_construction(self):
+        """The guard must fire when building the term, not only in theory."""
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+        with pytest.raises(ValueError, match="solar day"):
+            RRTMGPRadiation(aerosol_free_interval=12)
+
     def test_startup_log_distinguishes_exact_from_subsampled(self, caplog):
         """The log must say whether this run's ERFari is the reference.
 
@@ -1375,6 +1409,9 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
                     f"N={interval}/{key}: non-zero aerosol-free SW in "
                     f"darkness ({noa[1]})")
 
+    # Two full terms and two solves on the sunlit fixture; slow for
+    # the same memory reason as the others (jax-gcm#649).
+    @pytest.mark.slow
     def test_noa_effects_differ_between_the_four_keys(self):
         """The four slots must not be copies of one another.
 

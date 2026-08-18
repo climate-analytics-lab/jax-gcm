@@ -28,7 +28,24 @@ def resolve_aerosol_free_interval(interval: int | None) -> int | None:
     """
     if interval is None:
         return None
+    # A bool is an int in Python, and the PREVIOUS API spelled this switch
+    # as `aerosol_free_radiation: true` — so `aerosol_free_interval: true`
+    # is a live migration typo that would silently mean N=1.
+    if isinstance(interval, bool):
+        raise ValueError(
+            "aerosol_free_interval is a radiation-step count, not a flag "
+            f"(got {interval!r}). Use 1 for the exact ERFari reference, "
+            "N > 1 to subsample, or leave it unset for no *noa fluxes.")
     value = int(interval)
+    # Reject a fractional cadence rather than truncating it: this value
+    # decides which radiation calls run the companion solve, so silently
+    # turning 2.9 into 2 would change both the cost and the diagnostic
+    # without saying so (Codex review on PR #652).
+    if value != interval:
+        raise ValueError(
+            f"aerosol_free_interval must be a whole number of radiation "
+            f"steps (got {interval!r}); it selects which calls run the "
+            "aerosol-free companion, so a fractional value has no meaning.")
     if value < 1:
         raise ValueError(
             f"aerosol_free_interval must be >= 1 (got {interval!r}). Use 1 "
@@ -36,6 +53,48 @@ def resolve_aerosol_free_interval(interval: int | None) -> int | None:
             "companion every Nth radiation step, or leave it unset for no "
             "*noa fluxes at all.")
     return value
+
+
+#: Seconds in a solar day, for the cadence check below.
+_SECONDS_PER_DAY = 86400.0
+
+
+def check_cadence_precesses(interval, radiation_interval_seconds):
+    """Reject a companion cadence locked to the solar day.
+
+    The companion gate is GLOBAL — the same radiation calls run the
+    aerosol-free solve for every column — so a column is only ever sampled
+    at the local solar times the cadence happens to land on. When
+    ``interval x radiation_interval`` is a whole number of days, that is a
+    single local time, forever: columns dark at it never produce a usable
+    aerosol-effect fraction, their stored fraction stays at its zero
+    initial value, and every daylight held step then reports
+    ``toa_sw_up_noa == toa_sw_up``. The result is a silent, indefinite
+    zero shortwave ERFari over a band of longitudes — valid-looking output
+    that is simply wrong.
+
+    Raising is deliberate: the failure is invisible in the output, and the
+    remedy is to pick a neighbouring N. Found by Codex review on PR #652;
+    the underlying limitation (a global gate cannot guarantee per-column
+    daylight sampling) is jax-gcm#653.
+    """
+    if interval is None or interval <= 1:
+        return
+    seconds = float(radiation_interval_seconds)
+    if seconds <= 0:
+        return
+    days = interval * seconds / _SECONDS_PER_DAY
+    if abs(days - round(days)) > 1e-6 or round(days) < 1:
+        return
+    hours = interval * seconds / 3600.0
+    raise ValueError(
+        f"aerosol_free_interval={interval} with radiation_interval="
+        f"{seconds:g} s puts the aerosol-free companion every {hours:g} h — "
+        f"exactly {round(days)} solar day(s). The companion would then "
+        "always land at the same local solar time, so columns dark at that "
+        "time never get an aerosol-free sample and would report zero "
+        "shortwave ERFari indefinitely. Pick a cadence that is not a whole "
+        f"number of days, e.g. {interval - 1} or {interval + 1}.")
 
 
 #: What subsampling costs you, for the startup warning at N > 1. Measured

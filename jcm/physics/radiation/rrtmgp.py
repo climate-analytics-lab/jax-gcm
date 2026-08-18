@@ -969,6 +969,7 @@ def _maybe_chunked_vmap(fn, in_axes):
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     NOA_KEYS,
     SUBSAMPLING_CAVEAT,
+    check_cadence_precesses,
     hold_all,
     resolve_aerosol_free_interval,
     update_effect_fraction,
@@ -1061,6 +1062,11 @@ class RRTMGPRadiation(PhysicsTerm):
         # calls so a grey or emulated config is held to the same contract
         # rather than silently ignoring the argument.
         interval = resolve_aerosol_free_interval(aerosol_free_interval)
+        # A cadence locked to the solar day never samples some columns in
+        # daylight; see check_cadence_precesses.
+        check_cadence_precesses(
+            interval, (params or RadiationParameters.default())
+            .radiation_interval)
         self._aerosol_free = interval is not None
         # Between companions the aerosol EFFECT is held, not the raw
         # aerosol-free flux: the effect varies slowly, the flux does not,
