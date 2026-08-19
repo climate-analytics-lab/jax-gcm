@@ -395,15 +395,41 @@ def calculate_updraft(
             #
             # ECHAM restricts its own ascent ``zlift`` bonus to levels whose
             # neighbour below is still sub-cloud (mo_cuascent.f90:449,
-            # ``klab == 1``), which for a ``cubase``-initiated plume is never
-            # true — there the bonus is reachable only through ``cubasmc``
-            # mid-level triggering. We apply it throughout the ascent instead,
-            # because jcm has no ``klab`` state and because consistency with
-            # the cloud-base gate matters more than reproducing a branch that
-            # is unreachable for the deep and shallow types. ``zlift`` is
-            # added ONLY to the survival test, never to the stored ``buoy``:
-            # the Nordeng organized entrainment reads that diagnostic and
-            # must see the true buoyancy.
+            # ``klab == 1``), which for a ``cubase``-initiated deep or shallow
+            # plume is never true — there the bonus is reachable only through
+            # ``cubasmc`` mid-level triggering. jcm has no ``klab`` state, so
+            # the bonus applies throughout the ascent.
+            #
+            # KNOWN COST, measured rather than assumed. Applying it everywhere
+            # also relaxes the CLOUD TOP criterion: the plume survives until
+            # its virtual-temperature deficit exceeds ``zlift`` (~1 K by
+            # default) against a ~0.01 K termination sigmoid width, so a
+            # profile weakly stable above its equilibrium level would keep
+            # producing mass flux past it. That is a real defect of this form
+            # and was raised in review (PR #690).
+            #
+            # The obvious fix — latch the bonus off once the plume first
+            # achieves genuine buoyancy, i.e. ``zbuoy_accum > 0``, which is
+            # where ECHAM's ``klab`` would flip — was implemented and REJECTED
+            # on measurement: it cuts day-mean convective precip in the
+            # composed RCE column from 2.5e-5 to 6.4e-6 kg/m2/s (4x) and
+            # degrades the composed water closure from 0.71 % to 1.98 %, worse
+            # than before this PR. A plume crosses more than one thin
+            # inhibition layer, and a latch that trips on the first
+            # marginally-buoyant level kills it at the second.
+            #
+            # Keeping the bonus is the better of the two measured options
+            # TODAY because the cloud top here is set by organized detrainment
+            # and the scan ceiling, not by this buoyancy test (#669) — probes
+            # on tropical and weakly-stable-aloft columns, and on a
+            # near-undilute plume, all terminate on the mass-flux floor with
+            # buoyancy still strongly positive, so the relaxed criterion never
+            # binds. When #669 makes buoyancy govern the top this must be
+            # revisited: see #691.
+            #
+            # ``zlift`` is added ONLY to the survival test, never to the
+            # stored ``buoy``: the Nordeng organized entrainment reads that
+            # diagnostic and must see the true buoyancy.
             surv_buoy = jax.nn.sigmoid((buoy_new + zlift_buoy) / w_term_buoy)
             surv_mf = jax.nn.sigmoid(
                 (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
