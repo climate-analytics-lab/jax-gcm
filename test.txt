@@ -1,0 +1,24 @@
+     \[
+     \mathcal L(\theta)
+     =
+
+     \frac{1}{M}
+     \sum_{m=1}^{M}\mathcal L_m(\theta)
+     \]
+
+     and JAX differentiates through each seven-day simulation:
+
+     \[
+     \nabla_\theta\mathcal L
+     \]
+
+     Parameter Bounds
+
+     JEM-Cal optimizes unconstrained parameters \(u\), then maps them smoothly into physical ranges. For a bounded parameter:
+
+     \[
+     \theta =
+     \theta_{\min}
+     +
+     (\theta_{\max}-\theta_{\min})\sigma(u)
+     \]
