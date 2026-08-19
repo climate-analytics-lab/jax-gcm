@@ -1483,7 +1483,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, rain_prof, snow_prof) = cloud_microphysics_2m(
+         form, evap, _cf, rain_prof, snow_prof) = cloud_microphysics_2m(
             T, q, p, qc, jnp.zeros(nlev), qnc, jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1533,7 +1533,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _rp, _sp) = cloud_microphysics_2m(
+         form, evap, _cf, _rp, _sp) = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1742,6 +1742,387 @@ class TestColumnWaterConservation2M:
             "no below-cloud-base qi gain from the sedimenting flux — the "
             "scan's net ice change is not entering the pxite ledger"
         )
+
+
+class TestColumnEnthalpyConservation2M:
+    """Column enthalpy closes against the surface precipitation flux.
+
+    Every internal phase change leaves
+
+        E = Σ ρ·dz·(cpd·T − Lv·qc − Ls·qi)
+
+    invariant: condensation trades Lv of vapour enthalpy for Lv of warming,
+    freezing trades Lf for Lf, and so on. Vapour cancels out of E entirely,
+    which is what makes this test independent of
+    ``TestColumnWaterConservation2M`` above. The only way the column can
+    change E is by exporting condensate across the surface — rain leaves as
+    liquid (Lv per kg), snow as ice (Ls per kg) — so
+
+        Σ ρ·dz·(cpd·dT/dt − Lv·dqc/dt − Ls·dqi/dt) == Lv·rain + Ls·snow.
+
+    Modelled on CAM's ``check_energy_chng`` (column-integrated total energy
+    against ``previous + dt·boundary_flux``) rather than on a negativity
+    limiter, which cannot see a budget that is open in both directions.
+
+    This is the gate for a whole class of defect (#662): a process routine
+    that mutates its local in-cloud state and reports only the latent heat —
+    or only the mass — to the assembly ledger breaks this identity while
+    leaving total water perfectly conserved, so no water budget can catch it.
+    """
+
+    DT = 1800.0
+
+    @staticmethod
+    def _run(cols):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni, z, z, cf, rho, dz, tke,
+            jnp.full(nlev, 5e7), inp, z,
+            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+        )
+        return tend, float(rain_sfc), float(snow_sfc)
+
+    @staticmethod
+    def _assert_enthalpy_closes(name, cols):
+        """Assert the identity above and return (residual, gross) [W/m²]."""
+        import numpy as np
+        import jcm.constants as c
+
+        tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(cols)
+        _, _, _, _, _, _, _, _, rho, dz, _, _ = cols
+        mass = np.asarray(rho * dz)                       # [kg/m²] per level
+
+        heating = mass * c.cpd * np.asarray(tend.dtedt)   # [W/m²] per level
+        dE = float(np.sum(
+            heating
+            - mass * c.alhc * np.asarray(tend.dqcdt)
+            - mass * c.alhs * np.asarray(tend.dqidt)
+        ))
+        boundary = c.alhc * rain_sfc + c.alhs * snow_sfc
+        gross = float(np.sum(np.abs(heating))) + abs(boundary)
+        residual = dE - boundary
+
+        assert gross > 1.0, f"{name}: column did nothing — fixture is vacuous"
+        assert abs(residual) < 1e-5 * gross, (
+            f"{name}: column enthalpy open by {residual:+.4e} W/m² "
+            f"({100 * residual / gross:+.2f} % of gross {gross:.3e}); "
+            f"rain {rain_sfc:.3e}, snow {snow_sfc:.3e} kg/m²/s"
+        )
+        return residual, gross
+
+    # -- fixtures ---------------------------------------------------------
+    # Each returns (T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, ice_nuclei).
+
+    @staticmethod
+    def _warm_liquid(nlev=20):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        T = jnp.linspace(280.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        idx = jnp.arange(nlev)
+        q = jnp.where((idx >= 10) & (idx < 16), 0.95 * qsw, 0.7 * qsw)
+        qc = jnp.zeros(nlev).at[10:16].set(1e-3)
+        cf = jnp.where(qc > 0, 0.7, 0.0)
+        return (T, q, p, qc, jnp.zeros(nlev), jnp.where(qc > 0, 5e7, 0.0),
+                jnp.zeros(nlev), cf, rho, jnp.full(nlev, 500.0),
+                jnp.full(nlev, 0.1), jnp.zeros(nlev))
+
+    @staticmethod
+    def _wbf_mixed_phase(nlev=12, tke=0.0):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        T = jnp.full(nlev, 258.0)          # mixed-phase window
+        p = jnp.linspace(3e4, 8e4, nlev)
+        rho = p / (287.0 * T)
+        q = 1.02 * jax.vmap(saturation_specific_humidity)(p, T)  # depositing
+        qc = jnp.zeros(nlev).at[4:8].set(3e-4)
+        qi = jnp.zeros(nlev).at[4:8].set(5e-5)
+        cf = jnp.where((qc + qi) > 0, 0.9, 0.0)
+        # Quiescent: the Korolev/Mazin threshold-velocity gate stays open, so
+        # the Bergeron conversion actually fires.
+        return (T, q, p, qc, qi, jnp.where(qc > 0, 5e7, 0.0),
+                jnp.where(qi > 0, 1e5, 0.0), cf, rho, jnp.full(nlev, 500.0),
+                jnp.full(nlev, tke), jnp.zeros(nlev))
+
+    @staticmethod
+    def _cold_ice_to_surface(nlev=20):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        T = jnp.linspace(210.0, 262.0, nlev)   # never above freezing
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.9 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.zeros(nlev).at[6:12].set(5e-4)
+        cf = jnp.where(qi > 0, 0.7, 0.0)
+        # Few, large crystals → fast fallout that reaches the ground.
+        return (T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev),
+                jnp.where(qi > 0, 2e3, 0.0), cf, rho, jnp.full(nlev, 500.0),
+                jnp.full(nlev, 0.1), jnp.zeros(nlev))
+
+    @staticmethod
+    def _cloud_ice_above_freezing(nlev=12):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        T = jnp.full(nlev, 280.0)              # entire column above tmelt
+        p = jnp.linspace(5e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.8 * jax.vmap(saturation_specific_humidity)(p, T)
+        qi = jnp.zeros(nlev).at[4:8].set(2e-4)
+        cf = jnp.where(qi > 0, 0.7, 0.0)
+        return (T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev),
+                jnp.where(qi > 0, 1e4, 0.0), cf, rho, jnp.full(nlev, 500.0),
+                jnp.zeros(nlev), jnp.zeros(nlev))
+
+    # -- the four fixtures ------------------------------------------------
+
+    def test_enthalpy_closes_warm_liquid(self):
+        self._assert_enthalpy_closes("warm liquid", self._warm_liquid())
+
+    def test_enthalpy_closes_wbf_mixed_phase(self):
+        """A Bergeron cell must move mass, not just latent heat.
+
+        ``WBF_process`` returns a liquid debit, an ice credit and the fusion
+        warming for one and the same transfer. Take the warming alone and the
+        column gains ``Lf × wbf_col`` of enthalpy from nothing.
+        """
+        cols = self._wbf_mixed_phase()
+        tend, _, _ = self._run(cols)
+        _, _, _, _, _, _, _, _, rho, dz, _, _ = cols
+        dqc_col = float(jnp.sum(tend.dqcdt * rho * dz))
+        assert dqc_col < -1e-6, (
+            f"WBF fixture lost no liquid (column dqcdt {dqc_col:.3e}) — the "
+            "Bergeron transfer is not reaching the qc tendency"
+        )
+        self._assert_enthalpy_closes("WBF mixed phase", cols)
+
+    def test_enthalpy_closes_cold_ice_reaching_surface(self):
+        cols = self._cold_ice_to_surface()
+        _, _, snow_sfc = self._run(cols)
+        assert snow_sfc > 0.0, "fallout never reached the ground"
+        self._assert_enthalpy_closes("cold ice to surface", cols)
+
+    def test_enthalpy_closes_cloud_ice_above_freezing(self):
+        """Cloud ice above 0 °C must melt exactly once.
+
+        Sedimentation runs before melting, so the melt must act on what
+        sedimentation left. If ``pimlt`` is computed from the
+        pre-sedimentation ice, it and the sedimented flux claim the same
+        mass and the column makes ``2 × qi/dt`` of liquid out of ``qi``.
+        """
+        import numpy as np
+
+        cols = self._cloud_ice_above_freezing()
+        tend, rain_sfc, snow_sfc = self._run(cols)
+        _, _, _, _, qi, _, _, _, rho, dz, _, _ = cols
+        mass = np.asarray(rho * dz)
+
+        assert rain_sfc == 0.0 and snow_sfc == 0.0, (
+            "fixture is meant to melt in place, not precipitate"
+        )
+        dqc_col = float(np.sum(np.asarray(tend.dqcdt) * mass))
+        dqi_col = float(np.sum(np.asarray(tend.dqidt) * mass))
+        assert dqc_col > 0.0, "no melting happened — fixture is vacuous"
+        # Melting is a pure qi → qc transfer: what liquid gains, ice loses.
+        np.testing.assert_allclose(dqc_col, -dqi_col, rtol=1e-5)
+        # ...and no more ice than the column actually holds may melt.
+        available = float(np.sum(np.asarray(qi) * mass)) / self.DT
+        assert dqc_col < available * (1.0 + 1e-5), (
+            f"melted {dqc_col:.4e} kg/m²/s from a column holding only "
+            f"{available:.4e} — the ice is being melted twice"
+        )
+
+    def test_water_budget_closes_for_cloud_ice_above_freezing(self):
+        """The same fixture, against total water.
+
+        Melting ice twice makes liquid out of nothing, which opens the water
+        budget too — at ≈18 mm/day with no surface precipitation at all. The
+        fixtures in ``TestColumnWaterConservation2M`` never reach this state
+        (none of them carry cloud ice in air above freezing), which is why
+        this column belongs in both budgets.
+        """
+        import numpy as np
+
+        cols = self._cloud_ice_above_freezing()
+        tend, rain_sfc, snow_sfc = self._run(cols)
+        _, _, _, _, _, _, _, _, rho, dz, _, _ = cols
+        mass = np.asarray(rho * dz)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = rain_sfc + snow_sfc
+        # Scale the bound on the GROSS movement of each phase, not on the net
+        # per-level sum: melting is an internal qi → qc transfer, so the net
+        # is ~0 by construction here and would make any relative bound
+        # vacuous. The double melt showed up as a residual ≈ 26 mm/day.
+        gross = float(np.sum(
+            (np.abs(np.asarray(tend.dqdt)) + np.abs(np.asarray(tend.dqcdt))
+             + np.abs(np.asarray(tend.dqidt))) * mass
+        )) + abs(P)
+        residual = float(np.sum(dw * mass) + P)
+        assert gross > 0.0
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"water budget open by {residual:.3e} kg/m²/s with no "
+            f"precipitation (gross {gross:.3e})"
+        )
+
+    def test_published_cloud_fraction_never_exceeds_the_input(self):
+        """The microphysics may clear cloud, not conjure it.
+
+        The published cover exists so that cells emptied of both condensates
+        stop being cloudy for radiation, COSP and the JAM aerosol terms.
+        ``update_in_cloud_water`` also has an upward branch — clear cell with
+        any condensation gets cf = clip(RH, 0.01, 1) — which is a second,
+        RH-based cover closure competing with ``SundqvistCloudFraction``.
+
+        The fixture is the state that makes the difference stark: an
+        ice-supersaturated column at 5 hPa, above ``cloud_top_pressure_pa``,
+        where Sundqvist deliberately reports no cloud because "the RH-closure
+        otherwise fills the cold, near-zero-qsat stratosphere with spurious
+        cloud". Unclipped it comes back overcast.
+        """
+        import numpy as np
+        from jcm.physics import thermodynamics
+
+        nlev = 6
+        T = jnp.full(nlev, 210.0)
+        p = jnp.full(nlev, 5e2)                     # 5 hPa — stratosphere
+        rho = p / (287.0 * T)
+        esi = thermodynamics.saturation_vapor_pressure(T, phase="ice")
+        qsi = 0.622 * esi / jnp.maximum(p - 0.378 * esi, 1e-12)
+        q = 1.6 * qsi                               # strongly supersaturated
+        zeros = jnp.zeros(nlev)
+        # cloud_fraction = 0 everywhere: Sundqvist reports no stratospheric cloud.
+        cols = (T, q, p, zeros, zeros, zeros, zeros, zeros,
+                rho, jnp.full(nlev, 500.0), zeros, zeros)
+
+        cf_published = np.asarray(self._run_full(cols)[12])
+        assert float(np.max(cf_published)) == 0.0, (
+            f"cloud-free stratosphere published as cf={np.max(cf_published):.3f} "
+            "— the microphysics is substituting its own RH cover closure"
+        )
+
+        # And the clearing direction still works: a cell the scheme empties
+        # must lose its cover.
+        warm = self._cloud_ice_above_freezing()
+        out_warm = self._run_full(warm)
+        cf_in = np.asarray(warm[7])
+        cf_out = np.asarray(out_warm[12])
+        assert np.all(cf_out <= cf_in + 1e-6), "published cover exceeds input"
+
+    @staticmethod
+    def _run_full(cols):
+        """Full return tuple, for tests that need more than the tendencies."""
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni, z, z, cf, rho, dz, tke,
+            jnp.full(nlev, 5e7), inp, z,
+            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+        )
+
+    def test_homogeneous_freezing_removes_all_the_liquid(self):
+        """Below cthomi every drop freezes, in a partly-cloudy box too.
+
+        ``freezing_below_238K`` zeroes the in-cloud liquid outright and
+        reports the transfer already area-weighted (``pfrl += pxlb·paclc``),
+        so the ledger must receive it as-is. Area-weight it a second time and
+        only ``cf`` of the liquid is debited from ``qc`` while the in-cloud
+        state says the cloud is fully glaciated — the grid box then carries
+        liquid water below the homogeneous freezing point indefinitely,
+        halving the remainder each step.
+
+        No budget test can catch this: the liquid debit, the ice credit and
+        the fusion heat all come from that one number, so water and enthalpy
+        both close on the wrong value. Only the state can tell.
+        """
+        import numpy as np
+
+        nlev = 8
+        cf_val = 0.4                               # well away from 1.0
+        T = jnp.full(nlev, 230.0)                  # below cthomi = 238 K
+        p = jnp.linspace(2e4, 4e4, nlev)
+        rho = p / (287.0 * T)
+        q = jnp.full(nlev, 1e-6)
+        qc = jnp.zeros(nlev).at[3:6].set(1e-4)     # grid-mean liquid
+        cf = jnp.where(qc > 0, cf_val, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        cols = (T, q, p, qc, jnp.zeros(nlev), jnp.where(qc > 0, 5e7, 0.0),
+                jnp.zeros(nlev), cf, rho, dz,
+                jnp.zeros(nlev), jnp.zeros(nlev))
+
+        tend, _, _ = self._run(cols)
+        mass = np.asarray(rho * dz)
+        held = float(np.sum(np.asarray(qc) * mass))
+        frozen = -float(np.sum(np.asarray(tend.dqcdt) * mass)) * self.DT
+
+        assert frozen > 0.0, "no liquid froze below cthomi"
+        # All of it, not cf of it. The double-weighted form gives cf_val*held.
+        np.testing.assert_allclose(frozen, held, rtol=1e-3)
+
+    def test_het_freezing_moves_mass_and_fusion_heat(self):
+        """Immersion INP must freeze droplet MASS, not just crystal number.
+
+        The aerosol → ice coupling of #494 sets ICNC from the online INP and
+        freezes one mean-mass droplet per new crystal. That transfer was
+        applied to the local in-cloud arrays but never added to the freezing
+        accumulator the assembly ledger reads, so raising INP created
+        crystals with zero mass and destroyed droplets with zero mass — the
+        one finding that conserves water and so hides from every budget
+        check. Water conservation cannot see it; the Lf signature can.
+
+        WBF is suppressed here (strong turbulence shuts the threshold-
+        velocity gate): with it active the whole liquid reservoir glaciates
+        either way and the heterogeneous pathway is invisible in the totals.
+        """
+        import numpy as np
+        import jcm.constants as c
+
+        cols = list(self._wbf_mixed_phase(tke=5.0))
+        nlev = cols[0].shape[0]
+        qc = cols[3]
+
+        cols[11] = jnp.zeros(nlev)                       # no online INP
+        base, _, _ = self._run(tuple(cols))
+        cols[11] = jnp.where(qc > 0, 1e6, 0.0)           # 1e6 /m³ immersion INP
+        high, _, _ = self._run(tuple(cols))
+
+        d_qc = np.asarray(high.dqcdt - base.dqcdt)
+        d_qi = np.asarray(high.dqidt - base.dqidt)
+        d_te = np.asarray(high.dtedt - base.dtedt)
+        d_ni = np.asarray(high.dqnidt - base.dqnidt)
+
+        assert np.sum(d_ni) > 0.0, "INP did not raise the crystal number"
+        assert float(np.sum(d_qc)) < 0.0, (
+            "raising INP froze no droplet mass — heterogeneous freezing is "
+            "moving crystal number only"
+        )
+        assert float(np.sum(d_qi)) > 0.0, "the frozen mass never became ice"
+
+        # Per level inside the deck (levels 4-7 hold the condensate), the
+        # extra warming is exactly the extra frozen mass times the scheme's
+        # own fusion heat, ``lsdcp - lvdcp``. Note that is (alhs - alhc), NOT
+        # the independent ``alhf`` constant — they differ by 0.3 %.
+        #
+        # Column totals cannot carry this check: more crystals means smaller
+        # crystals, so the extra ice also sediments more slowly and the
+        # column ice gain is ~3x the frozen mass. dqc and dtedt are clean
+        # because nothing downstream feeds back on them here.
+        fusion = (c.alhs - c.alhc) / c.cpd
+        for k in range(4, 8):
+            assert d_qc[k] < 0.0, f"level {k} lost no liquid to INP"
+            np.testing.assert_allclose(
+                d_te[k], -d_qc[k] * fusion, rtol=1e-3,
+                err_msg=f"level {k}: fusion heat does not match frozen mass",
+            )
 
 
 class TestPrecipFluxProfiles2M:
