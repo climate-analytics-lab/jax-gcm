@@ -13,15 +13,9 @@ area-weighted grid mean
 
     merged = sea + fmask * (land - sea)
 
-so ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` are stored as merged
-2D maps only; the land and sea values are intermediates of this module.
-
-``hfluxn`` is the exception. It is the net heat flux *into the surface
-medium*, i.e. the term that drives a surface component's own temperature
-(the ground below the land skin, or the ocean mixed layer). A coupled land
-or ocean model needs its own tile's value, not the grid mean, so ``hfluxn``
-is published per surface type (``hfluxn_land``, ``hfluxn_sea``) alongside
-the merged grid mean that closes the column energy budget.
+so every published field — including ``hfluxn``, the net heat flux into
+the surface medium — is that merged 2D map. The land and sea values stay
+intermediates of this module.
 
 Near-surface extrapolation
 --------------------------
@@ -378,7 +372,6 @@ def get_surface_fluxes(
     surface_flux_out = physics_data.surface_flux.copy(
         ustr=merged.ustr, vstr=merged.vstr, shf=merged.shf, evap=merged.evap,
         rlus=merged.rlus, hfluxn=merged.hfluxn,
-        hfluxn_land=land.hfluxn, hfluxn_sea=sea.hfluxn,
         tsfc=sst + fmask * (forcing.stl_am - sst),
         tskin=sst + fmask * (tskin - sst),
         u0=air.u_wind, v0=air.v_wind, t0=t0,

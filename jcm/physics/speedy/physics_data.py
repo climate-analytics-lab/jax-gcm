@@ -355,11 +355,9 @@ class HumidityData:
 class SurfaceFluxData:
     """Surface fluxes, all as ``(ix, il)`` grid maps.
 
-    The fluxes the atmosphere feels are area-weighted land/sea grid means;
-    the land and sea contributions are internal to
-    ``jcm.physics.surface.speedy_surface_flux``. ``hfluxn`` is additionally
-    published per surface type because it drives a coupled surface model's
-    own temperature, where the grid mean would be the wrong forcing.
+    Every field is the area-weighted land/sea grid mean; the separate land
+    and sea contributions are intermediates internal to
+    ``jcm.physics.surface.speedy_surface_flux``.
 
     Fields:
     ustr: u-stress
@@ -370,8 +368,6 @@ class SurfaceFluxData:
     rlds: Downward flux of long-wave radiation at the surface
     rlns: Net upward flux of long-wave radiation at the surface
     hfluxn: Net downward heat flux into the surface
-    hfluxn_land: Net downward heat flux into the land surface
-    hfluxn_sea: Net downward heat flux into the sea surface
     tsfc: Surface temperature
     tskin: Skin surface temperature
     u0: Near-surface u-wind
@@ -387,8 +383,6 @@ class SurfaceFluxData:
     rlds: jnp.ndarray
     rlns: jnp.ndarray
     hfluxn: jnp.ndarray
-    hfluxn_land: jnp.ndarray
-    hfluxn_sea: jnp.ndarray
     tsfc: jnp.ndarray
     tskin: jnp.ndarray
     u0: jnp.ndarray

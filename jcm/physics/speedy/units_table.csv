@@ -35,8 +35,6 @@ mod_radcon.albsfc,1,albsfc,Combined surface albedo (land + sea)
 convection.precnv,g/m²/s,precnv,Convective precipitation [g/(m^2 s)]
 mod_radcon.snowc,1,snowc,Effective snow cover (fraction)
 surface_flux.hfluxn,W/m²,hfluxn,Net downward heat flux into the surface (fmask-weighted land/sea mean)
-surface_flux.hfluxn_land,W/m²,hfluxn,Net downward heat flux into the land surface
-surface_flux.hfluxn_sea,W/m²,hfluxn,Net downward heat flux into the sea surface
 shortwave_rad.cloudc,1,cloudc,Total cloud cover
 mod_radcon.st4a.1,W/m²,st4a,Blackbody emission on half levels
 shortwave_rad.fsol,W/m²,fsol,Solar radiation at the top

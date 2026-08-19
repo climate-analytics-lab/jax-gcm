@@ -37,13 +37,12 @@ Unreleased — issue-backlog tidy-up
   coupled run consumed as its grid-mean heat flux. Each of these is now a
   single 2D variable holding the grid mean: **``surface_flux.shf.2``
   becomes ``surface_flux.shf``**, and the per-surface ``.0``/``.1``
-  variables are gone. The merged values themselves are unchanged.
+  variables are gone. ``hfluxn`` gains the grid mean it never had. The
+  merged values themselves are unchanged.
 
-  ``hfluxn`` is the exception: it drives a surface component's own
-  temperature, so a coupled land or ocean model needs its own tile's
-  value rather than the grid mean. It is published as
-  ``surface_flux.hfluxn_land`` and ``surface_flux.hfluxn_sea`` beside the
-  merged ``surface_flux.hfluxn``.
+  A coupled surface model that was reading per-tile heat fluxes out of
+  ``hfluxn``'s channels now needs them from its own land/ocean components
+  rather than from the atmosphere's diagnostics.
 
   **Existing SPEEDY checkpoints will not load**, including the ``t31_l8``
   init state on the data mirror — the diagnostic struct changed shape.

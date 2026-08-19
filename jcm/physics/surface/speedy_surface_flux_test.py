@@ -78,11 +78,10 @@ def build_inputs(
                 forcing=forcing_cls(XY, **forcing_kwargs), terrain=terrain)
 
 
-# Reference [max, min, mean] of every published surface-flux field, for the
-# five configurations below. Fields are fmask-weighted land/sea means except
-# hfluxn_land / hfluxn_sea, which are the per-surface-type components.
-_FIELDS = ("ustr", "vstr", "shf", "evap", "rlus", "hfluxn", "hfluxn_land",
-           "hfluxn_sea", "tsfc", "tskin", "u0", "v0", "t0")
+# Reference [max, min, mean] of every published surface-flux field — all of
+# them fmask-weighted land/sea means — for the configurations below.
+_FIELDS = ("ustr", "vstr", "shf", "evap", "rlus", "hfluxn", "tsfc", "tskin",
+           "u0", "v0", "t0")
 
 _CASES = {
     # Warm sea under a cool near-isothermal column, with saturated forcing.
@@ -96,8 +95,6 @@ _CASES = {
          [9.53914225e-02, 8.26347470e-02, 9.13820267e-02],     # evap
          [4.31850861e+02, 4.18786133e+02, 4.22756989e+02],     # rlus
          [1.12463333e+02, 9.46041260e+01, 9.99318924e+01],     # hfluxn
-         [1.01222931e+02, 6.55045166e+01, 7.61595764e+01],     # hfluxn_land
-         [1.23703735e+02, 1.23703735e+02, 1.23703262e+02],     # hfluxn_sea
          [2.90000000e+02, 2.90000000e+02, 2.90000000e+02],     # tsfc
          [2.97230225e+02, 2.94678894e+02, 2.95440155e+02],     # tskin
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],     # u0
@@ -113,8 +110,6 @@ _CASES = {
          [3.71975675e-02, 3.02297361e-02, 3.52667645e-02],
          [4.40432190e+02, 4.29336853e+02, 4.32341431e+02],
          [2.35673111e+02, 2.19723160e+02, 2.23998611e+02],
-         [1.37954346e+02, 1.06054443e+02, 1.14604996e+02],
-         [3.33391876e+02, 3.33391876e+02, 3.33390808e+02],
          [2.89000000e+02, 2.89000000e+02, 2.89000000e+02],
          [2.98853882e+02, 2.96575317e+02, 2.97186798e+02],
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],
@@ -130,8 +125,6 @@ _CASES = {
          [3.65183949e-02, 2.92323455e-02, 3.45011912e-02],
          [4.42618805e+02, 4.30757050e+02, 4.33960571e+02],
          [2.38529633e+02, 2.21519623e+02, 2.26068863e+02],
-         [1.43667480e+02, 1.09647369e+02, 1.18746910e+02],
-         [3.33391876e+02, 3.33391876e+02, 3.33390808e+02],
          [2.89000000e+02, 2.89000000e+02, 2.89000000e+02],
          [2.99261963e+02, 2.96831970e+02, 2.97482574e+02],
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],
@@ -147,8 +140,6 @@ _CASES = {
          [1.97063759e-02, 1.81624368e-02, 1.92561075e-02],
          [4.57913269e+02, 4.57794006e+02, 4.57840332e+02],
          [2.88610413e+02, 2.85821365e+02, 2.86627014e+02],
-         [1.83628235e+02, 1.78050110e+02, 1.79660461e+02],
-         [3.93592621e+02, 3.93592621e+02, 3.93593597e+02],
          [2.89000000e+02, 2.89000000e+02, 2.89000000e+02],
          [3.02116302e+02, 3.01717865e+02, 3.01832672e+02],
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],
@@ -168,8 +159,6 @@ _CASES = {
          [4.79898155e-02, 3.40541564e-02, 4.41281646e-02],     # evap
          [4.87856598e+02, 4.65665894e+02, 4.71672852e+02],     # rlus
          [1.37954346e+02, 1.06054443e+02, 1.14604996e+02],     # hfluxn
-         [1.37954346e+02, 1.06054443e+02, 1.14604996e+02],     # hfluxn_land
-         [3.33391876e+02, 3.33391876e+02, 3.33390808e+02],     # hfluxn_sea
          [2.88000000e+02, 2.88000000e+02, 2.88000000e+02],     # tsfc
          [3.07707764e+02, 3.03150635e+02, 3.04372498e+02],     # tskin
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],     # u0
@@ -185,8 +174,6 @@ _CASES = {
          [4.69812490e-02, 4.07872051e-02, 4.52995971e-02],
          [4.27910583e+02, 4.15460693e+02, 4.18975739e+02],
          [1.91495117e+02, 1.74349945e+02, 1.79115692e+02],
-         [1.05238403e+02, 7.09480591e+01, 8.04812698e+01],
-         [2.77751831e+02, 2.77751831e+02, 2.77750305e+02],
          [2.89000000e+02, 2.89000000e+02, 2.89000000e+02],
          [2.96517029e+02, 2.94067719e+02, 2.94748505e+02],
          [9.49999988e-01, 9.49999988e-01, 9.50007141e-01],
@@ -254,16 +241,28 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         _, physics_data = get_surface_fluxes(**args)
         self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface_flux.hfluxn)))
 
-    def test_merged_hfluxn_is_the_area_weighted_mean(self):
-        """The published hfluxn is the fmask weighting of its two components."""
-        args = build_inputs(fmask=0.3)
-        fmask = args["terrain"].fmask
-        _, physics_data = get_surface_fluxes(**args)
-        sflux = physics_data.surface_flux
-        expected = sflux.hfluxn_sea + fmask * (sflux.hfluxn_land - sflux.hfluxn_sea)
-        self.assertTrue(jnp.allclose(sflux.hfluxn, expected, rtol=1e-6))
-        # The components must genuinely differ, or the check is vacuous.
-        self.assertFalse(jnp.allclose(sflux.hfluxn_land, sflux.hfluxn_sea))
+    def test_fluxes_are_linear_in_the_land_fraction(self):
+        """Each published flux is the fmask weighting of its two components.
+
+        The components are internal, so the weighting is pinned through its
+        endpoints instead: fmask 0 and 1 give the pure sea and pure land
+        values, and any intermediate fraction must fall on the straight line
+        between them. That catches a swapped or dropped weighting without
+        publishing the per-surface values.
+        """
+        flux = lambda fmask: get_surface_fluxes(
+            **build_inputs(fmask=fmask))[1].surface_flux
+        sea_only, half, land_only = flux(0.0), flux(0.5), flux(1.0)
+
+        for field in ("ustr", "vstr", "shf", "evap", "rlus", "hfluxn"):
+            over_sea = getattr(sea_only, field)
+            over_land = getattr(land_only, field)
+            self.assertFalse(jnp.allclose(over_land, over_sea),
+                             f"{field}: land and sea agree, so the check is vacuous")
+            self.assertTrue(
+                jnp.allclose(getattr(half, field), 0.5 * (over_land + over_sea),
+                             rtol=1e-6),
+                f"{field} is not linear in the land fraction")
 
     def test_tendencies_use_the_merged_fluxes(self):
         """Lowest-level tendencies scale with the merged flux, not a component."""
@@ -363,12 +362,18 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         self.assertTrue(jnp.all(tendencies.specific_humidity[-1] > 0),
                         "Humidity tendency should be positive from ocean evaporation")
 
-    def test_aquaplanet_merged_flux_is_the_sea_flux(self):
-        _, sflux, _ = self._run(ta=280.0, rh=0.7, ua=5.0, va=2.0, sst=300.0,
-                                rlds=350.0)
-        self.assertTrue(jnp.allclose(sflux.hfluxn, sflux.hfluxn_sea))
-        # No land branch ran, so its component carries no flux.
-        self.assertTrue(jnp.all(sflux.hfluxn_land == 0.0))
+    def test_aquaplanet_surface_temperature_is_the_sst(self):
+        """With no land fraction the merge must collapse onto the sea side.
+
+        The land branch does not run at all here, so a merge that leaned the
+        wrong way would surface the land branch's zeros rather than the SST.
+        """
+        _, sflux, args = self._run(ta=280.0, rh=0.7, ua=5.0, va=2.0, sst=300.0,
+                                   rlds=350.0)
+        self.assertTrue(jnp.allclose(
+            sflux.tsfc, args["forcing"].sea_surface_temperature))
+        self.assertTrue(jnp.allclose(
+            sflux.tskin, args["forcing"].sea_surface_temperature))
 
     def test_aquaplanet_sensible_heat_flux(self):
         tendencies, sflux, _ = self._run(ta=280.0, rh=0.7, ua=5.0, va=2.0,
