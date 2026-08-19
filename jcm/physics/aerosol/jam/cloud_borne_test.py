@@ -131,10 +131,11 @@ class CloudBorneExchangeTest(unittest.TestCase):
         )
         self.assertTrue(bool((cb > 0.0).all()))
         # The move is the relaxation fraction of the equilibrium target
-        # cf * f_mass * (q_int + q_cb).
+        # f_mass * (q_int + q_cb) — cloud fraction sets the RATE (it stretches
+        # the activation timescale by 1/cf), not the target.
         dt = 1800.0
-        target = 0.5 * 0.9 * 1.0e-9
-        phi = -np.expm1(-dt / 900.0)
+        target = 0.9 * 1.0e-9
+        phi = -np.expm1(-dt / (900.0 / 0.5))
         np.testing.assert_allclose(
             np.asarray(cb) * dt, target * phi, rtol=1e-6,
         )
@@ -146,6 +147,34 @@ class CloudBorneExchangeTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(cb_ait) * dt, 0.5 * target * phi, rtol=1e-6,
         )
+
+    def test_reservoir_is_not_capped_by_cloud_fraction(self):
+        """A thin cloud fills the reservoir slowly, not partially.
+
+        Capping the target at ``cf * f_act * q_total`` makes the grid-mean
+        removal ``cf * f_act * rate_cb``, which is algebraically the implicit
+        (no cloud-borne phase) treatment — the explicit reservoir then buys
+        only a delay, and accumulation-mode sulfate, whose only real sink is
+        in-cloud scavenging, is left removing far too slowly (#658). Cloud
+        fraction belongs in the rate: thin cloud processes the box slowly but
+        still processes all of it.
+        """
+        thin, thick = self._setup(cloud_fraction=0.1), self._setup(cloud_fraction=0.9)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        rate_thin = np.asarray(self._cb_rate(thin[1], CloudBorneExchange()(*thin, None, None)[1], nm))
+        rate_thick = np.asarray(self._cb_rate(thick[1], CloudBorneExchange()(*thick, None, None)[1], nm))
+        # Thicker cloud still activates faster...
+        self.assertTrue(bool((rate_thick > rate_thin).all()))
+        # ...but the thin-cloud transfer is far more than the 1/9 a
+        # cf-proportional target would give.
+        self.assertGreater(float(rate_thin.mean() / rate_thick.mean()), 0.2)
+
+    def test_reservoir_drains_when_the_cloud_is_gone(self):
+        """With no cloud the target is zero, so the phase resuspends."""
+        state, diagnostics = self._setup(cloud_fraction=0.0)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        cb = self._cb_rate(diagnostics, out, mass_name("so4", "acc", cloud_borne=True))
+        self.assertTrue(bool((np.asarray(cb) <= 0.0).all()))
 
     def test_mass_and_number_use_their_own_fractions(self):
         # Large particles activate preferentially: the mass fraction (0.9)

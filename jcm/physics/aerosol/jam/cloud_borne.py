@@ -72,6 +72,12 @@ from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
 
 
+#: Cloud fraction below which a box counts as clear: activation stops and the
+#: cloud-borne reservoir drains. Also floors the 1/cf stretch of the activation
+#: timescale, so a vanishingly thin cloud cannot make it infinite.
+_MIN_CLOUD_FRACTION = 1.0e-3
+
+
 @tree_math.struct
 class CloudBorneExchangeParameters:
     """Tunable exchange timescales (differentiable)."""
@@ -167,10 +173,36 @@ class CloudBorneExchange(PhysicsTerm):
 
         q_int_arr = jnp.stack(q_int)
         q_cb_arr = jnp.stack(q_cb)
-        target = cf * jnp.stack(fracs) * (q_int_arr + q_cb_arr)
+        # Cloud fraction sets the RATE at which the box's air is processed
+        # through droplets, not a ceiling on how much aerosol can be in them.
+        #
+        # Putting cf in the target instead pins the reservoir at cf·f_act of
+        # the total. Soluble interstitial aerosol has no stratiform in-cloud
+        # sink of its own, so the grid-mean removal then collapses to
+        # cf·f_act·rate_cb — algebraically the implicit (no cloud-borne phase)
+        # treatment, meaning the explicit reservoir buys only a delay. Measured
+        # against CAM's ``wetdepa_v2`` on this model's own condensate and
+        # precip-formation fields, that left accumulation-mode sulfate removal
+        # at 5-38% of CAM's (#658), and accumulation mode sits in the
+        # Greenfield gap where in-cloud scavenging is its only real sink.
+        #
+        # CAM has no downward relaxation at all: ``raercol_cw`` falls only when
+        # the cloud shrinks or disappears (``ndrop.F90:486-518, 719-721``), and
+        # cloud fraction enters through the activation flux and the
+        # cloud-fraction increment, so under a persistent deck the reservoir
+        # fills toward the activated fraction of the total. Matching that here:
+        # where there is cloud, relax toward ``f_act · q_total`` on a timescale
+        # stretched by 1/cf — thin cloud processes the box slowly — and where
+        # the cloud has gone, drain to zero on the resuspension timescale.
+        cloudy_cf = jnp.maximum(cf, _MIN_CLOUD_FRACTION)
+        target = jnp.where(
+            cf > _MIN_CLOUD_FRACTION,
+            jnp.stack(fracs) * (q_int_arr + q_cb_arr),
+            0.0,
+        )
         tau = jnp.where(
             target > q_cb_arr,
-            params.activation_timescale,
+            params.activation_timescale / cloudy_cf,
             params.resuspension_timescale,
         )
         # 1 − exp(−Δt/τ) ∈ [0, 1]: the move never overshoots the target, so
