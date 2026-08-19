@@ -11,6 +11,7 @@ Mirrors ``mo_hammoz_sedimentation`` / ``mo_ham_sedimentation``.
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar
 
 import jax
@@ -56,21 +57,49 @@ def stokes_velocity(
     rho_p: jnp.ndarray,
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
+    *,
+    geom_std_dev: float,
+    moment: int,
 ) -> jnp.ndarray:
-    """Stokes settling velocity [m/s] with Cunningham slip correction.
+    """Bulk Stokes settling velocity [m/s] of one lognormal mode.
 
-    ``v = (2 g ρ_p r² C_c) / (9 μ)``. Inputs broadcast against each other;
-    ``r_wet``/``rho_p`` may carry a leading mode axis. The radius is capped at
-    :data:`_R_WET_MAX` (HAMMOZ 50 µm median-diameter cap) so extreme wet growth
-    can't inflate the velocity.
+    ``v = (2 g ρ_p r² C_c) / (9 μ)`` is the single-particle velocity. A mode
+    is a distribution, not a particle, so the velocity that transports a
+    given moment of it is the velocity at that moment's median radius:
+    ``moment=0`` for the number mixing ratio, ``moment=3`` for mass. Since
+    ``v ∝ r²`` the two differ by ``exp(6 ln²σ)`` — a factor of 8 at σ = 1.8 —
+    so settling mass at the count-median velocity leaves the sink an order of
+    magnitude too weak. The shortfall also grows as particles grow, which
+    suppresses the ``r²`` feedback that should arrest their growth.
+
+    Mirrors CAM's ``modal_aero_depvel_part`` (``aero_model.F90:1577-1596``):
+    the moment-median radius, plus ``dispersion`` — the moment-independent
+    broadening of the bulk velocity over the distribution's width. jcm's
+    ``r_wet`` is the number-median radius where CAM passes the volume-mean
+    one, so CAM's ``exp((moment-1.5)·ln²σ)`` becomes ``exp(moment·ln²σ)``.
+
+    Args:
+        r_wet: Wet number-median radius [m], optionally with a leading mode
+            axis. Capped at :data:`_R_WET_MAX` before the moment scaling.
+        rho_p: Wet particle density [kg/m³].
+        temperature: Air temperature [K].
+        pressure: Air pressure [Pa].
+        geom_std_dev: Geometric standard deviation of the mode.
+        moment: Moment the velocity transports — 0 for number, 3 for mass.
+
+    Returns:
+        Settling velocity [m/s], positive downward.
+
     """
-    r = jnp.minimum(r_wet, _R_WET_MAX)
+    ln_sigma = math.log(geom_std_dev)
+    r = jnp.minimum(r_wet, _R_WET_MAX) * math.exp(moment * ln_sigma ** 2)
     mu = air_viscosity(temperature)
     # Mean free path λ = (μ/p)·√(π R T / (2 M_a)).
     mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
     kn = mfp / jnp.maximum(r, 1.0e-10)
     cunningham = 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
-    return (2.0 * _G * rho_p * r ** 2 * cunningham) / (9.0 * mu)
+    return ((2.0 * _G * rho_p * r ** 2 * cunningham) / (9.0 * mu)
+            * math.exp(2.0 * ln_sigma ** 2))
 
 
 def sediment_column(
@@ -138,9 +167,15 @@ class StokesSedimentation(PhysicsTerm):
         for i, mode in enumerate(self._spec.modes):
             if not mode.sediments:
                 continue
-            v = params.velocity_scale * stokes_velocity(
-                aer.r_wet[i], aer.rho[i], temperature, pressure,
-            )
+            # Number and mass ride different moments of the same mode, so
+            # they settle at different speeds (see stokes_velocity).
+            v_by_moment = {
+                moment: params.velocity_scale * stokes_velocity(
+                    aer.r_wet[i], aer.rho[i], temperature, pressure,
+                    geom_std_dev=mode.geom_std_dev, moment=moment,
+                )
+                for moment in (0, 3)
+            }
             # CFL cap: an explicit donor-cell step is only stable for a Courant
             # number ≤ 1, i.e. a particle may fall at most one layer per step.
             # Without this, coarse-mode sea salt at high near-surface RH (large
@@ -151,12 +186,16 @@ class StokesSedimentation(PhysicsTerm):
             # Mirrors HAMMOZ ``mo_ham_sedimentation`` L228:
             # ``zvsedi = MIN(zvsedi, pdz/time_step_len)``. With Courant ≤ 1 the
             # donor-cell flux out of a layer cannot exceed its content, so the
-            # tracers also stay non-negative (HAMMOZ's L235 flux limiter).
-            v = jnp.minimum(v, dz / dt)
-            for nm in [number_name(mode.short)] + [
-                mass_name(sp, mode.short) for sp in mode.species
-            ]:
+            # tracers also stay non-negative (HAMMOZ's L235 flux limiter). The
+            # mass velocity is the larger of the two, so it is the one that
+            # reaches the cap first — for the coarse mode, routinely.
+            v_by_moment = {m: jnp.minimum(v, dz / dt) for m, v in v_by_moment.items()}
+            for moment, nm in (
+                [(0, number_name(mode.short))]
+                + [(3, mass_name(sp, mode.short)) for sp in mode.species]
+            ):
                 names.append(nm)
+                v = v_by_moment[moment]
                 # Floored at 0: donor-cell settling of a negative
                 # (ringing) value transports negative mass downward and
                 # deposits it (see the wetdep note).
