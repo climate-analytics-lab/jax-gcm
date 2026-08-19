@@ -8,7 +8,16 @@
 # ``dinosaur>=X.Y`` — a VCS requirement cannot be published to PyPI and
 # makes the wheel uninstallable for downstream users (see #577).
 dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian
-flax>=0.12.0
+# Floor is 0.12.1: that release ADDED `nnx.Variable.get_value()` and deprecated
+# the `.value` property in its favour. jcm reads every nnx.Param/nnx.Variable
+# through `.get_value()` (~94 sites under jcm/physics/**), so on exactly 0.12.0
+# the lookup misses the class and falls through `Variable.__getattr__` to the
+# *wrapped* object — `AttributeError: 'SpeedyCoords' object has no attribute
+# 'get_value'` as soon as a Model is built (#655). Do NOT "fix" that by moving
+# to `.value`: that is the deprecated direction, and no flax ever released has
+# both. (0.12.0 is unusable here anyway — it imports the long-gone private
+# `jax._src.core.mutable_array`.)
+flax>=0.12.1
 jax-datetime
 tree-math
 hydra-core
