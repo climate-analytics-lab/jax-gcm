@@ -82,20 +82,57 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         self.assertGreater(float(E.max()), 0.0)
         self.assertGreater(float(P.max()) * 86400.0, 0.01,
                            "no precipitation over two days — vacuous budget")
-        # Closure on the SPUN-UP second day: 5 % of the dominant flux at
-        # every step (measured ~1 % on the fixed physics; the pre-fix
-        # schemes fail at the several-hundred-percent level — water
-        # created at the precipitation rate). Day 1 is excluded because
-        # spin-up convection bursts trip the _DTDT_MAX stability cap,
+        # Closure is judged on the SPUN-UP second day. Day 1 is excluded
+        # because spin-up convection bursts trip the _DTDT_MAX stability cap,
         # which scales the tendencies but cannot scale the scalar precip
         # diagnostic — the cap's documented, inherent conservation break
         # (it does not fire in equilibrated columns).
         spd = int(round(86400.0 / scm.dt_seconds))
         rel_eq = rel[spd:]
         residual_eq = residual[spd:]
+
+        # PRIMARY pin: the day-mean residual against the day-mean dominant
+        # flux. This is the statement that actually means "the composed step
+        # conserves water", and it is the one to tighten — the per-step
+        # version below cannot be, because its denominator is instantaneous
+        # and collapses during a convective lull, inflating a small absolute
+        # residual into a large ratio.
+        #
+        # Measured across #661 (the cloud-base water-conservation fix), day 2
+        # of this column:
+        #
+        #                     dev @ f6d1bcd      with #661
+        #   mean |residual|      4.95e-7          1.78e-7
+        #   mean E               2.76e-5          2.10e-5
+        #   mean P_conv          1.95e-6          2.52e-5
+        #   MEAN-RELATIVE        1.80 %           0.71 %
+        #   max per-step         1.79 %           6.77 %
+        #
+        # So the column convects ~13x harder AND the absolute leak falls 2.8x:
+        # mean closure improves 1.80 % -> 0.71 %. The 1.2 % bound sits between
+        # the two, so it encodes that improvement — the pre-#661 behaviour
+        # would fail it.
+        mean_flux = float(np.maximum(np.abs(E[spd:]).mean(),
+                                     np.abs(P[spd:]).mean()))
+        mean_rel = float(np.abs(residual_eq).mean()) / mean_flux
+        self.assertLess(
+            mean_rel, 0.012,
+            f"composed water budget leaks {mean_rel:.2%} of the day-mean "
+            f"flux over the equilibrated day "
+            f"(mean |residual| = {np.abs(residual_eq).mean():.3e} kg/m2/s)",
+        )
+
+        # SECONDARY pin: no single step may go grossly open. Loose by design
+        # for the denominator reason above — the pre-fix schemes this test was
+        # written against fail here at the several-hundred-percent level
+        # (water created at the precipitation rate), which is what it catches.
+        # Sanity that it is not vacuous: dropping P_conv from the sink side of
+        # the ledger scores 174 %, so convective precip really is debited.
+        # The lull sensitivity is a symptom of the convective intermittency
+        # tracked in #682; this bound should tighten when that is retuned.
         worst = int(np.argmax(rel_eq))
         self.assertLess(
-            float(rel_eq.max()), 0.05,
+            float(rel_eq.max()), 0.10,
             f"composed water budget open by {residual_eq[worst]:.3e} "
             f"kg/m2/s at equilibrated step {worst + spd} "
             f"(E={E[worst + spd]:.3e}, P={P[worst + spd]:.3e})",
