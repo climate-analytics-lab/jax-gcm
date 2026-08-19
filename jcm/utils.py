@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import jit
 from jax.tree_util import tree_map
 from importlib import resources
 import dinosaur
@@ -167,10 +166,6 @@ def validate_ds(ds, expected_structure):
             raise ValueError(
                 f"Variable '{var}' has dims {actual_dims}, expected {expected_dims}"
             )
-
-@jit
-def pass_fn(operand):
-    return operand
 
 def ones_like(x):
     return tree_map(jnp.ones_like, x)

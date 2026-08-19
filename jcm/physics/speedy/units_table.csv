@@ -12,63 +12,53 @@ condensation.dqlsc,g/kg/s,dqlsc,Specific humidity tendency due to large-scale co
 convection.se,J/kg,se,dry static energy
 shortwave_rad.rsns,W/m²,fsfc,Net downward flux of short-wave radiation at the surface
 shortwave_rad.dfabs,W/m²,dfabs,Flux of long-wave radiation absorbed in each atmospheric layer
-surface_flux.ustr.1,N/m²,ustr,u-stress over sea
+surface_flux.ustr,N/m²,ustr,u-stress (fmask-weighted land/sea mean)
 mod_radcon.flux.2,W/m²,flux,Radiative flux in spectral band 3 of 4
 shortwave_rad.compute_shortwave,bool,compute_shortwave,Flag to compute shortwave radiation
 mod_radcon.ablco2,1,ablco2,CO2 absorptivity
 mod_radcon.alb_l,1,alb_l,Daily-mean albedo over land (bare-land + snow)
-surface_flux.rlus.1,W/m²,slru,Upward flux of long-wave radiation at the surface over sea
+surface_flux.rlus,W/m²,slru,Upward flux of long-wave radiation at the surface (fmask-weighted land/sea mean)
 surface_flux.tskin,K,tskin,Skin surface temperature
 mod_radcon.st4a.0,W/m²,st4a,Blackbody emission on full levels
 mod_radcon.flux.1,W/m²,flux,Radiative flux in spectral band 2 of 4
 surface_flux.tsfc,K,tsfc,Surface temperature
 shortwave_rad.qcloud,1,qcloud,Equivalent specific humidity of clouds
-surface_flux.evap.0,g/m²/s,evap,Evaporation over land
+surface_flux.evap,g/m²/s,evap,Evaporation (fmask-weighted land/sea mean)
 shortwave_rad.cloudstr,1,clstr,Stratiform cloud cover
 convection.cbmf,kg/m²/s,cbmf,Cloud-base mass flux
 convection.qdif,g/kg,qdif,Excess humidity in convective gridboxes
 shortwave_rad.rsds,W/m²,fsfcd,Total downward flux of short-wave radiation at the surface
-surface_flux.shf.0,W/m²,shf,Sensible heat flux over land
-surface_flux.shf.2,W/m²,shf,Sensible heat flux grid-box mean (fmask-weighted)
+surface_flux.shf,W/m²,shf,Sensible heat flux (fmask-weighted land/sea mean)
 longwave_rad.dfabs,W/m²,dfabs,Flux of long-wave radiation absorbed in each atmospheric layer
 surface_flux.rlns,W/m²,-,Net upward flux of long-wave radiation at the surface
 mod_radcon.albsfc,1,albsfc,Combined surface albedo (land + sea)
 convection.precnv,g/m²/s,precnv,Convective precipitation [g/(m^2 s)]
-surface_flux.shf.1,W/m²,shf,Sensible heat flux over sea
 mod_radcon.snowc,1,snowc,Effective snow cover (fraction)
-surface_flux.hfluxn.0,W/m²,hfluxn,Net downward heat flux over land
+surface_flux.hfluxn,W/m²,hfluxn,Net downward heat flux into the surface (fmask-weighted land/sea mean)
 shortwave_rad.cloudc,1,cloudc,Total cloud cover
-surface_flux.ustr.2,N/m²,ustr,u-stress grid-box mean (fmask-weighted)
-surface_flux.ustr.0,N/m²,ustr,u-stress over land
 mod_radcon.st4a.1,W/m²,st4a,Blackbody emission on half levels
 shortwave_rad.fsol,W/m²,fsol,Solar radiation at the top
 mod_radcon.tau2.1,1,tau2,Layer transmissivity in spectral band 2 of 4
 shortwave_rad.ozone,ppmv,ozone,Ozone concentration in lower stratosphere
 surface_flux.v0,m/s,v0,Near-surface v-wind
-surface_flux.hfluxn.1,W/m²,hfluxn,Net downward heat flux over sea
 humidity.rh,1,rh,relative humidity
-surface_flux.vstr.0,N/m²,vstr,v-stress over land
-surface_flux.evap.1,g/m²/s,evap,Evaporation over sea
+surface_flux.vstr,N/m²,vstr,v-stress (fmask-weighted land/sea mean)
 mod_radcon.tau2.3,1,tau2,Layer transmissivity in spectral band 4 of 4
 shortwave_rad.stratz,W/m²,stratz,Polar night cooling in the stratosphere
 mod_radcon.alb_s,1,alb_s,Daily-mean albedo over sea (open sea + sea ice)
 shortwave_rad.icltop,model level index,icltop,Cloud top level
-surface_flux.vstr.1,N/m²,vstr,v-stress over sea
 mod_radcon.stratc.0,W/m²,stratc,Stratospheric correction term (component 1 of 2)
 convection.iptop,model level index,itop,Top of convection (layer index)
-surface_flux.vstr.2,N/m²,vstr,v-stress grid-box mean (fmask-weighted)
 longwave_rad.ftop,W/m²,ftop,Outgoing flux of long-wave radiation at the top of the atmosphere
 shortwave_rad.ozupp,Dobson Unit,ozupp,Ozone depth in upper stratosphere
 surface_flux.rlds,W/m²,slrd,Downward flux of long-wave radiation at the surface
 mod_radcon.flux.0,W/m²,flux,Radiative flux in spectral band 1 of 4
 condensation.dtlsc,K/s,dtlsc,Temperature tendency due to large-scale condensation
-surface_flux.rlus.2,W/m²,slru,Upward flux of long-wave radiation at the surface grid-box mean (fmask-weighted)
 land_model.stl_am,K,stl_am,Land surface temperature used by the atmospheric model
 mod_radcon.tau2.0,1,tau2,Layer transmissivity in spectral band 1 of 4
 condensation.precls,g/m²/s,precls,Precipitation due to large-scale condensation
 mod_radcon.tau2.2,1,tau2,Layer transmissivity in spectral band 3 of 4; band 3 also carries SW cloud reflectivity
 surface_flux.u0,m/s,u0,Near-surface u-wind
-surface_flux.rlus.0,W/m²,slru,Upward flux of long-wave radiation at the surface over land
 land_model.stl_lm,K,stl_lm,Land surface temperature calculated by the land model
-surface_flux.evap.2,g/m²/s,evap,Evaporation grid-box mean (fmask-weighted)
 mod_radcon.stratc.1,W/m²,stratc,Stratospheric correction term (component 2 of 2)
+shortwave_rad.step,1,step,Shortwave sub-stepping counter (mod nstrad)

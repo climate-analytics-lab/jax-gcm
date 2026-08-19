@@ -86,6 +86,10 @@ class PhysicsTerm(nnx.Module):
     # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # CSV mapping this term's output variable names to units and
+    # descriptions, which ``ModelPredictions.to_xarray`` attaches to the
+    # dataset. Columns: Variable, Units, <source name>, Description.
+    UNITS_TABLE_CSV_PATH: ClassVar = None
 
     def withheld_output_keys(self) -> tuple[str, ...]:
         """``<struct>.<field>`` keys this configuration never populates.

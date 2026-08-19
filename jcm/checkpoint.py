@@ -99,7 +99,17 @@ def load_checkpoint(model, path) -> float:
         "dycore_leaves": dycore_leaves_template,
         "physics_leaves": physics_leaves_template,
     }
-    payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
+    try:
+        payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
+    except ValueError as exc:
+        # from_bytes reports a bare leaf-count mismatch with no file name.
+        # A count mismatch means a different physics composition wrote the
+        # file, or a struct gained/lost a field since it was written.
+        raise ValueError(
+            f"Checkpoint {path} does not match the composed model: {exc}. "
+            "It was written by a different physics composition, or by a "
+            "jcm version whose diagnostic structs had different fields."
+        ) from exc
 
     # from_bytes validates structure (leaf count) but not leaf shapes: a
     # same-composition state for the WRONG grid/levels deserializes cleanly

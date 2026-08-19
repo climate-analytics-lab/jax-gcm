@@ -517,6 +517,25 @@ class ComposablePhysics(nnx.Module, Physics):
     #: all-sky flux, ~240 W/m2 instead of ~-1 (jax-gcm#647).
     _term_withheld_keys: frozenset[str] = frozenset()
 
+    def units_table_paths(self) -> tuple:
+        """Units/description CSVs of every term in this package, deduplicated.
+
+        Terms of the same family share one table, so the same path is
+        usually contributed many times; the order terms were composed in is
+        preserved, which is what decides precedence when two tables name the
+        same variable.
+
+        ``__add__`` accepts any callable carrying a ``category``, not only a
+        ``PhysicsTerm``, so the attribute is read defensively — a term
+        without a table must not turn into an ``AttributeError`` at the very
+        end of a run, when the output is being written.
+        """
+        paths = list(super().units_table_paths())
+        paths += [table for table in
+                  (getattr(term, "UNITS_TABLE_CSV_PATH", None) for term in self.terms)
+                  if table is not None]
+        return tuple(dict.fromkeys(paths))
+
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
     ) -> dict[str, Any]:
