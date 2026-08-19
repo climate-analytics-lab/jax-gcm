@@ -133,6 +133,17 @@ def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick, t_floor):
         # and inflates CAPE, the LZB and the ``t_ref`` relaxation target.
         # Same defect, and the same one-line fix, as the Tiedtke CAPE parcel
         # in ``tiedtke_nordeng.calculate_cape_cin`` (issue #661).
+        #
+        # The cap removes the invented water but NOT the temperature overshoot
+        # that causes it: ``t_k`` still takes a whole layer of moist-lapse
+        # warming for a level the parcel has only just saturated in, leaving
+        # the crossing level internally inconsistent (subsaturated at its own
+        # temperature). Against the same ascent on a 400x finer grid the parcel
+        # runs +0.95 K warm, essentially unchanged from the +0.96 K before the
+        # cap. Switching on ``q_parcel >= qsat_moist`` instead is 3.5x more
+        # accurate (-0.45 K) but errs COLD and moves convective onset on this
+        # scheme's own fixture from RH 0.90 to 0.95, so it is not a free swap.
+        # The unbiased fix is to resolve the LCL inside the layer: #695.
         q_k = jnp.where(is_sat, jnp.minimum(qsat_moist, q_parcel), q_parcel)
 
         buoyant = t_k > t_env_k
