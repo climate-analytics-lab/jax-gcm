@@ -74,6 +74,22 @@ class ConvectionParameters:
     smooth_term_mf: float    # Updraft-termination mass-flux-ratio width
     smooth_precip_pa: float  # zdnoprc precip-onset width (Pa)
 
+    # Cloud-base sub-grid buoyancy excess — ECHAM ``cubase``
+    # (mo_cuinitialize.f90:291) ``zlift = MAX(cminbuoy, MIN(cmaxbuoy,
+    # pthvsig*cbfac))``, then ``MIN(zlift, 1.0)``. This is the thermal
+    # excess of the warmest boundary-layer plumes over the grid mean; it is
+    # what lets a parcel cross the thin negative-buoyancy layer between its
+    # LCL and its LFC. Without it a grid-mean parcel is essentially never
+    # buoyant at its own LCL and no column convects.
+    cu_cminbuoy: float       # Floor on the excess (K) — ECHAM 0.2
+    cu_cmaxbuoy: float       # Ceiling on the excess (K) — ECHAM 1.0
+    cu_cbfac: float          # Multiplier on thvsig (-) — ECHAM 1.0
+    cu_thvsig: float         # Sub-grid σ(θ_v) at the lowest half level (K).
+                             # ECHAM takes this from vdiff's prognostic
+                             # θ_v variance; jcm does not yet thread that
+                             # through to convection, so it is a tunable
+                             # constant here (see the module docstring).
+
     # Switches (ECHAM namelist lmfdudv; carried as a traced bool so the
     # struct stays a plain tree_math pytree)
     lmfdudv: jnp.ndarray
@@ -88,6 +104,8 @@ class ConvectionParameters:
                  smooth_type_j=100.0, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
                  smooth_precip_pa=2.0e3,
+                 cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
+                 cu_thvsig=1.0,
                  lmfdudv=True) -> 'ConvectionParameters':
         """Return default convection parameters"""
         return cls(
@@ -115,6 +133,10 @@ class ConvectionParameters:
             smooth_term_buoy=jnp.array(smooth_term_buoy),
             smooth_term_mf=jnp.array(smooth_term_mf),
             smooth_precip_pa=jnp.array(smooth_precip_pa),
+            cu_cminbuoy=jnp.array(cu_cminbuoy),
+            cu_cmaxbuoy=jnp.array(cu_cmaxbuoy),
+            cu_cbfac=jnp.array(cu_cbfac),
+            cu_thvsig=jnp.array(cu_thvsig),
             lmfdudv=jnp.array(lmfdudv),
         )
 

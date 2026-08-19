@@ -113,55 +113,143 @@ def initialize_convection(temperature: jnp.ndarray,
     )
 
 
+def cloud_base_lift(config: ConvectionParameters) -> jnp.ndarray:
+    """ECHAM ``cubase`` sub-grid buoyancy excess ``zlift`` [K].
+
+    ``zlift = MIN(MAX(cminbuoy, MIN(cmaxbuoy, thvsig·cbfac)), 1.0)``
+    (mo_cuinitialize.f90:291, mo_cuascent.f90:444). It represents the
+    thermal excess of the warmest boundary-layer plumes over the grid-mean
+    parcel, and it is what allows a parcel to cross the thin
+    negative-buoyancy layer between its LCL and its LFC.
+
+    ECHAM sources ``pthvsig`` from vdiff's prognostic θ_v variance at the
+    lowest half level. jcm's TTE-TKE scheme prognoses a θ_v variance
+    (``vertical_diffusion_types.thv_var_tendency``) but does not yet thread
+    it to convection, so ``config.cu_thvsig`` stands in as a constant.
+    """
+    zlift = jnp.clip(config.cu_thvsig * config.cu_cbfac,
+                     config.cu_cminbuoy, config.cu_cmaxbuoy)
+    return jnp.minimum(zlift, 1.0)
+
+
 def find_cloud_base(temperature: jnp.ndarray,
-                   humidity: jnp.ndarray, 
+                   humidity: jnp.ndarray,
                    pressure: jnp.ndarray,
                    config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Find lifting condensation level (cloud base)
-    
+    """Find cloud base — the LCL, gated by ECHAM ``cubase``'s buoyancy test
+
+    Ports the decision half of ECHAM ``cubase`` (mo_cuinitialize.f90:276-320).
+    A surface parcel is lifted dry-adiabatically; the LCL is the lowest level
+    at which it condenses. Convection exists **only if the parcel is
+    positively buoyant there**, comparing condensate-loaded virtual
+    temperatures and crediting the sub-grid thermal excess ``zlift``:
+
+        zbuo = T_u·(1 + vtmpc1·q_u − l_u) − T_e·(1 + vtmpc1·q_e) + zlift
+
+    The buoyancy test was previously absent: any saturated level was accepted
+    as a cloud base regardless of whether a parcel could actually get a plume
+    going there. That was survivable only because the cloud-base saturation
+    adjustment was over-warming the seed parcel by several K (issue #661);
+    with that fixed, an unbuoyant cloud base gives a plume that terminates on
+    its first interior step. The two belong together — ECHAM's cloud base is
+    by construction a level the parcel is buoyant at.
+
+    Three deliberate departures from the reference, stated here rather than
+    silently absorbed:
+
+    * **ECHAM tests only the LCL itself.** Its ``klab`` walk stops at the
+      first condensing level, so a column whose parcel is unbuoyant *there*
+      gets no convection at all, however thin the inhibition is. We instead
+      take the lowest level that is both condensing and buoyant — the LFC.
+      On a 47-level tropical column the parcel runs −0.67 K at its LCL and
+      −0.11 K one level up before turning solidly positive (+0.87, +1.96,
+      +3.08 …), so ECHAM's rule makes the whole column's convection hinge on
+      whether ``zlift`` happens to exceed a two-level barrier. Starting the
+      plume at the LFC is the standard alternative and is far less sensitive
+      to the ``thvsig`` value we do not yet have.
+    * ECHAM also drops a column whose parcel goes negatively buoyant in the
+      **sub-cloud** layer below the LCL (``klab`` falls to 0 and the column
+      is never tested again). That test is against half-level environment
+      values which jcm does not yet have on this path (#530), and applying it
+      against full-level values suppresses convection far more aggressively
+      than the reference does.
+    * ``zlift`` uses a constant ``config.cu_thvsig`` rather than vdiff's
+      prognostic θ_v variance — see :func:`cloud_base_lift`.
+
+    ECHAM's *ascent* buoyancy test (mo_cuascent.f90:449) also adds ``zlift``,
+    but only where the level below is still sub-cloud (``klab == 1``), which
+    for a ``cubase``-initiated deep or shallow plume is never true — it fires
+    only for mid-level convection triggered by ``cubasmc``. So there is
+    deliberately no ``zlift`` term in :func:`~.updraft.calculate_updraft`.
+
     Args:
         temperature: Environmental temperature (K) [nlev]
         humidity: Environmental specific humidity (kg/kg) [nlev]
         pressure: Environmental pressure (Pa) [nlev]
         config: Convection configuration
-        
+
     Returns:
         Tuple of (cloud_base_level, cloud_base_exists)
 
     """
     nlev = len(temperature)
-    
+
     # Start from surface (bottom level - highest pressure)
     surf_idx = jnp.argmax(pressure)  # Surface is at highest pressure
     surf_temp = temperature[surf_idx]
     surf_humid = humidity[surf_idx]
     surf_press = pressure[surf_idx]
-    
+
     # Calculate parcel temperature at all levels (dry adiabatic)
     exner_ratios = (pressure / surf_press) ** (c.rd / c.cpd)
     parcel_temps = surf_temp * exner_ratios
-    
-    # Calculate saturation mixing ratio at parcel temperatures
-    parcel_qs = jax.vmap(saturation_mixing_ratio)(pressure, parcel_temps)
-    
-    # Check where parcel becomes saturated
-    is_saturated = surf_humid >= parcel_qs
-    
+
+    # Condense the lifted parcel at every level with the same damped
+    # ``cuadjtq`` Newton step the plume uses, so the buoyancy test below sees
+    # the parcel ECHAM would have after its ``cuadjtq`` call: warmed by the
+    # latent heat it actually released, carrying the condensate as load.
+    parcel_t, parcel_q, parcel_l = cuadjtq_newton(
+        parcel_temps, jnp.broadcast_to(surf_humid, parcel_temps.shape), pressure,
+    )
+
+    # Condensation happened here — ECHAM's ``pqu(jk) < zqold(jk)`` test for
+    # "we have reached the LCL".
+    is_saturated = parcel_l > 0.0
+
+    # ECHAM's cloud-base buoyancy, in virtual temperature with condensate
+    # loading, plus the sub-grid thermal excess.
+    zlift = cloud_base_lift(config)
+    buoy_cb = (
+        parcel_t * (1.0 + c.vtmpc1 * parcel_q - parcel_l)
+        - temperature * (1.0 + c.vtmpc1 * humidity)
+        + zlift
+    )
+    # A hard test, deliberately — and NOT wrapped in a sigmoid. The result
+    # feeds the ``argmax`` level pick below, so a sigmoid weight would still
+    # be collapsed to a discrete index and ``zlift``/``thvsig`` would keep the
+    # exactly-zero gradient anyway (``sigmoid(x/w) > 0.5`` *is* ``x > 0``).
+    # Softening belongs with the LCL/LFC/EL argmax rewrite in #665, which
+    # replaces the whole selection with cumulative soft masks; this gate
+    # joins that work rather than growing a width parameter that does nothing.
+    is_buoyant = buoy_cb > 0.0
+
     # Find first level (from bottom up) where saturation occurs
     # Start from surface and go up
     levels = jnp.arange(nlev)
-    
+
     # Mask for levels where saturation occurs
     # Only consider levels above surface but below very high levels
     valid_levels = jnp.logical_and(levels < nlev - 1, levels > 0)
-    saturated_and_valid = jnp.logical_and(is_saturated, valid_levels)
+    saturated_and_valid = jnp.logical_and(
+        jnp.logical_and(is_saturated, is_buoyant), valid_levels,
+    )
 
     # Find nearest-to-surface saturated level: the one with the highest pressure
     # This works regardless of index ordering (TOA-first or surface-first)
     saturated_pressure = jnp.where(saturated_and_valid, pressure, -1.0)
     cloud_base_level = jnp.argmax(saturated_pressure)
     cloud_base_found = saturated_pressure[cloud_base_level] > 0.0
-    
+
     # If no cloud base found, set to surface
     cloud_base_level = jnp.where(cloud_base_found, cloud_base_level, nlev - 1)
     

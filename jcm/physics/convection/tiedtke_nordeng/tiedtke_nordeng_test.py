@@ -357,7 +357,13 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     qs = jax.vmap(
         lambda pp, tt: saturation_specific_humidity(tt, pp)
     )(p[:, 0], T[:, 0])[:, None]
-    rh = jnp.array([0.5, 0.7, 0.75, 0.7, 0.65, 0.6, 0.8, 0.85])[:, None]
+    # Surface RH 0.90, not 0.85: with the cloud-base parcel no longer
+    # over-warmed by the non-conserving saturation adjustment (#661) this
+    # fixture's CAPE is 726 J/kg at 0.85 — below the 1000 J/kg deep
+    # threshold, so it selected ktype=2 and stopped exercising the DEEP
+    # ledger this test is about. 0.90 gives 1563 J/kg and genuine deep
+    # convection.
+    rh = jnp.array([0.5, 0.7, 0.75, 0.7, 0.65, 0.6, 0.8, 0.90])[:, None]
     rho = p / (rd * T)
     dz = jnp.abs(jnp.diff(
         -rd * T[:, 0] / grav * jnp.log(p[:, 0] / 1e5), append=0.0,

@@ -17,7 +17,7 @@ from jax import lax
 from typing import NamedTuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import ConvectionParameters
+from .tiedtke_nordeng import ConvectionParameters, cloud_base_lift
 # The ECHAM cuadjtq-style damped Newton adjustment. It lives in
 # jcm.physics.convection.saturation so that ``calculate_cape_cin`` (in
 # tiedtke_nordeng.py, which this module imports from) can call it too;
@@ -184,6 +184,7 @@ def calculate_updraft(
         jnp.full(nlev, config.cprcon),
         p_base_const,
         jnp.full(nlev, zdnoprc_col),
+        jnp.full(nlev, cloud_base_lift(config)),
     )
 
     # Create specialized step function with config parameters
@@ -191,7 +192,7 @@ def calculate_updraft(
         carry, zbuoy_accum = carry_tuple
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
          entr_base_in, w_deep_in, w_term_buoy, w_term_mf, w_precip,
-         cprcon, p_at_base, zdnoprc) = inputs
+         cprcon, p_at_base, zdnoprc, zlift_K) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -363,6 +364,9 @@ def calculate_updraft(
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
             buoy_new = c.grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
+            # The cloud-base sub-grid thermal excess expressed as a buoyancy,
+            # so it can be compared against ``buoy_new`` below.
+            zlift_buoy = c.grav * zlift_K / virtual_temp_e
 
             # Dynamic cloud-top termination: once above cloud base the parcel
             # becomes negatively buoyant (or the mass flux has already dropped
@@ -380,7 +384,27 @@ def calculate_updraft(
             # exactly like the previous all-or-nothing dump; widths → 0
             # recover the hard termination.
             above_cloud_base = k < kbase
-            surv_buoy = jax.nn.sigmoid(buoy_new / w_term_buoy)
+            # The plume is a warm thermal carrying the same sub-grid excess
+            # ``zlift`` that ``find_cloud_base`` credited it with, so the
+            # termination test must apply it too. Without this the cloud-base
+            # gate admits a level (zbuo + zlift > 0) that the very next
+            # ascent step then rejects (zbuo < 0), and the plume dies one
+            # level above its own base — which is exactly what happens on a
+            # tropical column, where the parcel runs −0.67 K at the LCL and
+            # −0.11 K one level up before turning solidly positive.
+            #
+            # ECHAM restricts its own ascent ``zlift`` bonus to levels whose
+            # neighbour below is still sub-cloud (mo_cuascent.f90:449,
+            # ``klab == 1``), which for a ``cubase``-initiated plume is never
+            # true — there the bonus is reachable only through ``cubasmc``
+            # mid-level triggering. We apply it throughout the ascent instead,
+            # because jcm has no ``klab`` state and because consistency with
+            # the cloud-base gate matters more than reproducing a branch that
+            # is unreachable for the deep and shallow types. ``zlift`` is
+            # added ONLY to the survival test, never to the stored ``buoy``:
+            # the Nordeng organized entrainment reads that diagnostic and
+            # must see the true buoyancy.
+            surv_buoy = jax.nn.sigmoid((buoy_new + zlift_buoy) / w_term_buoy)
             surv_mf = jax.nn.sigmoid(
                 (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
                  - 0.01) / w_term_mf
