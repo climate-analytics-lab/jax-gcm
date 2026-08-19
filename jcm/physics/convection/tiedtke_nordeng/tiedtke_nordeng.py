@@ -30,6 +30,7 @@ import jcm.constants as c
 # Shared Tetens saturation thermodynamics (water+ice "auto" phase, as used
 # throughout the ECHAM/Tiedtke path). Re-exported for backward compatibility.
 from jcm.physics.convection.saturation import (  # noqa: F401
+    cuadjtq_newton,
     saturation_mixing_ratio,
     saturation_vapor_pressure,
 )
@@ -231,16 +232,23 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     #
     # If the parcel arrives at cb already supersaturated (surf_q >
     # qsat(parcel_dry_T, p_cb) — common when find_cloud_base picks the
-    # next discrete level above the true LCL), do a one-step saturation
-    # adjustment: condense the excess water and warm the parcel by L/cp
-    # times the condensate. This raises the cloud-base parcel
-    # temperature to its physically meaningful value and prevents
-    # spurious cold biases that crush CAPE for warm tropical columns.
+    # next discrete level above the true LCL), condense the excess and
+    # warm the parcel by L/cp times the condensate. This raises the
+    # cloud-base parcel temperature to its physically meaningful value
+    # and prevents spurious cold biases that crush CAPE for warm
+    # tropical columns.
+    #
+    # The condensation must go through the damped ``cuadjtq`` Newton step
+    # (same routine the updraft uses), not an undamped ``L/cp·(q - qs(T))``:
+    # condensing warms the parcel, which raises qs, so the undamped form
+    # over-condenses and over-warms — +6.5 K instead of +2.0 K for a
+    # 290 K / 16 g/kg parcel at 900 hPa, inflating CAPE and pushing
+    # columns across the deep/shallow type threshold (issue #661).
     parcel_temp_at_cb_dry = parcel_temp_dry[cb_sf]
     p_cb = p_sf[cb_sf]
-    qsat_at_cb = saturation_mixing_ratio(p_cb, parcel_temp_at_cb_dry)
-    excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
-    cloud_base_temp = parcel_temp_at_cb_dry + (c.alhc / c.cpd) * excess
+    cloud_base_temp, _, _ = cuadjtq_newton(
+        parcel_temp_at_cb_dry, surf_humid, p_cb,
+    )
 
     def _step(parcel_t, args):
         p_curr, p_next, k = args
@@ -268,7 +276,15 @@ def calculate_cape_cin(temperature: jnp.ndarray,
         is_above_cb, parcel_temp_moist_sf, parcel_temp_dry,
     )
     parcel_qs_sf = jax.vmap(saturation_mixing_ratio)(p_sf, parcel_temp_sf)
-    parcel_q_sf = jnp.where(is_above_cb, parcel_qs_sf, surf_humid)
+    # On the pseudoadiabat the parcel carries its saturation value, but it can
+    # never hold *more* vapour than the total water it lifted off the surface
+    # with (condensate is precipitated out, so parcel total water only ever
+    # decreases). Without the cap, a cloud-base level at which the parcel is
+    # still marginally subsaturated is credited with invented moisture and an
+    # unearned virtual-temperature buoyancy — the CAPE-side face of #661.
+    parcel_q_sf = jnp.where(
+        is_above_cb, jnp.minimum(parcel_qs_sf, surf_humid), surf_humid,
+    )
 
     env_tv_sf = T_sf * (1.0 + 0.61 * q_sf)
     parcel_tv_sf = parcel_temp_sf * (1.0 + 0.61 * parcel_q_sf)
