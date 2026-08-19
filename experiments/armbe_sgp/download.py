@@ -1,4 +1,4 @@
-"""Download SGP ARMBE data via the ARM Live Data Web Service.
+"""Download ARM datastreams via the ARM Live Data Web Service.
 
 Uses the raw REST webservice (https://adc.arm.gov/armlive/) through ``requests``
 only — no heavy toolkit needed. Two datastreams are pulled by default:
@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 import requests
@@ -104,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start", default="2018-06-01", help="YYYY-MM-DD")
     ap.add_argument("--end", default="2018-07-01", help="YYYY-MM-DD (exclusive-ish)")
     ap.add_argument("--output", type=Path, default=Path(__file__).parent / "data")
+    ap.add_argument(
+        "--list-only",
+        action="store_true",
+        help="query and print matching filenames without downloading",
+    )
     args = ap.parse_args(argv)
 
     if not args.userid or not args.token:
@@ -114,10 +118,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"output dir: {args.output.resolve()}")
     total = 0
     for ds in args.datastreams:
+        if args.list_only:
+            files = list_files(args.userid, args.token, ds, args.start, args.end)
+            print(f"[{ds}] {len(files)} file(s) in {args.start}..{args.end}")
+            for filename in files:
+                print(f"  {filename}")
+            total += len(files)
+            continue
         got = pull_datastream(args.userid, args.token, ds,
                               args.start, args.end, args.output)
         total += len(got)
-    print(f"\ndone: {total} file(s) present across {len(args.datastreams)} "
+    action = "listed" if args.list_only else "present"
+    print(f"\ndone: {total} file(s) {action} across {len(args.datastreams)} "
           "datastream(s).")
     return 0
 
