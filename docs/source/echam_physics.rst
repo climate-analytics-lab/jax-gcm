@@ -170,7 +170,7 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
-- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent.
+- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent. The condensation-only (``kcall=1``) flavour used by the updraft and by the cloud-base and CAPE parcels is :py:func:`jcm.physics.convection.saturation.cuadjtq_newton`; the ``1 + L/cp · dqs/dT`` denominator is what makes it conserve total water, and every parcel-lifting site now goes through it rather than condensing ``q - qs(T)`` undamped.
 - **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
@@ -217,6 +217,35 @@ Convection activates based on the diagnosed convection type (``ktype``):
    * - ``dt_conv``
      - Convection time step (s)
      - 3600.0
+   * - ``cu_cminbuoy``
+     - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
+     - 0.2
+   * - ``cu_cmaxbuoy``
+     - Ceiling on ``zlift`` (K)
+     - 1.0
+   * - ``cu_cbfac``
+     - Multiplier applied to ``thvsig`` when forming ``zlift`` (-)
+     - 1.0
+   * - ``cu_thvsig``
+     - Sub-grid :math:`\sigma(\theta_v)` at the lowest half level (K)
+     - 1.0
+
+**Cloud-base determination**: cloud base is the lowest level at which a
+dry-adiabatically lifted surface parcel both condenses *and* is positively
+buoyant, comparing condensate-loaded virtual temperatures and crediting the
+sub-grid thermal excess
+
+.. math::
+
+   z_\mathrm{lift} = \min\!\big(\max(c_\mathrm{minbuoy},
+   \min(c_\mathrm{maxbuoy}, \sigma_{\theta_v} \cdot c_\mathrm{bfac})), 1\,\mathrm{K}\big)
+
+following ECHAM ``cubase`` (``mo_cuinitialize.f90``). The same ``zlift`` enters
+the updraft's termination test, so a plume is not seeded at a level the next
+ascent step would immediately reject. ECHAM takes :math:`\sigma_{\theta_v}` from
+vdiff's prognostic :math:`\theta_v` variance; jcm uses the constant
+``cu_thvsig`` until that is threaded through, so raising or lowering it makes
+convective onset harder or easier everywhere.
 
 .. admonition:: Gap vs. ICON-A
 
