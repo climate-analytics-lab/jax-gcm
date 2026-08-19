@@ -125,7 +125,8 @@ def cloud_base_lift(config: ConvectionParameters) -> jnp.ndarray:
     ECHAM sources ``pthvsig`` from vdiff's prognostic θ_v variance at the
     lowest half level. jcm's TTE-TKE scheme prognoses a θ_v variance
     (``vertical_diffusion_types.thv_var_tendency``) but does not yet thread
-    it to convection, so ``config.cu_thvsig`` stands in as a constant.
+    it to convection, so ``config.cu_thvsig`` stands in as a constant —
+    tracked as #683.
     """
     zlift = jnp.clip(config.cu_thvsig * config.cu_cbfac,
                      config.cu_cminbuoy, config.cu_cmaxbuoy)
@@ -172,9 +173,10 @@ def find_cloud_base(temperature: jnp.ndarray,
       is never tested again). That test is against half-level environment
       values which jcm does not yet have on this path (#530), and applying it
       against full-level values suppresses convection far more aggressively
-      than the reference does.
+      than the reference does. Tracked, together with the LCL-only-vs-LFC
+      choice above, as #684.
     * ``zlift`` uses a constant ``config.cu_thvsig`` rather than vdiff's
-      prognostic θ_v variance — see :func:`cloud_base_lift`.
+      prognostic θ_v variance — see :func:`cloud_base_lift` and #683.
 
     ECHAM's *ascent* buoyancy test (mo_cuascent.f90:449) also adds ``zlift``,
     but only where the level below is still sub-cloud (``klab == 1``), which
