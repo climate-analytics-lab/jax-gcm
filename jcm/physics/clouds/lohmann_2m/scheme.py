@@ -145,7 +145,8 @@ def cloud_microphysics_2m(
     cdnc = jnp.maximum(cdnc, cdnc_min)
 
     # pauloc==1 and pclcstar==cloud_fraction are conservative first-pass
-    # approximations — refine in later 5b steps.
+    # approximations. The true pclcstar is min(cloud cover, precip cover),
+    # which only exists inside the flux-coupled scan — see #685.
     autoconv_factor = jnp.ones_like(qc)
     min_cloud_precip_fraction = cloud_fraction
 
@@ -299,13 +300,18 @@ def cloud_microphysics_2m(
         params,
     )
 
+    # ``update_in_cloud_water`` rewrites ``paclc`` (a clear cell with positive
+    # condensation becomes cloudy), and the in-cloud condensate it returns is
+    # defined against that fraction. Every in-cloud → grid-mean conversion
+    # below therefore uses ``cloud_fraction_uicw``.
+
     # ------------------------------------------------------------------
     # Freezing below 238 K (homogeneous freezing, level-independent)
     # ------------------------------------------------------------------
     freezing_condition = temperature < params.cthomi
     (
         icnc_frz, _droplet_freezing_rate, cdnc_frz,
-        _freezing_rate, in_cloud_ice_frz, in_cloud_liquid_frz,
+        freezing_rate_hom, in_cloud_ice_frz, in_cloud_liquid_frz,
     ) = freezing_below_238K(
         freezing_condition,
         cloud_fraction_uicw,
@@ -355,6 +361,13 @@ def cloud_microphysics_2m(
         het_condition, jnp.maximum(cdnc_frz - new_crystals, params.cqtmin), cdnc_frz,
     )
 
+    # Grid-mean freezing ledger (ECHAM pfrl): the single accumulator the
+    # assembly step debits from liquid, credits to ice, and converts to fusion
+    # heat. Carries both legs — homogeneous below cthomi and the immersion
+    # freezing driven by ``ice_nuclei`` (#494) — since both routines above
+    # work on in-cloud condensate, hence the cloud-fraction weighting.
+    freezing_rate = (freezing_rate_hom + frozen_mass) * cloud_fraction_uicw
+
     # ------------------------------------------------------------------
     # WBF (Wegener-Bergeron-Findeisen): liquid → ice in mixed-phase
     # ------------------------------------------------------------------
@@ -377,12 +390,16 @@ def cloud_microphysics_2m(
         & (deposition_rate > 0.0)
         & (0.01 * updraft_velocity < zvervmax_wbf)
     )
+    # ``WBF_process`` computes the grid-mean transfer once (pxlb·paclc/dt) and
+    # reports it three ways — liquid debit, ice credit, fusion warming. All
+    # three are kept and seed the ledger together: they are one transfer, and
+    # the enthalpy budget only closes if the mass and the heat travel with it.
     (
         cdnc_wbf, in_cloud_liquid_wbf, in_cloud_ice_wbf,
-        _liq_tend_wbf, _ice_tend_wbf, dtedt_wbf,
+        liq_tend_wbf, ice_tend_wbf, dtedt_wbf,
     ) = WBF_process(
         wbf_mask,
-        cloud_fraction,
+        cloud_fraction_uicw,
         lsdcp, lvdcp,
         cdnc_het,
         in_cloud_liquid_het,
@@ -415,8 +432,8 @@ def cloud_microphysics_2m(
     ) = precip_formation_cold(
         cold_mask,
         autoconv_factor,
-        cloud_fraction,
-        min_cloud_precip_fraction,
+        cloud_fraction_uicw,
+        cloud_fraction_uicw,   # pclcstar first-pass approximation (#685)
         inv_rho,
         inv_rho,
         temperature,
@@ -434,7 +451,7 @@ def cloud_microphysics_2m(
     )
 
     # Convert in-cloud → grid-mean for tendency computation.
-    qi_after_cold = in_cloud_ice_cold * cloud_fraction
+    qi_after_cold = in_cloud_ice_cold * cloud_fraction_uicw
     # (qc_to_snow / qi_to_snow state differences removed with the qr/qs
     # ledger — see the dqrdt/dqsdt note below.)
 
@@ -509,17 +526,21 @@ def cloud_microphysics_2m(
             params,
         )
 
-        # --- Melting --- (per-level pimlt/psmlt/pximlt are KEPT: the
-        # in-cloud melt mass goes to cloud liquid, the falling-ice melt to
-        # cloud liquid, the snow melt to rain — all with per-level fusion
-        # cooling in update_tendencies. The previous scan discarded all
-        # three (melted in-cloud ice VANISHED from the mass ledger, only
-        # the ICNC→CDNC number transfer survived) and broadcast a
-        # column-accumulated snow_melt to every level (finding 2.23).
+        # --- Melting --- per-level pimlt/psmlt/pximlt all reach the ledger:
+        # in-cloud melt and falling-ice melt go to cloud liquid, snow melt to
+        # rain, each with its own fusion cooling in update_tendencies.
+        #
+        # The running ice tendency is threaded THROUGH the routine, which is
+        # how ECHAM stops the two ice sinks claiming the same mass:
+        # ``pimlt = max(pxim1 + ztmst·pxite, 0)`` reconstructs the ice left
+        # AFTER sedimentation, then debits that. So the sedimentation delta
+        # must be in ``pxite`` on the way in, and what comes back out is the
+        # combined sediment-plus-melt tendency the ledger wants.
+        sedi_ice_tendency = (qi_post_sedi - qi_k) / dt
         (
             icnc_post_melt, _qmel, cdnc_post_melt,
             rain_flux, snow_flux, ice_flux, ice_flux_n,
-            _ice_tend, pimlt_k, psmlt_k, pximlt_k,
+            ice_tend_k, pimlt_k, psmlt_k, pximlt_k,
         ) = melting_snow_and_ice(
             melt_k, t_k, qi_k, dp_k,
             icnc_post_sedi, lsdcp, lvdcp,
@@ -527,7 +548,7 @@ def cloud_microphysics_2m(
             jnp.array(0.0),  # qmel accumulator
             cdnc_k,
             rain_flux, snow_flux, ice_flux, ice_flux_n,
-            jnp.array(0.0),  # ice_tendency
+            sedi_ice_tendency,
             dt,
             params,
         )
@@ -591,7 +612,7 @@ def cloud_microphysics_2m(
         # which also makes the bottom row equal ``surface_snow_flux``
         # exactly.
         frozen_flux_k = snow_flux + jnp.where(is_bottom_k, 0.0, ice_flux)
-        level_out = (qi_post_sedi, icnc_post_melt, cdnc_post_melt,
+        level_out = (ice_tend_k, icnc_post_melt, cdnc_post_melt,
                      ice_sublim_k, snow_sublim_k, rain_evap_k,
                      psmlt_level, pimlt_k, pximlt_k,
                      rain_flux, frozen_flux_k)
@@ -601,7 +622,7 @@ def cloud_microphysics_2m(
     nlev_scan = temperature.shape[0]
     is_bottom_level = jnp.arange(nlev_scan) == (nlev_scan - 1)
     scan_inputs = (
-        cloud_fraction, air_density_correction, pressure_thickness,
+        cloud_fraction_uicw, air_density_correction, pressure_thickness,
         air_density, inv_rho, qi_after_cold, icnc_cold, cdnc_cold,
         temperature, melt_mask,
         specific_humidity, dp_over_g, subsat_wrt_ice, subsat_wrt_water,
@@ -617,7 +638,7 @@ def cloud_microphysics_2m(
     _final_carry, scan_outs = jax.lax.scan(
         _flux_coupled_step, init_carry, scan_inputs,
     )
-    (qi_after_scan, icnc_after_scan, cdnc_after_scan,
+    (ice_tendency_scan, icnc_after_scan, cdnc_after_scan,
      ice_sublim, snow_sublim, rain_evap,
      psmlt_per_level, pimlt_per_level, pximlt_per_level,
      rain_flux_profile, snow_flux_profile) = scan_outs
@@ -645,8 +666,15 @@ def cloud_microphysics_2m(
     ) = update_tendencies_and_important_vars(
         icnc=icnc_after_scan,
         cdnc=cdnc_after_scan,
-        ice_mmr_prev=in_cloud_ice_cold,
-        liq_mmr_prev=in_cloud_liquid_cold,
+        # ECHAM's pxim1/pxlm1 are the GRID-MEAN condensate the step started
+        # from, matching the increments the ledger adds to them (condensation,
+        # rain formation, riming, melting, freezing are all grid-mean). They
+        # reach the outputs only through the negative-mass guard, which tests
+        # the reconstructed ``*_mmr_next`` against the grid-mean threshold
+        # ``ccwmin`` — so an in-cloud magnitude here (larger by 1/cf) would be
+        # compared against the wrong scale in both directions.
+        ice_mmr_prev=qi,
+        liq_mmr_prev=qc,
         # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the previous-step
         # tracer values in per-kg-of-air. ``cdnc`` and ``icnc`` here are
         # the working per-m^3 values (qnc * rho, qni * rho), so we pass
@@ -660,7 +688,7 @@ def cloud_microphysics_2m(
         condensation_rate=condensation_rate,
         deposition_rate=deposition_rate,
         rain_evap_mmr=rain_evap,
-        freezing_rate=_freezing_rate,
+        freezing_rate=freezing_rate,
         tompkins_ice=zero,
         tompkins_liq=zero,
         incloud_ice_melt=pimlt_per_level,
@@ -695,15 +723,18 @@ def cloud_microphysics_2m(
         ice_cloud_flag=ice_cloud_flag,
         cloud_fraction=cloud_fraction_uicw,
         specific_humidity_tendency=zero,
-        temp_tendency=dtedt_wbf,     # seed with WBF contribution
-        # ECHAM folds ice sedimentation into pxite BEFORE this ledger
-        # (mo_cloud_micro_2m.f90 section 4: pxite = ztmst_rcp·(zxip1 −
-        # pxim1) after sedimentation_ice) — seeding zero here emitted the
-        # bottom-reaching ice flux as surface snow with no qi debit,
-        # opening the flux-form budget by exactly that flux (Codex review
-        # on #554).
-        ice_tendency=(qi_after_scan - qi_after_cold) / dt,
-        liq_tendency=zero,
+        # WBF is the one process that reports its transfer as a tendency
+        # rather than a per-step increment, so its three legs seed the three
+        # INOUT accumulators here (heat, ice credit, liquid debit).
+        temp_tendency=dtedt_wbf,
+        # ECHAM folds ice sedimentation AND melting into pxite before this
+        # ledger (mo_cloud_micro_2m.f90 section 4), so the scan's combined
+        # per-level tendency arrives here as a seed rather than as one of the
+        # increments below; WBF's ice credit joins it. Without the
+        # sedimentation leg the bottom-reaching ice flux would leave as
+        # surface snow with no matching qi debit (#554).
+        ice_tendency=ice_tendency_scan + ice_tend_wbf,
+        liq_tendency=liq_tend_wbf,
         tracer_tendency_cdnc=zero,
         tracer_tendency_icnc=zero,
         incloud_liq_before_rain=in_cloud_liquid,  # before warm step
@@ -761,7 +792,7 @@ def cloud_microphysics_2m(
     autoconv_rate_col = jnp.sum(autoconv_only * air_mass) / dt
     accretion_rate_col = jnp.sum(accretion_only * air_mass) / dt
     wbf_rate_col = jnp.sum(
-        (in_cloud_liquid_het - in_cloud_liquid_wbf) * cloud_fraction
+        (in_cloud_liquid_het - in_cloud_liquid_wbf) * cloud_fraction_uicw
         * air_mass) / dt
 
     # Microphysical effective radii (ECHAM preffl/preffi, um) — consumed
@@ -1009,9 +1040,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,
             # or driven below ``clc_min``, are no longer cloudy. Radiation and
-            # the aerosol cloud-borne partition both read this, so leaving the
-            # pre-microphysics value here left them seeing cloud that the step
-            # had already removed.
+            # the aerosol cloud-borne partition read this, and must see the
+            # cloud the step actually leaves behind.
             cloud_fraction=cloud_fraction_all.T,
             qnc_prev=qnc, qni_prev=qni,
             precip_rain=surface_rain_flux,
