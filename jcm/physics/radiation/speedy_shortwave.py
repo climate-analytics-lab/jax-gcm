@@ -1,3 +1,5 @@
+import functools
+
 import jax.numpy as jnp
 from jax import jit, vmap
 from jax import lax
@@ -33,6 +35,50 @@ from jcm.physics.speedy.smoothing import (
 #     stratocumulus deck.
 _GSE_SIGMA_TOP, _GSE_SIGMA_BOT = PBL_TOP_SIGMA, 0.95
 _CLOUDC_REF_SIGMAS = (0.34, 0.51, 0.685)  # free-troposphere layer centres
+_NESTED_RH_SIGMAS = (0.20, 0.34, 0.51, 0.685, 0.835, 0.95)
+_NESTED_RH_CALIBRATED_COEFFICIENTS = (
+    1.0803934227259704,
+    0.9798508872916644,
+    -0.0008863295063258815,
+)
+CLOUD_COVER_SCHEMES = (
+    "speedy",
+    "sr_total_cloudc",
+    "sr_nested_rh",
+    "sr_nested_rh_calibrated",
+)
+
+
+def nested_rh_features(rh, fsg):
+    """Derive the fixed-sigma RH summaries used by the nested SR closure."""
+    bounded_rh = jnp.clip(rh, 0.0, 1.2)
+    rh_20, rh_34, rh_51, rh_685, rh_835, rh_95 = (
+        interp_to_sigma(bounded_rh, fsg, sigma) for sigma in _NESTED_RH_SIGMAS
+    )
+    sampled_rh = jnp.stack((rh_20, rh_34, rh_51, rh_685, rh_835, rh_95))
+    return {
+        "rh_low_mean": (rh_685 + rh_835 + rh_95) / 3.0,
+        "rh_mid_mean": (rh_34 + rh_51) / 2.0,
+        "rh_high_mean": (rh_20 + rh_34) / 2.0,
+        "rh_vertical_range": jnp.max(sampled_rh, axis=0) - jnp.min(sampled_rh, axis=0),
+    }
+
+
+def nested_rh_cloud_cover(rh, fsg, *, calibrated=False):
+    """Evaluate the validation-selected nested-RH cloud-cover closure."""
+    features = nested_rh_features(rh, fsg)
+    a_vertical, a_high, bias = (
+        _NESTED_RH_CALIBRATED_COEFFICIENTS if calibrated else (1.0, 1.0, 0.0)
+    )
+    low_mid = features["rh_low_mean"] + features["rh_mid_mean"]
+    return jnp.tanh(
+        low_mid
+        * (
+            a_vertical * features["rh_vertical_range"] ** 3
+            + a_high * features["rh_high_mean"]
+        )
+        + bias
+    )
 
 @jit
 def get_shortwave_rad_fluxes(
@@ -367,23 +413,27 @@ def get_zonal_average_fields(
     
     return physics_data
 
-@jit
+@functools.partial(jit, static_argnames=("cloud_cover_scheme",))
 def get_clouds(
     state: PhysicsState,
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    terrain: TerrainData
+    terrain: TerrainData,
+    cloud_cover_scheme: str = "speedy",
 ) -> tuple[PhysicsTendency, PhysicsData]:
 
     # if compute_shortwave is true, then clouds
     # otherwise return the same physics_data and empty tendencies
     zero_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
-    state, physics_data, parameters, forcing, terrain, tendencies = clouds((state, physics_data, parameters, forcing, terrain, zero_tendencies))
+    state, physics_data, parameters, forcing, terrain, tendencies = clouds(
+        (state, physics_data, parameters, forcing, terrain, zero_tendencies),
+        cloud_cover_scheme=cloud_cover_scheme,
+    )
     return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, lambda: tendencies, lambda: zero_tendencies), physics_data
 
-@jit
-def clouds(operand):
+@functools.partial(jit, static_argnames=("cloud_cover_scheme",))
+def clouds(operand, cloud_cover_scheme: str = "speedy"):
     """Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
@@ -401,6 +451,8 @@ def clouds(operand):
         clstr: Stratiform cloud cover
 
     """
+    if cloud_cover_scheme not in CLOUD_COVER_SCHEMES:
+        raise ValueError(f"unknown cloud-cover scheme: {cloud_cover_scheme!r}")
     state, physics_data, parameters, forcing, terrain, tendencies = operand
 
     # Stratocumulus stability gradient: dry static energy gradient across the
@@ -483,33 +535,43 @@ def clouds(operand):
     w_cov = parameters.shortwave_radiation.cover_smoothing
     rh = humidity.rh
     rhcl1 = parameters.shortwave_radiation.rhcl1
-    cloudc = smooth_pos(interp_to_sigma(rh, fsg, PBL_TOP_SIGMA) - rhcl1, w_cov)
+    rh_cloudc_max = interp_to_sigma(rh, fsg, PBL_TOP_SIGMA)
     for sig_ref in _CLOUDC_REF_SIGMAS:
-        cloudc = smooth_max(cloudc, interp_to_sigma(rh, fsg, sig_ref) - rhcl1, w_cov)
+        rh_cloudc_max = smooth_max(rh_cloudc_max, interp_to_sigma(rh, fsg, sig_ref), w_cov)
 
-    # Third for loop (two levels)
-    # Perform the calculations (Two Loops)
-    # The precipitation term has three sharp sites: the pmaxcl cap, the
-    # sqrt corner at zero precipitation (slope 1/(2*sqrt(eps)) ~ 1.6e4
-    # with the hard epsilon floor), and the saturation of the total cover
-    # at 1. With cover_smoothing on, the cap and saturation become
-    # hyperbolic minima and the sqrt is regularized as sqrt(pr1 + delta)
-    # with delta = (w*pmaxcl)^2, bounding the corner slope at
-    # 1/(2*w*pmaxcl).
-    pmaxcl = parameters.shortwave_radiation.pmaxcl
-    pr1 = smooth_min(pmaxcl, 86.4 * (conv.precnv + condensation.precls), w_cov * pmaxcl)
-    sqrt_arg = jnp.where(
-        w_cov > 0.0,
-        smooth_pos(pr1, w_cov) + (w_cov * pmaxcl) ** 2,
-        jnp.maximum(epsilon, pr1),
-    )
-    cloudc = smooth_min(
-        1.0,
-        parameters.shortwave_radiation.wpcl * jnp.sqrt(sqrt_arg)
-        + smooth_min(1.0, cloudc * rrcl, w_cov)**2.0,
-        w_cov,
-    )
-    cloudc = jnp.where(jnp.isnan(cloudc), 1.0, cloudc)
+    if cloud_cover_scheme == "speedy":
+        cloudc = smooth_pos(rh_cloudc_max - rhcl1, w_cov)
+        # The precipitation term has three sharp sites: the pmaxcl cap, the
+        # sqrt corner at zero precipitation, and saturation at one.
+        pmaxcl = parameters.shortwave_radiation.pmaxcl
+        pr1 = smooth_min(pmaxcl, 86.4 * (conv.precnv + condensation.precls), w_cov * pmaxcl)
+        sqrt_arg = jnp.where(
+            w_cov > 0.0,
+            smooth_pos(pr1, w_cov) + (w_cov * pmaxcl) ** 2,
+            jnp.maximum(epsilon, pr1),
+        )
+        cloudc = smooth_min(
+            1.0,
+            parameters.shortwave_radiation.wpcl * jnp.sqrt(sqrt_arg)
+            + smooth_min(1.0, cloudc * rrcl, w_cov) ** 2.0,
+            w_cov,
+        )
+    elif cloud_cover_scheme == "sr_total_cloudc":
+        # Train-only calibrated SR readout for observed total cloud fraction.
+        cloudc = jnp.tanh(
+            1.100547 * rh_cloudc_max ** 4
+            + 0.673422 * jnp.sqrt(jnp.abs(gse)) * rh[kx - 1] ** 2
+            + 0.084255
+        )
+    else:
+        cloudc = nested_rh_cloud_cover(
+            rh,
+            fsg,
+            calibrated=cloud_cover_scheme == "sr_nested_rh_calibrated",
+        )
+    # The calibrated nested fit has a tiny negative bias and can produce cover
+    # just below zero in completely dry columns. Radiation requires a fraction.
+    cloudc = jnp.clip(jnp.where(jnp.isnan(cloudc), 1.0, cloudc), 0.0, 1.0)
     icltop = jnp.minimum(conv.iptop, icltop)
 
     # 2.  Equivalent specific humidity of clouds
@@ -521,12 +583,15 @@ def clouds(operand):
 
     # Fourth for loop (Two Loops)
     # 2. Stratocumulus clouds over sea and land
-    fstab = smooth_clip01(rgse * (gse - parameters.shortwave_radiation.gse_s0), w_cov)
-    # Stratocumulus clouds over sea
-    clstr = fstab * smooth_pos(parameters.shortwave_radiation.clsmax - clfact * cloudc, w_cov)
-    # Stratocumulus clouds over land
-    clstrl = smooth_max(clstr, parameters.shortwave_radiation.clsminl, w_cov) * humidity.rh[kx - 1]
-    clstr = clstr + terrain.fmask * (clstrl - clstr)
+    if cloud_cover_scheme == "speedy":
+        fstab = smooth_clip01(rgse * (gse - parameters.shortwave_radiation.gse_s0), w_cov)
+        # Stratocumulus clouds over sea
+        clstr = fstab * smooth_pos(parameters.shortwave_radiation.clsmax - clfact * cloudc, w_cov)
+        # Stratocumulus clouds over land
+        clstrl = smooth_max(clstr, parameters.shortwave_radiation.clsminl, w_cov) * humidity.rh[kx - 1]
+        clstr = clstr + terrain.fmask * (clstrl - clstr)
+    else:
+        clstr = jnp.zeros_like(cloudc)
     # Cloud cover is a fraction: cap at 1. The land-branch RH amplification
     # above is unbounded when the lowest layer supersaturates (rh > 1), which
     # the thin surface layers of high-nlev grids do routinely over cold land

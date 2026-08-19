@@ -605,7 +605,7 @@ class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """
 
     @staticmethod
-    def _cloud_diagnostics(kx, ix=64, il=32):
+    def _cloud_diagnostics(kx, ix=64, il=32, cloud_cover_scheme="speedy"):
         """Run get_clouds on analytic sigma-profiles discretized to kx levels."""
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.physics_data import (
@@ -652,8 +652,10 @@ class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
             (kx, ix, il), specific_humidity=qa, geopotential=phig,
             normalized_surface_pressure=jnp.ones(xy))
 
-        _, data_out = get_clouds(state, physics_data, parameters,
-                                 ForcingData.zeros(xy), terrain)
+        _, data_out = get_clouds(
+            state, physics_data, parameters, ForcingData.zeros(xy), terrain,
+            cloud_cover_scheme=cloud_cover_scheme,
+        )
         return data_out.shortwave_rad
 
     def test_gse_cloudc_clstr_agree_across_level_counts(self):
@@ -669,7 +671,60 @@ class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
             np.testing.assert_allclose(sw.cloudc, ref.cloudc, atol=0.05,
                                        err_msg=f"cloudc drifted at nlev={kx}")
             np.testing.assert_allclose(sw.cloudstr, ref.cloudstr, atol=0.05,
-                                       err_msg=f"cloudstr drifted at nlev={kx}")
+                                        err_msg=f"cloudstr drifted at nlev={kx}")
+
+    def test_sr_total_cloudc_is_bounded_and_one_component(self):
+        default = self._cloud_diagnostics(kx=8)
+        sr = self._cloud_diagnostics(kx=8, cloud_cover_scheme="sr_total_cloudc")
+        self.assertTrue(bool((sr.cloudc >= 0.0).all()))
+        self.assertTrue(bool((sr.cloudc <= 1.0).all()))
+        np.testing.assert_allclose(sr.cloudstr, 0.0)
+        self.assertFalse(np.allclose(np.asarray(default.cloudc), np.asarray(sr.cloudc)))
+
+    def test_nested_rh_schemes_are_bounded_and_one_component(self):
+        uncalibrated = self._cloud_diagnostics(kx=8, cloud_cover_scheme="sr_nested_rh")
+        calibrated = self._cloud_diagnostics(
+            kx=8, cloud_cover_scheme="sr_nested_rh_calibrated"
+        )
+        for diagnostics in (uncalibrated, calibrated):
+            self.assertTrue(bool((diagnostics.cloudc >= 0.0).all()))
+            self.assertTrue(bool((diagnostics.cloudc <= 1.0).all()))
+            np.testing.assert_allclose(diagnostics.cloudstr, 0.0)
+        self.assertFalse(
+            np.allclose(np.asarray(uncalibrated.cloudc), np.asarray(calibrated.cloudc))
+        )
+
+    def test_nested_rh_cloud_cover_agrees_across_level_counts(self):
+        for scheme in ("sr_nested_rh", "sr_nested_rh_calibrated"):
+            reference = self._cloud_diagnostics(kx=8, cloud_cover_scheme=scheme)
+            for kx in (16, 24):
+                diagnostics = self._cloud_diagnostics(kx=kx, cloud_cover_scheme=scheme)
+                np.testing.assert_allclose(
+                    diagnostics.cloudc,
+                    reference.cloudc,
+                    atol=0.05,
+                    err_msg=f"{scheme} cloud cover drifted at nlev={kx}",
+                )
+
+    def test_nested_rh_features_match_offline_definition(self):
+        from jcm.physics.radiation.speedy_shortwave import nested_rh_features
+        from jcm.physics.speedy.speedy_coords import compute_speedy_vertical_coords
+
+        _, fsg, *_ = compute_speedy_vertical_coords(8)
+        # The native eight-level centres coincide with all six feature sigmas.
+        rh = jnp.asarray((0.1, 0.2, 1.4, 0.4, 0.5, 0.6, 0.7, 0.8))[:, None, None]
+        features = nested_rh_features(rh, fsg)
+        bounded = np.clip(np.asarray(rh[:, 0, 0]), 0.0, 1.2)
+        sampled = bounded[[2, 3, 4, 5, 6, 7]]
+
+        expected = {
+            "rh_low_mean": np.mean(sampled[3:]),
+            "rh_mid_mean": np.mean(sampled[1:3]),
+            "rh_high_mean": np.mean(sampled[:2]),
+            "rh_vertical_range": np.ptp(sampled),
+        }
+        for name, value in expected.items():
+            np.testing.assert_allclose(features[name], value, atol=1e-7)
 
 
 class TestStratiformCloudCoverBounded(unittest.TestCase):

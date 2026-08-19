@@ -1,13 +1,14 @@
 # Data Inventory and Future Products
 
-This note distinguishes fields already available in the downloaded 2018 SGP
-ARMBE archive from products that would support future validation or a different
+This note distinguishes fields already available in the downloaded ARMBE
+collections from products that would support future validation or a different
 single-column-model experiment. It does not imply that every listed product
-should be downloaded or used.
+should be downloaded or used. `LOCAL_DATA_AUDIT.md` records the exact local
+filesystem inventory and canonical-release policy.
 
-## Current Download
+## Original 2018 Experiment Input
 
-The local ARM order contains annual 2018 files for:
+The original SGP experiment uses annual 2018 files for:
 
 - `sgparmbeatmC1.c1`: atmospheric state, surface meteorology, turbulent fluxes,
   and pressure- and height-grid sounding fields.
@@ -25,6 +26,16 @@ ARM order `267892` contains the following nominal coordinate-time coverage.
 Coverage does not imply a complete usable atmospheric profile at every listed
 timestamp; standard ARMBEATM sounding-derived states are substantially sparser
 than their hourly time coordinate.
+
+`ARMBE_STANDARD_VARIABLE_CADENCE.md` gives a complete per-variable breakdown of
+the one-hour temporal operator, empirical finite-value availability, and spacing
+between available cells across order `267892`. Its source CSV can be regenerated
+with `summarize_armbe_cadence.py`.
+
+The order is complete relative to its 298-file order manifest, but it is not a
+complete copy of every ARMBE family in the current ARM catalog. In particular,
+local data lack `sgparmbe2dgridX1.c1` and `sgparmbestnsX1.c1`. See
+`LOCAL_DATA_AUDIT.md` for the catalog comparison and duplicate-collection audit.
 
 | Site | Standard ATM coverage | Standard CLDRAD coverage | High-resolution coverage |
 |---|---|---|---|

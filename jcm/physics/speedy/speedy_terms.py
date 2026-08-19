@@ -302,10 +302,17 @@ class SpeedyClouds(SpeedyTermBase):
     category: ClassVar[str] = "clouds"
 
     def __init__(
-        self, sw_params: ShortwaveRadiationParameters | None = None,
+        self,
+        sw_params: ShortwaveRadiationParameters | None = None,
+        cloud_cover_scheme: str = "speedy",
     ):
         """Initialize SpeedyClouds."""
         super().__init__()
+        from jcm.physics.radiation.speedy_shortwave import CLOUD_COVER_SCHEMES
+
+        if cloud_cover_scheme not in CLOUD_COVER_SCHEMES:
+            raise ValueError(f"unknown cloud-cover scheme: {cloud_cover_scheme!r}")
+        self.cloud_cover_scheme = cloud_cover_scheme
         self.params = nnx.Param(sw_params or ShortwaveRadiationParameters.default())
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -313,7 +320,10 @@ class SpeedyClouds(SpeedyTermBase):
         params = _params_with(shortwave_radiation=self.params.get_value())
 
         from jcm.physics.radiation.speedy_shortwave import get_clouds
-        tend, data = get_clouds(state, data, params, forcing, terrain)
+        tend, data = get_clouds(
+            state, data, params, forcing, terrain,
+            cloud_cover_scheme=self.cloud_cover_scheme,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -512,12 +522,18 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
 # Factory function
 # ---------------------------------------------------------------------------
 
-def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool = True):
+def speedy_physics(
+    parameters: Parameters | None = None,
+    checkpoint_terms: bool = True,
+    cloud_cover_scheme: str = "speedy",
+):
     """Create a ComposablePhysics with the standard SPEEDY term ordering.
 
     Args:
         parameters: Optional Parameters struct. Uses defaults if None.
         checkpoint_terms: Whether to checkpoint terms for memory efficiency.
+        cloud_cover_scheme: One of ``"speedy"``, ``"sr_total_cloudc"``,
+            ``"sr_nested_rh"``, or ``"sr_nested_rh_calibrated"``.
 
     Returns:
         A ComposablePhysics instance with all SPEEDY terms.
@@ -536,7 +552,10 @@ def speedy_physics(parameters: Parameters | None = None, checkpoint_terms: bool 
             SpeedyHumidity(),
             SpeedyConvection(convection_params=p.convection),
             SpeedyLargeScaleCondensation(condensation_params=p.condensation),
-            SpeedyClouds(sw_params=p.shortwave_radiation),
+            SpeedyClouds(
+                sw_params=p.shortwave_radiation,
+                cloud_cover_scheme=cloud_cover_scheme,
+            ),
             SpeedyShortwaveRadiation(
                 sw_params=p.shortwave_radiation,
                 mod_radcon_params=p.mod_radcon,

@@ -471,6 +471,26 @@ To customize physics parameters:
    # Use in model
    model = Model(coords=get_speedy_coords(), physics=physics)
 
+Experimental Cloud-Cover Readouts
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The SPEEDY factory accepts an experimental ``cloud_cover_scheme`` selector. The
+default ``"speedy"`` retains the native two-component diagnosis. The
+``"sr_nested_rh"`` and ``"sr_nested_rh_calibrated"`` options use one-component
+symbolic readouts derived from the model's existing relative-humidity profile:
+
+.. code-block:: python
+
+   physics = speedy_physics(cloud_cover_scheme="sr_nested_rh")
+   model = Model(coords=get_speedy_coords(), physics=physics)
+
+Both readouts interpolate RH to fixed physical sigma surfaces before calculating
+low-, middle-, and high-level means and the vertical RH range. They set the
+separate stratiform cover to zero. These closures were selected from pooled ARM
+data on the T31L8 configuration and remain experimental outside that evaluation;
+the fixed-sigma definitions make other vertical resolutions executable but do
+not establish their accuracy.
+
 Viewing All Parameters
 ^^^^^^^^^^^^^^^^^^^^^^^
 
