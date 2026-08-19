@@ -217,10 +217,11 @@ class ModelPredictions:
             additional_coords=additional_coords,
         )
 
-        # Attach units / descriptions from the physics-specific units table.
-        units_df = pd.read_csv(DYNAMICS_UNITS_TABLE_CSV_PATH)
-        if self._physics.UNITS_TABLE_CSV_PATH is not None:
-            units_df = pd.concat([units_df, pd.read_csv(self._physics.UNITS_TABLE_CSV_PATH)], ignore_index=True)
+        # Attach units / descriptions from the physics-specific units tables.
+        units_df = pd.concat(
+            [pd.read_csv(p) for p in
+             (DYNAMICS_UNITS_TABLE_CSV_PATH, *self._physics.units_table_paths())],
+            ignore_index=True)
         for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
             if var in pred_ds:
                 pred_ds[var].attrs["units"] = unit

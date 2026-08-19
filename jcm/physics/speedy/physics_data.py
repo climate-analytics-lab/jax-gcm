@@ -1,8 +1,22 @@
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import tree_math
 from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jax import tree_util
+
+
+def _field_names(struct_cls):
+    """Field names of a ``tree_math.struct``, in declaration order."""
+    return tuple(f.name for f in dataclasses.fields(struct_cls))
+
+
+def _reject_unknown(overrides, names):
+    """Fail loudly on a misspelled or stale field name in a ``**overrides`` call."""
+    unknown = sorted(set(overrides) - set(names))
+    if unknown:
+        raise TypeError(f"unknown field(s) {unknown}; expected any of {list(names)}")
 
 
 def _safe_isnan(x):
@@ -351,7 +365,15 @@ class HumidityData:
 
 @tree_math.struct
 class SurfaceFluxData:
-    """Parameters:
+    """Surface fluxes, all as ``(ix, il)`` grid maps.
+
+    The fluxes the atmosphere feels are area-weighted land/sea grid means;
+    the land and sea contributions are internal to
+    ``jcm.physics.surface.speedy_surface_flux``. ``hfluxn`` is additionally
+    published per surface type because it drives a coupled surface model's
+    own temperature, where the grid mean would be the wrong forcing.
+
+    Fields:
     ustr: u-stress
     vstr: v-stress
     shf: Sensible heat flux
@@ -359,7 +381,9 @@ class SurfaceFluxData:
     rlus: Upward flux of long-wave radiation at the surface
     rlds: Downward flux of long-wave radiation at the surface
     rlns: Net upward flux of long-wave radiation at the surface
-    hfluxn: Net downward heat flux
+    hfluxn: Net downward heat flux into the surface
+    hfluxn_land: Net downward heat flux into the land surface
+    hfluxn_sea: Net downward heat flux into the sea surface
     tsfc: Surface temperature
     tskin: Skin surface temperature
     u0: Near-surface u-wind
@@ -367,73 +391,50 @@ class SurfaceFluxData:
     t0: Near-surface temperature
     """
 
-    ustr: jnp.ndarray 
-    vstr: jnp.ndarray 
-    shf: jnp.ndarray 
-    evap: jnp.ndarray 
-    rlus: jnp.ndarray 
-    rlds: jnp.ndarray 
-    rlns: jnp.ndarray 
-    hfluxn: jnp.ndarray 
-    tsfc: jnp.ndarray 
-    tskin: jnp.ndarray 
-    u0: jnp.ndarray 
-    v0: jnp.ndarray 
-    t0: jnp.ndarray 
+    ustr: jnp.ndarray
+    vstr: jnp.ndarray
+    shf: jnp.ndarray
+    evap: jnp.ndarray
+    rlus: jnp.ndarray
+    rlds: jnp.ndarray
+    rlns: jnp.ndarray
+    hfluxn: jnp.ndarray
+    hfluxn_land: jnp.ndarray
+    hfluxn_sea: jnp.ndarray
+    tsfc: jnp.ndarray
+    tskin: jnp.ndarray
+    u0: jnp.ndarray
+    v0: jnp.ndarray
+    t0: jnp.ndarray
 
     @classmethod
-    def zeros(cls, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
-        return cls(
-            ustr = ustr if ustr is not None else jnp.zeros((nodal_shape)+(3,)),
-            vstr = vstr if vstr is not None else jnp.zeros((nodal_shape)+(3,)),
-            shf = shf if shf is not None else jnp.zeros((nodal_shape)+(3,)),
-            evap = evap if evap is not None else jnp.zeros((nodal_shape)+(3,)),
-            rlus = rlus if rlus is not None else jnp.zeros((nodal_shape)+(3,)),
-            rlds = rlds if rlds is not None else jnp.zeros(nodal_shape),
-            rlns = rlns if rlns is not None else jnp.zeros(nodal_shape),
-            hfluxn = hfluxn if hfluxn is not None else jnp.zeros((nodal_shape)+(2,)),
-            tsfc = tsfc if tsfc is not None else jnp.zeros(nodal_shape),
-            tskin = tskin if tskin is not None else jnp.zeros(nodal_shape),
-            u0 = u0 if u0 is not None else jnp.zeros(nodal_shape),
-            v0 = v0 if v0 is not None else jnp.zeros(nodal_shape),
-            t0 = t0 if t0 is not None else jnp.zeros(nodal_shape)
-        )
-    
-    @classmethod
-    def ones(cls, nodal_shape, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
-        return cls(
-            ustr = ustr if ustr is not None else jnp.ones((nodal_shape)+(3,)),
-            vstr = vstr if vstr is not None else jnp.ones((nodal_shape)+(3,)),
-            shf = shf if shf is not None else jnp.ones((nodal_shape)+(3,)),
-            evap = evap if evap is not None else jnp.ones((nodal_shape)+(3,)),
-            rlus = rlus if rlus is not None else jnp.ones((nodal_shape)+(3,)),
-            rlds = rlds if rlds is not None else jnp.ones(nodal_shape),
-            rlns = rlns if rlns is not None else jnp.ones(nodal_shape),
-            hfluxn = hfluxn if hfluxn is not None else jnp.ones((nodal_shape)+(2,)),
-            tsfc = tsfc if tsfc is not None else jnp.ones(nodal_shape),
-            tskin = tskin if tskin is not None else jnp.ones(nodal_shape),
-            u0 = u0 if u0 is not None else jnp.ones(nodal_shape),
-            v0 = v0 if v0 is not None else jnp.ones(nodal_shape),
-            t0 = t0 if t0 is not None else jnp.ones(nodal_shape)
-        )
+    def zeros(cls, nodal_shape, **overrides):
+        return cls._filled(jnp.zeros(nodal_shape), overrides)
 
-    def copy(self, ustr=None, vstr=None, shf=None, evap=None, rlus=None, rlds=None, rlns=None, hfluxn=None, tsfc=None, tskin=None, u0=None, v0=None, t0=None):
+    @classmethod
+    def ones(cls, nodal_shape, **overrides):
+        return cls._filled(jnp.ones(nodal_shape), overrides)
+
+    @classmethod
+    def _filled(cls, fill, overrides):
+        """Build from ``fill``, taking any field given in ``overrides``.
+
+        Every field is a plain 2D map on the nodal grid, so one fill value
+        serves them all — there is no per-field shape to get out of step.
+        """
+        names = _field_names(cls)
+        _reject_unknown(overrides, names)
+        return cls(**{name: overrides.get(name) if overrides.get(name) is not None
+                      else fill for name in names})
+
+    def copy(self, **overrides):
+        names = _field_names(type(self))
+        _reject_unknown(overrides, names)
         return SurfaceFluxData(
-            ustr=ustr if ustr is not None else self.ustr,
-            vstr=vstr if vstr is not None else self.vstr,
-            shf=shf if shf is not None else self.shf,
-            evap=evap if evap is not None else self.evap,
-            rlus=rlus if rlus is not None else self.rlus,
-            rlds=rlds if rlds is not None else self.rlds,
-            rlns=rlns if rlns is not None else self.rlns,
-            hfluxn=hfluxn if hfluxn is not None else self.hfluxn,
-            tsfc=tsfc if tsfc is not None else self.tsfc,
-            tskin=tskin if tskin is not None else self.tskin,
-            u0=u0 if u0 is not None else self.u0,
-            v0=v0 if v0 is not None else self.v0,
-            t0=t0 if t0 is not None else self.t0
-        )
-    
+            **{name: overrides.get(name) if overrides.get(name) is not None
+               else getattr(self, name) for name in names})
+
+
     def isnan(self):
         return tree_util.tree_map(jnp.isnan, self)
 

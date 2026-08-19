@@ -1,11 +1,58 @@
+"""SPEEDY bulk surface fluxes (port of SPEEDY's ``suflux.f90``).
+
+Exchange of momentum, heat and moisture between the surface and the lowest
+model level, using bulk aerodynamic formulae with a stability correction.
+
+Two surface types
+-----------------
+Every flux is computed twice — once over the land fraction of the cell and
+once over the sea fraction — because the two differ in surface temperature,
+albedo, exchange coefficient and (over land) an orographic drag enhancement
+and an interactive skin temperature. The atmosphere only ever feels the
+area-weighted grid mean
+
+    merged = sea + fmask * (land - sea)
+
+so ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` are stored as merged
+2D maps only; the land and sea values are intermediates of this module.
+
+``hfluxn`` is the exception. It is the net heat flux *into the surface
+medium*, i.e. the term that drives a surface component's own temperature
+(the ground below the land skin, or the ocean mixed layer). A coupled land
+or ocean model needs its own tile's value, not the grid mean, so ``hfluxn``
+is published per surface type (``hfluxn_land``, ``hfluxn_sea``) alongside
+the merged grid mean that closes the column energy budget.
+
+Near-surface extrapolation
+--------------------------
+The bulk formulae need air properties at the surface layer (sigma = 0.99),
+not at the lowest model level. Two extrapolations are made:
+
+``t1``  using the *actual* near-surface lapse rate, measured between the
+        lowest layer and a fixed sigma (the sub-cloud-layer top). Anchoring
+        the reference in sigma makes the diagnosed lapse rate — and the
+        stable/unstable branch selected from it — independent of the vertical
+        grid. On the 8-level reference grid the fixed sigma is the
+        second-lowest layer centre, reproducing SPEEDY's original
+        ``wvi[kx-1, 1]`` interpolation weight exactly.
+
+``t2``  using the *dry-adiabatic* lapse rate, which is what the stability
+        correction compares the surface temperature against.
+
+The land and sea variants of each differ only by the orographic offset: sea
+values are extrapolated down to z = 0, land values stay at the model
+orography.
+"""
+
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 from jax import jit
 
-# importing custom functions from library
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
-from jcm.physics.speedy.params import Parameters
+from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
@@ -13,7 +60,263 @@ import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
 from jcm.physics.clouds.speedy_humidity import get_qsat, rel_hum_to_spec_hum
-from jcm.utils import pass_fn
+
+
+class SurfaceTypeFluxes(NamedTuple):
+    """Fluxes over a single surface type, all ``(ix, il)``.
+
+    Sign convention follows SPEEDY: ``ustr``/``vstr`` are the stress on the
+    atmosphere, ``shf``/``evap``/``rlus`` are upward (surface to atmosphere),
+    and ``hfluxn`` is downward (into the surface).
+    """
+
+    ustr: jnp.ndarray    # u-stress [N/m2]
+    vstr: jnp.ndarray    # v-stress [N/m2]
+    shf: jnp.ndarray     # sensible heat flux [W/m2]
+    evap: jnp.ndarray    # evaporation [g/m2/s]
+    rlus: jnp.ndarray    # upward longwave emission [W/m2]
+    hfluxn: jnp.ndarray  # net downward heat flux into the surface [W/m2]
+
+
+class NearSurfaceAir(NamedTuple):
+    """Air properties extrapolated to the surface layer (sigma = 0.99).
+
+    ``*_land`` / ``*_sea`` differ only through the orographic offset in the
+    extrapolation (see the module docstring).
+    """
+
+    psa: jnp.ndarray        # normalised surface pressure
+    u_wind: jnp.ndarray     # near-surface u-wind, fwind0-scaled [m/s]
+    v_wind: jnp.ndarray     # near-surface v-wind, fwind0-scaled [m/s]
+    u_bottom: jnp.ndarray   # lowest model level u-wind [m/s]
+    v_bottom: jnp.ndarray   # lowest model level v-wind [m/s]
+    t_land: jnp.ndarray    # temperature, actual lapse rate [K]
+    t_sea: jnp.ndarray
+    t2_land: jnp.ndarray   # temperature, dry-adiabatic lapse rate [K]
+    t2_sea: jnp.ndarray
+    q_land: jnp.ndarray    # specific humidity [g/kg]
+    q_sea: jnp.ndarray
+    rho_wind: jnp.ndarray  # density * wind speed incl. gustiness [kg/m2/s]
+
+
+def _stability_factor(surface_temp, t2, sfp: SurfaceFluxParameters):
+    """Stability correction multiplying the neutral density-wind product.
+
+    Driven by the surface-to-air potential temperature excess, clipped to
+    +/- ``dtheta``. With ``lscasym`` the stable (negative) side is damped by
+    half, so a stable surface suppresses exchange less than an equally
+    unstable one enhances it.
+    """
+    astab = jnp.where(sfp.lscasym, 0.5, 1.0)
+    rdth = sfp.fstab / sfp.dtheta
+    dth = jnp.where(
+        surface_temp > t2,
+        jnp.minimum(sfp.dtheta, surface_temp - t2),
+        jnp.maximum(-sfp.dtheta, astab * (surface_temp - t2)),
+    )
+    return 1.0 + dth * rdth
+
+
+def _near_surface_humidity(t_near, psa, rh_bottom, q_bottom, sfp: SurfaceFluxParameters):
+    """Near-surface specific humidity [g/kg].
+
+    ``fhum0`` blends between extrapolating at constant relative humidity
+    (1) and holding the lowest-level specific humidity (0).
+    """
+    q_extrapolated, _ = rel_hum_to_spec_hum(t_near, psa, 1.0, rh_bottom)
+    return jnp.where(
+        sfp.fhum0 > 0.0,
+        sfp.fhum0 * q_extrapolated + (1.0 - sfp.fhum0) * q_bottom,
+        q_bottom,
+    )
+
+
+def _land_fluxes(
+    air: NearSurfaceAir,
+    sfp: SurfaceFluxParameters,
+    forcing: ForcingData,
+    terrain: TerrainData,
+    physics_data: PhysicsData,
+    esbc,
+    rsds,
+    rlds,
+) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
+    """Land fluxes and the skin temperature they are evaluated at."""
+    stl_am = forcing.stl_am
+    snowc = physics_data.mod_radcon.snowc
+    alb_l = physics_data.mod_radcon.alb_l
+
+    # Effective skin temperature: the daytime skin excess over the prescribed
+    # land temperature, scaled by absorbed shortwave. Compensates for the
+    # non-linearity of the heat/moisture fluxes within the averaging period.
+    tskin = (stl_am + sfp.ctday * jnp.sqrt(physics_data.speedy_coords.coa)
+             * rsds * (1.0 - alb_l) * air.psa)
+
+    rho_wind = air.rho_wind * _stability_factor(tskin, air.t2_land, sfp)
+
+    # Momentum drag over land takes the neutral density-wind product (no
+    # stability correction) but is enhanced over orography; heat and moisture
+    # exchange use the stability-corrected one. The stress acts on the lowest
+    # level wind, while the density-wind product carries the fwind0-scaled
+    # near-surface wind and the gustiness floor.
+    forog = get_orog_land_sfc_drag(terrain.phis0, sfp.hdrag)
+    cdldv = sfp.cdl * air.rho_wind * forog
+    ustr = -cdldv * air.u_bottom
+    vstr = -cdldv * air.v_bottom
+
+    chlcp = sfp.chl * c.cpd
+    shf = chlcp * rho_wind * (tskin - air.t_land)
+
+    qsat_skin = get_qsat(tskin, air.psa, 1.0)
+
+    # The soil-moisture-limited evaporation onset is a hinge that zeroes
+    # every gradient through dry land columns (and gates the d(Evap)/d(Tskin)
+    # term in the energy balance below on the same hard condition).
+    # evap_smoothing > 0 [g/kg] rounds it with a softplus; 0 keeps the hard
+    # maximum.
+    evap_excess = forcing.soilw_am * qsat_skin - air.q_land
+    evap = sfp.chl * rho_wind * smooth_pos(evap_excess, sfp.evap_smoothing)
+
+    tsk3 = tskin ** 3.0
+    drls = 4.0 * esbc * tsk3
+    rlus = esbc * tsk3 * tskin
+    hfluxn = rsds * (1.0 - alb_l) + rlds - (rlus + shf + alhc * evap)
+
+    def skin_energy_balance(operand):
+        """Redefine the skin temperature so the surface energy budget closes.
+
+        One Newton step on the residual ``hfluxn``, treating the emission,
+        sensible and latent terms as locally linear in the skin temperature.
+        ``hfluxn`` then becomes the conductive flux into the soil below the
+        skin, which is what drives the land reservoir.
+        """
+        tskin, shf, evap, rlus, hfluxn = operand
+
+        clamb = sfp.clambda + snowc * (sfp.clambsn - sfp.clambda)
+        residual = hfluxn - clamb * (tskin - stl_am)
+
+        # d(Evap)/d(Tskin) for a 1-degree increment. The activity weight is
+        # the DERIVATIVE of the (possibly smoothed) evaporation hinge, not a
+        # hard evap > 0 mask: with evap_smoothing on, the softplus tail makes
+        # evap positive in dry columns and the hard mask would hand them the
+        # full latent sensitivity, over-damping the skin update (PR #567).
+        # smooth_gate is exactly the softplus derivative, and reproduces the
+        # hard mask at width 0.
+        evap_gate = smooth_gate(evap_excess, 0.0, sfp.evap_smoothing)
+        dqsat = evap_gate * forcing.soilw_am * (
+            get_qsat(tskin + 1.0, air.psa, 1.0) - qsat_skin)
+
+        dtskin = residual / (
+            clamb + drls + sfp.chl * rho_wind * (c.cpd + alhc * dqsat))
+        tskin = tskin + dtskin
+
+        return (
+            tskin,
+            shf + chlcp * rho_wind * dtskin,
+            evap + sfp.chl * rho_wind * dqsat * dtskin,
+            rlus + drls * dtskin,
+            clamb * (tskin - stl_am),
+        )
+
+    tskin, shf, evap, rlus, hfluxn = jax.lax.cond(
+        sfp.lskineb,
+        skin_energy_balance,
+        lambda operand: operand,
+        operand=(tskin, shf, evap, rlus, hfluxn),
+    )
+
+    return SurfaceTypeFluxes(ustr, vstr, shf, evap, rlus, hfluxn), tskin
+
+
+def _sea_fluxes(
+    air: NearSurfaceAir,
+    sfp: SurfaceFluxParameters,
+    forcing: ForcingData,
+    physics_data: PhysicsData,
+    esbc,
+    rsds,
+    rlds,
+) -> SurfaceTypeFluxes:
+    """Sea fluxes, evaluated at the prescribed sea-surface temperature."""
+    sst = forcing.sea_surface_temperature
+    alb_s = physics_data.mod_radcon.alb_s
+
+    rho_wind = air.rho_wind * _stability_factor(sst, air.t2_sea, sfp)
+
+    cdsdv = sfp.cds * rho_wind
+    ustr = -cdsdv * air.u_bottom
+    vstr = -cdsdv * air.v_bottom
+
+    shf = sfp.chs * c.cpd * rho_wind * (sst - air.t_sea)
+
+    qsat_sea = get_qsat(sst, air.psa, 1.0)
+    evap = sfp.chs * rho_wind * (qsat_sea - air.q_sea)
+
+    rlus = esbc * sst ** 4.0
+    hfluxn = rsds * (1.0 - alb_s) + rlds - (rlus + shf + alhc * evap)
+
+    return SurfaceTypeFluxes(ustr, vstr, shf, evap, rlus, hfluxn)
+
+
+def _extrapolate_to_surface(
+    state: PhysicsState,
+    physics_data: PhysicsData,
+    sfp: SurfaceFluxParameters,
+    terrain: TerrainData,
+) -> tuple[NearSurfaceAir, jnp.ndarray]:
+    """Extrapolate the lowest model level down to the surface layer.
+
+    Returns the near-surface air properties and the merged near-surface
+    temperature ``t0`` (also used for the near-surface density).
+    """
+    psa = state.normalized_surface_pressure
+    ta = state.temperature
+    phi0 = terrain.orog * c.grav
+    sigl = physics_data.speedy_coords.sigl
+    kx = ta.shape[0]
+
+    u_bottom, v_bottom = state.u_wind[-1], state.v_wind[-1]
+    u_wind = sfp.fwind0 * u_bottom
+    v_wind = sfp.fwind0 * v_bottom
+
+    ta_ref = interp_to_sigma(ta, physics_data.speedy_coords.fsg, PBL_TOP_SIGMA)
+    dt1_fac = (jnp.log(0.99) - sigl[kx - 1]) / (sigl[kx - 1] - jnp.log(PBL_TOP_SIGMA))
+    dt1 = dt1_fac * (ta[-1] - ta_ref)
+
+    # Actual-lapse-rate extrapolation; the sea variant continues down to z=0.
+    t1_land = ta[-1] + dt1
+    t1_sea = t1_land - phi0 * dt1 / (c.rd * 288.0 * sigl[kx - 1])
+
+    # Dry-adiabatic extrapolation.
+    rcp = 1.0 / c.cpd
+    t2_sea = ta[-1] + rcp * state.geopotential[-1]
+    t2_land = t2_sea - rcp * phi0
+
+    # Blend the two extrapolations, but only where the near-surface layer is
+    # statically unstable; in a stable layer the lowest-level temperature is
+    # carried down unchanged.
+    unstable = ta[-1] > ta_ref
+    blend = lambda t1, t2: jnp.where(
+        unstable, sfp.ftemp0 * t1 + (1.0 - sfp.ftemp0) * t2, ta[-1])
+    t1_land, t1_sea = blend(t1_land, t2_land), blend(t1_sea, t2_sea)
+
+    t0 = t1_sea + terrain.fmask * (t1_land - t1_sea)
+    rho_wind = ((c.p0 * psa / (c.rd * t0))
+                * jnp.sqrt(u_wind ** 2 + v_wind ** 2 + sfp.vgust ** 2))
+
+    rh_bottom = physics_data.humidity.rh[-1]
+    q_bottom = state.specific_humidity[-1]
+    air = NearSurfaceAir(
+        psa=psa, u_wind=u_wind, v_wind=v_wind,
+        u_bottom=u_bottom, v_bottom=v_bottom,
+        t_land=t1_land, t_sea=t1_sea,
+        t2_land=t2_land, t2_sea=t2_sea,
+        q_land=_near_surface_humidity(t1_land, psa, rh_bottom, q_bottom, sfp),
+        q_sea=_near_surface_humidity(t1_sea, psa, rh_bottom, q_bottom, sfp),
+        rho_wind=rho_wind,
+    )
+    return air, t0
+
 
 @jit
 def get_surface_fluxes(
@@ -21,307 +324,84 @@ def get_surface_fluxes(
     physics_data: PhysicsData,
     parameters: Parameters,
     forcing: ForcingData,
-    terrain: TerrainData
+    terrain: TerrainData,
 ) -> tuple[PhysicsTendency, PhysicsData]:
-    """Parameters
-    ----------
-    psa : 2D array
-        - Normalised surface pressure, state.normalized_surface_pressure
-    ua : 3D array
-        - u-wind, state.u_wind
-    va : 3D array
-        - v-wind, state.v_wind
-    ta :  3D array
-        - Temperature, state.temperature
-    qa : 3D array
-        - Specific humidity [g/kg], state.specific_humidity
-    rh : 3D array
-        - Relative humidity, physics_data.humidity.rh
-    phi : 3D array
-        - Geopotential, state.geopotential
-    phi0 : 2D array
-        - Surface geopotential, terrain.orog * grav
-    fmask : 2D array
-        - Fractional land-sea mask, physics_data.surface_flux.fmask
-    sea_surface_temperature : 2D array
-        - Sea-surface temperature, forcing.sea_surface_temperature
-    rsds : 2D array
-        - Downward flux of short-wave radiation at the surface, physics_data.shortwave_rad.rsds
-    rlds : 2D array
-        - Downward flux of long-wave radiation at the surface, physics_data.surface_flux.rlds
-    lfluxland : boolean, physics_data.surface_flux.lfluxland"
+    """Surface fluxes and the tendencies they impose on the lowest level.
+
+    Args:
+        state: Atmospheric state; the lowest level supplies the bulk-formula
+            air properties.
+        physics_data: Diagnostics; reads ``shortwave_rad.rsds``,
+            ``surface_flux.rlds``, ``humidity.rh``, ``mod_radcon`` albedos and
+            snow cover, and ``speedy_coords``.
+        parameters: SPEEDY parameters; ``surface_flux`` and ``mod_radcon``.
+        forcing: Boundary conditions; sea-surface temperature, land surface
+            temperature ``stl_am`` and soil wetness ``soilw_am``.
+        terrain: Orography, land fraction ``fmask``, and ``lfluxland``.
+
+    Returns:
+        The wind, temperature and humidity tendencies applied to the lowest
+        model level, and ``physics_data`` with ``surface_flux`` updated.
+
     """
-    stl_am = forcing.stl_am
-    lfluxland = terrain.lfluxland
-    kx, ix, il = state.temperature.shape
-
-    psa = state.normalized_surface_pressure
-    ua = state.u_wind
-    va = state.v_wind
-    ta = state.temperature
-    qa = state.specific_humidity
-    phi = state.geopotential
-    fmask = terrain.fmask
-
+    sfp = parameters.surface_flux
+    esbc = parameters.mod_radcon.emisfc * c.sbc
     rsds = physics_data.shortwave_rad.rsds
     rlds = physics_data.surface_flux.rlds
+    fmask = terrain.fmask
 
-    rh = physics_data.humidity.rh
-    phi0 = terrain.orog * c.grav # surface geopotential
+    air, t0 = _extrapolate_to_surface(state, physics_data, sfp, terrain)
 
-    snowc = physics_data.mod_radcon.snowc
-    alb_l = physics_data.mod_radcon.alb_l
-    alb_s = physics_data.mod_radcon.alb_s
-
-    # Initialize variables
-    esbc  = parameters.mod_radcon.emisfc*c.sbc
-    ghum0 = 1.0 - parameters.surface_flux.fhum0
-
-    ustr = jnp.zeros((ix, il, 3))
-    vstr = jnp.zeros((ix, il, 3))
-    shf = jnp.zeros((ix, il, 3))
-    evap = jnp.zeros((ix, il, 3))
-    rlus = jnp.zeros((ix, il, 3))
-    hfluxn = jnp.zeros((ix, il, 2))
-    t1 = jnp.zeros((ix, il, 2))
-    q1 = jnp.zeros((ix, il, 2))
-    t2 = jnp.zeros((ix, il, 2))
-    qsat0 = jnp.zeros((ix, il, 2))
-    denvvs = jnp.zeros((ix, il, 3))
-
-    u0 = parameters.surface_flux.fwind0*ua[kx-1]
-    v0 = parameters.surface_flux.fwind0*va[kx-1]
-
-    def compute_evap_true(operand):
-        q1, qsat0, idx = operand
-        q1_val, qsat0_val = rel_hum_to_spec_hum(t1[:, :, idx], psa, 1.0, rh[kx-1])
-        q1 = q1.at[:, :, idx].set(parameters.surface_flux.fhum0*q1_val + ghum0*qa[kx-1])
-        qsat0 = qsat0.at[:, :, idx].set(qsat0_val)
-        return q1, qsat0
-    
-    def compute_evap_false(operand):
-        q1, qsat0, idx = operand
-        q1 = q1.at[:, :, idx].set(qa[kx-1])
-        return q1, qsat0
-    
-    rdth  = parameters.surface_flux.fstab / parameters.surface_flux.dtheta
-
-    astab = jax.lax.cond(parameters.surface_flux.lscasym, lambda _: jnp.array(0.5), lambda _: jnp.array(1.0), operand=None)
-
-    # 1.1 Wind components
-    rcp = 1.0/c.cpd
-    gtemp0 = 1.0 - parameters.surface_flux.ftemp0
-
-    # Temperature difference between the lowest level and the surface,
-    # extrapolated from the near-surface lapse rate. The lapse rate is measured
-    # between the lowest layer and a fixed sigma (the top of the sub-cloud
-    # layer): that reference is a *physical* depth, so anchoring it in sigma
-    # keeps the diagnosed lapse rate — and the stable/unstable branch selected
-    # below — independent of the vertical grid. The extrapolation target is
-    # SPEEDY's near-surface sigma=0.99. On the 8-level reference grid the fixed
-    # sigma is the second-lowest layer centre and this reproduces the validated
-    # behaviour (the original wvi[kx-1, 1] interpolation weight) exactly.
-    sigl = physics_data.speedy_coords.sigl
-    ta_ref = interp_to_sigma(ta, physics_data.speedy_coords.fsg, PBL_TOP_SIGMA)
-    dt1_fac = (jnp.log(0.99) - sigl[kx-1]) / (sigl[kx-1] - jnp.log(PBL_TOP_SIGMA))
-    dt1 = dt1_fac * (ta[kx-1] - ta_ref)
-
-    # Extrapolated temperature using actual lapse rate (0:land, 1:sea)
-    # line 115 - 116
-    t1 = t1.at[:, :, 0].add(ta[kx-1] + dt1)
-    t1 = t1.at[:, :, 1].set(t1[:, :, 0] - phi0*dt1/(c.rd*288.0*physics_data.speedy_coords.sigl[kx-1]))
-
-    # Extrapolated temperature using dry-adiab. lapse rate (0:land, 1:sea)
-    # line 119 - 120
-    t2 = t2.at[:, :, 1].set(ta[kx-1] + rcp*phi[kx-1])
-    t2 = t2.at[:, :, 0].set(t2[:, :, 1] - rcp*phi0)
-
-    # lines 124 - 137
-    t1 = jnp.where((ta[kx-1] > ta_ref)[:, :, jnp.newaxis],
-                parameters.surface_flux.ftemp0*t1 + gtemp0*t2,
-                ta[kx-1][:, :, jnp.newaxis])
-    
-    t0 = t1[:, :, 1] + fmask * (t1[:, :, 0] - t1[:, :, 1])
-
-    # 1.3 Density * wind speed (including gustiness factor)
-    denvvs = denvvs.at[:, :, 0].set((c.p0*psa/(c.rd*t0))*jnp.sqrt(u0**2 + v0**2 + parameters.surface_flux.vgust**2))
-
-
-    ##########################################################
-    # Land surface
-    ##########################################################
-
-    def land_fluxes(operand):
-        u0,v0,ustr,vstr,shf,evap,rlus,hfluxn,t1,q1,t2,qsat0,denvvs,parameters,tskin = operand
-
-        # 2. Using Presribed Skin Temperature to Compute Land Surface Fluxes
-        # 2.1 Compensating for non-linearity of Heat/Moisture Fluxes by defining effective skin temperature
-
-        # Vectorized computation using JAX arrays
-        tskin = stl_am + parameters.surface_flux.ctday * jnp.sqrt(physics_data.speedy_coords.coa) * rsds * (1.0 - alb_l) * psa
-
-        # 2.2 Stability Correlation
-
-        dthl = jnp.where(
-            tskin > t2[:, :, 0],
-            jnp.minimum(parameters.surface_flux.dtheta, tskin - t2[:, :, 0]),
-            jnp.maximum(-parameters.surface_flux.dtheta, astab * (tskin - t2[:, :, 0]))
-        )
-
-        denvvs = denvvs.at[:, :, 1].set(denvvs[:, :, 0] * (1.0 + dthl * rdth))
-
-        # 2.3 Computing Wind Stress
-        forog = get_orog_land_sfc_drag(terrain.phis0, parameters.surface_flux.hdrag)
-        cdldv = parameters.surface_flux.cdl * denvvs[:, :, 0] * forog
-        ustr = ustr.at[:, :, 0].set(-cdldv * ua[kx-1])
-        vstr = vstr.at[:, :, 0].set(-cdldv * va[kx-1])
-
-        # 2.4 Computing Sensible Heat Flux
-        chlcp = parameters.surface_flux.chl * c.cpd
-        shf = shf.at[:, :, 0].set(chlcp * denvvs[:, :, 1] * (tskin - t1[:, :, 0]))
-        
-        # 2.5 Computing Evaporation
-
-        q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 0))
-
-        qsat0 = qsat0.at[:, :, 0].set(get_qsat(tskin, psa, 1.0))
-
-        # The soil-moisture-limited evaporation onset is a hinge that
-        # zeroes every gradient through dry land columns (and gates the
-        # d(Evap)/d(Tskin) term in the energy balance below on the same
-        # hard condition). evap_smoothing > 0 [g/kg] rounds it with a
-        # softplus; 0 keeps the hard maximum.
-        evap = evap.at[:, :, 0].set(parameters.surface_flux.chl * denvvs[:, :, 1] *\
-                    smooth_pos(forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
-                               parameters.surface_flux.evap_smoothing))
-
-        # 3. Computing land-surface energy balance; Adjust skin temperature and heat fluxes
-        # 3.1 Emission of lw radiation from the surface and net heat fluxes into land surface
-        tsk3 = tskin ** 3.0
-        drls = 4.0 * esbc * tsk3
-        rlus = rlus.at[:, :, 0].set(esbc * tsk3 * tskin)
-
-        hfluxn = hfluxn.at[:, :, 0].set(rsds * (1.0 - alb_l) + rlds - (rlus[:, :, 0] + shf[:, :, 0] + alhc * evap[:, :, 0]))
-
-        # 3.2 Re-definition of skin temperature from energy balance
-        def skin_temp(operand):
-            hfluxn, rlus, evap, shf, tskin, qsat0 = operand
-            
-            # Compute net heat flux including flux into ground
-            clamb = parameters.surface_flux.clambda + (snowc * (parameters.surface_flux.clambsn - parameters.surface_flux.clambda))
-            hfluxn = hfluxn.at[:, :, 0].set(hfluxn[:, :, 0] - (clamb * (tskin - stl_am)))
-            dtskin = tskin + 1.0
-
-            # Compute d(Evap) for a 1-degree increment of Tskin. The
-            # activity weight must be the DERIVATIVE of the (possibly
-            # smoothed) evaporation hinge, not the hard evap > 0 mask:
-            # with evap_smoothing on, the softplus tail makes evap
-            # positive in dry columns, and the hard mask would hand them
-            # the full latent sensitivity, over-damping the skin update
-            # (Codex review, PR #567). smooth_gate is exactly the
-            # softplus derivative, and reproduces the hard mask at
-            # width 0 (evap > 0 iff the hinge argument is > 0).
-            evap_gate = smooth_gate(
-                forcing.soilw_am * qsat0[:, :, 0] - q1[:, :, 0],
-                0.0,
-                parameters.surface_flux.evap_smoothing,
-            )
-            qsat0 = qsat0.at[:, :, 1].set(get_qsat(dtskin, psa, 1.0))
-            qsat0 = qsat0.at[:, :, 1].set(
-                    evap_gate * forcing.soilw_am * (qsat0[:, :, 1] - qsat0[:, :, 0])
-                )
-
-            # Redefine skin temperature to balance the heat budget
-            dtskin = hfluxn[:, :, 0] / (clamb + drls + (parameters.surface_flux.chl * denvvs[:, :, 1] * (c.cpd + (alhc * qsat0[:, :, 1]))))
-            tskin = tskin + dtskin
-
-            # Add linear corrections to heat fluxes
-            shf = shf.at[:, :, 0].set(shf[:, :, 0] + chlcp*denvvs[:, :, 1]*dtskin)
-            evap = evap.at[:, :, 0].set(evap[:, :, 0] + parameters.surface_flux.chl*denvvs[:, :, 1]*qsat0[:, :, 1]*dtskin)
-            rlus = rlus.at[:, :, 0].set(rlus[:, :, 0] + drls*dtskin)
-            hfluxn = hfluxn.at[:, :, 0].set(clamb*(tskin - stl_am))
-            
-            return (hfluxn, rlus, evap, shf, tskin, qsat0)
-        
-        hfluxn, rlus, evap, shf, tskin, qsat0 = jax.lax.cond(
-            parameters.surface_flux.lskineb, skin_temp, pass_fn, operand=(hfluxn, rlus, evap, shf, tskin, qsat0)
-        )
-
-        return (u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
-    
-    tskin = jnp.zeros_like(stl_am)
-    u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin = jax.lax.cond(
-        lfluxland, land_fluxes, pass_fn, operand=(u0, v0, ustr, vstr, shf, evap, rlus, hfluxn, t1, q1, t2, qsat0, denvvs, parameters, tskin)
+    # Skipping the land branch entirely (rather than masking it) keeps
+    # aquaplanet runs free of the land forcing fields, which are absent there.
+    land, tskin = jax.lax.cond(
+        terrain.lfluxland,
+        lambda _: _land_fluxes(air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds),
+        lambda _: (SurfaceTypeFluxes(*(6 * (jnp.zeros_like(t0),))), jnp.zeros_like(t0)),
+        operand=None,
     )
-    ##########################################################
-    # Sea Surface
-    ##########################################################
+    sea = _sea_fluxes(air, sfp, forcing, physics_data, esbc, rsds, rlds)
 
-    dths = jnp.where(
-        forcing.sea_surface_temperature > t2[:, :, 1],
-        jnp.minimum(parameters.surface_flux.dtheta, forcing.sea_surface_temperature - t2[:, :, 1]),
-        jnp.maximum(-parameters.surface_flux.dtheta, astab * (forcing.sea_surface_temperature - t2[:, :, 1]))
+    merged = jax.tree.map(lambda over_land, over_sea:
+                          over_sea + fmask * (over_land - over_sea), land, sea)
+
+    sst = forcing.sea_surface_temperature
+    surface_flux_out = physics_data.surface_flux.copy(
+        ustr=merged.ustr, vstr=merged.vstr, shf=merged.shf, evap=merged.evap,
+        rlus=merged.rlus, hfluxn=merged.hfluxn,
+        hfluxn_land=land.hfluxn, hfluxn_sea=sea.hfluxn,
+        tsfc=sst + fmask * (forcing.stl_am - sst),
+        tskin=sst + fmask * (tskin - sst),
+        u0=air.u_wind, v0=air.v_wind, t0=t0,
     )
-    
-    denvvs = denvvs.at[:, :, 2].set(denvvs[:, :, 0] * (1.0 + dths * rdth))
-
-    q1, qsat0 = jax.lax.cond(parameters.surface_flux.fhum0 > 0.0, compute_evap_true, compute_evap_false, operand=(q1, qsat0, 1))
-
-    # 4.2 Wind Stress
-    ks = 2
-
-    cdsdv = parameters.surface_flux.cds * denvvs[:, :, ks]
-    ustr = ustr.at[:, :, 1].set(-cdsdv * ua[kx-1])
-    vstr = vstr.at[:, :, 1].set(-cdsdv * va[kx-1])
-
-    # 4.3 Sensible heat flux
-    shf = shf.at[:, :, 1].set(parameters.surface_flux.chs * c.cpd * denvvs[:, :, ks] * (forcing.sea_surface_temperature - t1[:, :, 1]))
-
-    # 4.4 Evaporation
-    qsat0 = qsat0.at[:, :, 1].set(get_qsat(forcing.sea_surface_temperature, psa, 1.0))
-    evap = evap.at[:, :, 1].set(parameters.surface_flux.chs * denvvs[:, :, ks] * (qsat0[:, :, 1] - q1[:, :, 1]))
-    
-    # 4.5 Lw emission and net heat fluxes
-    rlus = rlus.at[:, :, 1].set(esbc * (forcing.sea_surface_temperature ** 4.0))
-    hfluxn = hfluxn.at[:, :, 1].set(rsds * (1.0 - alb_s) + rlds - (rlus[:, :, 1] + shf[:, :, 1] + alhc * evap[:, :, 1]))
-
-    # Weighted average of surface fluxes and temperatures according to land-sea mask
-    weighted_average = lambda var: var[:, :, 1] + fmask * (var[:, :, 0] - var[:, :, 1])
-
-    ustr = ustr.at[:, :, 2].set(weighted_average(ustr))
-    vstr = vstr.at[:, :, 2].set(weighted_average(vstr))
-    shf = shf.at[:, :, 2].set(weighted_average(shf))
-    evap = evap.at[:, :, 2].set(weighted_average(evap))
-    rlus = rlus.at[:, :, 2].set(weighted_average(rlus))
-
-    t0 = weighted_average(t1)
-
-    tsfc  = forcing.sea_surface_temperature + fmask * (stl_am - forcing.sea_surface_temperature)
-    tskin = forcing.sea_surface_temperature + fmask * (tskin  - forcing.sea_surface_temperature)
-
-    surface_flux_out = physics_data.surface_flux.copy(ustr=ustr, vstr=vstr, shf=shf, evap=evap, rlus=rlus,
-                                                      hfluxn=hfluxn, tsfc=tsfc, tskin=tskin, u0=u0, v0=v0, t0=t0)
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
 
-    # Compute tendencies due to surface fluxes (physics.f90:197-205)
+    # Tendencies on the lowest level (physics.f90:197-205).
     rps = 1.0 / state.normalized_surface_pressure
-    utend = jnp.zeros_like(state.u_wind).at[-1].add(ustr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
-    vtend = jnp.zeros_like(state.v_wind).at[-1].add(vstr[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
-    ttend = jnp.zeros_like(state.temperature).at[-1].add(shf[:,:,2]*rps*physics_data.speedy_coords.grdscp[-1])
-    qtend = jnp.zeros_like(state.specific_humidity).at[-1].add(evap[:,:,2]*rps*physics_data.speedy_coords.grdsig[-1])
-    physics_tendencies = PhysicsTendency(utend, vtend, ttend, qtend)
+    grdsig = physics_data.speedy_coords.grdsig[-1]
+    grdscp = physics_data.speedy_coords.grdscp[-1]
+    physics_tendencies = PhysicsTendency(
+        jnp.zeros_like(state.u_wind).at[-1].add(merged.ustr * rps * grdsig),
+        jnp.zeros_like(state.v_wind).at[-1].add(merged.vstr * rps * grdsig),
+        jnp.zeros_like(state.temperature).at[-1].add(merged.shf * rps * grdscp),
+        jnp.zeros_like(state.specific_humidity).at[-1].add(merged.evap * rps * grdsig),
+    )
 
     return physics_tendencies, physics_data
 
+
 @jit
 def get_orog_land_sfc_drag(phis0, hdrag):
-    """Parameters
-    ----------
-    phi0 : Array
-        - Array used for calculating the forog
+    """Orographic enhancement of the land momentum drag coefficient.
+
+    Args:
+        phis0: Surface geopotential [m2/s2].
+        hdrag: Height scale of the correction [m].
+
+    Returns:
+        Multiplicative factor >= 1 on the land drag coefficient.
+
     """
-    rhdrag = 1/(c.grav*hdrag)
+    rhdrag = 1 / (c.grav * hdrag)
 
-    forog = 1.0 + rhdrag*(1.0 - jnp.exp(-jnp.maximum(phis0, 0.0)*rhdrag))
-
-    return forog
+    return 1.0 + rhdrag * (1.0 - jnp.exp(-jnp.maximum(phis0, 0.0) * rhdrag))
