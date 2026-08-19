@@ -1483,7 +1483,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, rain_prof, snow_prof) = cloud_microphysics_2m(
+         form, evap, rain_prof, snow_prof) = cloud_microphysics_2m(
             T, q, p, qc, jnp.zeros(nlev), qnc, jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1533,7 +1533,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, _rp, _sp) = cloud_microphysics_2m(
+         form, evap, _rp, _sp) = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
             jnp.zeros(nlev), jnp.zeros(nlev), cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),

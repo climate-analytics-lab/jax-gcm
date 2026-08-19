@@ -790,7 +790,7 @@ def cloud_microphysics_2m(
     return tendencies, surface_rain_flux, surface_snow_flux, \
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
-        precip_formation_rate, precip_evaporation_rate, cloud_fraction_final, \
+        precip_formation_rate, precip_evaporation_rate, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -955,11 +955,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         (tend_all, surface_rain_flux, surface_snow_flux,
          r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
-         precip_form_all, precip_evap_all, cloud_fraction_all,
+         precip_form_all, precip_evap_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
-            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni, qr, qs,
@@ -1006,13 +1006,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # update_tendencies_and_important_vars; expose surface precip
         # diagnostics from the lax.scan.
         clouds_next = clouds.copy(
-            # ECHAM writes the post-microphysics cloud fraction back to
-            # ``paclc``: cells the scheme has just emptied of both condensates,
-            # or driven below ``clc_min``, are no longer cloudy. Radiation and
-            # the aerosol cloud-borne partition both read this, so leaving the
-            # pre-microphysics value here left them seeing cloud that the step
-            # had already removed.
-            cloud_fraction=cloud_fraction_all.T,
             qnc_prev=qnc, qni_prev=qni,
             precip_rain=surface_rain_flux,
             precip_snow=surface_snow_flux,
