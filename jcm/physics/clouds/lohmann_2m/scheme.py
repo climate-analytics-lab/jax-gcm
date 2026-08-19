@@ -363,10 +363,13 @@ def cloud_microphysics_2m(
 
     # Grid-mean freezing ledger (ECHAM pfrl): the single accumulator the
     # assembly step debits from liquid, credits to ice, and converts to fusion
-    # heat. Carries both legs — homogeneous below cthomi and the immersion
-    # freezing driven by ``ice_nuclei`` (#494) — since both routines above
-    # work on in-cloud condensate, hence the cloud-fraction weighting.
-    freezing_rate = (freezing_rate_hom + frozen_mass) * cloud_fraction_uicw
+    # heat. Carries both legs — homogeneous below cthomi, and the immersion
+    # freezing driven by ``ice_nuclei`` (#494).
+    #
+    # Only the heterogeneous leg is converted here. ``freezing_below_238K``
+    # already area-weights internally (``pfrl += pxlb·paclc``), whereas
+    # ``frozen_mass`` above is a bare in-cloud increment.
+    freezing_rate = freezing_rate_hom + frozen_mass * cloud_fraction_uicw
 
     # ------------------------------------------------------------------
     # WBF (Wegener-Bergeron-Findeisen): liquid → ice in mixed-phase
@@ -656,6 +659,7 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     liquid_cloud_flag = temperature > params.tmelt
     ice_cloud_flag = temperature <= params.tmelt
+    cloud_fraction_in = cloud_fraction
 
     (
         cloud_fraction_final,
@@ -754,6 +758,20 @@ def cloud_microphysics_2m(
     # destruction (review finding 2.18).
     dqrdt = jnp.zeros_like(qc)
     dqsdt = jnp.zeros_like(qc)
+
+    # The microphysics may REMOVE cloud, never create it. ECHAM's write-back
+    # to ``paclc`` exists to clear cells the scheme has just emptied of both
+    # condensates; the upward branch of ``update_in_cloud_water`` — which
+    # sets cf = clip(RH, 0.01, 1) wherever a clear cell has any condensation
+    # or deposition — is a second, RH-based cloud-cover closure, and
+    # ``SundqvistCloudFraction`` is the one this stack uses. Publishing the
+    # raw value substitutes it: an ice-supersaturated stratospheric column
+    # above ``cloud_top_pressure_pa``, which Sundqvist deliberately reports
+    # as cloud-free, comes back overcast (cf = 1) on ~1e-6 kg/kg of ice, and
+    # COSP, AeroCom and the JAM cloud-borne / aqueous / wetdep terms all read
+    # it. Clipping to the incoming cover keeps the emptying behaviour and
+    # drops the closure substitution.
+    cloud_fraction_final = jnp.minimum(cloud_fraction_final, cloud_fraction_in)
 
     # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
     # of-air per second once we pass qnc/qni (per-kg) as the tm1 tracers

@@ -1970,6 +1970,104 @@ class TestColumnEnthalpyConservation2M:
             f"precipitation (gross {gross:.3e})"
         )
 
+    def test_published_cloud_fraction_never_exceeds_the_input(self):
+        """The microphysics may clear cloud, not conjure it.
+
+        The published cover exists so that cells emptied of both condensates
+        stop being cloudy for radiation, COSP and the JAM aerosol terms.
+        ``update_in_cloud_water`` also has an upward branch — clear cell with
+        any condensation gets cf = clip(RH, 0.01, 1) — which is a second,
+        RH-based cover closure competing with ``SundqvistCloudFraction``.
+
+        The fixture is the state that makes the difference stark: an
+        ice-supersaturated column at 5 hPa, above ``cloud_top_pressure_pa``,
+        where Sundqvist deliberately reports no cloud because "the RH-closure
+        otherwise fills the cold, near-zero-qsat stratosphere with spurious
+        cloud". Unclipped it comes back overcast.
+        """
+        import numpy as np
+        from jcm.physics import thermodynamics
+
+        nlev = 6
+        T = jnp.full(nlev, 210.0)
+        p = jnp.full(nlev, 5e2)                     # 5 hPa — stratosphere
+        rho = p / (287.0 * T)
+        esi = thermodynamics.saturation_vapor_pressure(T, phase="ice")
+        qsi = 0.622 * esi / jnp.maximum(p - 0.378 * esi, 1e-12)
+        q = 1.6 * qsi                               # strongly supersaturated
+        zeros = jnp.zeros(nlev)
+        # cloud_fraction = 0 everywhere: Sundqvist reports no stratospheric cloud.
+        cols = (T, q, p, zeros, zeros, zeros, zeros, zeros,
+                rho, jnp.full(nlev, 500.0), zeros, zeros)
+
+        cf_published = np.asarray(self._run_full(cols)[12])
+        assert float(np.max(cf_published)) == 0.0, (
+            f"cloud-free stratosphere published as cf={np.max(cf_published):.3f} "
+            "— the microphysics is substituting its own RH cover closure"
+        )
+
+        # And the clearing direction still works: a cell the scheme empties
+        # must lose its cover.
+        warm = self._cloud_ice_above_freezing()
+        out_warm = self._run_full(warm)
+        cf_in = np.asarray(warm[7])
+        cf_out = np.asarray(out_warm[12])
+        assert np.all(cf_out <= cf_in + 1e-6), "published cover exceeds input"
+
+    @staticmethod
+    def _run_full(cols):
+        """Full return tuple, for tests that need more than the tendencies."""
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni, z, z, cf, rho, dz, tke,
+            jnp.full(nlev, 5e7), inp, z,
+            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+        )
+
+    def test_homogeneous_freezing_removes_all_the_liquid(self):
+        """Below cthomi every drop freezes, in a partly-cloudy box too.
+
+        ``freezing_below_238K`` zeroes the in-cloud liquid outright and
+        reports the transfer already area-weighted (``pfrl += pxlb·paclc``),
+        so the ledger must receive it as-is. Area-weight it a second time and
+        only ``cf`` of the liquid is debited from ``qc`` while the in-cloud
+        state says the cloud is fully glaciated — the grid box then carries
+        liquid water below the homogeneous freezing point indefinitely,
+        halving the remainder each step.
+
+        No budget test can catch this: the liquid debit, the ice credit and
+        the fusion heat all come from that one number, so water and enthalpy
+        both close on the wrong value. Only the state can tell.
+        """
+        import numpy as np
+
+        nlev = 8
+        cf_val = 0.4                               # well away from 1.0
+        T = jnp.full(nlev, 230.0)                  # below cthomi = 238 K
+        p = jnp.linspace(2e4, 4e4, nlev)
+        rho = p / (287.0 * T)
+        q = jnp.full(nlev, 1e-6)
+        qc = jnp.zeros(nlev).at[3:6].set(1e-4)     # grid-mean liquid
+        cf = jnp.where(qc > 0, cf_val, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        cols = (T, q, p, qc, jnp.zeros(nlev), jnp.where(qc > 0, 5e7, 0.0),
+                jnp.zeros(nlev), cf, rho, dz,
+                jnp.zeros(nlev), jnp.zeros(nlev))
+
+        tend, _, _ = self._run(cols)
+        mass = np.asarray(rho * dz)
+        held = float(np.sum(np.asarray(qc) * mass))
+        frozen = -float(np.sum(np.asarray(tend.dqcdt) * mass)) * self.DT
+
+        assert frozen > 0.0, "no liquid froze below cthomi"
+        # All of it, not cf of it. The double-weighted form gives cf_val*held.
+        np.testing.assert_allclose(frozen, held, rtol=1e-3)
+
     def test_het_freezing_moves_mass_and_fusion_heat(self):
         """Immersion INP must freeze droplet MASS, not just crystal number.
 
