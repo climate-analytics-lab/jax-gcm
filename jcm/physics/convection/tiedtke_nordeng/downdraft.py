@@ -45,7 +45,16 @@ def wetbulb_temperature(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate wet-bulb temperature and humidity
     
-    Simplified version - full implementation would iterate
+    KNOWN DEFECT (#694): this is not the wet bulb. The isobaric wet-bulb is
+    defined by ``cp·ΔT + L·Δq = 0``, whose linearised solution is the damped
+    Newton step ``(qs − q)/(1 + (L/cp)·dqs/dT)``. The code below replaces that
+    state-dependent damper with a hardcoded 0.3 and then re-saturates at the
+    result, so moist static energy is off by −5223 J/kg at 300 K/900 hPa and
+    +3173 J/kg at 280 K/700 hPa — the sign flips with height, and at the
+    mid-tropospheric levels where the LFS actually sits it under-cools and
+    invents ~0.7 g/kg of vapour that no rain flux is debited for. ECHAM's
+    ``cudlfs`` uses ``cuadjtq(kcall=2)``, which ``downdraft_step`` below
+    already calls correctly.
     
     Args:
         temperature: Environmental temperature (K)

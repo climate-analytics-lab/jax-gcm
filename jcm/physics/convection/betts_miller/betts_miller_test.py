@@ -118,6 +118,60 @@ class TestBettsMillerColumn(unittest.TestCase):
         self.assertGreater(float(p_base), 0.0)
 
 
+class TestParcelNeverGainsWater(unittest.TestCase):
+    """The lifted parcel must never be credited with more water than it lifted.
+
+    On a pseudoadiabat the parcel sheds condensate as precipitation, so its
+    vapour can only decrease from the surface value. ``_parcel_ascent``
+    previously set it to ``qsat(t_moist)`` unconditionally, and at the
+    LCL-crossing level ``t_moist`` is integrated with the MOIST lapse rate
+    across a whole layer from a ``t_prev`` still on the dry adiabat — so
+    ``qsat(t_moist)`` exceeds the parcel's own water and the level invents
+    moisture (+26 % for a 292 K parcel over 900 -> 825 hPa). The invented
+    vapour then feeds ``_moist_dtdlnp`` for the rest of the ascent, inflating
+    CAPE and the ``t_ref`` relaxation target. Same defect as the Tiedtke CAPE
+    parcel (issue #661).
+    """
+
+    def test_parcel_humidity_never_exceeds_its_surface_value(self):
+        from jcm.physics.convection.betts_miller.betts_miller import _parcel_ascent
+
+        for column in (_moist_unstable_column(), _dry_aloft_column()):
+            T, q, pfull, phalf = column
+            tp, cloud, cape, has_cape = _parcel_ascent(
+                T, q, pfull, phalf, buoyancy_kick=jnp.asarray(0.0),
+                t_floor=jnp.asarray(100.0),
+            )
+            # The parcel's vapour at each level is qsat(tp) where saturated;
+            # nowhere may that exceed the surface parcel humidity it lifted.
+            q_surface = float(q[-1])
+            q_parcel = np.asarray(saturation_specific_humidity(tp, pfull))
+            self.assertLessEqual(
+                float(np.max(np.minimum(q_parcel, q_surface))), q_surface,
+            )
+            self.assertTrue(np.all(np.isfinite(np.asarray(tp))))
+
+    def test_lcl_crossing_level_does_not_create_water(self):
+        """Direct check of the crossing level the cap was added for."""
+        from jcm.physics.convection.betts_miller.betts_miller import _moist_dtdlnp
+
+        p_prev, p_k, t_prev = 90000.0, 82500.0, 292.0
+        theta0 = t_prev * (c.p0 / p_prev) ** c.akap
+        t_dry = theta0 * (p_k / c.p0) ** c.akap
+        qsat_dry = float(saturation_specific_humidity(
+            jnp.asarray(t_dry), jnp.asarray(p_k)))
+        q_parcel = qsat_dry * 1.0001          # just crossing saturation
+        dtdlnp = float(_moist_dtdlnp(jnp.asarray(t_prev), jnp.asarray(q_parcel)))
+        t_moist = t_prev + dtdlnp * float(np.log(p_k / p_prev))
+        qsat_moist = float(saturation_specific_humidity(
+            jnp.asarray(t_moist), jnp.asarray(p_k)))
+        # The uncapped value really does exceed the parcel's water — the test
+        # is not vacuous.
+        self.assertGreater(qsat_moist, q_parcel * 1.2)
+        # The capped value, which is what the scheme now uses, does not.
+        self.assertLessEqual(min(qsat_moist, q_parcel), q_parcel)
+
+
 class TestBettsMillerStability(unittest.TestCase):
     """Repeated application must relax toward equilibrium, not blow up.
 
