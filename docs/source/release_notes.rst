@@ -28,6 +28,33 @@ Unreleased — transient AMIP forcing
 Unreleased — issue-backlog tidy-up
 ----------------------------------
 
+- **SPEEDY surface fluxes are published as flat 2D maps** (#645, #328,
+  #390). ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` carried land,
+  sea and area-weighted values in a trailing channel axis, so output files
+  held ``surface_flux.shf.0/.1/.2``. Only the weighted grid mean ever
+  reached the atmosphere, and ``hfluxn`` had no channel for it at all —
+  ``hfluxn[:, :, 2]`` clamped to the sea value instead of raising, which a
+  coupled run consumed as its grid-mean heat flux. Each of these is now a
+  single 2D variable holding the grid mean: **``surface_flux.shf.2``
+  becomes ``surface_flux.shf``**, and the per-surface ``.0``/``.1``
+  variables are gone. The merged values themselves are unchanged.
+
+  ``hfluxn`` is the exception: it drives a surface component's own
+  temperature, so a coupled land or ocean model needs its own tile's
+  value rather than the grid mean. It is published as
+  ``surface_flux.hfluxn_land`` and ``surface_flux.hfluxn_sea`` beside the
+  merged ``surface_flux.hfluxn``.
+
+  **Existing SPEEDY checkpoints will not load**, including the ``t31_l8``
+  init state on the data mirror — the diagnostic struct changed shape.
+  ``load_checkpoint`` now names the file and the reason instead of
+  surfacing a bare leaf-count error. Regenerate the state, or pin the
+  previous release.
+- **Every SPEEDY output variable carries units and a description** (#390).
+  The SPEEDY units table never reached output at all: the composable
+  physics container defined no table, so all 67 variables shipped bare.
+  Terms now declare their own table and the container gathers them, with
+  a test that fails if a new diagnostic arrives without a row.
 - **ECHAM hyperdiffusion now covers every hybrid grid, including L95**
   (#579). ``diffusion.kind=auto`` matched on ``layers == 47``, so the L95
   middle-atmosphere grids — which exist precisely to resolve the

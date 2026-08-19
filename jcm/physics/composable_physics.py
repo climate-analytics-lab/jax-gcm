@@ -521,12 +521,19 @@ class ComposablePhysics(nnx.Module, Physics):
         """Units/description CSVs of every term in this package, deduplicated.
 
         Terms of the same family share one table, so the same path is
-        usually contributed many times; order is preserved so an earlier
-        term's row wins if two tables name the same variable.
+        usually contributed many times; the order terms were composed in is
+        preserved, which is what decides precedence when two tables name the
+        same variable.
+
+        ``__add__`` accepts any callable carrying a ``category``, not only a
+        ``PhysicsTerm``, so the attribute is read defensively — a term
+        without a table must not turn into an ``AttributeError`` at the very
+        end of a run, when the output is being written.
         """
-        paths = [self.UNITS_TABLE_CSV_PATH] if self.UNITS_TABLE_CSV_PATH else []
-        paths += [term.UNITS_TABLE_CSV_PATH for term in self.terms
-                  if term.UNITS_TABLE_CSV_PATH is not None]
+        paths = list(super().units_table_paths())
+        paths += [table for table in
+                  (getattr(term, "UNITS_TABLE_CSV_PATH", None) for term in self.terms)
+                  if table is not None]
         return tuple(dict.fromkeys(paths))
 
     def data_struct_to_dict(

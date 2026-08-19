@@ -121,13 +121,19 @@ def _near_surface_humidity(t_near, psa, rh_bottom, q_bottom, sfp: SurfaceFluxPar
     """Near-surface specific humidity [g/kg].
 
     ``fhum0`` blends between extrapolating at constant relative humidity
-    (1) and holding the lowest-level specific humidity (0).
+    (1) and holding the lowest-level specific humidity (0). The blend sits
+    behind a ``cond`` rather than a ``where`` because ``fhum0`` defaults to
+    0: the saturation calculation is then never evaluated, and — more to the
+    point — its derivative never enters a reverse-mode pass, where a column
+    driving ``get_qsat`` toward its singular denominator would contribute
+    ``0 * inf`` to the gradient of the whole model.
     """
-    q_extrapolated, _ = rel_hum_to_spec_hum(t_near, psa, 1.0, rh_bottom)
-    return jnp.where(
+    return jax.lax.cond(
         sfp.fhum0 > 0.0,
-        sfp.fhum0 * q_extrapolated + (1.0 - sfp.fhum0) * q_bottom,
-        q_bottom,
+        lambda _: (sfp.fhum0 * rel_hum_to_spec_hum(t_near, psa, 1.0, rh_bottom)[0]
+                   + (1.0 - sfp.fhum0) * q_bottom),
+        lambda _: q_bottom,
+        operand=None,
     )
 
 
@@ -196,12 +202,10 @@ def _land_fluxes(
         residual = hfluxn - clamb * (tskin - stl_am)
 
         # d(Evap)/d(Tskin) for a 1-degree increment. The activity weight is
-        # the DERIVATIVE of the (possibly smoothed) evaporation hinge, not a
-        # hard evap > 0 mask: with evap_smoothing on, the softplus tail makes
-        # evap positive in dry columns and the hard mask would hand them the
-        # full latent sensitivity, over-damping the skin update (PR #567).
-        # smooth_gate is exactly the softplus derivative, and reproduces the
-        # hard mask at width 0.
+        # smooth_gate — the analytic derivative of the smooth_pos hinge above
+        # — so a dry column whose evaporation is only the softplus tail gets
+        # the matching fraction of the latent sensitivity rather than all of
+        # it. At width 0 it reduces to the hard evap > 0 mask.
         evap_gate = smooth_gate(evap_excess, 0.0, sfp.evap_smoothing)
         dqsat = evap_gate * forcing.soilw_am * (
             get_qsat(tskin + 1.0, air.psa, 1.0) - qsat_skin)
@@ -354,11 +358,16 @@ def get_surface_fluxes(
 
     # Skipping the land branch entirely (rather than masking it) keeps
     # aquaplanet runs free of the land forcing fields, which are absent there.
+    # The zero branch is built from the shapes and dtypes the land branch
+    # would produce: those follow the land forcing, which a caller may hand
+    # us at a different precision from the state, and lax.cond requires the
+    # two branches to agree exactly.
+    land_fluxes = lambda: _land_fluxes(
+        air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds)
+    no_land = jax.tree.map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
+                           jax.eval_shape(land_fluxes))
     land, tskin = jax.lax.cond(
-        terrain.lfluxland,
-        lambda _: _land_fluxes(air, sfp, forcing, terrain, physics_data, esbc, rsds, rlds),
-        lambda _: (SurfaceTypeFluxes(*(6 * (jnp.zeros_like(t0),))), jnp.zeros_like(t0)),
-        operand=None,
+        terrain.lfluxland, lambda _: land_fluxes(), lambda _: no_land, operand=None,
     )
     sea = _sea_fluxes(air, sfp, forcing, physics_data, esbc, rsds, rlds)
 

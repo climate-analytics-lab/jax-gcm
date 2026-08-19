@@ -7,18 +7,6 @@ from jcm.physics.speedy.speedy_coords import SpeedyCoords
 from jax import tree_util
 
 
-def _field_names(struct_cls):
-    """Field names of a ``tree_math.struct``, in declaration order."""
-    return tuple(f.name for f in dataclasses.fields(struct_cls))
-
-
-def _reject_unknown(overrides, names):
-    """Fail loudly on a misspelled or stale field name in a ``**overrides`` call."""
-    unknown = sorted(set(overrides) - set(names))
-    if unknown:
-        raise TypeError(f"unknown field(s) {unknown}; expected any of {list(names)}")
-
-
 def _safe_isnan(x):
     """Check for NaN, handling integer and float0 dtypes that lack NaN representation."""
     if hasattr(x, 'dtype') and (x.dtype == jax.dtypes.float0
@@ -420,19 +408,21 @@ class SurfaceFluxData:
         """Build from ``fill``, taking any field given in ``overrides``.
 
         Every field is a plain 2D map on the nodal grid, so one fill value
-        serves them all — there is no per-field shape to get out of step.
+        serves them all and there is no per-field shape to drift out of
+        step. The shape check keeps it that way: a caller still passing an
+        array with a trailing surface-type axis would otherwise broadcast
+        silently through the bulk formulae and reach the output file.
         """
-        names = _field_names(cls)
-        _reject_unknown(overrides, names)
-        return cls(**{name: overrides.get(name) if overrides.get(name) is not None
-                      else fill for name in names})
+        wrong = {name: jnp.shape(value) for name, value in overrides.items()
+                 if jnp.shape(value) != jnp.shape(fill)}
+        if wrong:
+            raise ValueError(
+                f"SurfaceFluxData fields are {jnp.shape(fill)} grid maps; got {wrong}")
+        # An unknown name raises TypeError from the generated __init__.
+        return cls(**({f.name: fill for f in dataclasses.fields(cls)} | overrides))
 
     def copy(self, **overrides):
-        names = _field_names(type(self))
-        _reject_unknown(overrides, names)
-        return SurfaceFluxData(
-            **{name: overrides.get(name) if overrides.get(name) is not None
-               else getattr(self, name) for name in names})
+        return dataclasses.replace(self, **overrides)
 
 
     def isnan(self):

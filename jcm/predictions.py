@@ -218,10 +218,15 @@ class ModelPredictions:
         )
 
         # Attach units / descriptions from the physics-specific units tables.
+        # ``Physics`` is a structural contract, so a physics predating
+        # ``units_table_paths`` still produces output, just undocumented.
+        table_paths = getattr(self._physics, "units_table_paths", tuple)()
         units_df = pd.concat(
-            [pd.read_csv(p) for p in
-             (DYNAMICS_UNITS_TABLE_CSV_PATH, *self._physics.units_table_paths())],
+            [pd.read_csv(p) for p in (DYNAMICS_UNITS_TABLE_CSV_PATH, *table_paths)],
             ignore_index=True)
+        # First table listed wins a duplicated variable name: the dynamics
+        # table is authoritative, then terms in composition order.
+        units_df = units_df.drop_duplicates(subset="Variable", keep="first")
         for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
             if var in pred_ds:
                 pred_ds[var].attrs["units"] = unit
