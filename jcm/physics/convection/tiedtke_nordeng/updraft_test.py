@@ -256,5 +256,110 @@ class TestDynamicCloudTop(unittest.TestCase):
         )
 
 
+class TestCloudBaseInitialisation(unittest.TestCase):
+    """The cloud-base parcel must conserve total water (issue #661).
+
+    ``calculate_updraft`` seeds the plume at ``kbase`` from a surface parcel
+    lifted dry-adiabatically. ECHAM ``cubase`` (mo_cuinitialize.f90:296-314)
+    runs ``cuadjtq`` there and keeps the condensate in the plume
+    (``plu = plu + zqold - pqu``), so the seed satisfies
+    ``qu + lu == q_surface`` exactly. The previous hand-rolled version
+    condensed ``q - qs(T_dry)`` undamped and then re-saturated at the warmed
+    temperature, which *created* water (+10% to +50%) and over-warmed the
+    parcel; a subsaturated parcel was moistened to saturation for free.
+    """
+
+    NLEV = 24
+
+    def _column(self, surf_temp=300.0, surf_rh=0.9):
+        """A conditionally unstable TOA-first column (index 0 = TOA)."""
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+        pressure = jnp.linspace(10_000.0, 100_000.0, self.NLEV)
+        # ~6.5 K/km lapse rate expressed on this pressure grid, capped at a
+        # 200 K stratosphere so the plume terminates somewhere sensible.
+        temperature = jnp.maximum(
+            surf_temp * (pressure / pressure[-1]) ** 0.19, 200.0,
+        )
+        humidity = 0.5 * saturation_mixing_ratio(pressure, temperature)
+        humidity = humidity.at[-1].set(
+            surf_rh * saturation_mixing_ratio(pressure[-1], temperature[-1])
+        )
+        return pressure, temperature, humidity
+
+    def _run(self, kbase, surf_rh):
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
+
+        pressure, temperature, humidity = self._column(surf_rh=surf_rh)
+        layer_thickness = jnp.full(self.NLEV, 500.0)
+        rho = pressure / (287.0 * temperature)
+        state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            kbase=kbase, ktop=2, ktype=1, mass_flux_base=0.1,
+            config=ConvectionParameters.default(),
+        )
+        # Surface = highest pressure = last index in this TOA-first column.
+        return state, pressure, temperature, humidity[-1]
+
+    def test_total_water_conserved_at_cloud_base(self):
+        """qu[kbase] + lu[kbase] == q_surface to round-off, saturated case."""
+        kbase = self.NLEV - 4
+        state, pressure, _, q_surf = self._run(kbase, surf_rh=1.0)
+        total = float(state.qu[kbase] + state.lu[kbase])
+        self.assertAlmostEqual(
+            total / float(q_surf), 1.0, places=6,
+            msg=f"Cloud-base total water {total:.6e} != surface q "
+                f"{float(q_surf):.6e} — the seed is creating water.",
+        )
+        self.assertGreater(float(state.lu[kbase]), 0.0,
+                           "A saturated cloud-base parcel must condense")
+
+    def test_subsaturated_parcel_is_untouched(self):
+        """A subsaturated cloud-base parcel keeps its vapour and stays dry.
+
+        This is the second, independent half of #661: the old code assigned
+        ``qu = qs(T)`` unconditionally, moistening the plume up to saturation
+        with no latent-heat debit whatsoever. CAM's UW shallow scheme
+        (uwshcu.F90:4700-4716) sets ``qv = qt`` in exactly this case.
+        """
+        # A low kbase (close to the surface, high pressure) leaves the lifted
+        # parcel warm enough to stay subsaturated at a modest surface RH.
+        kbase = self.NLEV - 2
+        state, pressure, _, q_surf = self._run(kbase, surf_rh=0.6)
+        self.assertAlmostEqual(float(state.qu[kbase]), float(q_surf), places=7)
+        self.assertAlmostEqual(float(state.lu[kbase]), 0.0, places=9)
+
+    def test_cloud_base_warming_matches_condensate(self):
+        """ΔT at cloud base is exactly L/cp times the condensate formed."""
+        from jcm.constants import alhc, cpd, rd
+
+        kbase = self.NLEV - 4
+        state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
+        t_dry = float(temperature[-1]) * (
+            float(pressure[kbase]) / float(pressure[-1])
+        ) ** (rd / cpd)
+        dT = float(state.tu[kbase]) - t_dry
+        expected = alhc * float(state.lu[kbase]) / cpd
+        self.assertAlmostEqual(dT / expected, 1.0, delta=0.005)
+
+    def test_cloud_base_parcel_is_saturated_not_supersaturated(self):
+        """The seed vapour equals qs at the *warmed* temperature.
+
+        The undamped version condensed to qs(T_dry) and then set the vapour to
+        the larger qs(T_warm), so it was both over-warm and over-moist.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+        kbase = self.NLEV - 4
+        state, pressure, _, _ = self._run(kbase, surf_rh=1.0)
+        qs = float(saturation_mixing_ratio(pressure[kbase], state.tu[kbase]))
+        self.assertAlmostEqual(float(state.qu[kbase]) / qs, 1.0, delta=0.005)
+
+
 if __name__ == "__main__":
     unittest.main()
