@@ -22,11 +22,14 @@ class ResistanceTest(unittest.TestCase):
         ra_windy = aerodynamic_resistance(jnp.asarray(1.0))
         self.assertGreater(float(ra_calm), float(ra_windy))
 
+    MONO = dict(geom_std_dev=1.0, moment=0)
+
     def test_deposition_velocity_positive_finite(self):
         v = deposition_velocity(
             r_wet=jnp.asarray(0.1e-6), v_grav=jnp.asarray(1e-5),
             u_star=jnp.asarray(0.3), temperature=jnp.asarray(285.0),
             pressure=jnp.asarray(1.0e5), air_density=jnp.asarray(1.2),
+            **self.MONO,
         )
         self.assertGreater(float(v), 0.0)
         self.assertTrue(np.isfinite(float(v)))
@@ -36,10 +39,27 @@ class ResistanceTest(unittest.TestCase):
         # accumulation-mode particles (the classic deposition minimum).
         kw = dict(v_grav=jnp.asarray(1e-7), u_star=jnp.asarray(0.4),
                   temperature=jnp.asarray(285.0), pressure=jnp.asarray(1.0e5),
-                  air_density=jnp.asarray(1.2))
+                  air_density=jnp.asarray(1.2), **self.MONO)
         v_tiny = deposition_velocity(r_wet=jnp.asarray(2e-9), **kw)
         v_accum = deposition_velocity(r_wet=jnp.asarray(0.3e-6), **kw)
         self.assertGreater(float(v_tiny), float(v_accum))
+
+    def test_mass_and_number_deposit_at_different_velocities(self):
+        """The moment scaling must reach the radius, not just v_grav.
+
+        The Schmidt number that sets Brownian removal is built from the
+        radius directly, and Brownian dominates for a submicron mode. If only
+        the Stokes/impaction term carried the moment, the two velocities
+        would come out all but identical here and mass would deposit at the
+        number moment's rate.
+        """
+        kw = dict(r_wet=jnp.asarray(0.055e-6), u_star=jnp.asarray(0.4),
+                  temperature=jnp.asarray(285.0), pressure=jnp.asarray(1.0e5),
+                  air_density=jnp.asarray(1.2), geom_std_dev=1.8)
+        # v_grav deliberately equal for both, isolating the radius pathway.
+        v_num = deposition_velocity(v_grav=jnp.asarray(1e-7), moment=0, **kw)
+        v_mass = deposition_velocity(v_grav=jnp.asarray(1e-7), moment=3, **kw)
+        self.assertLess(float(v_mass), 0.5 * float(v_num))
 
 
 class DryDepTermTest(unittest.TestCase):

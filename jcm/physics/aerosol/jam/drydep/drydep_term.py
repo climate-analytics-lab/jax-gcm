@@ -124,6 +124,7 @@ class SlinnDryDeposition(PhysicsTerm):
                 )
                 v_dep = deposition_velocity(
                     r_sfc, v_grav, u_star, t_sfc, p_sfc, rho_sfc,
+                    geom_std_dev=mode.geom_std_dev, moment=moment,
                     z_ref=params.z_ref, z0=params.z0,
                 )
                 loss_rate = v_dep / dz_sfc  # [1/s] applied to bottom layer

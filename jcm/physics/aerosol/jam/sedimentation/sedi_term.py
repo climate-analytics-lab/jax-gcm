@@ -52,6 +52,25 @@ def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
 _R_WET_MAX = 25.0e-6
 
 
+def moment_radius(
+    r_wet: jnp.ndarray, *, geom_std_dev: float, moment: int
+) -> jnp.ndarray:
+    """Radius representing ``moment`` of a lognormal mode [m].
+
+    Every size-dependent removal process — settling, Brownian diffusion,
+    impaction — has to be evaluated at the radius carrying the moment being
+    removed, or the mass moment inherits the number moment's rate. CAM
+    computes this once per moment and uses it throughout
+    (``aero_model.F90:1577``, ``radius_moment``).
+
+    ``r_wet`` is the number-median radius, so ``moment=0`` returns it
+    unchanged and ``moment=3`` returns the volume/mass-median radius. The
+    cap is applied first, matching CAM's ``min(50e-6, radius_part)``.
+    """
+    return jnp.minimum(r_wet, _R_WET_MAX) * math.exp(
+        moment * math.log(geom_std_dev) ** 2)
+
+
 def stokes_velocity(
     r_wet: jnp.ndarray,
     rho_p: jnp.ndarray,
@@ -92,7 +111,7 @@ def stokes_velocity(
 
     """
     ln_sigma = math.log(geom_std_dev)
-    r = jnp.minimum(r_wet, _R_WET_MAX) * math.exp(moment * ln_sigma ** 2)
+    r = moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment)
     mu = air_viscosity(temperature)
     # Mean free path λ = (μ/p)·√(π R T / (2 M_a)).
     mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
