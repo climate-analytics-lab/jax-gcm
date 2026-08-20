@@ -231,19 +231,30 @@ Convection activates based on the diagnosed convection type (``ktype``):
        is present; the model path reads vdiff's prognostic value
      - 1.0
 
-**Cloud-base determination**: cloud base is the lowest level at which a
-dry-adiabatically lifted surface parcel both condenses *and* is positively
-buoyant, comparing condensate-loaded virtual temperatures and crediting the
-sub-grid thermal excess
+**Cloud-base determination** follows ECHAM ``cubase``'s ``klab`` walk
+(``mo_cuinitialize.f90``). A parcel carrying the lowest level's temperature and
+humidity is walked upward one level at a time, conserving dry static energy. At
+each level it must be positively buoyant — otherwise the column is dropped and
+gets **no convection at all** — and the walk stops at the first level where the
+parcel condenses. That level is the cloud base if, and only if, the parcel is
+buoyant there with condensate loading included, crediting the sub-grid thermal
+excess
 
 .. math::
 
    z_\mathrm{lift} = \min\!\big(\max(c_\mathrm{minbuoy},
    \min(c_\mathrm{maxbuoy}, \sigma_{\theta_v} \cdot c_\mathrm{bfac})), 1\,\mathrm{K}\big)
 
-following ECHAM ``cubase`` (``mo_cuinitialize.f90``). The same ``zlift`` enters
-the updraft's termination test, so a plume is not seeded at a level the next
-ascent step would immediately reject.
+``zlift`` appears **only** in the cloud-base test. ECHAM's ascent adds it just
+where the level below is still sub-cloud (``klab == 1``), which for a
+``cubase``-initiated plume is never true, so the updraft's termination test uses
+the parcel's true buoyancy.
+
+The practical consequence is that the trigger requires a **well-mixed boundary
+layer**: a sounding running 6.5 K/km down to the surface loses roughly 0.4 K of
+parcel buoyancy per model layer, more than any physical ``zlift``, and cannot
+trigger. Elevated convection above a stable layer is ECHAM's separate
+``cubasmc`` mid-level trigger, which JAX-GCM does not yet implement.
 
 :math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
 virtual potential temperature at the second-lowest full level, taken from the

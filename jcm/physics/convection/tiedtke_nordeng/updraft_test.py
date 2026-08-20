@@ -373,8 +373,19 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
     makes the two consistent.
     """
 
-    def _sounding(self, nlev=47, sst=301.0, lapse=6.5e-3, rh_surf=0.85):
-        """Build a hydrostatically consistent tropical column, TOA-first."""
+    def _sounding(self, nlev=47, sst=301.0, lapse=6.5e-3, rh_surf=0.85,
+                  bl_top_m=800.0):
+        """Build a tropical column with a well-mixed boundary layer, TOA-first.
+
+        The mixed layer matters: ECHAM's ``cubase`` walks a dry parcel up and
+        drops the column the moment it is not buoyant, so a sounding whose
+        lapse rate runs at 6.5 K/km right down to the surface loses ~0.43 K of
+        parcel buoyancy per layer and cannot trigger at any physical
+        ``zlift``. Real boundary layers — and the ones jcm's own vdiff
+        produces — are near-neutral in the lowest few hundred metres, which is
+        exactly the condition the trigger is testing for. Pass
+        ``bl_top_m=0.0`` to get the unmixed case.
+        """
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             saturation_mixing_ratio,
         )
@@ -386,7 +397,8 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         for k in range(nlev - 2, -1, -1):
             dz = c.rd * T[k + 1] / c.grav * np.log(p[k + 1] / p[k])
             z[k] = z[k + 1] + dz
-            T[k] = max(T[k + 1] - lapse * dz, 195.0)
+            lam = c.grav / c.cpd if z[k] < bl_top_m else lapse
+            T[k] = max(T[k + 1] - lam * dz, 195.0)
         p, T = jnp.asarray(p), jnp.asarray(T)
         rh = jnp.asarray(np.clip(rh_surf - 0.5 * (1.0 - sig), 0.05, 0.9))
         q = rh * saturation_mixing_ratio(p, T)
@@ -398,70 +410,87 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, cloud_base_lift,
         )
-        # Below the floor -> cminbuoy; above the ceiling -> cmaxbuoy.
         self.assertAlmostEqual(
             float(cloud_base_lift(ConvectionParameters.default(cu_thvsig=0.0))),
             0.2, places=6)
         self.assertAlmostEqual(
             float(cloud_base_lift(ConvectionParameters.default(cu_thvsig=5.0))),
             1.0, places=6)
-        # In range -> thvsig·cbfac.
         self.assertAlmostEqual(
             float(cloud_base_lift(
                 ConvectionParameters.default(cu_thvsig=0.5, cu_cbfac=1.0))),
             0.5, places=6)
-        # The absolute MIN(zlift, 1.0) applies even if cmaxbuoy is raised.
         self.assertAlmostEqual(
             float(cloud_base_lift(ConvectionParameters.default(
                 cu_thvsig=5.0, cu_cmaxbuoy=3.0))),
             1.0, places=6)
+        # It also takes sigma from vdiff rather than the config when given.
+        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        self.assertAlmostEqual(
+            float(cloud_base_lift(cfg, jnp.asarray(0.4))), 0.4, places=6)
 
-    def test_unbuoyant_saturated_level_is_not_a_cloud_base(self):
-        """A capping inversion at the LCL must be rejected as a cloud base.
+    def test_cloud_base_is_the_lcl_not_the_lfc(self):
+        """ECHAM's walk stops at the first condensing level, full stop.
 
-        The parcel condenses there, so the old saturation-only test accepted
-        it; the ECHAM buoyancy test does not, because no plume can start in
-        an inversion that far above the parcel's own temperature.
+        An earlier version searched upward for the first level that was both
+        condensing AND buoyant, which let a plume start above a layer the
+        parcel could never have crossed.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base, saturation_mixing_ratio,
+        )
+        p, T, q, dz, _rho = self._sounding()
+        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertTrue(bool(found))
+        cb = int(cb)
+        # The returned level is the LOWEST one at which the lifted parcel
+        # condenses; every level below it must be subsaturated for the parcel.
+        theta_surf = float(T[-1])
+        for k in range(len(p) - 1, cb, -1):
+            t_dry = theta_surf * (float(p[k]) / float(p[-1])) ** (c.rd / c.cpd)
+            qs_k = float(saturation_mixing_ratio(p[k], jnp.asarray(t_dry)))
+            self.assertLess(float(q[-1]), qs_k,
+                            f"level {k} below the returned base already saturates")
+
+    def test_unmixed_boundary_layer_gets_no_convection(self):
+        """The sub-cloud dry-buoyancy gate — ECHAM's ``klab`` falling to 0.
+
+        With no mixed layer the dry parcel loses ~0.43 K per layer, more than
+        any physical zlift, so the walk stops below the LCL and the column is
+        dropped. This test is the reason the gate exists: before it, such a
+        column happily convected off a cloud base its parcel could not reach.
         """
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, find_cloud_base,
         )
-        p, T, q, _dz, _rho = self._sounding()
-        cfg = ConvectionParameters.default()
-        cb_ref, found_ref = find_cloud_base(T, q, p, cfg)
-        self.assertTrue(bool(found_ref))
+        p, T, q, dz, _rho = self._sounding(bl_top_m=0.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.3)
+        _cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertFalse(bool(found))
 
-        # Bury the reference cloud base under a 15 K inversion. The parcel
-        # still saturates there (q and p are untouched), but it is now far
-        # colder than its environment.
-        T_inv = T.at[int(cb_ref)].add(15.0)
-        cb_new, found_new = find_cloud_base(T_inv, q, p, cfg)
-        self.assertNotEqual(int(cb_new), int(cb_ref),
-                            "an inversion level must be rejected as cloud base")
+    def test_well_mixed_layer_convects_at_the_echam_minimum_lift(self):
+        """The same column WITH a mixed layer triggers at cminbuoy = 0.2 K.
 
-    def test_plume_survives_the_lcl_to_lfc_inhibition_layer(self):
-        """End-to-end: a tropical column convects and rains.
-
-        This is the regression that motivated the gate. With the #661 fix but
-        no buoyancy gate / zlift, this column's plume terminated one level
-        above its cloud base (cloud top == kbase - 1) and precipitation fell
-        to ~1e-3 mm/day.
+        Together with the previous test this pins the discriminator: it is the
+        boundary layer's mixing, not the lift constant, that decides.
         """
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
-            ConvectionParameters, tiedtke_nordeng_convection,
+            ConvectionParameters, find_cloud_base, tiedtke_nordeng_convection,
         )
-        p, T, q, dz, rho = self._sounding()
+        p, T, q, dz, rho = self._sounding(bl_top_m=500.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.0)   # clips to cminbuoy
+        cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertTrue(bool(found))
         z = jnp.zeros_like(T)
         tend, state = tiedtke_nordeng_convection(
-            T, q, p, dz, rho, z, z, z, z, 600.0, ConvectionParameters.default(),
+            T, q, p, dz, rho, z, z, z, z, 600.0, cfg,
             moisture_supply=jnp.asarray(1.5e-4),
         )
         kbase, ktop = int(state.kbase), int(state.ktop)
-        # TOA-first: a deep plume has its top many levels ABOVE (lower index).
         self.assertLess(ktop, kbase - 5,
                         f"plume died at its base: kbase={kbase} ktop={ktop}")
-        self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0,
-                           "a saturated tropical column must rain")
+        self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0)
 
 
 if __name__ == "__main__":

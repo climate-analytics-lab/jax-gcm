@@ -364,7 +364,13 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     nlev, ncols = 8, 1
     # Top-first unstable moist column (the SPEEDY-style moist-adiabat
     # fixture, reversed to the physics-internal orientation).
-    T = jnp.array([210., 230., 250., 265., 275., 285., 295., 300.])[:, None]
+    # Top-first. The lowest pair (295 -> 300 K) is the boundary layer: those
+    # two levels are ~1 km apart, so 295 K made it a 5 K/km lapse — too stable
+    # for a lifted parcel to stay buoyant through, and ECHAM's ``klab`` walk
+    # now (correctly) drops such a column before it ever reaches its LCL.
+    # 291 K makes the layer near-dry-adiabatic, i.e. a real mixed layer, which
+    # is what a deep-convection ledger fixture has to have.
+    T = jnp.array([210., 230., 250., 265., 275., 285., 291., 300.])[:, None]
     p = (jnp.array(
         [0.025, 0.095, 0.2, 0.34, 0.51, 0.685, 0.835, 0.95]
     ) * 1e5)[:, None]
@@ -798,9 +804,18 @@ class TestIdealizedConvection:
 
         # Moist adiabatic lapse rate is ~6.5 K/km vs dry ~10 K/km
         # Using a profile that creates instability
+        # NOTE the lowest layer. At this resolution level 0 (950 hPa) and
+        # level 1 (835 hPa) are 1.1 km apart, so the old 300 -> 295 K pair was
+        # a 4.5 K/km lapse — MORE stable than moist adiabatic, despite the
+        # profile's name, and a lifted parcel arrived at 835 hPa 1.6 K colder
+        # than the environment even after latent release. Nothing could
+        # convect off it, and only the missing sub-cloud buoyancy gate
+        # (ECHAM's ``klab`` walk) let it appear to. 290 K makes the layer
+        # near-dry-adiabatic — a well-developed convective boundary layer,
+        # which is what a "should trigger deep convection" fixture needs.
         temperature = jnp.array([
             300.0,   # Surface (warm)
-            295.0,   # 850 hPa
+            290.0,   # 850 hPa — well-mixed boundary layer
             285.0,   # 700 hPa (dry anomaly region starts)
             275.0,   # 500 hPa
             265.0,   # 350 hPa

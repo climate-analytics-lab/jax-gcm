@@ -17,7 +17,7 @@ from jax import lax
 from typing import NamedTuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import ConvectionParameters, cloud_base_lift
+from .tiedtke_nordeng import ConvectionParameters
 # The ECHAM cuadjtq-style damped Newton adjustment. It lives in
 # jcm.physics.convection.saturation so that ``calculate_cape_cin`` (in
 # tiedtke_nordeng.py, which this module imports from) can call it too;
@@ -58,7 +58,6 @@ def calculate_updraft(
     config: ConvectionParameters,
     land_fraction: jnp.ndarray = jnp.array(0.0),
     type_weights: jnp.ndarray | None = None,
-    thvsig: jnp.ndarray | None = None,
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -78,10 +77,6 @@ def calculate_updraft(
             threshold via ``config.cu_dnoprc_ocean`` and
             ``config.cu_dnoprc_land``. Defaults to 0 (ocean) so existing
             single-column tests behave as before.
-        thvsig: σ(θ_v) [K] from vdiff (ECHAM ``pthvsig``), used for the
-            ``zlift`` term in the termination test so it matches the value
-            ``find_cloud_base`` gated the base with. ``None`` falls back to
-            ``config.cu_thvsig``.
 
     Returns:
         UpdatedraftState with computed profiles
@@ -189,7 +184,6 @@ def calculate_updraft(
         jnp.full(nlev, config.cprcon),
         p_base_const,
         jnp.full(nlev, zdnoprc_col),
-        jnp.full(nlev, cloud_base_lift(config, thvsig)),
     )
 
     # Create specialized step function with config parameters
@@ -197,7 +191,7 @@ def calculate_updraft(
         carry, zbuoy_accum = carry_tuple
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
          entr_base_in, w_deep_in, w_term_buoy, w_term_mf, w_precip,
-         cprcon, p_at_base, zdnoprc, zlift_K) = inputs
+         cprcon, p_at_base, zdnoprc) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -369,9 +363,6 @@ def calculate_updraft(
             virtual_temp_u = tu_new * (1.0 + 0.608 * qu_new - lu_new)
             virtual_temp_e = env_temp * (1.0 + 0.608 * env_q)
             buoy_new = c.grav * (virtual_temp_u - virtual_temp_e) / virtual_temp_e
-            # The cloud-base sub-grid thermal excess expressed as a buoyancy,
-            # so it can be compared against ``buoy_new`` below.
-            zlift_buoy = c.grav * zlift_K / virtual_temp_e
 
             # Dynamic cloud-top termination: once above cloud base the parcel
             # becomes negatively buoyant (or the mass flux has already dropped
@@ -398,44 +389,22 @@ def calculate_updraft(
             # tropical column, where the parcel runs −0.67 K at the LCL and
             # −0.11 K one level up before turning solidly positive.
             #
-            # ECHAM restricts its own ascent ``zlift`` bonus to levels whose
-            # neighbour below is still sub-cloud (mo_cuascent.f90:449,
-            # ``klab == 1``), which for a ``cubase``-initiated deep or shallow
-            # plume is never true — there the bonus is reachable only through
-            # ``cubasmc`` mid-level triggering. jcm has no ``klab`` state, so
-            # the bonus applies throughout the ascent.
+            # NO ``zlift`` here — this is ECHAM, not a simplification.
+            # ``cuasc`` adds the bonus only where the level below is still
+            # sub-cloud (mo_cuascent.f90:449, ``IF(klab(jk+1).EQ.1)``), and
+            # ``cubase`` sets ``klab(kcbot) = 2``, so for a plume initiated
+            # from cloud base the test below it is always 2 and the bonus
+            # never applies. It is reachable only through ``cubasmc``
+            # mid-level triggering, which jcm does not implement (#697).
             #
-            # KNOWN COST, measured rather than assumed. Applying it everywhere
-            # also relaxes the CLOUD TOP criterion: the plume survives until
-            # its virtual-temperature deficit exceeds ``zlift`` (~1 K by
-            # default) against a ~0.01 K termination sigmoid width, so a
-            # profile weakly stable above its equilibrium level would keep
-            # producing mass flux past it. That is a real defect of this form
-            # and was raised in review (PR #690).
-            #
-            # The obvious fix — latch the bonus off once the plume first
-            # achieves genuine buoyancy, i.e. ``zbuoy_accum > 0``, which is
-            # where ECHAM's ``klab`` would flip — was implemented and REJECTED
-            # on measurement: it cuts day-mean convective precip in the
-            # composed RCE column from 2.5e-5 to 6.4e-6 kg/m2/s (4x) and
-            # degrades the composed water closure from 0.71 % to 1.98 %, worse
-            # than before this PR. A plume crosses more than one thin
-            # inhibition layer, and a latch that trips on the first
-            # marginally-buoyant level kills it at the second.
-            #
-            # Keeping the bonus is the better of the two measured options
-            # TODAY because the cloud top here is set by organized detrainment
-            # and the scan ceiling, not by this buoyancy test (#669) — probes
-            # on tropical and weakly-stable-aloft columns, and on a
-            # near-undilute plume, all terminate on the mass-flux floor with
-            # buoyancy still strongly positive, so the relaxed criterion never
-            # binds. When #669 makes buoyancy govern the top this must be
-            # revisited: see #691.
-            #
-            # ``zlift`` is added ONLY to the survival test, never to the
-            # stored ``buoy``: the Nordeng organized entrainment reads that
-            # diagnostic and must see the true buoyancy.
-            surv_buoy = jax.nn.sigmoid((buoy_new + zlift_buoy) / w_term_buoy)
+            # An earlier version added it at every ascent level to keep the
+            # plume alive above a cloud base picked at the LFC. Both halves
+            # of that are now gone: ``find_cloud_base`` does ECHAM's ``klab``
+            # walk and returns the LCL, and the parcel has to be genuinely
+            # buoyant to keep rising. Applying the bonus throughout also
+            # relaxed the CLOUD TOP criterion by ~1 K against a 0.01 K
+            # sigmoid width, which was the defect reported in #691.
+            surv_buoy = jax.nn.sigmoid(buoy_new / w_term_buoy)
             surv_mf = jax.nn.sigmoid(
                 (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
                  - 0.01) / w_term_mf

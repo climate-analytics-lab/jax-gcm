@@ -27,8 +27,25 @@ def _tropical_sounding(nlev: int = 47, surface_T: float = 302.0,
     p = jnp.logspace(jnp.log10(1000.0), jnp.log10(100_000.0), nlev)
     z_km = -8.4 * jnp.log(p / 100_000.0)  # approx hypsometric height
 
-    # T: standard lapse rate to 15 km, isothermal above
-    T = jnp.maximum(surface_T - lapse_K_per_km * z_km, 200.0)
+    # T: well-mixed (dry-adiabatic) boundary layer below 0.8 km, the standard
+    # lapse rate above, isothermal above 15 km.
+    #
+    # The mixed layer is required, not cosmetic. ECHAM's ``cubase`` walks a
+    # dry parcel upward and drops the column the moment it is not buoyant, so
+    # a sounding running 6.5 K/km right down to the surface loses ~0.4 K of
+    # parcel buoyancy per layer — more than any physical ``zlift`` — and
+    # cannot trigger at all. Real boundary layers, and the ones jcm's own
+    # vdiff produces in the coupled model, are near-neutral near the surface;
+    # that is precisely the condition the trigger tests for.
+    bl_top_km = 0.8
+    dry_lapse = 9.81 / 1004.64          # K/m
+    T = jnp.where(
+        z_km < bl_top_km,
+        surface_T - dry_lapse * 1000.0 * z_km,
+        surface_T - dry_lapse * 1000.0 * bl_top_km
+        - lapse_K_per_km * (z_km - bl_top_km),
+    )
+    T = jnp.maximum(T, 200.0)
 
     # Humidity: prescribed RH, drying aloft
     qs = saturation_mixing_ratio(p, T)
