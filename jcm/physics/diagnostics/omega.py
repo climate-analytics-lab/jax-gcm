@@ -8,11 +8,11 @@ physics package (SPEEDY, Held-Suarez, ECHAM, ...). It is deliberately not
 an AeroCom-ism: the AeroCom ``plev`` group separately derives its
 wap/w500/w700 submission fields from the same dycore field.
 
-Composing this term makes the provider a hard requirement (Model
-construction fails with a pointed error if the dycore flag is off), which
-is the honest failure mode for an explicitly requested diagnostic. The
-``jcm run`` CLI enables the provider automatically when the composed
-physics requires it.
+Composing this term makes the provider a hard requirement. ``Model``
+construction switches the dycore's ``compute_omega`` on to satisfy it, and
+fails with a pointed error only if the backend has no such provider at all
+— the honest handling for an explicitly requested diagnostic, which should
+never silently come back zero.
 """
 
 from typing import ClassVar

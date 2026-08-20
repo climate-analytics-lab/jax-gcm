@@ -58,6 +58,7 @@ def calculate_updraft(
     config: ConvectionParameters,
     land_fraction: jnp.ndarray = jnp.array(0.0),
     type_weights: jnp.ndarray | None = None,
+    lift: jnp.ndarray = jnp.array(0.0),
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -77,6 +78,13 @@ def calculate_updraft(
             threshold via ``config.cu_dnoprc_ocean`` and
             ``config.cu_dnoprc_land``. Defaults to 0 (ocean) so existing
             single-column tests behave as before.
+        type_weights: Smooth (deep, shallow, mid) weights; ``None`` falls
+            back to the one-hot of ``ktype``.
+        lift: ECHAM ``zlift`` [K], the sub-grid buoyancy excess. Applied to
+            the buoyancy test at the FIRST ascent level above cloud base and
+            ONLY for a mid-level (``ktype == 3``) plume — see the
+            termination comment below for why that is the reference's one
+            legitimate site for it.
 
     Returns:
         UpdatedraftState with computed profiles
@@ -130,6 +138,23 @@ def calculate_updraft(
     tu_cb, qu_cb, lu_cb = saturation_adjustment(
         parcel_T_dry_at_cb, surf_humid, pressure[kbase],
     )
+
+    # A MID-LEVEL plume has no surface connection: ECHAM ``cubasmc`` seeds it
+    # from the ENVIRONMENT at its own base (mo_cuascent.f90:620-622,
+    # ``pqu = pqen(kk)``, ``plu = 0``). Lifting a surface parcel to a base
+    # 3+ km up, as the ``cubase`` branch above does, would be the wrong
+    # parcel entirely — that is the whole point of the separate trigger.
+    #
+    # ECHAM's ``ptu`` is the full-level environmental temperature brought
+    # adiabatically DOWN to the layer's bottom interface, from which the
+    # ascent lifts it back through the layer. On jcm's full-level grid the
+    # base *is* the full level, so the two half-layer displacements are
+    # absent and the seed is the environment there — the scheme-wide
+    # staggering approximation (#530), not something specific to this seed.
+    is_midlevel = (ktype == 3)
+    tu_cb = jnp.where(is_midlevel, temperature[kbase], tu_cb)
+    qu_cb = jnp.where(is_midlevel, humidity[kbase], qu_cb)
+    lu_cb = jnp.where(is_midlevel, 0.0, lu_cb)
 
     tu_init = tu_init.at[kbase].set(tu_cb)
     qu_init = qu_init.at[kbase].set(qu_cb)
@@ -380,31 +405,35 @@ def calculate_updraft(
             # exactly like the previous all-or-nothing dump; widths → 0
             # recover the hard termination.
             above_cloud_base = k < kbase
-            # The plume is a warm thermal carrying the same sub-grid excess
-            # ``zlift`` that ``find_cloud_base`` credited it with, so the
-            # termination test must apply it too. Without this the cloud-base
-            # gate admits a level (zbuo + zlift > 0) that the very next
-            # ascent step then rejects (zbuo < 0), and the plume dies one
-            # level above its own base — which is exactly what happens on a
-            # tropical column, where the parcel runs −0.67 K at the LCL and
-            # −0.11 K one level up before turning solidly positive.
+            # ECHAM's sub-grid buoyancy bonus ``zlift`` applies to exactly
+            # one ascent test: ``IF(klab(jk+1).EQ.1) zbuo = zbuo + zlift``
+            # (mo_cuascent.f90:449) — the level below must still be
+            # SUB-CLOUD. ``cubase`` sets ``klab(kcbot) = 2``, so a
+            # surface-triggered plume never qualifies at any level; the only
+            # ``klab == 1`` above cloud base is the one ``cubasmc`` writes
+            # when it seeds a mid-level plume (mo_cuascent.f90:654). Hence
+            # the bonus here is gated on BOTH ``ktype == 3`` and the first
+            # step above the base, and is otherwise identically zero.
             #
-            # NO ``zlift`` here — this is ECHAM, not a simplification.
-            # ``cuasc`` adds the bonus only where the level below is still
-            # sub-cloud (mo_cuascent.f90:449, ``IF(klab(jk+1).EQ.1)``), and
-            # ``cubase`` sets ``klab(kcbot) = 2``, so for a plume initiated
-            # from cloud base the test below it is always 2 and the bonus
-            # never applies. It is reachable only through ``cubasmc``
-            # mid-level triggering, which jcm does not implement (#697).
+            # This is the resolution of #691: an earlier version added the
+            # bonus at EVERY ascent level to keep a plume alive above a
+            # cloud base wrongly picked at the LFC, which relaxed the CLOUD
+            # TOP criterion by ~1 K against a 0.01 K sigmoid width. #684
+            # removed both halves of that (``find_cloud_base`` now does
+            # ECHAM's ``klab`` walk and returns the LCL); this restores the
+            # bonus at the one site the reference actually uses it.
             #
-            # An earlier version added it at every ascent level to keep the
-            # plume alive above a cloud base picked at the LFC. Both halves
-            # of that are now gone: ``find_cloud_base`` does ECHAM's ``klab``
-            # walk and returns the LCL, and the parcel has to be genuinely
-            # buoyant to keep rising. Applying the bonus throughout also
-            # relaxed the CLOUD TOP criterion by ~1 K against a 0.01 K
-            # sigmoid width, which was the defect reported in #691.
-            surv_buoy = jax.nn.sigmoid(buoy_new / w_term_buoy)
+            # ``buoy_new`` is an acceleration (g·ΔTv/Tv), ``lift`` a
+            # temperature, so the bonus converts with g/Tv_env.
+            first_step_above_base = jnp.logical_and(
+                above_cloud_base, k == kbase - 1,
+            )
+            lift_accel = jnp.where(
+                jnp.logical_and(first_step_above_base, ktype == 3),
+                c.grav * lift / virtual_temp_e,
+                0.0,
+            )
+            surv_buoy = jax.nn.sigmoid((buoy_new + lift_accel) / w_term_buoy)
             surv_mf = jax.nn.sigmoid(
                 (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
                  - 0.01) / w_term_mf

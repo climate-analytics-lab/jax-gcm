@@ -483,9 +483,21 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         cb, found = find_cloud_base(T, q, p, cfg, None, dz)
         self.assertTrue(bool(found))
         z = jnp.zeros_like(T)
+        # Resolved convergence beyond 1.1*E so ECHAM's zdqcv test (#699)
+        # classifies the plume deep — the depth assertion below is about
+        # the TRIGGER admitting the plume, and needs entrpen, not the 30x
+        # stronger shallow entrainment a supply-only column now earns.
+        # (No vdiff profile is passed here, so the dynamics part must carry
+        # the whole integral by itself.)
+        nlev = T.shape[0]
+        sl = slice(nlev // 2, nlev - 4)
+        supply = 1.5e-4
+        conv = jnp.zeros(nlev).at[sl].set(
+            1.3 * supply / jnp.sum(rho[sl] * dz[sl]))
         tend, state = tiedtke_nordeng_convection(
             T, q, p, dz, rho, z, z, z, z, 600.0, cfg,
-            moisture_supply=jnp.asarray(1.5e-4),
+            moisture_supply=jnp.asarray(supply),
+            qte_dynamics=conv,
         )
         kbase, ktop = int(state.kbase), int(state.ktop)
         self.assertLess(ktop, kbase - 5,

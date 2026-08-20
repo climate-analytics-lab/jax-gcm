@@ -13,6 +13,9 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng_test import (  # noqa: E501
+    deep_convection_drivers,
+)
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     ConvectionParameters,
     tiedtke_nordeng_convection,
@@ -102,38 +105,49 @@ class TestRCEConvection(unittest.TestCase):
             "Updraft mass flux should activate on unstable sounding",
         )
 
-    def test_mid_level_convection_triggers_for_moderate_cape_moist_free_trop(self):
-        """ktype=3 should fire when CAPE is moderate (100 < CAPE < 1000)
-        and the free troposphere is moist (RH > 90 % at some 700-300 hPa
-        level). Mirrors the ECHAM ``cubasmc`` mid-level trigger.
+    def test_ktype_follows_the_echam_triggers_not_a_cape_proxy(self):
+        """Ktype records ECHAM's trigger + moisture-budget test (#697/#699).
 
-        Bug A regression test: before the trigger was added, JAX returned
-        only ktype ∈ {0, 1, 2}; ktype=3 (mid-level) was a documented
-        omission flagged by the Fortran harness comparison.
+        History: this test used to demand ktype ∈ {1, 3} for a
+        moderate-CAPE column with a moist free troposphere, pinning an
+        RH-based proxy that relabelled surface plumes "mid-level" to stand
+        in for the missing ``cubasmc`` trigger. Both proxies are gone —
+        the real ``cubasmc`` needs resolved ascent (omega < 0; covered in
+        ``midlevel_trigger_test``), and deep-vs-shallow is the
+        moisture-convergence integral. So the SAME column is now,
+        correctly: shallow on its own surface flux, deep with resolved
+        convergence beyond 0.1*E.
         """
-        # Build a sounding with weaker surface CAPE (cooler surface) but
-        # high free-trop RH. Use the helper's surface_T/lapse parameters
-        # to produce a moist-but-not-explosive column.
-        T, q, p, dz, rho = _tropical_sounding(
+        atm_args = _tropical_sounding(
             surface_T=298.0, surface_rh=0.85, lapse_K_per_km=5.5,
         )
+        T, q, p, dz, rho = atm_args
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
+        atm = {"rho": rho, "layer_thickness": dz}
 
-        _, state = tiedtke_nordeng_convection(
+        drivers = deep_convection_drivers(atm)
+        _, s_supply_only = tiedtke_nordeng_convection(
             T, q, p, dz, rho,
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
+            moisture_supply=drivers["moisture_supply"],
+            moisture_tend_profile=drivers["moisture_tend_profile"],
         )
-        ktype = int(state.ktype)
-        # Accept either deep or mid (sounding-dependent) but NOT shallow
-        # or no convection — both indicate the trigger isn't picking up
-        # the moist-free-trop signal.
-        assert ktype in (1, 3), (
-            f"Expected ktype ∈ {{1, 3}} for moderate-CAPE moist column; "
-            f"got ktype={ktype}"
+        _, s_convergent = tiedtke_nordeng_convection(
+            T, q, p, dz, rho,
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, cfg,
+            **drivers,
         )
+        assert int(s_supply_only.ktype) == 2, (
+            f"supply-only column must be shallow, got "
+            f"{int(s_supply_only.ktype)}")
+        assert int(s_convergent.ktype) == 1, (
+            f"convergent column must be deep, got "
+            f"{int(s_convergent.ktype)}")
 
     def test_stable_sounding_no_convection(self):
         """On a stable sounding (cold surface) the scheme should return zero
@@ -190,6 +204,9 @@ class TestRCEConvection(unittest.TestCase):
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
+            # Deep via ECHAM's zdqcv route (#699): the mid-troposphere heating
+            # peak this test pins is a DEEP plume property.
+            **deep_convection_drivers({'rho': rho, 'layer_thickness': dz}),
         )
         dtedt = np.asarray(tendencies.dtedt)
         peak_pos = float(np.max(dtedt))
@@ -304,12 +321,17 @@ class TestRCEConvection(unittest.TestCase):
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
 
+        # Deep classification via the zdqcv route (#699): the elevated
+        # cloud base + rain-through-dry-layer configuration needs a deep
+        # plume; supply-only is now (correctly) shallow with little rain.
+        drivers = deep_convection_drivers(
+            {"rho": rho, "layer_thickness": dz}, e_sfc=5e-5)
         tendencies, state = tiedtke_nordeng_convection(
             T, q, p, dz, rho,
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
-            moisture_supply=jnp.array(5e-5),
+            **drivers,
         )
         precip = float(tendencies.precip_conv)
 
@@ -423,15 +445,26 @@ class TestMoistureSupplyClosure(unittest.TestCase):
     """
 
     def _run(self, moisture_supply, dt=1800.0, surface_T=305.0,
-             surface_rh=0.9, lapse=7.0):
+             surface_rh=0.9, lapse=7.0, deep=False):
         T, q, p, dz, rho = _tropical_sounding(
             surface_T=surface_T, surface_rh=surface_rh, lapse_K_per_km=lapse,
         )
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
+        extra = {}
+        if deep:
+            # Resolved convergence > 1.1*supply so ECHAM's zdqcv test
+            # (#699) classifies deep on the dynamics signal alone; the
+            # closure-path comparisons this class makes are otherwise
+            # about the SUPPLY argument, which stays the sole variable.
+            sl = slice(nlev // 2, nlev - 4)
+            conv = jnp.zeros(nlev).at[sl].set(
+                1.3 * float(moisture_supply) / jnp.sum(rho[sl] * dz[sl]))
+            extra["qte_dynamics"] = conv
         tend, state = tiedtke_nordeng_convection(
             T, q, p, dz, rho, z, z, z, z, dt, ConvectionParameters.default(),
             moisture_supply=jnp.asarray(float(moisture_supply)),
+            **extra,
         )
         return tend, state
 
@@ -505,8 +538,8 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         # was a property of the replaced deviation, which capped deep
         # convection at the current evaporation and locked coupled runs
         # into a desiccated fixed point).
-        pr_1x = float(self._run(2.0e-5)[0].precip_conv)
-        pr_2x = float(self._run(4.0e-5)[0].precip_conv)
+        pr_1x = float(self._run(2.0e-5, deep=True)[0].precip_conv)
+        pr_2x = float(self._run(4.0e-5, deep=True)[0].precip_conv)
         self.assertGreater(pr_1x, 0.0)
         self.assertLess(abs(pr_2x / pr_1x - 1.0), 0.1)
 
@@ -592,13 +625,24 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
         cfg = ConvectionParameters.default()
+        # Both calls deep via the same convergence (#699): the equality
+        # below holds through the Nordeng rescale, which sets the deep
+        # amplitude independently of the first-guess flux. A shallow
+        # column has no rescale, so first-guess differences (the
+        # trigger-weight floor path with E > 0) would survive — a
+        # different property than the CFL-burst guard this test pins.
+        sl = slice(nlev // 2, nlev - 4)
+        conv = jnp.zeros(nlev).at[sl].set(
+            3.0e-4 / jnp.sum(rho[sl] * dz[sl]))
         _, st_supply = tiedtke_nordeng_convection(
             T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
             moisture_supply=jnp.asarray(2.0e-4),
+            qte_dynamics=conv,
         )
         _, st_cape = tiedtke_nordeng_convection(
             T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
             moisture_supply=jnp.asarray(0.0),
+            qte_dynamics=conv,
         )
         mfu_supply = float(jnp.max(st_supply.mfu))
         mfu_cape = float(jnp.max(st_cape.mfu))

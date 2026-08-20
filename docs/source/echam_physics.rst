@@ -175,11 +175,26 @@ Convection
 
 **Activation Criteria**:
 
-Convection activates based on the diagnosed convection type (``ktype``):
+``ktype`` records which trigger fired and how ECHAM's moisture-budget test
+classified it:
 
-1. **Deep convection**: Triggered by conditional instability with sufficient CAPE; CAPE closure timescale ``tau``
-2. **Shallow convection**: Triggered by moisture convergence in the boundary layer
-3. **Mid-level convection**: Triggered by conditional instability above the boundary layer
+1. **Deep convection** (``ktype=1``): a surface (``cubase``) plume in a column
+   whose moisture convergence exceeds 1.1x the surface latent flux
+   (``zdqcv > 1.1·E``, ``mo_cumastr.f90:571``) — large-scale convergence
+   beyond what the surface itself supplies. Demoted to shallow if the
+   realized cloud is thinner than 200 hPa.
+2. **Shallow convection** (``ktype=2``): a surface plume fed essentially by
+   its own surface flux (no excess convergence).
+3. **Mid-level convection** (``ktype=3``): a ``cubasmc``-initiated plume with
+   no surface connection (see the mid-level trigger above).
+
+The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
+tendency plus the dynamics (advection + hyperdiffusion) tendency of the
+just-completed dycore step, reconstructed one step lagged from the physics
+carry — the same information provenance as ECHAM's leapfrog dynamics
+tendency. It enters only this classification switch, never a closure
+amplitude (a lagged amplitude is the compounding convergence feedback the
+closure work deliberately excluded).
 
 **Configurable Parameters** (:py:class:`ConvectionParameters`):
 
@@ -217,6 +232,10 @@ Convection activates based on the diagnosed convection type (``ktype``):
    * - ``dt_conv``
      - Convection time step (s)
      - 3600.0
+   * - ``cu_dqcv_width``
+     - Width of the deep/shallow moisture-convergence sigmoid (kg/m²/s);
+       ECHAM's hard switch in a differentiable form
+     - 2.0e-7
    * - ``cu_cminbuoy``
      - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
      - 0.2
@@ -230,6 +249,18 @@ Convection activates based on the diagnosed convection type (``ktype``):
      - Fallback :math:`\sigma(\theta_v)` (K), used only when no vdiff term
        is present; the model path reads vdiff's prognostic value
      - 1.0
+   * - ``cu_lmfmid``
+     - ECHAM ``lmfmid``: enable the ``cubasmc`` mid-level trigger
+     - ``True``
+   * - ``cu_midlev_rh``
+     - Environmental RH a mid-level cloud base must exceed (-)
+     - 0.90
+   * - ``cu_midlev_zmin``
+     - Minimum height above the surface for a mid-level cloud base (m)
+     - 1500.0
+   * - ``cu_midlev_ptop``
+     - Pressure floor for a mid-level cloud base, ECHAM ``nmctop`` (Pa)
+     - 30000.0
 
 **Cloud-base determination** follows ECHAM ``cubase``'s ``klab`` walk
 (``mo_cuinitialize.f90``). A parcel carrying the lowest level's temperature and
@@ -245,16 +276,50 @@ excess
    z_\mathrm{lift} = \min\!\big(\max(c_\mathrm{minbuoy},
    \min(c_\mathrm{maxbuoy}, \sigma_{\theta_v} \cdot c_\mathrm{bfac})), 1\,\mathrm{K}\big)
 
-``zlift`` appears **only** in the cloud-base test. ECHAM's ascent adds it just
-where the level below is still sub-cloud (``klab == 1``), which for a
-``cubase``-initiated plume is never true, so the updraft's termination test uses
-the parcel's true buoyancy.
-
-The practical consequence is that the trigger requires a **well-mixed boundary
+The practical consequence is that this trigger requires a **well-mixed boundary
 layer**: a sounding running 6.5 K/km down to the surface loses roughly 0.4 K of
 parcel buoyancy per model layer, more than any physical ``zlift``, and cannot
-trigger. Elevated convection above a stable layer is ECHAM's separate
-``cubasmc`` mid-level trigger, which JAX-GCM does not yet implement.
+trigger. That strictness is deliberate, because it is only half of ECHAM's
+trigger.
+
+**Mid-level convection** (ECHAM ``cubasmc``, ``mo_cuascent.f90``) is the other
+half, and it starts a plume with no surface connection at all. Scanning upward,
+the lowest level that is
+
+* within 10 % of saturation (:math:`q > 0.90\,q_s`),
+* being lifted by resolved ascent (:math:`\omega < 0`),
+* more than 1500 m above the surface, and
+* below the 300 hPa ``nmctop`` ceiling
+
+becomes a cloud base, provided the plume seeded there survives its first ascent
+step (ECHAM otherwise retries one level higher). The parcel is the
+**environment at that level** — not a surface parcel lifted to it — and the
+cloud-base mass flux is the resolved ascent itself,
+:math:`\max(c_\mathrm{mfcmin}, \min(c_\mathrm{mfcmax}, -\omega/g))`, with no
+CAPE or moisture-budget closure and no Nordeng rescale (ECHAM gates that on
+``ktype == 1``). This is what covers elevated convection above a stable layer,
+warm-conveyor and frontal ascent, and nocturnal elevated convection over land.
+
+``ktype`` therefore records **which trigger fired**, not a diagnosis of the
+column: 3 means ``cubasmc``, while 1/2 are ``cubase`` plumes split deep/shallow.
+
+``zlift`` appears in the cloud-base test of both triggers, and in exactly one
+ascent test: ECHAM adds it where the level below is still sub-cloud
+(``klab == 1``), which happens only at the first step above a ``cubasmc`` base —
+``cubase`` sets ``klab = 2`` at its own cloud base. Everywhere else the
+updraft's termination test uses the parcel's true buoyancy.
+
+.. note::
+
+   The mid-level trigger needs :math:`\omega` from the dynamical core, so
+   composing Tiedtke convection makes the ``omega`` dycore field a hard
+   requirement. Backends that can supply it have the provider switched on
+   automatically; one that cannot (currently pySES) fails at ``Model``
+   construction, and the trigger must then be disabled explicitly with
+   ECHAM's own namelist switch,
+   ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``. That is a
+   real loss of capability, not a formality — such a run has no elevated
+   convection.
 
 :math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
 virtual potential temperature at the second-lowest full level, taken from the

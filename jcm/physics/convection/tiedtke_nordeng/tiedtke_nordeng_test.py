@@ -4,6 +4,7 @@ Date: 2025-01-09
 """
 
 import jax.numpy as jnp
+import numpy as np
 import jax
 from types import SimpleNamespace
 
@@ -22,6 +23,31 @@ from jcm.physics_interface import PhysicsState
 from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import mass_flux_closure
+
+
+def deep_convection_drivers(atm, fraction=0.5, e_sfc=3.0e-5):
+    """Moisture arguments that make ECHAM's zdqcv test classify DEEP.
+
+    Since #699 the deep/shallow split is ECHAM's moisture-convergence test,
+    not a CAPE threshold: with no moisture information at all a column ties
+    to shallow (ECHAM's FSEL semantics), and a column fed only by its own
+    surface flux is shallow too. Tests that need a deep plume must say so
+    the way the atmosphere would — surface evaporation plus a resolved
+    moisture-convergence profile exceeding 0.1*E.
+    """
+    rho = np.asarray(atm['rho'])
+    dz = np.asarray(atm['layer_thickness'])
+    nlev = rho.shape[0]
+    prof = np.zeros(nlev)
+    prof[-4:] = e_sfc / (rho[-4:] * dz[-4:]).sum()
+    conv = np.zeros(nlev)
+    sl = slice(nlev // 2, nlev - 8)
+    conv[sl] = fraction * e_sfc / (rho[sl] * dz[sl]).sum()
+    return dict(
+        moisture_supply=jnp.array(e_sfc),
+        moisture_tend_profile=jnp.array(prof),
+        qte_dynamics=jnp.array(conv),
+    )
 
 
 def create_test_atmosphere(nlev=40, unstable=True):
@@ -175,7 +201,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, moisture_tend_profile, thvsig,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -354,51 +380,68 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     flux entering from below (``entrain_up = entr·mfu_below·dz`` by
     construction, so the cloud-base supply appears via plume continuity,
     not as entrainment).
+
+    The fixture is 16 levels, not the 8-level toy the other wrapper tests
+    use: on 8 levels the first ascent step spans ~175 hPa, the plume dies
+    one level above base, and ECHAM's depth demotion (mo_cumastr.f90:752,
+    #699) then — correctly — refuses to call a 150 hPa cloud deep. Deep
+    classification itself comes through the honest #699 route: surface
+    evaporation plus a ``_prev_step`` carry implying resolved moisture
+    convergence of 0.5·E.
     """
     import numpy as np
     from jcm.physics.convection.saturation import (
         saturation_specific_humidity,
     )
-    from jcm.constants import grav, rd
+    from jcm.constants import rd
 
-    nlev, ncols = 8, 1
-    # Top-first unstable moist column (the SPEEDY-style moist-adiabat
-    # fixture, reversed to the physics-internal orientation).
-    # Top-first. The lowest pair (295 -> 300 K) is the boundary layer: those
-    # two levels are ~1 km apart, so 295 K made it a 5 K/km lapse — too stable
-    # for a lifted parcel to stay buoyant through, and ECHAM's ``klab`` walk
-    # now (correctly) drops such a column before it ever reaches its LCL.
-    # 291 K makes the layer near-dry-adiabatic, i.e. a real mixed layer, which
-    # is what a deep-convection ledger fixture has to have.
-    T = jnp.array([210., 230., 250., 265., 275., 285., 291., 300.])[:, None]
-    p = (jnp.array(
-        [0.025, 0.095, 0.2, 0.34, 0.51, 0.685, 0.835, 0.95]
-    ) * 1e5)[:, None]
+    nlev, ncols = 16, 1
+    p_col = jnp.linspace(5000.0, 96000.0, nlev)
+    t_np = np.empty(nlev)
+    t_np[-1] = 301.0
+    dz_np = np.empty(nlev)
+    for k in range(nlev - 1):
+        dz_np[k] = 287.0 * 260.0 / 9.81 * np.log(float(p_col[k + 1] / p_col[k]))
+    dz_np[-1] = 400.0
+    for k in range(nlev - 2, -1, -1):
+        lapse = 9.7e-3 if k >= nlev - 3 else 6.2e-3
+        t_np[k] = t_np[k + 1] - lapse * dz_np[k]
+    T = jnp.array(t_np)[:, None]
+    p = p_col[:, None]
     qs = jax.vmap(
         lambda pp, tt: saturation_specific_humidity(tt, pp)
     )(p[:, 0], T[:, 0])[:, None]
-    # Surface RH 0.90, not 0.85: with the cloud-base parcel no longer
-    # over-warmed by the non-conserving saturation adjustment (#661) this
-    # fixture's CAPE is 726 J/kg at 0.85 — below the 1000 J/kg deep
-    # threshold, so it selected ktype=2 and stopped exercising the DEEP
-    # ledger this test is about. 0.90 gives 1563 J/kg and genuine deep
-    # convection.
-    rh = jnp.array([0.5, 0.7, 0.75, 0.7, 0.65, 0.6, 0.8, 0.90])[:, None]
+    q = 0.9 * qs
     rho = p / (rd * T)
-    dz = jnp.abs(jnp.diff(
-        -rd * T[:, 0] / grav * jnp.log(p[:, 0] / 1e5), append=0.0,
-    ))[:, None] + 500.0
+    dz = jnp.array(dz_np)[:, None]
     state = PhysicsState.zeros(
-        (nlev, ncols), temperature=T, specific_humidity=rh * qs,
+        (nlev, ncols), temperature=T, specific_humidity=q,
         tracers={"qc": jnp.zeros((nlev, ncols)),
                  "qi": jnp.zeros((nlev, ncols))},
     )
+    e_sfc = 3.0e-5
+    conv_prof = jnp.zeros((nlev, ncols)).at[6:12, :].set(
+        0.5 * e_sfc / float((rho[6:12, 0] * dz[6:12, 0]).sum()))
+    supply_prof = jnp.zeros((nlev, ncols)).at[-2:, :].set(
+        e_sfc / float((rho[-2:, 0] * dz[-2:, 0]).sum()))
+    surface = SimpleNamespace(
+        evaporation=jnp.full((ncols,), e_sfc),
+        effective_evaporation=jnp.full((ncols,), e_sfc))
+    vdiff = SimpleNamespace(qv_tendency=supply_prof, thv_sigma=None)
+    dt = 900.0
     diagnostics = {
-        "_dt_seconds": 900.0,
+        "_dt_seconds": dt,
         "pressure_full": p,
         "layer_thickness": dz,
         "air_density": rho,
         "clouds": CloudData.zeros((ncols,), nlev),
+        "surface": surface,
+        "vertical_diffusion": vdiff,
+        "_prev_step": {
+            "specific_humidity":
+                state.specific_humidity - dt * conv_prof,
+            "q_tendency": jnp.zeros((nlev, ncols)),
+        },
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
 
@@ -607,9 +650,16 @@ class TestConvectionScheme:
             # Net mass flux at each level should be continuous
             # (This is a simplified check)
             state.mfu + state.mfd  # Downdraft is negative
-            
-            # Mass flux should decrease with height
-            assert jnp.all(jnp.diff(state.mfu[:state.ktop]) <= 0)
+
+            # Mass flux should decrease with height, judged on numerically
+            # meaningful fluxes only: the smooth termination sigmoid leaves
+            # sub-1e-20 remnants above the realized cloud top, and their
+            # ordering is denormal noise, not physics (cmfcmin = 1e-10 is
+            # the scheme's own floor for a real flux).
+            mfu_above = state.mfu[:state.ktop]
+            meaningful = mfu_above > 1e-10
+            assert jnp.all(
+                jnp.where(meaningful[1:], jnp.diff(mfu_above) <= 0, True))
     
     def test_energy_conservation(self):
         """Test approximate energy conservation"""
@@ -1149,7 +1199,10 @@ class TestConvectivePrecipitation:
             atm['layer_thickness'], atm['rho'],
             atm['u_wind'], atm['v_wind'],
             jnp.zeros(nlev), jnp.zeros(nlev),
-            dt=3600.0, config=config
+            dt=3600.0, config=config,
+            # Deep plume via the honest route (#699): a shallow plume with
+            # a cloud thinner than zdnoprc correctly makes NO precipitation.
+            **deep_convection_drivers(atm),
         )
 
         # Convection should be active

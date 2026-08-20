@@ -225,11 +225,22 @@ class TestCloudDepthIntegration(unittest.TestCase):
             entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
             cprcon=2.5e-4, cevapcu=2.0e-5, cmfctop=0.20, cmfdeps=0.30,
         )
+        # Deep via ECHAM's zdqcv moisture-convergence route (#699): the
+        # scan-ceiling regression this test guards is a property of the
+        # DEEP path (150 hPa target top); a no-information column now
+        # correctly classifies shallow with a 700 hPa ceiling, which is
+        # exactly the truncation this test would misread as the bug.
+        e_sfc = 3.0e-5
+        sl = slice(nlev // 2, nlev - 4)
+        conv = jnp.zeros(nlev).at[sl].set(
+            1.3 * e_sfc / jnp.sum(rho[sl] * dz[sl]))
         tend, state = tiedtke_nordeng_convection(
             T, q, p_full, dz, rho,
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
+            moisture_supply=jnp.array(e_sfc),
+            qte_dynamics=conv,
         )
         # Find topmost level with nonzero updraft mass flux
         mfu = np.asarray(state.mfu)

@@ -944,9 +944,10 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
 
     An explicit ``dycore.compute_omega`` always wins. Left unset, the
     provider defaults ON when either (a) the composed physics REQUIRES
-    the ``omega`` dycore field (e.g. the model-agnostic
-    ``OmegaDiagnostic`` term), so an explicitly requested diagnostic
-    never dies on the construction-time contract check, or (b) the
+    the ``omega`` dycore field (the ``OmegaDiagnostic`` term, or Tiedtke
+    convection with ECHAM's ``lmfmid`` mid-level trigger on) — ``Model``
+    would switch the provider on anyway, so this only keeps the resolved
+    config honest about what the run computes — or (b) the
     physics config runs the AeroCom ``plev`` group (``enable_aerocom``
     with ``plev`` in ``aerocom_groups``), whose wap/w500/w700 would
     otherwise be silently zero-filled: exactly the kind of
