@@ -46,9 +46,19 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         # the budget is evaluated at every saved step.
         preds = run_rce(scm, ic, n_days=2.0)
 
+        # Layer masses at the column's ACTUAL surface pressure.
+        # ``rce_initial_state`` builds the column at ``c.p0`` (1e5 Pa), and
+        # the SCM never changes it. An earlier version of this test used
+        # 101325 Pa here — a 1.3 % error in the mass measure that mimicked a
+        # water leak proportional to whichever flux dominated the column
+        # tendency. That artifact was chased across four commits as a real
+        # conservation defect (the #696 "large-scale precipitation leak")
+        # before a per-term ledger showed every term closing to round-off
+        # and the composed residual collapsing 55x under the correct mass.
+        ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
         a = np.asarray(scm.vertical.a_boundaries)
         b = np.asarray(scm.vertical.b_boundaries)
-        mass = np.diff(a + b * 101325.0) / c.grav
+        mass = np.diff(a + b * ps) / c.grav
 
         t = preds.tendencies
         nsteps = np.asarray(t.specific_humidity).shape[0]
@@ -93,59 +103,43 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
 
         # PRIMARY pin: the day-mean residual against the day-mean dominant
         # flux. This is the statement that actually means "the composed step
-        # conserves water", and it is the one to tighten — the per-step
-        # version below cannot be, because its denominator is instantaneous
-        # and collapses during a convective lull, inflating a small absolute
-        # residual into a large ratio.
+        # conserves water".
         #
-        # Measured across the Tiedtke cloud-base work, day 2 of this column:
-        #
-        #                          mean-rel   mean P_conv   mean P_ls
-        #   dev @ f6d1bcd            1.80 %     1.95e-6      3.0e-14
-        #   #661, constant zlift 1K  0.71 %     2.52e-5      1.06e-7
-        #   #683, prognostic thvsig  1.36 %     1.54e-5      7.2e-14
-        #   #684/#691, klab walk     2.20 %     4.30e-6      4.93e-6
-        #
-        # READ THAT LAST COLUMN. The metric tracks how much LARGE-SCALE
-        # precipitation the column happens to produce, not how well anything
-        # conserves. Attribution over the same 96 steps:
-        #
-        #   corr(|residual|, P_conv) = +0.077
-        #   corr(|residual|, P_ls)   = +0.992
-        #
-        # i.e. the residual is ~9 % of the large-scale precipitation rate and
-        # essentially independent of convection. The leak is in the
-        # stratiform condensation -> microphysics -> precipitation chain and
-        # is tracked as #696. It was invisible until the faithful cubase walk
-        # made this column split its precipitation between the two paths;
-        # before that it precipitated almost entirely convectively.
-        #
-        # So this bound is a smoke alarm, not a closure guard, until #696
-        # lands — it cannot discriminate convective closure, and convection's
-        # own per-scheme budgets (rce_integration_test) are what pin that.
-        # 2.6 % passes the measured 2.20 % with margin for the intermittency
-        # in #682. Expect it well below 1 % once #696 is fixed.
+        # History worth keeping: with the 101325-Pa mass error above, this
+        # metric wandered 0.71 % - 2.20 % across the Tiedtke cloud-base work
+        # and correlated 0.99 with large-scale precipitation, which was filed
+        # as a stratiform conservation defect (#696). The correlation was the
+        # artifact's signature, not a leak's: a mis-scaled mass measure makes
+        # the residual a fixed fraction of the net column tendency, which
+        # tracks whichever flux is bursty in the current regime. With the
+        # correct mass the per-term ledger closes vdiff to its delivered
+        # evaporation, convection to its precipitation, and the 1M to
+        # round-off (1e-13); the composed day-2 mean residual measured
+        # 6.1e-9 kg/m2/s = 0.03 % of E. The bound is 0.5 %: an order of
+        # magnitude of margin for regime shifts, and an order of magnitude
+        # tighter than anything a genuine flux-proportional leak would pass.
         mean_flux = float(np.maximum(np.abs(E[spd:]).mean(),
                                      np.abs(P[spd:]).mean()))
         mean_rel = float(np.abs(residual_eq).mean()) / mean_flux
         self.assertLess(
-            mean_rel, 0.026,
+            mean_rel, 0.005,
             f"composed water budget leaks {mean_rel:.2%} of the day-mean "
             f"flux over the equilibrated day "
             f"(mean |residual| = {np.abs(residual_eq).mean():.3e} kg/m2/s)",
         )
 
-        # SECONDARY pin: no single step may go grossly open. Loose by design
-        # for the denominator reason above — the pre-fix schemes this test was
+        # SECONDARY pin: no single step may go grossly open. Its denominator
+        # is instantaneous, so it stays looser than the day-mean pin — a
+        # convective lull collapses the scale and inflates a small absolute
+        # residual into a large ratio. The pre-fix schemes this test was
         # written against fail here at the several-hundred-percent level
-        # (water created at the precipitation rate), which is what it catches.
-        # Sanity that it is not vacuous: dropping P_conv from the sink side of
-        # the ledger scores 174 %, so convective precip really is debited.
-        # The lull sensitivity is a symptom of the convective intermittency
-        # tracked in #682; this bound should tighten when that is retuned.
+        # (water created at the precipitation rate), which is what it
+        # catches. Sanity that it is not vacuous: dropping P_conv from the
+        # sink side of the ledger scores 174 %, so convective precip really
+        # is debited.
         worst = int(np.argmax(rel_eq))
         self.assertLess(
-            float(rel_eq.max()), 0.10,
+            float(rel_eq.max()), 0.02,
             f"composed water budget open by {residual_eq[worst]:.3e} "
             f"kg/m2/s at equilibrated step {worst + spd} "
             f"(E={E[worst + spd]:.3e}, P={P[worst + spd]:.3e})",
