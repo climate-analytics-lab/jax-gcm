@@ -18,8 +18,9 @@ from typing import NamedTuple, Tuple
 from functools import partial
 
 import jcm.constants as c
+from jcm.physics.convection.saturation import cuadjtq_newton_evap
 from .tiedtke_nordeng import (
-    ConvectionParameters, saturation_mixing_ratio
+    ConvectionParameters
 )
 
 
@@ -43,49 +44,27 @@ def wetbulb_temperature(
     humidity: jnp.ndarray,
     pressure: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate wet-bulb temperature and humidity
-    
-    KNOWN DEFECT (#694): this is not the wet bulb. The isobaric wet-bulb is
-    defined by ``cp·ΔT + L·Δq = 0``, whose linearised solution is the damped
-    Newton step ``(qs − q)/(1 + (L/cp)·dqs/dT)``. The code below replaces that
-    state-dependent damper with a hardcoded 0.3 and then re-saturates at the
-    result, so moist static energy is off by −5223 J/kg at 300 K/900 hPa and
-    +3173 J/kg at 280 K/700 hPa — the sign flips with height, and at the
-    mid-tropospheric levels where the LFS actually sits it under-cools and
-    invents ~0.7 g/kg of vapour that no rain flux is debited for. ECHAM's
-    ``cudlfs`` uses ``cuadjtq(kcall=2)``, which ``downdraft_step`` below
-    already calls correctly.
-    
+    """Calculate wet-bulb temperature and humidity.
+
+    ECHAM ``cuadjtq(kcall=2)`` — the evaporation-only damped Newton
+    adjustment (see :func:`~jcm.physics.convection.saturation.
+    cuadjtq_newton_evap`). Conserves moist static energy exactly
+    (``cp·ΔT + L·Δq = 0``), and already-saturated air comes back unchanged
+    because the evaporation-only clip zeroes the step. This replaced a
+    hand-rolled ``T − 0.3·(L/cp)·(qs − q)`` + unconditional re-saturation
+    that broke MSE by up to 5 kJ/kg with a height-dependent sign (#694).
+
     Args:
         temperature: Environmental temperature (K)
         humidity: Environmental humidity (kg/kg)
         pressure: Pressure (Pa)
-        
+
     Returns:
         Tuple of (wetbulb_temp, wetbulb_humidity)
 
     """
-    # Get saturation values
-    qs = saturation_mixing_ratio(pressure, temperature)
-    
-    # If already saturated, wet-bulb equals dry-bulb
-    is_saturated = humidity >= qs
-    
-    def calculate_wetbulb():
-        # Simplified: assume wet-bulb is slightly cooler
-        # Full version would iterate to find equilibrium
-        cooling = (qs - humidity) * c.alhc / c.cpd
-        twb = temperature - 0.3 * cooling  # Damping factor
-        qwb = saturation_mixing_ratio(pressure, twb)
-        return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
-
-    def already_saturated():
-        return temperature, humidity
-
-    # Both branches must return identical dtypes for ``lax.cond``. Tie them to
-    # the inputs (not a hardcoded float32) so the convection scheme is correct
-    # whether the model runs in float32 or float64.
-    return lax.cond(is_saturated, already_saturated, calculate_wetbulb)
+    twb, qwb = cuadjtq_newton_evap(temperature, humidity, pressure)
+    return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
 
 
 def find_lfs(

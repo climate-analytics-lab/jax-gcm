@@ -181,3 +181,54 @@ def cuadjtq_newton(
         _refine_body, (T1, q1, liq1), None, length=n_refine
     )
     return T_adj, vapor, liquid
+
+
+def cuadjtq_newton_evap(
+    temperature: jnp.ndarray,
+    humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
+    n_refine: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Newton-Raphson wet-bulb adjustment (``cuadjtq``, kcall=2 flavour).
+
+    ECHAM's evaporation-only mode, used wherever descending or mixed air
+    evaporates precipitation toward saturation (``cudlfs`` / ``cuddraf``,
+    mo_cuadjust.f90:149-166): the same damped Newton step as
+    :func:`cuadjtq_newton`,
+
+        Δq = (q − qs(T)) / (1 + (L/cp)·dqs/dT),
+
+    but clipped ``MIN(Δq, 0)`` in every pass — only evaporation, never
+    condensation, so already-saturated air is returned unchanged. The fixed
+    point is the isobaric wet bulb: ``cp·ΔT + L·Δq = 0`` by construction,
+    so moist static energy is conserved exactly, and the state-dependent
+    damper is what a hand-rolled ``T − 0.3·(L/cp)(qs−q)`` (the pre-#694
+    downdraft code) replaced with a constant — off by −5.2 kJ/kg of MSE at
+    300 K/900 hPa and +3.2 kJ/kg at 280 K/700 hPa, with the sign flipping
+    in the mid-troposphere where the LFS sits.
+
+    Args:
+        temperature: Temperature (K).
+        humidity: Specific humidity (kg/kg).
+        pressure: Pressure (Pa).
+        n_refine: Refinement passes after the first (ECHAM uses 1).
+
+    Returns:
+        Tuple of ``(T_wb, q_wb)`` with ``cp·(T_wb − T) + L·(q_wb − q) = 0``.
+
+    """
+    def _lcp(T):
+        return jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
+
+    def _pass(carry, _):
+        T, q = carry
+        L_cp = _lcp(T)
+        qs, dqs_dT = saturation_specific_humidity_and_derivative(T, pressure)
+        cond = (q - qs) / (1.0 + L_cp * dqs_dT)
+        cond = jnp.minimum(cond, 0.0)          # kcall=2: evaporation only
+        return (T + L_cp * cond, q - cond), None
+
+    (T_wb, q_wb), _ = lax.scan(
+        _pass, (temperature, humidity), None, length=1 + n_refine
+    )
+    return T_wb, q_wb
