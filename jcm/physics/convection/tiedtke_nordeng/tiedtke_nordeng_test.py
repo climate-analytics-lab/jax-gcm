@@ -175,14 +175,16 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, moisture_tend_profile,
+        moisture_supply, moisture_tend_profile, thvsig,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
             dtedt=zeros, dqdt=moisture_tend_profile, dudt=zeros, dvdt=zeros,
             qc_conv=temperature, qi_conv=humidity,
             precip_formation=jnp.zeros_like(temperature),
-            precip_conv=jnp.array(0.0),
+            # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
+            # zero so cap_scale == 1 and it passes through unscaled.
+            precip_conv=thvsig,
             dqc_dt=zeros, dqi_dt=zeros,
         ), None
 
@@ -211,7 +213,10 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         "air_density": jnp.ones(shape),
         "clouds": clouds,
         "thermo_run": thermo_run,
-        "vertical_diffusion": SimpleNamespace(qv_tendency=qv_tend_vdiff),
+        "vertical_diffusion": SimpleNamespace(
+            qv_tendency=qv_tend_vdiff,
+            thv_sigma=jnp.array([0.35, 0.80]),
+        ),
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
 
@@ -225,6 +230,10 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     conv = diagnostics_out["convection"]
     assert jnp.allclose(conv.qc_conv, thermo_run["temperature"])
     assert jnp.allclose(conv.qi_conv, thermo_run["specific_humidity"])
+    # sigma(theta_v) reaches the scheme per column, straight from vdiff's
+    # prognostic theta_v variance (ECHAM pthvsig) — NOT the cu_thvsig
+    # constant, which would give the same value in both columns.
+    assert jnp.allclose(conv.precip_conv, jnp.array([0.35, 0.80]))
 
     # Without a vdiff diagnostic (and without thermo_run): zeros profile and
     # the raw state as environment.
@@ -238,6 +247,11 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     assert jnp.allclose(tendency2.specific_humidity, 0.0)
     assert jnp.allclose(
         diagnostics_out2["convection"].qc_conv, state.temperature,
+    )
+    # With no vdiff term at all, thvsig falls back to the config constant.
+    assert jnp.allclose(
+        diagnostics_out2["convection"].precip_conv,
+        ConvectionParameters.default().cu_thvsig,
     )
 
 

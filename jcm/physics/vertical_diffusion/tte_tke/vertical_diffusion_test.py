@@ -1204,3 +1204,100 @@ if __name__ == "__main__":
     print("✓ Utility function tests passed")
     
     print("All vertical diffusion tests passed! ✓")
+
+class TestThvVarianceBudget:
+    """The theta_v variance budget — ECHAM ``vdiff.f90`` lines 857-860.
+
+    This budget is what makes ``pthvsig`` a physical quantity rather than a
+    namelist constant, and hence what the convective trigger's ``zlift``
+    stands on. Before it existed the variance had no source at all and the
+    convection scheme had to read a fixed ``cu_thvsig``.
+    """
+
+    def _call(self, prev, grad, kh, tke, ell, dt, **kw):
+        from .tke_budget import echam_thv_variance_source_update
+        f = lambda x: jnp.asarray(x, dtype=jnp.float64 if False else jnp.float32)
+        return echam_thv_variance_source_update(
+            prev_thv_variance=f(prev), thv_gradient=f(grad),
+            exchange_coeff_heat=f(kh), tke=f(tke), mixing_length=f(ell),
+            dt=dt, **kw,
+        )
+
+    def test_production_is_two_kh_gradient_squared(self):
+        """With dissipation switched off, d(var)/dt == 2*K_h*(dthv/dz)^2."""
+        kh, grad, dt = 5.0, 0.01, 100.0
+        # prev = 0 kills the dissipation term (it is linear in the variance).
+        out = float(self._call(0.0, grad, kh, 1.0, 50.0, dt))
+        expected = 2.0 * kh * grad * grad * dt
+        assert abs(out - expected) / expected < 1e-5   # float32
+
+    def test_dissipation_is_linear_in_the_variance_and_uses_c_d_over_l(self):
+        """Zero gradient -> pure decay at sqrt(TKE)*c_d/l."""
+        prev, tke, ell, c_d, dt = 4.0, 0.25, 100.0, 0.19, 10.0
+        out = float(self._call(prev, 0.0, 1.0, tke, ell, dt, c_d=c_d))
+        expected = prev - prev * (tke ** 0.5) * c_d / ell * dt
+        assert abs(out - expected) / expected < 1e-5
+
+    def test_settles_on_the_production_dissipation_equilibrium(self):
+        """Iterated to steady state: var* = 2*K_h*G^2 * l / (c_d*sqrt(TKE)).
+
+        The relaxation rate is ``sqrt(TKE)*c_d/l`` per second, so the step
+        has to be long enough that 500 iterations actually converge — at
+        dt = 1 s this map is still 2 % short after 4000 iterations, which
+        looks exactly like a wrong equilibrium if you do not check.
+        """
+        kh, grad, tke, ell, c_d = 5.0, 0.01, 0.25, 100.0, 0.19
+        var = 0.0
+        for _ in range(500):
+            var = float(self._call(var, grad, kh, tke, ell, 100.0, c_d=c_d))
+        expected = 2.0 * kh * grad * grad * ell / (c_d * tke ** 0.5)
+        assert abs(var - expected) / expected < 0.005
+
+    def test_floored_at_tke_min_and_never_negative(self):
+        """A long step with strong dissipation cannot drive it through zero."""
+        out = self._call(1e-8, 0.0, 1.0, 100.0, 1.0, dt=1.0e6)
+        assert float(out) >= 1.0e-10
+
+    def test_equilibrium_variance_does_not_depend_on_tke(self):
+        """A non-obvious property worth pinning: sigma* is TKE-independent.
+
+        With ``K_h = c_h*l*sqrt(TKE)`` the production carries ``sqrt(TKE)``
+        and the dissipation carries it too, so it cancels:
+
+            var* = 2*c_h*l*sqrt(TKE)*G^2 * l/(c_d*sqrt(TKE))
+                 = 2*c_h*l^2*G^2/c_d
+
+        So at EQUILIBRIUM sigma(theta_v) is set by the mixing length and the
+        ambient gradient alone. What distinguishes a quiescent layer is the
+        RATE (next test), not the fixed point — a fact that is easy to get
+        backwards when reasoning about the convective trigger.
+        """
+        grad, ell, c_h, c_d = 0.004, 100.0, 0.5, 0.19
+        def equilibrium(tke):
+            var = 0.0
+            for _ in range(500):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, 200.0, c_d=c_d))
+            return var
+        expected = 2.0 * c_h * ell * ell * grad * grad / c_d
+        for tke in (0.04, 1.0, 4.0):
+            assert abs(equilibrium(tke) - expected) / expected < 0.01
+
+    def test_a_quiescent_layer_builds_variance_far_more_slowly(self):
+        """Spin-up rate, which is what lets the zlift tell the two apart.
+
+        Over a fixed spin-up from the floor the vigorously mixed column
+        reaches a much larger sigma(theta_v) than the quiescent one, because
+        production goes as sqrt(TKE) even though the eventual fixed point
+        does not.
+        """
+        grad, ell, c_h, dt = 0.004, 100.0, 0.5, 60.0
+        def spin(tke, nsteps=30):
+            var = 1e-10
+            for _ in range(nsteps):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, dt))
+            return var ** 0.5
+        stirred = spin(1.0)          # sqrt(TKE) = 1 m/s
+        quiescent = spin(1.0e-4)     # sqrt(TKE) = 0.01 m/s
+        assert stirred > 5.0 * quiescent

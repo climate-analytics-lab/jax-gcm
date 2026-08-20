@@ -227,7 +227,8 @@ Convection activates based on the diagnosed convection type (``ktype``):
      - Multiplier applied to ``thvsig`` when forming ``zlift`` (-)
      - 1.0
    * - ``cu_thvsig``
-     - Sub-grid :math:`\sigma(\theta_v)` at the lowest half level (K)
+     - Fallback :math:`\sigma(\theta_v)` (K), used only when no vdiff term
+       is present; the model path reads vdiff's prognostic value
      - 1.0
 
 **Cloud-base determination**: cloud base is the lowest level at which a
@@ -242,10 +243,20 @@ sub-grid thermal excess
 
 following ECHAM ``cubase`` (``mo_cuinitialize.f90``). The same ``zlift`` enters
 the updraft's termination test, so a plume is not seeded at a level the next
-ascent step would immediately reject. ECHAM takes :math:`\sigma_{\theta_v}` from
-vdiff's prognostic :math:`\theta_v` variance; jcm uses the constant
-``cu_thvsig`` until that is threaded through, so raising or lowering it makes
-convective onset harder or easier everywhere.
+ascent step would immediately reject.
+
+:math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
+virtual potential temperature at the second-lowest full level, taken from the
+TTE-TKE scheme's prognostic :math:`\theta_v` variance (ECHAM ``pthvsig``,
+``vdiff.f90:1338``) and published as ``vertical_diffusion.thv_sigma``. The
+variance carries its own production/dissipation budget
+(:func:`~jcm.physics.vertical_diffusion.tte_tke.tke_budget.echam_thv_variance_source_update`),
+so convective onset follows the boundary layer's turbulent state. Measured on
+a 3-day T63L47 run it spans 0.01–1.14 K with a land mean of 0.30 K against an
+ocean mean of 0.15 K — structure a constant cannot produce.
+
+``cu_thvsig`` remains only as the fallback for configurations with no vertical
+diffusion term (column-mode tests, dry dynamical-core runs).
 
 .. admonition:: Gap vs. ICON-A
 

@@ -113,7 +113,8 @@ def initialize_convection(temperature: jnp.ndarray,
     )
 
 
-def cloud_base_lift(config: ConvectionParameters) -> jnp.ndarray:
+def cloud_base_lift(config: ConvectionParameters,
+                    thvsig: jnp.ndarray | None = None) -> jnp.ndarray:
     """ECHAM ``cubase`` sub-grid buoyancy excess ``zlift`` [K].
 
     ``zlift = MIN(MAX(cminbuoy, MIN(cmaxbuoy, thvsig·cbfac)), 1.0)``
@@ -122,13 +123,31 @@ def cloud_base_lift(config: ConvectionParameters) -> jnp.ndarray:
     parcel, and it is what allows a parcel to cross the thin
     negative-buoyancy layer between its LCL and its LFC.
 
-    ECHAM sources ``pthvsig`` from vdiff's prognostic θ_v variance at the
-    lowest half level. jcm's TTE-TKE scheme prognoses a θ_v variance
-    (``vertical_diffusion_types.thv_var_tendency``) but does not yet thread
-    it to convection, so ``config.cu_thvsig`` stands in as a constant —
-    tracked as #683.
+    ``thvsig`` is ECHAM's ``pthvsig``: the standard deviation of virtual
+    potential temperature at the second-lowest full level, produced by
+    vdiff's PROGNOSTIC θ_v variance (``vdiff.f90:1338``). Passing it makes
+    the convective trigger respond to what the boundary layer is actually
+    doing — a well-mixed daytime layer carries a large σ(θ_v) and convects
+    readily, a nocturnal stable layer carries almost none and does not. The
+    scheme reads it off the ``vertical_diffusion`` diagnostic, which the
+    TTE-TKE term publishes as ``thv_sigma``.
+
+    ``config.cu_thvsig`` is the fallback for callers with no vdiff
+    diagnostic — the column-mode tests and anyone driving the convection
+    routine standalone. It is NOT the model path.
+
+    Args:
+        config: Convection configuration (cminbuoy / cmaxbuoy / cbfac, and
+            the ``cu_thvsig`` fallback).
+        thvsig: σ(θ_v) [K] from vdiff, shape ``(ncols,)`` or scalar. When
+            ``None``, ``config.cu_thvsig`` is used.
+
+    Returns:
+        ``zlift`` [K], broadcasting against ``thvsig``.
+
     """
-    zlift = jnp.clip(config.cu_thvsig * config.cu_cbfac,
+    sigma = config.cu_thvsig if thvsig is None else thvsig
+    zlift = jnp.clip(sigma * config.cu_cbfac,
                      config.cu_cminbuoy, config.cu_cmaxbuoy)
     return jnp.minimum(zlift, 1.0)
 
@@ -136,7 +155,9 @@ def cloud_base_lift(config: ConvectionParameters) -> jnp.ndarray:
 def find_cloud_base(temperature: jnp.ndarray,
                    humidity: jnp.ndarray,
                    pressure: jnp.ndarray,
-                   config: ConvectionParameters) -> Tuple[jnp.ndarray, jnp.ndarray]:
+                   config: ConvectionParameters,
+                   thvsig: jnp.ndarray | None = None,
+                   ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Find cloud base — the LCL, gated by ECHAM ``cubase``'s buoyancy test
 
     Ports the decision half of ECHAM ``cubase`` (mo_cuinitialize.f90:276-320).
@@ -175,8 +196,9 @@ def find_cloud_base(temperature: jnp.ndarray,
       against full-level values suppresses convection far more aggressively
       than the reference does. Tracked, together with the LCL-only-vs-LFC
       choice above, as #684.
-    * ``zlift`` uses a constant ``config.cu_thvsig`` rather than vdiff's
-      prognostic θ_v variance — see :func:`cloud_base_lift` and #683.
+    ``zlift`` comes from vdiff's prognostic θ_v variance (ECHAM ``pthvsig``)
+    when the caller supplies it; ``config.cu_thvsig`` remains only as the
+    standalone/column-mode fallback.
 
     ECHAM's *ascent* buoyancy test (mo_cuascent.f90:449) also adds ``zlift``,
     but only where the level below is still sub-cloud (``klab == 1``), which
@@ -189,6 +211,8 @@ def find_cloud_base(temperature: jnp.ndarray,
         humidity: Environmental specific humidity (kg/kg) [nlev]
         pressure: Environmental pressure (Pa) [nlev]
         config: Convection configuration
+        thvsig: σ(θ_v) [K] from vdiff (ECHAM ``pthvsig``). ``None`` falls
+            back to ``config.cu_thvsig``.
 
     Returns:
         Tuple of (cloud_base_level, cloud_base_exists)
@@ -220,7 +244,7 @@ def find_cloud_base(temperature: jnp.ndarray,
 
     # ECHAM's cloud-base buoyancy, in virtual temperature with condensate
     # loading, plus the sub-grid thermal excess.
-    zlift = cloud_base_lift(config)
+    zlift = cloud_base_lift(config, thvsig)
     buoy_cb = (
         parcel_t * (1.0 + c.vtmpc1 * parcel_q - parcel_l)
         - temperature * (1.0 + c.vtmpc1 * humidity)
@@ -532,6 +556,7 @@ def tiedtke_nordeng_convection(
     land_fraction: jnp.ndarray = jnp.array(0.0),
     moisture_supply: jnp.ndarray = jnp.array(0.0),
     moisture_tend_profile: jnp.ndarray | None = None,
+    thvsig: jnp.ndarray | None = None,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -574,7 +599,7 @@ def tiedtke_nordeng_convection(
     
     # Find cloud base
     cloud_base, has_cloud_base = find_cloud_base(
-        temperature, humidity, pressure, config
+        temperature, humidity, pressure, config, thvsig
     )
 
     # ECHAM zdqpbl closure supply (mo_cumastr.f90:534-545): the moisture-
@@ -817,6 +842,7 @@ def tiedtke_nordeng_convection(
             cloud_base, ktop, conv_type, mass_flux_base, config,
             land_fraction=land_fraction,
             type_weights=type_weights,
+            thvsig=thvsig,
         )
         
         # Calculate precipitation from updraft
@@ -1194,9 +1220,22 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             moisture_tend_profile = jnp.zeros_like(state.specific_humidity)
 
+        # ECHAM ``pthvsig`` — σ(θ_v) at the second-lowest full level, from
+        # vdiff's prognostic θ_v variance. This is what sets the cloud-base
+        # ``zlift``, so convective onset follows the boundary layer's actual
+        # turbulent state rather than a namelist constant: a well-mixed
+        # daytime layer earns the full 1 K excess and convects readily, a
+        # nocturnal stable layer earns the 0.2 K floor and does not. With no
+        # vdiff term in the package (column-mode tests, dry configurations)
+        # the scheme falls back to ``params.cu_thvsig``.
+        thvsig = getattr(vdiff_diag, "thv_sigma", None)
+        if thvsig is None:
+            thvsig = jnp.full((ncols,), params.cu_thvsig)
+        thvsig = jnp.broadcast_to(jnp.reshape(thvsig, (-1,)), (ncols,))
+
         column_fn = jax.vmap(
             tiedtke_nordeng_convection,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -1204,7 +1243,7 @@ class TiedtkeConvection(PhysicsTerm):
             pressure_full, layer_thickness, air_density,
             state.u_wind, state.v_wind, qc, qi,
             dt, params, land_fraction, moisture_supply,
-            moisture_tend_profile,
+            moisture_tend_profile, thvsig,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied

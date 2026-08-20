@@ -58,6 +58,7 @@ def calculate_updraft(
     config: ConvectionParameters,
     land_fraction: jnp.ndarray = jnp.array(0.0),
     type_weights: jnp.ndarray | None = None,
+    thvsig: jnp.ndarray | None = None,
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -77,6 +78,10 @@ def calculate_updraft(
             threshold via ``config.cu_dnoprc_ocean`` and
             ``config.cu_dnoprc_land``. Defaults to 0 (ocean) so existing
             single-column tests behave as before.
+        thvsig: σ(θ_v) [K] from vdiff (ECHAM ``pthvsig``), used for the
+            ``zlift`` term in the termination test so it matches the value
+            ``find_cloud_base`` gated the base with. ``None`` falls back to
+            ``config.cu_thvsig``.
 
     Returns:
         UpdatedraftState with computed profiles
@@ -184,7 +189,7 @@ def calculate_updraft(
         jnp.full(nlev, config.cprcon),
         p_base_const,
         jnp.full(nlev, zdnoprc_col),
-        jnp.full(nlev, cloud_base_lift(config)),
+        jnp.full(nlev, cloud_base_lift(config, thvsig)),
     )
 
     # Create specialized step function with config parameters

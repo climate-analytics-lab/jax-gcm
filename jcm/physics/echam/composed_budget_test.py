@@ -98,25 +98,34 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         # and collapses during a convective lull, inflating a small absolute
         # residual into a large ratio.
         #
-        # Measured across #661 (the cloud-base water-conservation fix), day 2
-        # of this column:
+        # Measured across the Tiedtke cloud-base work, day 2 of this column:
         #
-        #                     dev @ f6d1bcd      with #661
-        #   mean |residual|      4.95e-7          1.78e-7
-        #   mean E               2.76e-5          2.10e-5
-        #   mean P_conv          1.95e-6          2.52e-5
-        #   MEAN-RELATIVE        1.80 %           0.71 %
-        #   max per-step         1.79 %           6.77 %
+        #                     dev @ f6d1bcd   #661, zlift=1 K   + real thvsig
+        #   mean |residual|      4.95e-7         1.78e-7           3.38e-7
+        #   mean E               2.76e-5         2.10e-5           2.49e-5
+        #   mean P_conv          1.95e-6         2.52e-5           1.54e-5
+        #   MEAN-RELATIVE        1.80 %          0.71 %            1.36 %
+        #   max per-step         1.79 %          6.77 %            1.79 %
         #
-        # So the column convects ~13x harder AND the absolute leak falls 2.8x:
-        # mean closure improves 1.80 % -> 0.71 %. The 1.2 % bound sits between
-        # the two, so it encodes that improvement — the pre-#661 behaviour
-        # would fail it.
+        # The middle column is #661 with the placeholder constant zlift of
+        # 1 K; the right one is #683, where zlift comes from vdiff's
+        # prognostic sigma(theta_v) and works out much smaller in this
+        # column (~0.2-0.4 K), so it convects less hard than the constant
+        # did and the relative leak lands between the two.
+        #
+        # The 1.6 % bound still discriminates — the pre-#661 behaviour at
+        # 1.80 % fails it — but BE AWARE the margin is now narrow on both
+        # sides (1.36 measured, 1.60 bound, 1.80 pre-fix). It is narrow
+        # because the residual is dominated by convective intermittency
+        # rather than by any leak; retuning that is #682, and this bound
+        # should tighten substantially once it lands. If a future change
+        # pushes this over, check whether convection went intermittent
+        # before assuming water is being created.
         mean_flux = float(np.maximum(np.abs(E[spd:]).mean(),
                                      np.abs(P[spd:]).mean()))
         mean_rel = float(np.abs(residual_eq).mean()) / mean_flux
         self.assertLess(
-            mean_rel, 0.012,
+            mean_rel, 0.016,
             f"composed water budget leaks {mean_rel:.2%} of the day-mean "
             f"flux over the equilibrated day "
             f"(mean |residual| = {np.abs(residual_eq).mean():.3e} kg/m2/s)",
