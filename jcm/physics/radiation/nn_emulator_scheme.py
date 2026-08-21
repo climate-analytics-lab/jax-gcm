@@ -10,6 +10,7 @@ Reference architecture: Ukkonen (2024), https://github.com/peterukk/rte-rrtmgp-n
 Date: 2026-04-11
 """
 
+import dataclasses
 from typing import Tuple, Optional
 
 import jax.numpy as jnp
@@ -25,6 +26,7 @@ from jcm.physics.radiation.nn_emulator import (
     EmulatorWeights,
     InputScaling,
     init_emulator_weights,
+    load_emulator_weights,
     preprocess_sw_inputs,
     preprocess_lw_inputs,
     lw_emulator_column,
@@ -231,6 +233,83 @@ def _column_vector_emulated(value: jnp.ndarray, ncols: int) -> jnp.ndarray:
     return jnp.reshape(value, (ncols,))
 
 
+# Config key to point at when the checkpoint and the term disagree.
+_TERM_CONFIG_HINT = (
+    "the nn_emulator_radiation term in "
+    "jcm/config/physics/echam-emulated-2m.yaml"
+)
+
+
+def _validate_weights_file(
+    filepath: str,
+    weights: EmulatorWeights,
+    sw_scaling: InputScaling,
+    lw_scaling: InputScaling,
+    metadata: dict,
+    band_mode: str,
+    n_bnd_sw: int,
+    n_bnd_lw: int,
+) -> None:
+    """Reject a checkpoint that was not trained for this configuration.
+
+    ``band_mode`` and the band counts jointly fix the network's input
+    width, and all three come from config rather than from the file. A
+    mismatch either dies deep inside a GRU matmul with a bare
+    ``dot_general`` shape error or — when the widths happen to agree —
+    runs the network on features unlike anything it was trained on,
+    which produces plausible-looking but wrong fluxes.
+
+    Args:
+        filepath: Checkpoint path, quoted in every message.
+        weights / sw_scaling / lw_scaling: What was loaded from it.
+        metadata: Global attributes from the file; must carry
+            ``band_mode``.
+        band_mode / n_bnd_sw / n_bnd_lw: The term's configuration.
+
+    Raises:
+        ValueError: Naming the offending values and the config key.
+
+    """
+    file_band_mode = metadata.get("band_mode")
+    if file_band_mode is None:
+        raise ValueError(
+            f"Emulator weights file {filepath!r} carries no 'band_mode' "
+            f"metadata, so it cannot be checked against band_mode="
+            f"{band_mode!r}. Re-save it with save_emulator_weights(..., "
+            "metadata={'band_mode': ...})."
+        )
+    file_band_mode = str(file_band_mode)
+    if file_band_mode != band_mode:
+        raise ValueError(
+            f"Emulator weights file {filepath!r} was trained with "
+            f"band_mode={file_band_mode!r} but the term is configured "
+            f"with band_mode={band_mode!r}. Set band_mode on "
+            f"{_TERM_CONFIG_HINT} to {file_band_mode!r}, or train "
+            f"weights for {band_mode!r}."
+        )
+
+    for side, n_bnd, band_key, w, scaling in (
+        ("SW", n_bnd_sw, "n_bnd_sw", weights.sw, sw_scaling),
+        ("LW", n_bnd_lw, "n_bnd_lw", weights.lw, lw_scaling),
+    ):
+        stored = int(w.gru_fwd.kernel.shape[0])
+        expected = n_input_features(band_mode, n_bnd)
+        if stored != expected:
+            raise ValueError(
+                f"{side} weights in {filepath!r} take {stored} input "
+                f"features, but band_mode={band_mode!r} with {band_key}="
+                f"{n_bnd} gives {expected}. Fix band_mode, {band_key} or "
+                f"weights_file on {_TERM_CONFIG_HINT} so the three agree."
+            )
+        got = int(scaling.x_max.shape[-1])
+        if got != stored:
+            raise ValueError(
+                f"{side} scaling in {filepath!r} has {got} entries but "
+                f"the {side} weights take {stored} input features. The "
+                "checkpoint is internally inconsistent; re-save it."
+            )
+
+
 class NNEmulatorRadiation(PhysicsTerm):
     """Bidirectional-GRU neural network radiation emulator as a PhysicsTerm.
 
@@ -260,15 +339,16 @@ class NNEmulatorRadiation(PhysicsTerm):
         n_bnd_sw: int = 14,
         n_bnd_lw: int = 16,
         zero_tendency: bool = False,
+        weights_file: str | None = None,
     ):
         """Hold the scheme-native :class:`RadiationParameters` (with NN weights).
 
         Args:
             params: Scheme parameters. If it carries no
-                ``emulator_weights``, randomly initialised ones sized for
-                ``band_mode`` are built here, which is what training from
-                scratch starts from and what lets Hydra construct the
-                term at all.
+                ``emulator_weights`` and no ``weights_file`` is given,
+                randomly initialised ones sized for ``band_mode`` are
+                built here, which is what training from scratch starts
+                from and what lets Hydra construct the term at all.
             band_mode: How aerosol optics enter the features; fixes the
                 input width, so it must match what the weights were
                 trained with. A plain attribute rather than a parameter
@@ -281,11 +361,34 @@ class NNEmulatorRadiation(PhysicsTerm):
                 a step, and a blown-up run cannot be timed; this measures
                 what the scheme costs on a trajectory that stays finite.
                 It is a cost-measurement aid and never a valid simulation.
+            weights_file: NetCDF checkpoint written by
+                :func:`nn_emulator.save_emulator_weights`. Supplies the
+                trained weights *and* both input scalings, and is
+                validated against ``band_mode`` / the band counts before
+                use. This is jax-gcm's own format, not the upstream
+                rte-rrtmgp-nn one.
+
+        Raises:
+            ValueError: If ``weights_file`` disagrees with ``band_mode``
+                or the band counts.
 
         """
         params = params or RadiationParameters.default()
-        if params.emulator_weights is None:
-            params = RadiationParameters.default(
+        if weights_file is not None:
+            weights, sw_scaling, lw_scaling, metadata = load_emulator_weights(
+                weights_file,
+            )
+            _validate_weights_file(
+                weights_file, weights, sw_scaling, lw_scaling, metadata,
+                band_mode, n_bnd_sw, n_bnd_lw,
+            )
+            params = dataclasses.replace(
+                params, emulator_weights=weights,
+                sw_scaling=sw_scaling, lw_scaling=lw_scaling,
+            )
+        elif params.emulator_weights is None:
+            params = dataclasses.replace(
+                params,
                 emulator_weights=init_emulator_weights(
                     sw_features=n_input_features(band_mode, n_bnd_sw),
                     lw_features=n_input_features(band_mode, n_bnd_lw),

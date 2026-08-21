@@ -7,6 +7,8 @@ flow through the NN weights.
 Date: 2026-04-11
 """
 
+import os
+import tempfile
 import unittest
 
 import jax
@@ -14,6 +16,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.radiation.nn_emulator import (
+    save_emulator_weights,
+    load_emulator_weights,
     gru_cell,
     gru_forward_sequence,
     gru_backward_sequence,
@@ -423,6 +427,94 @@ class TestWeightInitialization(unittest.TestCase):
         w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
         self.assertEqual(n_sw, 49)
         self.assertEqual(w.sw.gru_fwd.kernel.shape, (49, 48))
+
+
+class TestWeightPersistence(unittest.TestCase):
+    """Save/load round trip for jax-gcm's own emulator checkpoint format.
+
+    Training is worthless if the result cannot be reloaded exactly, so
+    the round trip is checked bit-for-bit rather than to a tolerance.
+    """
+
+    def setUp(self):
+        self.n_sw = n_input_features("broadband", 14)
+        self.n_lw = n_input_features("per_band", 16)
+        self.weights = init_emulator_weights(
+            sw_features=self.n_sw, lw_features=self.n_lw, units=6,
+            key=jax.random.key(7),
+        )
+        self.sw_scaling = InputScaling(
+            x_max=jnp.arange(1, self.n_sw + 1, dtype=jnp.float32))
+        self.lw_scaling = InputScaling(
+            x_max=jnp.arange(1, self.n_lw + 1, dtype=jnp.float32))
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir.name, "emulator.nc")
+        self.addCleanup(self.tmpdir.cleanup)
+
+    def test_round_trip_is_bit_identical(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, sw_scaling, lw_scaling, _ = load_emulator_weights(self.path)
+
+        for saved, loaded in zip(jax.tree.leaves(self.weights),
+                                 jax.tree.leaves(weights)):
+            self.assertEqual(saved.dtype, loaded.dtype)
+            np.testing.assert_array_equal(
+                np.asarray(saved), np.asarray(loaded))
+        np.testing.assert_array_equal(
+            np.asarray(sw_scaling.x_max), np.asarray(self.sw_scaling.x_max))
+        np.testing.assert_array_equal(
+            np.asarray(lw_scaling.x_max), np.asarray(self.lw_scaling.x_max))
+
+    def test_metadata_round_trips(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling,
+            metadata={"band_mode": "broadband", "units": 6,
+                      "train_loss": 0.25},
+        )
+        *_, metadata = load_emulator_weights(self.path)
+        self.assertEqual(metadata["band_mode"], "broadband")
+        self.assertEqual(int(metadata["units"]), 6)
+        self.assertAlmostEqual(float(metadata["train_loss"]), 0.25, places=6)
+
+    def test_metadata_defaults_to_empty(self):
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        *_, metadata = load_emulator_weights(self.path)
+        self.assertEqual(metadata, {})
+
+    def test_sw_and_lw_slots_keep_their_own_widths(self):
+        """The two networks are sized independently; the file must not mix them."""
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, *_ = load_emulator_weights(self.path)
+        self.assertEqual(weights.sw.gru_fwd.kernel.shape[0], self.n_sw)
+        self.assertEqual(weights.lw.gru_fwd.kernel.shape[0], self.n_lw)
+        self.assertIsInstance(weights.sw, LWEmulatorWeights)
+        self.assertIsInstance(weights.lw, LWEmulatorWeights)
+
+    def test_loaded_weights_reproduce_the_network_output(self):
+        """The point of the format: same weights in, same fluxes out."""
+        save_emulator_weights(
+            self.path, self.weights, self.sw_scaling, self.lw_scaling)
+        weights, *_ = load_emulator_weights(self.path)
+
+        x_seq = jax.random.normal(jax.random.key(3), (12, self.n_lw))
+        emissivity = jnp.array([0.97])
+        np.testing.assert_array_equal(
+            np.asarray(lw_emulator_column(x_seq, emissivity, self.weights.lw)),
+            np.asarray(lw_emulator_column(x_seq, emissivity, weights.lw)),
+        )
+
+    def test_rejects_a_file_that_is_not_an_emulator_checkpoint(self):
+        """The upstream rte-rrtmgp-nn format must not be mistaken for ours."""
+        import xarray as xr
+
+        xr.Dataset({"w1": (("a", "b"), np.zeros((3, 4), dtype=np.float32))},
+                   ).to_netcdf(self.path)
+        with self.assertRaises(KeyError) as ctx:
+            load_emulator_weights(self.path)
+        self.assertIn("save_emulator_weights", str(ctx.exception))
 
 
 class TestGradientFlow(unittest.TestCase):

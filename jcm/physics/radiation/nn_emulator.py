@@ -671,14 +671,136 @@ def flux_to_heating_rate(
 # Weight loading from NetCDF
 # ---------------------------------------------------------------------------
 
+# Sub-weight layout of :class:`LWEmulatorWeights`, written out explicitly
+# so the on-disk variable names are fixed by this table. Reflecting over
+# the pytree instead would let a struct field rename silently change the
+# file format and break every previously trained checkpoint.
+_GRU_FIELDS = ("kernel", "recurrent_kernel", "bias")
+_DENSE_FIELDS = ("kernel", "bias")
+_EMULATOR_LAYERS = (
+    ("gru_fwd", GRUWeights, _GRU_FIELDS),
+    ("surface_dense", DenseWeights, _DENSE_FIELDS),
+    ("gru_bwd", GRUWeights, _GRU_FIELDS),
+    ("gru3", GRUWeights, _GRU_FIELDS),
+    ("output_dense", DenseWeights, _DENSE_FIELDS),
+)
+
+
+def _weight_dims(name: str, array) -> tuple[str, ...]:
+    """Per-variable dimension names, so no two variables can clash.
+
+    Every array gets private dims rather than shared ones like ``units``:
+    the layers have genuinely independent sizes and a shared name would
+    make xarray reject a file the moment two of them differed.
+    """
+    stem = name.replace(".", "_")
+    return tuple(f"{stem}_dim{i}" for i in range(array.ndim))
+
+
+def save_emulator_weights(
+    filepath: str,
+    weights: EmulatorWeights,
+    sw_scaling: InputScaling,
+    lw_scaling: InputScaling,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Write trained emulator weights and input scalings to NetCDF.
+
+    This is jax-gcm's *own* checkpoint format — flat, explicitly named
+    variables such as ``sw.gru_fwd.kernel`` plus ``sw_x_max`` /
+    ``lw_x_max``. It is unrelated to :func:`load_weights_from_netcdf`,
+    which reads the upstream rte-rrtmgp-nn dense-layer format
+    (``w1``/``b1``/...). Only files written here can be fed to
+    :func:`load_emulator_weights` or to ``NNEmulatorRadiation``'s
+    ``weights_file``.
+
+    Args:
+        filepath: Destination ``.nc`` path.
+        weights: Trained weights. Both slots are
+            :class:`LWEmulatorWeights` (see :class:`EmulatorWeights`).
+        sw_scaling / lw_scaling: Input normalization for each network.
+        metadata: Small scalars/strings stored as NetCDF global
+            attributes and returned by :func:`load_emulator_weights`.
+            ``band_mode`` belongs here — the physics term refuses to load
+            a file without it, since the band handling fixes the input
+            width and a mismatch is otherwise silent.
+
+    Arrays are stored in their native dtype with no packing, so a
+    float32 round trip is bit-identical.
+
+    """
+    import numpy as np
+    import xarray as xr
+
+    data_vars = {}
+
+    def _put(name: str, array) -> None:
+        values = np.asarray(array)
+        data_vars[name] = (_weight_dims(name, values), values)
+
+    for side, side_weights in (("sw", weights.sw), ("lw", weights.lw)):
+        for layer, _, fields in _EMULATOR_LAYERS:
+            layer_weights = getattr(side_weights, layer)
+            for field in fields:
+                _put(f"{side}.{layer}.{field}", getattr(layer_weights, field))
+    _put("sw_x_max", sw_scaling.x_max)
+    _put("lw_x_max", lw_scaling.x_max)
+
+    ds = xr.Dataset(data_vars, attrs=dict(metadata or {}))
+    ds.to_netcdf(filepath)
+    ds.close()
+
+
+def load_emulator_weights(
+    filepath: str,
+) -> tuple[EmulatorWeights, InputScaling, InputScaling, dict]:
+    """Read back a checkpoint written by :func:`save_emulator_weights`.
+
+    Reads jax-gcm's own emulator format, *not* the upstream
+    rte-rrtmgp-nn one handled by :func:`load_weights_from_netcdf`.
+
+    Args:
+        filepath: Path to the ``.nc`` file.
+
+    Returns:
+        ``(weights, sw_scaling, lw_scaling, metadata)``. ``metadata`` is
+        the file's global attributes, empty if it carries none.
+
+    """
+    import xarray as xr
+
+    with xr.open_dataset(filepath) as ds:
+        def _get(name: str):
+            if name not in ds.variables:
+                raise KeyError(
+                    f"{filepath!r} has no variable {name!r}; it is not an "
+                    "emulator checkpoint written by save_emulator_weights."
+                )
+            return jnp.asarray(ds[name].values)
+
+        def _side(side: str) -> LWEmulatorWeights:
+            return LWEmulatorWeights(**{
+                layer: cls(**{f: _get(f"{side}.{layer}.{f}") for f in fields})
+                for layer, cls, fields in _EMULATOR_LAYERS
+            })
+
+        weights = EmulatorWeights(sw=_side("sw"), lw=_side("lw"))
+        sw_scaling = InputScaling(x_max=_get("sw_x_max"))
+        lw_scaling = InputScaling(x_max=_get("lw_x_max"))
+        metadata = dict(ds.attrs)
+
+    return weights, sw_scaling, lw_scaling, metadata
+
+
 def load_weights_from_netcdf(filepath: str) -> tuple:
     """Load NN weights from a NetCDF file in the rte-rrtmgp-nn format.
 
     User-facing utility (no internal callers): use it to load pretrained
     rte-rrtmgp-nn weights when configuring :class:`NNEmulatorRadiation`.
 
-    The NetCDF file contains weight matrices and bias vectors for each layer,
-    along with activation function names and scaling coefficients.
+    This reads the *upstream* per-layer ``w1``/``b1``/... dense format
+    from peterukk/rte-rrtmgp-nn. It is NOT the format jax-gcm's own
+    trainer writes — for that use :func:`load_emulator_weights`.
 
     Args:
         filepath: Path to the .nc file.

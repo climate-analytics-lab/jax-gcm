@@ -5,10 +5,11 @@
 # compose the same aerosol, cloud and dynamics path and differ only in
 # how radiative fluxes are obtained.
 #
-# The emulator needs trained weights. Constructed without any it builds
-# randomly initialised ones, which are the starting point for training
-# but drive the model to NaN inside a step — set ``zero_tendency: true``
-# on the term to measure its cost against RRTMGP before weights exist.
+# The emulator needs trained weights: point ``weights_file`` below at a
+# checkpoint. Constructed without one it builds randomly initialised
+# weights, which are the starting point for training but drive the model
+# to NaN inside a step — set ``zero_tendency: true`` on the term to
+# measure its cost against RRTMGP before weights exist.
 #
 # Use it as::
 #
@@ -33,6 +34,13 @@ terms:
     # Per-band aerosol optics as input features, so the emulator can
     # represent the MACv2-SP forcing the term above produces.
     band_mode: per_band
+    # NetCDF checkpoint from tools/radiation_emulator/train_emulator.py,
+    # supplying the trained weights and both input scalings. Null falls
+    # back to random weights (cost benchmarking only — see the header).
+    # It is validated against band_mode and the band counts on load, so
+    # a checkpoint trained under a different band structure is rejected
+    # rather than silently run.
+    weights_file: null
   # ECHAM physc ordering: vdiff (with the surface exchange in its
   # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
   # closure reads the SAME-STEP vdiff moisture tendency and delivered

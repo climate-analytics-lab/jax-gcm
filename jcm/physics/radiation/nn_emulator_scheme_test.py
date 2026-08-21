@@ -6,6 +6,8 @@ because the existing suite did the latter, so ``AerosolData`` grew six
 per-band fields underneath a vmap that never ran.
 """
 
+import os
+import tempfile
 import unittest
 from datetime import datetime
 
@@ -18,8 +20,10 @@ from jax_solar import OrbitalTime
 from jcm.forcing import SolarGeometry
 from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.physics.radiation.nn_emulator import (
+    InputScaling,
     init_emulator_weights,
     n_input_features,
+    save_emulator_weights,
 )
 from jcm.physics.radiation.nn_emulator_scheme import radiation_scheme_emulated
 from jcm.physics.radiation.radiation_types import RadiationParameters
@@ -366,6 +370,103 @@ class BandConfigTest(unittest.TestCase):
             term._check_band_counts(1, 0)
         self.assertIn("input features", str(ctx.exception))
         self.assertIn("_band_config_for_terms", str(ctx.exception))
+
+
+class WeightsFileTest(unittest.TestCase):
+    """Loading a trained checkpoint onto the term.
+
+    A checkpoint carries no record of the band structure other than its
+    metadata, so the term must refuse anything that does not match its
+    own configuration — the emulator has already been run once under the
+    wrong band structure and only crashed by luck.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.path = os.path.join(self.tmpdir.name, "emulator.nc")
+
+    def _write(self, band_mode="per_band", n_bnd_sw=N_BND_SW,
+               n_bnd_lw=N_BND_LW, metadata=...):
+        n_sw = n_input_features(band_mode, n_bnd_sw)
+        n_lw = n_input_features(band_mode, n_bnd_lw)
+        weights = init_emulator_weights(
+            sw_features=n_sw, lw_features=n_lw, units=8,
+            key=jax.random.key(5))
+        if metadata is ...:
+            metadata = {"band_mode": band_mode}
+        save_emulator_weights(
+            self.path, weights,
+            InputScaling(x_max=jnp.ones(n_sw)),
+            InputScaling(x_max=jnp.ones(n_lw)),
+            metadata=metadata,
+        )
+        return weights
+
+    def test_term_uses_the_weights_and_scalings_from_the_file(self):
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        saved = self._write()
+        term = NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        params = term.params.get_value()
+        for a, b in zip(jax.tree.leaves(saved),
+                        jax.tree.leaves(params.emulator_weights)):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # Both scalings come from the file, not left at None for the
+        # scheme to substitute ones for.
+        self.assertEqual(
+            params.sw_scaling.x_max.shape,
+            (n_input_features("per_band", N_BND_SW),))
+        self.assertEqual(
+            params.lw_scaling.x_max.shape,
+            (n_input_features("per_band", N_BND_LW),))
+
+    def test_no_weights_file_still_randomly_initialises(self):
+        """The cost-only benchmark path must keep working untouched."""
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        params = NNEmulatorRadiation(band_mode="per_band").params.get_value()
+        self.assertIsNotNone(params.emulator_weights)
+        self.assertEqual(
+            params.emulator_weights.sw.gru_fwd.kernel.shape[0],
+            n_input_features("per_band", N_BND_SW))
+        self.assertIsNone(params.sw_scaling)
+
+    def test_band_mode_mismatch_raises(self):
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        self._write(band_mode="broadband")
+        with self.assertRaises(ValueError) as ctx:
+            NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        message = str(ctx.exception)
+        self.assertIn("'broadband'", message)
+        self.assertIn("'per_band'", message)
+        self.assertIn("band_mode", message)
+        self.assertIn("echam-emulated-2m.yaml", message)
+
+    def test_input_width_mismatch_raises(self):
+        """Same band_mode, wrong band count — the silent-failure case."""
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        # Trained against 10 SW bands, run under the RRTMGP 14.
+        self._write(band_mode="per_band", n_bnd_sw=10)
+        with self.assertRaises(ValueError) as ctx:
+            NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        message = str(ctx.exception)
+        self.assertIn("input features", message)
+        self.assertIn("n_bnd_sw", message)
+        self.assertIn(str(n_input_features("per_band", 10)), message)
+        self.assertIn(str(n_input_features("per_band", N_BND_SW)), message)
+        self.assertIn("echam-emulated-2m.yaml", message)
+
+    def test_missing_band_mode_metadata_raises(self):
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        self._write(metadata={})
+        with self.assertRaises(ValueError) as ctx:
+            NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        self.assertIn("band_mode", str(ctx.exception))
+        self.assertIn("save_emulator_weights", str(ctx.exception))
 
 
 class GradientTest(unittest.TestCase):
