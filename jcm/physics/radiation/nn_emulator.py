@@ -521,30 +521,52 @@ def reconstruct_sw_interface_fluxes(
     return down, fluxes[:, 1], down_clear, fluxes[:, 3]
 
 
+def lw_flux_scale(
+    surface_temperature: jnp.ndarray,
+    temperature: jnp.ndarray,
+) -> jnp.ndarray:
+    """Return the longwave flux normalizing scale sigma*T_max^4 [W/m^2].
+
+    ``T_max`` is the warmest temperature anywhere in the column, surface
+    included. No longwave flux at any interface can exceed black-body
+    emission at that temperature, so every normalized target lands in
+    [0, 1] — which is exactly the range the network's sigmoid output can
+    represent.
+
+    Scaling by the *surface emission* eps*sigma*T_s^4 instead does not
+    have that property: over a cold surface under a warmer atmosphere
+    (polar night, Antarctica) the outgoing longwave exceeds the surface
+    emission, and in RRTMGP-labelled T63L47 columns ~14% of upward
+    longwave values land above 1 that way, reaching 1.28 — unreachable
+    for a sigmoid, so the error could not be trained away.
+    """
+    t_max = jnp.maximum(surface_temperature, jnp.max(temperature))
+    return c.sbc * t_max ** 4
+
+
 def reconstruct_lw_interface_fluxes(
     nn_output: jnp.ndarray,
     surface_temperature: jnp.ndarray,
-    surface_emissivity: jnp.ndarray,
+    temperature: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Scale normalized all-sky + clear-sky LW output to W/m^2.
 
     Args:
         nn_output: NN predictions at interfaces (nlev+1, 4), ordered
-            (down, up, down_clear, up_clear), normalized by the surface
-            emission.
+            (down, up, down_clear, up_clear), normalized by
+            :func:`lw_flux_scale`.
         surface_temperature: Surface temperature (scalar, K).
-        surface_emissivity: Surface emissivity (scalar).
+        temperature: Column temperature profile (nlev,) [K].
 
-    Surface emission sigma*eps*T^4 sets the scale of every longwave flux
-    in the column, so dividing it out leaves the network a target that is
-    O(1) across the whole climate range.
+    Surface emissivity is not part of the scale; the network receives it
+    as the auxiliary input to its surface dense layer instead, so the
+    dependence is learned rather than imposed.
 
     Returns:
         ``(down, up, down_clear, up_clear)``, each (nlev+1,) [W/m^2].
 
     """
-    scale = surface_emissivity * c.sbc * surface_temperature ** 4
-    fluxes = nn_output * scale
+    fluxes = nn_output * lw_flux_scale(surface_temperature, temperature)
     return fluxes[:, 0], fluxes[:, 1], fluxes[:, 2], fluxes[:, 3]
 
 

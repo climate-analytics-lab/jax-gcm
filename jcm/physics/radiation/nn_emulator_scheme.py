@@ -149,7 +149,7 @@ def radiation_scheme_emulated(
     )
     (lw_flux_down, lw_flux_up, lw_flux_down_clear,
      lw_flux_up_clear) = reconstruct_lw_interface_fluxes(
-        lw_nn_output, surface_temperature, surface_emissivity,
+        lw_nn_output, surface_temperature, temperature,
     )
 
     # --- Heating rates ---

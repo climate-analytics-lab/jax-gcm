@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
 from jcm.physics.radiation.nn_emulator import (
     save_emulator_weights,
     load_emulator_weights,
@@ -31,6 +32,8 @@ from jcm.physics.radiation.nn_emulator import (
     reconstruct_sw_fluxes,
     reconstruct_lw_fluxes,
     flux_to_heating_rate,
+    lw_flux_scale,
+    reconstruct_lw_interface_fluxes,
     init_gru_weights,
     init_dense_weights,
     init_sw_emulator_weights,
@@ -427,6 +430,42 @@ class TestWeightInitialization(unittest.TestCase):
         w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
         self.assertEqual(n_sw, 49)
         self.assertEqual(w.sw.gru_fwd.kernel.shape, (49, 48))
+
+
+class TestLongwaveFluxScale(unittest.TestCase):
+    """The LW normalizing scale must bound every flux the labels contain.
+
+    Otherwise the target sits above the output sigmoid's ceiling of 1 and the
+    residual is untrainable — which is what scaling by the surface emission
+    did over cold surfaces under a warmer atmosphere.
+    """
+
+    def test_scale_exceeds_outgoing_longwave_over_a_cold_surface(self):
+        # Antarctic-like: 220 K surface beneath a much warmer troposphere.
+        temperature = jnp.array([250.0, 260.0, 255.0, 240.0])
+        surface_temperature = jnp.array(220.0)
+        scale = lw_flux_scale(surface_temperature, temperature)
+        self.assertGreater(float(scale), float(c.sbc) * 220.0 ** 4)
+        # No level can radiate more than a black body at the column maximum.
+        np.testing.assert_allclose(
+            float(scale), float(c.sbc) * 260.0 ** 4, rtol=1e-5)
+
+    def test_surface_temperature_wins_when_it_is_the_warmest(self):
+        scale = lw_flux_scale(
+            jnp.array(300.0), jnp.array([250.0, 260.0, 280.0]))
+        np.testing.assert_allclose(
+            float(scale), float(c.sbc) * 300.0 ** 4, rtol=1e-5)
+
+    def test_reconstruction_uses_that_scale(self):
+        temperature = jnp.array([250.0, 260.0, 255.0])
+        surface_temperature = jnp.array(220.0)
+        output = jnp.full((4, 4), 0.5)
+        down, up, _, _ = reconstruct_lw_interface_fluxes(
+            output, surface_temperature, temperature)
+        expected = 0.5 * float(
+            lw_flux_scale(surface_temperature, temperature))
+        np.testing.assert_allclose(np.asarray(down), expected, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(up), expected, rtol=1e-6)
 
 
 class TestWeightPersistence(unittest.TestCase):
