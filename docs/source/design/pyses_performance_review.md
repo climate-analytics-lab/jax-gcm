@@ -143,15 +143,20 @@ Measured on the **spectral T63L47** arm of the same physics (`ma-t63-l47`,
 chain does not). Reproduced to within 0.2 % across two independent runs. Device
 time per step:
 
-| component | ms/step | % |
-|---|---:|---:|
-| `RRTMGPRadiation` | 116.4 | 44 |
-| `JamOpticsTerm` | 40.6 | 15 |
-| `Mam4JaxMicrophysics` | 36.7 | 14 |
-| dynamics (spectral) | 19.0 | 7 |
-| `TiedtkeConvection` | 14.9 | 6 |
-| all other physics terms | ~34 | 13 |
-| dynamics↔physics bridge | 1.8 | 1 |
+| component | ms/step | % | ms/call |
+|---|---:|---:|---:|
+| `RRTMGPRadiation` | 116.4 | 44 | 1164 |
+| `JamOpticsTerm` | 40.6 | 15 | 406 |
+| `Mam4JaxMicrophysics` | 36.7 | 14 | 36.7 |
+| dynamics (spectral) | 19.0 | 7 | 19.0 |
+| `TiedtkeConvection` | 14.9 | 6 | 14.9 |
+| all other physics terms | ~34 | 13 | ~34 |
+| dynamics↔physics bridge | 1.8 | 1 | 1.8 |
+
+`ms/step` is amortised over every step; `ms/call` is the cost on a step where
+the component runs. They differ for `RRTMGPRadiation` and `JamOpticsTerm`,
+which both ride the 1-in-10 radiation gate (the optics gate exists precisely
+because its per-band Mie output is consumed only by radiation).
 
 The inferred *ordering* holds: optics and MAM4 are the two largest JAM terms,
 and the 10 remaining JAM terms are collectively small. The correction is that
@@ -159,6 +164,11 @@ and the 10 remaining JAM terms are collectively small. The correction is that
 — it is ~1.16 s on each step it runs. That makes B3 (`compute_cre=False`,
 halving the RRTMGP work) the highest-value lever on this list, ahead of the
 B1/B2 optics and MAM4 work the section was written to gate.
+
+A radiation step is therefore ~1.7 s and an intermediate step ~0.1 s, a 16×
+swing. Anything that reasons about per-step cost — load balancing, a
+memory-pressure estimate, an ensemble scheduler — has two populations to
+account for, not one mean.
 
 The bridge, often assumed to be a real cost of the composable design, is 1 % of
 device time and not worth optimising.

@@ -435,6 +435,8 @@ def render_report(result: dict) -> str:
     nsteps = result["steps"]
     total = att["total_us"]
     span = result["device_span_us"]
+    per_cycle = result.get("radiation_subcycle_steps", 1)
+    subcycled = set(result.get("subcycled_terms") or ())
     lines = [
         f"# Step cost breakdown — {result['preset']}",
         "",
@@ -444,7 +446,8 @@ def render_report(result: dict) -> str:
         f"- steady-state steps profiled: {nsteps} "
         f"(after two discarded warm-up runs)",
         f"- radiation sub-cycle: every "
-        f"{result.get('radiation_subcycle_steps', 1)} steps",
+        f"{result.get('radiation_subcycle_steps', 1)} steps, gating "
+        f"{', '.join(sorted(subcycled)) or 'nothing'}",
         f"- device elapsed per step: {span / nsteps / 1000:.2f} ms",
         f"- device busy per step: {total / nsteps / 1000:.2f} ms "
         f"({100 * total / span:.0f}% occupancy; the rest is launch gaps, "
@@ -452,9 +455,9 @@ def render_report(result: dict) -> str:
         "",
         "``ms/step`` amortises a component over every step of the window and",
         "is the throughput-relevant number. ``ms/call`` is what it costs on a",
-        "step where it actually runs; the two differ only for the sub-cycled",
-        "radiation term, whose cadence is read from the configuration rather",
-        "than inferred from the trace.",
+        "step where it actually runs; the two differ for the terms gated to",
+        "the radiation cadence, whose membership and interval are read from",
+        "the configuration rather than inferred from the trace.",
         "",
         "| component | ms/step | % of device | ms/call | kernels/step |",
         "|---|---:|---:|---:|---:|",
@@ -462,15 +465,13 @@ def render_report(result: dict) -> str:
     # Every term is listed, including those that cost nothing measurable: a
     # term absent from the table would read as "not measured" when what it
     # actually means is "free", which is the more interesting fact.
-    per_cycle = result.get("radiation_subcycle_steps", 1)
-    subcycled = result.get("subcycled_term")
     per_label = dict(att["per_label_us"])
     for name in result.get("terms", ()):
         per_label.setdefault(name, 0.0)
     ordered = sorted(per_label.items(), key=lambda kv: -kv[1])
     for label, us in ordered:
         pct = 100.0 * us / total if total else 0.0
-        cadence = per_cycle if label == subcycled else 1
+        cadence = per_cycle if label in subcycled else 1
         per_call = us * cadence / nsteps / 1000
         kernels = att["kernels_per_label"].get(label, 0) / nsteps
         lines.append(
@@ -550,7 +551,7 @@ def profile_run(
     steps_were_explicit = steps is not None
 
     model = runners.build_model(cfg)
-    per_cycle, subcycled_term = subcycle_steps(model, time_step_min)
+    per_cycle, subcycled_terms = subcycle_steps(model, time_step_min)
 
     if steps is None:
         steps = (max(1, round(days * 1440.0 / time_step_min))
@@ -632,7 +633,7 @@ def profile_run(
         # the device timeline instead.
         "traced_block_wall_s": wall_s,
         "radiation_subcycle_steps": per_cycle,
-        "subcycled_term": subcycled_term,
+        "subcycled_terms": sorted(subcycled_terms),
         "terms": terms,
         # Which checkout was profiled. An editable install shadowing a
         # worktree is silent otherwise, and the numbers would describe the
@@ -643,37 +644,52 @@ def profile_run(
     }
 
 
-def subcycle_steps(model, time_step_min: float) -> tuple[int, str | None]:
-    """Return (steps between full radiation calls, the radiation term's name).
+def subcycle_steps(model, time_step_min: float) -> tuple[int, frozenset[str]]:
+    """Return (steps between radiation calls, the names of terms on that gate).
 
-    Radiation is the only sub-cycled component (``radiation_interval``, 7200 s
-    by default, gated by a ``lax.cond`` in the radiation term) and usually the
-    largest one. Two things depend on knowing its cadence:
+    Radiation runs on a ``radiation_interval`` cadence (7200 s by default) and
+    is usually the largest component. Two things depend on knowing that:
 
     - the profiled window must span a whole number of sub-cycles, or it
       averages in a different number of radiation calls per step than the model
       pays -- at the default 2 h cadence, a factor-of-two error on the biggest
       row;
-    - its cost *on a step where it runs* is its per-step average times this
-      factor.
+    - a gated term's cost *on a step where it runs* is its per-step average
+      times this factor.
 
-    The cadence is read from the configuration rather than inferred from the
-    trace on purpose. Kernel execution counts cannot recover it: internal scans
-    and vmaps make the per-instruction counts within a single term span three
+    More than one term rides the gate. ``JamOpticsTerm`` is gated too, because
+    its per-band Mie optics are consumed only by radiation, so recomputing them
+    on intermediate steps would be discarded work. Membership is therefore
+    taken from the codebase's own marker for it -- the ``configure_radiation_gate``
+    method that ``echam_physics`` calls on exactly these terms -- rather than
+    from a hardcoded name, so a future gated term is picked up automatically.
+
+    Cadence is read from the configuration rather than inferred from the trace
+    on purpose. Kernel execution counts cannot recover it: internal scans and
+    vmaps make the per-instruction counts within a single term span three
     orders of magnitude (RRTMGP's range from 2 to 2816 over a 20-step window in
     which it ran exactly twice), so no summary statistic of them is the
     invocation count.
 
-    Returns ``(1, None)`` when nothing is sub-cycled.
+    Returns ``(1, frozenset())`` when nothing is sub-cycled.
     """
+    per_cycle = 1
+    gated: set[str] = set()
     for term in getattr(model.physics, "terms", ()):
         params = getattr(term, "params", None)
         value = params.get_value() if params is not None else None
         interval = getattr(value, "radiation_interval", None)
+        # ``_radiation_interval_s`` is None when the gate is configured off
+        # (interval <= 0), which is what distinguishes "gated" from "merely
+        # gate-aware".
+        if interval is None and hasattr(term, "configure_radiation_gate"):
+            interval = getattr(term, "_radiation_interval_s", None)
         if interval:
             per_cycle = max(1, round(float(interval) / (time_step_min * 60.0)))
-            return per_cycle, getattr(term, "name", None)
-    return 1, None
+            name = getattr(term, "name", None)
+            if name:
+                gated.add(name)
+    return per_cycle, frozenset(gated)
 
 
 def _config_summary(cfg, overrides: list[str]) -> str:
@@ -784,15 +800,21 @@ def main(argv=None) -> int:
 
     probes = {profiling.DYNAMICS, profiling.BRIDGE_TO_PHYSICS,
               profiling.BRIDGE_TO_DYNAMICS}
+    # EVERY probe must be complete, not just the best of them. The probes are
+    # ordered within a step (bridge_to_physics runs before dynamics), so a
+    # buffer that fills partway through the final step leaves the earlier probe
+    # at the full count while a later one is short; taking the max would accept
+    # that trace and then divide short totals by the full step count.
     cycle = result.get("radiation_subcycle_steps", 1)
-    seen = [n for label, n in att.steps_seen.items() if label in probes]
-    if seen and max(seen) < result["steps"]:
-        fits = max(cycle, max(seen) // cycle * cycle)
+    seen = {label: n for label, n in att.steps_seen.items() if label in probes}
+    if seen and min(seen.values()) < result["steps"]:
+        worst = min(seen.values())
+        fits = max(cycle, worst // cycle * cycle)
         raise SystemExit(
-            f"the trace covers only {max(seen)} of the {result['steps']} steps "
-            f"run ({len(kernels)} kernels captured), so the profiler's event "
-            "buffer overflowed and every number would be an undercount. "
-            f"Profile a shorter window: --steps {fits} or fewer."
+            f"the trace covers only {worst} of the {result['steps']} steps run "
+            f"({len(kernels)} kernels captured; per-probe {seen}), so the "
+            "profiler's event buffer overflowed and every number would be an "
+            f"undercount. Profile a shorter window: --steps {fits} or fewer."
         )
 
     result.update({

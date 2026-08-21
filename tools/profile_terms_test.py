@@ -293,7 +293,7 @@ def test_report_uses_the_configured_cadence_for_ms_per_call(parsed):
         "gpu_name": "GPU 0", "gpu_index": 0, "steps": 20,
         "device_span_us": 2000.0, "terms": [],
         "radiation_subcycle_steps": 10,
-        "subcycled_term": "tiedtke_convection",
+        "subcycled_terms": ["tiedtke_convection"],
         "attribution": att.as_dict(),
     }
     report = pt.render_report(result)
@@ -310,7 +310,7 @@ def test_report_leaves_every_step_components_alone(parsed):
         "gpu_name": "GPU 0", "gpu_index": 0, "steps": 20,
         "device_span_us": 2000.0, "terms": [],
         "radiation_subcycle_steps": 10,
-        "subcycled_term": "rrtmgp_radiation",
+        "subcycled_terms": ["rrtmgp_radiation"],
         "attribution": att.as_dict(),
     }
     report = pt.render_report(result)
@@ -349,11 +349,68 @@ class _FakeModel:
 def test_subcycle_steps_reads_the_radiation_interval():
     """7200 s of radiation interval is 10 steps at a 12 minute timestep."""
     model = _FakeModel([_FakeTerm(), _FakeTerm(_FakeRadiationParams(), "rad")])
-    assert pt.subcycle_steps(model, 12.0) == (10, "rad")
-    assert pt.subcycle_steps(model, 15.0) == (8, "rad")
+    assert pt.subcycle_steps(model, 12.0) == (10, frozenset({"rad"}))
+    assert pt.subcycle_steps(model, 15.0) == (8, frozenset({"rad"}))
 
 
 def test_subcycle_steps_defaults_to_every_step():
     """No radiation term (or no interval) means nothing is sub-cycled."""
-    assert pt.subcycle_steps(_FakeModel([_FakeTerm()]), 12.0) == (1, None)
-    assert pt.subcycle_steps(_FakeModel([]), 12.0) == (1, None)
+    assert pt.subcycle_steps(_FakeModel([_FakeTerm()]), 12.0) == (
+        1, frozenset())
+    assert pt.subcycle_steps(_FakeModel([]), 12.0) == (1, frozenset())
+
+
+class _FakeGatedTerm:
+    """A term riding the radiation gate, like JamOpticsTerm."""
+
+    def __init__(self, interval_s, name="optics"):
+        self.name = name
+        self._radiation_interval_s = interval_s
+
+    def configure_radiation_gate(self, interval_s):
+        self._radiation_interval_s = interval_s if interval_s > 0 else None
+
+
+def test_subcycle_steps_finds_every_gated_term():
+    """Optics rides the radiation gate too, so its ms/call must be scaled.
+
+    Missing this understated the second-largest component by 10x: its
+    per-band Mie optics are consumed only by radiation, so the term is gated
+    to the same cadence rather than running every step.
+    """
+    model = _FakeModel([
+        _FakeTerm(_FakeRadiationParams(), "rad"),
+        _FakeGatedTerm(7200.0, "optics"),
+        _FakeTerm(name="convection"),
+    ])
+    per_cycle, gated = pt.subcycle_steps(model, 12.0)
+    assert per_cycle == 10
+    assert gated == frozenset({"rad", "optics"})
+
+
+def test_subcycle_steps_ignores_a_disabled_gate():
+    """A gate configured off (interval <= 0) means the term runs every step."""
+    model = _FakeModel([
+        _FakeTerm(_FakeRadiationParams(), "rad"),
+        _FakeGatedTerm(None, "optics"),
+    ])
+    _, gated = pt.subcycle_steps(model, 12.0)
+    assert gated == frozenset({"rad"})
+
+
+def test_report_scales_every_gated_term(parsed):
+    """Both gated terms get the cadence, not just the radiation one."""
+    att = _attribute(_kernels(
+        ("conv_fusion", 0.0, 400.0), ("dyn_fusion", 1.0, 100.0),
+    ), parsed)
+    result = {
+        "preset": "fixture", "config": "physics=x dt=12min",
+        "gpu_name": "GPU 0", "gpu_index": 0, "steps": 20,
+        "device_span_us": 1000.0, "terms": [],
+        "radiation_subcycle_steps": 10,
+        "subcycled_terms": ["tiedtke_convection", "dynamics"],
+        "attribution": att.as_dict(),
+    }
+    report = pt.render_report(result)
+    assert "| tiedtke_convection | 0.02 | 80.0 | 0.20 |" in report
+    assert "| dynamics | 0.01 | 20.0 | 0.05 |" in report
