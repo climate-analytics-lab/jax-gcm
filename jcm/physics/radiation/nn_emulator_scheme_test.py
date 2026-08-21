@@ -311,6 +311,36 @@ class TermComputeFullTest(unittest.TestCase):
             np.isfinite(np.asarray(rad_out.lw_flux_down_clear)).all())
 
 
+class BandConfigTest(unittest.TestCase):
+    """The emulator must run under RRTMGP's band structure.
+
+    The band config follows the active radiation backend. With the
+    emulator unrecognised it fell back to a single 550 nm SW band and no
+    LW bands, so the aerosol term fed the network 10 features against
+    weights sized for 49 — and, had the shapes happened to agree, would
+    silently have supplied aerosol input unlike anything the training
+    labels were generated under.
+    """
+
+    def test_emulator_term_selects_the_rrtmgp_bands(self):
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+        from jcm.runners import _band_config_for_terms
+
+        cfg = _band_config_for_terms([NNEmulatorRadiation()])
+        self.assertEqual(len(cfg.sw_band_centers_nm), N_BND_SW)
+        self.assertEqual(len(cfg.lw_band_centers_nm), N_BND_LW)
+
+    def test_band_count_mismatch_raises_a_useful_error(self):
+        """A mismatch must name the cause, not fail inside a GRU matmul."""
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        term = NNEmulatorRadiation(band_mode="per_band")
+        with self.assertRaises(ValueError) as ctx:
+            term._check_band_counts(1, 0)
+        self.assertIn("input features", str(ctx.exception))
+        self.assertIn("_band_config_for_terms", str(ctx.exception))
+
+
 class GradientTest(unittest.TestCase):
     """A differentiable scheme is the whole point; gradients must reach it."""
 

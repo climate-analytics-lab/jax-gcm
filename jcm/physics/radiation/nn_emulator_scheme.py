@@ -297,6 +297,25 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._zero_tendency = bool(zero_tendency)
         self._coords_cached = False
 
+    def _check_band_counts(self, n_bnd_sw: int, n_bnd_lw: int) -> None:
+        """Fail clearly when the aerosol bands do not match the weights."""
+        weights = self.params.get_value().emulator_weights
+        for name, n_bnd, w in (
+            ("SW", n_bnd_sw, weights.sw), ("LW", n_bnd_lw, weights.lw),
+        ):
+            expected = w.gru_fwd.kernel.shape[0]
+            got = n_input_features(self._band_mode, n_bnd)
+            if got != expected:
+                raise ValueError(
+                    f"{name} emulator weights expect {expected} input "
+                    f"features but the aerosol term supplies {n_bnd} "
+                    f"{name} bands, giving {got} under band_mode="
+                    f"{self._band_mode!r}. The band config follows the "
+                    "active radiation backend; a radiation term absent "
+                    "from jcm.runners._band_config_for_terms falls back "
+                    "to a single 550 nm SW band and no LW bands."
+                )
+
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
         lat, lon = column_lat_lon(coords.horizontal)
@@ -388,6 +407,11 @@ class NNEmulatorRadiation(PhysicsTerm):
         aerosol_in = diagnostics["aerosol"]
         n_bnd_sw = aerosol_in.aod_sw_per_band.shape[0]
         n_bnd_lw = aerosol_in.aod_lw_per_band.shape[0]
+        # The weights were sized at construction from assumed band counts,
+        # but the aerosol term's are set by the active band config. A
+        # mismatch otherwise surfaces deep in a GRU matmul as a bare
+        # dot_general shape error.
+        self._check_band_counts(n_bnd_sw, n_bnd_lw)
 
         def _per_band_to_col(arr, n_bnd):
             """(n_bnd, nlev, ncols) → (ncols, n_bnd, nlev) for the column vmap."""

@@ -350,19 +350,28 @@ def _build_physics_from_factory(physics_cfg):
 def _band_config_for_terms(terms):
     """Pick a ``RadiationBandConfig`` to match the active radiation backend.
 
-    Walks the term list for an ``RRTMGPRadiation`` instance and reads its
-    band centers; otherwise returns the broadband (single 550 nm SW band)
-    fallback. Centralised here so every wavelength-dependent term — not
-    just the aerosol scheme — sees the same band structure as whatever
-    radiation backend is actually running. The band config is owned by
-    ``ComposablePhysics`` and injected into ``diagnostics["_band_config"]``
-    each step (same pattern as ``_dt_seconds``).
+    Walks the term list for a term that resolves radiation band by band
+    and reads RRTMGP's band centers; otherwise returns the broadband
+    (single 550 nm SW band) fallback. Centralised here so every
+    wavelength-dependent term — not just the aerosol scheme — sees the
+    same band structure as whatever radiation backend is actually
+    running. The band config is owned by ``ComposablePhysics`` and
+    injected into ``diagnostics["_band_config"]`` each step (same pattern
+    as ``_dt_seconds``).
+
+    The NN emulator counts because it is trained on RRTMGP's band-resolved
+    aerosol optics: give it the broadband fallback and the aerosol term
+    feeds it a single 550 nm band, which is not the input its labels were
+    generated under. That costs one load of the RRTMGP tables at
+    construction even though the emulator never solves with them, which is
+    worth it to keep the two arms on identical aerosol input.
     """
     from jcm.physics.radiation.band_config import RadiationBandConfig
+    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
     from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
 
     for t in terms:
-        if isinstance(t, RRTMGPRadiation):
+        if isinstance(t, (RRTMGPRadiation, NNEmulatorRadiation)):
             return RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
     return RadiationBandConfig.broadband()
 
