@@ -470,11 +470,16 @@ def score(val):
     return val["sw"]["heating_rmse"] + val["lw"]["heating_rmse"]
 
 
+# One axis varied at a time off a (32, 3e-3, 0) centre, plus the two
+# heating-weighted variants at the widths worth pairing it with. Kept short
+# deliberately: each candidate trains both networks, and the point is to place
+# the working point, not to squeeze the last percent out of it.
 SWEEP = [
     dict(units=16, lr=3e-3, heating_weight=0.0),
     dict(units=32, lr=3e-3, heating_weight=0.0),
     dict(units=64, lr=3e-3, heating_weight=0.0),
     dict(units=32, lr=1e-3, heating_weight=0.0),
+    dict(units=32, lr=3e-3, heating_weight=1e-3),
     dict(units=32, lr=3e-3, heating_weight=1e-2),
     dict(units=64, lr=3e-3, heating_weight=1e-2),
 ]
