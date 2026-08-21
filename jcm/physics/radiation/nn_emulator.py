@@ -197,6 +197,7 @@ def gru_backward_sequence(
     x_seq: jnp.ndarray,
     h0: jnp.ndarray,
     weights: GRUWeights,
+    realign: bool = True,
 ) -> jnp.ndarray:
     """Run a GRU backward over a sequence (go_backwards=True).
 
@@ -204,14 +205,20 @@ def gru_backward_sequence(
         x_seq: Input sequence (seq_len, input_dim).
         h0: Initial hidden state (units,).
         weights: GRU weights.
+        realign: If True, reverse the output back so element ``i`` is the
+            state *at* level ``i``, which is what a concat against a
+            forward pass needs (Keras ``Bidirectional`` semantics). If
+            False, leave it in computation order — a bare Keras
+            ``GRU(go_backwards=True, return_sequences=True)`` does not
+            reverse its output, so reproducing upstream ``rte-rrtmgp-nn``
+            checkpoints requires this.
 
     Returns:
-        Hidden states at all time steps (seq_len, units), reversed back
-        to original ordering.
+        Hidden states at all time steps (seq_len, units).
 
     """
     hidden_rev = gru_forward_sequence(x_seq[::-1], h0, weights)
-    return hidden_rev[::-1]
+    return hidden_rev[::-1] if realign else hidden_rev
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +402,7 @@ def lw_emulator_column(
     x_seq: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
     weights: LWEmulatorWeights,
+    realign_backward: bool = True,
 ) -> jnp.ndarray:
     """Run the LW forward-backward GRU emulator for one column.
 
@@ -405,6 +413,11 @@ def lw_emulator_column(
         x_seq: Preprocessed input features (nlev, n_features).
         surface_emissivity: Surface emissivity (1,).
         weights: LW emulator weights.
+        realign_backward: Pair the backward state *at* each level with the
+            forward state there. False reproduces upstream checkpoints,
+            whose bare Keras ``go_backwards`` GRU leaves its output in
+            computation order and so concatenates level ``i`` against
+            level ``nlev - i``. See :func:`gru_backward_sequence`.
 
     Returns:
         Normalized flux predictions (nlev+1, 2) — (rld_norm, rlu_norm).
@@ -428,7 +441,9 @@ def lw_emulator_column(
 
     # Backward GRU on extended sequence
     h0_bwd = jnp.zeros(nneur)
-    hidden_bwd = gru_backward_sequence(hidden_fwd_extended, h0_bwd, weights.gru_bwd)
+    hidden_bwd = gru_backward_sequence(
+        hidden_fwd_extended, h0_bwd, weights.gru_bwd, realign=realign_backward,
+    )
 
     # Concatenate forward and backward
     hidden_concat = jnp.concatenate([hidden_fwd_extended, hidden_bwd], axis=-1)

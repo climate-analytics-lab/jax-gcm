@@ -33,11 +33,83 @@ from jcm.physics.radiation.nn_emulator import (
     init_lw_emulator_weights,
     init_emulator_weights,
     DenseWeights,
+    GRUWeights,
     SWEmulatorWeights,
     LWEmulatorWeights,
     EmulatorWeights,
     InputScaling,
 )
+
+
+class UpstreamCheckpointTest(unittest.TestCase):
+    """Reproduce upstream ``rte-rrtmgp-nn`` outputs bit-for-bit.
+
+    Fixture ``jcm/data/test/rrtmgp_nn_bigru16_reference.npz`` holds the
+    weights of ``bigru_gru_16_new.onnx`` (peterukk/rte-rrtmgp-nn, nn_dev)
+    together with fixed inputs and the fluxes onnxruntime produces from
+    them. Nothing else pins the GRU port: gate order, the
+    ``reset_after=True`` two-row bias, and the backward-pass alignment
+    are all conventions that mismatch silently and cost accuracy rather
+    than raising.
+
+    The checkpoint's graph is this module's LW architecture — forward
+    GRU, dense on ``[last_state, aux]``, backward GRU, GRU on the
+    concat, sigmoid dense — with albedo as the aux input and 10 input
+    features, so ``lw_emulator_column`` reproduces it directly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib import resources
+
+        path = (resources.files("jcm.data.test")
+                / "rrtmgp_nn_bigru16_reference.npz")
+        with resources.as_file(path) as f:
+            cls.d = dict(np.load(f))
+
+    def _weights(self):
+        d = self.d
+
+        def gru(prefix):
+            return GRUWeights(
+                kernel=jnp.asarray(d[f"{prefix}_kernel"]),
+                recurrent_kernel=jnp.asarray(d[f"{prefix}_recurrent"]),
+                bias=jnp.stack([jnp.asarray(d[f"{prefix}_bias0"]),
+                                jnp.asarray(d[f"{prefix}_bias1"])]),
+            )
+
+        return LWEmulatorWeights(
+            gru_fwd=gru("gru_fwd"),
+            surface_dense=DenseWeights(
+                kernel=jnp.asarray(d["surface_kernel"]),
+                bias=jnp.asarray(d["surface_bias"]),
+            ),
+            gru_bwd=gru("gru_bwd"),
+            gru3=gru("gru3"),
+            output_dense=DenseWeights(
+                kernel=jnp.asarray(d["output_kernel"]),
+                bias=jnp.asarray(d["output_bias"]),
+            ),
+        )
+
+    def test_matches_onnxruntime(self):
+        got = jax.vmap(lw_emulator_column, in_axes=(0, 0, None, None))(
+            jnp.asarray(self.d["x_main"]), jnp.asarray(self.d["x_alb"]),
+            self._weights(), False,
+        )
+        np.testing.assert_allclose(got, self.d["ref"], atol=1e-5)
+
+    def test_realign_changes_the_answer(self):
+        """``realign=True`` must not silently reproduce upstream.
+
+        Guards the fix from regressing into a no-op: the two conventions
+        differ, and only ``realign=False`` matches the checkpoint.
+        """
+        got = jax.vmap(lw_emulator_column, in_axes=(0, 0, None, None))(
+            jnp.asarray(self.d["x_main"]), jnp.asarray(self.d["x_alb"]),
+            self._weights(), True,
+        )
+        self.assertGreater(np.abs(np.asarray(got) - self.d["ref"]).max(), 1e-2)
 
 
 class TestActivations(unittest.TestCase):
