@@ -144,8 +144,31 @@ the optimiser details.
 `preprocess_sw_inputs` / `preprocess_lw_inputs` the online scheme calls, from
 the same raw fields, with the same derived quantities. Re-deriving features in
 the trainer would let the network drift from what it is fed at run time — the
-classic silent failure of an emulator. The divide-by-max scaling is fitted on
-the training split alone and stored in the weight file.
+classic silent failure of an emulator. Scaling is fitted on the training split
+alone, stored in the weight file, and applied through the one shared
+`apply_input_scaling` so train and inference cannot diverge.
+
+**Input conditioning.** The scaling is affine, `(x - x_offset) / x_max`, not
+the reference divide-by-max. Profiling what the network actually receives found
+two features unusable under divide-by-max alone:
+
+| feature | mean | std |
+|---|---|---|
+| temperature | 0.848 | 0.042 |
+| cloud liquid path | 0.004 | 0.038 |
+| cloud ice path | 0.0003 | 0.006 |
+| co2 | 1.000 | 0.000 |
+
+Temperature — the dominant longwave input — sits in a narrow band far from
+zero, so the network must learn large weights to resolve the variation it cares
+about. The cloud paths are so skewed that a few extreme columns set the scale
+and the cloud signal is crushed to nothing. Centring fixes the first; the cloud
+paths additionally take the same fourth root the gas features use, which is
+also a reasonable compression of an optical depth that enters transmittance
+exponentially. `x_offset` defaults to 0, so upstream checkpoints and any
+weights fitted before this keep loading unchanged. The denominator is floored
+in `fit_scaling` so a constant feature (CO2, in a fixed-concentration dataset)
+maps to 0 rather than dividing rounding noise by ~0.
 
 **Honest validation.** The split is by **solar-geometry group**: every column
 sharing an `(orbital_phase, synodic_phase)` pair came from one model snapshot
@@ -167,6 +190,34 @@ still what the model has to integrate.
 Hyperparameters are ranked on validation at a short budget (`--sweep`), and the
 winner is retrained for the full budget. Test metrics are computed once, from
 the third partition, and never used to choose anything.
+
+### What the first sweep found
+
+Seven candidates at 8 epochs each, on 160k training columns, scored by total
+mass-weighted heating RMSE on validation:
+
+| units | lr | heating weight | K/day |
+|---|---|---|---|
+| 16 | 3e-3 | 0 | 21.27 |
+| 32 | 3e-3 | 0 | 16.18 |
+| 64 | 3e-3 | 0 | 10.07 |
+| 32 | 1e-3 | 0 | 22.22 |
+| 32 | 3e-3 | 1e-3 | 21.56 |
+| 32 | 3e-3 | 1e-2 | 19.33 |
+| **64** | **3e-3** | **1e-2** | **8.18** |
+
+Two things to carry forward. **Width dominates** — it is the only axis that
+moves the number much, and since the network's run-time cost is already in the
+noise (the measured 4.13x speedup over RRTMGP is at the Amdahl ceiling), width
+is a free lever rather than a trade-off. And **the heating term interacts with
+capacity**: at 32 units it hurts (16.18 to 19.33), at 64 it helps (10.07 to
+8.18). A small network cannot satisfy the flux and heating objectives at once,
+so the extra term just competes; a larger one can.
+
+Every candidate's loss was still falling at its last epoch, so these numbers
+rank how fast a configuration learns, not the skill it reaches. Retraining the
+winner at 40 epochs took total heating RMSE to 2.87 K/day, with test-set TOA
+upward RMSE of 19.6 W/m² (SW) and 7.0 W/m² (LW) at near-zero bias.
 
 ## Running a trained emulator
 
