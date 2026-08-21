@@ -1,0 +1,578 @@
+r"""Train the JCM radiation NN emulator against RRTMGP labels.
+
+Consumes the files written by ``generate_training_data.py`` and produces a
+weight file that ``NNEmulatorRadiation(weights_file=...)`` can load.
+
+Two properties matter more than anything else here and drive the design:
+
+*Feature parity.* The inputs are built by calling the very same
+``preprocess_sw_inputs`` / ``preprocess_lw_inputs`` the online scheme calls,
+from the same raw fields, with the same derived quantities (water-vapour
+mixing ratio, in-cloud water paths). Re-deriving features here would let the
+trained network drift away from what it is fed at run time, which is the
+classic silent failure of an emulator.
+
+*Honest validation.* Columns drawn from one model snapshot are strongly
+correlated with each other, so a column-wise random split would put near-copies
+of training columns into validation and report a skill the emulator does not
+have. The split is therefore by SOLAR GEOMETRY GROUP: every column sharing an
+(orbital_phase, synodic_phase) pair comes from one snapshot and lands wholly in
+one partition. The synthetic sweep randomises its geometry per column, so the
+same rule degenerates to a plain random split there, which is correct because
+those columns are independent by construction.
+
+Usage::
+
+    python tools/radiation_emulator/train_emulator.py \
+        --data 'training/*.nc' --out emulator_weights.nc --epochs 40
+
+    python tools/radiation_emulator/train_emulator.py \
+        --data 'training/*.nc' --out best.nc --sweep
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import pathlib
+import sys
+import time
+
+import numpy as np
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+import jax                                                      # noqa: E402
+import jax.numpy as jnp                                         # noqa: E402
+import optax                                                    # noqa: E402
+
+import jcm.constants as c                                       # noqa: E402
+from jcm.physics.radiation.nn_emulator import (                 # noqa: E402
+    EmulatorWeights,
+    InputScaling,
+    flux_to_heating_rate,
+    lw_flux_scale,
+    init_lw_emulator_weights,
+    lw_emulator_column,
+    n_input_features,
+    preprocess_lw_inputs,
+    preprocess_sw_inputs,
+    reconstruct_sw_interface_fluxes,
+    save_emulator_weights,
+)
+
+SECONDS_PER_DAY = 86400.0
+
+# Interface flux channels, in the order reconstruct_*_interface_fluxes expects.
+CHANNELS = ("down", "up", "down_clear", "up_clear")
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+
+def load_columns(pattern):
+    """Concatenate every generated training file matching ``pattern``."""
+    import xarray as xr
+
+    paths = []
+    for piece in str(pattern).split(","):
+        matched = sorted(glob.glob(piece.strip()))
+        if not matched:
+            raise FileNotFoundError(f"no training file matches {piece!r}")
+        paths.extend(matched)
+
+    parts = [xr.open_dataset(p) for p in paths]
+    nlev = {int(d.sizes["level"]) for d in parts}
+    if len(nlev) != 1:
+        raise ValueError(f"training files disagree on level count: {nlev}")
+    ds = xr.concat(parts, dim="column", combine_attrs="drop_conflicts")
+    print(f"loaded {ds.sizes['column']} columns from {len(paths)} file(s)")
+    return ds, paths
+
+
+def solar_group_ids(ds):
+    """Group columns by the snapshot they came from.
+
+    Columns sharing a solar geometry came from one model snapshot and are
+    spatially correlated; the sweep source randomises geometry per column, so
+    there each column is its own group. See the module docstring.
+    """
+    phase = np.stack([
+        np.round(np.asarray(ds["orbital_phase"].values), 9),
+        np.round(np.asarray(ds["synodic_phase"].values), 9),
+    ], axis=1)
+    _, ids = np.unique(phase, axis=0, return_inverse=True)
+    return ids
+
+
+def split_by_group(group_ids, fractions, seed):
+    """Split column indices into train/val/test without splitting a group.
+
+    Groups are assigned greedily to fill each partition's share of the COLUMNS
+    (not of the groups): a trajectory snapshot contributes thousands of columns
+    while a sweep column contributes one, so an even split of groups would be a
+    wildly uneven split of data.
+
+    Largest group first. Taking them in random order instead lets a run of
+    small groups fill the training quota and a single large group arrive while
+    training is still the emptiest partition — which put every column in
+    training and left validation empty.
+    """
+    rng = np.random.default_rng(seed)
+    groups, sizes = np.unique(group_ids, return_counts=True)
+    # Shuffle first so equal-sized groups (the sweep's per-column groups) are
+    # ordered randomly rather than by label, then sort by descending size.
+    shuffle = rng.permutation(len(groups))
+    order = shuffle[np.argsort(-sizes[shuffle], kind="stable")]
+
+    quotas = [f * len(group_ids) for f in fractions]
+    assigned, filled = {}, [0, 0, 0]
+    for i in order:
+        # Whichever partition is furthest below its quota takes the group.
+        k = int(np.argmax([q - n for q, n in zip(quotas, filled)]))
+        assigned[groups[i]] = k
+        filled[k] += int(sizes[i])
+
+    membership = np.array([assigned[g] for g in group_ids])
+    splits = [np.where(membership == k)[0] for k in range(3)]
+    if any(len(s) == 0 for s in splits):
+        raise ValueError(
+            f"split produced an empty partition ({[len(s) for s in splits]} "
+            f"columns from {len(groups)} groups). With so few solar-geometry "
+            "groups a held-out split is not meaningful -- generate columns "
+            "from more model snapshots."
+        )
+    return splits
+
+
+def build_features(ds, band_mode):
+    """Build network inputs and normalized targets for every column.
+
+    Returns a dict of unscaled inputs, per-column auxiliary scalars, targets,
+    and the physical quantities the heating-rate loss needs.
+    """
+    f32 = lambda name: jnp.asarray(ds[name].values, dtype=jnp.float32)  # noqa: E731
+
+    q = f32("specific_humidity")
+    # Identical to radiation_scheme_emulated: mass mixing ratio to volume.
+    h2o_vmr = q / (c.eps * (1.0 - q) + q)
+    ozone_vmr = f32("ozone_vmr")
+    cf = f32("cloud_fraction")
+    # In-cloud water paths, exactly as the scheme derives them.
+    cwp = f32("cloud_water") * f32("air_density") * f32("layer_thickness") * cf
+    cip = f32("cloud_ice") * f32("air_density") * f32("layer_thickness") * cf
+
+    temperature = f32("temperature")
+    pressure = f32("pressure_levels")
+    n_sw = n_input_features(band_mode, ds.sizes["band_sw"])
+    n_lw = n_input_features(band_mode, ds.sizes["band_lw"])
+    unit_sw = InputScaling(x_max=jnp.ones(n_sw))
+    unit_lw = InputScaling(x_max=jnp.ones(n_lw))
+
+    # Unscaled here; the divide-by-max scaling is fitted on the TRAIN split
+    # alone and applied afterwards, so validation cannot leak into it.
+    x_sw = jax.vmap(
+        lambda *a: preprocess_sw_inputs(*a[:7], unit_sw, *a[7:], band_mode)
+    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip,
+      f32("cos_zenith"), f32("aod_sw_per_band"), f32("ssa_sw_per_band"),
+      f32("asy_sw_per_band"))
+    x_lw = jax.vmap(
+        lambda *a: preprocess_lw_inputs(*a[:7], unit_lw, *a[7:], band_mode)
+    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip,
+      f32("co2_vmr"), f32("aod_lw_per_band"), f32("ssa_lw_per_band"),
+      f32("asy_lw_per_band"))
+
+    # Auxiliary scalar fed to the surface dense layer of each network.
+    albedo = 0.46 * f32("surface_albedo_vis") + 0.54 * f32("surface_albedo_nir")
+    emissivity = f32("surface_emissivity")
+    surface_temperature = f32("surface_temperature")
+
+    # Normalisation scales, matching reconstruct_*_interface_fluxes exactly:
+    # the TOA insolation for shortwave, the surface emission for longwave.
+    toa_sw_down = f32("sw_flux_down")[:, 0]
+    lw_scale = jax.vmap(lw_flux_scale)(surface_temperature, temperature)
+
+    def stack(prefix):
+        return jnp.stack([f32(f"{prefix}_flux_{ch}") for ch in CHANNELS], -1)
+
+    sw_labels, lw_labels = stack("sw"), stack("lw")
+    lit = toa_sw_down > 1.0
+    # A dark column carries no shortwave information: every flux is zero
+    # whatever the network says, so it is excluded from the SW loss rather
+    # than divided by a zero normalisation.
+    safe_sw = jnp.where(lit, toa_sw_down, 1.0)
+
+    return dict(
+        x_sw=x_sw, x_lw=x_lw,
+        aux_sw=albedo[:, None], aux_lw=emissivity[:, None],
+        y_sw=sw_labels / safe_sw[:, None, None],
+        y_lw=lw_labels / lw_scale[:, None, None],
+        sw_scale=safe_sw, lw_scale=lw_scale, lit=lit,
+        pressure_interfaces=f32("pressure_interfaces"),
+        sw_labels=sw_labels, lw_labels=lw_labels,
+    )
+
+
+def report_target_range(data):
+    """Report how much of the target distribution the output layer can reach.
+
+    The output dense layer ends in a sigmoid, so predictions are confined to
+    (0, 1). Longwave upward flux at the surface is emission PLUS reflected
+    downwelling, which normalised by the emission alone exceeds 1 whenever the
+    emissivity is below 1 — an error the network cannot train away. Quantify it
+    rather than discovering it as an unexplained bias later.
+    """
+    for band in ("sw", "lw"):
+        y = np.asarray(data[f"y_{band}"])
+        if band == "sw":
+            # The TOA downward interface normalizes to exactly 1 and is set by
+            # construction in reconstruct_sw_interface_fluxes, not predicted,
+            # so counting it here would misreport a ceiling problem.
+            y = y[np.asarray(data["lit"])][:, 1:, :]
+        over = float(np.mean(y > 1.0))
+        print(f"{band} normalized targets: min {y.min():.4f} "
+              f"max {y.max():.4f}, {over * 100:.3f}% above the sigmoid "
+              f"ceiling of 1")
+
+
+def fit_scaling(x_train):
+    """Divide-by-max coefficients, matching the preprocessing convention.
+
+    Fitted on the training split only. ``abs`` because the asymmetry-parameter
+    features may be negative, in which case a plain max would leave the feature
+    unbounded below.
+    """
+    return InputScaling(x_max=jnp.max(jnp.abs(x_train), axis=(0, 1)))
+
+
+# ---------------------------------------------------------------------------
+# Loss and metrics
+# ---------------------------------------------------------------------------
+
+
+EVAL_CHUNK = 4096
+
+
+def _predict(weights, x, aux):
+    """Run one network over a batch of columns."""
+    return jax.vmap(lw_emulator_column, in_axes=(0, 0, None))(x, aux, weights)
+
+
+def _predict_chunked(weights, x, aux, chunk=EVAL_CHUNK):
+    """Predict over a whole split without materialising every activation.
+
+    A vmapped GRU over tens of thousands of columns holds all three hidden
+    sequences at once, which is a multi-GB allocation the training batches
+    never provoke.
+    """
+    return jnp.concatenate([
+        _predict(weights, x[i:i + chunk], aux[i:i + chunk])
+        for i in range(0, x.shape[0], chunk)
+    ], axis=0)
+
+
+def _heating(pred_norm, scale, p_half, is_sw):
+    """All-sky heating rate (K/day) from normalized interface predictions."""
+    if is_sw:
+        down, up, _, _ = jax.vmap(reconstruct_sw_interface_fluxes)(
+            pred_norm, scale)
+    else:
+        down, up = pred_norm[..., 0] * scale[:, None], \
+            pred_norm[..., 1] * scale[:, None]
+    return jax.vmap(flux_to_heating_rate)(down, up, p_half) * SECONDS_PER_DAY
+
+
+def mass_weights(p_half):
+    """Per-level layer-mass weights summing to 1 along each column.
+
+    Heating rate is (g/cp) dF/dp, so a fixed flux error becomes a heating error
+    proportional to 1/dp. The topmost model layers are ~1 Pa thick, which
+    amplifies their flux error by three orders of magnitude and would let them
+    dominate an unweighted heating loss entirely. Weighting by layer mass turns
+    the term into an energy error, which is what conservation cares about.
+    """
+    dp = jnp.diff(p_half, axis=-1)
+    return dp / jnp.sum(dp, axis=-1, keepdims=True)
+
+
+def make_loss(is_sw, heating_weight):
+    """Build the loss for one band.
+
+    The flux term is on the normalized targets the network actually outputs;
+    the heating term is on the physical flux divergence, which is what the
+    model consumes and which small flux errors can corrupt disproportionately
+    when they are vertically correlated. ``heating_weight`` trades them off.
+    """
+    def loss_fn(weights, batch):
+        pred = _predict(weights, batch["x"], batch["aux"])
+        mask = batch["mask"][:, None, None]
+        n = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
+        flux_mse = jnp.sum(((pred - batch["y"]) ** 2) * mask) / (
+            n * pred.shape[1] * pred.shape[2])
+        if heating_weight == 0.0:
+            return flux_mse, flux_mse
+        hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
+        hr_true = _heating(batch["y"], batch["scale"], batch["p_half"], is_sw)
+        w = mass_weights(batch["p_half"]) * batch["mask"][:, None]
+        hr_mse = jnp.sum(((hr_pred - hr_true) ** 2) * w) / n
+        return flux_mse + heating_weight * hr_mse, flux_mse
+    return loss_fn
+
+
+def band_metrics(pred_norm, data, idx, is_sw):
+    """Physical error metrics on a held-out split, in W/m^2 and K/day."""
+    scale = data["sw_scale" if is_sw else "lw_scale"][idx]
+    truth = data["sw_labels" if is_sw else "lw_labels"][idx]
+    mask = np.asarray(data["lit"][idx]) if is_sw else np.ones(len(idx), bool)
+    pred = np.asarray(pred_norm) * np.asarray(scale)[:, None, None]
+    truth = np.asarray(truth)
+
+    def err(a, b):
+        d = (a - b)[mask]
+        return float(np.sqrt(np.mean(d ** 2))), float(np.mean(d))
+
+    p_half = data["pressure_interfaces"][idx]
+    hr_pred = np.asarray(jax.vmap(flux_to_heating_rate)(
+        jnp.asarray(pred[..., 0]), jnp.asarray(pred[..., 1]), p_half,
+    )) * SECONDS_PER_DAY
+    hr_true = np.asarray(jax.vmap(flux_to_heating_rate)(
+        jnp.asarray(truth[..., 0]), jnp.asarray(truth[..., 1]), p_half,
+    )) * SECONDS_PER_DAY
+    # Both weightings are reported because they answer different questions:
+    # the mass-weighted one is the energy error, the raw one exposes the
+    # near-vacuum top levels where a small flux error is a large K/day error
+    # that the model still has to integrate.
+    w = np.asarray(mass_weights(p_half))[mask]
+    d_hr = (hr_pred - hr_true)[mask]
+    hr_rmse = float(np.sqrt(np.sum(w * d_hr ** 2) / np.sum(w)))
+    hr_bias = float(np.sum(w * d_hr) / np.sum(w))
+    hr_rmse_raw, _ = err(hr_pred, hr_true)
+
+    # TOA is interface 0 and the surface is the last: the stored columns are
+    # TOA-first (see the generator's vertical_convention attribute).
+    toa_rmse, toa_bias = err(pred[:, 0, 1], truth[:, 0, 1])
+    sfc_rmse, sfc_bias = err(pred[:, -1, 0], truth[:, -1, 0])
+    return dict(
+        toa_up_rmse=toa_rmse, toa_up_bias=toa_bias,
+        sfc_down_rmse=sfc_rmse, sfc_down_bias=sfc_bias,
+        heating_rmse=hr_rmse, heating_bias=hr_bias,
+        heating_rmse_raw=hr_rmse_raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+
+def train_band(data, splits, is_sw, config, key, log_prefix=""):
+    """Train one band's network; return ``(weights, scaling, history)``."""
+    train_idx, val_idx = splits[0], splits[1]
+    x_all = data["x_sw" if is_sw else "x_lw"]
+    aux_all = data["aux_sw" if is_sw else "aux_lw"]
+    y_all = data["y_sw" if is_sw else "y_lw"]
+    scale_all = data["sw_scale" if is_sw else "lw_scale"]
+    mask_all = data["lit"] if is_sw else jnp.ones(x_all.shape[0], bool)
+
+    scaling = fit_scaling(x_all[train_idx])
+    x_all = x_all / jnp.maximum(scaling.x_max, 1e-30)
+
+    def gather(idx):
+        idx = jnp.asarray(idx)
+        return dict(x=x_all[idx], aux=aux_all[idx], y=y_all[idx],
+                    scale=scale_all[idx], p_half=data["pressure_interfaces"][idx],
+                    mask=mask_all[idx].astype(jnp.float32))
+
+    val_batches = [gather(val_idx[i:i + EVAL_CHUNK])
+                   for i in range(0, len(val_idx), EVAL_CHUNK)]
+    weights = init_lw_emulator_weights(
+        n_features=x_all.shape[-1], units=config["units"],
+        n_outputs=len(CHANNELS), key=key,
+    )
+    loss_fn = make_loss(is_sw, config["heating_weight"])
+    n_steps = max(1, len(train_idx) // config["batch_size"]) * config["epochs"]
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=config["lr"] * 0.1, peak_value=config["lr"],
+        warmup_steps=max(1, n_steps // 20), decay_steps=n_steps,
+        end_value=config["lr"] * 0.01,
+    )
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0),
+                            optax.adam(schedule))
+    opt_state = optimizer.init(weights)
+
+    @jax.jit
+    def step(weights, opt_state, batch):
+        (total, flux), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+            weights, batch)
+        updates, opt_state = optimizer.update(grads, opt_state, weights)
+        return optax.apply_updates(weights, updates), opt_state, total, flux
+
+    @jax.jit
+    def evaluate(weights, batch):
+        return loss_fn(weights, batch)[1]
+
+    rng = np.random.default_rng(config["seed"])
+    best = (np.inf, weights)
+    history = []
+    started = time.time()
+    for epoch in range(config["epochs"]):
+        order = rng.permutation(train_idx)
+        n_batches = max(1, len(order) // config["batch_size"])
+        for b in range(n_batches):
+            batch = gather(order[b * config["batch_size"]:
+                                 (b + 1) * config["batch_size"]])
+            weights, opt_state, _, _ = step(weights, opt_state, batch)
+        val_loss = float(np.mean([evaluate(weights, b) for b in val_batches]))
+        history.append(val_loss)
+        if val_loss < best[0]:
+            best = (val_loss, weights)
+        print(f"{log_prefix}epoch {epoch + 1:3d}/{config['epochs']}  "
+              f"val flux MSE {val_loss:.3e}  "
+              f"({time.time() - started:.0f}s)", flush=True)
+    return best[1], scaling, history
+
+
+def evaluate_split(weights, scaling, data, idx, is_sw):
+    """Physical metrics for one trained band on one split."""
+    x = data["x_sw" if is_sw else "x_lw"][jnp.asarray(idx)]
+    x = x / jnp.maximum(scaling.x_max, 1e-30)
+    aux = data["aux_sw" if is_sw else "aux_lw"][jnp.asarray(idx)]
+    return band_metrics(_predict_chunked(weights, x, aux), data, idx, is_sw)
+
+
+def run_config(data, splits, config, verbose=True):
+    """Train both bands under one hyperparameter configuration."""
+    key_sw, key_lw = jax.random.split(jax.random.PRNGKey(config["seed"]))
+    w_sw, s_sw, _ = train_band(data, splits, True, config, key_sw,
+                               "  [sw] " if verbose else "")
+    w_lw, s_lw, _ = train_band(data, splits, False, config, key_lw,
+                               "  [lw] " if verbose else "")
+    val = dict(
+        sw=evaluate_split(w_sw, s_sw, data, splits[1], True),
+        lw=evaluate_split(w_lw, s_lw, data, splits[1], False),
+    )
+    return dict(weights=EmulatorWeights(sw=w_sw, lw=w_lw),
+                sw_scaling=s_sw, lw_scaling=s_lw, val=val)
+
+
+def score(val):
+    """Single number to rank configurations by.
+
+    Total heating-rate RMSE: the emulator's job is to give the model the right
+    temperature tendency, and a flux error that cancels in the divergence
+    matters far less than one that does not.
+    """
+    return val["sw"]["heating_rmse"] + val["lw"]["heating_rmse"]
+
+
+SWEEP = [
+    dict(units=16, lr=3e-3, heating_weight=0.0),
+    dict(units=32, lr=3e-3, heating_weight=0.0),
+    dict(units=64, lr=3e-3, heating_weight=0.0),
+    dict(units=32, lr=1e-3, heating_weight=0.0),
+    dict(units=32, lr=3e-3, heating_weight=1e-2),
+    dict(units=64, lr=3e-3, heating_weight=1e-2),
+]
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--data", required=True,
+                   help="generated training file(s): path, glob or list")
+    p.add_argument("--out", required=True, help="weight file to write")
+    p.add_argument("--band-mode", default="per_band",
+                   choices=("none", "broadband", "per_band"))
+    p.add_argument("--units", type=int, default=32)
+    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--heating-weight", type=float, default=1e-2)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--sweep-epochs", type=int, default=12,
+                   help="shorter budget per sweep candidate")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--sweep", action="store_true",
+                   help="rank SWEEP candidates on validation, then retrain "
+                        "the winner for the full --epochs budget")
+    p.add_argument("--report", default=None, help="JSON metrics output")
+    args = p.parse_args(argv)
+
+    ds, paths = load_columns(args.data)
+    data = build_features(ds, args.band_mode)
+    groups = solar_group_ids(ds)
+    splits = split_by_group(groups, (0.8, 0.1, 0.1), args.seed)
+    print(f"split: {len(splits[0])} train / {len(splits[1])} val / "
+          f"{len(splits[2])} test columns from "
+          f"{len(np.unique(groups))} solar-geometry groups")
+    print(f"lit fraction: {float(jnp.mean(data['lit'])):.3f}")
+    report_target_range(data)
+
+    base = dict(batch_size=args.batch_size, seed=args.seed,
+                epochs=args.epochs, units=args.units, lr=args.lr,
+                heating_weight=args.heating_weight)
+
+    sweep_results = []
+    if args.sweep:
+        for i, candidate in enumerate(SWEEP):
+            config = {**base, **candidate, "epochs": args.sweep_epochs}
+            print(f"\n=== sweep {i + 1}/{len(SWEEP)}: {candidate} ===",
+                  flush=True)
+            result = run_config(data, splits, config)
+            sweep_results.append(dict(config=candidate, val=result["val"],
+                                      score=score(result["val"])))
+            print(f"  score (total heating RMSE) {score(result['val']):.4f} "
+                  "K/day")
+        best = min(sweep_results, key=lambda r: r["score"])
+        print(f"\nbest sweep config: {best['config']} "
+              f"(score {best['score']:.4f} K/day)")
+        base = {**base, **best["config"]}
+
+    print(f"\n=== final training: {base} ===", flush=True)
+    final = run_config(data, splits, base)
+    test = dict(
+        sw=evaluate_split(final["weights"].sw, final["sw_scaling"],
+                          data, splits[2], True),
+        lw=evaluate_split(final["weights"].lw, final["lw_scaling"],
+                          data, splits[2], False),
+    )
+
+    metadata = dict(
+        band_mode=args.band_mode, units=int(base["units"]),
+        n_outputs=len(CHANNELS),
+        n_bnd_sw=int(ds.sizes["band_sw"]), n_bnd_lw=int(ds.sizes["band_lw"]),
+        n_levels=int(ds.sizes["level"]),
+        trained_on=";".join(pathlib.Path(p).name for p in paths),
+        n_train=int(len(splits[0])),
+        learning_rate=float(base["lr"]),
+        heating_weight=float(base["heating_weight"]),
+        epochs=int(base["epochs"]),
+    )
+    save_emulator_weights(args.out, final["weights"], final["sw_scaling"],
+                          final["lw_scaling"], metadata)
+    print(f"\nwrote {args.out}")
+
+    for band in ("sw", "lw"):
+        m = test[band]
+        print(f"TEST {band.upper()}: "
+              f"TOA up {m['toa_up_rmse']:7.2f} W/m2 RMSE "
+              f"({m['toa_up_bias']:+.2f} bias) | "
+              f"sfc down {m['sfc_down_rmse']:7.2f} "
+              f"({m['sfc_down_bias']:+.2f}) | "
+              f"heating {m['heating_rmse']:.4f} K/day mass-weighted "
+              f"({m['heating_bias']:+.4f} bias, "
+              f"{m['heating_rmse_raw']:.2f} unweighted)")
+
+    if args.report:
+        with open(args.report, "w") as fh:
+            json.dump(dict(metadata=metadata, test=test,
+                           val=final["val"], sweep=sweep_results), fh,
+                      indent=2)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
