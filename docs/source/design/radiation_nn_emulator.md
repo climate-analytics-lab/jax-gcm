@@ -170,6 +170,30 @@ weights fitted before this keep loading unchanged. The denominator is floored
 in `fit_scaling` so a constant feature (CO2, in a fixed-concentration dataset)
 maps to 0 rather than dividing rounding noise by ~0.
 
+**Measured neutral, and kept anyway.** A controlled A/B — same 64 units, same
+40 epochs, same seed, scaling the only difference — gives:
+
+| metric | divide-by-max | affine + cloud 4th root |
+|---|---|---|
+| SW TOA up (W/m²) | 19.55 | 18.69 |
+| SW surface down | 38.79 | 37.71 |
+| LW TOA up | 7.02 | 6.67 |
+| LW surface down | 14.85 | 14.56 |
+| SW heating (K/day) | 2.246 | 2.324 |
+| LW heating | 0.620 | 0.611 |
+| **total heating** | **2.866** | **2.935** |
+
+All four flux measures improve by 2-5%, but total heating — the metric that
+matters — is 2.4% *worse*. On one seed there is no noise floor, so the honest
+reading is that this is a wash. The feature statistics above are real, but
+conditioning was **not** the binding constraint: a GRU's gate biases can absorb
+a constant input offset, and the network had evidently already compensated.
+Capacity and training budget are what limit skill (see the sweep below).
+
+It is kept because it is backward-compatible, improves the flux metrics
+consistently, and plausibly matters more at larger widths — not because it was
+shown to help. Do not cite it as an improvement.
+
 **Honest validation.** The split is by **solar-geometry group**: every column
 sharing an `(orbital_phase, synodic_phase)` pair came from one model snapshot
 and lands wholly in one partition. Columns from one snapshot are spatially
