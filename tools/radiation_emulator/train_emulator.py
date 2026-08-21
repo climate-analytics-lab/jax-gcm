@@ -418,7 +418,13 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
 
     @jax.jit
     def evaluate(weights, batch):
-        return loss_fn(weights, batch)[1]
+        # The FULL objective, including the heating term -- not the flux part
+        # alone. Selecting the best epoch by flux while ranking and reporting
+        # by heating lets a longer run pick a checkpoint that is better on the
+        # selection metric and worse on the reported one, which is how a
+        # 300-epoch 128-unit model ended up with worse longwave heating than a
+        # 40-epoch 64-unit one.
+        return loss_fn(weights, batch)[0]
 
     rng = np.random.default_rng(config["seed"])
     best = (np.inf, weights)
@@ -436,7 +442,7 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
         if val_loss < best[0]:
             best = (val_loss, weights)
         print(f"{log_prefix}epoch {epoch + 1:3d}/{config['epochs']}  "
-              f"val flux MSE {val_loss:.3e}  "
+              f"val loss {val_loss:.3e}  "
               f"({time.time() - started:.0f}s)", flush=True)
     return best[1], scaling, history
 
