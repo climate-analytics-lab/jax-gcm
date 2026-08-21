@@ -502,22 +502,45 @@ class Model:
         self.coords = dycore.coords
         self.terrain = dycore.terrain
 
-        # Validate the dycore-field contract at construction: every field a
-        # term declares in ``requires_dycore_fields`` must be supplied by the
-        # backend (physics_field_names) or an upstream term's ``provides`` —
-        # fail here, not deep inside the first traced step.
-        self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        # Satisfy, then validate, the dycore-field contract at construction:
+        # every field a term declares in ``requires_dycore_fields`` must be
+        # supplied by the backend (physics_field_names) or an upstream term's
+        # ``provides`` — settled here, not deep inside the first traced step.
+        #
+        # A backend that CAN produce a required field but has its provider
+        # switched off is turned on rather than rejected: the provider flags
+        # (``compute_omega``, ``compute_frontogenesis``) are pure cost knobs,
+        # and a term that declares a field cannot function without it, so
+        # there is no configuration in which "off" is the right answer. The
+        # alternative — making every caller of ``Model(physics=echam_physics())``
+        # hand-construct ``DinosaurDycore(compute_omega=True)`` — is a tax
+        # that buys nothing, and the silent-fallback alternative is worse
+        # still (a term losing an input it declared, invisibly). The Hydra
+        # path has resolved providers this way since jax-gcm#409
+        # (``runners._want_omega``); this makes the policy uniform for
+        # library callers, and leaves genuine incapability (a backend with no
+        # such provider at all, e.g. pySES and omega — #698) as the only
+        # failure.
         required = tuple(getattr(self.physics, "required_dycore_fields",
                                  lambda: ())())
+        for field in required:
+            if field in self.dycore.physics_field_names():
+                continue
+            flag = f"compute_{field}"
+            if hasattr(self.dycore, flag):
+                setattr(self.dycore, flag, True)
+        self._dycore_field_names = tuple(self.dycore.physics_field_names())
         missing = [f for f in required if f not in self._dycore_field_names]
         if missing:
             raise ValueError(
                 f"The composed physics requires dycore-supplied fields "
                 f"{missing}, but this backend provides "
-                f"{list(self._dycore_field_names) or 'none'}. Construct the "
-                "dycore with the relevant provider enabled (e.g. "
-                "DinosaurDycore(compute_frontogenesis=True)) or add a "
-                "physics-side provider term upstream."
+                f"{list(self._dycore_field_names) or 'none'}, and has no "
+                f"compute_<field> provider to switch on. Add a physics-side "
+                "provider term whose ``provides`` names the field, or turn "
+                "off the feature that declares it — each requiring term's "
+                "docstring names its switch (e.g. TiedtkeConvection's "
+                "``cu_lmfmid`` for ``omega``)."
             )
 
         for observer in self.observers:

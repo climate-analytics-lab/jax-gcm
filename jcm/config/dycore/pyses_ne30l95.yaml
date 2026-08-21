@@ -24,6 +24,17 @@
 # NOTE: the ``grid`` group is IGNORED with this backend — resolution comes
 # from nx/npt/nlev here. ``run.time_step`` is also ignored (the Model
 # adopts dt_seconds). Requires `pip install jcm[pyses]`.
+#
+# NOTE: pySES exposes no ``omega`` provider (it computes the vertical
+# pressure velocity internally but does not publish it — #698), so ECHAM's
+# ``lmfmid`` mid-level convection trigger (``cubasmc``, #697) cannot run on
+# this backend. Model construction will refuse to build an ECHAM package
+# here until you turn that trigger off with the reference's own switch:
+#
+#   +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+#
+# That is a real capability gap, not a formality: elevated convection above
+# a stable layer is simply absent from such a run. Prefer fixing #698.
 name: pyses
 nx: 30
 npt: 4

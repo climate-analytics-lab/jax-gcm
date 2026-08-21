@@ -348,6 +348,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
 
     def test_model_drives_coupled_run(self):
         from jcm.model import Model
+        from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
         from jcm.physics.echam.echam_terms import echam_physics
 
         dycore = PysesCamSEDycore(
@@ -357,7 +358,14 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         model = Model(
             dycore=dycore,
             time_step=dycore.dt_seconds / 60.0,
-            physics=echam_physics(radiation_scheme="grey"),
+            # pySES publishes no ``omega`` (#698), so ECHAM's ``lmfmid``
+            # mid-level convection trigger cannot run here — turn it off
+            # with the reference's own switch, as the config comment in
+            # ``dycore/pyses_ne30l47.yaml`` documents.
+            physics=echam_physics(
+                radiation_scheme="grey",
+                convection=ConvectionParameters.default(cu_lmfmid=False),
+            ),
         )
         forcing = build_forcing(T63_FORCING, dycore)
         dt_days = dycore.dt_seconds / 86400.0
@@ -378,6 +386,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         template to ``dycore.physics_dtype``.
         """
         from jcm.model import Model
+        from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
         from jcm.physics.echam.echam_terms import echam_physics
 
         dycore = PysesCamSEDycore(
@@ -387,7 +396,14 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         model = Model(
             dycore=dycore,
             time_step=dycore.dt_seconds / 60.0,
-            physics=echam_physics(radiation_scheme="grey"),
+            # pySES publishes no ``omega`` (#698), so ECHAM's ``lmfmid``
+            # mid-level convection trigger cannot run here — turn it off
+            # with the reference's own switch, as the config comment in
+            # ``dycore/pyses_ne30l47.yaml`` documents.
+            physics=echam_physics(
+                radiation_scheme="grey",
+                convection=ConvectionParameters.default(cu_lmfmid=False),
+            ),
         )
         forcing = build_forcing(T63_FORCING, dycore)
         dt_days = dycore.dt_seconds / 86400.0
