@@ -157,6 +157,12 @@ def radiation_scheme_emulated(
         lw_flux_up=lw_flux_up,
         lw_flux_down=lw_flux_down,
         lw_heating_rate=lw_heating,
+        # Clear-sky profiles await an emulator trained on the RRTMGP
+        # clear-sky labels; zeros keep downstream consumers off stale data.
+        sw_flux_up_clear=jnp.zeros_like(sw_flux_up),
+        sw_flux_down_clear=jnp.zeros_like(sw_flux_down),
+        lw_flux_up_clear=jnp.zeros_like(lw_flux_up),
+        lw_flux_down_clear=jnp.zeros_like(lw_flux_down),
         surface_sw_down=sw_flux_down[-1],
         surface_lw_down=lw_flux_down[-1],
         surface_sw_up=sw_flux_up[-1],
@@ -387,6 +393,10 @@ class NNEmulatorRadiation(PhysicsTerm):
             lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
             lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
             lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.T,
+            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.T,
+            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.T,
+            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.T,
             surface_sw_down=_column_vector_emulated(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),

@@ -130,6 +130,16 @@ def cloud_overlap_name(code: int) -> str:
     return name
 
 
+# Fields a scheme can only fill by running a second, cloud-free solve.
+# A scheme that skips it must withhold these rather than publish the zero
+# default, which would read as a CRE equal to the whole all-sky flux.
+CLEAR_SKY_KEYS = (
+    "toa_sw_up_clear", "toa_lw_up_clear",
+    "sw_flux_up_clear", "sw_flux_down_clear",
+    "lw_flux_up_clear", "lw_flux_down_clear",
+)
+
+
 @tree_math.struct
 class RadiationData:
     """Radiation diagnostics shared by every radiation scheme.
@@ -158,6 +168,18 @@ class RadiationData:
     lw_flux_up: jnp.ndarray          # Upward LW flux [W/m²] (nlev+1, ncols)
     lw_flux_down: jnp.ndarray        # Downward LW flux [W/m²] (nlev+1, ncols)
     lw_heating_rate: jnp.ndarray     # LW heating rate [K/s] (nlev, ncols)
+
+    # Clear-sky flux PROFILES, on the same interfaces and vertical
+    # ordering as the all-sky profiles above so the two are directly
+    # differenced. "Clear-sky" is the CMIP convention: cloud-free but
+    # aerosols retained. Needed as training labels for the radiation NN
+    # emulator, which predicts all-sky and clear-sky fluxes at every
+    # interface rather than only the TOA cloud radiative effect. Zero on
+    # schemes (or configurations) that run no clear-sky solve.
+    sw_flux_up_clear: jnp.ndarray    # Clear-sky upward SW [W/m²] (nlev+1, ncols)
+    sw_flux_down_clear: jnp.ndarray  # Clear-sky downward SW [W/m²] (nlev+1, ncols)
+    lw_flux_up_clear: jnp.ndarray    # Clear-sky upward LW [W/m²] (nlev+1, ncols)
+    lw_flux_down_clear: jnp.ndarray  # Clear-sky downward LW [W/m²] (nlev+1, ncols)
 
     # Surface fluxes
     surface_sw_down: jnp.ndarray     # Surface downward SW [W/m²] (ncols,)
@@ -234,6 +256,10 @@ class RadiationData:
             lw_flux_up=jnp.zeros((nlev + 1,) + nodal_shape),
             lw_flux_down=jnp.zeros((nlev + 1,) + nodal_shape),
             lw_heating_rate=jnp.zeros((nlev,) + nodal_shape),
+            sw_flux_up_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            sw_flux_down_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_flux_up_clear=jnp.zeros((nlev + 1,) + nodal_shape),
+            lw_flux_down_clear=jnp.zeros((nlev + 1,) + nodal_shape),
             surface_sw_down=jnp.zeros(nodal_shape),
             surface_lw_down=jnp.zeros(nodal_shape),
             surface_sw_up=jnp.zeros(nodal_shape),
@@ -267,6 +293,10 @@ class RadiationData:
             'lw_flux_up': self.lw_flux_up,
             'lw_flux_down': self.lw_flux_down,
             'lw_heating_rate': self.lw_heating_rate,
+            'sw_flux_up_clear': self.sw_flux_up_clear,
+            'sw_flux_down_clear': self.sw_flux_down_clear,
+            'lw_flux_up_clear': self.lw_flux_up_clear,
+            'lw_flux_down_clear': self.lw_flux_down_clear,
             'surface_sw_down': self.surface_sw_down,
             'surface_lw_down': self.surface_lw_down,
             'surface_sw_up': self.surface_sw_up,

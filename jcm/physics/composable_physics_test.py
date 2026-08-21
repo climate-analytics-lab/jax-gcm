@@ -1010,6 +1010,24 @@ class TestWithheldOutputKeys:
             assert RRTMGPRadiation(
                 aerosol_free_interval=on).withheld_output_keys() == ()
 
+    def test_rrtmgp_withholds_clear_sky_only_without_compute_cre(self):
+        """Clear-sky slots are the same trap as the ``*noa`` ones.
+
+        Without the second cloud-free solve they stay zero, which reads
+        as a CRE equal to the entire all-sky flux.
+        """
+        from jcm.physics.radiation.radiation_types import CLEAR_SKY_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+        off = RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=False,
+        ).withheld_output_keys()
+        assert off == clear
+        assert RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=True,
+        ).withheld_output_keys() == ()
+
     def test_composable_physics_drops_the_declared_keys(self):
         """The aggregated keys must actually be filtered from the output."""
         from jcm.physics.composable_physics import ComposablePhysics

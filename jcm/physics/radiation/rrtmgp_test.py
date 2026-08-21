@@ -702,6 +702,93 @@ class TestRRTMGPMcICA:
         assert toa_diff < max(all_minus_clear * 2, 50.0)
 
 
+class TestRRTMGPClearSkyProfiles:
+    """Clear-sky flux PROFILES from the ``compute_cre`` solve.
+
+    These are the clear-sky training labels for the radiation NN
+    emulator, which predicts up/down fluxes at every interface for both
+    skies — so the profiles must share the all-sky g-point summation and
+    TOA-first ordering, not just be internally plausible.
+    """
+
+    _CLEAR_FIELDS = ("sw_flux_up_clear", "sw_flux_down_clear",
+                     "lw_flux_up_clear", "lw_flux_down_clear")
+
+    def _cloudy_inputs(self, nlev=10):
+        """Build an overcast column with real condensate, clear-sky solve on."""
+        inputs = _make_inputs(nlev=nlev)
+        inputs["cloud_fraction"] = jnp.ones((nlev,))
+        inputs["cloud_water"] = jnp.zeros((nlev,)).at[3:6].set(5e-4)
+        inputs["compute_cre"] = True
+        return inputs
+
+    def test_profiles_have_interface_shape_and_are_finite(self):
+        nlev = 10
+        _, diag = radiation_scheme_rrtmgp(**self._cloudy_inputs(nlev))
+
+        for name in self._CLEAR_FIELDS:
+            profile = np.asarray(getattr(diag, name))
+            assert profile.shape == (nlev + 1,), name
+            assert np.all(np.isfinite(profile)), name
+        # Anti-vacuity: the clear-sky call really ran, so the profiles are
+        # not just the zero default passing the finiteness check.
+        assert np.asarray(diag.lw_flux_up_clear).max() > 1.0
+        assert np.asarray(diag.sw_flux_down_clear).max() > 1.0
+
+    def test_clouds_can_only_dim_the_surface_shortwave(self):
+        """Removing cloud can never reduce SW reaching the surface."""
+        _, diag = radiation_scheme_rrtmgp(**self._cloudy_inputs())
+
+        surface_all = float(diag.sw_flux_down[-1])
+        surface_clear = float(diag.sw_flux_down_clear[-1])
+        # Sunlit column, or the inequality below is 0 >= 0.
+        assert surface_all > 1.0
+        assert surface_clear >= surface_all - 1e-3
+        # The overcast column must actually attenuate, otherwise the
+        # inequality would hold for a scheme that ignored the cloud.
+        assert surface_clear > surface_all + 1.0
+
+    def test_toa_scalars_match_the_profile_endpoints(self):
+        """Pins the ordering/flip: both come from the same solve.
+
+        ``toa_*_up_clear`` is read straight off the library's TOA scalar
+        while the profile is the g-point-summed, flipped array, so index 0
+        agreeing exactly is what proves the profile is TOA-first and
+        summed the same way as the all-sky path.
+        """
+        _, diag = radiation_scheme_rrtmgp(**self._cloudy_inputs())
+
+        np.testing.assert_allclose(
+            float(diag.sw_flux_up_clear[0]), float(diag.toa_sw_up_clear),
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            float(diag.lw_flux_up_clear[0]), float(diag.toa_lw_up_clear),
+            rtol=1e-6,
+        )
+        # Same convention on the all-sky side, so the two skies are
+        # differenced level-by-level without a hidden flip between them.
+        np.testing.assert_allclose(
+            float(diag.sw_flux_up[0]), float(diag.toa_sw_up), rtol=1e-6,
+        )
+        np.testing.assert_allclose(
+            float(diag.sw_flux_down[-1]), float(diag.surface_sw_down),
+            rtol=1e-6,
+        )
+
+    def test_compute_cre_false_leaves_profiles_zero(self):
+        nlev = 10
+        inputs = self._cloudy_inputs(nlev)
+        inputs["compute_cre"] = False
+
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+
+        for name in self._CLEAR_FIELDS:
+            profile = np.asarray(getattr(diag, name))
+            assert profile.shape == (nlev + 1,), name
+            assert np.all(profile == 0.0), name
+
+
 class TestRRTMGPThinCloudInflation:
     """A thin but resolved cloud carrying large grid-mean condensate must not
     NaN the radiation (the in-cloud-water inflation / cloud-optical-depth

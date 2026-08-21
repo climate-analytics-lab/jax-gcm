@@ -241,6 +241,71 @@ def dense(x: jnp.ndarray, weights: DenseWeights, activation=None) -> jnp.ndarray
 # Input preprocessing
 # ---------------------------------------------------------------------------
 
+# Smallest mixing ratio fed to the quartic-root transform. A spectral
+# dycore delivers small negative humidity from Gibbs ringing and
+# (-1e-12) ** 0.25 is NaN, so the floor is required, not defensive.
+# 1e-15 kg/kg is far below any radiatively active amount.
+GAS_FLOOR = 1e-15
+
+
+def _band_features(
+    aod: jnp.ndarray,
+    ssa: jnp.ndarray,
+    asy: jnp.ndarray,
+    band_mode: str,
+) -> list[jnp.ndarray]:
+    """Turn per-band aerosol optics into per-level input features.
+
+    Args:
+        aod / ssa / asy: Per-band optics, ``(n_bnd, nlev)``.
+        band_mode: ``"per_band"`` keeps every band (highest fidelity,
+            ``3 * n_bnd`` features); ``"broadband"`` collapses to three
+            (AOD summed over bands, AOD-weighted SSA and asymmetry);
+            ``"none"`` drops aerosol entirely, matching the upstream
+            feature set.
+
+    Band optics are strongly correlated across bands, so ``"broadband"``
+    buys a 16x narrower input for a modest fidelity loss. Which is the
+    better trade is an empirical question for the training sweep, hence
+    the switch rather than a fixed layout.
+
+    Returns:
+        List of ``(nlev,)`` feature arrays.
+
+    """
+    if band_mode == "none":
+        return []
+    if band_mode == "per_band":
+        return [*aod, *ssa, *asy]
+    if band_mode == "broadband":
+        # AOD-weighted means: SSA and asymmetry are intensive, so summing
+        # them across bands would be meaningless.
+        total = jnp.sum(aod, axis=0)
+        weight = jnp.maximum(total, 1e-30)
+        return [total,
+                jnp.sum(ssa * aod, axis=0) / weight,
+                jnp.sum(asy * aod, axis=0) / weight]
+    raise ValueError(
+        f"Unknown band_mode {band_mode!r}; expected 'per_band', "
+        "'broadband' or 'none'."
+    )
+
+
+def n_input_features(band_mode: str, n_bnd: int, n_base: int = 7) -> int:
+    """Return the number of input features a given band handling produces.
+
+    Lets the weight initialisers and the training driver size the input
+    layer without building a dummy column first.
+    """
+    extra = {"none": 0, "broadband": 3, "per_band": 3 * n_bnd}
+    if band_mode not in extra:
+        raise ValueError(
+            f"Unknown band_mode {band_mode!r}; expected 'per_band', "
+            "'broadband' or 'none'."
+        )
+    return n_base + extra[band_mode]
+
+
 def preprocess_sw_inputs(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
@@ -250,6 +315,10 @@ def preprocess_sw_inputs(
     cloud_ice: jnp.ndarray,
     cos_zenith: jnp.ndarray,
     scaling: InputScaling,
+    aerosol_aod: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asy: Optional[jnp.ndarray] = None,
+    band_mode: str = "none",
 ) -> jnp.ndarray:
     """Prepare SW NN inputs from atmospheric profiles.
 
@@ -265,20 +334,27 @@ def preprocess_sw_inputs(
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
         cos_zenith: Cosine of solar zenith angle (scalar).
         scaling: Input normalization coefficients.
+        aerosol_aod / aerosol_ssa / aerosol_asy: Per-SW-band optics,
+            ``(n_bnd_sw, nlev)``. Required unless ``band_mode="none"``.
+        band_mode: See :func:`_band_features`.
 
     Returns:
-        Scaled input array (nlev, n_features).
+        Scaled input array (nlev, n_features), features ordered
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, mu0, *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
-    h2o_t = h2o ** 0.25
-    o3_t = o3 ** 0.25
+    h2o_t = jnp.maximum(h2o, GAS_FLOOR) ** 0.25
+    o3_t = jnp.maximum(o3, GAS_FLOOR) ** 0.25
 
     mu0 = jnp.broadcast_to(cos_zenith, temperature.shape)
 
-    # Stack features: [T, log(p), h2o^1/4, o3^1/4, lwp, iwp, mu0]
-    x = jnp.stack([temperature, log_p, h2o_t, o3_t,
-                    cloud_water, cloud_ice, mu0], axis=-1)
+    features = [temperature, log_p, h2o_t, o3_t, cloud_water, cloud_ice, mu0]
+    if band_mode != "none":
+        features += _band_features(
+            aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
+        )
+    x = jnp.stack(features, axis=-1)
 
     # Divide-by-max scaling
     return x / jnp.maximum(scaling.x_max, 1e-30)
@@ -293,6 +369,10 @@ def preprocess_lw_inputs(
     cloud_ice: jnp.ndarray,
     co2_vmr: float,
     scaling: InputScaling,
+    aerosol_aod: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asy: Optional[jnp.ndarray] = None,
+    band_mode: str = "none",
 ) -> jnp.ndarray:
     """Prepare LW NN inputs from atmospheric profiles.
 
@@ -305,19 +385,26 @@ def preprocess_lw_inputs(
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
         co2_vmr: CO2 volume mixing ratio (scalar).
         scaling: Input normalization coefficients.
+        aerosol_aod / aerosol_ssa / aerosol_asy: Per-LW-band optics,
+            ``(n_bnd_lw, nlev)``. Required unless ``band_mode="none"``.
+        band_mode: See :func:`_band_features`.
 
     Returns:
-        Scaled input array (nlev, n_features).
+        Scaled input array (nlev, n_features), features ordered
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, co2, *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
-    h2o_t = h2o ** 0.25
-    o3_t = o3 ** 0.25
+    h2o_t = jnp.maximum(h2o, GAS_FLOOR) ** 0.25
+    o3_t = jnp.maximum(o3, GAS_FLOOR) ** 0.25
     co2 = jnp.broadcast_to(jnp.asarray(co2_vmr), temperature.shape)
 
-    # Stack features: [T, log(p), h2o^1/4, o3^1/4, lwp, iwp, co2]
-    x = jnp.stack([temperature, log_p, h2o_t, o3_t,
-                    cloud_water, cloud_ice, co2], axis=-1)
+    features = [temperature, log_p, h2o_t, o3_t, cloud_water, cloud_ice, co2]
+    if band_mode != "none":
+        features += _band_features(
+            aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
+        )
+    x = jnp.stack(features, axis=-1)
 
     return x / jnp.maximum(scaling.x_max, 1e-30)
 
