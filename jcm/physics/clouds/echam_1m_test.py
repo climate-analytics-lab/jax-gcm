@@ -904,3 +904,72 @@ class TestColumnSweepParameterGradients:
         assert jnp.isclose(d_cvtfall, fd, rtol=0.05), (
             f"AD {float(d_cvtfall)} vs FD {fd}"
         )
+
+
+class TestCloudFractionWriteBack1M:
+    """The 1M term clears the cover of cells it empties (#687).
+
+    ECHAM's 1M ``cloud`` routine writes the post-microphysics cover back
+    to ``paclc`` (mo_cloud.f90:1280): a cell whose end-of-step condensate
+    is below ``ccwmin`` in BOTH phases stops being cloudy. Without it,
+    ``clouds.cloud_fraction`` meant the RH-diagnosed pre-microphysics
+    cover under cloud_scheme='1m' but the post-microphysics cover under
+    '2m', so every shared consumer (radiation, COSP, AeroCom, the JAM
+    cloud-borne/aqueous/wetdep terms) switched semantics with the scheme.
+    """
+
+    @staticmethod
+    def _drive_term(qc0, qi0, cf0, q_scale=0.95):
+        from types import SimpleNamespace
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = 8, 2
+        T = jnp.full((nlev, ncols), 285.0)
+        p = jnp.linspace(3e4, 1e5, nlev)[:, None] * jnp.ones((1, ncols))
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        qsw = saturation_specific_humidity(p, T)
+        q = q_scale * qsw            # subsaturated: condensate evaporates
+        rho = p / (287.0 * T)
+        zeros = jnp.zeros((nlev, ncols))
+
+        state = PhysicsState(
+            u_wind=zeros, v_wind=zeros, temperature=T,
+            specific_humidity=q, geopotential=zeros,
+            normalized_surface_pressure=jnp.ones(ncols),
+            tracers={"qc": qc0, "qi": qi0},
+        )
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cf0, qc=qc0, qi=qi0)
+        diagnostics = {
+            "_dt_seconds": 1800.0,
+            "pressure_full": p,
+            "air_density": rho,
+            "layer_thickness": jnp.full((nlev, ncols), 500.0),
+            "clouds": clouds,
+            "aerosol": SimpleNamespace(cdnc_factor=jnp.ones(ncols)),
+        }
+        term = Echam1MMicrophysics()
+        _, diags_out = term(state, diagnostics, None, None)
+        return diags_out["clouds"].cloud_fraction
+
+    def test_emptied_cell_loses_cover_kept_cell_keeps_it(self):
+        import numpy as np
+        nlev, ncols = 8, 2
+        qc0 = jnp.zeros((nlev, ncols))
+        qi0 = jnp.zeros((nlev, ncols))
+        cf0 = jnp.zeros((nlev, ncols))
+        # Level 3: a wisp of liquid (5e-7) — the 5 % saturation deficit
+        # evaporates it below ccwmin within the step. Level 5: a solid
+        # deck (1e-3) the same deficit can only nibble at.
+        qc0 = qc0.at[3].set(5e-7).at[5].set(1e-3)
+        cf0 = cf0.at[3].set(0.4).at[5].set(0.7)
+
+        cf_out = np.asarray(self._drive_term(qc0, qi0, cf0))
+        assert np.all(cf_out[3] == 0.0), (
+            f"emptied cell keeps cover {cf_out[3]} — no paclc write-back"
+        )
+        assert np.all(cf_out[5] > 0.0), (
+            "a cell still holding condensate lost its cover"
+        )

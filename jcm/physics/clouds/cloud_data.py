@@ -18,7 +18,16 @@ import tree_math
 class CloudData:
     """Cloud-fraction, condensate, and surface-precip diagnostics."""
 
-    # Cloud fraction
+    # Cloud fraction. SEMANTICS (#687): after the microphysics term has
+    # run, this is the POST-microphysics cover — cells the scheme emptied
+    # of both condensates (end-of-step qc AND qi below ccwmin) have
+    # cloud_fraction = 0, under BOTH the 1M and 2M schemes (ECHAM's
+    # ``paclc`` write-back). Between SundqvistCloudFraction and the
+    # microphysics term it is the RH-diagnosed cover. The microphysics
+    # may only ever REMOVE cover relative to the diagnosed value, never
+    # add it. Consumers (radiation via the carry, COSP, AeroCom, the JAM
+    # cloud-borne/aqueous/wetdep terms) therefore always see the cloud
+    # the step actually left behind.
     cloud_fraction: jnp.ndarray      # Cloud fraction [1] (nlev, ncols)
 
     # Cloud condensate (updated by condensation within the cloud scheme)
