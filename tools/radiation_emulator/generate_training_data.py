@@ -29,13 +29,15 @@ Usage::
         --n-seeds 8 --out training_data.nc
 
     python tools/radiation_emulator/generate_training_data.py \
-        --source trajectory --state-file run/output.nc \
+        --source trajectory --state-file 'run/out_day*.nc' \
         --n-columns 20000 --out traj_labels.nc
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
+import glob
 import os
 import pathlib
 import subprocess
@@ -220,14 +222,22 @@ def label_batch(batch, n_seeds: int, base_seed: int = 0, labeller=None):
         for seed in range(n_seeds)
     ]
     # A frozen McICA step makes every draw identical, so the averaging
-    # silently becomes a no-op that still returns plausible labels. Catch
-    # it on the data rather than trusting the parameter default.
-    if n_seeds > 1 and np.array_equal(draws[0]["sw_flux_up"],
-                                      draws[-1]["sw_flux_up"]):
+    # silently becomes a no-op that still returns plausible labels. Catch it
+    # on the data rather than trusting the parameter default -- but only where
+    # the draws are *required* to differ. A cloud-free batch legitimately
+    # yields identical draws, and it does occur for small batches, so
+    # conditioning on cloud is what keeps this a correctness check rather than
+    # a random abort partway through a long generation. The comparison is on
+    # the longwave over the meaningfully-cloudy columns only: the shortwave is
+    # identically zero at night whatever the draw, so comparing it would trip
+    # on any batch whose cloudy columns all happen to be in darkness.
+    cloudy = np.max(batch["cloud_fraction"], axis=1) > 0.01
+    if n_seeds > 1 and cloudy.any() and np.array_equal(
+            draws[0]["lw_flux_up"][cloudy], draws[-1]["lw_flux_up"][cloudy]):
         raise ValueError(
-            "McICA draws are identical across seeds, so seed averaging is "
-            "doing nothing. Check that RadiationParameters.mcica_freeze_step "
-            "is 0 and that the columns are not all cloud-free."
+            "McICA draws are identical across seeds for a batch containing "
+            "cloud, so seed averaging is doing nothing. Check that "
+            "RadiationParameters.mcica_freeze_step is 0."
         )
     per_seed = {
         k: np.stack([d[k] for d in draws], axis=0) for k in LABEL_FIELDS
@@ -697,6 +707,64 @@ def _first_var(ds, names, default=None, shape=None):
     return np.full(shape, default, dtype=np.float64), f"<default {default}>"
 
 
+@functools.lru_cache(maxsize=1)
+def _load_trajectory_fields(state_file):
+    """Read every field the trajectory source needs from one JCM output file.
+
+    Cached one file deep because :func:`generate` drives the files in major
+    order: the fields used here are ~700 MB for a 20-frame T63L47 file, and
+    re-reading them for every 256-column batch would dominate the run.
+
+    Fields the run did not write fall back to documented constants, since
+    JCM output content depends on the run's diagnostic configuration.
+    """
+    import xarray as xr
+
+    from jcm.utils import load_states_from_xarray
+
+    ds = xr.open_dataset(state_file)
+    # The core state goes through the shared loader so this source stays
+    # consistent with the SCM/prescribed runners in jcm.runners.
+    states = load_states_from_xarray(ds)
+    out = {
+        "temperature": np.asarray(states.temperature),
+        "specific_humidity": np.asarray(states.specific_humidity),
+    }
+    shape_3d = out["temperature"].shape
+    shape_2d = shape_3d[:1] + shape_3d[2:]
+    out["pressure_levels"] = _first_var(ds, ["pressure_full"])[0]
+    out["pressure_interfaces"] = _first_var(ds, ["pressure_half"])[0]
+    out["cloud_water"] = _first_var(ds, ["clouds.qc", "qc"], 0.0, shape_3d)[0]
+    out["cloud_ice"] = _first_var(ds, ["clouds.qi", "qi"], 0.0, shape_3d)[0]
+    out["cloud_fraction"] = _first_var(
+        ds, ["clouds.cloud_fraction"], 0.0, shape_3d)[0]
+    # chemistry.ozone_vmr is ppmv on output (see rrtmgp._compute_full).
+    out["ozone_vmr"] = _first_var(
+        ds, ["chemistry.ozone_vmr"], 1.0, shape_3d)[0] * 1e-6
+    out["surface_temperature"] = _first_var(
+        ds, ["surface.surface_temperature", "surface.skin_temperature"],
+        288.0, shape_2d)[0]
+    out["surface_albedo_vis"] = _first_var(
+        ds, ["radiation.surface_albedo_vis"], 0.07, shape_2d)[0]
+    out["surface_albedo_nir"] = _first_var(
+        ds, ["radiation.surface_albedo_nir"], 0.07, shape_2d)[0]
+    out["surface_emissivity"] = _first_var(
+        ds, ["radiation.surface_emissivity"], 0.98, shape_2d)[0]
+    out["aod_profile"] = _first_var(
+        ds, ["aerosol.aod_profile"], 0.0, shape_3d)[0]
+    out["ssa_profile"] = _first_var(
+        ds, ["aerosol.ssa_profile"], 0.9, shape_3d)[0]
+    out["asy_profile"] = _first_var(
+        ds, ["aerosol.asy_profile"], 0.7, shape_3d)[0]
+    out["angstrom"] = _first_var(
+        ds, ["aerosol.angstrom"], 1.5, shape_2d)[0]
+    out["lat"] = np.asarray(ds["lat"].values)
+    out["lon"] = np.asarray(ds["lon"].values)
+    out["time"] = np.asarray(ds["time"].values)
+    ds.close()
+    return out
+
+
 def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
                        sw_centers_nm, lw_centers_nm, state_file=None,
                        clip_stats=None, **_ignored):
@@ -713,18 +781,10 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     are still internally consistent but get the geometry of the window's
     timestamp rather than of the averaged state.
     """
-    import xarray as xr
-
-    from jcm.utils import load_states_from_xarray
-
     if state_file is None:
         raise ValueError("--state-file is required for source='trajectory'")
-    ds = xr.open_dataset(state_file)
-    # The core state goes through the shared loader so this source stays
-    # consistent with the SCM/prescribed runners in jcm.runners.
-    states = load_states_from_xarray(ds)
-    temperature_all = np.asarray(states.temperature)
-    nt, file_nlev, nlon, nlat = temperature_all.shape
+    f = _load_trajectory_fields(state_file)
+    nt, file_nlev, nlon, nlat = f["temperature"].shape
     if nlev not in (file_nlev, None):
         raise ValueError(
             f"state file has {file_nlev} levels, --nlev says {nlev}; "
@@ -734,51 +794,32 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     idx_t = rng.integers(0, nt, n_columns)
     idx_x = rng.integers(0, nlon, n_columns)
     idx_y = rng.integers(0, nlat, n_columns)
-    take = lambda a: a[idx_t, :, idx_x, idx_y]         # noqa: E731
-    take_2d = lambda a: a[idx_t, idx_x, idx_y]         # noqa: E731
+    take = lambda name: f[name][idx_t, :, idx_x, idx_y]   # noqa: E731
+    take_2d = lambda name: f[name][idx_t, idx_x, idx_y]   # noqa: E731
 
-    shape_3d = (nt, file_nlev, nlon, nlat)
-    shape_2d = (nt, nlon, nlat)
-    temperature = take(temperature_all)
-    specific_humidity = take(np.asarray(states.specific_humidity))
-    pressure_levels, _ = _first_var(ds, ["pressure_full"])
-    pressure_levels = take(pressure_levels)
-    pressure_interfaces, _ = _first_var(ds, ["pressure_half"])
-    pressure_interfaces = pressure_interfaces[idx_t, :, idx_x, idx_y]
+    temperature = take("temperature")
+    specific_humidity = take("specific_humidity")
+    pressure_levels = take("pressure_levels")
+    pressure_interfaces = take("pressure_interfaces")
+    cloud_water = take("cloud_water")
+    cloud_ice = take("cloud_ice")
+    cloud_fraction = take("cloud_fraction")
+    ozone_vmr = take("ozone_vmr")
 
-    cloud_water = take(_first_var(
-        ds, ["clouds.qc", "qc"], 0.0, shape_3d)[0])
-    cloud_ice = take(_first_var(
-        ds, ["clouds.qi", "qi"], 0.0, shape_3d)[0])
-    cloud_fraction = take(_first_var(
-        ds, ["clouds.cloud_fraction"], 0.0, shape_3d)[0])
-    # chemistry.ozone_vmr is ppmv on output (see rrtmgp._compute_full).
-    ozone_vmr = take(_first_var(
-        ds, ["chemistry.ozone_vmr"], 1.0, shape_3d)[0]) * 1e-6
+    surface_temperature = take_2d("surface_temperature")
+    surface_albedo_vis = take_2d("surface_albedo_vis")
+    surface_albedo_nir = take_2d("surface_albedo_nir")
+    surface_emissivity = take_2d("surface_emissivity")
 
-    surface_temperature = take_2d(_first_var(
-        ds, ["surface.surface_temperature", "surface.skin_temperature"],
-        288.0, shape_2d)[0])
-    surface_albedo_vis = take_2d(_first_var(
-        ds, ["radiation.surface_albedo_vis"], 0.07, shape_2d)[0])
-    surface_albedo_nir = take_2d(_first_var(
-        ds, ["radiation.surface_albedo_nir"], 0.07, shape_2d)[0])
-    surface_emissivity = take_2d(_first_var(
-        ds, ["radiation.surface_emissivity"], 0.98, shape_2d)[0])
+    aod_profile = take("aod_profile")
+    ssa_profile = take("ssa_profile")
+    asy_profile = take("asy_profile")
+    angstrom = take_2d("angstrom")
 
-    aod_profile = take(_first_var(
-        ds, ["aerosol.aod_profile"], 0.0, shape_3d)[0])
-    ssa_profile = take(_first_var(
-        ds, ["aerosol.ssa_profile"], 0.9, shape_3d)[0])
-    asy_profile = take(_first_var(
-        ds, ["aerosol.asy_profile"], 0.7, shape_3d)[0])
-    angstrom = take_2d(_first_var(
-        ds, ["aerosol.angstrom"], 1.5, shape_2d)[0])
-
-    lat = np.asarray(ds["lat"].values)[idx_y]
-    lon = np.asarray(ds["lon"].values)[idx_x]
-    times = np.asarray(ds["time"].values)[idx_t]
-    orbital_phase, synodic_phase = _solar_phases_from_datetime64(times)
+    lat = f["lat"][idx_y]
+    lon = f["lon"][idx_x]
+    orbital_phase, synodic_phase = _solar_phases_from_datetime64(
+        f["time"][idx_t])
 
     batch = dict(
         temperature=temperature,
@@ -973,6 +1014,26 @@ def build_dataset(batch, labels, attrs):
 # ---------------------------------------------------------------------------
 
 
+def expand_state_files(state_file):
+    """Expand a comma-separated list and/or glob into a sorted list of paths.
+
+    Returns ``[None]`` when no state file is given, so a source that does not
+    need one (the synthetic sweep) still drives the loop exactly once.
+    """
+    if not state_file:
+        return [None]
+    paths = []
+    for piece in str(state_file).split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        matched = sorted(glob.glob(piece))
+        if not matched:
+            raise FileNotFoundError(f"no state file matches {piece!r}")
+        paths.extend(matched)
+    return paths
+
+
 def generate(source, n_columns, nlev, n_seeds, base_seed, batch_size,
              rng_seed, state_file=None, progress_every=20):
     """Generate ``n_columns`` labelled columns and return ``(batch, labels)``.
@@ -989,11 +1050,19 @@ def generate(source, n_columns, nlev, n_seeds, base_seed, batch_size,
     batches, label_sets = [], []
     n_kept = n_attempted = n_batches = n_empty = 0
     started = time.time()
+    # A model run writes one file per chunk, so the trajectory source is
+    # driven file-major: each file supplies an equal share of the columns and
+    # is opened once, rather than being reopened per batch.
+    files = expand_state_files(state_file)
+    quotas = [n_columns * (i + 1) // len(files) for i in range(len(files))]
+    file_index = 0
     while n_kept < n_columns:
+        while file_index + 1 < len(files) and n_kept >= quotas[file_index]:
+            file_index += 1
         n_here = min(batch_size, n_columns - n_kept)
         raw = COLUMN_SOURCES[source](
             n_here, nlev, rng, n_bnd_sw, n_bnd_lw, sw_centers, lw_centers,
-            state_file=state_file, clip_stats=clip_stats,
+            state_file=files[file_index], clip_stats=clip_stats,
         )
         chunk = _finalize_batch(raw, n_bnd_sw, n_bnd_lw, clip_stats)
         labels, _ = label_batch(chunk, n_seeds, base_seed, labeller)
@@ -1051,7 +1120,9 @@ def main(argv=None):
     p.add_argument("--rng-seed", type=int, default=0,
                    help="seed for the column sampler")
     p.add_argument("--state-file", default=None,
-                   help="JCM output netCDF for source=trajectory")
+                   help="JCM output netCDF(s) for source=trajectory: a path, "
+                        "a glob, or a comma-separated list. Each file "
+                        "supplies an equal share of the columns.")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 

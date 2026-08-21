@@ -33,6 +33,7 @@ from generate_training_data import (  # noqa: E402
     _solar_geometry_for_cos_zenith,
     band_counts,
     build_dataset,
+    expand_state_files,
     generate,
     label_batch,
     label_quality_mask,
@@ -243,6 +244,31 @@ class InputSanitisationTest(unittest.TestCase):
         out = _finalize_batch(batch, n_sw, n_lw, stats)
         np.testing.assert_allclose(out["surface_emissivity"], [1.0, 0.98])
         self.assertEqual(stats["surface_emissivity"][0], 1)
+
+
+class StateFileExpansionTest(unittest.TestCase):
+    """A model run writes one file per chunk, so a trajectory spans files."""
+
+    def test_expands_globs_and_lists_in_sorted_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            names = ["out_day10.nc", "out_day20.nc", "other.nc"]
+            for name in names:
+                pathlib.Path(tmp, name).touch()
+            self.assertEqual(
+                expand_state_files(os.path.join(tmp, "out_day*.nc")),
+                [os.path.join(tmp, "out_day10.nc"),
+                 os.path.join(tmp, "out_day20.nc")])
+            self.assertEqual(
+                expand_state_files(f"{tmp}/other.nc, {tmp}/out_day10.nc"),
+                [os.path.join(tmp, "other.nc"),
+                 os.path.join(tmp, "out_day10.nc")])
+
+    def test_no_state_file_still_drives_one_pass(self):
+        self.assertEqual(expand_state_files(None), [None])
+
+    def test_unmatched_pattern_is_an_error(self):
+        with self.assertRaises(FileNotFoundError):
+            expand_state_files("/nonexistent/path/*.nc")
 
 
 class LabelQualityTest(unittest.TestCase):
