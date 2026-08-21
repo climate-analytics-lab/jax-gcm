@@ -129,7 +129,9 @@ class BandModeTest(unittest.TestCase):
     """Each aerosol band handling must trace and stay finite."""
 
     def test_every_band_mode_runs_and_is_finite(self):
-        for mode, n_sw in (("none", 7), ("broadband", 10), ("per_band", 49)):
+        # 8 base features (T, log p, h2o, o3, lwp, iwp, cloud fraction,
+        # mu0) plus 3 per aerosol band.
+        for mode, n_sw in (("none", 8), ("broadband", 11), ("per_band", 50)):
             with self.subTest(mode=mode):
                 self.assertEqual(n_input_features(mode, N_BND_SW), n_sw)
                 tend, diag = _run(mode)

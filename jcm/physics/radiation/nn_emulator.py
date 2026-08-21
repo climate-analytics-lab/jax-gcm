@@ -313,11 +313,13 @@ def _band_features(
     )
 
 
-def n_input_features(band_mode: str, n_bnd: int, n_base: int = 7) -> int:
+def n_input_features(band_mode: str, n_bnd: int, n_base: int = 8) -> int:
     """Return the number of input features a given band handling produces.
 
     Lets the weight initialisers and the training driver size the input
-    layer without building a dummy column first.
+    layer without building a dummy column first. ``n_base`` is 8 for the
+    features this module builds; upstream ``rte-rrtmgp-nn`` checkpoints
+    predate the cloud-fraction feature and need ``n_base=7``.
     """
     extra = {"none": 0, "broadband": 3, "per_band": 3 * n_bnd}
     if band_mode not in extra:
@@ -358,6 +360,7 @@ def preprocess_sw_inputs(
     o3: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     cos_zenith: jnp.ndarray,
     scaling: InputScaling,
     aerosol_aod: Optional[jnp.ndarray] = None,
@@ -377,6 +380,7 @@ def preprocess_sw_inputs(
         o3: Ozone mass mixing ratio (nlev,) [kg/kg].
         cloud_water: Cloud liquid water path (nlev,) [kg/m^2].
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
+        cloud_fraction: Cloud area fraction (nlev,) [0-1].
         cos_zenith: Cosine of solar zenith angle (scalar).
         scaling: Input normalization coefficients.
         aerosol_aod / aerosol_ssa / aerosol_asy: Per-SW-band optics,
@@ -385,7 +389,7 @@ def preprocess_sw_inputs(
 
     Returns:
         Scaled input array (nlev, n_features), features ordered
-        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, mu0, *aerosol]``.
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, cf, mu0, *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
@@ -394,9 +398,13 @@ def preprocess_sw_inputs(
 
     mu0 = jnp.broadcast_to(cos_zenith, temperature.shape)
 
+    # Cloud fraction is a separate feature, not folded into the paths. The
+    # paths are grid means (in-cloud water x cf), so at equal mean path a thin
+    # overcast layer and a thick broken one are indistinguishable without it --
+    # and their shortwave reflectance is not, being nonlinear in optical depth.
     features = [temperature, log_p, h2o_t, o3_t,
                 _cloud_path_feature(cloud_water),
-                _cloud_path_feature(cloud_ice), mu0]
+                _cloud_path_feature(cloud_ice), cloud_fraction, mu0]
     if band_mode != "none":
         features += _band_features(
             aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
@@ -411,6 +419,7 @@ def preprocess_lw_inputs(
     o3: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     co2_vmr: float,
     scaling: InputScaling,
     aerosol_aod: Optional[jnp.ndarray] = None,
@@ -427,6 +436,7 @@ def preprocess_lw_inputs(
         o3: Ozone mass mixing ratio (nlev,) [kg/kg].
         cloud_water: Cloud liquid water path (nlev,) [kg/m^2].
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
+        cloud_fraction: Cloud area fraction (nlev,) [0-1].
         co2_vmr: CO2 volume mixing ratio (scalar).
         scaling: Input normalization coefficients.
         aerosol_aod / aerosol_ssa / aerosol_asy: Per-LW-band optics,
@@ -435,7 +445,7 @@ def preprocess_lw_inputs(
 
     Returns:
         Scaled input array (nlev, n_features), features ordered
-        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, co2, *aerosol]``.
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, cf, co2, *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
@@ -445,7 +455,7 @@ def preprocess_lw_inputs(
 
     features = [temperature, log_p, h2o_t, o3_t,
                 _cloud_path_feature(cloud_water),
-                _cloud_path_feature(cloud_ice), co2]
+                _cloud_path_feature(cloud_ice), cloud_fraction, co2]
     if band_mode != "none":
         features += _band_features(
             aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,

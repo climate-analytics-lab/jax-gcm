@@ -121,7 +121,7 @@ def radiation_scheme_emulated(
     # --- Shortwave ---
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
-        cwp, cip, cos_zenith, sw_scaling,
+        cwp, cip, cloud_fraction, cos_zenith, sw_scaling,
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
     )
@@ -140,7 +140,7 @@ def radiation_scheme_emulated(
     # --- Longwave ---
     lw_input = preprocess_lw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
-        cwp, cip, co2_vmr, lw_scaling,
+        cwp, cip, cloud_fraction, co2_vmr, lw_scaling,
         aerosol_data.aod_lw_per_band, aerosol_data.ssa_lw_per_band,
         aerosol_data.asy_lw_per_band, band_mode,
     )

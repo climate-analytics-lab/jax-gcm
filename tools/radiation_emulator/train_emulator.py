@@ -178,13 +178,13 @@ def build_features(ds, band_mode):
     # Unscaled here; the divide-by-max scaling is fitted on the TRAIN split
     # alone and applied afterwards, so validation cannot leak into it.
     x_sw = jax.vmap(
-        lambda *a: preprocess_sw_inputs(*a[:7], unit_sw, *a[7:], band_mode)
-    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip,
+        lambda *a: preprocess_sw_inputs(*a[:8], unit_sw, *a[8:], band_mode)
+    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip, cf,
       f32("cos_zenith"), f32("aod_sw_per_band"), f32("ssa_sw_per_band"),
       f32("asy_sw_per_band"))
     x_lw = jax.vmap(
-        lambda *a: preprocess_lw_inputs(*a[:7], unit_lw, *a[7:], band_mode)
-    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip,
+        lambda *a: preprocess_lw_inputs(*a[:8], unit_lw, *a[8:], band_mode)
+    )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip, cf,
       f32("co2_vmr"), f32("aod_lw_per_band"), f32("ssa_lw_per_band"),
       f32("asy_lw_per_band"))
 

@@ -355,7 +355,7 @@ class TestPreprocessing(unittest.TestCase):
 
     def test_sw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(7) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(8) * 1000.0)
         x = preprocess_sw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -363,14 +363,15 @@ class TestPreprocessing(unittest.TestCase):
             o3=jnp.full(nlev, 5e-6),
             cloud_water=jnp.zeros(nlev),
             cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
             cos_zenith=jnp.array(0.5),
             scaling=scaling,
         )
-        self.assertEqual(x.shape, (nlev, 7))
+        self.assertEqual(x.shape, (nlev, 8))
 
     def test_lw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(7) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(8) * 1000.0)
         x = preprocess_lw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -378,10 +379,11 @@ class TestPreprocessing(unittest.TestCase):
             o3=jnp.full(nlev, 5e-6),
             cloud_water=jnp.zeros(nlev),
             cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
             co2_vmr=400e-6,
             scaling=scaling,
         )
-        self.assertEqual(x.shape, (nlev, 7))
+        self.assertEqual(x.shape, (nlev, 8))
 
 
 class TestWeightInitialization(unittest.TestCase):
@@ -429,9 +431,10 @@ class TestWeightInitialization(unittest.TestCase):
     def test_init_sizes_input_layer_from_band_mode(self):
         """Per-band aerosol widens the input layer, not anything else."""
         n_sw = n_input_features("per_band", 14)
+        # 8 base features plus 3 per SW band.
         w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
-        self.assertEqual(n_sw, 49)
-        self.assertEqual(w.sw.gru_fwd.kernel.shape, (49, 48))
+        self.assertEqual(n_sw, 50)
+        self.assertEqual(w.sw.gru_fwd.kernel.shape, (50, 48))
 
 
 class TestInputConditioning(unittest.TestCase):
