@@ -297,16 +297,21 @@ def label_quality_mask(batch, labels):
 # ---------------------------------------------------------------------------
 
 # Physically admissible ranges for the fields a column source supplies.
-# Model-output diagnostics do leave these bounds by small amounts, and the
-# violation is NOT benign: MACv2-SP's per-band scaling divides by
+# Model-output diagnostics do leave these bounds: surface emissivity reaches
+# 1.9 over polar land (jax-gcm#703, an unclipped sea-ice fraction in the
+# radiative surface-optics blend) and the time-averaged 550 nm SSA exceeds 1 by
+# a few ppm through the float32 diagnostic accumulator. Neither is benign here,
+# because MACv2-SP's per-band scaling divides by
 # ``ssa550*l^4 + (1-ssa550)*l``, whose sign flips just above ssa550 = 1, so a
 # 550 nm SSA of 1.0003 becomes a per-band SSA of ~1e21 in the far infrared.
 # RRTMGP then returns >1000 W/m2 OLR for an otherwise unremarkable clear-sky
 # column. Bounds are therefore enforced on input rather than trusted, and every
 # clip is counted and reported so a bad source cannot pass silently.
 
-# Keep the MACv2-SP SSA denominator strictly positive (see above).
-_SSA550_MAX = 1.0 - 1e-6
+# Keep the MACv2-SP SSA denominator positive (see above). SSA = 1 exactly is
+# fine and common — MACv2-SP sets it there wherever the plume AOD vanishes —
+# so only genuine excursions above 1 are clipped.
+_SSA550_MAX = 1.0
 
 INPUT_BOUNDS = {
     # 550 nm references, clipped BEFORE the per-band scaling so the bands
