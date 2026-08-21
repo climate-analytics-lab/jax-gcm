@@ -5,6 +5,7 @@ including individual components and integrated behavior.
 """
 
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.constants import PhysicalConstants
 from .vertical_diffusion_types import VDiffParameters, VDiffState
@@ -1282,6 +1283,87 @@ class TestThvVarianceBudget:
         expected = 2.0 * c_h * ell * ell * grad * grad / c_d
         for tke in (0.04, 1.0, 4.0):
             assert abs(equilibrium(tke) - expected) / expected < 0.01
+
+    def test_scheme_evaluates_both_terms_at_the_pre_source_tke(self):
+        """Wiring pin: the scheme feeds the variance budget PRE-source TKE.
+
+        ECHAM evaluates BOTH variance terms at ``ztkesq = SQRT(ptkem1)``
+        (vdiff.f90:849, 857-858) — the previous time level, the same
+        ``ztkesq`` that built the exchange coefficients; only the transport
+        coefficients (:855-856) rescale to the post-source ``ztkevn``.
+        Passing the post-source TKE into the dissipation while production
+        rode the pre-source exchange coefficient mixed the two turbulent
+        velocity scales and broke the exact equilibrium cancellation
+        var* = 2*c_h*l^2*G^2/c_d (Codex on #690). The unit tests above
+        cannot see this — they pass one ``tke`` — so pin the WIRING: run
+        the column step under a spy and assert the tke argument is the
+        state's, in a regime where the source update changes TKE by >10%.
+        """
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .tke_budget import (
+            echam_thv_variance_source_update as real_update,
+            echam_tke_source_update as real_tke_update,
+        )
+
+        ncol, nlev = 1, 10
+        # Strongly sheared column so the TKE source update moves TKE a lot.
+        z = jnp.linspace(4000.0, 10.0, nlev)[None, :]
+        state_kwargs = dict(
+            u=jnp.linspace(0.0, 25.0, nlev)[None, :],
+            v=jnp.zeros((ncol, nlev)),
+            temperature=jnp.linspace(260.0, 290.0, nlev)[None, :],
+            qv=jnp.full((ncol, nlev), 5e-3),
+            qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
+            pressure_full=jnp.linspace(60000.0, 100000.0, nlev)[None, :],
+            pressure_half=jnp.linspace(58000.0, 101000.0, nlev + 1)[None, :],
+            geopotential=z * 9.81,
+            air_mass=jnp.full((ncol, nlev), 3000.0),
+            surface_temperature=jnp.full((ncol, 1), 291.0),
+            surface_fraction=jnp.ones((ncol, 1)),
+            roughness_length=jnp.full((ncol, 1), 1e-3),
+            roughness_heat=jnp.full((ncol, 1), 1e-4),
+            surface_wetness=jnp.ones((ncol, 1)),
+            height_full=z,
+            height_half=jnp.linspace(4200.0, 0.0, nlev + 1)[None, :],
+            tke=jnp.full((ncol, nlev), 0.05),
+            thv_variance=jnp.full((ncol, nlev), 0.01),
+            ocean_u=jnp.zeros(ncol), ocean_v=jnp.zeros(ncol),
+        )
+        from .vertical_diffusion_types import VDiffState, VDiffParameters
+        state = VDiffState(**state_kwargs)
+        params = VDiffParameters.default()
+
+        captured = {}
+
+        def spy(**kw):
+            captured["variance_tke_arg"] = kw["tke"]
+            return real_update(**kw)
+
+        def tke_spy(**kw):
+            out = real_tke_update(**kw)
+            captured["post_source_tke"] = out
+            return out
+
+        # Call the un-jitted python function so the spies capture concrete
+        # arrays rather than tracers (the module wraps it in @jax.jit).
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
+        with mock.patch.object(
+                vd, "echam_thv_variance_source_update", side_effect=spy), \
+             mock.patch.object(
+                vd, "echam_tke_source_update", side_effect=tke_spy):
+            column_fn(state, params, 900.0)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["variance_tke_arg"]), np.asarray(state.tke))
+        # Anti-vacuity: the post-source TKE genuinely differs from the
+        # pre-source TKE here, so the assertion above discriminates the two
+        # candidate wirings rather than passing on a quiescent fixture.
+        rel = float(jnp.max(
+            jnp.abs(captured["post_source_tke"] - state.tke) / state.tke))
+        assert rel > 0.1, f"fixture too quiescent to discriminate ({rel:.2%})"
 
     def test_a_quiescent_layer_builds_variance_far_more_slowly(self):
         """Spin-up rate, which is what lets the zlift tell the two apart.

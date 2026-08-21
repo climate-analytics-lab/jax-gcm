@@ -247,11 +247,19 @@ def vertical_diffusion_column(
         state.temperature, state.pressure_full,
         state.qv, state.qc, state.qi, state.height_full,
     )
+    # PRE-source TKE, deliberately: ECHAM evaluates BOTH variance terms at
+    # ``ztkesq = SQRT(ptkem1)`` — the previous time level — (vdiff.f90:849,
+    # 857-858; only the transport coefficients at :855-856 rescale to the
+    # post-source ``ztkevn``). ``exchange_coeff_heat`` above already carries
+    # √(state.tke), so production and dissipation share one turbulent
+    # velocity scale, which is also what makes the documented equilibrium
+    # cancellation var* = 2·c_h·l²·G²/c_d exact. Passing the post-source
+    # TKE here mixed the two levels (Codex on #690).
     post_source_thv_var = echam_thv_variance_source_update(
         prev_thv_variance=state.thv_variance,
         thv_gradient=thv_gradient,
         exchange_coeff_heat=exchange_coeff_heat,
-        tke=post_source_tke,
+        tke=state.tke,
         mixing_length=mixing_length,
         dt=dt,
     )
