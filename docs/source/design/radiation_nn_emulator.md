@@ -116,6 +116,24 @@ production) to give a clean conditional mean. The draw is varied through
 key — not through `base_seed`, which is a Python static and would force a full
 ~40 s XLA re-trace per seed.
 
+**The residual noise is a floor on any reported skill**, so measure it rather
+than assuming it. `tools/radiation_emulator/label_noise.py` differences two
+independent N-draw means of the same columns; on the 2026-08 T63L47 set with
+8 draws:
+
+| quantity | noise on an 8-draw mean | for scale: 128-unit model RMSE |
+|---|---|---|
+| SW TOA up | 4.70 W/m² | 18.35 |
+| SW surface down | 5.16 | 31.41 |
+| LW TOA up | 0.40 | 6.32 |
+| LW surface down | 0.89 | 13.38 |
+
+At that skill level sampling noise is ~6% of the shortwave error *variance*, so
+the labels are **not** what limits the emulator and buying more draws would
+achieve almost nothing — 4 draws give 7.74 W/m² against 8 draws' 4.70, the
+expected 1/sqrt(N). Re-measure before concluding otherwise once model error
+approaches ~10 W/m².
+
 ### Inputs are bounded, and labels are checked
 
 Model-output diagnostics leave physical bounds, and the violations are not
