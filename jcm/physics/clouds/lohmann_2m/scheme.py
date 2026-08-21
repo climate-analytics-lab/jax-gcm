@@ -4,6 +4,8 @@
 column as one flux-coupled top-down ``lax.scan`` — a faithful
 transcription of ECHAM's ``column_processes`` loop — and
 ``Lohmann2MMicrophysics`` wraps it as a composable ``PhysicsTerm``.
+Design rationale and the state-splitting convention:
+``docs/source/design/lohmann_2m_column_processes.md``.
 """
 
 from typing import ClassVar
@@ -152,7 +154,7 @@ def cloud_microphysics_2m(
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``).
+    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.

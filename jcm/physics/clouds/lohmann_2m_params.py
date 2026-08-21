@@ -116,8 +116,7 @@ class CloudParams2M:
     # additionally at the two levels around a diagnosed low-level
     # inversion when the large-scale vertical velocity is downward
     # (knvb/lonacc gate) — that needs pvervel, which is not plumbed to
-    # this scheme yet; see the vertical-velocity issue referenced in the
-    # scheme docstring.
+    # this scheme yet (#705).
     cauloc: jnp.ndarray      # [-] zauloc ramp factor (ECHAM 2M hardwires 3)
     clmin: jnp.ndarray       # [-] lower zauloc clip (ECHAM 0.0)
     clmax: jnp.ndarray       # [-] upper zauloc clip (ECHAM 0.5)
