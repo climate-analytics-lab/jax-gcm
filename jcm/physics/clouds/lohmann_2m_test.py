@@ -1798,6 +1798,21 @@ class TestColumnEnthalpyConservation2M:
         return tend, float(rain_sfc), float(snow_sfc)
 
     @staticmethod
+    def _run_full(cols):
+        """Full return tuple, for tests that need more than the tendencies."""
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
+        nlev = T.shape[0]
+        z = jnp.zeros(nlev)
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke,
+            jnp.full(nlev, 5e7), inp, z,
+            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+        )
+
+    @staticmethod
     def _assert_enthalpy_closes(name, cols):
         """Assert the identity above and return (residual, gross) [W/m²]."""
         import numpy as np
@@ -2042,20 +2057,6 @@ class TestColumnEnthalpyConservation2M:
         cf_out = np.asarray(out_warm[12])
         assert np.all(cf_out <= cf_in + 1e-6), "published cover exceeds input"
 
-    @staticmethod
-    def _run_full(cols):
-        """Full return tuple, for tests that need more than the tendencies."""
-        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
-        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
-
-        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
-        nlev = T.shape[0]
-        z = jnp.zeros(nlev)
-        return cloud_microphysics_2m(
-            T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke,
-            jnp.full(nlev, 5e7), inp, z,
-            TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
-        )
 
     def test_homogeneous_freezing_removes_all_the_liquid(self):
         """Below cthomi every drop freezes, in a partly-cloudy box too.
@@ -2160,6 +2161,104 @@ class TestColumnEnthalpyConservation2M:
         # budget — the guard against the extra in-step coupling smuggling
         # heat in from nowhere.
         self._assert_enthalpy_closes("het INP mixed phase", tuple(cols))
+
+
+class TestSaturationGate2M:
+    """The scheme owns saturation adjustment — no supersaturation survives.
+
+    The gate #667 asked for: with the zdqsdt fix the internal Newton step
+    is live, and with the external bolt-on removed it is the ONLY
+    condensation path — so a supersaturated cloudy cell must be pulled to
+    (about) saturation within a step. The absence of this assertion is
+    what let the double adjustment survive the c.ak fix.
+    """
+
+    def test_liquid_supersaturation_removed_in_one_step(self):
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics import thermodynamics
+
+        nlev = 12
+        dt = 1800.0
+        T = jnp.full(nlev, 285.0)
+        p = jnp.linspace(5e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        qs0, _ = thermodynamics.saturation_specific_humidity_and_derivative(
+            T, p, phase="water")
+        q = 1.10 * qs0                       # 10 % supersaturated
+        z = jnp.zeros(nlev)
+        tend, *_ = cloud_microphysics_2m(
+            T, q, p, z, z, z, z, jnp.full(nlev, 0.9), rho,
+            jnp.full(nlev, 500.0), z, jnp.full(nlev, 1e8), z, z,
+            dt, CloudParams2M.default(),
+        )
+        T_new = T + dt * tend.dtedt
+        q_new = q + dt * tend.dqdt
+        qs_new, _ = thermodynamics.saturation_specific_humidity_and_derivative(
+            T_new, p, phase="water")
+        s_after = np.asarray(q_new / qs_new)
+        # ECHAM's zoversat tolerance is 1 % of qs; allow a little slack
+        # for the Newton linearisation.
+        assert float(np.max(s_after)) <= 1.015, (
+            f"supersaturation survives the step (max q/qs = "
+            f"{np.max(s_after):.4f}) — the internal adjustment is inert "
+            "or a second adjustment is fighting it"
+        )
+        # ...and the condensate the adjustment formed actually exists.
+        assert float(jnp.sum(tend.dqcdt)) > 0.0, "no liquid was condensed"
+
+
+class TestColdChainSameStepCoupling2M:
+    """Ice created during the step meets its cold-chain sinks (#686).
+
+    A pure supercooled liquid deck (qi = 0 at entry) glaciates via WBF
+    within the step. Under the old ``qi > ccwmin`` entry gate the cold
+    chain was masked off for that step, so the fresh ice had no
+    aggregation/riming sink and could only sediment. ECHAM gates on the
+    CURRENT in-cloud ice, so snow forms in the same step.
+    """
+
+    def test_wbf_glaciated_deck_forms_snow_same_step(self):
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 12
+        T = jnp.full(nlev, 258.0)            # mixed-phase window
+        p = jnp.linspace(3e4, 8e4, nlev)
+        rho = p / (287.0 * T)
+        q = 1.02 * jax.vmap(saturation_specific_humidity)(p, T)  # depositing
+        qc = jnp.zeros(nlev).at[4:8].set(3e-4)
+        qi = jnp.zeros(nlev)                 # NO ice at entry
+        cf = jnp.where(qc > 0, 0.9, 0.0)
+        z = jnp.zeros(nlev)
+        # TKE = 0: quiescent, the Korolev/Mazin gate stays open → WBF fires.
+        out = cloud_microphysics_2m(
+            T, q, p, qc, qi, jnp.where(qc > 0, 5e7, 0.0), z,
+            cf, rho, jnp.full(nlev, 500.0), z,
+            jnp.full(nlev, 5e7), z, z,
+            1800.0, CloudParams2M.default(),
+        )
+        tend = out[0]
+        frozen_flux_profile = out[14]
+        # The deck must have glaciated...
+        dqc_col = float(jnp.sum(tend.dqcdt * rho * 500.0))
+        assert dqc_col < -1e-6, "WBF did not glaciate the deck"
+        # ...and the fresh ice must reach a snow sink IN THIS STEP: the
+        # frozen flux leaving the deck bottom (level 7) must be nonzero.
+        # Sedimentation alone cannot explain it at this magnitude within
+        # one step from qi = 0 — but assert the mechanism directly too:
+        # a positive frozen flux with zero entry qi requires in-step
+        # aggregation/riming of ice that WBF/deposition created.
+        deck_bottom_flux = float(np.asarray(frozen_flux_profile)[7])
+        assert deck_bottom_flux > 1e-8, (
+            f"no frozen precipitation leaves the glaciated deck "
+            f"(flux {deck_bottom_flux:.3e} kg/m²/s) — ice made this step "
+            "has no cold-chain sink (#686)"
+        )
+
 
 
 class TestPrecipFluxProfiles2M:
