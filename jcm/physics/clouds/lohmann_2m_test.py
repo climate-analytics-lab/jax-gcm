@@ -2109,8 +2109,8 @@ class TestColumnEnthalpyConservation2M:
 
         # Per level inside the deck (levels 4-7 hold the condensate), the
         # extra warming is exactly the extra frozen mass times the scheme's
-        # own fusion heat, ``lsdcp - lvdcp``. Note that is (alhs - alhc), NOT
-        # the independent ``alhf`` constant — they differ by 0.3 %.
+        # own fusion heat, ``lsdcp - lvdcp`` = (alhs - alhc)/cpd — which is
+        # also ``c.alhf/cpd`` now that the fusion heat is derived (#681).
         #
         # Column totals cannot carry this check: more crystals means smaller
         # crystals, so the extra ice also sediments more slowly and the
