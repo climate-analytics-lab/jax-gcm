@@ -297,6 +297,24 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._zero_tendency = bool(zero_tendency)
         self._coords_cached = False
 
+    def _zero_if_requested(self, tendency: PhysicsTendency) -> PhysicsTendency:
+        """Drop the heating under ``zero_tendency``, leaving the cost paid.
+
+        Applied downstream of the compute-vs-cache branch so it covers
+        both. The cached branch rebuilds the tendency from the heating
+        rates on the carry, and radiation sub-steps, so most calls take
+        it — zeroing only the compute branch leaves untrained heating
+        driving the model.
+        """
+        if not self._zero_tendency:
+            return tendency
+        return PhysicsTendency(
+            u_wind=tendency.u_wind, v_wind=tendency.v_wind,
+            temperature=jnp.zeros_like(tendency.temperature),
+            specific_humidity=tendency.specific_humidity,
+            tracers=tendency.tracers,
+        )
+
     def _check_band_counts(self, n_bnd_sw: int, n_bnd_lw: int) -> None:
         """Fail clearly when the aerosol bands do not match the weights."""
         weights = self.params.get_value().emulator_weights
@@ -359,6 +377,10 @@ class NNEmulatorRadiation(PhysicsTerm):
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
+        # Zeroed downstream of the cond, so it covers the cached branch
+        # too: that one rebuilds the tendency from the heating rates on
+        # the carry, and with radiation sub-stepping most steps take it.
+        tendency = self._zero_if_requested(tendency)
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). Mirrors the carry-side step bump
         # in the grey two-stream / RRTMGP radiation terms so the
@@ -532,16 +554,10 @@ class NNEmulatorRadiation(PhysicsTerm):
             step=jnp.int32(0),
         )
 
-        # Zeroed here, after the network has run, so the measured cost is
-        # the real one while the trajectory stays finite.
-        heating = tendencies_vmapped.temperature_tendency.T
-        if self._zero_tendency:
-            heating = jnp.zeros_like(heating)
-
         tendency = PhysicsTendency(
             u_wind=jnp.zeros((nlev, ncols)),
             v_wind=jnp.zeros((nlev, ncols)),
-            temperature=heating,
+            temperature=tendencies_vmapped.temperature_tendency.T,
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )

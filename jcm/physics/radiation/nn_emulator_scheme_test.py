@@ -301,6 +301,33 @@ class TermComputeFullTest(unittest.TestCase):
         return term._compute_full(
             state, diagnostics, forcing, params), shape, ncols, nlev
 
+    def test_zero_tendency_holds_on_the_cached_substep(self):
+        """The cost-only mode must cover the cached branch too.
+
+        Radiation sub-steps, so most calls rebuild the tendency from the
+        heating rates on the carry rather than running the network.
+        Zeroing only inside the compute branch left those steps applying
+        untrained heating, and a T63L47 run reached 100% NaN by day 5.
+        """
+        from jcm.physics.radiation import cached_radiation_tendency
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        nlev, ncols = 8, 12
+        shape = (nlev, ncols)
+        # A carry holding heating rates as hostile as untrained weights give.
+        radiation = RadiationData.zeros((ncols,), nlev).copy(
+            sw_heating_rate=jnp.full(shape, 5e-3),
+            lw_heating_rate=jnp.full(shape, -3e-3),
+        )
+        cached = cached_radiation_tendency(radiation, shape)
+        self.assertGreater(float(jnp.abs(cached.temperature).max()), 0.0)
+
+        term = NNEmulatorRadiation(zero_tendency=True)
+        zeroed = term._zero_if_requested(cached)
+        np.testing.assert_array_equal(
+            np.asarray(zeroed.temperature), np.zeros(shape))
+
     def test_term_handles_production_per_band_layout(self):
         (tendency, rad_out), shape, ncols, nlev = self._run_term()
         self.assertEqual(tendency.temperature.shape, shape)
