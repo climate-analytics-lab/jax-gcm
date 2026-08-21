@@ -24,6 +24,7 @@ from jcm.physics.radiation.radiation_types import (
 from jcm.physics.radiation.nn_emulator import (
     EmulatorWeights,
     InputScaling,
+    init_emulator_weights,
     preprocess_sw_inputs,
     preprocess_lw_inputs,
     lw_emulator_column,
@@ -254,16 +255,46 @@ class NNEmulatorRadiation(PhysicsTerm):
         self,
         params: RadiationParameters | None = None,
         band_mode: str = "per_band",
+        units: int = 16,
+        init_seed: int = 42,
+        n_bnd_sw: int = 14,
+        n_bnd_lw: int = 16,
+        zero_tendency: bool = False,
     ):
         """Hold the scheme-native :class:`RadiationParameters` (with NN weights).
 
-        ``band_mode`` fixes the input width, so it must match what the
-        weights were trained with. It stays a plain Python attribute
-        rather than a parameter leaf because it selects a code path at
-        trace time.
+        Args:
+            params: Scheme parameters. If it carries no
+                ``emulator_weights``, randomly initialised ones sized for
+                ``band_mode`` are built here, which is what training from
+                scratch starts from and what lets Hydra construct the
+                term at all.
+            band_mode: How aerosol optics enter the features; fixes the
+                input width, so it must match what the weights were
+                trained with. A plain attribute rather than a parameter
+                leaf because it selects a code path at trace time.
+            units: GRU hidden size.
+            init_seed: PRNG seed for randomly initialised weights.
+            n_bnd_sw / n_bnd_lw: Band counts used to size the input layer.
+            zero_tendency: Run the network at full cost but return zero
+                heating. Untrained weights drive the model to NaN within
+                a step, and a blown-up run cannot be timed; this measures
+                what the scheme costs on a trajectory that stays finite.
+                It is a cost-measurement aid and never a valid simulation.
+
         """
-        self.params = nnx.Param(params or RadiationParameters.default())
+        params = params or RadiationParameters.default()
+        if params.emulator_weights is None:
+            params = RadiationParameters.default(
+                emulator_weights=init_emulator_weights(
+                    sw_features=n_input_features(band_mode, n_bnd_sw),
+                    lw_features=n_input_features(band_mode, n_bnd_lw),
+                    units=units, key=jax.random.key(init_seed),
+                ),
+            )
+        self.params = nnx.Param(params)
         self._band_mode = band_mode
+        self._zero_tendency = bool(zero_tendency)
         self._coords_cached = False
 
     def cache_coords(self, coords) -> None:
@@ -477,10 +508,16 @@ class NNEmulatorRadiation(PhysicsTerm):
             step=jnp.int32(0),
         )
 
+        # Zeroed here, after the network has run, so the measured cost is
+        # the real one while the trajectory stays finite.
+        heating = tendencies_vmapped.temperature_tendency.T
+        if self._zero_tendency:
+            heating = jnp.zeros_like(heating)
+
         tendency = PhysicsTendency(
             u_wind=jnp.zeros((nlev, ncols)),
             v_wind=jnp.zeros((nlev, ncols)),
-            temperature=tendencies_vmapped.temperature_tendency.T,
+            temperature=heating,
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )

@@ -1,0 +1,52 @@
+# ECHAM with the NN radiation emulator in place of RRTMGP, alongside the
+# Lohmann 2-moment microphysics.
+#
+# Identical to ``echam-rrtmgp-2m.yaml`` with one term swap, so the two
+# compose the same aerosol, cloud and dynamics path and differ only in
+# how radiative fluxes are obtained.
+#
+# The emulator needs trained weights. Constructed without any it builds
+# randomly initialised ones, which are the starting point for training
+# but drive the model to NaN inside a step — set ``zero_tendency: true``
+# on the term to measure its cost against RRTMGP before weights exist.
+#
+# Use it as::
+#
+#     python -m jcm.main physics=echam-emulated-2m
+
+vectorize_columns: true
+checkpoint_terms: true
+
+terms:
+  moist_air_state:
+    _target_: jcm.physics.diagnostics.moist_air_state.MoistAirColumnState
+  echam_boundary_conditions:
+    _target_: jcm.physics.forcing.echam_boundary_conditions.EchamBoundaryConditions
+  macv2_sp_aerosol:
+    _target_: jcm.physics.aerosol.Macv2SpAerosol
+  simple_chemistry:
+    _target_: jcm.physics.chemistry.SimpleChemistry
+  sundqvist_cloud_fraction:
+    _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
+  nn_emulator_radiation:
+    _target_: jcm.physics.radiation.nn_emulator_scheme.NNEmulatorRadiation
+    # Per-band aerosol optics as input features, so the emulator can
+    # represent the MACv2-SP forcing the term above produces.
+    band_mode: per_band
+  # ECHAM physc ordering: vdiff (with the surface exchange in its
+  # implicit solve) runs BEFORE convection, so the Tiedtke zdqpbl
+  # closure reads the SAME-STEP vdiff moisture tendency and delivered
+  # evaporation. echam_surface only republishes the vdiff-delivered
+  # fluxes, so it follows vdiff directly.
+  tte_tke_vertical_diffusion:
+    _target_: jcm.physics.vertical_diffusion.tte_tke.TteTkeVerticalDiffusion
+  echam_surface:
+    _target_: jcm.physics.surface.echam.surface_physics.EchamSurface
+  tiedtke_convection:
+    _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
+  lohmann_2m_microphysics:
+    _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+  hines_gwd:
+    _target_: jcm.physics.gravity_waves.hines.HinesGwd
+  lott_miller_sso:
+    _target_: jcm.physics.gravity_waves.sso.LottMillerSso
