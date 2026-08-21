@@ -72,6 +72,15 @@ class CloudData:
     rain_formation_warm: jnp.ndarray  # (ncols,)
     rain_from_melt: jnp.ndarray       # (ncols,)
 
+    # Column-integrated latent heating of the 2M negative-mass repair
+    # [W/m²] (#689): the ECHAM zdxlcor/zdxicor guard returns condensate
+    # below ccwmin (including dycore-ringing negatives) to vapour with
+    # the matching latent heat. Thermodynamically consistent but
+    # sign-definite — undershoots always become warming + drying — so it
+    # is exported for monitoring rather than folded silently into the
+    # tendencies. Zero under the 1M scheme.
+    negative_mass_repair: jnp.ndarray  # (ncols,)
+
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
@@ -117,6 +126,7 @@ class CloudData:
             precip_evaporation_rate=jnp.zeros((nlev,) + nodal_shape),
             rain_formation_warm=jnp.zeros(nodal_shape),
             rain_from_melt=jnp.zeros(nodal_shape),
+            negative_mass_repair=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
@@ -141,6 +151,7 @@ class CloudData:
             'precip_evaporation_rate': self.precip_evaporation_rate,
             'rain_formation_warm': self.rain_formation_warm,
             'rain_from_melt': self.rain_from_melt,
+            'negative_mass_repair': self.negative_mass_repair,
             'droplet_number': self.droplet_number,
             'r_eff_liq': self.r_eff_liq,
             'r_eff_ice': self.r_eff_ice,

@@ -792,6 +792,7 @@ def cloud_microphysics_2m(
         dqncdt_perkg, dqnidt_perkg,
         _incloud_liq, _incloud_ice,
         liq_eff_radius, ice_eff_radius,
+        zdxlcor, zdxicor,
     ) = update_tendencies_and_important_vars(
         icnc=icnc_final,
         cdnc=cdnc_final,
@@ -926,6 +927,17 @@ def cloud_microphysics_2m(
     ) / dt
     precip_evaporation_rate = (rain_evap + snow_sublim) / dt
 
+    # Negative-mass-repair diagnostic (#689): the column-integrated
+    # latent heating of the zdxlcor/zdxicor guard [W/m²]. The repair is
+    # ECHAM-faithful and thermodynamically consistent, but sign-definite
+    # — every condensate undershoot the dycore leaves becomes warming +
+    # drying, never the reverse — so its magnitude and geographic pattern
+    # must be observable in a run rather than silently folded into
+    # dtedt/dqdt. Positive values = spurious heating from repairing
+    # negative/sub-ccwmin condensate.
+    negative_mass_repair = jnp.sum(
+        (c.alhc * zdxlcor + c.alhs * zdxicor) * air_mass)
+
     # NOTE the (nlev,) rain / frozen flux profiles stay LAST: call sites and
     # tests unpack them positionally from the end (``*_, rain_b, snow_b``),
     # so new outputs are inserted before them, not appended.
@@ -933,6 +945,7 @@ def cloud_microphysics_2m(
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
         precip_formation_rate, precip_evaporation_rate, cloud_fraction_final, \
+        negative_mass_repair, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -1107,11 +1120,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
+         negative_mass_repair_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                      None, None, 1, 1, 1, 1),
-            out_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            out_axes=(0,) * 16,
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni,
@@ -1166,6 +1180,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # style observable for the warm-rain calibration.
             rain_formation_warm=rain_formation_warm,
             rain_from_melt=rain_from_melt,
+            # Column-integrated latent heating of the negative-mass
+            # repair [W/m²] (#689): sign-definite spurious warming from
+            # returning sub-ccwmin/negative condensate to vapour.
+            negative_mass_repair=negative_mass_repair_all,
         )
         # Advance the running condensate view so terms downstream (the
         # satellite simulators and the AeroCom diagnostics) describe the
