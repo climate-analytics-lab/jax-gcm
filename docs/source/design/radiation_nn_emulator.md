@@ -32,21 +32,51 @@ forward state was being concatenated against level *nlev - i*'s backward state.
 for checkpoint compatibility; `realign=True` is the correct pairing and is what
 jax-gcm trains and runs.
 
-## Inputs: per-band aerosol optics
+## Inputs
 
-The base features are `[T, log p, h2o^1/4, o3^1/4, lwp, iwp, mu0 or co2]`.
+The base features are
+`[T, log p, h2o^1/4, o3^1/4, lwp, iwp, cloud fraction, mu0 or co2]`.
 Aerosol enters through `band_mode`:
 
 | `band_mode` | features | rationale |
 |---|---|---|
-| `none` | 7 | aerosol-blind; for testing only |
-| `broadband` | 10 | one AOD/SSA/ASY triple |
-| `per_band` | 49 SW / 55 LW | one triple per RRTMGP band |
+| `none` | 8 | aerosol-blind; for testing only |
+| `broadband` | 11 | one AOD/SSA/ASY triple |
+| `per_band` | 50 SW / 56 LW | one triple per RRTMGP band |
+
+### Cloud fraction is a separate feature, not folded into the paths
+
+The water and ice paths handed to the network are GRID MEANS — in-cloud water
+times cloud fraction. Passing only those makes a thin overcast layer and a
+thick broken one identical inputs at equal mean path, while their shortwave
+reflectance is quite different, reflectance being nonlinear in optical depth.
+
+That degeneracy is not a small effect and it caps skill at any network size.
+Shortwave TOA upward flux sat at ~18.3 W/m² RMSE across a 4x range of width
+while shortwave *heating* improved 3.5x over the same range:
+
+| units / epochs | SW TOA up | LW TOA up | SW heating | LW heating |
+|---|---|---|---|---|
+| 64 / 40 | 18.69 | 6.67 | 2.324 | 0.611 |
+| 128 / 300 | 18.35 | 6.32 | 0.837 | 0.720 |
+| 256 / 200 | 18.29 | 6.41 | 0.663 | 0.717 |
+
+With the label-noise floor measured at 4.70 W/m² (see below), neither capacity
+nor the labels explained it. Longwave, whose emission is far closer to linear
+in optical depth, kept improving — which is the asymmetry the degeneracy
+predicts.
+
+Adding the fraction moves the `per_band` widths from 49/55 to 50/56.
+Checkpoints trained on the old layout are rejected by the input-width
+validation rather than silently misread. Upstream `rte-rrtmgp-nn` weights
+predate the feature and need `n_input_features(..., n_base=7)`.
 
 `per_band` is the default. It costs essentially nothing: the measured
 throughput at T63L47 is 4.13x over RRTMGP, which is exactly the Amdahl ceiling
 implied by radiation being 75.8% of the step, so the network itself is already
-free and a narrower input would buy no wall time.
+free and a narrower input would buy no wall time. The same arithmetic is why
+width is a free lever: a wider network changes the input tensor and the matmul
+sizes but not the fact that radiation has stopped being the bottleneck.
 
 **The band structure must come from the active radiation backend.** The
 emulator is matched in `runners._band_config_for_terms` alongside
