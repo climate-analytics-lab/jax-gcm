@@ -25,14 +25,17 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from generate_training_data import (  # noqa: E402
     LABEL_FIELDS,
     PROFILE_FIELDS,
+    _clip_to_bounds,
     _finalize_batch,
     _latin_hypercube,
     _orient_toa_first,
+    _per_band_optics,
     _solar_geometry_for_cos_zenith,
     band_counts,
     build_dataset,
     generate,
     label_batch,
+    label_quality_mask,
     make_labeller,
     perturbation_sweep,
 )
@@ -145,10 +148,13 @@ class LabelTest(unittest.TestCase):
     """RRTMGP-driven label properties."""
 
     def test_tiny_generation_produces_finite_labels(self):
-        batch, labels = generate(
+        batch, labels, quality = generate(
             "perturbation", n_columns=NCOL, nlev=NLEV, n_seeds=2,
             base_seed=0, batch_size=NCOL, rng_seed=0,
         )
+        # The synthetic sweep is constructed in-bounds, so nothing should
+        # need rejecting; a non-zero count here means the sweep drifted.
+        self.assertEqual(quality["n_rejected"], 0)
         for name in LABEL_FIELDS:
             arr = labels[name]
             self.assertEqual(arr.shape, (NCOL, NLEV + 1), name)
@@ -203,6 +209,87 @@ class LabelTest(unittest.TestCase):
         second, _ = label_batch(batch, n_seeds=2, labeller=_labeller())
         for name in LABEL_FIELDS:
             np.testing.assert_array_equal(first[name], second[name], name)
+
+
+class InputSanitisationTest(unittest.TestCase):
+    """Guards against out-of-range inputs reaching RRTMGP.
+
+    A 550 nm SSA a whisker above 1 (which ECHAM's aerosol diagnostic does
+    produce) flips the sign of the MACv2-SP per-band denominator and yields a
+    ~1e21 far-infrared SSA, which drove the LW solver to >1000 W/m2 OLR.
+    """
+
+    def test_ssa_above_one_does_not_explode_the_per_band_scaling(self):
+        _, _, sw_centers, lw_centers = _bands()
+        aod = np.full((2, NLEV), 0.05)
+        ssa = np.full((2, NLEV), 1.0 + 3.0e-4)
+        asy = np.full((2, NLEV), 0.7)
+        angstrom = np.full((2,), 2.0)
+        stats = {}
+        for centers in (sw_centers, lw_centers):
+            _, ssa_band, _ = _per_band_optics(
+                aod, ssa, asy, angstrom, centers, stats)
+            self.assertTrue(np.all(ssa_band >= 0.0))
+            self.assertTrue(np.all(ssa_band <= 1.0),
+                            f"max per-band SSA {ssa_band.max():g}")
+        self.assertEqual(stats["ssa550"][0], 2 * NLEV * 2)
+
+    def test_finalize_clips_emissivity_above_one(self):
+        n_sw, n_lw, _, _ = _bands()
+        batch = perturbation_sweep(
+            2, NLEV, np.random.default_rng(0), n_sw, n_lw, *_bands()[2:])
+        batch["surface_emissivity"] = np.array([1.9, 0.98])
+        stats = {}
+        out = _finalize_batch(batch, n_sw, n_lw, stats)
+        np.testing.assert_allclose(out["surface_emissivity"], [1.0, 0.98])
+        self.assertEqual(stats["surface_emissivity"][0], 1)
+
+
+class LabelQualityTest(unittest.TestCase):
+    """The last line of defence: reject labels no correct solve can produce."""
+
+    def _good(self):
+        batch = {
+            "temperature": np.full((3, NLEV), 250.0),
+            "surface_temperature": np.full((3,), 280.0),
+        }
+        labels = {name: np.full((3, NLEV + 1), 100.0)
+                  for name in LABEL_FIELDS}
+        for name in ("sw_flux_down", "sw_flux_down_clear"):
+            labels[name] = np.full((3, NLEV + 1), 300.0)
+        return batch, labels
+
+    def test_clean_labels_are_all_kept(self):
+        keep, reasons = label_quality_mask(*self._good())
+        self.assertTrue(keep.all())
+        self.assertEqual(reasons, {})
+
+    def test_rejects_longwave_above_black_body(self):
+        batch, labels = self._good()
+        # 1089 W/m2 OLR from a 280 K column: the real failure that motivated
+        # this check.
+        labels["lw_flux_up"][1, 0] = 1089.0
+        keep, reasons = label_quality_mask(batch, labels)
+        np.testing.assert_array_equal(keep, [True, False, True])
+        self.assertEqual(reasons, {"longwave above black body": 1})
+
+    def test_rejects_nonfinite_and_negative_and_overbright_shortwave(self):
+        batch, labels = self._good()
+        labels["lw_flux_down"][0, 3] = np.nan
+        labels["sw_flux_up"][1, 2] = -5.0
+        labels["sw_flux_up_clear"][2, 4] = 400.0     # exceeds its down flux
+        keep, reasons = label_quality_mask(batch, labels)
+        self.assertFalse(keep.any())
+        self.assertEqual(set(reasons), {"non-finite flux", "negative flux",
+                                        "SW up exceeds SW down"})
+
+    def test_clip_to_bounds_leaves_in_range_arrays_untouched(self):
+        stats = {}
+        arrays = {"cloud_fraction": np.array([0.0, 0.5, 1.0])}
+        out = _clip_to_bounds(arrays, stats)
+        np.testing.assert_array_equal(out["cloud_fraction"],
+                                      arrays["cloud_fraction"])
+        self.assertEqual(stats, {})
 
 
 if __name__ == "__main__":

@@ -242,6 +242,127 @@ def label_batch(batch, n_seeds: int, base_seed: int = 0, labeller=None):
     return labels, per_seed
 
 
+def label_quality_mask(batch, labels):
+    """Return ``(keep, reasons)`` rejecting columns with unphysical labels.
+
+    Input clipping removes the causes of solver blow-up that are known, but a
+    training set must not depend on knowing them all: one column emitting
+    1000 W/m2 of OLR would dominate a mean-squared-error loss over thousands of
+    good ones. So the labels are checked against bounds that any correct
+    radiative transfer must satisfy, and violating columns are dropped rather
+    than silently trained on.
+    """
+    import jcm.constants as c
+
+    keep = np.ones(batch["temperature"].shape[0], dtype=bool)
+    reasons = {}
+
+    def reject(name, bad):
+        nonlocal keep
+        n = int((bad & keep).sum())
+        if n:
+            reasons[name] = reasons.get(name, 0) + n
+        keep = keep & ~bad
+
+    finite = np.ones_like(keep)
+    for name in LABEL_FIELDS:
+        finite &= np.isfinite(labels[name]).all(axis=1)
+    reject("non-finite flux", ~finite)
+
+    for name in LABEL_FIELDS:
+        reject("negative flux", (labels[name] < -1.0e-3).any(axis=1))
+
+    # Shortwave cannot reflect more than it receives at any interface.
+    for up, down in (("sw_flux_up", "sw_flux_down"),
+                     ("sw_flux_up_clear", "sw_flux_down_clear")):
+        reject("SW up exceeds SW down",
+               (labels[up] > labels[down] + 1.0e-3).any(axis=1))
+
+    # No interface can carry more longwave than a black body at the warmest
+    # temperature anywhere in the column (10 K of headroom for the surface
+    # skin sitting above the lowest model level).
+    t_max = np.maximum(batch["temperature"].max(axis=1),
+                       batch["surface_temperature"]) + 10.0
+    lw_ceiling = (float(c.sbc) * t_max ** 4)[:, None]
+    for name in ("lw_flux_up", "lw_flux_down",
+                 "lw_flux_up_clear", "lw_flux_down_clear"):
+        reject("longwave above black body",
+               (labels[name] > lw_ceiling).any(axis=1))
+
+    return keep, reasons
+
+
+# ---------------------------------------------------------------------------
+# Input sanitisation
+# ---------------------------------------------------------------------------
+
+# Physically admissible ranges for the fields a column source supplies.
+# Model-output diagnostics do leave these bounds by small amounts, and the
+# violation is NOT benign: MACv2-SP's per-band scaling divides by
+# ``ssa550*l^4 + (1-ssa550)*l``, whose sign flips just above ssa550 = 1, so a
+# 550 nm SSA of 1.0003 becomes a per-band SSA of ~1e21 in the far infrared.
+# RRTMGP then returns >1000 W/m2 OLR for an otherwise unremarkable clear-sky
+# column. Bounds are therefore enforced on input rather than trusted, and every
+# clip is counted and reported so a bad source cannot pass silently.
+
+# Keep the MACv2-SP SSA denominator strictly positive (see above).
+_SSA550_MAX = 1.0 - 1e-6
+
+INPUT_BOUNDS = {
+    # 550 nm references, clipped BEFORE the per-band scaling so the bands
+    # get the right small value rather than a clipped-to-1.0 wrong one.
+    "ssa550": (0.0, _SSA550_MAX),
+    "asy550": (-1.0, 1.0),
+    "temperature": (150.0, 350.0),
+    "surface_temperature": (150.0, 350.0),
+    "specific_humidity": (0.0, 0.1),
+    "cloud_water": (0.0, 0.05),
+    "cloud_ice": (0.0, 0.05),
+    "cloud_fraction": (0.0, 1.0),
+    "ozone_vmr": (0.0, 5.0e-5),
+    "surface_albedo_vis": (0.0, 1.0),
+    "surface_albedo_nir": (0.0, 1.0),
+    "surface_emissivity": (0.0, 1.0),
+    "ssa_sw_per_band": (0.0, 1.0),
+    "ssa_lw_per_band": (0.0, 1.0),
+    "asy_sw_per_band": (-1.0, 1.0),
+    "asy_lw_per_band": (-1.0, 1.0),
+    "aod_sw_per_band": (0.0, 10.0),
+    "aod_lw_per_band": (0.0, 10.0),
+}
+
+
+def _clip_to_bounds(arrays, stats=None):
+    """Clip ``arrays`` into ``INPUT_BOUNDS``, tallying violations in ``stats``.
+
+    ``stats`` maps a field name to ``[n_violating, worst_low, worst_high]`` and
+    accumulates across batches so the driver can report once at the end.
+    """
+    out = dict(arrays)
+    for name, (lo, hi) in INPUT_BOUNDS.items():
+        if name not in out:
+            continue
+        arr = np.asarray(out[name], dtype=np.float64)
+        n_bad = int(((arr < lo) | (arr > hi)).sum())
+        if not n_bad:
+            continue
+        out[name] = np.clip(arr, lo, hi)
+        if stats is not None:
+            entry = stats.setdefault(name, [0, np.inf, -np.inf])
+            entry[0] += n_bad
+            entry[1] = min(entry[1], float(arr.min()))
+            entry[2] = max(entry[2], float(arr.max()))
+    return out
+
+
+def report_clips(stats):
+    """Print the accumulated input-clipping tally (empty tally prints nothing)."""
+    for name, (n_bad, lo, hi) in sorted(stats.items()):
+        bound = INPUT_BOUNDS[name]
+        print(f"  clipped {name}: {n_bad} values outside "
+              f"[{bound[0]:g}, {bound[1]:g}] (input range {lo:g}..{hi:g})")
+
+
 # ---------------------------------------------------------------------------
 # Shared column-building helpers
 # ---------------------------------------------------------------------------
@@ -279,16 +400,23 @@ def _interfaces_from_levels(pressure):
     return np.concatenate([top, mid, sfc], axis=-1)
 
 
-def _per_band_optics(aod_550, ssa550, asy550, angstrom, band_centers_nm):
+def _per_band_optics(aod_550, ssa550, asy550, angstrom, band_centers_nm,
+                     clip_stats=None):
     """Per-band ``(ncol, n_bnd, nlev)`` optics from 550 nm references.
 
     Wraps the MACv2-SP closed-form wavelength scaling
     (``per_band_optical_properties``) so both column sources build their
-    per-band aerosol the same way the online scheme does.
+    per-band aerosol the same way the online scheme does. The 550 nm SSA is
+    clipped below 1 first: the scaling's denominator changes sign there and
+    an SSA a whisker above 1 produces a ~1e21 far-infrared SSA.
     """
     import jax.numpy as jnp
 
     from jcm.physics.aerosol.macv2_sp import per_band_optical_properties
+
+    clipped = _clip_to_bounds(
+        {"ssa550": ssa550, "asy550": asy550}, clip_stats)
+    ssa550, asy550 = clipped["ssa550"], clipped["asy550"]
 
     # The helper broadcasts a (n_bnd, 1, 1) wavelength axis against
     # (ncol, nlev) references, so per-column scalars gain a level axis.
@@ -307,8 +435,9 @@ def _per_band_optics(aod_550, ssa550, asy550, angstrom, band_centers_nm):
     return to_col(aod), to_col(ssa), to_col(asy)
 
 
-def _finalize_batch(batch, n_bnd_sw, n_bnd_lw):
-    """Validate shapes and cast a raw column batch to float32/float64 numpy."""
+def _finalize_batch(batch, n_bnd_sw, n_bnd_lw, clip_stats=None):
+    """Validate shapes, clip to physical bounds, and cast to float64 numpy."""
+    batch = _clip_to_bounds(batch, clip_stats)
     ncol, nlev = batch["temperature"].shape
     expected = {}
     for name in PROFILE_FIELDS:
@@ -406,7 +535,8 @@ def _loguniform(u, lo, hi):
 
 
 def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
-                       sw_centers_nm, lw_centers_nm, **_ignored):
+                       sw_centers_nm, lw_centers_nm, clip_stats=None,
+                       **_ignored):
     """Designed synthetic sweep over the radiatively active parameters.
 
     Base state is the standard-lapse-rate reference atmosphere the
@@ -564,7 +694,7 @@ def _first_var(ds, names, default=None, shape=None):
 
 def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
                        sw_centers_nm, lw_centers_nm, state_file=None,
-                       **_ignored):
+                       clip_stats=None, **_ignored):
     """Sample columns from a JCM output netCDF.
 
     Randomly subsamples over (time, lon, lat). Fields the run did not
@@ -682,9 +812,11 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
 
     aod_sw, ssa_sw, asy_sw = _per_band_optics(
         aod_profile, ssa_profile, asy_profile, angstrom, sw_centers_nm,
+        clip_stats,
     )
     aod_lw, ssa_lw, asy_lw = _per_band_optics(
         aod_profile, ssa_profile, asy_profile, angstrom, lw_centers_nm,
+        clip_stats,
     )
     batch.update(
         aod_sw_per_band=aod_sw, ssa_sw_per_band=ssa_sw,
@@ -837,25 +969,50 @@ def build_dataset(batch, labels, attrs):
 
 
 def generate(source, n_columns, nlev, n_seeds, base_seed, batch_size,
-             rng_seed, state_file=None):
-    """Generate ``n_columns`` labelled columns and return ``(batch, labels)``."""
+             rng_seed, state_file=None, progress_every=20):
+    """Generate ``n_columns`` labelled columns and return ``(batch, labels)``.
+
+    Columns whose labels fail :func:`label_quality_mask` are dropped and
+    replaced, so the returned batch always holds exactly ``n_columns`` good
+    columns; the rejection tally is printed at the end.
+    """
     rng = np.random.default_rng(rng_seed)
     n_bnd_sw, n_bnd_lw, sw_centers, lw_centers = band_counts()
     labeller = make_labeller(base_seed)
 
+    clip_stats, reject_stats = {}, {}
     batches, label_sets = [], []
-    remaining = n_columns
-    while remaining > 0:
-        n_here = min(batch_size, remaining)
+    n_kept = n_attempted = n_batches = n_empty = 0
+    started = time.time()
+    while n_kept < n_columns:
+        n_here = min(batch_size, n_columns - n_kept)
         raw = COLUMN_SOURCES[source](
             n_here, nlev, rng, n_bnd_sw, n_bnd_lw, sw_centers, lw_centers,
-            state_file=state_file,
+            state_file=state_file, clip_stats=clip_stats,
         )
-        chunk = _finalize_batch(raw, n_bnd_sw, n_bnd_lw)
+        chunk = _finalize_batch(raw, n_bnd_sw, n_bnd_lw, clip_stats)
         labels, _ = label_batch(chunk, n_seeds, base_seed, labeller)
-        batches.append(chunk)
-        label_sets.append(labels)
-        remaining -= n_here
+        keep, reasons = label_quality_mask(chunk, labels)
+        for name, count in reasons.items():
+            reject_stats[name] = reject_stats.get(name, 0) + count
+        batches.append({k: v[keep] for k, v in chunk.items()})
+        label_sets.append({k: v[keep] for k, v in labels.items()})
+        n_kept += int(keep.sum())
+        n_attempted += n_here
+        n_batches += 1
+        # Resampling only terminates if the source can produce good columns
+        # at all; a systematically broken one would otherwise spin forever.
+        n_empty = n_empty + 1 if not keep.any() else 0
+        if n_empty >= 5:
+            raise RuntimeError(
+                f"5 consecutive batches rejected entirely ({reject_stats}); "
+                "the column source or the radiation configuration is broken."
+            )
+        if progress_every and n_batches % progress_every == 0:
+            rate = n_kept / max(time.time() - started, 1e-9)
+            print(f"  {n_kept}/{n_columns} columns "
+                  f"({rate:.1f}/s, {n_attempted - n_kept} rejected)",
+                  flush=True)
 
     batch = {
         k: np.concatenate([b[k] for b in batches], axis=0) for k in batches[0]
@@ -864,7 +1021,11 @@ def generate(source, n_columns, nlev, n_seeds, base_seed, batch_size,
         k: np.concatenate([s[k] for s in label_sets], axis=0)
         for k in label_sets[0]
     }
-    return batch, labels
+    report_clips(clip_stats)
+    for name, count in sorted(reject_stats.items()):
+        print(f"  rejected {count} columns: {name}")
+    return batch, labels, dict(n_attempted=n_attempted,
+                               n_rejected=n_attempted - n_kept)
 
 
 def main(argv=None):
@@ -890,7 +1051,7 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     started = time.time()
-    batch, labels = generate(
+    batch, labels, quality = generate(
         args.source, args.n_columns, args.nlev, args.n_seeds,
         args.base_seed, args.batch_size, args.rng_seed, args.state_file,
     )
@@ -911,6 +1072,10 @@ def main(argv=None):
         rng_seed=int(args.rng_seed),
         n_bands_sw=int(n_bnd_sw),
         n_bands_lw=int(n_bnd_lw),
+        # A non-zero rejection count is a signal about the source, not just
+        # bookkeeping: it belongs with the data it describes.
+        n_columns_attempted=int(quality["n_attempted"]),
+        n_columns_rejected=int(quality["n_rejected"]),
         rrtmgp_config="rrtmgp-gas-lw-g128 / rrtmgp-gas-sw-g112, "
                       "McICA exponential overlap, compute_cre=True",
         vertical_convention="level 0 = model top (TOA-first)",
