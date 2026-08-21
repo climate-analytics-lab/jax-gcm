@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
+from jcm import profiling
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -253,6 +254,9 @@ class ComposablePhysics(nnx.Module, Physics):
 
         for term in self.terms:
             call_fn = jax.checkpoint(term) if self.checkpoint_terms else term
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(state, diagnostics, forcing, terrain)
             tendencies += tend
 
@@ -344,6 +348,9 @@ class ComposablePhysics(nnx.Module, Physics):
                 if self.checkpoint_terms
                 else term
             )
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(
                 vectorized_state, diagnostics, forcing, terrain,
             )
