@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 import tree_math
 
+import jcm.constants as c
+
 
 # ---------------------------------------------------------------------------
 # Activation functions
@@ -107,9 +109,20 @@ class LWEmulatorWeights:
 
 @tree_math.struct
 class EmulatorWeights:
-    """All weights for the emulated radiation scheme."""
+    """All weights for the emulated radiation scheme.
 
-    sw: SWEmulatorWeights
+    Both slots hold :class:`LWEmulatorWeights`-shaped weights: upstream's
+    shipped shortwave model (``bigru_gru_16``) uses this surface-aux
+    architecture, not the bidirectional one, and it is the only variant
+    verified against a real checkpoint. It also emits at ``nlev+1``
+    interfaces, where the fluxes actually live. The aux input is surface
+    albedo for SW and emissivity for LW.
+
+    :class:`SWEmulatorWeights` and :func:`sw_emulator_column` remain as
+    the bidirectional alternative for the architecture sweep.
+    """
+
+    sw: LWEmulatorWeights
     lw: LWEmulatorWeights
 
 
@@ -481,6 +494,60 @@ def reconstruct_sw_fluxes(
     return rsd, rsu
 
 
+def reconstruct_sw_interface_fluxes(
+    nn_output: jnp.ndarray,
+    toa_sw_down: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale normalized all-sky + clear-sky SW output to W/m^2.
+
+    Args:
+        nn_output: NN predictions at interfaces (nlev+1, 4), ordered
+            (down, up, down_clear, up_clear) as fractions of the
+            incoming TOA flux.
+        toa_sw_down: Incoming SW flux at TOA (scalar, W/m^2).
+
+    Normalizing by the incoming flux makes the target scale-free, so the
+    network sees the same distribution at every solar zenith angle and at
+    night. The TOA downward boundary is then exact by construction rather
+    than something the network has to learn.
+
+    Returns:
+        ``(down, up, down_clear, up_clear)``, each (nlev+1,) [W/m^2].
+
+    """
+    fluxes = nn_output * toa_sw_down
+    down = fluxes[:, 0].at[0].set(toa_sw_down)
+    down_clear = fluxes[:, 2].at[0].set(toa_sw_down)
+    return down, fluxes[:, 1], down_clear, fluxes[:, 3]
+
+
+def reconstruct_lw_interface_fluxes(
+    nn_output: jnp.ndarray,
+    surface_temperature: jnp.ndarray,
+    surface_emissivity: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale normalized all-sky + clear-sky LW output to W/m^2.
+
+    Args:
+        nn_output: NN predictions at interfaces (nlev+1, 4), ordered
+            (down, up, down_clear, up_clear), normalized by the surface
+            emission.
+        surface_temperature: Surface temperature (scalar, K).
+        surface_emissivity: Surface emissivity (scalar).
+
+    Surface emission sigma*eps*T^4 sets the scale of every longwave flux
+    in the column, so dividing it out leaves the network a target that is
+    O(1) across the whole climate range.
+
+    Returns:
+        ``(down, up, down_clear, up_clear)``, each (nlev+1,) [W/m^2].
+
+    """
+    scale = surface_emissivity * c.sbc * surface_temperature ** 4
+    fluxes = nn_output * scale
+    return fluxes[:, 0], fluxes[:, 1], fluxes[:, 2], fluxes[:, 3]
+
+
 # ---------------------------------------------------------------------------
 # LW emulator (forward-backward GRU — brnn2.py architecture)
 # ---------------------------------------------------------------------------
@@ -561,10 +628,8 @@ def reconstruct_lw_fluxes(
         lw_flux_up: Upward LW flux at interfaces (nlev+1,) [W/m^2].
 
     """
-    sigma = 5.670374419e-8  # Stefan-Boltzmann constant
-
     # Scale factor: surface blackbody emission
-    surface_emission = surface_emissivity * sigma * surface_temperature ** 4
+    surface_emission = surface_emissivity * c.sbc * surface_temperature ** 4
 
     rld = nn_output[:, 0] * surface_emission
     rlu = nn_output[:, 1] * surface_emission
@@ -594,15 +659,12 @@ def flux_to_heating_rate(
         Heating rate at full levels (nlev,) [K/s].
 
     """
-    g = 9.81
-    cp = 1004.0
-
     net_flux = flux_down - flux_up  # positive downward
     d_net_flux = jnp.diff(net_flux)  # (nlev,)
     dp = jnp.diff(pressure_interfaces)  # (nlev,)
 
     # dT/dt = (g/cp) * dF_net/dp  (positive heating when net flux increases downward)
-    return (g / cp) * d_net_flux / dp
+    return (c.grav / c.cpd) * d_net_flux / dp
 
 
 # ---------------------------------------------------------------------------
@@ -742,18 +804,33 @@ def init_emulator_weights(
     sw_features: int = 7,
     lw_features: int = 7,
     units: int = 16,
+    n_outputs: int = 4,
     key: Optional[jax.Array] = None,
 ) -> EmulatorWeights:
     """Initialize random weights for both SW and LW emulators.
 
-    User-facing utility (no internal callers): the starting point for
-    training an emulator from scratch rather than loading pretrained
-    weights via :func:`load_weights_from_netcdf`.
+    The starting point for training from scratch. Both slots get the
+    surface-aux architecture (see :class:`EmulatorWeights`). Four outputs
+    by default: all-sky and clear-sky, up and down.
+
+    Args:
+        sw_features / lw_features: Input feature counts, from
+            :func:`n_input_features` for the chosen ``band_mode``.
+        units: GRU hidden size.
+        n_outputs: Channels per interface.
+        key: PRNG key (default: key(42)).
+
     """
     if key is None:
         key = jax.random.key(42)
     k1, k2 = jax.random.split(key)
     return EmulatorWeights(
-        sw=init_sw_emulator_weights(n_features=sw_features, units=units, key=k1),
-        lw=init_lw_emulator_weights(n_features=lw_features, units=units, key=k2),
+        sw=init_lw_emulator_weights(
+            n_features=sw_features, units=units,
+            n_outputs=n_outputs, key=k1,
+        ),
+        lw=init_lw_emulator_weights(
+            n_features=lw_features, units=units,
+            n_outputs=n_outputs, key=k2,
+        ),
     )

@@ -26,10 +26,10 @@ from jcm.physics.radiation.nn_emulator import (
     InputScaling,
     preprocess_sw_inputs,
     preprocess_lw_inputs,
-    sw_emulator_column,
     lw_emulator_column,
-    reconstruct_sw_fluxes,
-    reconstruct_lw_fluxes,
+    n_input_features,
+    reconstruct_sw_interface_fluxes,
+    reconstruct_lw_interface_fluxes,
     flux_to_heating_rate,
 )
 import jcm.constants as c
@@ -59,11 +59,12 @@ def radiation_scheme_emulated(
     emulator_weights: Optional[EmulatorWeights] = None,
     sw_scaling: Optional[InputScaling] = None,
     lw_scaling: Optional[InputScaling] = None,
+    band_mode: str = "per_band",
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Emulated radiation scheme — drop-in replacement for ``radiation_scheme_rrtmgp``.
 
-    Uses bidirectional GRU neural networks to predict shortwave and longwave
-    fluxes, then derives heating rates from flux divergence. The call
+    Runs a GRU network per column to predict all-sky and clear-sky flux
+    profiles, then derives heating rates from flux divergence. The call
     signature matches the other radiation schemes so it can be used
     interchangeably.
 
@@ -72,6 +73,10 @@ def radiation_scheme_emulated(
             provided; passed through the parameters mechanism in EchamPhysics.
         sw_scaling: Input normalization for SW network.
         lw_scaling: Input normalization for LW network.
+        band_mode: How aerosol optics enter the input features; see
+            ``nn_emulator._band_features``. Must match what the weights
+            were trained with, since it fixes the input width.
+
     """
     from jax_solar import OrbitalTime, radiation_flux, get_solar_sin_altitude
 
@@ -103,35 +108,44 @@ def radiation_scheme_emulated(
     cwp = cloud_water * air_density * layer_thickness * cloud_fraction
     cip = cloud_ice * air_density * layer_thickness * cloud_fraction
 
-    # Default scaling if not provided
+    n_sw = n_input_features(band_mode, aerosol_data.aod_sw_per_band.shape[0])
+    n_lw = n_input_features(band_mode, aerosol_data.aod_lw_per_band.shape[0])
     if sw_scaling is None:
-        sw_scaling = InputScaling(x_max=jnp.ones(7))
+        sw_scaling = InputScaling(x_max=jnp.ones(n_sw))
     if lw_scaling is None:
-        lw_scaling = InputScaling(x_max=jnp.ones(7))
+        lw_scaling = InputScaling(x_max=jnp.ones(n_lw))
 
     # --- Shortwave ---
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cos_zenith, sw_scaling,
+        aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
+        aerosol_data.asy_sw_per_band, band_mode,
     )
-    surface_albedo = 0.5 * (surface_albedo_vis + surface_albedo_nir)
-    sw_nn_output = sw_emulator_column(
+    # Same 0.46/0.54 vis/NIR weighting RRTMGP is driven with, so the
+    # emulator sees the boundary condition its labels were made under.
+    surface_albedo = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
+    sw_nn_output = lw_emulator_column(
         sw_input, jnp.atleast_1d(surface_albedo), emulator_weights.sw,
     )
     toa_sw_down = jnp.maximum(toa_flux, 0.0)
-    sw_flux_down, sw_flux_up = reconstruct_sw_fluxes(
-        sw_nn_output, toa_sw_down, surface_albedo,
+    (sw_flux_down, sw_flux_up, sw_flux_down_clear,
+     sw_flux_up_clear) = reconstruct_sw_interface_fluxes(
+        sw_nn_output, toa_sw_down,
     )
 
     # --- Longwave ---
     lw_input = preprocess_lw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, co2_vmr, lw_scaling,
+        aerosol_data.aod_lw_per_band, aerosol_data.ssa_lw_per_band,
+        aerosol_data.asy_lw_per_band, band_mode,
     )
     lw_nn_output = lw_emulator_column(
         lw_input, jnp.atleast_1d(surface_emissivity), emulator_weights.lw,
     )
-    lw_flux_down, lw_flux_up = reconstruct_lw_fluxes(
+    (lw_flux_down, lw_flux_up, lw_flux_down_clear,
+     lw_flux_up_clear) = reconstruct_lw_interface_fluxes(
         lw_nn_output, surface_temperature, surface_emissivity,
     )
 
@@ -157,12 +171,10 @@ def radiation_scheme_emulated(
         lw_flux_up=lw_flux_up,
         lw_flux_down=lw_flux_down,
         lw_heating_rate=lw_heating,
-        # Clear-sky profiles await an emulator trained on the RRTMGP
-        # clear-sky labels; zeros keep downstream consumers off stale data.
-        sw_flux_up_clear=jnp.zeros_like(sw_flux_up),
-        sw_flux_down_clear=jnp.zeros_like(sw_flux_down),
-        lw_flux_up_clear=jnp.zeros_like(lw_flux_up),
-        lw_flux_down_clear=jnp.zeros_like(lw_flux_down),
+        sw_flux_up_clear=sw_flux_up_clear,
+        sw_flux_down_clear=sw_flux_down_clear,
+        lw_flux_up_clear=lw_flux_up_clear,
+        lw_flux_down_clear=lw_flux_down_clear,
         surface_sw_down=sw_flux_down[-1],
         surface_lw_down=lw_flux_down[-1],
         surface_sw_up=sw_flux_up[-1],
@@ -170,11 +182,9 @@ def radiation_scheme_emulated(
         toa_sw_up=sw_flux_up[0],
         toa_lw_up=lw_flux_up[0],
         toa_sw_down=toa_sw_down,
-        # NN emulator returns only all-sky fluxes; running it twice
-        # (with and without cloud condensate) for clear-sky CRE values
-        # is a follow-up. Zeros for now so downstream consumers don't
-        # see stale data in the diagnostic key.
-        toa_sw_up_clear=jnp.zeros_like(sw_flux_up[0]),
+        # Clear sky comes from dedicated output channels, so CRE is a
+        # real difference here rather than a placeholder.
+        toa_sw_up_clear=sw_flux_up_clear[0],
         toa_sw_up_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_sw_up_clear_noa=jnp.zeros_like(sw_flux_up[0]),
@@ -183,7 +193,7 @@ def radiation_scheme_emulated(
         noa_frac_toa_sw_up_clear=jnp.zeros_like(sw_flux_up[0]),
         noa_frac_toa_lw_up_clear=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear_noa=jnp.zeros_like(sw_flux_up[0]),
-        toa_lw_up_clear=jnp.zeros_like(lw_flux_up[0]),
+        toa_lw_up_clear=lw_flux_up_clear[0],
         # No sub-column machinery in the emulator: McICA cloud cover is 0.
         total_cloud_cover=jnp.zeros_like(sw_flux_up[0]),
         # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
@@ -240,9 +250,20 @@ class NNEmulatorRadiation(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
 
-    def __init__(self, params: RadiationParameters | None = None):
-        """Hold the scheme-native :class:`RadiationParameters` (with NN weights)."""
+    def __init__(
+        self,
+        params: RadiationParameters | None = None,
+        band_mode: str = "per_band",
+    ):
+        """Hold the scheme-native :class:`RadiationParameters` (with NN weights).
+
+        ``band_mode`` fixes the input width, so it must match what the
+        weights were trained with. It stays a plain Python attribute
+        rather than a parameter leaf because it selects a code path at
+        trace time.
+        """
         self.params = nnx.Param(params or RadiationParameters.default())
+        self._band_mode = band_mode
         self._coords_cached = False
 
     def cache_coords(self, coords) -> None:
@@ -294,9 +315,8 @@ class NNEmulatorRadiation(PhysicsTerm):
         # sub-stepping gate sees the same cadence regardless of scheme.
         new_radiation = new_radiation.copy(step=radiation.step + 1)
         # Mirror TOA fluxes onto the clouds sub-struct for CRE
-        # diagnostics. The emulator only produces all-sky values, so
-        # the clear-sky fields stay at zero until the 2-call clear-sky
-        # extension is wired (follow-up).
+        # diagnostics. Clear sky comes from dedicated network output
+        # channels, so no second solve is needed.
         clouds = diagnostics["clouds"].copy(
             toa_sw_up_all=new_radiation.toa_sw_up,
             toa_sw_up_clear=new_radiation.toa_sw_up_clear,
@@ -335,6 +355,16 @@ class NNEmulatorRadiation(PhysicsTerm):
         surface_emissivity_col = radiation_in.surface_emissivity.reshape(ncols)
 
         aerosol_in = diagnostics["aerosol"]
+        n_bnd_sw = aerosol_in.aod_sw_per_band.shape[0]
+        n_bnd_lw = aerosol_in.aod_lw_per_band.shape[0]
+
+        def _per_band_to_col(arr, n_bnd):
+            """(n_bnd, nlev, ncols) → (ncols, n_bnd, nlev) for the column vmap."""
+            return arr.reshape(n_bnd, nlev, ncols).transpose(2, 0, 1)
+
+        # Every leaf must carry the column axis first: ``in_axes=0`` maps
+        # the whole pytree, so a field left with its band axis leading
+        # makes vmap reject the trace.
         aerosol_for_vmap = aerosol_in.copy(
             aod_profile=aerosol_in.aod_profile.reshape(nlev, ncols).T,
             ssa_profile=aerosol_in.ssa_profile.reshape(nlev, ncols).T,
@@ -344,11 +374,18 @@ class NNEmulatorRadiation(PhysicsTerm):
             aod_anthropogenic=aerosol_in.aod_anthropogenic.reshape(ncols),
             aod_background=aerosol_in.aod_background.reshape(ncols),
             angstrom=aerosol_in.angstrom.reshape(ncols),
+            aod_sw_per_band=_per_band_to_col(aerosol_in.aod_sw_per_band, n_bnd_sw),
+            ssa_sw_per_band=_per_band_to_col(aerosol_in.ssa_sw_per_band, n_bnd_sw),
+            asy_sw_per_band=_per_band_to_col(aerosol_in.asy_sw_per_band, n_bnd_sw),
+            aod_lw_per_band=_per_band_to_col(aerosol_in.aod_lw_per_band, n_bnd_lw),
+            ssa_lw_per_band=_per_band_to_col(aerosol_in.ssa_lw_per_band, n_bnd_lw),
+            asy_lw_per_band=_per_band_to_col(aerosol_in.asy_lw_per_band, n_bnd_lw),
         )
 
         emulator_weights = params.emulator_weights
         sw_scaling = params.sw_scaling
         lw_scaling = params.lw_scaling
+        band_mode = self._band_mode
 
         tendencies_vmapped, diagnostics_vmapped = jax.vmap(
             radiation_scheme_emulated,
@@ -358,7 +395,7 @@ class NNEmulatorRadiation(PhysicsTerm):
                 0, 0, 0, 0,
                 None, 0, 0,
                 None, 0, 1, None,
-                None, None, None,
+                None, None, None, None,
             ),
             out_axes=(0, 0),
             axis_size=ncols,
@@ -371,7 +408,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             surface_albedo_nir_col, surface_emissivity_col,
             solar, latitudes, longitudes,
             params, aerosol_for_vmap, ozone_vmr, co2_vmr,
-            emulator_weights, sw_scaling, lw_scaling,
+            emulator_weights, sw_scaling, lw_scaling, band_mode,
         )
 
         rad_out = RadiationData(

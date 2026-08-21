@@ -32,6 +32,7 @@ from jcm.physics.radiation.nn_emulator import (
     init_sw_emulator_weights,
     init_lw_emulator_weights,
     init_emulator_weights,
+    n_input_features,
     DenseWeights,
     GRUWeights,
     SWEmulatorWeights,
@@ -389,7 +390,9 @@ class TestWeightInitialization(unittest.TestCase):
         self.assertEqual(w.bias.shape, (8,))
 
     def test_sw_emulator_init(self):
+        """The bidirectional variant stays available for the sweep."""
         w = init_sw_emulator_weights(n_features=7, units=16)
+        self.assertIsInstance(w, SWEmulatorWeights)
         self.assertEqual(w.gru_fwd.kernel.shape, (7, 48))
         self.assertEqual(w.gru2.kernel.shape, (32, 48))
         self.assertEqual(w.output_dense.kernel.shape, (16, 2))
@@ -401,10 +404,25 @@ class TestWeightInitialization(unittest.TestCase):
         self.assertEqual(w.gru3.kernel.shape, (32, 48))
 
     def test_full_emulator_init(self):
+        """Both slots use the surface-aux architecture, with 4 channels.
+
+        Upstream's shipped shortwave model is surface-aux, not
+        bidirectional, and it is the only variant pinned to a real
+        checkpoint. Four outputs carry all-sky and clear-sky.
+        """
         w = init_emulator_weights()
         self.assertIsInstance(w, EmulatorWeights)
-        self.assertIsInstance(w.sw, SWEmulatorWeights)
+        self.assertIsInstance(w.sw, LWEmulatorWeights)
         self.assertIsInstance(w.lw, LWEmulatorWeights)
+        self.assertEqual(w.sw.output_dense.kernel.shape, (16, 4))
+        self.assertEqual(w.lw.output_dense.kernel.shape, (16, 4))
+
+    def test_init_sizes_input_layer_from_band_mode(self):
+        """Per-band aerosol widens the input layer, not anything else."""
+        n_sw = n_input_features("per_band", 14)
+        w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
+        self.assertEqual(n_sw, 49)
+        self.assertEqual(w.sw.gru_fwd.kernel.shape, (49, 48))
 
 
 class TestGradientFlow(unittest.TestCase):
