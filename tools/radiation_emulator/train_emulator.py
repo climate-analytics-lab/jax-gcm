@@ -52,6 +52,7 @@ import optax                                                    # noqa: E402
 import jcm.constants as c                                       # noqa: E402
 from jcm.physics.radiation.nn_emulator import (                 # noqa: E402
     EmulatorWeights,
+    apply_input_scaling,
     InputScaling,
     flux_to_heating_rate,
     lw_flux_scale,
@@ -241,13 +242,16 @@ def report_target_range(data):
 
 
 def fit_scaling(x_train):
-    """Divide-by-max coefficients, matching the preprocessing convention.
+    """Affine input scaling fitted on the training split only.
 
-    Fitted on the training split only. ``abs`` because the asymmetry-parameter
-    features may be negative, in which case a plain max would leave the feature
-    unbounded below.
+    Centres each feature on its mean and divides by the largest absolute
+    deviation, so every feature lands in [-1, 1] with mean 0. The floor on the
+    denominator keeps a constant feature (CO2, in a fixed-concentration
+    dataset) at exactly 0 instead of dividing rounding noise by ~0.
     """
-    return InputScaling(x_max=jnp.max(jnp.abs(x_train), axis=(0, 1)))
+    x_offset = jnp.mean(x_train, axis=(0, 1))
+    x_max = jnp.max(jnp.abs(x_train - x_offset), axis=(0, 1))
+    return InputScaling(x_max=jnp.maximum(x_max, 1e-6), x_offset=x_offset)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +384,7 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
     mask_all = data["lit"] if is_sw else jnp.ones(x_all.shape[0], bool)
 
     scaling = fit_scaling(x_all[train_idx])
-    x_all = x_all / jnp.maximum(scaling.x_max, 1e-30)
+    x_all = apply_input_scaling(x_all, scaling)
 
     def gather(idx):
         idx = jnp.asarray(idx)
@@ -440,7 +444,7 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
 def evaluate_split(weights, scaling, data, idx, is_sw):
     """Physical metrics for one trained band on one split."""
     x = data["x_sw" if is_sw else "x_lw"][jnp.asarray(idx)]
-    x = x / jnp.maximum(scaling.x_max, 1e-30)
+    x = apply_input_scaling(x, scaling)
     aux = data["aux_sw" if is_sw else "aux_lw"][jnp.asarray(idx)]
     return band_metrics(_predict_chunked(weights, x, aux), data, idx, is_sw)
 

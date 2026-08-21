@@ -128,9 +128,18 @@ class EmulatorWeights:
 
 @tree_math.struct
 class InputScaling:
-    """Min-max scaling coefficients for NN inputs: x_scaled = x / x_max."""
+    """Affine input scaling: ``x_scaled = (x - x_offset) / x_max``.
+
+    ``x_offset`` defaults to 0, which reduces this to the reference
+    divide-by-max convention and is what upstream checkpoints want. Fitting
+    an offset matters for features whose useful range sits far from zero:
+    temperature spans ~200-320 K, so divide-by-max alone leaves it in
+    [0.62, 1.0] with a standard deviation of 0.04, and the network has to
+    learn large weights to resolve the variation it cares about.
+    """
 
     x_max: jnp.ndarray  # (n_features,)
+    x_offset: jnp.ndarray = 0.0  # (n_features,) or scalar
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +328,29 @@ def n_input_features(band_mode: str, n_bnd: int, n_base: int = 7) -> int:
     return n_base + extra[band_mode]
 
 
+def _cloud_path_feature(path: jnp.ndarray) -> jnp.ndarray:
+    """Fourth-root transform of a cloud water/ice path.
+
+    The raw paths are extremely skewed -- most columns are clear and a few
+    carry three orders of magnitude more condensate -- so dividing by their
+    maximum crushes almost every value to ~0.004 and hides the cloud signal.
+    The same fourth root the gas features use spreads them across the range
+    the GRU can resolve, and is a reasonable compression of an optical depth
+    that enters transmittance exponentially.
+    """
+    return jnp.maximum(path, 0.0) ** 0.25
+
+
+def apply_input_scaling(x: jnp.ndarray, scaling: InputScaling) -> jnp.ndarray:
+    """Apply the affine input scaling (see :class:`InputScaling`).
+
+    Public because the offline trainer scales its features with it too: train
+    and inference must agree bit for bit, so they share one implementation
+    rather than two that can drift.
+    """
+    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-30)
+
+
 def preprocess_sw_inputs(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
@@ -362,15 +394,14 @@ def preprocess_sw_inputs(
 
     mu0 = jnp.broadcast_to(cos_zenith, temperature.shape)
 
-    features = [temperature, log_p, h2o_t, o3_t, cloud_water, cloud_ice, mu0]
+    features = [temperature, log_p, h2o_t, o3_t,
+                _cloud_path_feature(cloud_water),
+                _cloud_path_feature(cloud_ice), mu0]
     if band_mode != "none":
         features += _band_features(
             aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
         )
-    x = jnp.stack(features, axis=-1)
-
-    # Divide-by-max scaling
-    return x / jnp.maximum(scaling.x_max, 1e-30)
+    return apply_input_scaling(jnp.stack(features, axis=-1), scaling)
 
 
 def preprocess_lw_inputs(
@@ -412,14 +443,14 @@ def preprocess_lw_inputs(
     o3_t = jnp.maximum(o3, GAS_FLOOR) ** 0.25
     co2 = jnp.broadcast_to(jnp.asarray(co2_vmr), temperature.shape)
 
-    features = [temperature, log_p, h2o_t, o3_t, cloud_water, cloud_ice, co2]
+    features = [temperature, log_p, h2o_t, o3_t,
+                _cloud_path_feature(cloud_water),
+                _cloud_path_feature(cloud_ice), co2]
     if band_mode != "none":
         features += _band_features(
             aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
         )
-    x = jnp.stack(features, axis=-1)
-
-    return x / jnp.maximum(scaling.x_max, 1e-30)
+    return apply_input_scaling(jnp.stack(features, axis=-1), scaling)
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +798,10 @@ def save_emulator_weights(
                 _put(f"{side}.{layer}.{field}", getattr(layer_weights, field))
     _put("sw_x_max", sw_scaling.x_max)
     _put("lw_x_max", lw_scaling.x_max)
+    _put("sw_x_offset", jnp.broadcast_to(sw_scaling.x_offset,
+                                         jnp.shape(sw_scaling.x_max)))
+    _put("lw_x_offset", jnp.broadcast_to(lw_scaling.x_offset,
+                                         jnp.shape(lw_scaling.x_max)))
 
     ds = xr.Dataset(data_vars, attrs=dict(metadata or {}))
     ds.to_netcdf(filepath)
@@ -806,9 +841,18 @@ def load_emulator_weights(
                 for layer, cls, fields in _EMULATOR_LAYERS
             })
 
+        def _offset(side: str):
+            # Checkpoints predating the affine offset carry only x_max; 0
+            # reproduces exactly the divide-by-max scaling they were fitted
+            # with, so they keep loading correctly.
+            name = f"{side}_x_offset"
+            return jnp.asarray(ds[name].values) if name in ds.variables else 0.0
+
         weights = EmulatorWeights(sw=_side("sw"), lw=_side("lw"))
-        sw_scaling = InputScaling(x_max=_get("sw_x_max"))
-        lw_scaling = InputScaling(x_max=_get("lw_x_max"))
+        sw_scaling = InputScaling(x_max=_get("sw_x_max"),
+                                  x_offset=_offset("sw"))
+        lw_scaling = InputScaling(x_max=_get("lw_x_max"),
+                                  x_offset=_offset("lw"))
         metadata = dict(ds.attrs)
 
     return weights, sw_scaling, lw_scaling, metadata

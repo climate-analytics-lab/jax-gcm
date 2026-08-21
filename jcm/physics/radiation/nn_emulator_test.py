@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import jcm.constants as c
+import jcm.physics.radiation.nn_emulator as nn_emulator
 from jcm.physics.radiation.nn_emulator import (
     save_emulator_weights,
     load_emulator_weights,
@@ -31,6 +32,7 @@ from jcm.physics.radiation.nn_emulator import (
     lw_emulator_column,
     reconstruct_sw_fluxes,
     reconstruct_lw_fluxes,
+    apply_input_scaling,
     flux_to_heating_rate,
     lw_flux_scale,
     reconstruct_lw_interface_fluxes,
@@ -430,6 +432,59 @@ class TestWeightInitialization(unittest.TestCase):
         w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
         self.assertEqual(n_sw, 49)
         self.assertEqual(w.sw.gru_fwd.kernel.shape, (49, 48))
+
+
+class TestInputConditioning(unittest.TestCase):
+    """Input scaling has to spread features the network must resolve.
+
+    Divide-by-max alone leaves temperature in a narrow band far from zero and
+    crushes the heavily-skewed cloud paths to ~0, which is what stalled
+    training.
+    """
+
+    def test_offset_centres_a_narrow_feature(self):
+        x = jnp.linspace(200.0, 320.0, 50)[:, None]
+        plain = apply_input_scaling(x, InputScaling(x_max=jnp.array([320.0])))
+        centred = apply_input_scaling(
+            x, InputScaling(x_max=jnp.array([60.0]),
+                            x_offset=jnp.array([260.0])))
+        self.assertGreater(float(jnp.std(centred)), 5 * float(jnp.std(plain)))
+        np.testing.assert_allclose(float(jnp.mean(centred)), 0.0, atol=1e-6)
+
+    def test_default_offset_reproduces_divide_by_max(self):
+        x = jnp.arange(6.0).reshape(3, 2)
+        scaling = InputScaling(x_max=jnp.array([5.0, 5.0]))
+        np.testing.assert_allclose(
+            np.asarray(apply_input_scaling(x, scaling)), np.asarray(x) / 5.0)
+
+    def test_cloud_paths_are_spread_not_crushed(self):
+        # Realistic in-cloud water paths span several decades.
+        paths = jnp.asarray([0.0, 1e-4, 1e-3, 1e-2, 1e-1])
+        raw = paths / paths.max()
+        transformed = nn_emulator._cloud_path_feature(paths)
+        transformed = transformed / transformed.max()
+        # The mid-range value is invisible under linear scaling.
+        self.assertLess(float(raw[2]), 0.02)
+        self.assertGreater(float(transformed[2]), 0.3)
+        self.assertEqual(float(transformed[0]), 0.0)
+
+    def test_checkpoint_without_offset_still_loads(self):
+        """Weights fitted before the offset existed must keep working."""
+        import xarray as xr
+
+        weights = init_emulator_weights(sw_features=7, lw_features=7,
+                                        units=4, n_outputs=4,
+                                        key=jax.random.key(0))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "w.nc")
+            save_emulator_weights(path, weights, InputScaling(jnp.ones(7)),
+                                  InputScaling(jnp.ones(7)),
+                                  {"band_mode": "none"})
+            with xr.open_dataset(path) as ds:
+                stripped = ds.drop_vars(["sw_x_offset", "lw_x_offset"]).load()
+            stripped.to_netcdf(path)
+            _, sw_scaling, _, _ = load_emulator_weights(path)
+        self.assertEqual(float(jnp.sum(jnp.abs(sw_scaling.x_offset))), 0.0)
 
 
 class TestLongwaveFluxScale(unittest.TestCase):
