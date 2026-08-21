@@ -707,7 +707,7 @@ _MIN_MOISTURE_SUPPLY = 1.0e-7
 _MIN_CAPE_FOR_MOISTURE_TRIGGER = 10.0
 
 
-def tiedtke_nordeng_convection(
+def _tiedtke_convection_toa_first(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
     pressure: jnp.ndarray,
@@ -1337,6 +1337,79 @@ def tiedtke_nordeng_convection(
     )
 
     return tendencies, updated_state
+
+
+def tiedtke_nordeng_convection(
+    temperature: jnp.ndarray,
+    humidity: jnp.ndarray,
+    pressure: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    rho: jnp.ndarray,
+    u_wind: jnp.ndarray,
+    v_wind: jnp.ndarray,
+    qc: jnp.ndarray,
+    qi: jnp.ndarray,
+    dt: float,
+    config: ConvectionParameters = None,
+    land_fraction: jnp.ndarray = jnp.array(0.0),
+    moisture_supply: jnp.ndarray = jnp.array(0.0),
+    moisture_tend_profile: jnp.ndarray | None = None,
+    thvsig: jnp.ndarray | None = None,
+    omega: jnp.ndarray | None = None,
+    qte_dynamics: jnp.ndarray | None = None,
+) -> Tuple[ConvectionTendencies, ConvectionState]:
+    """Run the Tiedtke-Nordeng scheme in either vertical ordering.
+
+    Orientation-canonicalizing entry point: the scheme's internals — in
+    particular the ``calculate_updraft`` ascent scan (``reverse=True`` with
+    the parcel entering from ``k+1``) and the downdraft descent — are
+    written for the physics-internal TOA-first layout, while the trigger
+    helpers (``find_cloud_base``, ``find_midlevel_cloud_base``) accept
+    either ordering. Feeding a SURFACE-first column straight into the core
+    therefore produced a plume that could never propagate past its own
+    base level (the ascent looked for the parcel on the wrong side — the
+    defect Codex flagged on the mid-level path, but it applied equally to
+    ``cubase`` plumes). This wrapper flips a surface-first column into
+    TOA-first, runs the core, and mirrors every returned profile and level
+    index back, so both orderings give the same physics by construction.
+    TOA-first input (the ``TiedtkeConvection`` model path) passes through
+    unchanged.
+
+    See :func:`_tiedtke_convection_toa_first` for the physics
+    documentation and argument descriptions.
+    """
+    nlev = temperature.shape[0]
+    is_surface_first = pressure[0] >= pressure[-1]
+
+    def to_toa(a):
+        return None if a is None else jnp.where(is_surface_first, a[::-1], a)
+
+    tend, state = _tiedtke_convection_toa_first(
+        to_toa(temperature), to_toa(humidity), to_toa(pressure),
+        to_toa(layer_thickness), to_toa(rho),
+        to_toa(u_wind), to_toa(v_wind), to_toa(qc), to_toa(qi),
+        dt, config, land_fraction, moisture_supply,
+        to_toa(moisture_tend_profile), thvsig,
+        to_toa(omega), to_toa(qte_dynamics),
+    )
+
+    def back(a):
+        if hasattr(a, "ndim") and a.ndim >= 1 and a.shape[0] == nlev:
+            return jnp.where(is_surface_first, a[::-1], a)
+        return a
+
+    def back_idx(k):
+        return jnp.where(is_surface_first, nlev - 1 - k, k)
+
+    tend = ConvectionTendencies(*(back(f) for f in tend))
+    state = state._replace(
+        **{f: back(getattr(state, f))
+           for f in ("tu", "qu", "lu", "uu", "vu", "td", "qd", "ud", "vd",
+                     "mfu", "mfd", "entr")},
+        kbase=back_idx(state.kbase),
+        ktop=back_idx(state.ktop),
+    )
+    return tend, state
 
 
 # ---------------------------------------------------------------------------

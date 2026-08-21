@@ -53,8 +53,11 @@ def _unstable_column(cap_hpa=None):
 def _run(column, qte_dynamics=None, config=None):
     t, q, p, dz, rho = column
     rho_np = np.asarray(rho)
+    # The vdiff-supply profile lives in the lowest layers, wherever the
+    # SURFACE is in this column's ordering (highest pressure).
     prof = np.zeros(NLEV)
-    prof[-4:] = E_SFC / (rho_np[-4:] * np.asarray(dz)[-4:]).sum()
+    sfc = slice(-4, None) if float(p[-1]) >= float(p[0]) else slice(0, 4)
+    prof[sfc] = E_SFC / (rho_np[sfc] * np.asarray(dz)[sfc]).sum()
     zeros = jnp.zeros(NLEV)
     return tiedtke_nordeng_convection(
         t, q, p, dz, rho, zeros, zeros, zeros, zeros,
@@ -124,6 +127,40 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
             self.assertLess(p[int(state.kbase)] - p[top].min(), 2.0e4,
                             "fixture failed to cap the plume below 200 hPa")
         self.assertNotEqual(int(state.ktype), 1)
+
+
+class TestOrientationCanonicalization(unittest.TestCase):
+    """A surface-first column must give the mirror of the TOA-first result.
+
+    The ascent/descent scans are TOA-first internals; the public entry
+    point canonicalizes. Before it did, a surface-first column's plume
+    could never propagate past its own base (the scan looked for the
+    arriving parcel on the wrong side) — flagged by Codex on the
+    mid-level path, but it applied to every trigger.
+    """
+
+    def test_surface_first_mirrors_toa_first(self):
+        col = _unstable_column()          # TOA-first
+        t, q, p, dz, rho = col
+        conv = _convergence_profile(rho, dz, 0.5)
+        tend_a, state_a = _run(col, qte_dynamics=conv)
+        flip = lambda a: a[::-1]
+        col_sf = tuple(flip(a) for a in col)
+        tend_b, state_b = _run(col_sf, qte_dynamics=flip(conv))
+
+        self.assertEqual(int(state_a.ktype), 1, "fixture must convect deep")
+        self.assertEqual(int(state_b.ktype), int(state_a.ktype))
+        self.assertEqual(int(state_b.kbase), NLEV - 1 - int(state_a.kbase))
+        np.testing.assert_allclose(float(state_b.prate),
+                                   float(state_a.prate), rtol=1e-5)
+        for field in ("dtedt", "dqdt", "dqc_dt", "dqi_dt"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(tend_b, field)),
+                np.asarray(getattr(tend_a, field))[::-1],
+                rtol=1e-5, atol=1e-12, err_msg=field)
+        np.testing.assert_allclose(
+            np.asarray(state_b.mfu), np.asarray(state_a.mfu)[::-1],
+            rtol=1e-5, atol=1e-12)
 
 
 class TestLaggedDynamicsReconstruction(unittest.TestCase):
