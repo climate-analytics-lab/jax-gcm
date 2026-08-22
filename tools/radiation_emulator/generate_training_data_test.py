@@ -145,6 +145,51 @@ class ColumnSourceTest(unittest.TestCase):
             out["pressure_interfaces"], [[50.0, 300.0, 700.0, 1013.0]])
 
 
+class SweepCoverageTest(unittest.TestCase):
+    """The sweep must cover the states the coupled model actually visits.
+
+    A coupled run failed because it did not: the sweep's grid stopped at
+    100 Pa while the model top is 1 Pa, and its single tropospheric lapse
+    rate floored at 190 K piled every top-level column on the floor. The
+    trajectory source covered 242-252 K there, so the training distribution
+    was bimodal with a hole at 205-240 -- exactly where the live model sat.
+    """
+
+    def _sweep(self, n=2000):
+        return perturbation_sweep(
+            n, NLEV, np.random.default_rng(0), 14, 16,
+            np.linspace(300.0, 4000.0, 14), np.linspace(4000.0, 50000.0, 16))
+
+    def test_pressure_grid_reaches_the_model_top(self):
+        p = self._sweep(64)["pressure_levels"][0]
+        self.assertLessEqual(p[0], 1.0)
+        self.assertGreater(p[-1], 1.0e5)
+        self.assertTrue(np.all(np.diff(p) > 0), "must stay TOA-first")
+
+    def test_model_top_temperature_is_spread_not_piled(self):
+        t_top = self._sweep()["temperature"][:, 0]
+        self.assertGreater(t_top.std(), 10.0)
+        # No single value may claim a large share: that is the floor bug.
+        _, counts = np.unique(np.round(t_top, 1), return_counts=True)
+        self.assertLess(counts.max() / t_top.size, 0.05)
+
+    def test_model_top_brackets_the_coupled_model_range(self):
+        # Measured from a T63L47 ERA5-initialised run: 204.5 to 245.7 K.
+        t_top = self._sweep()["temperature"][:, 0]
+        self.assertLess(t_top.min(), 204.5)
+        self.assertGreater(t_top.max(), 245.7)
+
+    def test_profile_has_a_tropopause_minimum_and_warm_stratopause(self):
+        b = self._sweep(512)
+        t, p = b["temperature"], b["pressure_levels"][0]
+        k_strat = int(np.argmin(np.abs(p - 1.0e2)))
+        k_trop = int(np.argmin(np.abs(p - 2.0e4)))
+        # Coldest point aloft is the tropopause, not the surface or the
+        # stratopause -- the shape ozone heating produces.
+        self.assertLess(t[:, k_trop].mean(), t[:, -1].mean())
+        self.assertLess(t[:, k_trop].mean(), t[:, k_strat].mean())
+
+
 class LabelTest(unittest.TestCase):
     """RRTMGP-driven label properties."""
 

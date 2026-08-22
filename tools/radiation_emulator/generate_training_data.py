@@ -87,6 +87,14 @@ LABEL_FIELDS = (
 # Lowest pressure (Pa) at which the synthetic sweep will place cloud.
 _MIN_CLOUD_PRESSURE = 1.0e4
 
+# Top of the synthetic pressure grid, matching the model's own model top
+# (1 Pa for the L47 hybrid levels).
+_TOP_PRESSURE = 1.0
+
+# Stratopause pressure (Pa): the temperature maximum between the tropopause
+# and the mesosphere.
+_STRATOPAUSE_PRESSURE = 1.0e2
+
 
 # ---------------------------------------------------------------------------
 # RRTMGP driving / labelling (source-agnostic)
@@ -561,20 +569,64 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     amount and vertical placement, cloud fraction, aerosol loading and
     type, surface temperature, humidity and CO2.
     """
-    u = _latin_hypercube(rng, n_columns, 12)
+    u = _latin_hypercube(rng, n_columns, 15)
 
     # Fixed pressure/height grid: perturbations act on the state, not the
-    # discretisation, so all columns share one vertical grid.
-    pressure = np.logspace(np.log10(100.0), np.log10(101325.0), nlev)
-    height = np.linspace(20000.0, 0.0, nlev)
+    # discretisation, so all columns share one vertical grid. It spans the
+    # MODEL's range, 1 Pa to the surface -- an earlier version stopped at
+    # 100 Pa and so gave the top eight L47 levels no synthetic coverage at
+    # all, which is precisely where a coupled run then failed.
+    pressure = np.logspace(np.log10(_TOP_PRESSURE), np.log10(101325.0), nlev)
     pressure_levels = np.broadcast_to(pressure, (n_columns, nlev)).copy()
-    height_levels = np.broadcast_to(height, (n_columns, nlev)).copy()
+    # Pressure-derived height, so the two stay consistent over five decades
+    # of pressure rather than only over a 20 km troposphere.
+    height_levels = -8000.0 * np.log(pressure_levels / 101325.0)
 
+    # Temperature is piecewise-linear in log(p) through three sampled control
+    # points -- surface, tropopause, stratopause. A single tropospheric lapse
+    # rate floored at 190 K (the earlier form) has no stratospheric inversion,
+    # so every column piled up at exactly 190 K near the model top while real
+    # ones sit at 204-252 K. That gap between the synthetic pile and the
+    # trajectory data is a hole the network has to extrapolate across.
     surface_temperature = 220.0 + 100.0 * u[:, 0]
     lapse_rate = (4.0 + 5.0 * u[:, 1]) * 1e-3            # 4-9 K/km
-    temperature = np.maximum(
-        surface_temperature[:, None] - lapse_rate[:, None] * height_levels,
-        190.0,
+    p_tropopause = _loguniform(u[:, 10], 8.0e3, 3.0e4)
+    t_tropopause = np.maximum(
+        surface_temperature - lapse_rate * (-8000.0 * np.log(
+            p_tropopause / 101325.0)),
+        185.0,
+    )
+    # Ozone heating warms the stratopause, near 100 Pa, back to ~240-285 K;
+    # above it the mesosphere COOLS again, so the model top at 1 Pa is a
+    # separate control point rather than the profile's maximum. Getting this
+    # wrong in either direction leaves a gap the network must extrapolate
+    # across: a single tropospheric lapse floored at 190 K put every column
+    # at 190 there, and running the warm branch all the way to 1 Pa put them
+    # all at 240-285. The coupled model actually sits at ~205-246.
+    t_stratopause = 240.0 + 45.0 * u[:, 11]
+    t_model_top = 195.0 + 65.0 * u[:, 12]
+
+    log_p = np.log(pressure_levels)
+    log_sfc, log_top = np.log(101325.0), np.log(_TOP_PRESSURE)
+    log_trop = np.log(p_tropopause)[:, None]
+    log_strat = np.log(_STRATOPAUSE_PRESSURE)
+
+    def _blend(lo_log, hi_log, lo_t, hi_t):
+        """Linear in log(p) between two control points."""
+        f = (log_p - lo_log) / (hi_log - lo_log)
+        return lo_t + np.clip(f, 0.0, 1.0) * (hi_t - lo_t)
+
+    temperature = np.where(
+        pressure_levels >= p_tropopause[:, None],
+        _blend(log_trop, log_sfc, t_tropopause[:, None],
+               surface_temperature[:, None]),
+        np.where(
+            pressure_levels >= _STRATOPAUSE_PRESSURE,
+            _blend(log_trop, log_strat, t_tropopause[:, None],
+                   t_stratopause[:, None]),
+            _blend(log_strat, log_top, t_stratopause[:, None],
+                   t_model_top[:, None]),
+        ),
     )
 
     # Humidity: exponential decay from a surface value spanning polar
@@ -601,8 +653,8 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     levels = np.arange(nlev)[None, :]
     # Cloud tops are confined to p > 100 hPa. Above that the sweep would
     # be sampling stratospheric "clouds" that do not occur, and RRTMGP
-    # answers them with a small negative downward LW at the top interface
-    # — nonsense labels the emulator would have to fit.
+    # answers them with a negative downward LW at the top interface
+    # (jax-gcm#711) — nonsense labels the emulator would have to fit.
     k_top = int(np.argmax(pressure >= _MIN_CLOUD_PRESSURE))
     top_idx = k_top + np.floor(u[:, 3] * (nlev - k_top)).astype(int)
     depth = 1 + np.floor(u[:, 4] * max(nlev // 3, 1)).astype(int)
