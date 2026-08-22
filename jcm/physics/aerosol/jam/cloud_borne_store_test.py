@@ -203,7 +203,17 @@ class CarryModeExchangeTest(unittest.TestCase):
         )
 
         class _Clouds:
+            # Cover plus all-zero #708 ledger fields: "no cloud process
+            # this step" routes resuspension to the timescale drain these
+            # tests were written against.
             cloud_fraction = jnp.full(shape, cf)
+            incloud_liquid = jnp.zeros(shape)
+            incloud_ice = jnp.zeros(shape)
+            incloud_rain_formation = jnp.zeros(shape)
+            incloud_snow_formation = jnp.zeros(shape)
+            incloud_riming = jnp.zeros(shape)
+            process_cloud_fraction = jnp.zeros(shape)
+            condensate_evaporation_rate = jnp.zeros(shape)
 
         diagnostics = {
             CARRY_KEY: {
