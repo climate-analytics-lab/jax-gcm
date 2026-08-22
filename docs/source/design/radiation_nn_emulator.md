@@ -346,6 +346,35 @@ capacity**: at 32 units it hurts (16.18 to 19.33), at 64 it helps (10.07 to
 8.18). A small network cannot satisfy the flux and heating objectives at once,
 so the extra term just competes; a larger one can.
 
+### Ukkonen's network scale does NOT transfer
+
+His production shortwave model is 3 GRU layers x 16 units — 5,698 parameters —
+and reaches 0.16 K/day; nothing published in that literature exceeds 96 units.
+That is a strong argument for shrinking, and it was tested here directly.
+It does not hold. Ranking on the worst level's heating RMSE, on the corrected
+300k-column dataset (so the model top is properly sampled and fitting it does
+not require extrapolation):
+
+| units | worst-level heating RMSE (K/day) |
+|---|---|
+| 16 | 18039 |
+| 24 | 9364 |
+| 32 | 6630 |
+| 64 | 2038 |
+
+Monotonic, with the largest gain at the last step. The same monotonicity
+appeared on the earlier, hole-y dataset, and the natural explanation there —
+that capacity was being rewarded for overfitting sparse data in the coverage
+gap — is ruled out by its surviving the fix.
+
+The differences that plausibly explain it all make this the larger problem:
+**50-56 input features against his 11**, four output channels against two,
+per-band aerosol optics and McICA cloud variability he did not have (his clouds
+fill the grid box and his effective radii are constants), and a model top a
+decade lower in pressure. Capacity requirements scale with what the network is
+asked to represent. Do not shrink this network on the strength of his
+parameter count.
+
 Every candidate's loss was still falling at its last epoch, so these numbers
 rank how fast a configuration learns, not the skill it reaches. Retraining the
 winner at 40 epochs took total heating RMSE to 2.87 K/day, with test-set TOA
