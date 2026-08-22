@@ -276,11 +276,48 @@ partition is furthest below its column quota; assigning in random order let a
 run of small groups fill the training quota and a single large snapshot arrive
 while training was still emptiest, swallowing every column.
 
-**The heating-rate loss term is mass-weighted.** Heating is `(g/cp) dF/dp` and
-the topmost model layers are ~1 Pa thick, so a 0.1 W/m² flux error there is
-~80 K/day and would dominate an unweighted term entirely. Mass weighting turns
-it into an energy error. Both weightings are reported, because the raw one is
-still what the model has to integrate.
+### Offline skill is not a stability criterion
+
+**The single most important lesson from building this.** The first emulator to
+reach good offline skill — 7.43 W/m² shortwave TOA, 0.92 K/day total heating,
+every metric improved — **NaN'd the GCM at 100% temperature within five days**,
+while the identical 10 days under RRTMGP ran clean.
+
+The error was one layer:
+
+| level | pressure | SW heating error RMSE |
+|---|---|---|
+| **0** | **1.0 Pa** | **129.9 K/day** (422 max) |
+| 1 | 4.3 Pa | 6.24 |
+| 2 | 11.1 Pa | 4.51 |
+| 10-40 | 0.6-785 hPa | **0.02-0.17** |
+
+Heating is `(g/cp) dF/dp`, and the topmost layer is ~2 Pa thick, so it
+amplifies flux error by **421 K/day per W/m²**. A 0.3 W/m² flux-difference
+error — negligible against a 7 W/m² flux RMSE — is 130 K/day. Applied every
+radiation step, that is a dead model.
+
+The heating loss was **mass-weighted** at the time, which gave that layer
+~1e-5 of the loss, and the headline score was the mass-weighted 0.72 K/day.
+Mass weighting measures the *energy* error and is the right lens for asking
+whether the emulator conserves energy; it is the wrong lens for asking whether
+the model survives, because a level's temperature does not care how little mass
+it holds.
+
+So the trainer now:
+
+- trains the heating term on **uniform per-level weights** (`uniform_weights`),
+  not mass weights;
+- reports the **worst level's** heating RMSE and its index, because a column
+  mean under *any* weighting hides one catastrophic layer;
+- **ranks configurations on that worst level** (`score`), because that is what
+  decides whether the run survives.
+
+Mass weighting stays available and reported as the energy-error lens.
+
+Generalise the lesson before trusting any future metric here: an emulator can
+be near-perfect in everything you chose to measure and still destroy the model
+through a layer your metric discounted. Put it in the loop.
 
 Hyperparameters are ranked on validation at a short budget (`--sweep`), and the
 winner is retrained for the full budget. Test metrics are computed once, from
