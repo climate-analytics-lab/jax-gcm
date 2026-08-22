@@ -27,6 +27,56 @@ class MicrophysicsTendencies_2M(NamedTuple):
     dqrdt: jnp.ndarray          # Rain water tendency (kg/kg/s)
     dqsdt: jnp.ndarray          # Snow tendency (kg/kg/s)
 
+class ScavengingLedger(NamedTuple):
+    """The ECHAM-HAM wet-scavenging interface (``cloud_subm_2``, #708).
+
+    ECHAM-HAM does not reconstruct aerosol scavenging from cover x
+    grid-mean state: ``cloud_subm_2`` receives the process-time ledger the
+    microphysics itself integrated. These are its per-level equivalents,
+    per column (each field is ``(nlev,)`` inside the scheme, stacked to
+    ``(nlev, ncols)`` by the term's vmap). Published on ``CloudData`` for
+    the JAM wet-deposition and cloud-borne exchange terms.
+
+    ``incloud_liquid`` / ``incloud_ice`` are ECHAM's ``zmlwc``/``zmiwc``:
+    the IN-CLOUD condensate captured just before precipitation formation
+    (section 7), after the assembly's faithful zeroing (cells whose
+    post-write-back cover fell below ``clc_min``, or whose value is below
+    1e-20, carry zero — mo_cloud_micro_2m.f90:3660-3665). A zeroed pool
+    with a positive formation rate therefore marks a cell the step fully
+    converted to precipitation; consumers must treat that as
+    scavenged-fraction 1, not 0 (the one documented deviation from
+    HAMMOZ's ``prep_wetdep_hydro``, which maps it to 0 and misses the
+    removal — the #708 dead zone).
+
+    The formation rates are IN-CLOUD [kg/kg/s]: ``rain_formation`` is
+    ``zmratepr`` (KK2000 autoconversion + both accretion pathways),
+    ``snow_formation`` is ``zmrateps`` (ice-sedimentation seed per ECHAM
+    1243, overwritten by aggregation + ice accretion where the cold chain
+    runs, per the Fortran MERGE at 3310), and ``liquid_riming`` is
+    ``zmsnowacl`` (cloud droplets collected by falling snow — a LIQUID
+    sink into the frozen precip).
+
+    ``process_cloud_fraction`` is the cover the processes actually ran
+    under (pre-write-back ``paclc``): the in-droplet share of interstitial
+    aerosol during the step, where the post-microphysics
+    ``CloudData.cloud_fraction`` is already 0 in emptied cells.
+
+    ``condensate_evaporation`` is the grid-mean cloud-condensate
+    evaporation ledger [kg/kg/s] (``zxlevap + zxievap``, #707): condensate
+    in cloud-free cells plus the clear-sky share of positive increments
+    returned to vapour. This is the resuspension key — a droplet that
+    evaporates releases its aerosol; one that rains out does not.
+    """
+
+    incloud_liquid: jnp.ndarray            # zmlwc [kg/kg, in-cloud]
+    incloud_ice: jnp.ndarray               # zmiwc [kg/kg, in-cloud]
+    rain_formation: jnp.ndarray            # zmratepr/dt [kg/kg/s, in-cloud]
+    snow_formation: jnp.ndarray            # zmrateps/dt [kg/kg/s, in-cloud]
+    liquid_riming: jnp.ndarray             # zmsnowacl/dt [kg/kg/s, in-cloud]
+    process_cloud_fraction: jnp.ndarray    # paclc at process time [1]
+    condensate_evaporation: jnp.ndarray    # (zxlevap+zxievap)/dt [kg/kg/s]
+
+
 def microphysics_dt_constants(dt: jnp.ndarray, params: CloudParams2M) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Constants that depend on the microphysics timestep. Here for consistency with ECHAM6,
     where they cannot be parameters.

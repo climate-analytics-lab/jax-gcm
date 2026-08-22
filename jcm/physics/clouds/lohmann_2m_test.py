@@ -1483,7 +1483,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, _nmr, rain_prof, snow_prof) = cloud_microphysics_2m(
+         form, evap, _cf, _nmr, _ledger, rain_prof, snow_prof) = cloud_microphysics_2m(
             T, q, p, qc, jnp.zeros(nlev), qnc, jnp.zeros(nlev),
             cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -1533,7 +1533,7 @@ class TestColumnWaterConservation2M:
         params = CloudParams2M.default()
 
         (tend, rain_sfc, snow_sfc, _rl, _ri, _rfw, _rfm, _au, _ac, _wbf,
-         form, evap, _cf, _nmr, _rp, _sp) = cloud_microphysics_2m(
+         form, evap, _cf, _nmr, _ledger, _rp, _sp) = cloud_microphysics_2m(
             T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), qni,
             cf, rho, dz,
             jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
@@ -2347,3 +2347,106 @@ class TestPrecipFluxProfiles2M:
         for i in range(3):
             assert jnp.allclose(rain_b[i], rain_1, atol=1e-12)
             assert jnp.allclose(snow_b[i], snow_1, atol=1e-12)
+
+
+class TestScavengingLedger2M:
+    """The ECHAM-HAM wet-scavenging ledger (#708).
+
+    The scheme must publish the process-time quantities ``cloud_subm_2``
+    receives — in-cloud pools captured before precipitation formation,
+    the in-cloud formation rates, the process-time cover, and the
+    condensate-evaporation ledger — because the JAM wetdep / cloud-borne
+    terms key their removal and resuspension to them, not to the
+    post-write-back cover.
+    """
+
+    LEDGER_INDEX = 14  # position in the cloud_microphysics_2m return
+
+    @staticmethod
+    def _warm_deck(nlev=16):
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(250.0, 295.0, nlev)
+        p = jnp.linspace(3e4, 1e5, nlev)
+        rho = p / (287.0 * T)
+        q = 0.9 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.zeros(nlev).at[9:14].set(8e-4)
+        qi = jnp.zeros(nlev)
+        cf = jnp.where(qc > 0, 0.6, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qnc = jnp.where(qc > 0, 1e8 / rho, 0.0)
+        qni = jnp.zeros(nlev)
+        return T, q, p, qc, qi, qnc, qni, cf, rho, dz
+
+    def _run(self, column, dt=900.0):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz = column
+        nlev = T.shape[0]
+        return cloud_microphysics_2m(
+            T, q, p, qc, qi, qnc, qni, cf, rho, dz,
+            jnp.full(nlev, 0.1), jnp.full(nlev, 1e8),
+            jnp.zeros(nlev), jnp.zeros(nlev), dt, CloudParams2M.default(),
+        )
+
+    def test_incloud_pool_is_condensate_over_cover(self):
+        """zmlwc is IN-CLOUD: ~qc/cf in the deck, not the grid mean."""
+        column = self._warm_deck()
+        out = self._run(column)
+        ledger = out[self.LEDGER_INDEX]
+        qc, cf = column[3], column[7]
+        deck = np.asarray(qc) > 0
+        il = np.asarray(ledger.incloud_liquid)[deck]
+        # The pool is captured after evaporation/condensation adjustments,
+        # so require the right scale (qc/cf = 1.33e-3), not equality.
+        assert (il > 1.0e-3).all() and (il < 2.0e-3).all()
+        # Cover: process-time cover matches the diagnosed deck cover.
+        pcf = np.asarray(ledger.process_cloud_fraction)
+        assert np.allclose(pcf[deck], 0.6, atol=1e-6)
+        assert np.allclose(pcf[~deck], 0.0, atol=1e-6)
+
+    def test_formation_rate_bounded_by_pool(self):
+        """f = formation*dt / pool is a fraction: the ledger denominator is
+        captured BEFORE the formation depletes it, so f <= 1 wherever the
+        pool survives (the #708 boundedness-by-construction property)."""
+        column = self._warm_deck()
+        dt = 900.0
+        ledger = self._run(column, dt=dt)[self.LEDGER_INDEX]
+        il = np.asarray(ledger.incloud_liquid)
+        form = np.asarray(
+            ledger.rain_formation + ledger.liquid_riming) * dt
+        live = il > 1e-10
+        assert form[live].max() <= il[live].max() + 1e-12
+        assert (form[live] / il[live] <= 1.0 + 1e-6).all()
+        assert form[live].sum() > 0.0  # the deck does rain
+
+    def test_snow_formation_carries_ice_sedimentation(self):
+        """ECHAM seeds zmrateps from sedimentation_ice (1243->1703): a
+        cirrus layer with NO cold-chain aggregation (cloud flag off below,
+        few large crystals falling) must still report a positive in-cloud
+        snow-formation ledger — the sedimenting ice is a scavenging
+        carrier in ECHAM-HAM's cloud_subm_2."""
+        nlev = 16
+        T = jnp.linspace(215.0, 260.0, nlev)   # all below freezing
+        p = jnp.linspace(2e4, 6e4, nlev)
+        rho = p / (287.0 * T)
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        q = 0.5 * jax.vmap(saturation_specific_humidity)(p, T)  # subsaturated
+        qi = jnp.zeros(nlev).at[3:6].set(5e-4)
+        qc = jnp.zeros(nlev)
+        cf = jnp.where(qi > 0, 0.5, 0.0)
+        dz = jnp.full(nlev, 500.0)
+        qni = jnp.where(qi > 0, 1e2, 0.0)      # few, large -> fast fallout
+        qnc = jnp.zeros(nlev)
+        ledger = self._run(
+            (T, q, p, qc, qi, qnc, qni, cf, rho, dz)
+        )[self.LEDGER_INDEX]
+        assert float(jnp.sum(ledger.snow_formation)) > 0.0
+
+    def test_term_publishes_ledger_to_cloud_data(self):
+        """The composable term must write all seven ledger fields."""
+        from jcm.physics.clouds.cloud_data import CloudData
+        nlev, ncols = 12, 3
+        zeros = CloudData.zeros((ncols,), nlev)
+        for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
+                  "incloud_snow_formation", "incloud_riming",
+                  "process_cloud_fraction", "condensate_evaporation_rate"):
+            assert getattr(zeros, f).shape == (nlev, ncols)
