@@ -222,7 +222,7 @@ def jam_aerosol_physics(
             scavenging ledger (#708 — the ECHAM-HAM ``cloud_subm``
             interface). Requires a cloud scheme that publishes the
             ``CloudData`` ledger fields (the 2M scheme); set False for the
-            1M scheme, which does not yet, so both terms fall back to the
+            1M scheme, which does not yet (#712), so both terms fall back to the
             legacy cover-keyed reconstruction. Static by design — the
             fallback must never be a silent per-cell branch.
 

@@ -343,8 +343,8 @@ class WetScavenging(PhysicsTerm):
         microphysics emptied) instead of the legacy cover x
         p_form/condensate reconstruction. Static because it must match
         what the composed cloud scheme publishes: the 2M scheme writes
-        the ledger, the 1M scheme does not yet (its own issue tracks the
-        mo_cloud port) — the factory wires this to ``cloud_scheme``.
+        the ledger, the 1M scheme does not yet (#712 tracks the mo_cloud
+        port) — the factory wires this to ``cloud_scheme``.
         """
         self.params = nnx.Param(params or WetDepParameters.default())
         self._in_plume_convective = in_plume_convective
