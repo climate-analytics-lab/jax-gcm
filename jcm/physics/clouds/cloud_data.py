@@ -18,7 +18,16 @@ import tree_math
 class CloudData:
     """Cloud-fraction, condensate, and surface-precip diagnostics."""
 
-    # Cloud fraction
+    # Cloud fraction. SEMANTICS (#687): after the microphysics term has
+    # run, this is the POST-microphysics cover — cells the scheme emptied
+    # of both condensates (end-of-step qc AND qi below ccwmin) have
+    # cloud_fraction = 0, under BOTH the 1M and 2M schemes (ECHAM's
+    # ``paclc`` write-back). Between SundqvistCloudFraction and the
+    # microphysics term it is the RH-diagnosed cover. The microphysics
+    # may only ever REMOVE cover relative to the diagnosed value, never
+    # add it. Consumers (radiation via the carry, COSP, AeroCom, the JAM
+    # cloud-borne/aqueous/wetdep terms) therefore always see the cloud
+    # the step actually left behind.
     cloud_fraction: jnp.ndarray      # Cloud fraction [1] (nlev, ncols)
 
     # Cloud condensate (updated by condensation within the cloud scheme)
@@ -62,6 +71,15 @@ class CloudData:
     # the warm-rain and aerosol-activation parameters.
     rain_formation_warm: jnp.ndarray  # (ncols,)
     rain_from_melt: jnp.ndarray       # (ncols,)
+
+    # Column-integrated latent heating of the 2M negative-mass repair
+    # [W/m²] (#689): the ECHAM zdxlcor/zdxicor guard returns condensate
+    # below ccwmin (including dycore-ringing negatives) to vapour with
+    # the matching latent heat. Thermodynamically consistent but
+    # sign-definite — undershoots always become warming + drying — so it
+    # is exported for monitoring rather than folded silently into the
+    # tendencies. Zero under the 1M scheme.
+    negative_mass_repair: jnp.ndarray  # (ncols,)
 
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
@@ -108,6 +126,7 @@ class CloudData:
             precip_evaporation_rate=jnp.zeros((nlev,) + nodal_shape),
             rain_formation_warm=jnp.zeros(nodal_shape),
             rain_from_melt=jnp.zeros(nodal_shape),
+            negative_mass_repair=jnp.zeros(nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
@@ -132,6 +151,7 @@ class CloudData:
             'precip_evaporation_rate': self.precip_evaporation_rate,
             'rain_formation_warm': self.rain_formation_warm,
             'rain_from_melt': self.rain_from_melt,
+            'negative_mass_repair': self.negative_mass_repair,
             'droplet_number': self.droplet_number,
             'r_eff_liq': self.r_eff_liq,
             'r_eff_ice': self.r_eff_ice,

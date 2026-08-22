@@ -139,7 +139,7 @@ class TestBuilders(unittest.TestCase):
             t for t in physics.terms if t.category == "convection"
         )
         self.assertAlmostEqual(
-            float(convection_term.params.value.entrpen), 4e-4,
+            float(convection_term.params.get_value().entrpen), 4e-4,
         )
 
     def test_build_physics_curated_preset(self):
@@ -154,7 +154,7 @@ class TestBuilders(unittest.TestCase):
             t for t in physics.terms if t.category == "convection"
         )
         self.assertAlmostEqual(
-            float(convection_term.params.value.entrpen), 4e-4,
+            float(convection_term.params.get_value().entrpen), 4e-4,
         )
 
     def test_build_physics_swap_radiation_via_preset(self):

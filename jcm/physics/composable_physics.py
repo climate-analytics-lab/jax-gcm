@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
+from jcm import profiling
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -253,8 +254,17 @@ class ComposablePhysics(nnx.Module, Physics):
 
         for term in self.terms:
             call_fn = jax.checkpoint(term) if self.checkpoint_terms else term
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(state, diagnostics, forcing, terrain)
             tendencies += tend
+
+        # Same cross-step handoff as the columns path (see there for why).
+        diagnostics["_prev_step"] = {
+            "specific_humidity": state.specific_humidity,
+            "q_tendency": tendencies.specific_humidity,
+        }
 
         return tendencies, diagnostics
 
@@ -338,10 +348,34 @@ class ComposablePhysics(nnx.Module, Physics):
                 if self.checkpoint_terms
                 else term
             )
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(
                 vectorized_state, diagnostics, forcing, terrain,
             )
             acc = _accumulate(acc, tend)
+
+        # Publish the step-start humidity and this step's total physics
+        # moisture tendency for the NEXT step (they ride the diagnostics
+        # carry). A consumer can then reconstruct the DYNAMICS moisture
+        # tendency of the just-completed dycore step as
+        #
+        #     dyn = (q_now - q_prev)/dt - q_tend_physics_prev
+        #
+        # which is everything the host applied between the two physics
+        # calls: advection, hyperdiffusion, filters. This is exactly the
+        # information ECHAM's ``pqte`` carries into ``cucall`` — and with
+        # the same one-step-lagged provenance, since ECHAM's leapfrog
+        # dynamics tendency is computed from the previous time level too.
+        # First consumer: the Tiedtke deep/shallow moisture-convergence
+        # test (``zdqcv``, #699). Excluded from xarray output; zeros on
+        # step 1 (the structural template), which reads as "no known
+        # dynamics tendency yet".
+        diagnostics["_prev_step"] = {
+            "specific_humidity": vectorized_state.specific_humidity,
+            "q_tendency": acc["specific_humidity"],
+        }
 
         # Keep the accumulated tendencies column-sharded before the lon-major
         # un-flatten, so the (nlev, ncols) -> (nlev, nlon, nlat) reshape lands
@@ -494,6 +528,9 @@ class ComposablePhysics(nnx.Module, Physics):
     # scientific value. Filter is applied to the full dotted key
     # (e.g. ``aerosol.aod_sw_per_band``).
     _EXCLUDED_OUTPUT_KEYS: ClassVar[frozenset[str]] = frozenset({
+        # Cross-step (q, dq/dt) handoff for the lagged dynamics-tendency
+        # reconstruction (#699) — carry plumbing, not an output field.
+        "_prev_step",
         "aerosol.aod_sw_per_band",
         "aerosol.ssa_sw_per_band",
         "aerosol.asy_sw_per_band",
@@ -516,6 +553,25 @@ class ComposablePhysics(nnx.Module, Physics):
     #: of 0 turns downstream ERFari (``rsut - rsutnoa``) into the whole
     #: all-sky flux, ~240 W/m2 instead of ~-1 (jax-gcm#647).
     _term_withheld_keys: frozenset[str] = frozenset()
+
+    def units_table_paths(self) -> tuple:
+        """Units/description CSVs of every term in this package, deduplicated.
+
+        Terms of the same family share one table, so the same path is
+        usually contributed many times; the order terms were composed in is
+        preserved, which is what decides precedence when two tables name the
+        same variable.
+
+        ``__add__`` accepts any callable carrying a ``category``, not only a
+        ``PhysicsTerm``, so the attribute is read defensively — a term
+        without a table must not turn into an ``AttributeError`` at the very
+        end of a run, when the output is being written.
+        """
+        paths = list(super().units_table_paths())
+        paths += [table for table in
+                  (getattr(term, "UNITS_TABLE_CSV_PATH", None) for term in self.terms)
+                  if table is not None]
+        return tuple(dict.fromkeys(paths))
 
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
@@ -540,7 +596,11 @@ class ComposablePhysics(nnx.Module, Physics):
 
         items: dict[str, Any] = {}
         for k, v in struct.items():
-            if k in self._INTERNAL_DIAGNOSTIC_KEYS:
+            # The exclusion set holds dotted leaf names for sub-structs and
+            # bare names for whole top-level entries (e.g. the ``_prev_step``
+            # carry handoff, whose flattened children would otherwise pass).
+            if (k in self._INTERNAL_DIAGNOSTIC_KEYS
+                    or k in self._EXCLUDED_OUTPUT_KEYS):
                 continue
             out_key = k.lstrip("_") if k.startswith("_") else k
             if not out_key:

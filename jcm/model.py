@@ -24,6 +24,7 @@ from dinosaur.scales import units
 from functools import partial
 import logging
 
+from jcm import profiling
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
@@ -502,22 +503,45 @@ class Model:
         self.coords = dycore.coords
         self.terrain = dycore.terrain
 
-        # Validate the dycore-field contract at construction: every field a
-        # term declares in ``requires_dycore_fields`` must be supplied by the
-        # backend (physics_field_names) or an upstream term's ``provides`` —
-        # fail here, not deep inside the first traced step.
-        self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        # Satisfy, then validate, the dycore-field contract at construction:
+        # every field a term declares in ``requires_dycore_fields`` must be
+        # supplied by the backend (physics_field_names) or an upstream term's
+        # ``provides`` — settled here, not deep inside the first traced step.
+        #
+        # A backend that CAN produce a required field but has its provider
+        # switched off is turned on rather than rejected: the provider flags
+        # (``compute_omega``, ``compute_frontogenesis``) are pure cost knobs,
+        # and a term that declares a field cannot function without it, so
+        # there is no configuration in which "off" is the right answer. The
+        # alternative — making every caller of ``Model(physics=echam_physics())``
+        # hand-construct ``DinosaurDycore(compute_omega=True)`` — is a tax
+        # that buys nothing, and the silent-fallback alternative is worse
+        # still (a term losing an input it declared, invisibly). The Hydra
+        # path has resolved providers this way since jax-gcm#409
+        # (``runners._want_omega``); this makes the policy uniform for
+        # library callers, and leaves genuine incapability (a backend with no
+        # such provider at all, e.g. pySES and omega — #698) as the only
+        # failure.
         required = tuple(getattr(self.physics, "required_dycore_fields",
                                  lambda: ())())
+        for field in required:
+            if field in self.dycore.physics_field_names():
+                continue
+            flag = f"compute_{field}"
+            if hasattr(self.dycore, flag):
+                setattr(self.dycore, flag, True)
+        self._dycore_field_names = tuple(self.dycore.physics_field_names())
         missing = [f for f in required if f not in self._dycore_field_names]
         if missing:
             raise ValueError(
                 f"The composed physics requires dycore-supplied fields "
                 f"{missing}, but this backend provides "
-                f"{list(self._dycore_field_names) or 'none'}. Construct the "
-                "dycore with the relevant provider enabled (e.g. "
-                "DinosaurDycore(compute_frontogenesis=True)) or add a "
-                "physics-side provider term upstream."
+                f"{list(self._dycore_field_names) or 'none'}, and has no "
+                f"compute_<field> provider to switch on. Add a physics-side "
+                "provider term whose ``provides`` names the field, or turn "
+                "off the feature that declares it — each requiring term's "
+                "docstring names its switch (e.g. TiedtkeConvection's "
+                "``cu_lmfmid`` for ``omega``)."
             )
 
         for observer in self.observers:
@@ -686,20 +710,33 @@ class Model:
         def step(state, physics_state):
             date = self._date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
-            physics_state_grid = self.dycore.to_physics_state(state)
-            if self._dycore_field_names:
-                # Dycore-supplied diagnostic fields (frontogenesis, ...):
-                # re-injected every step under a plumbing key that
-                # ComposablePhysics strips from its output, so the scan
-                # carry's pytree structure is unaffected (the codex-P1
-                # lesson from the observers work: anything that rides the
-                # carry must exist in the construction-time template).
-                extra = self.dycore.physics_fields(state, physics_state_grid)
-                physics_state = {**physics_state, "_dycore_fields": extra}
+            # The scopes opened here and in ComposablePhysics's term loop label
+            # this step's HLO, so that a profiler trace can be split into
+            # dynamics / bridge / per-term cost. See jcm.profiling.
+            with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
+                physics_state_grid = self.dycore.to_physics_state(state)
+                if self._dycore_field_names:
+                    # Dycore-supplied diagnostic fields (frontogenesis, ...):
+                    # re-injected every step under a plumbing key that
+                    # ComposablePhysics strips from its output, so the scan
+                    # carry's pytree structure is unaffected (the codex-P1
+                    # lesson from the observers work: anything that rides the
+                    # carry must exist in the construction-time template).
+                    extra = self.dycore.physics_fields(state,
+                                                       physics_state_grid)
+                    physics_state = {**physics_state,
+                                     "_dycore_fields": extra}
             call = partial(
                 compute_physics_step_gridpoint,
                 physics=self.physics, time_step=self.dt_si.m,
             )
+            # Scope the physics call as a whole. It ENCLOSES the per-term
+            # scopes, so under the innermost-wins attribution rule it retains
+            # only the driver's own overhead: verification, the column
+            # reshapes and the tendency accumulation between terms. Applied to
+            # the callable rather than at the call sites so that the sharding
+            # branch below stays as it was.
+            call = profiling.scoped(call, profiling.BRIDGE_TO_DYNAMICS)
             args = (physics_state_grid, forcing_now, self.terrain,
                     physics_state)
             axis = _ambient_explicit_axis()
@@ -728,7 +765,8 @@ class Model:
                 physics_tendency, new_physics_state = auto_axes(
                     call, axes=axis, out_sharding=specs,
                 )(*args)
-            state_next = self.dycore.step(state, physics_tendency)
+            with profiling.scope(profiling.DYNAMICS):
+                state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state
 
         return step

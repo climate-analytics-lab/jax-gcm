@@ -1,11 +1,12 @@
 # ECHAM with RRTMGP radiation and the Lohmann 2-moment microphysics
 # (Lohmann2MMicrophysics) in place of the 1-moment Echam1MMicrophysics.
 #
-# Same term list as ``echam-rrtmgp.yaml`` with one term swap. The 2M
-# scheme carries qc / qi / qnc / qni / qr / qs as prognostic tracers and
-# does its own saturation adjustment internally via
-# ``mixed_phase_deposition_and_corrections``, so it pairs with the pure-
-# cf ``SundqvistCloudFraction`` upstream just like the merged 1M does.
+# Same term list as ``physics=echam`` with one term swap. The 2M scheme
+# carries qc / qi / qnc / qni as prognostic tracers (rain/snow live in
+# the within-step fluxes, not tracers) and owns saturation adjustment
+# internally (the ECHAM section-5 condensation closure + supersaturation
+# corrections, #667), so it pairs with the pure-cf
+# ``SundqvistCloudFraction`` upstream just like the merged 1M does.
 #
 # Use it as::
 #

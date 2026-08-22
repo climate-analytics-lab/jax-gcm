@@ -53,11 +53,14 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(dycore.physics_field_names(), ())
         self.assertEqual(dycore.physics_fields(None, None), {})
 
-    def test_model_validation_fails_without_provider(self):
+    def test_model_enables_the_provider_it_needs(self):
+        # A declared requirement RESOLVES against a capable backend rather
+        # than rejecting it; only genuine incapability is an error (see
+        # OmegaDiagnosticTermTest for that half).
         coords = _coords()
         physics = ComposablePhysics(terms=[_FrontgfRecorder()])
-        with self.assertRaisesRegex(ValueError, "frontogenesis"):
-            Model(coords=coords, physics=physics)
+        model = Model(coords=coords, physics=physics)
+        self.assertIn("frontogenesis", model._dycore_field_names)
 
     def test_upstream_provider_term_satisfies_requirement(self):
         # A physics-side term whose ``provides`` names the field counts as
@@ -391,12 +394,40 @@ class OmegaDiagnosticTermTest(unittest.TestCase):
         # requirement comes from the omega term alone.
         self.assertIn("omega", physics.required_dycore_fields())
 
-    def test_model_validation_fails_without_provider(self):
+    def test_model_enables_a_switched_off_provider(self):
+        """A capable backend gets its provider turned on, not rejected.
+
+        The flags are pure cost knobs and a term that declares a field
+        cannot run without it, so ``Model`` resolves the contract rather
+        than making every caller pre-configure the dycore. Before this,
+        ``Model(coords=..., physics=echam_physics())`` raised — which is
+        every library caller of the ECHAM package, since Tiedtke's
+        ``cubasmc`` trigger requires omega (#697).
+        """
         from jcm.physics.speedy.speedy_terms import speedy_physics
         coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0)
+        self.assertEqual(dycore.physics_field_names(), ())
+        model = Model(dycore=dycore,
+                      physics=speedy_physics(diagnose_omega=True))
+        self.assertTrue(dycore.compute_omega)
+        self.assertIn("omega", model._dycore_field_names)
+
+    def test_model_validation_fails_when_backend_cannot_provide(self):
+        """A backend with no such provider at all still fails loudly."""
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = _coords()
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=1800.0)
+        # Stand in for a backend like pySES that computes omega internally
+        # but exposes no ``compute_omega`` provider flag (#698).
+        dycore.physics_field_names = lambda: ()
+        del dycore.compute_omega
         with self.assertRaisesRegex(ValueError, "omega"):
-            Model(coords=coords,
-                  physics=speedy_physics(diagnose_omega=True))
+            Model(dycore=dycore, physics=speedy_physics(diagnose_omega=True))
 
     def test_speedy_run_emits_omega(self):
         from jcm.physics.speedy.speedy_terms import speedy_physics
@@ -429,11 +460,14 @@ class EchamFactoryTest(unittest.TestCase):
         names = [t.name for t in frontal.terms]
         self.assertIn("frontal_gravity_wave_drag", names)
         self.assertNotIn("hines_gwd", " ".join(names))
+        # ``omega`` comes from Tiedtke convection: ECHAM's ``lmfmid``
+        # mid-level trigger (``cubasmc``) is on by default and gates on the
+        # resolved vertical velocity, so every ECHAM package requires it.
         self.assertEqual(frontal.required_dycore_fields(),
-                         ("frontogenesis",))
+                         ("omega", "frontogenesis"))
 
         hines = echam_physics(radiation_scheme="grey", gw_scheme="hines")
-        self.assertEqual(hines.required_dycore_fields(), ())
+        self.assertEqual(hines.required_dycore_fields(), ("omega",))
 
         none = echam_physics(radiation_scheme="grey", gw_scheme="none")
         none_names = [t.name for t in none.terms]

@@ -191,6 +191,16 @@ class Physics:
     UNITS_TABLE_CSV_PATH = None
     cached_coords = None
 
+    def units_table_paths(self) -> tuple:
+        """Units/description CSVs to attach to ``to_xarray`` output.
+
+        A container physics gathers the tables of the terms it holds, so
+        each term ships the metadata for the diagnostics it publishes.
+        """
+        if self.UNITS_TABLE_CSV_PATH is None:
+            return ()
+        return (self.UNITS_TABLE_CSV_PATH,)
+
     def cache_coords(self, coords):
         return None
 

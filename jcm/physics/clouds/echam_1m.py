@@ -102,6 +102,14 @@ class MicrophysicsParameters:
     epsilon: float       # Small number for numerical stability
     d_epsilon: float     # Absolute floor for differentiability guards only
     dt_sedi: float       # Sub-timestep for sedimentation (s)
+    cqtmin: float        # ECHAM ``cqtmin`` (mo_echam_cloud_params): the
+                         # cloud-fraction floor below which a cell counts as
+                         # cloud-free and its condensate force-evaporates
+                         # (the ``nloidx`` partition, #668)
+    ccwmin: float        # ECHAM ``ccwmin`` (mo_echam_cloud_params): grid-mean
+                         # condensate below which a cell no longer counts as
+                         # cloudy — drives the post-microphysics ``paclc``
+                         # write-back (mo_cloud.f90:1280, #687)
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
     # 0 = Beheng (1994) implicit form (default; robust at large dt).
@@ -127,6 +135,7 @@ class MicrophysicsParameters:
                  vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30, dt_sedi=10.0,
+                 cqtmin=1.0e-12, ccwmin=1.0e-7,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
@@ -173,6 +182,8 @@ class MicrophysicsParameters:
             t_mix_max=jnp.array(t_mix_max),
             epsilon=jnp.array(epsilon),
             d_epsilon=jnp.array(d_epsilon),
+            cqtmin=jnp.array(cqtmin),
+            ccwmin=jnp.array(ccwmin),
             dt_sedi=jnp.array(dt_sedi),
             autoconversion_scheme=int(autoconversion_scheme),
         )
@@ -536,6 +547,7 @@ def _saturation_adjustment_layer(
     qi: jnp.ndarray,
     p: jnp.ndarray,
     config: MicrophysicsParameters,
+    cf: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Per-layer cuadjtq-style saturation adjustment.
 
@@ -585,10 +597,21 @@ def _saturation_adjustment_layer(
     L_eff = weight_liquid * c.alhc + (1.0 - weight_liquid) * c.alhs
     L_cp = L_eff / c.cpd
 
-    # ---- Pass 1: linearised Newton step (matches sundqvist) ----
+    # ---- Pass 1: linearised Newton step, CLOUD-FRACTION weighted ----
+    # ECHAM's condensational growth/dissipation ``zqcdif`` carries a
+    # ``zclcaux`` factor (mo_cloud.f90:729): condensation happens in the
+    # cloudy part of the cell, so a cf=0 cell generates NO condensate from
+    # pass 1 at all — its supersaturation stays vapour up to the pass-2
+    # grid-box allowance below. Without this factor the adjustment was
+    # grid-mean-unconditional, which made the ``zxlevap`` clearing in the
+    # sweep a measured NO-OP: everything the clearing released re-condensed
+    # immediately, in every regime (#668). ``cf=None`` (legacy callers)
+    # preserves the unweighted behaviour.
     qs, dqs_dt = _qs_and_dqs_dt(p, T)
     q_excess = q - qs
     cond1 = q_excess / jnp.maximum(1.0 + L_cp * dqs_dt, 1e-3)
+    if cf is not None:
+        cond1 = cond1 * cf
     total_cloud = qc + qi
     cond1 = jnp.maximum(cond1, -total_cloud)
     cond1 = jnp.minimum(cond1, jnp.maximum(q, 0.0))
@@ -832,12 +855,42 @@ def cloud_microphysics_column_sweep(
         zsmlt_rate = zsnmlt / jnp.maximum(mref, config.epsilon)
         dTdt_melt = -zlfdcp * zsmlt_rate
 
+        # ---------- (1b) cloud-free cells: force-evaporate ALL condensate --
+        # ECHAM ``zxlevap``/``zxievap`` (mo_cloud.f90:660-670): in a cell the
+        # cloud scheme declares cloud-free (``zclcaux <= cqtmin``), every
+        # kg of condensate returns to vapour UNCONDITIONALLY — regardless of
+        # saturation — with the matching latent cooling (:706-708, :711).
+        # Without it, a cf=0 cell that reaches saturation (detrainment into
+        # a clear cell, within-step moistening past the step-start cf
+        # diagnosis, or the hard-zeroed cf above ``cloud_top_pressure_pa``)
+        # accumulates condensate that no microphysical process can touch —
+        # every source/sink below is cf-weighted, so at cf=0 only ice
+        # sedimentation removes anything. A radiatively-active, permanently
+        # growing condensate reservoir with no sink (#668, #537).
+        #
+        # Runs BEFORE the saturation adjustment so the adjustment acts on
+        # the cleared state and may legitimately re-condense what the
+        # thermodynamics supports — as vapour, subject to the cloud scheme
+        # next step, not as orphaned condensate. NOTE: ECHAM's *partial*
+        # clear-fraction evaporation ``(1−zclcaux)·...`` is commented out in
+        # 6.3 (mo_cloud.f90:683-684), so cf>0 cells keep their condensate
+        # here too — only the fully cloud-free cells clear.
+        is_cloud_free = cf <= config.cqtmin
+        zxlevap = jnp.where(is_cloud_free, jnp.maximum(qc0, 0.0), 0.0)
+        zxievap = jnp.where(is_cloud_free, jnp.maximum(qi0, 0.0), 0.0)
+        q0 = q0 + zxlevap + zxievap
+        qc0 = qc0 - zxlevap
+        qi0 = qi0 - zxievap
+        T0 = T0 - zlvdcp * zxlevap - zlsdcp * zxievap
+        dTdt_clearevap = (-zlvdcp * zxlevap - zlsdcp * zxievap) / dt
+        dq_clearevap = zxlevap + zxievap        # absolute increments over dt
+
         # ---------- (2) pre-microphysics saturation adjustment ----------
         # Two-pass Newton condensation / evaporation on this layer's
         # ``(T0, q0, qc0, qi0)`` — same logic as ECHAM ``mo_cloud.f90``
         # 696-784. Outputs are absolute increments over ``dt``.
         dT_cond_a, dq_cond_a, dqc_cond_a, dqi_cond_a = _saturation_adjustment_layer(
-            T0, q0, qc0, qi0, p, config,
+            T0, q0, qc0, qi0, p, config, cf=cf,
         )
         T1 = T0 + dT_cond_a
         q1 = q0 + dq_cond_a
@@ -1086,10 +1139,12 @@ def cloud_microphysics_column_sweep(
         # the dynamics state. The single condensation pass returns
         # absolute increments over dt, so divide by dt to convert to a
         # rate.
-        dTdt = dTdt_melt + dTdt_rime + dTdt_evap + dTdt_imlt + dT_cond_a / dt
-        dqdt = (dq_evap / dt) + dq_cond_a / dt
-        dqcdt = dqcdt_micro + dqc_cond_a / dt + zimlt / dt
-        dqidt = dqidt_micro + dqi_cond_a / dt + dqidt_sed - zimlt / dt
+        dTdt = (dTdt_melt + dTdt_rime + dTdt_evap + dTdt_imlt
+                + dTdt_clearevap + dT_cond_a / dt)
+        dqdt = (dq_evap / dt) + dq_clearevap / dt + dq_cond_a / dt
+        dqcdt = dqcdt_micro + dqc_cond_a / dt + (zimlt - zxlevap) / dt
+        dqidt = (dqidt_micro + dqi_cond_a / dt + dqidt_sed
+                 - (zimlt + zxievap) / dt)
 
         # ``zraut`` is the in-cloud per-dt autoconversion depletion
         # (kg/kg over dt). Convert to a grid-mean rate (kg/kg/s) for
@@ -1318,7 +1373,24 @@ class Echam1MMicrophysics(PhysicsTerm):
         diagnostics = {**diagnostics, "autoconv": autoconv_col,
                        "accretn": accretn_col, "wbf": zero_col}
 
+        # Post-microphysics cloud-cover write-back (ECHAM mo_cloud.f90:1280
+        # — ``paclc = FSEL(-(zxlp1_d*zxip1_d), paclc, 0)``): a cell whose
+        # end-of-step condensate falls below ``ccwmin`` in BOTH phases is
+        # no longer cloudy. This makes ``clouds.cloud_fraction`` mean the
+        # same thing under cloud_scheme='1m' and '2m' (#687): the cover
+        # the step actually leaves behind, which radiation, COSP, AeroCom
+        # and the JAM cloud-borne/aqueous/wetdep terms all read. The
+        # end-of-step condensate is interim + the scheme's own tendency
+        # (upstream increments are already inside the interim values).
+        qc_end = qc_interim + dt * micro_tend.dqcdt.T
+        qi_end = qi_interim + dt * micro_tend.dqidt.T
+        cloud_fraction_out = jnp.where(
+            (qc_end < params.ccwmin) & (qi_end < params.ccwmin),
+            0.0, cloud_fraction,
+        )
+
         clouds = clouds.copy(
+            cloud_fraction=cloud_fraction_out,
             precip_rain=micro_state.precip_rain,
             precip_snow=micro_state.precip_snow,
             # Per-level precipitation flux profiles for satellite-simulator

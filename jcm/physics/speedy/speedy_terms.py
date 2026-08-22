@@ -9,6 +9,7 @@ Date: 2026-04-12
 
 from __future__ import annotations
 
+from importlib import resources
 from typing import ClassVar
 
 from flax import nnx
@@ -32,6 +33,9 @@ import jax.numpy as jnp
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+
+#: Units and descriptions of every diagnostic the SPEEDY terms publish.
+SPEEDY_UNITS_TABLE_CSV_PATH = resources.files('jcm.physics.speedy') / 'units_table.csv'
 
 
 def set_physics_flags(
@@ -153,6 +157,8 @@ class SpeedyTermBase(PhysicsTerm):
     translation helpers. Subclasses hold their own parameter sub-struct
     as nnx.Param and implement __call__.
     """
+
+    UNITS_TABLE_CSV_PATH: ClassVar = SPEEDY_UNITS_TABLE_CSV_PATH
 
     def __init__(self):
         """Initialize SpeedyTermBase."""
