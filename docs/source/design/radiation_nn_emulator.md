@@ -351,6 +351,72 @@ rank how fast a configuration learns, not the skill it reaches. Retraining the
 winner at 40 epochs took total heating RMSE to 2.87 K/day, with test-set TOA
 upward RMSE of 19.6 W/m² (SW) and 7.0 W/m² (LW) at near-zero bias.
 
+## Coupled stability: the offline/online gap
+
+**Offline skill did not predict coupled behaviour, and the gap was entirely in
+the training distribution.** Three coupled T63L47 attempts NaN'd within a day
+while RRTMGP ran clean from the identical start. Driving the *live* scheme
+offline on real columns, though, the emulator matched RRTMGP to 0.09-1.68
+K/day through the mid-column — so the network was not the problem, and neither
+was orientation, feature wiring, nor the loss.
+
+The failure localised to longwave at the model top:
+
+| level | p (Pa) | emulator LW rms | RRTMGP LW rms |
+|---|---|---|---|
+| 0 (surface) | 96417 | 33.2 | 10.8 |
+| 20-30 | 23499-3743 | 1.0-1.2 | 1.3-1.6 |
+| 46 (top) | **1.0** | **323.5** (max 1111) | **41.7** (max 79) |
+
+with the model top warming 232 to 257 K in twelve hours before diverging.
+Shortwave was unaffected, because shortwave heating at 1 Pa does not depend on
+the local Planck function.
+
+**The cause was a coverage hole of our own making.** At 1 Pa the training data
+was bimodal: the trajectory source spanned 242-252 K (a spun-up run's narrow
+band) and the synthetic sweep piled at exactly 190 K (its floor), leaving
+nothing between 205 and 240 — which is where a realistically-initialised model
+sits, median 234 K. Every point was inside the union of the two ranges, so a
+min/max check saw nothing wrong. The emulator was extrapolating into the gap,
+and the resulting error warmed the top further into it.
+
+Two defects fed the hole, both in the sweep's base state and both fixed: its
+pressure grid stopped at 100 Pa (no coverage at all for the top eight levels),
+and its temperature was a single tropospheric lapse rate floored at 190 K, with
+no stratosphere. The grid is now the model's own hybrid levels — inventing one
+instead produced per-layer aerosol optical depths of 21 and ~9% unphysical
+columns — and the temperature is piecewise-linear in log(p) through surface,
+tropopause, stratopause and model top.
+
+The other half of the fix is training on the states the coupled model actually
+visits: `trajectory_era5.nc` samples an ERA5-initialised RRTMGP run in the
+configuration the emulator is meant to run in. That is the intervention the
+literature supports most strongly — see below.
+
+### What the literature says about coupling one of these
+
+- **Ukkonen (2022, JAMES; peterukk/rte-rrtmgp-nn)** never coupled the
+  full-scheme emulator in that work, and his model top is **10 Pa over 60
+  layers**, not 1 Pa. He applies no dp-weighting, no top-level exclusion and no
+  clipping, and reports up to 20 K/day heating error at the top.
+- **Bertoli et al. (2025, ICON)** needed *"a Gaussian smoothing as
+  postprocessing and a simplified computation of the fluxes at the upper
+  levels"* — above 25 km longwave, 40 km shortwave — *"to ensure stability of
+  the ICON model top"*.
+- **Hafner et al. (2025)** avoided flux prediction entirely, predicting heating
+  rates plus boundary fluxes with an explicit energy-consistency loss term,
+  citing exactly those stability issues.
+- **CMA-GFS (operational)** had **18% of 50 coupled ten-day forecasts crash**.
+  Output bounds and physical reconstruction of heating did not fix it;
+  harvesting the states at which the model broke and retraining on them did,
+  with **no architecture change**.
+- Ukkonen's emulators that *did* run stably in the IFS were trained on the host
+  model's own ecRad inputs and outputs — on-trajectory by construction.
+
+So the field's verdict is consistent: predict fluxes and do something explicit
+at the top, or predict heating rates and penalise energy imbalance — and in
+either case train on the distribution the coupled model produces.
+
 ## Running a trained emulator
 
 ```bash
