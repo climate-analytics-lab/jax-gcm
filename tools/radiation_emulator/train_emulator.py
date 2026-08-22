@@ -322,27 +322,48 @@ def uniform_weights(p_half):
     return jnp.full(p_half.shape[:-1] + (n,), 1.0 / n)
 
 
-def make_loss(is_sw, heating_weight):
-    """Build the loss for one band.
+# Below this normalised mean a channel/level carries essentially no signal
+# (longwave downward at TOA is ~1e-4), and 1/mean would hand it a weight of
+# 1e4 and let it dominate the flux term outright.
+_WEIGHT_PROF_FLOOR = 1.0e-2
 
-    The flux term is on the normalized targets the network actually outputs;
-    the heating term is on the physical flux divergence, which is what the
-    model consumes and which small flux errors can corrupt disproportionately
-    when they are vertically correlated. ``heating_weight`` trades them off.
+
+def channel_weights(y_train):
+    """Per-level, per-channel ``1/mean`` weights for the flux term.
+
+    Ukkonen's ``weight_prof = 1/y_tr.mean(axis=0)``: it equalises the
+    contribution of each level and each output channel, so the large
+    downward flux near TOA cannot swamp the small upward one. Fitted on the
+    training split only, like the input scaling.
+    """
+    return 1.0 / jnp.maximum(jnp.mean(y_train, axis=0), _WEIGHT_PROF_FLOOR)
+
+
+def make_loss(is_sw, alpha, weight_prof):
+    """Build the loss for one band, following Ukkonen's hybrid formulation.
+
+    ``alpha * RMSE(heating) + (1 - alpha) * MSE(weighted flux)``, with the
+    heating term in K/day computed from denormalised fluxes and the TRUE dp,
+    so the model top's amplification enters the loss exactly as it enters the
+    physics. The asymmetry is deliberate: RMSE on the heating term keeps it
+    from vanishing as it converges, while alpha = 1e-4 is unit-balancing --
+    the flux MSE is O(1e-4) on O(1) targets and the heating RMSE is O(1) in
+    K/day, so the two contribute comparably rather than one dominating.
     """
     def loss_fn(weights, batch):
         pred = _predict(weights, batch["x"], batch["aux"])
         mask = batch["mask"][:, None, None]
         n = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
-        flux_mse = jnp.sum(((pred - batch["y"]) ** 2) * mask) / (
+        err = (pred - batch["y"]) * weight_prof
+        flux_mse = jnp.sum((err ** 2) * mask) / (
             n * pred.shape[1] * pred.shape[2])
-        if heating_weight == 0.0:
+        if alpha == 0.0:
             return flux_mse, flux_mse
         hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
         hr_true = _heating(batch["y"], batch["scale"], batch["p_half"], is_sw)
         w = uniform_weights(batch["p_half"]) * batch["mask"][:, None]
-        hr_mse = jnp.sum(((hr_pred - hr_true) ** 2) * w) / n
-        return flux_mse + heating_weight * hr_mse, flux_mse
+        hr_rmse = jnp.sqrt(jnp.sum(((hr_pred - hr_true) ** 2) * w) / n)
+        return alpha * hr_rmse + (1.0 - alpha) * flux_mse, flux_mse
     return loss_fn
 
 
@@ -423,7 +444,12 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
         n_features=x_all.shape[-1], units=config["units"],
         n_outputs=len(CHANNELS), key=key,
     )
-    loss_fn = make_loss(is_sw, config["heating_weight"])
+    # Fitted on the columns the loss actually sees: every shortwave flux is
+    # zero at night, so including dark columns would drag each mean down and
+    # inflate the weights by roughly 1/(lit fraction).
+    train_sel = jnp.asarray(train_idx)[mask_all[jnp.asarray(train_idx)]]
+    weight_prof = channel_weights(y_all[train_sel])
+    loss_fn = make_loss(is_sw, config["alpha"], weight_prof)
     n_steps = max(1, len(train_idx) // config["batch_size"]) * config["epochs"]
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=config["lr"] * 0.1, peak_value=config["lr"],
@@ -508,18 +534,22 @@ def score(val):
             + val["lw"]["heating_rmse_worst_level"])
 
 
-# One axis varied at a time off a (32, 3e-3, 0) centre, plus the two
-# heating-weighted variants at the widths worth pairing it with. Kept short
-# deliberately: each candidate trains both networks, and the point is to place
-# the working point, not to squeeze the last percent out of it.
+# Centred on 32 units, which is where this literature actually operates:
+# Ukkonen's production shortwave model is 3 GRU layers x 16 units -- 5,698
+# parameters -- and reaches 0.16 K/day, and nothing published exceeds 96.
+# Earlier sweeps here ran 128-256, one to two orders of magnitude over, which
+# buys nothing at run time (the network is already free against RRTMGP) and
+# costs exactly the thing that matters: an over-parameterised network
+# extrapolates wildly where the training distribution is thin, and that is
+# what killed the coupled runs.
 SWEEP = [
-    dict(units=16, lr=3e-3, heating_weight=0.0),
-    dict(units=32, lr=3e-3, heating_weight=0.0),
-    dict(units=64, lr=3e-3, heating_weight=0.0),
-    dict(units=32, lr=1e-3, heating_weight=0.0),
-    dict(units=32, lr=3e-3, heating_weight=1e-3),
-    dict(units=32, lr=3e-3, heating_weight=1e-2),
-    dict(units=64, lr=3e-3, heating_weight=1e-2),
+    dict(units=16, lr=3e-3, alpha=1e-4),
+    dict(units=24, lr=3e-3, alpha=1e-4),
+    dict(units=32, lr=3e-3, alpha=1e-4),
+    dict(units=64, lr=3e-3, alpha=1e-4),
+    dict(units=32, lr=1e-3, alpha=1e-4),
+    dict(units=32, lr=3e-3, alpha=1e-3),
+    dict(units=32, lr=3e-3, alpha=0.0),
 ]
 
 
@@ -532,7 +562,9 @@ def main(argv=None):
                    choices=("none", "broadband", "per_band"))
     p.add_argument("--units", type=int, default=32)
     p.add_argument("--lr", type=float, default=3e-3)
-    p.add_argument("--heating-weight", type=float, default=1e-2)
+    p.add_argument("--alpha", type=float, default=1e-4,
+                   help="weight on the heating RMSE term; 1e-4 balances "
+                        "it against the flux MSE (Ukkonen)")
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--sweep-epochs", type=int, default=12,
@@ -556,7 +588,7 @@ def main(argv=None):
 
     base = dict(batch_size=args.batch_size, seed=args.seed,
                 epochs=args.epochs, units=args.units, lr=args.lr,
-                heating_weight=args.heating_weight)
+                alpha=args.alpha)
 
     sweep_results = []
     if args.sweep:
@@ -591,7 +623,7 @@ def main(argv=None):
         trained_on=";".join(pathlib.Path(p).name for p in paths),
         n_train=int(len(splits[0])),
         learning_rate=float(base["lr"]),
-        heating_weight=float(base["heating_weight"]),
+        alpha=float(base["alpha"]),
         epochs=int(base["epochs"]),
     )
     save_emulator_weights(args.out, final["weights"], final["sw_scaling"],
