@@ -294,14 +294,32 @@ def _heating(pred_norm, scale, p_half, is_sw):
 def mass_weights(p_half):
     """Per-level layer-mass weights summing to 1 along each column.
 
-    Heating rate is (g/cp) dF/dp, so a fixed flux error becomes a heating error
-    proportional to 1/dp. The topmost model layers are ~1 Pa thick, which
-    amplifies their flux error by three orders of magnitude and would let them
-    dominate an unweighted heating loss entirely. Weighting by layer mass turns
-    the term into an energy error, which is what conservation cares about.
+    Reported, but NOT used for training -- see :func:`uniform_weights`. Mass
+    weighting measures the energy error, which is what conservation cares
+    about, and it is the right lens for asking whether the emulator loses
+    energy. It is the wrong lens for asking whether the model survives.
     """
     dp = jnp.diff(p_half, axis=-1)
     return dp / jnp.sum(dp, axis=-1, keepdims=True)
+
+
+def uniform_weights(p_half):
+    """Equal weight per level, normalised to sum to 1 along each column.
+
+    This is what the heating loss trains on, because heating rate -- not
+    energy -- is what the model integrates, and a level's temperature does not
+    care how little mass it holds.
+
+    Mass weighting was tried first and produced a model that NaN'd the GCM in
+    under five days. Heating is (g/cp) dF/dp and the topmost layer is ~2 Pa
+    thick, so a 0.3 W/m2 flux-difference error there is 130 K/day; mass
+    weighting gave that level ~1e-5 of the loss and the trained emulator
+    reached 130 K/day RMSE at level 0 while sitting at 0.02-0.17 K/day through
+    the whole troposphere. The headline mass-weighted score was 0.72 K/day and
+    said nothing about it.
+    """
+    n = p_half.shape[-1] - 1
+    return jnp.full(p_half.shape[:-1] + (n,), 1.0 / n)
 
 
 def make_loss(is_sw, heating_weight):
@@ -322,7 +340,7 @@ def make_loss(is_sw, heating_weight):
             return flux_mse, flux_mse
         hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
         hr_true = _heating(batch["y"], batch["scale"], batch["p_half"], is_sw)
-        w = mass_weights(batch["p_half"]) * batch["mask"][:, None]
+        w = uniform_weights(batch["p_half"]) * batch["mask"][:, None]
         hr_mse = jnp.sum(((hr_pred - hr_true) ** 2) * w) / n
         return flux_mse + heating_weight * hr_mse, flux_mse
     return loss_fn
@@ -356,6 +374,11 @@ def band_metrics(pred_norm, data, idx, is_sw):
     hr_rmse = float(np.sqrt(np.sum(w * d_hr ** 2) / np.sum(w)))
     hr_bias = float(np.sum(w * d_hr) / np.sum(w))
     hr_rmse_raw, _ = err(hr_pred, hr_true)
+    # The single worst level, because a column mean of any weighting hides one
+    # catastrophic layer -- and one catastrophic layer is what NaNs the model.
+    per_level = np.sqrt(np.mean(d_hr ** 2, axis=0))
+    hr_rmse_worst = float(per_level.max())
+    hr_worst_level = int(np.argmax(per_level))
 
     # TOA is interface 0 and the surface is the last: the stored columns are
     # TOA-first (see the generator's vertical_convention attribute).
@@ -366,6 +389,8 @@ def band_metrics(pred_norm, data, idx, is_sw):
         sfc_down_rmse=sfc_rmse, sfc_down_bias=sfc_bias,
         heating_rmse=hr_rmse, heating_bias=hr_bias,
         heating_rmse_raw=hr_rmse_raw,
+        heating_rmse_worst_level=hr_rmse_worst,
+        heating_worst_level=hr_worst_level,
     )
 
 
@@ -473,11 +498,14 @@ def run_config(data, splits, config, verbose=True):
 def score(val):
     """Single number to rank configurations by.
 
-    Total heating-rate RMSE: the emulator's job is to give the model the right
-    temperature tendency, and a flux error that cancels in the divergence
-    matters far less than one that does not.
+    The WORST LEVEL's heating RMSE, summed over bands. Column-mean heating
+    error ranks models by how well they do on average; what determines whether
+    the GCM survives is the single worst layer, and ranking on the mean once
+    selected a model that scored 0.72 K/day and NaN'd the model in five days
+    off a 130 K/day error at the top level alone.
     """
-    return val["sw"]["heating_rmse"] + val["lw"]["heating_rmse"]
+    return (val["sw"]["heating_rmse_worst_level"]
+            + val["lw"]["heating_rmse_worst_level"])
 
 
 # One axis varied at a time off a (32, 3e-3, 0) centre, plus the two
@@ -577,9 +605,10 @@ def main(argv=None):
               f"({m['toa_up_bias']:+.2f} bias) | "
               f"sfc down {m['sfc_down_rmse']:7.2f} "
               f"({m['sfc_down_bias']:+.2f}) | "
-              f"heating {m['heating_rmse']:.4f} K/day mass-weighted "
-              f"({m['heating_bias']:+.4f} bias, "
-              f"{m['heating_rmse_raw']:.2f} unweighted)")
+              f"heating {m['heating_rmse']:.4f} K/day mass-weighted, "
+              f"{m['heating_rmse_raw']:.2f} unweighted, "
+              f"WORST LEVEL {m['heating_rmse_worst_level']:.1f} "
+              f"at k={m['heating_worst_level']}")
 
     if args.report:
         with open(args.report, "w") as fh:

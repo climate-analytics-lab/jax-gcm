@@ -18,6 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from train_emulator import (  # noqa: E402
     mass_weights,
+    uniform_weights,
     solar_group_ids,
     split_by_group,
 )
@@ -99,8 +100,27 @@ class SplitTest(unittest.TestCase):
             np.testing.assert_array_equal(x, y)
 
 
+class WeightingTest(unittest.TestCase):
+    """The two weightings answer different questions; both are reported."""
+
+    def test_uniform_weights_do_not_discount_the_thin_top_layer(self):
+        # The failure that motivated training on uniform weights: mass
+        # weighting gave the ~2 Pa top layer ~1e-5 of the loss, the emulator
+        # reached 130 K/day there, and the GCM NaN'd in under five days.
+        p_half = np.array([[0.0, 2.0, 5e4, 1.0e5]])
+        mass = np.asarray(mass_weights(p_half))[0]
+        uniform = np.asarray(uniform_weights(p_half))[0]
+        self.assertLess(mass[0], 1e-4)
+        np.testing.assert_allclose(uniform, 1.0 / 3.0)
+        np.testing.assert_allclose(uniform.sum(), 1.0)
+
+    def test_uniform_weights_match_the_layer_count(self):
+        p_half = np.zeros((5, 48))
+        self.assertEqual(np.asarray(uniform_weights(p_half)).shape, (5, 47))
+
+
 class MassWeightTest(unittest.TestCase):
-    """Layer-mass weighting is what keeps the model top from dominating."""
+    """Mass weighting stays available as the energy-error lens."""
 
     def test_weights_sum_to_one_per_column(self):
         p_half = np.array([[1.0, 10.0, 1e4, 1e5], [2.0, 20.0, 2e4, 9e4]])
