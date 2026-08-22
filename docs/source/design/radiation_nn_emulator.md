@@ -64,7 +64,30 @@ while shortwave *heating* improved 3.5x over the same range:
 With the label-noise floor measured at 4.70 W/m² (see below), neither capacity
 nor the labels explained it. Longwave, whose emission is far closer to linear
 in optical depth, kept improving — which is the asymmetry the degeneracy
-predicts.
+predicts, and which is what identified the missing variable.
+
+Adding the feature confirms it. Same 128 units, same 300 epochs, same seed,
+cloud fraction the only change:
+
+| metric | without cf | with cf |
+|---|---|---|
+| SW TOA up (W/m²) | 18.35 | **7.43** |
+| SW surface down | 31.41 | **12.71** |
+| LW TOA up | 6.32 | **2.27** |
+| LW surface down | 13.38 | **3.95** |
+| SW heating (K/day) | 0.837 | **0.723** |
+| LW heating | 0.720 | **0.196** |
+| total heating | 1.556 | **0.920** |
+
+Every metric improves, most by 2.5-3.7x. **One input feature was worth more
+than 4x the network width and 7.5x the training budget put together.** At 256
+units / 200 epochs it goes a little further — SW TOA 7.25, LW TOA 2.28, total
+heating 0.796 — but width has clearly stopped being the lever.
+
+Note this moves the shortwave close to the label-noise floor: 7.25 W/m² against
+4.70 leaves ~5.5 W/m² of model error, so McICA sampling is now ~40% of the TOA
+shortwave error rather than the ~6% it was before. More draws per column is now
+worth considering, where earlier it was not.
 
 Adding the fraction moves the `per_band` widths from 49/55 to 50/56.
 Checkpoints trained on the old layout are rejected by the input-width
