@@ -309,11 +309,19 @@ def _main(argv=None) -> int:
                          "--start")
     args = ap.parse_args(argv)
 
-    from hydra import compose, initialize_config_module
+    import pathlib as _pathlib
+
+    from hydra import compose, initialize_config_dir
 
     from jcm.runners import build_coords
-    with initialize_config_module(version_base=None,
-                                  config_module="jcm.config"):
+
+    # initialize_config_dir, not initialize_config_module: jcm/config is a
+    # directory of YAML shipped as package data, not an importable module, so
+    # the module form fails with "Primary config module 'jcm.config' not
+    # found" and made this documented prefetch command unusable.
+    config_dir = _pathlib.Path(__file__).resolve().parents[1] / "config"
+    with initialize_config_dir(version_base=None,
+                               config_dir=str(config_dir)):
         cfg = compose(config_name="config", overrides=[f"grid={args.grid}"])
     coords = build_coords(cfg)
     ds = dataset_on_model_grid(coords, args.start, args.end, freq=args.freq)
