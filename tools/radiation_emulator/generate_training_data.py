@@ -540,6 +540,30 @@ def _solar_geometry_for_cos_zenith(rng, target_cos_zenith, n_scan=2880):
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=4)
+def _model_level_pressures(nlev, surface_pressure=101325.0):
+    """Full-level pressures (TOA-first) on the model's own hybrid levels.
+
+    Falls back to a log-spaced grid spanning the same range if the level
+    definitions are unavailable, so the sweep still runs for level counts
+    the ECHAM coefficients do not define.
+    """
+    try:
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
+        coords = get_echam_levels(nlev)
+        a = np.asarray(coords.a_boundaries, dtype=np.float64)
+        b = np.asarray(coords.b_boundaries, dtype=np.float64)
+        p_half = a + b * surface_pressure
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+        if p_full[0] > p_full[-1]:          # keep the TOA-first convention
+            p_full = p_full[::-1]
+        return np.maximum(p_full, _TOP_PRESSURE)
+    except Exception:
+        return np.logspace(
+            np.log10(_TOP_PRESSURE), np.log10(surface_pressure), nlev)
+
+
 def _latin_hypercube(rng, n_samples, n_dim):
     """Stratified LHS draws in [0, 1) — one sample per stratum per axis.
 
@@ -571,12 +595,15 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     """
     u = _latin_hypercube(rng, n_columns, 15)
 
-    # Fixed pressure/height grid: perturbations act on the state, not the
-    # discretisation, so all columns share one vertical grid. It spans the
-    # MODEL's range, 1 Pa to the surface -- an earlier version stopped at
-    # 100 Pa and so gave the top eight L47 levels no synthetic coverage at
-    # all, which is precisely where a coupled run then failed.
-    pressure = np.logspace(np.log10(_TOP_PRESSURE), np.log10(101325.0), nlev)
+    # The MODEL's own hybrid levels, not an invented grid. Two earlier
+    # versions got this wrong in opposite directions: a logspace grid from
+    # 100 Pa left the top eight L47 levels with no coverage at all (and a
+    # coupled run then failed exactly there), while a logspace grid from
+    # 1 Pa spread 47 levels over five decades instead of three, thickening
+    # every tropospheric layer until per-layer aerosol optical depth reached
+    # 21 and ~9% of columns came back with unphysical fluxes. Using the real
+    # coefficients keeps layer thicknesses right at every altitude.
+    pressure = _model_level_pressures(nlev)
     pressure_levels = np.broadcast_to(pressure, (n_columns, nlev)).copy()
     # Pressure-derived height, so the two stay consistent over five decades
     # of pressure rather than only over a 20 km troposphere.

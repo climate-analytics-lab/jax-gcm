@@ -44,6 +44,9 @@ from generate_training_data import (  # noqa: E402
 NCOL = 8
 NLEV = 10
 
+# The sweep is checked on the real model level count, not the tiny test one.
+NLEV_MODEL = 47
+
 _BANDS = None
 _LABELLER = None
 
@@ -157,14 +160,33 @@ class SweepCoverageTest(unittest.TestCase):
 
     def _sweep(self, n=2000):
         return perturbation_sweep(
-            n, NLEV, np.random.default_rng(0), 14, 16,
+            n, NLEV_MODEL, np.random.default_rng(0), 14, 16,
             np.linspace(300.0, 4000.0, 14), np.linspace(4000.0, 50000.0, 16))
 
-    def test_pressure_grid_reaches_the_model_top(self):
+    def test_pressure_grid_is_the_models_own_hybrid_grid(self):
+        """Use the real coefficients, not an invented grid.
+
+        Layer thicknesses drift otherwise, and per-layer optical depths
+        go with them.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
         p = self._sweep(64)["pressure_levels"][0]
-        self.assertLessEqual(p[0], 1.0)
-        self.assertGreater(p[-1], 1.0e5)
+        coords = get_echam_levels(NLEV_MODEL)
+        a = np.asarray(coords.a_boundaries, dtype=np.float64)
+        b = np.asarray(coords.b_boundaries, dtype=np.float64)
+        half = a + b * 101325.0
+        expected = 0.5 * (half[:-1] + half[1:])
+        if expected[0] > expected[-1]:
+            expected = expected[::-1]
+        np.testing.assert_allclose(p, np.maximum(expected, 1.0), rtol=1e-6)
         self.assertTrue(np.all(np.diff(p) > 0), "must stay TOA-first")
+
+    def test_per_layer_aerosol_optical_depth_stays_physical(self):
+        # A log-spaced grid over five pressure decades thickened the
+        # tropospheric layers until per-layer AOD hit 21 and ~9% of columns
+        # came back with unphysical fluxes.
+        self.assertLess(self._sweep(512)["aod_sw_per_band"].max(), 5.0)
 
     def test_model_top_temperature_is_spread_not_piled(self):
         t_top = self._sweep()["temperature"][:, 0]
