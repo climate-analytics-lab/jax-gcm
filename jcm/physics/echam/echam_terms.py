@@ -357,7 +357,7 @@ def echam_physics(
             # The process-time scavenging ledger (#708) is published by
             # the 2M scheme only; under 1M the wetdep/cloud-borne terms
             # fall back to the legacy cover-keyed reconstruction until the
-            # 1M mo_cloud ledger port lands (tracked in its own issue).
+            # 1M mo_cloud ledger port lands (#712).
             scavenging_ledger=(cloud_scheme == "2m"),
         )
         # The per-band Mie optics are only consumed by the interval-gated

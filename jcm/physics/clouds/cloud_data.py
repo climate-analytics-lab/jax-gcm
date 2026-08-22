@@ -83,7 +83,7 @@ class CloudData:
 
     # The ECHAM-HAM wet-scavenging interface (#708): the process-time
     # ledger ``cloud_subm_2`` receives, written by the 2M scheme (zero
-    # under 1M — a gap tracked by its own issue; the JAM terms that read
+    # under 1M — the mo_cloud ledger port is #712; the JAM terms that read
     # these are wired by the factory to fall back to the condensate-ratio
     # pathway under 1M). ``incloud_liquid``/``incloud_ice`` are ECHAM's
     # zmlwc/zmiwc — IN-CLOUD condensate captured before precipitation

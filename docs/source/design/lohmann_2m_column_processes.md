@@ -116,3 +116,41 @@ fusion heat from below rather than trusting closure alone.
 1M and 2M schemes (#687; documented on `CloudData`), and the 2M
 negative-mass repair is exported as `clouds.negative_mass_repair` [W/m²]
 (#689) so its sign-definite heating is measurable in any run.
+
+## The wet-scavenging interface (#708)
+
+ECHAM-HAM does not reconstruct aerosol scavenging from cover × grid-mean
+state: after `column_processes`, `cloud_subm_2` receives the ledger the
+microphysics itself integrated — `zmlwc`/`zmiwc` (in-cloud condensate
+captured at section 7, before precipitation formation depletes it), the
+in-cloud formation rates `zmratepr`/`zmrateps`/`zmsnowacl` (with `zmrateps`
+seeded from `sedimentation_ice`: sedimenting ice **is** a scavenging carrier
+in ECHAM-HAM), and `paclc`. The scan already computed all of these; they are
+now published on `CloudData` (`incloud_*`, `process_cloud_fraction`,
+`condensate_evaporation_rate` — see `ScavengingLedger` in
+`lohmann_2m/types.py`) and the JAM wet-deposition and cloud-borne exchange
+terms key to them:
+
+- **In-cloud removal** is HAMMOZ `prep_wetdep_hydro`'s
+  `peffwat = (zmratepr+zmsnowacl)·Δt/zmlwc` and `peffice = zmrateps·Δt/zmiwc`
+  (clipped to [0, 1]), split by the in-cloud ice mass fraction. Numerator and
+  denominator are both captured at process time, so the fraction is bounded
+  by construction — no unbounded rate ratio, no floor being "accidentally
+  correct" in near-empty cells.
+- **Resuspension** of cloud-borne aerosol keys to the condensate-evaporation
+  ledger (`zxlevap + zxievap`): a sky cleared by evaporation releases the
+  reservoir in one step, a sky cleared by rainout releases nothing (that
+  aerosol leaves with the precip), and the same step's rainout claim caps the
+  released share so the two sinks cannot jointly overdraw. Cover alone
+  cannot make this distinction — both endings read `cloud_fraction = 0`.
+
+One documented deviation from the reference: ECHAM-HAM zeroes `zmlwc`/`zmiwc`
+*after* the `paclc` write-back (mo_cloud_micro_2m.f90:3655 → 3660), so a cell
+whose condensate fully converted to precipitation reaches `cloud_subm_2` with
+a zero pool, `peffwat = 0`, and **no scavenging in exactly the step with the
+largest removal** — the reference has the dead zone itself. jcm keeps the
+faithful zeroing (the marker is information: zero pool + positive formation
+identifies the fully-converting cell) but maps the marker to scavenged
+fraction **1**, not 0. The 1M scheme does not publish the ledger yet (#712);
+the factory statically wires the JAM terms back to the legacy cover-keyed
+reconstruction under `cloud_scheme: 1m`.
