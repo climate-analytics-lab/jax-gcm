@@ -106,6 +106,10 @@ class MicrophysicsParameters:
                          # cloud-fraction floor below which a cell counts as
                          # cloud-free and its condensate force-evaporates
                          # (the ``nloidx`` partition, #668)
+    ccwmin: float        # ECHAM ``ccwmin`` (mo_echam_cloud_params): grid-mean
+                         # condensate below which a cell no longer counts as
+                         # cloudy — drives the post-microphysics ``paclc``
+                         # write-back (mo_cloud.f90:1280, #687)
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
     # 0 = Beheng (1994) implicit form (default; robust at large dt).
@@ -131,7 +135,7 @@ class MicrophysicsParameters:
                  vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30, dt_sedi=10.0,
-                 cqtmin=1.0e-12,
+                 cqtmin=1.0e-12, ccwmin=1.0e-7,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
@@ -179,6 +183,7 @@ class MicrophysicsParameters:
             epsilon=jnp.array(epsilon),
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
+            ccwmin=jnp.array(ccwmin),
             dt_sedi=jnp.array(dt_sedi),
             autoconversion_scheme=int(autoconversion_scheme),
         )
@@ -1368,7 +1373,24 @@ class Echam1MMicrophysics(PhysicsTerm):
         diagnostics = {**diagnostics, "autoconv": autoconv_col,
                        "accretn": accretn_col, "wbf": zero_col}
 
+        # Post-microphysics cloud-cover write-back (ECHAM mo_cloud.f90:1280
+        # — ``paclc = FSEL(-(zxlp1_d*zxip1_d), paclc, 0)``): a cell whose
+        # end-of-step condensate falls below ``ccwmin`` in BOTH phases is
+        # no longer cloudy. This makes ``clouds.cloud_fraction`` mean the
+        # same thing under cloud_scheme='1m' and '2m' (#687): the cover
+        # the step actually leaves behind, which radiation, COSP, AeroCom
+        # and the JAM cloud-borne/aqueous/wetdep terms all read. The
+        # end-of-step condensate is interim + the scheme's own tendency
+        # (upstream increments are already inside the interim values).
+        qc_end = qc_interim + dt * micro_tend.dqcdt.T
+        qi_end = qi_interim + dt * micro_tend.dqidt.T
+        cloud_fraction_out = jnp.where(
+            (qc_end < params.ccwmin) & (qi_end < params.ccwmin),
+            0.0, cloud_fraction,
+        )
+
         clouds = clouds.copy(
+            cloud_fraction=cloud_fraction_out,
             precip_rain=micro_state.precip_rain,
             precip_snow=micro_state.precip_snow,
             # Per-level precipitation flux profiles for satellite-simulator

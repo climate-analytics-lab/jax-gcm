@@ -188,6 +188,17 @@ def update_tendencies_and_important_vars(
     tracer_tendency_icnc = ztmst_rcp * (icnc * inv_air_density - tracer_tm1_icnc)
 
     # --- 5) Corrections to avoid negative in-cloud mass (merge logic)
+    # ECHAM's zdxlcor/zdxicor (mo_cloud_micro_2m.f90:3640-3660): where the
+    # reconstructed end-of-step GRID-MEAN condensate falls below ccwmin
+    # (1e-7 kg/kg — including small positives and dycore-ringing
+    # negatives), the residual is returned to vapour with the matching
+    # latent heat and the number tracers are zeroed. The grid-mean-vs-
+    # ccwmin pairing is verified against the reference (#688: ECHAM tests
+    # zxlp1/zxip1, both grid-mean, against the same 1e-7). The repair is
+    # thermodynamically consistent but SIGN-DEFINITE — an undershoot
+    # always becomes warming+drying — so it is returned to the caller and
+    # published as a diagnostic rather than folded silently into the
+    # tendencies (#689).
     # liquid
     ll_liq_neg = liq_mmr_next < params.ccwmin
     zdxlcor = jnp.where(ll_liq_neg, -ztmst_rcp * liq_mmr_next, 0.0)
@@ -284,6 +295,8 @@ def update_tendencies_and_important_vars(
         incloud_ice_before_snow,
         out_preffl,
         out_preffi,
+        zdxlcor,
+        zdxicor,
     )
 
 

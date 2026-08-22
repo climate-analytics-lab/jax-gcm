@@ -12,6 +12,8 @@ from math import pi
 
 import jcm.constants as c
 
+from jcm.physics import thermodynamics
+
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     eff_ice_crystal_radius,
@@ -217,68 +219,49 @@ def mixed_phase_deposition_and_corrections(
     )
 
     # -------------------------------------------------------------------------
-    # 6. Saturation vapour pressures and specific humidities at temperature_tmp
-    #    using Teten's formula (replaces Fortran lookup tables).
+    # 6. Saturation specific humidities and dqs/dT at temperature_tmp.
     #
-    #    Over ice  (lo2=True):  e_s = e_s_ice(T_tmp)
-    #    Over water(lo2=False): e_s = e_s_water(T_tmp)
+    #    ECHAM reads the mo_convect_tables lookups here: ``tlucua(it)`` is
+    #    eps·e_s from the Tetens pairs (ice c3ies=21.875/c4ies=7.66, water
+    #    c3les=17.269/c4les=35.86, prefactor c1es=610.78), indexed by
+    #    it = NINT(1000·T), and ``zdqsdt = 1000·(qs(it+1) − qs(it))`` — a
+    #    finite difference over 0.001 K, i.e. dqs/dT. We use the shared
+    #    ``jcm.physics.thermodynamics`` implementation of exactly those
+    #    Tetens pairs, with the analytic derivative (the 0.001 K difference
+    #    quotient to machine precision, without the subtraction noise).
     #
-    #    sat_spec_hum: q_s = eps * e_s / (p - (1-eps)*e_s)
-    #                      ≈ e_s / (p/(eps) - e_s)    [standard approximation]
-    #    where eps = Rd/Rv, vtmpc1 = Rv/Rd - 1
+    #    Two earlier ports of this block were badly wrong and are the
+    #    history behind #667: first c.ak (the BOLTZMANN constant) as the
+    #    exponent coefficient with c.p0s1_bg (101325 Pa!) as the prefactor
+    #    suppressed zqcon by ~1e6 (review finding 1.2); the repaired
+    #    version then evaluated the difference quotient at T + 1.0 K but
+    #    kept the ×1000 lookup-step factor, leaving zdqsdt ~1000× too
+    #    large and zqcon = 1/(1 + L/cp·zdqsdt) at ~1/650 — the scheme's
+    #    own saturation adjustment was still effectively inert (#667.1).
+    #    It also mixed a Clausius–Clapeyron integral form for qs(T) with
+    #    Tetens for qs(T+1), which the analytic pair here makes moot.
     # -------------------------------------------------------------------------
+    qs_ice_tmp, dqs_ice_dt = thermodynamics.saturation_specific_humidity_and_derivative(
+        temperature_tmp, pressure, phase="ice")
+    qs_wat_tmp, dqs_wat_dt = thermodynamics.saturation_specific_humidity_and_derivative(
+        temperature_tmp, pressure, phase="water")
 
-    # Re-evaluate at temperature_tmp (this replaces fortran lookup tables)
-    ztmp_ice = (c.alhs/c.rv)*(1.0/c.tmelt - 1.0/temperature_tmp)
-    ztmp_water = (c.alhc/c.rv)*(1.0/c.tmelt - 1.0/temperature_tmp)
-    zes_ice_new = 611 * jnp.exp(ztmp_ice)
-    zes_water_new = 611 * jnp.exp(ztmp_water)
+    qsat_tmp = jnp.where(lo2, qs_ice_tmp, qs_wat_tmp)   # pqsp1tmp
+    qsat_tmp_water = qs_wat_tmp                          # zqsp1tmpw
 
-    # Select phase-appropriate saturation vapour pressure
-    zes = jnp.where(lo2, zes_ice_new, zes_water_new)
-    zesw = zes_water_new
-
-    # Saturation specific humidity (standard formula)
-    # q_s = zes / (p - (1 - Rd/Rv)*zes)  — same form as ECHAM sat_spec_hum
-    def _qsat(e, p):
-        # q_s = eps·e_s / (p − (1−eps)·e_s). The leading eps was missing
-        # (qsat 1.61× high — review finding 2.20); note 1/(1+vtmpc1) ≡ eps.
-        e_clipped = jnp.minimum(e, 0.4 * p)   # safety clip (Fortran: zes < 0.4)
-        return c.eps * e_clipped / (p - (1.0 - c.eps) * e_clipped)
-
-    qsat_tmp = _qsat(zes, pressure)          # pqsp1tmp: phase-appropriate
-    qsat_tmp_water = _qsat(zesw, pressure)   # zqsp1tmpw: always over water
-
-    # zcor: correction factor d(q_s)/d(e_s) * p / (p - e_s)^2  (used in zlcdqsdt)
-    # In ECHAM: zcor = 1 / (1 - vtmpc1 * q_s)
+    # zcor = 1/(1 − vtmpc1·qs): d(qs)/d(es) factor, used in the ll1=False
+    # branch of zlcdqsdt below (kept for the exact Fortran mapping).
     zcor = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp, params.eps)
-    zcorw = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp_water, params.eps)  # noqa: F841 — used in Phase 5b
 
-    # -------------------------------------------------------------------------
-    # 7. Saturation specific humidity at (t+1) for zdqsdt
-    #    In Fortran: zqst1 uses tlucuap1 (lookup at it+1), approximated here
-    #    by evaluating at (T_tmp + 1 K) and taking finite difference.
-    # -------------------------------------------------------------------------
-    # ECHAM mo_convect_tables Tetens pairs: ice c3ies=21.875/c4ies=7.66,
-    # water c3les=17.269/c4les=35.86, prefactor c2es = c1es·(Rd/Rv) =
-    # 610.78·eps — the lookup table tlucua stores eps·e_s, which is why the
-    # /pressure form below carries no explicit eps. The previous code used
-    # c.ak (the BOLTZMANN constant, 1.38e-23) as the exponent coefficient
-    # and c.p0s1_bg (101325 Pa!) as the prefactor: exp(~0)·101325/p pinned
-    # zqst1 at its 0.5 cap, made zdqsdt ~ +490 and the zqcon
-    # thermodynamic factor ~1e-6 — suppressing internal condensation/
-    # deposition by six orders of magnitude (review finding 1.2).
-    ztmp_ice_p1 = jnp.minimum(21.875 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 7.66, params.eps), 700.0)
-    ztmp_water_p1 = jnp.minimum(17.269 * (temperature_tmp + 1.0 - c.tmelt) / jnp.maximum(temperature_tmp + 1.0 - 35.86, params.eps), 700.0)
+    # dqs/dT on the phase surface lo2 selected (ECHAM zdqsdt, units kg/kg/K).
+    zdqsdt = jnp.where(lo2, dqs_ice_dt, dqs_wat_dt)
 
-    c2es = 610.78 * c.eps
-    zes_p1 = jnp.where(lo2, c2es * jnp.exp(ztmp_ice_p1), c2es * jnp.exp(ztmp_water_p1))
-    zqst1 = zes_p1 / pressure
-    zqst1 = jnp.minimum(zqst1, 0.5)
-    zqst1 = zqst1 / (1.0 - c.vtmpc1 * zqst1)
-
-    # zdqsdt = 1000*(q_s(T+1) - q_s(T))  [units: per 1000 K — as in Fortran]
-    zdqsdt = 1000.0 * (zqst1 - qsat_tmp)
+    # Phase-appropriate e_s, needed only for the ll1 regime switch below.
+    zes = jnp.where(
+        lo2,
+        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="ice"),
+        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="water"),
+    )
 
     # -------------------------------------------------------------------------
     # 8. Thermodynamic correction factor zqcon
@@ -288,7 +271,10 @@ def mixed_phase_deposition_and_corrections(
     #    a numerical regime of the lookup table; for the analytic formula the
     #    two expressions converge).
     # -------------------------------------------------------------------------
-    ll1 = zes < 0.4 * pressure   # equivalent to Fortran ll1 (zes < 0.4 in sat_spec_hum units)
+    # Fortran ``ll1 = (zes < 0.4)`` where sat_spec_hum's zes is eps·e_s/p —
+    # the lookup-validity regime switch, essentially always True at
+    # atmospheric conditions.
+    ll1 = (c.eps * zes / jnp.maximum(pressure, params.eps)) < 0.4
 
     zlc = jnp.where(lo2, lsdcp, lvdcp)
 
