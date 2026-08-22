@@ -2388,11 +2388,11 @@ class TestScavengingLedger2M:
         )
 
     def test_incloud_pool_is_condensate_over_cover(self):
-        """zmlwc is IN-CLOUD: ~qc/cf in the deck, not the grid mean."""
+        """Zmlwc is IN-CLOUD: ~qc/cf in the deck, not the grid mean."""
         column = self._warm_deck()
         out = self._run(column)
         ledger = out[self.LEDGER_INDEX]
-        qc, cf = column[3], column[7]
+        qc = column[3]
         deck = np.asarray(qc) > 0
         il = np.asarray(ledger.incloud_liquid)[deck]
         # The pool is captured after evaporation/condensation adjustments,
@@ -2404,9 +2404,10 @@ class TestScavengingLedger2M:
         assert np.allclose(pcf[~deck], 0.0, atol=1e-6)
 
     def test_formation_rate_bounded_by_pool(self):
-        """f = formation*dt / pool is a fraction: the ledger denominator is
+        """F = formation*dt / pool is a fraction: the ledger denominator is
         captured BEFORE the formation depletes it, so f <= 1 wherever the
-        pool survives (the #708 boundedness-by-construction property)."""
+        pool survives (the #708 boundedness-by-construction property).
+        """
         column = self._warm_deck()
         dt = 900.0
         ledger = self._run(column, dt=dt)[self.LEDGER_INDEX]
@@ -2423,7 +2424,8 @@ class TestScavengingLedger2M:
         cirrus layer with NO cold-chain aggregation (cloud flag off below,
         few large crystals falling) must still report a positive in-cloud
         snow-formation ledger — the sedimenting ice is a scavenging
-        carrier in ECHAM-HAM's cloud_subm_2."""
+        carrier in ECHAM-HAM's cloud_subm_2.
+        """
         nlev = 16
         T = jnp.linspace(215.0, 260.0, nlev)   # all below freezing
         p = jnp.linspace(2e4, 6e4, nlev)
