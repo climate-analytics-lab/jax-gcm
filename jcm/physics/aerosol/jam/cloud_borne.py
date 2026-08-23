@@ -271,17 +271,32 @@ class CloudBorneExchange(PhysicsTerm):
                 e_gm / jnp.maximum(e_gm + pool_gm, _PROCESS_FLOOR),
                 0.0,
             )
-            # Cells with NO cloud process this step (advected-in q_cb in
-            # clear air: nothing evaporated, nothing formed) keep the slow
-            # CAM-style timescale drain; everywhere else the ledger says
-            # exactly which share to release. A fully-rained-out cell is
-            # ``live`` through its formation ledger with f_evap ≈ 0 — no
-            # resuspension racing the rainout.
-            phi_down = jnp.where(
+            # The ledger keying applies ONLY where the sky has cleared
+            # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0) — the branch the
+            # #708 race lived in: a rained-out cell is ``live`` through
+            # its formation ledger with f_evap ≈ 0 (no resuspension racing
+            # the rainout), an evaporated cell releases everything in one
+            # step, and a no-process cell (advected-in q_cb in clear air)
+            # keeps the slow CAM-style timescale drain.
+            #
+            # Where cloud PERSISTS, the downward direction is the
+            # equilibrium relaxation toward the (nonzero) target and MUST
+            # keep its timescale: keying it to the evaporation ledger
+            # zeroes it in any non-evaporating cloudy cell, which turns
+            # the reservoir into a ratchet — q_cb can rise toward the
+            # activation target but never fall. A 60-day T63 run with that
+            # form loaded the cloud-borne accumulation mode ~1e4x at cloud
+            # levels and blew every activatable species up exponentially
+            # from day ~32 (dust x390 in 30 days); restoring the under-
+            # cloud relaxation is what bounds the reservoir by the
+            # activation equilibrium.
+            cleared = cf <= _MIN_CLOUD_FRACTION
+            phi_ledger = jnp.where(
                 live,
                 jnp.minimum(f_evap, jnp.maximum(1.0 - f_form, 0.0)),
                 phi_slow,
             )
+            phi_down = jnp.where(cleared, phi_ledger, phi_slow)
         else:
             phi_down = phi_slow
         # phi ∈ [0, 1]: the move never overshoots the target, so neither

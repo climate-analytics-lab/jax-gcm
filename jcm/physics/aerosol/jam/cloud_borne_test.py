@@ -357,6 +357,38 @@ class CloudBorneExchangeTest(unittest.TestCase):
             np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
         )
 
+    def test_persistent_cloud_still_relaxes_excess_down(self):
+        # THE anti-ratchet gate: under PERSISTENT cloud (target > 0) the
+        # downward direction is the equilibrium relaxation and must keep
+        # its timescale even when nothing evaporated this step. Keying it
+        # to the evaporation ledger zeroed it in every non-evaporating
+        # cloudy cell, making the reservoir a ratchet (rise toward the
+        # activation target, never fall) — measured blowing up every
+        # activatable species exponentially in a 60-day T63 run.
+        state, diagnostics = self._setup(
+            cloud_fraction=0.5, q_cb=1.0e-9, n_cb=1.0e8,
+            q_int=1.0e-12, n_int=1.0e3,   # target << q_cb
+        )
+        shape = state.temperature.shape
+        clouds = diagnostics["clouds"]
+        # Persistent, non-evaporating, non-precipitating cloud.
+        clouds.incloud_liquid = jnp.full(shape, 1.0e-3)
+        clouds.process_cloud_fraction = jnp.full(shape, 0.5)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q0 = np.asarray(diagnostics[CARRY_KEY][nm])
+        q1 = np.asarray(out[CARRY_KEY][nm])
+        # Excess above target must relax by the 900 s fraction
+        # (phi = 1 - exp(-1800/900) ~ 0.86) toward the activation target
+        # (0.9 x q_tot here), not stay ratcheted (phi_down = 0).
+        q_int0 = 1.0e-12
+        target = 0.9 * (q_int0 + q0)
+        phi = -np.expm1(-1800.0 / 900.0)
+        expected = q0 + (target - q0) * phi
+        np.testing.assert_allclose(q1, expected, rtol=1e-3)
+        self.assertTrue((q1 < 0.999 * q0).all(),
+                        f"reservoir ratcheted: {q1.max()} vs {q0.max()}")
+
     def test_phase_transfer_is_not_evaporation(self):
         # WBF / freezing move condensate between phases WITHIN the pool
         # (liquid pool empty, ice pool full, no evaporation ledger): the
