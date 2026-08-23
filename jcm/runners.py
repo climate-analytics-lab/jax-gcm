@@ -2034,7 +2034,22 @@ def run_chunked(
             if k.startswith("budget_dyn_"))
         if budget_species:
             import numpy as _np
-            _w = _np.cos(_np.deg2rad(_np.asarray(ds.lat, dtype=_np.float64)))
+            _lat = _np.asarray(ds.lat, dtype=_np.float64)
+            # Exact Gaussian quadrature weights when the output grid is
+            # Gauss-Legendre (dinosaur): match the nodes by sin(lat) and
+            # use their weights, so a transport residual whose quadrature
+            # integral should cancel actually reads zero. cos(lat) is
+            # only the leading approximation of those weights and biases
+            # meridionally structured fields. Non-Gaussian grids fall
+            # back to cosine weighting.
+            _nodes, _gw = _np.polynomial.legendre.leggauss(_lat.size)
+            _order = _np.argsort(_np.sin(_np.deg2rad(_lat)))
+            if _np.allclose(_np.sin(_np.deg2rad(_lat))[_order], _nodes,
+                            atol=1e-6):
+                _w = _np.empty_like(_gw)
+                _w[_order] = _gw
+            else:
+                _w = _np.cos(_np.deg2rad(_lat))
             def _gm(name):
                 v = _np.asarray(ds[name], dtype=_np.float64)
                 # (time, lon, lat) -> weighted global+time mean

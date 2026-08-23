@@ -69,6 +69,29 @@ class GaugeTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(out3["budget_dyn_du"]),
                                    created / dt, rtol=1e-5)
 
+    def test_zero_filled_template_expectation_reads_as_invalid(self):
+        # get_empty_data traces the gauge and ZERO-FILLS the carry, and
+        # the initial physics carry hands that template back on step 1 —
+        # a warm start (nonzero burden) must NOT report its entire
+        # initial mass as a fictitious dynamics source (Codex P2 on
+        # #720). The zero-filled _valid flag marks the seed structural.
+        import jax
+
+        dt = 600.0
+        state, diag = _make(q=5e-9)     # warm start: real burden
+        tends = {"m_du_acc": jnp.zeros((4, 3)), "m_du_cor": jnp.zeros((4, 3))}
+        real = gauge_aerosol_budget(dict(diag), state, tends, dt)
+        # Simulate the template: zero-fill the carried expectation.
+        template = jax.tree_util.tree_map(
+            jnp.zeros_like, real[CARRY_KEY])
+        seeded = {**diag, CARRY_KEY: template}
+        out = gauge_aerosol_budget(seeded, state, tends, dt)
+        np.testing.assert_array_equal(np.asarray(out["budget_dyn_du"]), 0.0)
+        # The step it emits is valid, so the NEXT step measures normally.
+        out2 = gauge_aerosol_budget(dict(out), state, tends, dt)
+        np.testing.assert_allclose(np.asarray(out2["budget_dyn_du"]), 0.0,
+                                   atol=1e-22)
+
     def test_noop_without_airmass_or_aerosols(self):
         state, diag = _make()
         # No air-mass diagnostics -> untouched dict.

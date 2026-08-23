@@ -87,6 +87,18 @@ def gauge_aerosol_budget(
 
     dm = rho * dz                                   # (nlev, ncols) [kg/m²]
     prev_expected = diagnostics.get(CARRY_KEY)
+    # Validity flag rides the carry: ``get_empty_data`` traces this
+    # function and ZERO-FILLS the resulting carry template, and the
+    # initial physics carry hands that template back on the first step —
+    # so ``prev_expected`` is present-but-structural there, and treating
+    # it as a real expectation would report the entire initial burden as
+    # a fictitious dynamics source on step one (harmless from a zero
+    # cold start, badly wrong from a warm start). The flag is written as
+    # 1 by every real step and is 0 exactly when the expectation is the
+    # zero-filled seed.
+    valid = jnp.asarray(0.0, dm.dtype)
+    if prev_expected is not None:
+        valid = prev_expected.get("_valid", valid) * jnp.ones((), dm.dtype)
     out = dict(diagnostics)
     expected: dict[str, jnp.ndarray] = {}
     for sp, names in sorted(by_species.items()):
@@ -102,9 +114,12 @@ def gauge_aerosol_budget(
         out[f"budget_mass_{sp}"] = mass
         out[f"budget_ptend_{sp}"] = ptend
         if prev_expected is not None and sp in prev_expected:
-            out[f"budget_dyn_{sp}"] = (mass - prev_expected[sp]) / dt
+            out[f"budget_dyn_{sp}"] = (
+                valid * (mass - prev_expected[sp]) / dt
+            )
         else:
             out[f"budget_dyn_{sp}"] = jnp.zeros_like(mass)
         expected[sp] = mass + dt * ptend
+    expected["_valid"] = jnp.ones((), dm.dtype)
     out[CARRY_KEY] = expected
     return out
