@@ -2023,6 +2023,37 @@ def run_chunked(
         reports.append(report)
         print_report(report)
 
+        # #713: one greppable aerosol-budget line per species per chunk.
+        # The gauge fields close d(mass)/dt = ptend + dyn in-step, so the
+        # chunk means printed here attribute any drift on the spot:
+        # ``dyn`` is the transport (SL/filters) creation, ``ptend-ledger``
+        # the unledgered physics. All float64 global means — a drift that
+        # takes months to show in burdens is visible in one chunk here.
+        budget_species = sorted(
+            k[len("budget_dyn_"):] for k in ds.data_vars
+            if k.startswith("budget_dyn_"))
+        if budget_species:
+            import numpy as _np
+            _w = _np.cos(_np.deg2rad(_np.asarray(ds.lat, dtype=_np.float64)))
+            def _gm(name):
+                v = _np.asarray(ds[name], dtype=_np.float64)
+                # (time, lon, lat) -> weighted global+time mean
+                return float(
+                    (v * _w[None, None, :]).sum(axis=(-1, -2)).mean()
+                    / (_w.sum() * v.shape[-2]))
+            for sp in budget_species:
+                mass = _gm(f"budget_mass_{sp}")
+                ptend = _gm(f"budget_ptend_{sp}")
+                dyn = _gm(f"budget_dyn_{sp}")
+                ledger = 0.0
+                for fam, sgn in (("emi", 1.0), ("wet", -1.0), ("dry", -1.0)):
+                    key = f"{fam}_{sp}"
+                    if key in ds:
+                        ledger += sgn * _gm(key)
+                print(f"  budget {sp:4s}: mass={mass*1e6:10.3f} mg/m2  "
+                      f"ptend={ptend*1e12:+10.2f} dyn={dyn*1e12:+10.2f} "
+                      f"unledgered={(ptend-ledger)*1e12:+10.2f} ng/m2/s")
+
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         ds.attrs.update(provenance.attrs())
         ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
