@@ -61,10 +61,15 @@ def resolve_refs(pins: dict) -> dict:
         r = subprocess.run(["git", "ls-remote", url, ref],
                            capture_output=True, text=True, timeout=120)
         sha = r.stdout.split()[0] if r.stdout.split() else (
-            ref if len(ref) >= 7 and all(c in "0123456789abcdef" for c in ref)
+            ref if len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)
             else None)
         if not sha:
-            raise SystemExit(f"cannot resolve {ref!r} in {url}")
+            hexish = all(c in "0123456789abcdef" for c in ref) and len(ref) >= 7
+            hint = (" — that looks like a SHORT SHA: git fetch-by-SHA needs "
+                    "the full 40 characters (GitHub refuses abbreviated "
+                    "SHAs; the pod died with 'couldn't find remote ref'). "
+                    "Use $(git rev-parse <short>)." if hexish else "")
+            raise SystemExit(f"cannot resolve {ref!r} in {url}{hint}")
         out[d] = (url, sha)
     return out
 
