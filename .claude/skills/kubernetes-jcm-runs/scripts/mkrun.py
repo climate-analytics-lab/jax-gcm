@@ -94,7 +94,12 @@ def build(a, resolved) -> dict:
     S = site_profile.get(a.site)
     name = f"jcm-run-{a.name}".lower().replace("_", "-")[:60]
     rundir = f"/runs/{a.name}"
+    # rm -rf first: restartPolicy OnFailure restarts the CONTAINER in the
+    # same pod, and /work (an emptyDir) survives that — a bare git clone
+    # then dies on the existing directory under `set -e`, turning every
+    # in-place restart into a crash loop (observed on jam-2yr-fixed).
     clone = "\n".join(
+        f'rm -rf /work/{d} && '
         f'git clone --filter=blob:none --no-checkout {url} /work/{d} '
         f'&& git -C /work/{d} fetch --depth 1 origin {sha} '
         f'&& git -C /work/{d} checkout --detach {sha}'
@@ -128,6 +133,26 @@ echo "=== node $NODE_NAME | $(nvidia-smi --query-gpu=name --format=csv,noheader)
 mkdir -p /work {rundir}
 {clone}
 cd /work/jcm
+# The image installs jcm EDITABLE from /app, and a modern pip editable
+# install resolves through a meta-path finder that beats BOTH the cwd and
+# PYTHONPATH — so without this reinstall, `python -m jcm.main` from
+# /work/jcm silently runs the image's RELEASE code while PROVENANCE
+# records the pinned SHA (observed: Hydra searching /app/jcm/config and
+# missing configs the pinned branch has). Re-point the editable install
+# at the clone, then HARD-GATE the import paths: a wrong path must kill
+# the run, not lie in the provenance.
+pip install --no-cache-dir --no-deps -q -e /work/jcm
+python - <<'PYPATH'
+import os, sys
+import jcm, dinosaur
+for mod, want in ((jcm, "/work/jcm"), (dinosaur, "/work/dinosaur-sl")):
+    p = os.path.dirname(mod.__file__)
+    if not p.startswith(want):
+        sys.exit("FATAL: %s imports from %s, not %s — the pinned "
+                 "clone is not the code that would run."
+                 % (mod.__name__, p, want))
+print("import paths OK:", os.path.dirname(jcm.__file__))
+PYPATH
 # MAM4-JAX declares diffrax and matplotlib; neither is in the jcm image, and
 # the JAM condensation backend imports diffrax at module load. Installing it
 # here can in principle drag jax with it, which would silently swap the CUDA

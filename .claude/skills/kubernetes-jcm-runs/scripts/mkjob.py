@@ -157,7 +157,10 @@ def job(preset: str, a) -> dict:
     # the previous commit, which is how the first Nautilus run executed
     # without the fix it was submitted to test. It also makes reruns
     # unreproducible, which is the whole point of jax-gcm#591.
+    # rm -rf first: an in-place container restart re-runs the script with
+    # /work intact and a bare clone dies on the existing dir (see mkrun).
     clone = "\n".join(
+        f'rm -rf /work/{d} && '
         f'git clone --filter=blob:none --no-checkout {url} /work/{d} '
         f'&& git -C /work/{d} fetch --depth 1 origin {sha} '
         f'&& git -C /work/{d} checkout --detach {sha} '
@@ -181,6 +184,20 @@ echo "=== node: $NODE_NAME  gpu: $(nvidia-smi --query-gpu=name --format=csv,nohe
 mkdir -p /work /scratch /reports
 {clone}
 cd /work/jcm
+# Re-point the image's editable jcm install at the clone and hard-gate the
+# import paths — the editable finder otherwise beats cwd AND PYTHONPATH and
+# the benchmark times RELEASE code under a pinned-SHA label (see mkrun).
+pip install --no-cache-dir --no-deps -q -e /work/jcm
+python - <<'PYPATH'
+import os, sys
+import jcm, dinosaur
+for mod, want in ((jcm, "/work/jcm"), (dinosaur, "/work/dinosaur-sl")):
+    p = os.path.dirname(mod.__file__)
+    if not p.startswith(want):
+        sys.exit("FATAL: %s imports from %s, not %s."
+                 % (mod.__name__, p, want))
+print("import paths OK:", os.path.dirname(jcm.__file__))
+PYPATH
 # Packages the image lacks: it runs `pip install -e .` with no extras, off a
 # release that predates the data mirror. diffrax (MAM4-JAX's condensation
 # backend imports it at module load), huggingface_hub (resolves the hf://
