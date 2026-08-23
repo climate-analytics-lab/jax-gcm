@@ -52,11 +52,18 @@ from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
-# Cap on in-cloud condensate (kg/kg) handed to the cloud optics — the high end
-# of realistic in-cloud water; bounds the cloud optical depth of thin clouds
-# carrying large grid-mean condensate so the two-stream solver can't NaN. The
-# faithful-radiation equivalent of ECHAM's optics inhomogeneity factor + r_eff
-# table clamp. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+# NaN guard on in-cloud condensate (kg/kg) handed to the cloud optics. A thin
+# but resolved cloud carrying large grid-mean condensate gives a huge in-cloud
+# water (grid_mean / cf), and the resulting optical depth NaNs the two-stream
+# solver. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+#
+# This is NOT a sub-grid inhomogeneity scaling, and jcm implements none.
+# ECHAM's ``zinhoml`` is a continuous LWP-dependent rescaling applied to every
+# cloudy cell; this is a one-sided clip that is the identity almost everywhere
+# and flattens everything above the threshold to the same value. Measured on
+# T63L47 output it binds in 0.0026% of cloudy cells, and removing it entirely
+# there moves fluxes by <= 0.006 W/m2 -- inert in practice, but do not read it
+# as inhomogeneity being covered (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
