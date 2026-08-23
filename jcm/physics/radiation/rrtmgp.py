@@ -428,6 +428,7 @@ def prepare_icon_data(
         # surface scalars through bare; replicate exactly so the cached
         # branch in `_radiation_with_caching` matches our shape.
         cos_zenith=jnp.atleast_1d(cos_zenith),
+        cos_zenith_at_compute=jnp.atleast_1d(cos_zenith),
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
@@ -898,7 +899,9 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
     radiation_should_compute,
+    rescale_cached_radiation,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -1115,6 +1118,13 @@ class RRTMGPRadiation(PhysicsTerm):
         """Compute or reuse cached RRTMGP heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
             tend, rad = self._compute_full(state, diagnostics, forcing, params)
@@ -1130,14 +1140,13 @@ class RRTMGPRadiation(PhysicsTerm):
             return tend, rad
 
         def _use_cached():
-            tend = cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            )
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
             # Same dtype pin as _compute: under x64 the cached heating ->
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, radiation
+            return tend, rad
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),
@@ -1437,6 +1446,9 @@ class RRTMGPRadiation(PhysicsTerm):
         rad_out = RadiationData(
             **noa,
             cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
+            cos_zenith_at_compute=_column_vector_rrtmgp(
+                diagnostics_vmapped.cos_zenith_at_compute, ncols,
+            ),
             surface_albedo_vis=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_albedo_vis, ncols,
             ),
