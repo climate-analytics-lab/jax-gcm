@@ -314,6 +314,11 @@ class RadiationState(NamedTuple):
     # Gas mixing ratios
     h2o_vmr: jnp.ndarray            # Water vapor volume mixing ratio [nlev]
     o3_vmr: jnp.ndarray             # Ozone volume mixing ratio [nlev]
+    # Specific humidity is carried alongside ``h2o_vmr`` so the RRTMGP path
+    # never has to invert the grey scheme's vmr convention. Recovering q from
+    # h2o_vmr used to give back the MIXING RATIO q/(1-q), which the library
+    # then divided by (1-q) a second time (#678).
+    specific_humidity: jnp.ndarray  # Specific humidity (kg/kg) [nlev]
     
     # Cloud properties
     cloud_fraction: jnp.ndarray      # Cloud fraction [nlev]

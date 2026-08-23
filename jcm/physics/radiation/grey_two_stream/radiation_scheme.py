@@ -185,6 +185,7 @@ def prepare_radiation_state(
         pressure_interfaces=pressure_interfaces,
         h2o_vmr=h2o_vmr,
         o3_vmr=ozone_vmr,
+        specific_humidity=q_clipped,
         cloud_fraction=cloud_fraction,
         cloud_water_path=cloud_water_path,
         cloud_ice_path=cloud_ice_path,

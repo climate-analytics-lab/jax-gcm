@@ -302,10 +302,17 @@ def prepare_rrtmgp_data(
     cloud_ice_mixing = cip_1d / (rho * layer_thickness)
     total_condensate = cloud_water_mixing + cloud_ice_mixing
 
-    # Water vapour VMR -> mass mixing ratio: q = VMR * eps
-    h2o_mass_mixing = icon_data.h2o_vmr * c.eps
-    h2o_mass_mixing = lax.cond(needs_reversal, flip, identity, h2o_mass_mixing)
-    total_water = h2o_mass_mixing + total_condensate
+    # The library wants q_t as a SPECIFIC humidity: it forms the vapour
+    # mixing ratio itself as (q_t - q_c)/(1 - q_t). Reconstructing q from
+    # h2o_vmr instead returned q/(1-q) -- because the grey scheme's
+    # `h2o_vmr = q/(1-q)*1.608` and `1.608*eps = 1.0002` cancel -- so the
+    # 1/(1-q) was applied twice and the H2O VMR reaching gas optics was
+    # +2.1% at q = 20 g/kg (#678). Pass the specific humidity straight
+    # through instead of round-tripping the grey convention.
+    h2o_specific = lax.cond(
+        needs_reversal, flip, identity, icon_data.specific_humidity,
+    )
+    total_water = h2o_specific + total_condensate
 
     # Cloud effective radii (microns -> metres). Microphysical values from
     # the clouds carry (ECHAM preffl/preffi, written by the 2M scheme) take
