@@ -233,49 +233,6 @@ class MicrophysicsTendencies(NamedTuple):
     dqsdt: jnp.ndarray          # Snow tendency (kg/kg/s)
 
 
-def cloud_droplet_radius(
-    cloud_water: jnp.ndarray,
-    air_density: jnp.ndarray,
-    droplet_number: jnp.ndarray,
-    config: MicrophysicsParameters
-) -> jnp.ndarray:
-    """Calculate effective cloud droplet radius
-    
-    Args:
-        cloud_water: Cloud liquid water content (kg/kg)
-        air_density: Air density (kg/m³)
-        droplet_number: Droplet number concentration (1/kg)
-        config: Microphysics configuration
-        
-    Returns:
-        Effective radius (m)
-
-    """
-    # Convert mixing ratio to mass concentration
-    cloud_water_density = cloud_water * air_density  # kg/m³
-    
-    # Convert droplet number from per kg to per m³
-    droplet_density = droplet_number * air_density  # 1/m³
-    
-    # Volume of single droplet
-    volume_per_droplet = cloud_water_density / (droplet_density + config.epsilon) / c.rhow  # m³
-    
-    # Volume mean radius. Double-where guard: the cube root has an infinite
-    # derivative at 0 and the clip below has zero slope there, so without a
-    # safe base the backward pass multiplies 0 × ∞ = NaN at cloud-free
-    # points. Forward values are unchanged (0**(1/3) was 0, then clipped).
-    has_water = volume_per_droplet > 0.0
-    volume_safe = jnp.where(has_water, volume_per_droplet, 1.0)
-    radius = jnp.where(
-        has_water, (3.0 * volume_safe / (4.0 * jnp.pi)) ** (1.0 / 3.0), 0.0,
-    )
-
-    # Apply limits
-    radius = jnp.clip(radius, config.ceffmin * 1e-6, config.ceffmax * 1e-6)
-    
-    return radius
-
-
 def autoconversion_beheng(
     cloud_water: jnp.ndarray,
     cloud_fraction: jnp.ndarray,

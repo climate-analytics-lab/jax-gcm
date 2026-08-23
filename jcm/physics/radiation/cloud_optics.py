@@ -234,34 +234,46 @@ def mie_scattering_water(
     return q_ext, ssa, g
 
 
+# Land/ocean average of CAM4's ``reltab`` (14 um ocean, 8 um land;
+# atmos_phys ``cloud_optical_properties.F90``). See
+# ``effective_radius_liquid`` for why the land/ocean contrast is not applied.
+_R_EFF_LIQUID_UM = 11.0
+
+
 @jax.jit
-def effective_radius_liquid(
-    cdnc_factor: jnp.ndarray,
-    land_fraction: float = 0.5
-) -> jnp.ndarray:
-    """Calculate effective radius for liquid cloud droplets.
-    
-    Simple parameterization based on temperature and surface type,
-    with optional aerosol-cloud interactions (Twomey effect).
+def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
+    """Fallback liquid droplet effective radius (microns).
+
+    A column constant scaled by the Twomey factor. This is a FALLBACK: the
+    2-moment scheme publishes a microphysical ``clouds.r_eff_liq`` from the
+    ECHAM Martin/Bower law and never reaches here, and every production
+    configuration runs 2M. It is live only on the 1M ``physics=echam``
+    preset, where the resulting lack of any LWC dependence is jax-gcm#717.
+
+    The land/ocean contrast is deliberately NOT applied, because the two
+    references mean different things by it:
+
+    - CAM4's ``reltab`` uses land as a proxy for CCN concentration, which
+      would double-count here -- ``cdnc_factor`` already carries the
+      aerosol effect, and applying both counts it twice through unrelated
+      channels.
+    - ECHAM's land dependence is a different quantity: the Martin et al.
+      (1994) spectral-BREADTH factor ``zkap``, 1.143 continental / 1.077
+      maritime (= ``k^(-1/3)`` for the measured k = 0.67 / 0.80). That is a
+      6% effect, not the 75% implied by 14 vs 8 um, and ECHAM replaces it
+      with ``breadth_factor(cdnc)`` wherever a droplet number exists -- as
+      it does on both of jcm's cloud paths.
 
     Args:
-        land_fraction: Fraction of land (0=ocean, 1=land)
-        cdnc_factor: Cloud droplet number concentration factor from aerosols
+        cdnc_factor: Droplet-number enhancement from aerosol (1 = clean).
 
     Returns:
-        Effective radius (microns)
+        Effective radius (microns).
 
     """
-    # Different values over land and ocean
-    r_eff_ocean = 14.0  # microns
-    r_eff_land = 8.0    # microns
-    
-    # Weighted average
-    r_eff = r_eff_ocean * (1 - land_fraction) + r_eff_land * land_fraction
-        
-    # apply Twomey effect (convert cdnc_factor to effective radius)
-    return r_eff * (cdnc_factor ** (-1.0/3.0)) 
-    
+    return _R_EFF_LIQUID_UM * (cdnc_factor ** (-1.0 / 3.0))
+
+
 
 @jax.jit
 def effective_radius_ice(iwc_gm3: jnp.ndarray) -> jnp.ndarray:
@@ -557,7 +569,6 @@ def cloud_optics(
     cloud_ice_path: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
-    land_fraction: float = 0.5
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """Calculate complete cloud optical properties.
 
@@ -565,7 +576,6 @@ def cloud_optics(
         cloud_water_path: In-cloud water path per layer (kg/m²) [nlev]
         cloud_ice_path: In-cloud ice path per layer (kg/m²) [nlev]
         layer_thickness: Geometric layer thickness (m) [nlev]
-        land_fraction: Land fraction for droplet size
         cdnc_factor: Cloud droplet number concentration factor from aerosols
 
     Returns:
@@ -577,7 +587,7 @@ def cloud_optics(
     # Calculate effective radii. The Moss/Foot ice formula wants the
     # IN-CLOUD ice water content in g/m3; the caller hands in-cloud paths
     # per layer (kg/m2), so IWC = path / dz, converted kg -> g.
-    r_eff_liq = effective_radius_liquid(cdnc_factor, land_fraction)
+    r_eff_liq = effective_radius_liquid(cdnc_factor)
     iwc_gm3 = cloud_ice_path / jnp.maximum(layer_thickness, 1.0) * 1e3
     r_eff_ice = effective_radius_ice(iwc_gm3)
     

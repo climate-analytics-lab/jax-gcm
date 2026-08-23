@@ -232,7 +232,6 @@ def prepare_rrtmgp_data(
     layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
     surface_temperature: jnp.ndarray,
-    land_fraction: float = 0.5,
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
 ) -> dict:
@@ -246,7 +245,6 @@ def prepare_rrtmgp_data(
         layer_thickness: geometric layer thickness (m), TOA-first.
         cdnc_factor: aerosol CDNC scaling for the liquid r_eff fallback.
         surface_temperature: scalar surface temperature (K).
-        land_fraction: land fraction for the liquid r_eff fallback.
         r_eff_liq_um: optional microphysical liquid effective radius (um),
             TOA-first (nlev,). Entries <= 0 mean "not provided" and fall
             back to the diagnostic ``effective_radius_liquid``.
@@ -326,7 +324,7 @@ def prepare_rrtmgp_data(
     # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
     # here.
     fallback_liq = jnp.broadcast_to(
-        jnp.asarray(effective_radius_liquid(cdnc_factor, land_fraction)),
+        jnp.asarray(effective_radius_liquid(cdnc_factor)),
         (nlev,),
     )
     iwc_gm3 = cip_1d / jnp.maximum(layer_thickness, 1.0) * 1e3

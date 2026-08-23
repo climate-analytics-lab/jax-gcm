@@ -3,44 +3,12 @@
 import jax.numpy as jnp
 import jax
 from .echam_1m import (
-    MicrophysicsParameters, cloud_droplet_radius,
+    MicrophysicsParameters,
     autoconversion, autoconversion_beheng, autoconversion_kk2000,
     ice_autoconversion, sedimentation_flux,
     cloud_microphysics_column_sweep,
 )
 from jcm.constants import tmelt
-
-
-class TestCloudDropletRadius:
-    """Test cloud droplet radius calculations"""
-    
-    def test_typical_values(self):
-        """Test with typical atmospheric values"""
-        cloud_water = jnp.array(0.5e-3)  # 0.5 g/kg
-        air_density = jnp.array(1.0)      # kg/m³
-        droplet_number = jnp.array(100e6) # 100 per cm³ -> per kg
-        config = MicrophysicsParameters.default()
-        
-        radius = cloud_droplet_radius(cloud_water, air_density, droplet_number, config)
-        
-        # Should be in reasonable range (5-20 microns)
-        assert 5e-6 < radius < 20e-6
-    
-    def test_limits(self):
-        """Test radius limits are applied"""
-        config = MicrophysicsParameters.default()
-        
-        # Very high cloud water with very few droplets should hit max radius
-        radius_high = cloud_droplet_radius(
-            jnp.array(10e-3), jnp.array(1.0), jnp.array(1e5), config  # Very few droplets
-        )
-        assert jnp.allclose(radius_high, float(config.ceffmax) * 1e-6)
-        
-        # Very low cloud water with many droplets should hit min radius
-        radius_low = cloud_droplet_radius(
-            jnp.array(1e-6), jnp.array(1.0), jnp.array(1000e6), config  # Many droplets
-        )
-        assert jnp.allclose(radius_low, float(config.ceffmin) * 1e-6)
 
 
 class TestAutoconversion:
