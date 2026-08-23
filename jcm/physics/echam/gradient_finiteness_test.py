@@ -200,7 +200,7 @@ def test_cloud_optics_gradient_finite_in_clear_layer():
 
     def summed(cwp):
         sw_optics, _ = cloud_optics(
-            cwp, cloud_ice_path, layer_thickness, cdnc_factor, 0.5,
+            cwp, cloud_ice_path, layer_thickness, cdnc_factor,
         )
         return jnp.sum(
             sw_optics.single_scatter_albedo + sw_optics.asymmetry_factor
