@@ -773,9 +773,15 @@ class DinosaurDycore(DynamicalCore):
             tiny = jnp.asarray(1e-300, dtype=q_new.dtype) if \
                 q_new.dtype == jnp.float64 else jnp.asarray(1e-30, q_new.dtype)
             ok = (current > tiny) & (target > tiny)
+            # Double-where guard (#558): the masked branch's division must
+            # see benign inputs, or its cotangent (∝ target/current²) blows
+            # up through empty fields — qc/qi start at zero in every
+            # cold-start run and this NaN'd the two-step gradient gate.
+            safe_current = jnp.where(ok, current, 1.0)
+            safe_target = jnp.where(ok, target, 1.0)
             scale = jnp.where(
                 ok,
-                jnp.clip(target / jnp.maximum(current, tiny), 2.0 / 3.0, 1.5),
+                jnp.clip(safe_target / safe_current, 2.0 / 3.0, 1.5),
                 1.0,
             )
             tracers[name] = q_new * scale
