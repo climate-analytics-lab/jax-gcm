@@ -20,6 +20,7 @@ from train_emulator import (  # noqa: E402
     mass_weights,
     uniform_weights,
     solar_group_ids,
+    split_by_source_and_group,
     split_by_group,
 )
 
@@ -98,6 +99,66 @@ class SplitTest(unittest.TestCase):
         b = split_by_group(group_ids, (0.8, 0.1, 0.1), seed=7)
         for x, y in zip(a, b):
             np.testing.assert_array_equal(x, y)
+
+
+class SourceStratifiedSplitTest(unittest.TestCase):
+    """Every source must reach validation and test, not just training."""
+
+    # The real geometry that broke it: two trajectory files with a handful of
+    # enormous solar-geometry groups, and a sweep with one group per column.
+    ERA5, TRAJ, SWEEP = 100_000, 120_000, 80_000
+
+    def _real_geometry(self):
+        group_ids = np.concatenate([
+            np.repeat(np.arange(8), self.ERA5 // 8),
+            100 + np.repeat(np.arange(40), self.TRAJ // 40),
+            1000 + np.arange(self.SWEEP),
+        ])
+        source_ids = np.concatenate([
+            np.zeros(self.ERA5, int),
+            np.ones(self.TRAJ, int),
+            2 * np.ones(self.SWEEP, int),
+        ])
+        return group_ids, source_ids
+
+    def test_every_source_reaches_val_and_test(self):
+        # Pooled group splitting put 0 ERA5 and 4.7% trajectory columns in the
+        # daylit test set, so the offline metric reported a -0.13 W/m2
+        # shortwave bias for a network that ran -21.7 W/m2 in the GCM.
+        group_ids, source_ids = self._real_geometry()
+        splits = split_by_source_and_group(
+            group_ids, source_ids, (0.8, 0.1, 0.1), seed=0,
+        )
+        for k, name in ((1, "val"), (2, "test")):
+            for source in (0, 1, 2):
+                n = int(np.sum(source_ids[splits[k]] == source))
+                self.assertGreater(
+                    n, 0, f"source {source} absent from {name}",
+                )
+
+    def test_each_source_keeps_its_own_fractions(self):
+        group_ids, source_ids = self._real_geometry()
+        splits = split_by_source_and_group(
+            group_ids, source_ids, (0.8, 0.1, 0.1), seed=0,
+        )
+        for source, total in ((0, self.ERA5), (1, self.TRAJ), (2, self.SWEEP)):
+            got = [
+                int(np.sum(source_ids[s] == source)) / total for s in splits
+            ]
+            for g, want in zip(got, (0.8, 0.1, 0.1)):
+                self.assertAlmostEqual(g, want, delta=0.06)
+
+    def test_no_group_is_split_across_partitions(self):
+        group_ids, source_ids = self._real_geometry()
+        splits = split_by_source_and_group(
+            group_ids, source_ids, (0.8, 0.1, 0.1), seed=0,
+        )
+        seen = {}
+        for k, idx in enumerate(splits):
+            for g in np.unique(group_ids[idx]):
+                self.assertNotIn(g, seen, f"group {g} in two partitions")
+                seen[g] = k
+        self.assertEqual(sum(len(s) for s in splits), len(group_ids))
 
 
 class WeightingTest(unittest.TestCase):

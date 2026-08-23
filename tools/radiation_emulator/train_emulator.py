@@ -91,9 +91,11 @@ def load_columns(pattern):
     nlev = {int(d.sizes["level"]) for d in parts}
     if len(nlev) != 1:
         raise ValueError(f"training files disagree on level count: {nlev}")
+    counts = [int(d.sizes["column"]) for d in parts]
     ds = xr.concat(parts, dim="column", combine_attrs="drop_conflicts")
+    source_ids = np.repeat(np.arange(len(paths)), counts)
     print(f"loaded {ds.sizes['column']} columns from {len(paths)} file(s)")
-    return ds, paths
+    return ds, paths, source_ids
 
 
 def solar_group_ids(ds):
@@ -149,6 +151,35 @@ def split_by_group(group_ids, fractions, seed):
             "from more model snapshots."
         )
     return splits
+
+
+def split_by_source_and_group(group_ids, source_ids, fractions, seed):
+    """Split within each source file, so every source reaches val and test.
+
+    Splitting the pooled set by group alone concentrated the realistic columns
+    in training. The sources have wildly different group granularity -- a
+    trajectory file is ~10^5 columns in 8-40 solar-geometry groups, while the
+    synthetic sweep randomises geometry per column and so is one group per
+    column. Largest-group-first then hands every trajectory snapshot to
+    training (its quota is 8x validation's, so it stays furthest below quota
+    longest), and the sweep's singletons are left to fill validation and test.
+
+    The result was a test set that was 95% synthetic and contained ZERO ERA5
+    trajectory columns, so the offline metric was measured on columns the
+    coupled model never visits -- it reported a -0.13 W/m2 shortwave bias for
+    a network that ran a -21.7 W/m2 bias in the GCM.
+
+    Splitting per source keeps each one's own 80/10/10, so held-out skill is
+    reported on realistic columns too.
+    """
+    splits = [[], [], []]
+    for source in np.unique(source_ids):
+        idx = np.where(source_ids == source)[0]
+        # Vary the seed per source so sources do not share a group ordering.
+        sub = split_by_group(group_ids[idx], fractions, seed + int(source))
+        for k in range(3):
+            splits[k].append(idx[sub[k]])
+    return [np.concatenate(p) for p in splits]
 
 
 def build_features(ds, band_mode):
@@ -576,13 +607,26 @@ def main(argv=None):
     p.add_argument("--report", default=None, help="JSON metrics output")
     args = p.parse_args(argv)
 
-    ds, paths = load_columns(args.data)
+    ds, paths, source_ids = load_columns(args.data)
     data = build_features(ds, args.band_mode)
     groups = solar_group_ids(ds)
-    splits = split_by_group(groups, (0.8, 0.1, 0.1), args.seed)
+    splits = split_by_source_and_group(
+        groups, source_ids, (0.8, 0.1, 0.1), args.seed,
+    )
     print(f"split: {len(splits[0])} train / {len(splits[1])} val / "
           f"{len(splits[2])} test columns from "
           f"{len(np.unique(groups))} solar-geometry groups")
+    # Per-source composition of the held-out sets: the failure this guards is
+    # a test set that looks big but contains none of the realistic columns.
+    for k, name in enumerate(("train", "val", "test")):
+        by_source = [
+            int(np.sum(source_ids[splits[k]] == s))
+            for s in range(len(paths))
+        ]
+        parts = ", ".join(
+            f"{pathlib.Path(p).name}:{n}" for p, n in zip(paths, by_source)
+        )
+        print(f"  {name:5s} {parts}")
     print(f"lit fraction: {float(jnp.mean(data['lit'])):.3f}")
     report_target_range(data)
 

@@ -458,6 +458,34 @@ def _per_band_optics(aod_550, ssa550, asy550, angstrom, band_centers_nm,
     return to_col(aod), to_col(ssa), to_col(asy)
 
 
+def _absent_lw_optics(n_bnd_lw, aod_550):
+    """Zero longwave per-band optics, matching what MACv2-SP actually emits.
+
+    ``Macv2SpAerosol`` writes only the SHORTWAVE per-band trio
+    (``macv2_sp.py``, the ``aerosol_data.copy(...)`` return); the longwave
+    slots keep their ``AerosolData.zeros()`` default. Only the JAM optics term
+    ever fills them.
+
+    Generating labels with a wavelength-scaled longwave aerosol therefore fed
+    the emulator 32 features that are identically zero at run time but
+    averaged ssa 0.49 / asy 0.09 in training -- a ~1 unit offset on 32 of the
+    56 longwave inputs, 100% outside the training distribution. The network
+    responded with +41 W/m2 of surface downward longwave, which warmed the
+    surface, dried the boundary layer and destroyed over half the cloud; the
+    -22 W/m2 shortwave bias that showed up at TOA was the consequence, not
+    the cause.
+
+    The scaled values were meaningless anyway: MACv2-SP's longwave AOD is
+    ~5e-6, so the ssa/asy attached to it carry no radiative information.
+
+    Revisit when generating labels from a JAM run -- there the longwave
+    optics are real and must be sampled from the run, not zeroed.
+    """
+    ncol, nlev = aod_550.shape
+    zeros = np.zeros((ncol, n_bnd_lw, nlev))
+    return zeros, zeros.copy(), zeros.copy()
+
+
 def _finalize_batch(batch, n_bnd_sw, n_bnd_lw, clip_stats=None):
     """Validate shapes, clip to physical bounds, and cast to float64 numpy."""
     batch = _clip_to_bounds(batch, clip_stats)
@@ -719,9 +747,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     aod_sw, ssa_sw, asy_sw = _per_band_optics(
         aod_550, ssa550, asy550, angstrom, sw_centers_nm,
     )
-    aod_lw, ssa_lw, asy_lw = _per_band_optics(
-        aod_550, ssa550, asy550, angstrom, lw_centers_nm,
-    )
+    aod_lw, ssa_lw, asy_lw = _absent_lw_optics(len(lw_centers_nm), aod_550)
 
     # Surface: broadband albedo from ocean to fresh snow, with a sampled
     # vis/nir contrast (snow and vegetation sit at opposite signs of it).
@@ -939,9 +965,8 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         aod_profile, ssa_profile, asy_profile, angstrom, sw_centers_nm,
         clip_stats,
     )
-    aod_lw, ssa_lw, asy_lw = _per_band_optics(
-        aod_profile, ssa_profile, asy_profile, angstrom, lw_centers_nm,
-        clip_stats,
+    aod_lw, ssa_lw, asy_lw = _absent_lw_optics(
+        len(lw_centers_nm), aod_profile,
     )
     batch.update(
         aod_sw_per_band=aod_sw, ssa_sw_per_band=ssa_sw,
