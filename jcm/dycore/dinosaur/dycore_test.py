@@ -149,3 +149,99 @@ class OffCenteringDefaultTest(unittest.TestCase):
     def test_sl_options_still_override(self):
         dycore = _small_dycore(sl_options={"off_centering": 0.05})
         self.assertEqual(dycore.off_centering, 0.05)
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class TracerMassFixerTest(unittest.TestCase):
+    """The SL global mass fixer (#713).
+
+    Semi-Lagrangian transport does not conserve tracer mass; with the
+    quasi-monotone limiter the error is systematically POSITIVE wherever
+    strong sinks leave sharp minima (the limiter can only add mass when it
+    clips an interpolation undershoot at a minimum). The 2026-08 aerosol
+    runaway compounded exactly this. The fixer restores each nodal
+    tracer's global ``integral(q dp)`` to its pre-transport value every
+    step.
+    """
+
+    def _dycore_with_tracer(self):
+        from jcm.physics.physics_term import TracerSpec
+
+        dycore = _small_dycore(
+            tracer_specs={"dust": TracerSpec(name="dust")},
+        )
+        state = dycore.initial_state(None, random_seed=0)
+        return dycore, state
+
+    def _mass(self, dycore, state):
+        import jax.numpy as jnp
+        import numpy as np
+
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights)
+        dp = dycore._nodal_tracer_column_weight(state)
+        return float(jnp.sum(state.tracers["dust"] * dp * w))
+
+    def test_fixer_restores_transport_mass_error(self):
+        import jax.numpy as jnp
+
+        dycore, state = self._dycore_with_tracer()
+        # A rough positive field (the regime where SL leaks).
+        q = 1e-9 * (1.0 + 0.9 * jnp.sin(
+            jnp.arange(state.tracers["dust"].size, dtype=jnp.float64)
+        ).reshape(state.tracers["dust"].shape))
+        state.tracers = {**state.tracers, "dust": jnp.abs(q)}
+        # Fabricate a 1% transport gain on the same state.
+        gained = state.replace(
+            tracers={**state.tracers, "dust": 1.01 * state.tracers["dust"]},
+        )
+        fixed = dycore._fix_nodal_tracer_mass(state, gained)
+        self.assertAlmostEqual(
+            self._mass(dycore, fixed) / self._mass(dycore, state), 1.0,
+            places=10,
+        )
+
+    def test_fixer_guards_empty_fields_and_clips(self):
+        import jax.numpy as jnp
+        import numpy as np
+
+        dycore, state = self._dycore_with_tracer()
+        zero = state.replace(
+            tracers={**state.tracers,
+                     "dust": jnp.zeros_like(state.tracers["dust"])},
+        )
+        # Zero reference AND zero current: passes through untouched.
+        out = dycore._fix_nodal_tracer_mass(zero, zero)
+        np.testing.assert_array_equal(np.asarray(out.tracers["dust"]), 0.0)
+        # A 10x discrepancy is not interpolation error: the clip bounds the
+        # correction at 1.5x rather than silently absorbing a real bug.
+        small = state.replace(
+            tracers={**state.tracers,
+                     "dust": jnp.full_like(state.tracers["dust"], 1e-10)},
+        )
+        big = state.replace(
+            tracers={**state.tracers,
+                     "dust": jnp.full_like(state.tracers["dust"], 1e-9)},
+        )
+        out = dycore._fix_nodal_tracer_mass(big, small)
+        np.testing.assert_allclose(
+            np.asarray(out.tracers["dust"]), 1.5e-10, rtol=1e-6,
+        )
+
+    def test_step_conserves_nodal_tracer_mass(self):
+        import jax.numpy as jnp
+
+        dycore, state = self._dycore_with_tracer()
+        # Sharp positive blob: the hard case for SL conservation.
+        shape = state.tracers["dust"].shape
+        q = jnp.zeros(shape, dtype=jnp.float64)
+        q = q.at[:, 10:14, 20:24].set(1e-8)
+        state.tracers = {**state.tracers, "dust": q}
+        m0 = self._mass(dycore, state)
+        s = state
+        for _ in range(5):
+            s = dycore.step(s, None)
+        m5 = self._mass(dycore, s)
+        # ps evolves, so integral(q dp) is conserved per step against the
+        # step's own reference; over 5 dry adiabatic steps the drift must
+        # be at the clip/roundoff level, not the raw SL leak.
+        self.assertAlmostEqual(m5 / m0, 1.0, places=6)

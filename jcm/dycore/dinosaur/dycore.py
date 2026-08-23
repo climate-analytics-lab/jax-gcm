@@ -710,7 +710,76 @@ class DinosaurDycore(DynamicalCore):
         state_next = state_after_dyn
         for f in self._filters:
             state_next = f(state, state_next)
+        if self._nodal_tracers and self._sl_options.get("mass_fixer", True):
+            # SL transport is not mass-conserving (its own validation test
+            # says so) and its quasi-monotone limiter rectifies the error
+            # into systematic CREATION where removal digs sharp minima —
+            # the #713 budget gauge measured it at >10% of the dust
+            # emission rate on dev and unbounded once stronger sinks
+            # sharpened the fields. Restore each nodal tracer's global
+            # mass to its pre-transport value.
+            state_next = self._fix_nodal_tracer_mass(
+                state_after_physics, state_next,
+            )
         return state_next
+
+    def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
+        """Per-cell air-mass weight ``dp`` [nondim] for nodal-tracer integrals."""
+        ps = jnp.exp(
+            self.coords.horizontal.to_nodal(state.log_surface_pressure)
+        )  # (1, lon, lat)
+        vert = self.coords.vertical
+        if isinstance(vert, HybridCoordinates):
+            a = jnp.asarray(vert.a_boundaries)
+            b = jnp.asarray(vert.b_boundaries)
+            da = (a[1:] - a[:-1])[:, None, None]
+            db = (b[1:] - b[:-1])[:, None, None]
+            return da + db * ps
+        sigma = jnp.asarray(vert.boundaries)
+        return (sigma[1:] - sigma[:-1])[:, None, None] * ps
+
+    def _fix_nodal_tracer_mass(self, state_ref, state_new):
+        """ECMWF-style proportional global mass fixer for the SL tracers (#713).
+
+        Semi-Lagrangian interpolation does not conserve ``∫ q·dp`` — and
+        with the quasi-monotone limiter the error is one-signed wherever a
+        strong sink leaves sharp minima (clipping interpolation
+        undershoots at a minimum can only ADD mass), which is exactly the
+        state strong scavenging/sedimentation produces. Each nodal tracer
+        is therefore rescaled by one global factor per step so its
+        post-transport mass equals the post-physics pre-transport value
+        (Diamantakis & Flemming 2014, the proportional fixer): positivity
+        and the spatial distribution are preserved, and the correction is
+        spread in proportion to the field itself.
+
+        The factor is clipped to [2/3, 1.5]: per-step interpolation error
+        is O(1e-3); a factor outside that band means something other than
+        transport error (a genuinely empty field spinning up, a physics
+        bug) and must surface in the ``budget_dyn_*`` gauge rather than
+        be silently absorbed here.
+        """
+        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
+        dp_ref = self._nodal_tracer_column_weight(state_ref)
+        dp_new = self._nodal_tracer_column_weight(state_new)
+        tracers = dict(state_new.tracers)
+        for name in self._nodal_tracers:
+            q_ref = state_ref.tracers[name]
+            q_new = tracers[name]
+            target = jnp.sum(q_ref * dp_ref * w)
+            current = jnp.sum(q_new * dp_new * w)
+            # A fixer must never manufacture sign: only rescale when both
+            # totals are meaningfully positive (mixing ratios; a cold-start
+            # zero field or a ringing near-zero total passes through).
+            tiny = jnp.asarray(1e-300, dtype=q_new.dtype) if \
+                q_new.dtype == jnp.float64 else jnp.asarray(1e-30, q_new.dtype)
+            ok = (current > tiny) & (target > tiny)
+            scale = jnp.where(
+                ok,
+                jnp.clip(target / jnp.maximum(current, tiny), 2.0 / 3.0, 1.5),
+                1.0,
+            )
+            tracers[name] = q_new * scale
+        return state_new.replace(tracers=tracers)
 
     def sim_time(self, state: State) -> jnp.ndarray:
         return state.sim_time
