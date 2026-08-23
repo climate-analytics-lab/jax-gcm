@@ -39,11 +39,13 @@ REPOS = {
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
     # Required by every echam-jam preset and NOT present in the published
-    # image, so it has to be cloned like the others. Pinned to main: the
-    # configure_gas_netprod work the dev box ran from a local branch was
-    # merged (and developed further) upstream, so main is the same code plus
-    # later fixes — verified by diffing, the only differences were comments.
-    "mam4-jax": ("https://github.com/reflective-org/MAM4-JAX", "main"),
+    # image, so it has to be cloned like the others. Pinned to the SHA the
+    # dev box validates against, NOT main: upstream restructured the package
+    # for v0.3.x (72fd36a) and jcm's wrapper imports (mam4_jax.data) no
+    # longer resolve there — a floating main broke the jam-2yr run at model
+    # construction. Bump this SHA together with the jcm wrapper.
+    "mam4-jax": ("https://github.com/reflective-org/MAM4-JAX",
+                 "5ed465661dcd1b4a858ed92524ac58fc37696cfd"),
 }
 
 
