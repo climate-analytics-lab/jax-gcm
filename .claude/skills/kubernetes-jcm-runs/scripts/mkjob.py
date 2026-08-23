@@ -188,7 +188,7 @@ cd /work/jcm
 # import paths — the editable finder otherwise beats cwd AND PYTHONPATH and
 # the benchmark times RELEASE code under a pinned-SHA label (see mkrun).
 pip install --no-cache-dir --no-deps -q -e /work/jcm
-python - <<'PYPATH'
+PYTHONPATH={pythonpath} python - <<'PYPATH'
 import os, sys
 import jcm, dinosaur
 for mod, want in ((jcm, "/work/jcm"), (dinosaur, "/work/dinosaur-sl")):

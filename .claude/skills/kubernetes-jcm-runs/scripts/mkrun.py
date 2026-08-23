@@ -131,6 +131,10 @@ def build(a, resolved) -> dict:
     script = f"""set -euo pipefail
 echo "=== node $NODE_NAME | $(nvidia-smi --query-gpu=name --format=csv,noheader) | attempt $(date -u +%FT%TZ) ==="
 mkdir -p /work {rundir}
+# Persist EVERYTHING from here on to the PVC: a setup crash otherwise dies
+# with the pod and a crash-looping container's logs are only readable in
+# the instants between restarts (observed: 3.5 h of invisible failures).
+exec &> >(tee -a {rundir}/setup.log)
 {clone}
 cd /work/jcm
 # The image installs jcm EDITABLE from /app, and a modern pip editable
@@ -142,7 +146,7 @@ cd /work/jcm
 # at the clone, then HARD-GATE the import paths: a wrong path must kill
 # the run, not lie in the provenance.
 pip install --no-cache-dir --no-deps -q -e /work/jcm
-python - <<'PYPATH'
+PYTHONPATH={pythonpath} python - <<'PYPATH'
 import os, sys
 import jcm, dinosaur
 for mod, want in ((jcm, "/work/jcm"), (dinosaur, "/work/dinosaur-sl")):
