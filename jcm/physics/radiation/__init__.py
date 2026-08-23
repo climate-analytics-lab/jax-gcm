@@ -111,9 +111,16 @@ def rescale_cached_radiation(
     ``surface_sw_down`` that feed back into the model, keeps the saved flux
     diagnostics consistent with the heating actually applied.
 
-    The rescaled fluxes are written back into the carry, so the reference
-    ``cos_zenith_for_fluxes`` MUST advance with them. Successive cached steps
-    then telescope --
+    ``radiation.cos_zenith`` is the reference, and no second field is needed
+    for it: the stored shortwave always corresponds to that zenith. A solve
+    writes both together, and this function rescales the fluxes and updates
+    the zenith together, so the invariant holds on every path. Keeping it to
+    one field also keeps ``RadiationData``'s pytree leaf count unchanged --
+    the physics carry is checkpointed as a positional flat leaf list, so a new
+    leaf would invalidate every existing checkpoint (#719 review).
+
+    Because the rescaled fluxes are written back into the carry, the reference
+    MUST advance with them. Successive cached steps then telescope --
     ``(mu_1/mu_0)(mu_2/mu_1)...(mu_k/mu_{k-1}) = mu_k/mu_0`` -- which is the
     intended factor against the compute step. Holding the reference fixed at
     the compute-step value instead makes each step rescale an already-rescaled
@@ -128,7 +135,7 @@ def rescale_cached_radiation(
     the interval, and is the reason ``radiation_interval`` should not be
     pushed far beyond a couple of hours.
     """
-    mu0_ref = radiation.cos_zenith_for_fluxes
+    mu0_ref = radiation.cos_zenith
     mu0_now = jnp.maximum(cos_zenith_now, 0.0)
     ratio = jnp.where(
         mu0_ref > _MIN_COS_ZENITH_FOR_RESCALE,
@@ -139,11 +146,7 @@ def rescale_cached_radiation(
         name: getattr(radiation, name) * ratio
         for name in _CACHED_SW_FIELDS
     }
-    return radiation.copy(
-        cos_zenith=cos_zenith_now,
-        cos_zenith_for_fluxes=mu0_now,
-        **scaled,
-    )
+    return radiation.copy(cos_zenith=mu0_now, **scaled)
 
 
 __all__ = [

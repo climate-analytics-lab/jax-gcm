@@ -141,14 +141,14 @@ class RadiationData:
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 
-    # Solar/geometric variables. ``cos_zenith`` is refreshed on EVERY call,
-    # cached step included, because consumers outside radiation read it as
-    # the current solar geometry (JAM oxidant photolysis,
-    # ``aerosol/jam/chemistry/oxidants.py``).
-    # ``cos_zenith_for_fluxes`` is stamped only when the fluxes are actually
-    # solved; the ratio of the two rescales the cached shortwave (#671).
+    # Cosine solar zenith angle, refreshed on EVERY call including cached
+    # steps -- consumers outside radiation read it as the current solar
+    # geometry (JAM oxidant photolysis, ``aerosol/jam/chemistry/oxidants.py``).
+    #
+    # It doubles as the rescaling reference for the shortwave cache: the
+    # stored shortwave always corresponds to THIS zenith, both after a solve
+    # and after a rescale, so no second field is needed (#671).
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
-    cos_zenith_for_fluxes: jnp.ndarray  # Same, at the last flux solve (ncols,)
 
     # Surface properties
     surface_albedo_vis: jnp.ndarray    # Surface albedo visible [1] (ncols,)
@@ -231,7 +231,6 @@ class RadiationData:
     def zeros(cls, nodal_shape, nlev):
         return cls(
             cos_zenith=jnp.zeros(nodal_shape),
-            cos_zenith_for_fluxes=jnp.zeros(nodal_shape),
             surface_albedo_vis=jnp.zeros(nodal_shape),
             surface_albedo_nir=jnp.zeros(nodal_shape),
             surface_emissivity=jnp.zeros(nodal_shape),
@@ -265,7 +264,6 @@ class RadiationData:
     def copy(self, **kwargs):
         new_data = {
             'cos_zenith': self.cos_zenith,
-            'cos_zenith_for_fluxes': self.cos_zenith_for_fluxes,
             'surface_albedo_vis': self.surface_albedo_vis,
             'surface_albedo_nir': self.surface_albedo_nir,
             'surface_emissivity': self.surface_emissivity,

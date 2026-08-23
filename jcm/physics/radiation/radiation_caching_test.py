@@ -27,7 +27,6 @@ def _solved_at(mu0):
     sw = {name: getattr(rad, name) + 100.0 * mu0 for name in _CACHED_SW_FIELDS}
     return rad.copy(
         cos_zenith=mu0,
-        cos_zenith_for_fluxes=mu0,
         lw_flux_up=jnp.full((NLEV + 1, NCOLS), 240.0),
         lw_heating_rate=jnp.full((NLEV, NCOLS), -1.5e-5),
         noa_frac_toa_sw_up=jnp.full((NCOLS,), 0.02),
@@ -50,7 +49,7 @@ class ZenithRescalingTest(unittest.TestCase):
         # A cached step at the compute-step geometry must reproduce it
         # exactly, so enabling the rescale cannot perturb an interval of 1.
         rad = _solved_at([0.9, 0.5, 0.1, 0.02])
-        out = rescale_cached_radiation(rad, rad.cos_zenith_for_fluxes)
+        out = rescale_cached_radiation(rad, rad.cos_zenith)
         for name in _CACHED_SW_FIELDS:
             np.testing.assert_allclose(
                 np.asarray(getattr(out, name)),
@@ -104,13 +103,10 @@ class ZenithRescalingTest(unittest.TestCase):
         rad = _solved_at([0.8] * NCOLS)
         out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.25))
         np.testing.assert_allclose(np.asarray(out.cos_zenith), 0.25)
-        # cos_zenith_for_fluxes tracks the stored fluxes, which have just been
-        # rescaled to this sun -- it is the reference for the NEXT step, not a
-        # record of the compute step. Freezing it here is what made the ratio
-        # compound (see SuccessiveCachedStepsTest).
-        np.testing.assert_allclose(
-            np.asarray(out.cos_zenith_for_fluxes), 0.25,
-        )
+        # cos_zenith is also the rescaling reference for the NEXT step: it
+        # tracks the sun the stored fluxes correspond to. Freezing it at the
+        # compute-step value is what made the ratio compound (see
+        # SuccessiveCachedStepsTest).
 
     def test_rescaled_heating_reaches_the_replayed_tendency(self):
         # The whole point: the tendency actually applied to the model must

@@ -148,8 +148,6 @@ def radiation_scheme_emulated(
 
     diagnostics = RadiationData(
         cos_zenith=cos_zenith,
-        cos_zenith_for_fluxes=cos_zenith,
-        surface_albedo_vis=jnp.atleast_1d(surface_albedo_vis),
         surface_albedo_nir=jnp.atleast_1d(surface_albedo_nir),
         surface_emissivity=jnp.atleast_1d(surface_emissivity),
         sw_flux_up=sw_flux_up,
@@ -380,9 +378,6 @@ class NNEmulatorRadiation(PhysicsTerm):
         rad_out = RadiationData(
             cos_zenith=_column_vector_emulated(
                 diagnostics_vmapped.cos_zenith, ncols,
-            ),
-            cos_zenith_for_fluxes=_column_vector_emulated(
-                diagnostics_vmapped.cos_zenith_for_fluxes, ncols,
             ),
             surface_albedo_vis=_column_vector_emulated(
                 diagnostics_vmapped.surface_albedo_vis, ncols,
