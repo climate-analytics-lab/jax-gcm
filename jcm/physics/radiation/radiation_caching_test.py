@@ -27,7 +27,7 @@ def _solved_at(mu0):
     sw = {name: getattr(rad, name) + 100.0 * mu0 for name in _CACHED_SW_FIELDS}
     return rad.copy(
         cos_zenith=mu0,
-        cos_zenith_at_compute=mu0,
+        cos_zenith_for_fluxes=mu0,
         lw_flux_up=jnp.full((NLEV + 1, NCOLS), 240.0),
         lw_heating_rate=jnp.full((NLEV, NCOLS), -1.5e-5),
         noa_frac_toa_sw_up=jnp.full((NCOLS,), 0.02),
@@ -50,7 +50,7 @@ class ZenithRescalingTest(unittest.TestCase):
         # A cached step at the compute-step geometry must reproduce it
         # exactly, so enabling the rescale cannot perturb an interval of 1.
         rad = _solved_at([0.9, 0.5, 0.1, 0.02])
-        out = rescale_cached_radiation(rad, rad.cos_zenith_at_compute)
+        out = rescale_cached_radiation(rad, rad.cos_zenith_for_fluxes)
         for name in _CACHED_SW_FIELDS:
             np.testing.assert_allclose(
                 np.asarray(getattr(out, name)),
@@ -102,11 +102,14 @@ class ZenithRescalingTest(unittest.TestCase):
         # sun (aerosol/jam/chemistry/oxidants.py). Before the split it was
         # frozen for the whole radiation interval.
         rad = _solved_at([0.8] * NCOLS)
-        now = jnp.full((NCOLS,), 0.25)
-        out = rescale_cached_radiation(rad, now)
+        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.25))
         np.testing.assert_allclose(np.asarray(out.cos_zenith), 0.25)
+        # cos_zenith_for_fluxes tracks the stored fluxes, which have just been
+        # rescaled to this sun -- it is the reference for the NEXT step, not a
+        # record of the compute step. Freezing it here is what made the ratio
+        # compound (see SuccessiveCachedStepsTest).
         np.testing.assert_allclose(
-            np.asarray(out.cos_zenith_at_compute), 0.8,
+            np.asarray(out.cos_zenith_for_fluxes), 0.25,
         )
 
     def test_rescaled_heating_reaches_the_replayed_tendency(self):
@@ -121,6 +124,67 @@ class ZenithRescalingTest(unittest.TestCase):
             rtol=1e-6,
         )
 
+class SuccessiveCachedStepsTest(unittest.TestCase):
+    """The rescale is applied REPEATEDLY, so it must not compound.
+
+    Every other test here rescales a fresh struct exactly once, which is not
+    how the cache is used: the rescaled fluxes are written back into the carry
+    and rescaled again on the next step. Holding the reference zenith at the
+    compute-step value made each step multiply an already-rescaled flux, so
+    the ratio compounded geometrically -- 100 W/m2 became 708,750 over eight
+    steps through a sunrise and NaN'd the GCM inside a day. That got through
+    nine passing unit tests and was caught by a whole-model integration test.
+    """
+
+    def test_a_full_interval_of_cached_steps_matches_a_single_ratio(self):
+        rad = _solved_at([0.2] * NCOLS)
+        base = np.asarray(rad.surface_sw_down).copy()
+        march = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        for mu in march:
+            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), mu))
+        # Telescoping: the product of successive ratios is mu_end / mu_start.
+        np.testing.assert_allclose(
+            np.asarray(rad.surface_sw_down), base * (march[-1] / 0.2),
+            rtol=1e-5,
+        )
+
+    def test_repeating_the_same_sun_is_idempotent(self):
+        # Eight cached steps at an unchanged zenith must not drift at all.
+        rad = _solved_at([0.6] * NCOLS)
+        base = {n: np.asarray(getattr(rad, n)).copy() for n in _CACHED_SW_FIELDS}
+        for _ in range(8):
+            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.6))
+        for name in _CACHED_SW_FIELDS:
+            np.testing.assert_allclose(
+                np.asarray(getattr(rad, name)), base[name],
+                rtol=1e-5, err_msg=name,
+            )
+
+    def test_a_descending_sun_decays_rather_than_compounding(self):
+        rad = _solved_at([1.0] * NCOLS)
+        base = np.asarray(rad.surface_sw_down).copy()
+        for mu in (0.8, 0.6, 0.4, 0.2):
+            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), mu))
+        np.testing.assert_allclose(
+            np.asarray(rad.surface_sw_down), base * 0.2, rtol=1e-5,
+        )
+
+    def test_shortwave_stays_bounded_across_a_long_march(self):
+        # The blunt guard: whatever the sun does, cached shortwave can never
+        # exceed the compute-step value scaled by the largest ratio seen.
+        rad = _solved_at([0.15] * NCOLS)
+        rng = np.random.default_rng(0)
+        for mu in rng.uniform(0.0, 1.0, 64):
+            rad = rescale_cached_radiation(rad, jnp.full((NCOLS,), float(mu)))
+            got = np.asarray(rad.surface_sw_down)
+            self.assertTrue(np.all(np.isfinite(got)))
+            self.assertTrue(
+                np.all(got <= 100.0 * 0.15 / 0.15 * (1.0 / 0.15) + 1e-3),
+                f"cached shortwave ran away to {got.max()} W/m2",
+            )
+
+
+class PerColumnTest(unittest.TestCase):
     def test_per_column_ratios_are_independent(self):
         # The terminator runs through the grid, so neighbouring columns get
         # very different ratios in the same call.

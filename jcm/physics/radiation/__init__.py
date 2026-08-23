@@ -111,23 +111,39 @@ def rescale_cached_radiation(
     ``surface_sw_down`` that feed back into the model, keeps the saved flux
     diagnostics consistent with the heating actually applied.
 
-    Longwave is untouched. So is a column that was dark when radiation last
-    ran: its cached fluxes are identically zero, and no factor recovers a
-    solve that never happened, so it stays dark until the next compute step.
-    That residual error is bounded by the interval and is the reason
-    ``radiation_interval`` should not be pushed far beyond a couple of hours.
+    The rescaled fluxes are written back into the carry, so the reference
+    ``cos_zenith_for_fluxes`` MUST advance with them. Successive cached steps
+    then telescope --
+    ``(mu_1/mu_0)(mu_2/mu_1)...(mu_k/mu_{k-1}) = mu_k/mu_0`` -- which is the
+    intended factor against the compute step. Holding the reference fixed at
+    the compute-step value instead makes each step rescale an already-rescaled
+    flux, so the ratio COMPOUNDS: eight cached steps through a sunrise turned
+    100 W/m2 into 708,750 and NaN'd the model within a day.
+
+    Longwave is untouched. So is a column whose stored shortwave is already
+    zero -- either it was dark when radiation last ran, or it went dark during
+    the interval. Multiplication cannot recover a flux that has been driven to
+    zero, so such a column stays dark until the next compute step even if the
+    sun comes back up within the interval. That residual error is bounded by
+    the interval, and is the reason ``radiation_interval`` should not be
+    pushed far beyond a couple of hours.
     """
-    mu0_compute = radiation.cos_zenith_at_compute
+    mu0_ref = radiation.cos_zenith_for_fluxes
+    mu0_now = jnp.maximum(cos_zenith_now, 0.0)
     ratio = jnp.where(
-        mu0_compute > _MIN_COS_ZENITH_FOR_RESCALE,
-        jnp.maximum(cos_zenith_now, 0.0) / jnp.maximum(mu0_compute, _MIN_COS_ZENITH_FOR_RESCALE),
+        mu0_ref > _MIN_COS_ZENITH_FOR_RESCALE,
+        mu0_now / jnp.maximum(mu0_ref, _MIN_COS_ZENITH_FOR_RESCALE),
         0.0,
     )
     scaled = {
         name: getattr(radiation, name) * ratio
         for name in _CACHED_SW_FIELDS
     }
-    return radiation.copy(cos_zenith=cos_zenith_now, **scaled)
+    return radiation.copy(
+        cos_zenith=cos_zenith_now,
+        cos_zenith_for_fluxes=mu0_now,
+        **scaled,
+    )
 
 
 __all__ = [

@@ -557,7 +557,7 @@ def radiation_scheme(
     # the carry slot after the cond on every call.
     diagnostics = RadiationData(
         cos_zenith=cos_zenith[jnp.newaxis],
-        cos_zenith_at_compute=cos_zenith[jnp.newaxis],
+        cos_zenith_for_fluxes=cos_zenith[jnp.newaxis],
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
@@ -823,8 +823,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         # out and transpose back to (nlev+1, ncols).
         rad_out = RadiationData(
             cos_zenith=_column_vector(diagnostics_vmapped.cos_zenith, ncols),
-            cos_zenith_at_compute=_column_vector(
-                diagnostics_vmapped.cos_zenith_at_compute, ncols,
+            cos_zenith_for_fluxes=_column_vector(
+                diagnostics_vmapped.cos_zenith_for_fluxes, ncols,
             ),
             surface_albedo_vis=_column_vector(
                 diagnostics_vmapped.surface_albedo_vis, ncols,

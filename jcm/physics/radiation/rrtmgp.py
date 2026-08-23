@@ -440,7 +440,7 @@ def prepare_icon_data(
         # surface scalars through bare; replicate exactly so the cached
         # branch in `_radiation_with_caching` matches our shape.
         cos_zenith=jnp.atleast_1d(cos_zenith),
-        cos_zenith_at_compute=jnp.atleast_1d(cos_zenith),
+        cos_zenith_for_fluxes=jnp.atleast_1d(cos_zenith),
         surface_albedo_vis=surface_albedo_vis,
         surface_albedo_nir=surface_albedo_nir,
         surface_emissivity=surface_emissivity,
@@ -1458,8 +1458,8 @@ class RRTMGPRadiation(PhysicsTerm):
         rad_out = RadiationData(
             **noa,
             cos_zenith=_column_vector_rrtmgp(diagnostics_vmapped.cos_zenith, ncols),
-            cos_zenith_at_compute=_column_vector_rrtmgp(
-                diagnostics_vmapped.cos_zenith_at_compute, ncols,
+            cos_zenith_for_fluxes=_column_vector_rrtmgp(
+                diagnostics_vmapped.cos_zenith_for_fluxes, ncols,
             ),
             surface_albedo_vis=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_albedo_vis, ncols,
