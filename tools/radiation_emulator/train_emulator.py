@@ -199,6 +199,12 @@ def build_features(ds, band_mode):
     cwp = f32("cloud_water") * f32("air_density") * f32("layer_thickness") * cf
     cip = f32("cloud_ice") * f32("air_density") * f32("layer_thickness") * cf
 
+    # Already RESOLVED by the generator (microphysical where the source had a
+    # value, diagnostic fallback elsewhere) and strictly positive, and the
+    # RRTMGP labels in the same file were produced from these very numbers.
+    r_eff_liq = f32("r_eff_liq")
+    r_eff_ice = f32("r_eff_ice")
+
     temperature = f32("temperature")
     pressure = f32("pressure_levels")
     n_sw = n_input_features(band_mode, ds.sizes["band_sw"])
@@ -211,12 +217,14 @@ def build_features(ds, band_mode):
     x_sw = jax.vmap(
         lambda *a: preprocess_sw_inputs(*a[:8], unit_sw, *a[8:], band_mode)
     )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip, cf,
-      f32("cos_zenith"), f32("aod_sw_per_band"), f32("ssa_sw_per_band"),
+      f32("cos_zenith"), r_eff_liq, r_eff_ice,
+      f32("aod_sw_per_band"), f32("ssa_sw_per_band"),
       f32("asy_sw_per_band"))
     x_lw = jax.vmap(
         lambda *a: preprocess_lw_inputs(*a[:8], unit_lw, *a[8:], band_mode)
     )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip, cf,
-      f32("co2_vmr"), f32("aod_lw_per_band"), f32("ssa_lw_per_band"),
+      f32("co2_vmr"), r_eff_liq, r_eff_ice,
+      f32("aod_lw_per_band"), f32("ssa_lw_per_band"),
       f32("asy_lw_per_band"))
 
     # Auxiliary scalar fed to the surface dense layer of each network.

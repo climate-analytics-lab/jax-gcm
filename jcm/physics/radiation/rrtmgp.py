@@ -42,10 +42,7 @@ from jcm.physics.radiation.mcica import (
     in_cloud_path,
 )
 from jcm.physics.radiation.radiation_types import cloud_overlap_name
-from jcm.physics.radiation.cloud_optics import (
-    effective_radius_liquid,
-    effective_radius_ice,
-)
+from jcm.physics.radiation.cloud_optics import resolve_effective_radii
 import jcm.constants as c
 
 import rrtmgp
@@ -346,14 +343,10 @@ def prepare_rrtmgp_data(
     # The jax-rrtmgp library clips both radii to its LUT bounds internally
     # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
     # here.
-    fallback_liq = jnp.broadcast_to(
-        jnp.asarray(effective_radius_liquid(cdnc_factor, land_fraction)),
-        (nlev,),
+    r_eff_liq, r_eff_ice = resolve_effective_radii(
+        r_eff_liq_um, r_eff_ice_um, cdnc_factor, land_fraction,
+        cip_1d, layer_thickness,
     )
-    iwc_gm3 = cip_1d / jnp.maximum(layer_thickness, 1.0) * 1e3
-    fallback_ice = effective_radius_ice(iwc_gm3)
-    r_eff_liq = jnp.where(r_eff_liq_um > 0.0, r_eff_liq_um, fallback_liq)
-    r_eff_ice = jnp.where(r_eff_ice_um > 0.0, r_eff_ice_um, fallback_ice)
     cloud_r_eff_liq = r_eff_liq * 1e-6
     cloud_r_eff_ice = r_eff_ice * 1e-6
 

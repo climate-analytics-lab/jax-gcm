@@ -129,9 +129,9 @@ class BandModeTest(unittest.TestCase):
     """Each aerosol band handling must trace and stay finite."""
 
     def test_every_band_mode_runs_and_is_finite(self):
-        # 8 base features (T, log p, h2o, o3, lwp, iwp, cloud fraction,
-        # mu0) plus 3 per aerosol band.
-        for mode, n_sw in (("none", 8), ("broadband", 11), ("per_band", 50)):
+        # 10 base features (T, log p, h2o, o3, lwp, iwp, cloud fraction,
+        # mu0, r_eff_liq, r_eff_ice) plus 3 per aerosol band.
+        for mode, n_sw in (("none", 10), ("broadband", 13), ("per_band", 52)):
             with self.subTest(mode=mode):
                 self.assertEqual(n_input_features(mode, N_BND_SW), n_sw)
                 tend, diag = _run(mode)
@@ -427,12 +427,15 @@ class WeightsFileTest(unittest.TestCase):
         """The cost-only benchmark path must keep working untouched."""
         from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 
-        params = NNEmulatorRadiation(band_mode="per_band").params.get_value()
-        self.assertIsNotNone(params.emulator_weights)
+        term = NNEmulatorRadiation(band_mode="per_band")
+        # Weights live in their own Param, separate from RadiationParameters,
+        # so an optimizer can address the differentiable subtree alone.
+        weights = term.weights.get_value()
+        self.assertIsNotNone(weights)
         self.assertEqual(
-            params.emulator_weights.sw.gru_fwd.kernel.shape[0],
+            weights.sw.gru_fwd.kernel.shape[0],
             n_input_features("per_band", N_BND_SW))
-        self.assertIsNone(params.sw_scaling)
+        self.assertIsNone(term.params.get_value().sw_scaling)
 
     def test_band_mode_mismatch_raises(self):
         from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation

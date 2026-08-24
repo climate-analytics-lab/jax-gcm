@@ -15,6 +15,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -22,6 +23,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import generate_training_data  # noqa: E402
 from generate_training_data import (  # noqa: E402
     LABEL_FIELDS,
     PROFILE_FIELDS,
@@ -39,6 +41,7 @@ from generate_training_data import (  # noqa: E402
     label_quality_mask,
     make_labeller,
     perturbation_sweep,
+    trajectory_columns,
 )
 
 NCOL = 8
@@ -146,6 +149,119 @@ class ColumnSourceTest(unittest.TestCase):
             out["temperature"], [[230.0, 260.0, 290.0]])
         np.testing.assert_array_equal(
             out["pressure_interfaces"], [[50.0, 300.0, 700.0, 1013.0]])
+
+
+class EffectiveRadiusTest(unittest.TestCase):
+    """Stored radii are the RESOLVED ones the labels were generated with.
+
+    Three ways this can go wrong silently: storing the raw microphysical
+    values (zero outside cloud, so the stored feature describes a different
+    cloud from the RRTMGP label), leaving them out of the vertical
+    re-orientation (a radius profile upside down against its own pressure),
+    and not reaching RRTMGP at all (labels independent of the feature).
+    """
+
+    # effective_radius_liquid(cdnc_factor=1, land_fraction=0.5) and
+    # effective_radius_ice(0 g/m3) — what "not provided" resolves to.
+    LIQUID_FALLBACK = 11.0
+    ICE_FALLBACK = 83.8
+
+    def test_sweep_radii_are_resolved_and_strictly_positive(self):
+        batch = _sweep_batch(seed=5, n_columns=256)
+        r_liq, r_ice = batch["r_eff_liq"], batch["r_eff_ice"]
+        self.assertEqual(r_liq.shape, batch["cloud_fraction"].shape)
+        self.assertTrue(np.all(r_liq > 0.0), r_liq.min())
+        self.assertTrue(np.all(r_ice > 0.0), r_ice.min())
+
+        cloudy = batch["cloud_fraction"] > 0.0
+        self.assertTrue(cloudy.any())
+        # In cloud the sampled microphysical draw survives untouched.
+        self.assertGreater(r_liq[cloudy].min(), 1.99)
+        self.assertLess(r_liq[cloudy].max(), 20.01)
+        self.assertGreater(r_ice[cloudy].min(), 9.99)
+        self.assertLess(r_ice[cloudy].max(), 150.01)
+        # Outside cloud the sweep provides nothing, so the diagnostic
+        # fallbacks fill in — the same ones RRTMGP would have applied.
+        np.testing.assert_allclose(
+            r_liq[~cloudy], self.LIQUID_FALLBACK, rtol=1e-5)
+        np.testing.assert_allclose(
+            r_ice[~cloudy], self.ICE_FALLBACK, rtol=1e-5)
+
+    def _fake_trajectory_fields(self):
+        """Build a surface-first "JCM output" — the order the source must undo."""
+        nt, nlev, nlon, nlat = 2, 4, 3, 2
+        shape_3d = (nt, nlev, nlon, nlat)
+        shape_2d = (nt, nlon, nlat)
+
+        def profile(values, levels=nlev):
+            v = np.asarray(values, dtype=np.float64)
+            return np.broadcast_to(
+                v[None, :, None, None], (nt, levels, nlon, nlat)).copy()
+
+        fields = {
+            "temperature": profile([290.0, 275.0, 255.0, 225.0]),
+            "specific_humidity": profile([1e-2, 5e-3, 1e-3, 1e-5]),
+            "pressure_levels": profile([1.0e5, 7.0e4, 4.0e4, 1.0e4]),
+            "pressure_interfaces": profile(
+                [1.013e5, 8.5e4, 5.5e4, 2.5e4, 1.0e3], levels=nlev + 1),
+            "cloud_water": profile([2.0e-4] * nlev),
+            "cloud_ice": profile([1.0e-5] * nlev),
+            "cloud_fraction": profile([0.5] * nlev),
+            "r_eff_liq": profile([4.0, 6.0, 8.0, 10.0]),
+            "r_eff_ice": profile([20.0, 40.0, 60.0, 80.0]),
+            "ozone_vmr": profile([5e-8, 1e-7, 5e-7, 2e-6]),
+            "aod_profile": profile([0.05] * nlev),
+            "ssa_profile": profile([0.9] * nlev),
+            "asy_profile": profile([0.7] * nlev),
+        }
+        for name, value in (("surface_temperature", 290.0),
+                            ("surface_albedo_vis", 0.07),
+                            ("surface_albedo_nir", 0.07),
+                            ("surface_emissivity", 0.98),
+                            ("angstrom", 1.5)):
+            fields[name] = np.full(shape_2d, value)
+        self.assertEqual(fields["temperature"].shape, shape_3d)
+        fields["lat"] = np.linspace(-45.0, 45.0, nlat)
+        fields["lon"] = np.linspace(0.0, 300.0, nlon)
+        fields["time"] = np.array(
+            ["2000-01-01T00:00:00", "2000-01-01T12:00:00"],
+            dtype="datetime64[s]")
+        return fields
+
+    def test_trajectory_radii_are_flipped_with_pressure(self):
+        with mock.patch.object(
+            generate_training_data, "_load_trajectory_fields",
+            return_value=self._fake_trajectory_fields(),
+        ):
+            batch = trajectory_columns(
+                6, 4, np.random.default_rng(0), 3, 3,
+                np.linspace(300.0, 4000.0, 3),
+                np.linspace(4000.0, 50000.0, 3), state_file="fake.nc",
+            )
+        self.assertTrue(np.all(np.diff(batch["pressure_levels"], axis=1) > 0),
+                        "pressure must land TOA-first")
+        # Every level is cloudy and carries a microphysical radius, so the
+        # resolved values are the file's own — reversed exactly like pressure.
+        np.testing.assert_allclose(
+            batch["r_eff_liq"], np.broadcast_to([10.0, 8.0, 6.0, 4.0], (6, 4)),
+            rtol=1e-6)
+        np.testing.assert_allclose(
+            batch["r_eff_ice"],
+            np.broadcast_to([80.0, 60.0, 40.0, 20.0], (6, 4)), rtol=1e-6)
+
+    def test_labeller_drives_rrtmgp_with_the_stored_radii(self):
+        # At a fixed water path smaller droplets mean more cloud optical
+        # depth and a brighter cloud. Identical labels here would mean the
+        # radii never reached RRTMGP and the stored feature is decoration.
+        batch = _cloudy_sunlit_batch()
+        cloudy = batch["cloud_fraction"] > 0.0
+        small = dict(batch, r_eff_liq=np.where(cloudy, 4.0, batch["r_eff_liq"]))
+        large = dict(batch, r_eff_liq=np.where(cloudy, 20.0, batch["r_eff_liq"]))
+        labeller = _labeller()
+        toa_small = np.asarray(labeller(small, 0)["sw_flux_up"])[:, 0]
+        toa_large = np.asarray(labeller(large, 0)["sw_flux_up"])[:, 0]
+        self.assertTrue(np.all(toa_small > toa_large + 1.0),
+                        f"4 um {toa_small} vs 20 um {toa_large}")
 
 
 class SweepCoverageTest(unittest.TestCase):

@@ -35,6 +35,7 @@ from jcm.physics.radiation.nn_emulator import (
     reconstruct_lw_interface_fluxes,
     flux_to_heating_rate,
 )
+from jcm.physics.radiation.cloud_optics import resolve_effective_radii
 import jcm.constants as c
 
 
@@ -63,6 +64,8 @@ def radiation_scheme_emulated(
     sw_scaling: Optional[InputScaling] = None,
     lw_scaling: Optional[InputScaling] = None,
     band_mode: str = "per_band",
+    r_eff_liq_um: Optional[jnp.ndarray] = None,
+    r_eff_ice_um: Optional[jnp.ndarray] = None,
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Emulated radiation scheme — drop-in replacement for ``radiation_scheme_rrtmgp``.
 
@@ -111,6 +114,17 @@ def radiation_scheme_emulated(
     cwp = cloud_water * air_density * layer_thickness * cloud_fraction
     cip = cloud_ice * air_density * layer_thickness * cloud_fraction
 
+    # Effective radii, resolved against the same diagnostic fallbacks RRTMGP
+    # uses so a feature and the label it was trained against describe the same
+    # cloud. Zero (1M microphysics, cold start, or no caller-supplied value)
+    # selects the fallback rather than meaning "zero-radius droplets".
+    zeros = jnp.zeros_like(temperature)
+    r_eff_liq_um, r_eff_ice_um = resolve_effective_radii(
+        zeros if r_eff_liq_um is None else r_eff_liq_um,
+        zeros if r_eff_ice_um is None else r_eff_ice_um,
+        aerosol_data.cdnc_factor, 0.5, cip, layer_thickness,
+    )
+
     n_sw = n_input_features(band_mode, aerosol_data.aod_sw_per_band.shape[0])
     n_lw = n_input_features(band_mode, aerosol_data.aod_lw_per_band.shape[0])
     if sw_scaling is None:
@@ -122,6 +136,7 @@ def radiation_scheme_emulated(
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, cos_zenith, sw_scaling,
+        r_eff_liq_um, r_eff_ice_um,
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
     )
@@ -141,6 +156,7 @@ def radiation_scheme_emulated(
     lw_input = preprocess_lw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
         cwp, cip, cloud_fraction, co2_vmr, lw_scaling,
+        r_eff_liq_um, r_eff_ice_um,
         aerosol_data.aod_lw_per_band, aerosol_data.ssa_lw_per_band,
         aerosol_data.asy_lw_per_band, band_mode,
     )
@@ -395,7 +411,16 @@ class NNEmulatorRadiation(PhysicsTerm):
                     units=units, key=jax.random.key(init_seed),
                 ),
             )
-        self.params = nnx.Param(params)
+        # The network weights live in their OWN Param, separate from the rest
+        # of RadiationParameters, because that struct carries integer leaves
+        # (band counts, the cloud-overlap enum) and jax.grad rejects a pytree
+        # containing them. Keeping the weights partitioned means an optimizer
+        # can address exactly the differentiable subtree -- which is what an
+        # online fine-tuning loop needs -- without filtering.
+        self.weights = nnx.Param(params.emulator_weights)
+        self.params = nnx.Param(
+            dataclasses.replace(params, emulator_weights=None),
+        )
         self._band_mode = band_mode
         self._zero_tendency = bool(zero_tendency)
         self._coords_cached = False
@@ -420,7 +445,7 @@ class NNEmulatorRadiation(PhysicsTerm):
 
     def _check_band_counts(self, n_bnd_sw: int, n_bnd_lw: int) -> None:
         """Fail clearly when the aerosol bands do not match the weights."""
-        weights = self.params.get_value().emulator_weights
+        weights = self.weights.get_value()
         for name, n_bnd, w in (
             ("SW", n_bnd_sw, weights.sw), ("LW", n_bnd_lw, weights.lw),
         ):
@@ -521,6 +546,14 @@ class NNEmulatorRadiation(PhysicsTerm):
         # CO2 is a prescribed forcing read straight from ForcingData.
         co2_vmr = forcing.co2_vmr * 1e-6
 
+        # Microphysical effective radii from the clouds carry, sourced exactly
+        # as RRTMGP sources them so the emulator sees the cloud its labels
+        # describe. Zero (1M, or a cold start) selects the diagnostic fallback
+        # inside the scheme.
+        clouds_in = diagnostics["clouds"]
+        r_eff_liq_um = clouds_in.r_eff_liq.reshape(nlev, ncols)
+        r_eff_ice_um = clouds_in.r_eff_ice.reshape(nlev, ncols)
+
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
         )
@@ -562,7 +595,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             asy_lw_per_band=_per_band_to_col(aerosol_in.asy_lw_per_band, n_bnd_lw),
         )
 
-        emulator_weights = params.emulator_weights
+        emulator_weights = self.weights.get_value()
         sw_scaling = params.sw_scaling
         lw_scaling = params.lw_scaling
         band_mode = self._band_mode
@@ -576,6 +609,7 @@ class NNEmulatorRadiation(PhysicsTerm):
                 None, 0, 0,
                 None, 0, 1, None,
                 None, None, None, None,
+                1, 1,
             ),
             out_axes=(0, 0),
             axis_size=ncols,
@@ -589,6 +623,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             solar, latitudes, longitudes,
             params, aerosol_for_vmap, ozone_vmr, co2_vmr,
             emulator_weights, sw_scaling, lw_scaling, band_mode,
+            r_eff_liq_um, r_eff_ice_um,
         )
 
         rad_out = RadiationData(

@@ -17,6 +17,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from train_emulator import (  # noqa: E402
+    build_features,
     mass_weights,
     uniform_weights,
     solar_group_ids,
@@ -159,6 +160,66 @@ class SourceStratifiedSplitTest(unittest.TestCase):
                 self.assertNotIn(g, seen, f"group {g} in two partitions")
                 seen[g] = k
         self.assertEqual(sum(len(s) for s in splits), len(group_ids))
+
+
+class BuildFeaturesTest(unittest.TestCase):
+    """The trainer must feed the network exactly what the online scheme does.
+
+    Feature parity is the emulator's classic silent failure: a feature the
+    trainer forgets to pass is a column of zeros in training and a real number
+    at run time, and nothing in the loss curve says so.
+    """
+
+    NCOL, NLEV, NBND = 4, 6, 3
+    R_LIQ, R_ICE = 9.0, 40.0
+
+    def _dataset(self):
+        import xarray as xr
+
+        ncol, nlev, nbnd = self.NCOL, self.NLEV, self.NBND
+        prof = lambda v: (("column", "level"),          # noqa: E731
+                          np.full((ncol, nlev), v, np.float32))
+        col = lambda v: (("column",),                   # noqa: E731
+                         np.full((ncol,), v, np.float32))
+        iface = lambda v: (("column", "interface"),     # noqa: E731
+                           np.full((ncol, nlev + 1), v, np.float32))
+        band = lambda dim, v: ((("column", dim, "level")),  # noqa: E731
+                               np.full((ncol, nbnd, nlev), v, np.float32))
+
+        data = dict(
+            temperature=prof(260.0), pressure_levels=prof(5.0e4),
+            specific_humidity=prof(1.0e-3), ozone_vmr=prof(1.0e-6),
+            cloud_water=prof(1.0e-4), cloud_ice=prof(1.0e-5),
+            cloud_fraction=prof(0.5), air_density=prof(0.7),
+            layer_thickness=prof(500.0),
+            r_eff_liq=prof(self.R_LIQ), r_eff_ice=prof(self.R_ICE),
+            co2_vmr=col(400e-6), cos_zenith=col(0.6),
+            surface_temperature=col(288.0), surface_albedo_vis=col(0.1),
+            surface_albedo_nir=col(0.2), surface_emissivity=col(0.98),
+            pressure_interfaces=iface(5.0e4),
+            aod_sw_per_band=band("band_sw", 0.05),
+            ssa_sw_per_band=band("band_sw", 0.9),
+            asy_sw_per_band=band("band_sw", 0.7),
+            aod_lw_per_band=band("band_lw", 0.0),
+            ssa_lw_per_band=band("band_lw", 0.0),
+            asy_lw_per_band=band("band_lw", 0.0),
+        )
+        for prefix in ("sw", "lw"):
+            for channel in ("down", "up", "down_clear", "up_clear"):
+                data[f"{prefix}_flux_{channel}"] = iface(200.0)
+        return xr.Dataset(data)
+
+    def test_effective_radii_reach_both_networks(self):
+        from jcm.physics.radiation.nn_emulator import n_input_features
+
+        data = build_features(self._dataset(), "per_band")
+        want = n_input_features("per_band", self.NBND)
+        for name in ("x_sw", "x_lw"):
+            x = np.asarray(data[name])
+            self.assertEqual(x.shape, (self.NCOL, self.NLEV, want), name)
+            # Features 8 and 9 are the radii; see preprocess_*_inputs.
+            np.testing.assert_allclose(x[..., 8], self.R_LIQ, rtol=1e-6)
+            np.testing.assert_allclose(x[..., 9], self.R_ICE, rtol=1e-6)
 
 
 class WeightingTest(unittest.TestCase):

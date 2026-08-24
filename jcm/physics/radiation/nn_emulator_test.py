@@ -405,7 +405,7 @@ class TestPreprocessing(unittest.TestCase):
 
     def test_sw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(8) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(10) * 1000.0)
         x = preprocess_sw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -416,12 +416,14 @@ class TestPreprocessing(unittest.TestCase):
             cloud_fraction=jnp.zeros(nlev),
             cos_zenith=jnp.array(0.5),
             scaling=scaling,
+            r_eff_liq_um=jnp.full(nlev, 11.0),
+            r_eff_ice_um=jnp.full(nlev, 40.0),
         )
-        self.assertEqual(x.shape, (nlev, 8))
+        self.assertEqual(x.shape, (nlev, 10))
 
     def test_lw_preprocessing_shape(self):
         nlev = 40
-        scaling = InputScaling(x_max=jnp.ones(8) * 1000.0)
+        scaling = InputScaling(x_max=jnp.ones(10) * 1000.0)
         x = preprocess_lw_inputs(
             temperature=jnp.full(nlev, 250.0),
             pressure=jnp.linspace(100, 101325, nlev),
@@ -432,8 +434,10 @@ class TestPreprocessing(unittest.TestCase):
             cloud_fraction=jnp.zeros(nlev),
             co2_vmr=400e-6,
             scaling=scaling,
+            r_eff_liq_um=jnp.full(nlev, 11.0),
+            r_eff_ice_um=jnp.full(nlev, 40.0),
         )
-        self.assertEqual(x.shape, (nlev, 8))
+        self.assertEqual(x.shape, (nlev, 10))
 
 
 class TestWeightInitialization(unittest.TestCase):
@@ -481,10 +485,10 @@ class TestWeightInitialization(unittest.TestCase):
     def test_init_sizes_input_layer_from_band_mode(self):
         """Per-band aerosol widens the input layer, not anything else."""
         n_sw = n_input_features("per_band", 14)
-        # 8 base features plus 3 per SW band.
+        # 10 base features (8 plus the two effective radii) and 3 per SW band.
         w = init_emulator_weights(sw_features=n_sw, lw_features=n_sw)
-        self.assertEqual(n_sw, 50)
-        self.assertEqual(w.sw.gru_fwd.kernel.shape, (50, 48))
+        self.assertEqual(n_sw, 52)
+        self.assertEqual(w.sw.gru_fwd.kernel.shape, (52, 48))
 
 
 class TestInputConditioning(unittest.TestCase):
@@ -519,7 +523,14 @@ class TestInputConditioning(unittest.TestCase):
         # The mid-range value is invisible under linear scaling.
         self.assertLess(float(raw[2]), 0.02)
         self.assertGreater(float(transformed[2]), 0.3)
-        self.assertEqual(float(transformed[0]), 0.0)
+        # A zero path maps to the floor's fourth root rather than to exactly
+        # zero -- that floor is what keeps d/dx finite at zero cloud, which a
+        # differentiated rollout needs. It must still be negligible.
+        self.assertLess(float(transformed[0]), 1e-2)
+        self.assertTrue(
+            jnp.isfinite(jax.grad(
+                lambda x: nn_emulator._cloud_path_feature(x).sum(),
+            )(jnp.float32(0.0))))
 
     def test_checkpoint_without_offset_still_loads(self):
         """Weights fitted before the offset existed must keep working."""

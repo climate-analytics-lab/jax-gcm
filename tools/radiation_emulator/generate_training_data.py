@@ -63,6 +63,11 @@ PROFILE_FIELDS = (
     "temperature", "specific_humidity", "pressure_levels",
     "layer_thickness", "air_density", "cloud_water", "cloud_ice",
     "cloud_fraction", "ozone_vmr",
+    # RESOLVED effective radii (um): the microphysical value where the source
+    # provides one, the diagnostic fallback elsewhere. Stored resolved, and
+    # RRTMGP is driven with exactly these, so a feature and its label always
+    # describe the same cloud (see _resolved_effective_radii).
+    "r_eff_liq", "r_eff_ice",
 )
 INTERFACE_FIELDS = ("pressure_interfaces",)
 SCALAR_FIELDS = (
@@ -153,6 +158,8 @@ def make_labeller(base_seed: int = 0):
         None, 0,             # parameters, aerosol
         0, None, None, None,  # col_index, model_step, base_seed, compute_cre
         0, 0,                # ozone_vmr, co2_vmr
+        None, None,          # ch4_vmr, n2o_vmr (unset: RRTMGP's own defaults)
+        0, 0,                # r_eff_liq_um, r_eff_ice_um
     )
     vmapped = jax.vmap(radiation_scheme_rrtmgp, in_axes=in_axes)
 
@@ -205,6 +212,11 @@ def make_labeller(base_seed: int = 0):
             base_seed, True,
             _f32(batch["ozone_vmr"]),
             jnp.broadcast_to(_f32(batch["co2_vmr"])[:, None], (ncol, nlev)),
+            # ch4/n2o stay unprescribed, as before; the radii are positional
+            # after them, and they are the batch's RESOLVED values so the
+            # labels describe exactly the cloud the stored features do.
+            None, None,
+            _f32(batch["r_eff_liq"]), _f32(batch["r_eff_ice"]),
         )
         out = {k: getattr(diag, k) for k in LABEL_FIELDS}
         # The scheme carries cos_zenith as a length-1 per-column vector.
@@ -342,6 +354,11 @@ INPUT_BOUNDS = {
     "cloud_water": (0.0, 0.05),
     "cloud_ice": (0.0, 0.05),
     "cloud_fraction": (0.0, 1.0),
+    # Effective radii, generous on both ends: the bound exists to catch a
+    # corrupt source, not to shape the distribution. The jax-rrtmgp optics
+    # clip to their own LUT limits internally.
+    "r_eff_liq": (0.0, 100.0),
+    "r_eff_ice": (0.0, 500.0),
     "ozone_vmr": (0.0, 5.0e-5),
     "surface_albedo_vis": (0.0, 1.0),
     "surface_albedo_nir": (0.0, 1.0),
@@ -413,6 +430,57 @@ def _layer_thickness(pressure, temperature):
     dz[..., 1:] = dp / (rho_mid * float(c.grav))
     dz[..., 0] = dz[..., 1]
     return dz
+
+
+def _resolved_effective_radii(batch):
+    """Return ``batch`` with ``r_eff_liq`` / ``r_eff_ice`` resolved.
+
+    A source supplies RAW radii (um), zero meaning "not provided". This
+    replaces them with the resolved values ``resolve_effective_radii``
+    produces — microphysical where given, the diagnostic fallback elsewhere —
+    and those are what get stored AND what the labeller hands RRTMGP. Storing
+    the raw values instead would let a stored feature (0 outside cloud)
+    describe a different cloud from the label RRTMGP computed from the
+    fallback. The resolved radii are strictly positive, so RRTMGP's own
+    fallback never re-triggers on them.
+
+    The ice fallback is a power law in the IN-CLOUD ice water content, so the
+    grid-mean condensate goes through the same ``in_cloud_path`` division and
+    ``_MAX_IN_CLOUD_CONDENSATE`` cap that ``radiation_scheme_rrtmgp`` applies
+    before building its radiation state.
+
+    Requires ``air_density`` and ``layer_thickness`` to be present already.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from jcm.physics.radiation.cloud_optics import resolve_effective_radii
+    from jcm.physics.radiation.mcica import in_cloud_path
+    from jcm.physics.radiation.rrtmgp import _MAX_IN_CLOUD_CONDENSATE
+
+    ice_in_cloud = jnp.minimum(
+        in_cloud_path(jnp.asarray(batch["cloud_ice"]),
+                      jnp.asarray(batch["cloud_fraction"])),
+        _MAX_IN_CLOUD_CONDENSATE,
+    )
+    in_cloud_ice_path = (
+        jnp.maximum(ice_in_cloud, 0.0)
+        * jnp.asarray(batch["air_density"])
+        * jnp.asarray(batch["layer_thickness"])
+    )
+    # cdnc_factor = 1 and land_fraction = 0.5 are what the labeller's
+    # AerosolData and prepare_rrtmgp_data's default hand the liquid fallback.
+    r_liq, r_ice = jax.vmap(
+        resolve_effective_radii, in_axes=(0, 0, None, None, 0, 0),
+    )(
+        jnp.asarray(batch["r_eff_liq"]), jnp.asarray(batch["r_eff_ice"]),
+        jnp.asarray(1.0), 0.5,
+        in_cloud_ice_path, jnp.asarray(batch["layer_thickness"]),
+    )
+    out = dict(batch)
+    out["r_eff_liq"] = np.asarray(r_liq, dtype=np.float64)
+    out["r_eff_ice"] = np.asarray(r_ice, dtype=np.float64)
+    return out
 
 
 def _interfaces_from_levels(pressure):
@@ -723,6 +791,15 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     cloud_water = cloud_fraction * condensate * (1.0 - ice_fraction)
     cloud_ice = cloud_fraction * condensate * ice_fraction
 
+    # Effective radii on the two spare LHS axes, spanning the observed ranges
+    # (drizzling marine stratocumulus to continental haze; small cirrus
+    # crystals to large aggregates). Zero outside cloud means "not provided",
+    # so the clear part of every column exercises the diagnostic fallback the
+    # coupled model uses wherever the microphysics writes nothing.
+    cloudy = cloud_fraction > 0.0
+    r_eff_liq = np.where(cloudy, (2.0 + 18.0 * u[:, 13])[:, None], 0.0)
+    r_eff_ice = np.where(cloudy, (10.0 + 140.0 * u[:, 14])[:, None], 0.0)
+
     # Ozone: analytic stratospheric profile (mole fraction), scaled to
     # span the observed column range.
     p_mb = np.maximum(pressure_levels / 100.0, 1e-3)
@@ -763,7 +840,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     (latitude, longitude, orbital_phase,
      synodic_phase, _) = _solar_geometry_for_cos_zenith(rng, target_mu0)
 
-    return dict(
+    return _resolved_effective_radii(dict(
         temperature=temperature,
         specific_humidity=specific_humidity,
         pressure_levels=pressure_levels,
@@ -773,6 +850,8 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
+        r_eff_liq=r_eff_liq,
+        r_eff_ice=r_eff_ice,
         ozone_vmr=ozone_vmr,
         co2_vmr=(280.0 + 920.0 * rng.random(n_columns)) * 1e-6,
         surface_temperature=surface_temperature,
@@ -789,7 +868,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         aod_lw_per_band=aod_lw,
         ssa_lw_per_band=ssa_lw,
         asy_lw_per_band=asy_lw,
-    )
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +922,13 @@ def _load_trajectory_fields(state_file):
     out["cloud_ice"] = _first_var(ds, ["clouds.qi", "qi"], 0.0, shape_3d)[0]
     out["cloud_fraction"] = _first_var(
         ds, ["clouds.cloud_fraction"], 0.0, shape_3d)[0]
+    # Microphysical radii (um), written by the 2M scheme. Zero -- both as the
+    # fallback for a 1M run that wrote none, and level-by-level within a 2M
+    # run -- means "not provided" and selects the diagnostic parameterisation.
+    out["r_eff_liq"] = _first_var(
+        ds, ["clouds.r_eff_liq"], 0.0, shape_3d)[0]
+    out["r_eff_ice"] = _first_var(
+        ds, ["clouds.r_eff_ice"], 0.0, shape_3d)[0]
     # chemistry.ozone_vmr is ppmv on output (see rrtmgp._compute_full).
     out["ozone_vmr"] = _first_var(
         ds, ["chemistry.ozone_vmr"], 1.0, shape_3d)[0] * 1e-6
@@ -910,6 +996,8 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     cloud_ice = take("cloud_ice")
     cloud_fraction = take("cloud_fraction")
     ozone_vmr = take("ozone_vmr")
+    r_eff_liq = take("r_eff_liq")
+    r_eff_ice = take("r_eff_ice")
 
     surface_temperature = take_2d("surface_temperature")
     surface_albedo_vis = take_2d("surface_albedo_vis")
@@ -934,6 +1022,13 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
+        # Raw here; resolved below, once dz and rho exist. Carried in the
+        # batch (not in ``aux``) so _orient_toa_first flips them with the same
+        # per-column mask as pressure -- a misaligned radius profile would be
+        # silent and severe. ``aux`` is only for fields consumed and dropped
+        # before the batch is returned, which these are not.
+        r_eff_liq=r_eff_liq,
+        r_eff_ice=r_eff_ice,
         ozone_vmr=ozone_vmr,
         surface_temperature=surface_temperature,
         surface_albedo_vis=surface_albedo_vis,
@@ -960,6 +1055,7 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         batch["pressure_levels"], batch["temperature"])
     batch["layer_thickness"] = _layer_thickness(
         batch["pressure_levels"], batch["temperature"])
+    batch = _resolved_effective_radii(batch)
 
     aod_sw, ssa_sw, asy_sw = _per_band_optics(
         aod_profile, ssa_profile, asy_profile, angstrom, sw_centers_nm,
