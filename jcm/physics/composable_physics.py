@@ -31,6 +31,7 @@ from jcm import profiling
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+from jcm.physics.budget_gauge import gauge_aerosol_budget
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
 
@@ -377,6 +378,15 @@ class ComposablePhysics(nnx.Module, Physics):
             "q_tendency": acc["specific_humidity"],
         }
 
+        # Per-species aerosol mass-budget gauge (#713): entry mass, net
+        # physics tendency, and the lagged DYNAMICS residual — the
+        # in-step budget closure that makes a transport leak or an
+        # unledgered physics source visible in one save window instead
+        # of after months of compounding. No-op without aerosol tracers.
+        diagnostics = gauge_aerosol_budget(
+            diagnostics, vectorized_state, acc["tracers"], self.dt_seconds,
+        )
+
         # Keep the accumulated tendencies column-sharded before the lon-major
         # un-flatten, so the (nlev, ncols) -> (nlev, nlon, nlat) reshape lands
         # back in the physics 3D sharding rather than triggering a gather.
@@ -531,6 +541,9 @@ class ComposablePhysics(nnx.Module, Physics):
         # Cross-step (q, dq/dt) handoff for the lagged dynamics-tendency
         # reconstruction (#699) — carry plumbing, not an output field.
         "_prev_step",
+        # Cross-step per-species mass expectation for the #713 budget
+        # gauge — carry plumbing, not an output field.
+        "_budget_expected",
         "aerosol.aod_sw_per_band",
         "aerosol.ssa_sw_per_band",
         "aerosol.asy_sw_per_band",
