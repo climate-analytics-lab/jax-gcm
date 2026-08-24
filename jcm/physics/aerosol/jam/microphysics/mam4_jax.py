@@ -254,11 +254,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # (modal_aero_gasaerexch.F90:37), the MAM4 box harness 3.0,
         # ECHAM-HAM's counterpart (m7_coat) 1.0 — an order of magnitude of
         # legitimate disagreement, and it directly sets the BC/POA
-        # lifetime, so it is exposed here as a calibration knob. Trace-time
-        # static (a Python float in the core's process-global config), so
-        # NOT differentiable — set before construction, like the backend.
-        _amicphys.configure_pcarbon_aging(
-            n_so4_monolayers=float(n_so4_monolayers))
+        # lifetime, so it is exposed here as a calibration knob. Held on
+        # the instance and passed PER CALL to the core (a static jit
+        # argument) — NOT installed into the core's process-global config,
+        # which is read at trace time and would make several
+        # differently-configured instances in one process order-dependent
+        # (Codex P1 on #726). Trace-time static, so not differentiable.
         self._n_so4_monolayers = float(n_so4_monolayers)
 
         # Precision — applied during construction so the dycore state built
@@ -455,7 +456,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             for k, v in core_state.items()
         }
         in_axes = ({k: (None if k == "deltat" else 0) for k in flat_state},)
-        one_step = lambda s: amicphys(wateruptake(calcsize(s)))
+        one_step = lambda s: amicphys(
+            wateruptake(calcsize(s)),
+            n_so4_monolayers=self._n_so4_monolayers)
         flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)
 
         def from_cells(a):
