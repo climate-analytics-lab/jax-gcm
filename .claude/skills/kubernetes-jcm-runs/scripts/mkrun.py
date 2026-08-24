@@ -261,6 +261,16 @@ exit $RC
             # from the checkpoint. Contrast the benchmark generator, where a
             # retry would silently re-time on a different node.
             "backoffLimit": a.retries,
+            # Infrastructure disruptions (preemption, node drain/death) do
+            # not consume the retry budget — backoffLimit is for OUR
+            # failures.
+            "podFailurePolicy": {
+                "rules": [
+                    {"action": "Ignore",
+                     "onPodConditions": [{"type": "DisruptionTarget",
+                                          "status": "True"}]},
+                ],
+            },
             # No TTL — production output and its Job history are kept until
             # deliberately removed.
             "template": {
