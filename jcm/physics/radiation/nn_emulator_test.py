@@ -349,6 +349,56 @@ class TestHeatingRate(unittest.TestCase):
         hr = flux_to_heating_rate(flux_down, flux_up, p_int)
         np.testing.assert_allclose(hr, 0.0, atol=1e-10)
 
+    # The three tests below pin the SIGN and the energy budget. The shape and
+    # zero-divergence tests above cannot: both pass under a sign flip, which
+    # is how an inverted conversion reached a coupled run. The trainer is
+    # blind to it too, applying this same function to prediction and target
+    # so the error cancels in the loss.
+
+    def test_absorption_warms(self):
+        """Net downward flux decreasing with depth = absorption = warming."""
+        nlev = 10
+        # TOA-first: 800 W/m2 enters the top, 700 reaches the bottom, so the
+        # column absorbed 100 W/m2 and every layer must warm.
+        flux_down = jnp.linspace(800.0, 700.0, nlev + 1)
+        flux_up = jnp.zeros(nlev + 1)
+        p_int = jnp.linspace(100.0, 101325.0, nlev + 1)
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        self.assertTrue(jnp.all(hr > 0.0), f"absorption must warm, got {hr}")
+
+    def test_emission_cools(self):
+        """Net upward flux growing with height = emission to space = cooling."""
+        nlev = 10
+        flux_down = jnp.zeros(nlev + 1)
+        # TOA-first: more leaves the top than enters from below.
+        flux_up = jnp.linspace(300.0, 200.0, nlev + 1)
+        p_int = jnp.linspace(100.0, 101325.0, nlev + 1)
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        self.assertTrue(jnp.all(hr < 0.0), f"emission must cool, got {hr}")
+
+    def test_energy_closure(self):
+        """Column-integrated heating == net flux convergence across the column.
+
+        Heating IS flux divergence, so this identity holds by construction for
+        any correct implementation and fails by exactly a factor of -1 for an
+        inverted one. It is the check that localises a sign error to this
+        function rather than to the network's flux predictions.
+        """
+        nlev = 30
+        rng = np.random.default_rng(0)
+        p_int = jnp.asarray(np.linspace(100.0, 101325.0, nlev + 1))
+        flux_down = jnp.asarray(
+            900.0 - np.cumsum(rng.uniform(0.0, 8.0, nlev + 1)))
+        flux_up = jnp.asarray(
+            200.0 + np.cumsum(rng.uniform(0.0, 3.0, nlev + 1)))
+
+        hr = flux_to_heating_rate(flux_down, flux_up, p_int)
+        integrated = float(
+            jnp.sum(hr * jnp.diff(p_int) / c.grav * c.cpd))
+        net = flux_down - flux_up
+        convergence = float(net[0] - net[-1])   # TOA-first: top minus surface
+        np.testing.assert_allclose(integrated, convergence, rtol=1e-5)
+
 
 class TestPreprocessing(unittest.TestCase):
     """Tests for input preprocessing."""

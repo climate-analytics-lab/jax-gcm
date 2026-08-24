@@ -726,8 +726,12 @@ def flux_to_heating_rate(
     d_net_flux = jnp.diff(net_flux)  # (nlev,)
     dp = jnp.diff(pressure_interfaces)  # (nlev,)
 
-    # dT/dt = (g/cp) * dF_net/dp  (positive heating when net flux increases downward)
-    return (c.grav / c.cpd) * d_net_flux / dp
+    # Energy convergence into layer i is net[i] - net[i+1] = -diff(net), so
+    # the minus is required: without it shortwave absorption reads as cooling
+    # and longwave emission as warming. Column-integrated heating must equal
+    # the net flux convergence across the column, which is what the energy
+    # closure test asserts.
+    return -(c.grav / c.cpd) * d_net_flux / dp
 
 
 # ---------------------------------------------------------------------------
