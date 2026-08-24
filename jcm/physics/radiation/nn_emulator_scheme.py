@@ -36,6 +36,8 @@ from jcm.physics.radiation.nn_emulator import (
     flux_to_heating_rate,
 )
 from jcm.physics.radiation.cloud_optics import resolve_effective_radii
+from jcm.physics.radiation.mcica import in_cloud_path
+from jcm.physics.radiation.rrtmgp import _MAX_IN_CLOUD_CONDENSATE
 import jcm.constants as c
 
 
@@ -118,11 +120,20 @@ def radiation_scheme_emulated(
     # uses so a feature and the label it was trained against describe the same
     # cloud. Zero (1M microphysics, cold start, or no caller-supplied value)
     # selects the fallback rather than meaning "zero-radius droplets".
+    # The ice fallback is a power law in IN-CLOUD IWC, so it needs the
+    # in-cloud path (grid mean DIVIDED by cloud fraction), not the grid-mean
+    # `cip` above. Using `cip` here would feed an IWC too small by ~cf^2 and
+    # reintroduce exactly the feature/label mismatch this input exists to
+    # remove -- the label generator resolves from the in-cloud path.
+    ice_in_cloud = jnp.minimum(
+        in_cloud_path(cloud_ice, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE,
+    )
     zeros = jnp.zeros_like(temperature)
     r_eff_liq_um, r_eff_ice_um = resolve_effective_radii(
         zeros if r_eff_liq_um is None else r_eff_liq_um,
         zeros if r_eff_ice_um is None else r_eff_ice_um,
-        aerosol_data.cdnc_factor, 0.5, cip, layer_thickness,
+        aerosol_data.cdnc_factor, 0.5,
+        ice_in_cloud * air_density * layer_thickness, layer_thickness,
     )
 
     n_sw = n_input_features(band_mode, aerosol_data.aod_sw_per_band.shape[0])
