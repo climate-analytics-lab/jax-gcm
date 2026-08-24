@@ -19,14 +19,12 @@ def test_aerosol_cloud_interaction():
     """Test that aerosols modify cloud effective radius"""
     print("Testing aerosol-cloud interactions...")
     
-    land_fraction = 0.5
-    
     # Test without aerosols
-    r_eff_clean = effective_radius_liquid(jnp.array([1.0]), land_fraction)
+    r_eff_clean = effective_radius_liquid(jnp.array([1.0]))
     
     # Test with aerosols (increased CDNC)
     cdnc_factor = jnp.array([2.0])  # Double the droplet concentration
-    r_eff_polluted = effective_radius_liquid(cdnc_factor, land_fraction)
+    r_eff_polluted = effective_radius_liquid(cdnc_factor)
     
     # With more droplets, effective radius should be smaller
     assert r_eff_polluted[0] < r_eff_clean[0], f"Expected smaller droplets with aerosols: {r_eff_polluted[0]} vs {r_eff_clean[0]}"

@@ -36,5 +36,5 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp>=0.2.1  # 0.2.1+ has the per-call sfc_alb/sfc_emis overrides the per-column surface coupling needs (0.2.0: gas-optics gather + shared-table fixes)
+jax-rrtmgp>=0.3.0  # 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
 huggingface_hub

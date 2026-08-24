@@ -52,11 +52,18 @@ from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
-# Cap on in-cloud condensate (kg/kg) handed to the cloud optics — the high end
-# of realistic in-cloud water; bounds the cloud optical depth of thin clouds
-# carrying large grid-mean condensate so the two-stream solver can't NaN. The
-# faithful-radiation equivalent of ECHAM's optics inhomogeneity factor + r_eff
-# table clamp. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+# NaN guard on in-cloud condensate (kg/kg) handed to the cloud optics. A thin
+# but resolved cloud carrying large grid-mean condensate gives a huge in-cloud
+# water (grid_mean / cf), and the resulting optical depth NaNs the two-stream
+# solver. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+#
+# This is NOT a sub-grid inhomogeneity scaling, and jcm implements none.
+# ECHAM's ``zinhoml`` is a continuous LWP-dependent rescaling applied to every
+# cloudy cell; this is a one-sided clip that is the identity almost everywhere
+# and flattens everything above the threshold to the same value. Measured on
+# T63L47 output it binds in 0.0026% of cloudy cells, and removing it entirely
+# there moves fluxes by <= 0.006 W/m2 -- inert in practice, but do not read it
+# as inhomogeneity being covered (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
@@ -232,7 +239,6 @@ def prepare_rrtmgp_data(
     layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
     surface_temperature: jnp.ndarray,
-    land_fraction: float = 0.5,
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
 ) -> dict:
@@ -246,7 +252,6 @@ def prepare_rrtmgp_data(
         layer_thickness: geometric layer thickness (m), TOA-first.
         cdnc_factor: aerosol CDNC scaling for the liquid r_eff fallback.
         surface_temperature: scalar surface temperature (K).
-        land_fraction: land fraction for the liquid r_eff fallback.
         r_eff_liq_um: optional microphysical liquid effective radius (um),
             TOA-first (nlev,). Entries <= 0 mean "not provided" and fall
             back to the diagnostic ``effective_radius_liquid``.
@@ -302,10 +307,17 @@ def prepare_rrtmgp_data(
     cloud_ice_mixing = cip_1d / (rho * layer_thickness)
     total_condensate = cloud_water_mixing + cloud_ice_mixing
 
-    # Water vapour VMR -> mass mixing ratio: q = VMR * eps
-    h2o_mass_mixing = icon_data.h2o_vmr * c.eps
-    h2o_mass_mixing = lax.cond(needs_reversal, flip, identity, h2o_mass_mixing)
-    total_water = h2o_mass_mixing + total_condensate
+    # The library wants q_t as a SPECIFIC humidity: it forms the vapour
+    # mixing ratio itself as (q_t - q_c)/(1 - q_t). Reconstructing q from
+    # h2o_vmr instead returned q/(1-q) -- because the grey scheme's
+    # `h2o_vmr = q/(1-q)*1.608` and `1.608*eps = 1.0002` cancel -- so the
+    # 1/(1-q) was applied twice and the H2O VMR reaching gas optics was
+    # +2.1% at q = 20 g/kg (#678). Pass the specific humidity straight
+    # through instead of round-tripping the grey convention.
+    h2o_specific = lax.cond(
+        needs_reversal, flip, identity, icon_data.specific_humidity,
+    )
+    total_water = h2o_specific + total_condensate
 
     # Cloud effective radii (microns -> metres). Microphysical values from
     # the clouds carry (ECHAM preffl/preffi, written by the 2M scheme) take
@@ -319,7 +331,7 @@ def prepare_rrtmgp_data(
     # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
     # here.
     fallback_liq = jnp.broadcast_to(
-        jnp.asarray(effective_radius_liquid(cdnc_factor, land_fraction)),
+        jnp.asarray(effective_radius_liquid(cdnc_factor)),
         (nlev,),
     )
     iwc_gm3 = cip_1d / jnp.maximum(layer_thickness, 1.0) * 1e3
@@ -898,7 +910,9 @@ from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
     radiation_should_compute,
+    rescale_cached_radiation,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -1115,6 +1129,13 @@ class RRTMGPRadiation(PhysicsTerm):
         """Compute or reuse cached RRTMGP heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
             tend, rad = self._compute_full(state, diagnostics, forcing, params)
@@ -1130,14 +1151,13 @@ class RRTMGPRadiation(PhysicsTerm):
             return tend, rad
 
         def _use_cached():
-            tend = cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            )
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
             # Same dtype pin as _compute: under x64 the cached heating ->
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, radiation
+            return tend, rad
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),

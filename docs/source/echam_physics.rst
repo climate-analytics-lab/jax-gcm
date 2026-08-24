@@ -126,7 +126,9 @@ The grey scheme is a simplified two-stream scheme with hand-tuned band coefficie
 - Aerosol direct effects with Angstrom spectral scaling (AOD(λ) = AOD(550nm) · (λ/0.55)^(-α))
 - Aerosol indirect (Twomey) effect via CDNC modification of droplet effective radius
 - Solar geometry from ``jax_solar`` (zenith angle, day/night, orbital parameters)
-- Heating-rate caching: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps via ``_radiation_with_caching``. This matches the ECHAM/ICON convention — radiation is the slowest physics term and varies on hour timescales, so caching is essentially free at the accuracy level. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+- Heating-rate caching with solar rescaling: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps. This matches the ECHAM/ICON convention — radiation is the slowest physics term and the atmosphere's transmissivity varies on hour timescales. The **sun does not**, so on cached steps every shortwave quantity (heating rate, surface and TOA fluxes, clear-sky and aerosol-free slots) is rescaled by ``cos_zenith_now / cos_zenith_when_solved``. This is ECHAM psrad's scheme of caching transmissivity and rescaling by the instantaneous solar flux; without it a column crossing the terminator receives either zero or full daylight for the whole interval, worst at the equinoxes and at high latitude. Longwave is not rescaled. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+
+  One residual error is bounded by the interval rather than removed: a column whose cached shortwave is zero — dark when radiation last ran, or gone dark since — cannot be brought back by a multiplicative factor, so it stays dark until the next full solve even if the sun rises within the interval. That is the main reason not to push ``radiation_interval`` far past a couple of hours.
 
 **Configurable parameters** (:py:class:`jcm.physics.radiation.radiation_types.RadiationParameters`)
 

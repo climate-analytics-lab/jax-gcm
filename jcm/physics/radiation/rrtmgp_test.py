@@ -246,7 +246,7 @@ class TestRRTMGPEffectiveRadii:
         assert np.isclose(float(r_ice[k]), 25.0, rtol=1e-5)
         assert np.isclose(float(r_liq[k + 2]), 9.5, rtol=1e-5)
         # Unprovided levels fall back to the diagnostics
-        fallback_liq = float(effective_radius_liquid(jnp.array(1.0), 0.5))
+        fallback_liq = float(effective_radius_liquid(jnp.array(1.0)))
         assert np.isclose(float(r_liq[k]), fallback_liq, rtol=1e-5)
         assert np.isclose(
             float(r_ice[k + 1]), 83.8, rtol=1e-4,
