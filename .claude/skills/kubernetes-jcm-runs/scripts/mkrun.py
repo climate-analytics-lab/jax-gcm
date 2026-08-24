@@ -275,7 +275,13 @@ exit $RC
             # deliberately removed.
             "template": {
                 "spec": {
-                    "restartPolicy": "OnFailure",
+                    # "Never", not "OnFailure": the OnFailure backoff
+                    # accounting interacts badly with node-death pods
+                    # (BackoffLimitExceeded at failed=2 with limit=40 killed
+                    # a healthy day-570 run), and podFailurePolicy requires
+                    # Never anyway. Checkpoint resume makes pod identity
+                    # irrelevant.
+                    "restartPolicy": "Never",
                     "nodeSelector": (
                         {"nvidia.com/gpu.product": a.gpu_product}
                         if a.gpu_product
