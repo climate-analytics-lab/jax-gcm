@@ -40,9 +40,12 @@ mode *number* move by `xferfrac`; shell species move wholesale.
 because the references legitimately disagree by an order of magnitude —
 E3SM production hard-codes 8, the MAM4 box harness uses 3, ECHAM-HAM uses 1 —
 and it directly sets the BC/POA lifetime (smaller = faster ageing). Default:
-8.0 (deployed-MAM4). It is trace-time static in the core's process-global
-config, so it is **not** a differentiable parameter; calibrating it means a
-sweep, not a gradient.
+8.0 (deployed-MAM4). Each term instance holds its own value and passes it to
+the core **per call** as a static jit argument (never via the core's
+process-global config, which is read at trace time and would make several
+differently-configured instances in one process order-dependent). Static
+means it is **not** a differentiable parameter; calibrating it means a
+sweep — which the per-instance binding makes safe — not a gradient.
 
 ## Why in-core, not a harness term
 
