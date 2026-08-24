@@ -41,7 +41,7 @@ jcm = [
 mam4 = [
     # Pinned to the main SHA carrying configure_gas_netprod (#642) until
     # the requested upstream release is tagged — then flip to the version.
-    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@5ed465661dcd1b4a858ed92524ac58fc37696cfd",
+    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@69540a16f0d34134c4b6f4f43aef9902a5941638",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.

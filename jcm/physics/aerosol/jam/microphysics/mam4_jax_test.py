@@ -19,8 +19,17 @@ import pytest
 # the optional dependency is installed. Each test below re-enables x64 (via the
 # term's lazy import) and restores it in tearDown.
 _x64_at_import = jax.config.read("jax_enable_x64")
-pytest.importorskip("mam4_jax")
-jax.config.update("jax_enable_x64", _x64_at_import)
+# The dotted path also skips (rather than errors) when an OLD pre-0.3
+# mam4-jax layout is installed — the adapter needs the core/coupling/physics
+# package structure plus pcarbon aging (jax-gcm#721); the pinned version has
+# both. The restore MUST be in a finally: importorskip imports the parent
+# ``mam4_jax`` (flipping x64 on) and then raises Skipped when ``coupling``
+# is missing — without the finally, that abandons the whole xdist worker
+# in float64 and unrelated tests' dtype assertions fail.
+try:
+    pytest.importorskip("mam4_jax.coupling")
+finally:
+    jax.config.update("jax_enable_x64", _x64_at_import)
 
 
 def _column_state(nlev=4, ncols=2):
@@ -123,7 +132,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
     def _assert_backend_runs_finite(self, backend):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -164,7 +173,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self._assert_backend_runs_finite("astem")
 
     def test_default_backend_is_substep(self):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
@@ -179,7 +188,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             _amicphys.configure_condensation(backend="substep")
 
     def test_enable_x64_control(self):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
@@ -204,6 +213,51 @@ class Mam4JaxAdapterTest(unittest.TestCase):
                 Mam4JaxMicrophysics(condensation_backend="not-a-backend")
         finally:
             _amicphys.configure_condensation(backend="substep")
+
+    def test_carbon_aging_moves_bc_from_pcm_to_accum(self):
+        """Ageing (jax-gcm#721): condensed H2SO4 coats the pcm mode and the
+        core transfers the coated fraction of BC (and pcm number) to accum.
+        Attribution is by monolayer-threshold sensitivity: an absurdly thick
+        required coating (1e9 monolayers) makes ageing inert, leaving only
+        the pcm→acc coagulation pathway, so the default-vs-inert difference
+        isolates the ageing transfer.
+        """
+        from mam4_jax.coupling import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        state, diagnostics = _column_state()
+        # A healthy H2SO4 reservoir so within-step condensation builds a
+        # real shell on pcm.
+        state = state.copy(tracers={**state.tracers,
+                                    "g_h2so4": jnp.full((4, 2), 1.0e-9)})
+        try:
+            aged, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
+            inert_term = Mam4JaxMicrophysics(n_so4_monolayers=1.0e9)
+            inert, _ = inert_term(state, diagnostics, None, None)
+        finally:
+            _amicphys.configure_pcarbon_aging(n_so4_monolayers=8.0)
+
+        d_bc_pcm = np.asarray(aged.tracers["m_bc_pcm"]
+                              - inert.tracers["m_bc_pcm"], np.float64)
+        d_bc_acc = np.asarray(aged.tracers["m_bc_acc"]
+                              - inert.tracers["m_bc_acc"], np.float64)
+        d_n_pcm = np.asarray(aged.tracers["n_pcm"]
+                             - inert.tracers["n_pcm"], np.float64)
+        self.assertTrue(np.all(d_bc_pcm < 0.0),
+                        "ageing must remove BC from the pcm mode")
+        self.assertTrue(np.all(d_bc_acc > 0.0),
+                        "ageing must deliver BC to the accum mode")
+        self.assertTrue(np.all(d_n_pcm < 0.0),
+                        "ageing must move pcm number out")
+        # BC has no other source/sink in the core: the ageing difference
+        # must conserve BC between the two modes.
+        np.testing.assert_allclose(
+            d_bc_pcm + d_bc_acc, np.zeros_like(d_bc_pcm),
+            atol=1e-6 * float(np.abs(d_bc_pcm).max()),
+            err_msg="ageing must conserve BC across pcm+acc")
 
     def test_core_dtype_scoped_float32(self):
         # The float32 core runs under a SCOPED x64-off context: the global

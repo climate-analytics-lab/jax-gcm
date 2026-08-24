@@ -5,8 +5,21 @@ Wraps the MAM4-JAX box model (``reflective-org/MAM4-JAX``) as a JAM
 :class:`PlaceholderMicrophysics` with the actual modal microphysics —
 ``calcsize`` (size redistribution) → ``wateruptake`` (Köhler water) →
 ``amicphys`` (gas–aerosol exchange, rename, binary H₂SO₄ nucleation,
-coagulation). The core owns rename/aging, so the harness does **not**
-duplicate them.
+coagulation, carbonaceous ageing). The core owns rename and ageing, so the
+harness does **not** duplicate them.
+
+Carbonaceous ageing (jax-gcm#721)
+---------------------------------
+The core's ``mam_pcarbon_aging_1subarea`` port (mam4-jax ≥ the #721 pin,
+``mdo_pcarbonaging`` on by default) moves the sulfate-coated fraction of
+the primary-carbon mode — number plus pom/bc/mom mass by the
+monolayer-criterion fraction, condensed so4/soa wholesale — into the
+accumulation mode each step. This is what turns fresh hydrophobic BC/POA
+into wet-scavengable CCN (the pcm mode is ``can_activate=False`` by
+design), and it also closes the core's pcm repack leak (condensed so4/soa
+on pcm has no state slot and was silently dropped). The monolayer
+threshold is the ``n_so4_monolayers`` constructor knob (default 8.0 =
+E3SM production; box harness 3.0; ECHAM-HAM's ``m7_coat`` uses 1.0).
 
 Tracer adapter
 --------------
@@ -85,11 +98,11 @@ from jcm.physics_interface import PhysicsTendency
 # precision per-instance (see ``enable_x64``). If the ``jcm[mam4]`` extra isn't
 # installed this raises ``ImportError`` here, which is the right signal.
 import mam4_jax  # noqa: F401
-from mam4_jax import data
-from mam4_jax.processes import amicphys as _amicphys
-from mam4_jax.processes.amicphys import amicphys
-from mam4_jax.processes.calcsize import calcsize
-from mam4_jax.processes.wateruptake import wateruptake
+from mam4_jax.core import data
+from mam4_jax.coupling import amicphys as _amicphys
+from mam4_jax.coupling.amicphys import amicphys
+from mam4_jax.physics.calcsize import calcsize
+from mam4_jax.physics.wateruptake import wateruptake
 
 # amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
 # maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.
@@ -137,6 +150,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         n_substeps: int = 4,
         enable_x64: bool | None = None,
         core_dtype: str | None = None,
+        n_so4_monolayers: float = 8.0,
     ):
         """Import the core, set precision, select the condensation backend.
 
@@ -157,6 +171,11 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
 
         Both need a mam4_jax with ``configure_condensation``
         (reflective-org/MAM4-JAX#59).
+
+        ``n_so4_monolayers`` sets the carbonaceous-ageing coating
+        threshold (see the module docstring; default 8.0 = E3SM
+        production). Smaller ages faster ⇒ shorter BC/POA lifetime.
+        Trace-time static — not a differentiable parameter.
 
         ``enable_x64`` controls the GLOBAL model precision. Both backends are
         float32-safe (the coag ``qv12`` underflow was fixed upstream), so
@@ -213,6 +232,34 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "the pinned version: pip install 'jcm[mam4]'."
             )
         _amicphys.configure_gas_netprod(h2so4=0.0, soa=0.0)
+
+        # Carbonaceous ageing (jax-gcm#721). The core's pcarbon-aging
+        # transfer (mam_pcarbon_aging_1subarea, on by default upstream) is
+        # the ONLY pathway that moves fresh BC/POA out of the
+        # non-activatable pcm mode into accum where wet removal reaches it
+        # — and, mechanically, the routine that rescues so4/soa condensed
+        # onto pcm before the LMAP_AER repack drops it (a per-step sulfur
+        # leak otherwise). A core without the hook has neither, so refuse
+        # it like the gas-netprod guard above rather than silently run
+        # 21-day BC lifetimes with a sulfur sink.
+        if not hasattr(_amicphys, "configure_pcarbon_aging"):
+            raise ImportError(
+                "The installed mam4-jax has no pcarbon aging "
+                "(configure_pcarbon_aging): BC/POA would never leave the "
+                "primary-carbon mode (jax-gcm#721) and so4/soa condensed "
+                "onto it is silently dropped at the state repack. Install "
+                "the pinned version: pip install 'jcm[mam4]'."
+            )
+        # Monolayer threshold: E3SM production uses 8.0
+        # (modal_aero_gasaerexch.F90:37), the MAM4 box harness 3.0,
+        # ECHAM-HAM's counterpart (m7_coat) 1.0 — an order of magnitude of
+        # legitimate disagreement, and it directly sets the BC/POA
+        # lifetime, so it is exposed here as a calibration knob. Trace-time
+        # static (a Python float in the core's process-global config), so
+        # NOT differentiable — set before construction, like the backend.
+        _amicphys.configure_pcarbon_aging(
+            n_so4_monolayers=float(n_so4_monolayers))
+        self._n_so4_monolayers = float(n_so4_monolayers)
 
         # Precision — applied during construction so the dycore state built
         # afterwards (in bootstrap/run) inherits it; toggling it later would
