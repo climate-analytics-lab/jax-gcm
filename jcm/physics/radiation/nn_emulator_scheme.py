@@ -347,6 +347,18 @@ def _validate_weights_file(
                 f"the {side} weights take {stored} input features. The "
                 "checkpoint is internally inconsistent; re-save it."
             )
+        # Flux reconstruction reads channels 0-3 (all-sky + clear-sky,
+        # down/up). JAX clamps an out-of-bounds gather, so a narrower
+        # checkpoint would not fail — it would silently publish channel 1
+        # again as "clear sky" and corrupt every CRE diagnostic.
+        n_out = int(w.output_dense.kernel.shape[-1])
+        if n_out != 4:
+            raise ValueError(
+                f"{side} weights in {filepath!r} emit {n_out} output "
+                "channels, but flux reconstruction needs exactly 4 "
+                "(down, up, down_clear, up_clear). The file predates the "
+                "clear-sky output channels; retrain it."
+            )
 
 
 class NNEmulatorRadiation(PhysicsTerm):

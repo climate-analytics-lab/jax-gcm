@@ -467,6 +467,29 @@ class WeightsFileTest(unittest.TestCase):
         )
         return weights
 
+    def test_rejects_weights_without_clear_sky_channels(self):
+        # A pre-clear-sky checkpoint has 2 output channels; JAX clamps the
+        # out-of-bounds gather for channels 2/3, so without this check it
+        # would load and silently publish the all-sky up-flux again as
+        # "clear sky" (PR #730 review).
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        n_sw = n_input_features("per_band", N_BND_SW)
+        n_lw = n_input_features("per_band", N_BND_LW)
+        weights = init_emulator_weights(
+            sw_features=n_sw, lw_features=n_lw, units=8, n_outputs=2,
+            key=jax.random.key(7))
+        save_emulator_weights(
+            self.path, weights,
+            InputScaling(x_max=jnp.ones(n_sw)),
+            InputScaling(x_max=jnp.ones(n_lw)),
+            metadata={"band_mode": "per_band"},
+        )
+        with self.assertRaises(ValueError) as ctx:
+            NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        self.assertIn("output", str(ctx.exception))
+        self.assertIn("retrain", str(ctx.exception))
+
     def test_term_uses_the_weights_and_scalings_from_the_file(self):
         from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 
