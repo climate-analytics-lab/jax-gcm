@@ -222,8 +222,6 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         the pcm→acc coagulation pathway, so the default-vs-inert difference
         isolates the ageing transfer.
         """
-        from mam4_jax.coupling import amicphys as _amicphys
-
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
         )
@@ -233,12 +231,12 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         # real shell on pcm.
         state = state.copy(tracers={**state.tracers,
                                     "g_h2so4": jnp.full((4, 2), 1.0e-9)})
-        try:
-            aged, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
-            inert_term = Mam4JaxMicrophysics(n_so4_monolayers=1.0e9)
-            inert, _ = inert_term(state, diagnostics, None, None)
-        finally:
-            _amicphys.configure_pcarbon_aging(n_so4_monolayers=8.0)
+        # No try/finally needed: the constructor holds the threshold as
+        # an nnx.Param and passes it per call — it never mutates the
+        # core's process-global config, so instances cannot interfere.
+        aged, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        inert_term = Mam4JaxMicrophysics(n_so4_monolayers=1.0e9)
+        inert, _ = inert_term(state, diagnostics, None, None)
 
         d_bc_pcm = np.asarray(aged.tracers["m_bc_pcm"]
                               - inert.tracers["m_bc_pcm"], np.float64)
@@ -258,6 +256,44 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             d_bc_pcm + d_bc_acc, np.zeros_like(d_bc_pcm),
             atol=1e-6 * float(np.abs(d_bc_pcm).max()),
             err_msg="ageing must conserve BC across pcm+acc")
+
+    def test_aging_threshold_is_a_differentiable_param_leaf(self):
+        """The threshold must be an nnx.Param LEAF (visible to jax.grad /
+        optimizers per the repo's differentiable-parameters rule), and
+        the gradient of a tendency through the term w.r.t. it must be
+        finite and non-zero.
+        """
+        from flax import nnx
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics()
+        leaves = nnx.state(term, nnx.Param)
+        flat = jax.tree.leaves(leaves)
+        assert any(
+            np.asarray(v).shape == () and float(np.asarray(v)) == 3.0
+            for v in flat
+        ), "n_so4_monolayers must appear as a Param leaf (default 3.0)"
+
+        # Moderate H2SO4 so the pcm shell stays SUB-saturated at n=3:
+        # in the saturated regime the criterion clamps and d/dn is
+        # (correctly) exactly zero, which would make this test vacuous.
+        state, diagnostics = _column_state()
+        state = state.copy(tracers={**state.tracers,
+                                    "g_h2so4": jnp.full((4, 2), 1.0e-11)})
+
+        def bc_acc_tendency(n):
+            t = Mam4JaxMicrophysics(n_so4_monolayers=1.0)
+            t.n_so4_monolayers.set_value(n)
+            tend, _ = t(state, diagnostics, None, None)
+            return jnp.sum(tend.tracers["m_bc_acc"])
+
+        g = jax.grad(bc_acc_tendency)(jnp.asarray(3.0))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertLess(float(g), 0.0,
+                        "thicker required coating must age less BC")
 
     def test_core_dtype_scoped_float32(self):
         # The float32 core runs under a SCOPED x64-off context: the global

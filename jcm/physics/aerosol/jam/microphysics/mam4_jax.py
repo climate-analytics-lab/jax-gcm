@@ -21,7 +21,10 @@ on pcm has no state slot and was silently dropped). The monolayer
 threshold is the ``n_so4_monolayers`` constructor knob (default 3.0 —
 the amicphys-path reference value, fed via phys_control in
 CAM5/ACME/E3SM; the oft-quoted 8.0 belongs to the legacy
-modal_aero_coag aging path; ECHAM-HAM's ``m7_coat`` uses 1.0).
+modal_aero_coag aging path; ECHAM-HAM's ``m7_coat`` uses 1.0). It is a
+**differentiable parameter**: an ``nnx.Param`` leaf on the term, passed
+to the core per call as a traced ``AmicphysParams`` leaf, so gradients
+flow and a calibration sweep reuses one compile.
 
 Tracer adapter
 --------------
@@ -73,6 +76,7 @@ from typing import ClassVar
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
@@ -177,7 +181,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         ``n_so4_monolayers`` sets the carbonaceous-ageing coating
         threshold (see the module docstring; default 3.0, the amicphys
         reference value). Smaller ages faster ⇒ shorter BC/POA
-        lifetime. Trace-time static — not a differentiable parameter.
+        lifetime. A differentiable ``nnx.Param`` leaf — the gradient is
+        well-defined (piecewise; zero once the mode saturates) and the
+        upstream core takes it as a traced pytree field.
 
         ``enable_x64`` controls the GLOBAL model precision. Both backends are
         float32-safe (the coag ``qv12`` underflow was fixed upstream), so
@@ -244,10 +250,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # leak otherwise). A core without the hook has neither, so refuse
         # it like the gas-netprod guard above rather than silently run
         # 21-day BC lifetimes with a sulfur sink.
-        if not hasattr(_amicphys, "configure_pcarbon_aging"):
+        if not hasattr(_amicphys, "AmicphysParams"):
             raise ImportError(
-                "The installed mam4-jax has no pcarbon aging "
-                "(configure_pcarbon_aging): BC/POA would never leave the "
+                "The installed mam4-jax has no pcarbon aging / params API "
+                "(AmicphysParams): BC/POA would never leave the "
                 "primary-carbon mode (jax-gcm#721) and so4/soa condensed "
                 "onto it is silently dropped at the state repack. Install "
                 "the pinned version: pip install 'jcm[mam4]'."
@@ -256,14 +262,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # actually receives (via phys_control; the 8.0 in
         # modal_aero_gasaerexch.F90 belongs to the legacy
         # modal_aero_coag path), ECHAM-HAM's counterpart (m7_coat) uses
-        # 1.0 — the spread directly sets the BC/POA lifetime, so it is
-        # exposed here as a calibration knob. Held on
-        # the instance and passed PER CALL to the core (a static jit
-        # argument) — NOT installed into the core's process-global config,
-        # which is read at trace time and would make several
-        # differently-configured instances in one process order-dependent
-        # (Codex P1 on #726). Trace-time static, so not differentiable.
-        self._n_so4_monolayers = float(n_so4_monolayers)
+        # 1.0 — the spread directly sets the BC/POA lifetime, making it
+        # a key uncertain parameter. Held as an ``nnx.Param`` LEAF (per
+        # the repo's differentiable-parameters convention: numeric
+        # tunables must be visible to jax.grad / optimizers) and passed
+        # to the core per call as a TRACED AmicphysParams leaf — never
+        # via the core's process-global config, which is read at trace
+        # time and would make several differently-configured instances
+        # order-dependent (Codex P1 on #726). A calibration sweep over
+        # it reuses one compile.
+        self.n_so4_monolayers = nnx.Param(
+            jnp.asarray(float(n_so4_monolayers)))
 
         # Precision — applied during construction so the dycore state built
         # afterwards (in bootstrap/run) inherits it; toggling it later would
@@ -459,9 +468,11 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             for k, v in core_state.items()
         }
         in_axes = ({k: (None if k == "deltat" else 0) for k in flat_state},)
+        core_params = _amicphys.AmicphysParams(
+            n_so4_monolayers=jnp.asarray(
+                self.n_so4_monolayers.get_value(), cdt))
         one_step = lambda s: amicphys(
-            wateruptake(calcsize(s)),
-            n_so4_monolayers=self._n_so4_monolayers)
+            wateruptake(calcsize(s)), core_params)
         flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)
 
         def from_cells(a):

@@ -42,12 +42,18 @@ receives 3 (via `phys_control`, the CAM5/ACME lineage; the oft-quoted 8 in
 `modal_aero_gasaerexch.F90` belongs to E3SM's legacy `modal_aero_coag` ageing
 path), and ECHAM-HAM uses 1 — and it directly sets the BC/POA lifetime
 (smaller = faster ageing). Default: 3.0 (the amicphys reference value, which
-also reproduces the vendored Fortran captures). Each term instance holds its own value and passes it to
-the core **per call** as a static jit argument (never via the core's
-process-global config, which is read at trace time and would make several
-differently-configured instances in one process order-dependent). Static
-means it is **not** a differentiable parameter; calibrating it means a
-sweep — which the per-instance binding makes safe — not a gradient.
+also reproduces the vendored Fortran captures). Each term instance holds its
+own value as an **`nnx.Param` leaf** — a differentiable parameter per the
+repo convention — and passes it to the core per call as a **traced**
+`AmicphysParams` field (never via the core's process-global config, which is
+read at trace time and would make several differently-configured instances in
+one process order-dependent). Consequences: `jax.grad` flows through the
+criterion (piecewise — the gradient is exactly zero once the mode saturates),
+a calibration sweep over the threshold reuses a single compiled step, and the
+gas netprod rates ride the same pytree for future source calibration. The
+`mdo_pcarbonaging` toggle is *not* subsumed by the threshold: 0 monolayers
+means a zero-thickness coating requirement (instant full ageing, not off),
+and no finite threshold suppresses the wholesale shell-species transfer.
 
 ## Why in-core, not a harness term
 
