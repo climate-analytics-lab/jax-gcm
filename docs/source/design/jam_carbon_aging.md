@@ -37,10 +37,12 @@ with `Δr = 4.76e-10 m` (one bisulfate monolayer), `vol_shell` = so4 + soa
 mode *number* move by `xferfrac`; shell species move wholesale.
 
 **The monolayer count `n` is exposed** (`Mam4JaxMicrophysics(n_so4_monolayers=…)`)
-because the references legitimately disagree by an order of magnitude —
-E3SM production hard-codes 8, the MAM4 box harness uses 3, ECHAM-HAM uses 1 —
-and it directly sets the BC/POA lifetime (smaller = faster ageing). Default:
-8.0 (deployed-MAM4). Each term instance holds its own value and passes it to
+because the references legitimately disagree — the MAM4 *amicphys* path
+receives 3 (via `phys_control`, the CAM5/ACME lineage; the oft-quoted 8 in
+`modal_aero_gasaerexch.F90` belongs to E3SM's legacy `modal_aero_coag` ageing
+path), and ECHAM-HAM uses 1 — and it directly sets the BC/POA lifetime
+(smaller = faster ageing). Default: 3.0 (the amicphys reference value, which
+also reproduces the vendored Fortran captures). Each term instance holds its own value and passes it to
 the core **per call** as a static jit argument (never via the core's
 process-global config, which is read at trace time and would make several
 differently-configured instances in one process order-dependent). Static

@@ -18,8 +18,10 @@ accumulation mode each step. This is what turns fresh hydrophobic BC/POA
 into wet-scavengable CCN (the pcm mode is ``can_activate=False`` by
 design), and it also closes the core's pcm repack leak (condensed so4/soa
 on pcm has no state slot and was silently dropped). The monolayer
-threshold is the ``n_so4_monolayers`` constructor knob (default 8.0 =
-E3SM production; box harness 3.0; ECHAM-HAM's ``m7_coat`` uses 1.0).
+threshold is the ``n_so4_monolayers`` constructor knob (default 3.0 —
+the amicphys-path reference value, fed via phys_control in
+CAM5/ACME/E3SM; the oft-quoted 8.0 belongs to the legacy
+modal_aero_coag aging path; ECHAM-HAM's ``m7_coat`` uses 1.0).
 
 Tracer adapter
 --------------
@@ -150,7 +152,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         n_substeps: int = 4,
         enable_x64: bool | None = None,
         core_dtype: str | None = None,
-        n_so4_monolayers: float = 8.0,
+        n_so4_monolayers: float = 3.0,
     ):
         """Import the core, set precision, select the condensation backend.
 
@@ -173,9 +175,9 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         (reflective-org/MAM4-JAX#59).
 
         ``n_so4_monolayers`` sets the carbonaceous-ageing coating
-        threshold (see the module docstring; default 8.0 = E3SM
-        production). Smaller ages faster ⇒ shorter BC/POA lifetime.
-        Trace-time static — not a differentiable parameter.
+        threshold (see the module docstring; default 3.0, the amicphys
+        reference value). Smaller ages faster ⇒ shorter BC/POA
+        lifetime. Trace-time static — not a differentiable parameter.
 
         ``enable_x64`` controls the GLOBAL model precision. Both backends are
         float32-safe (the coag ``qv12`` underflow was fixed upstream), so
@@ -250,11 +252,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "onto it is silently dropped at the state repack. Install "
                 "the pinned version: pip install 'jcm[mam4]'."
             )
-        # Monolayer threshold: E3SM production uses 8.0
-        # (modal_aero_gasaerexch.F90:37), the MAM4 box harness 3.0,
-        # ECHAM-HAM's counterpart (m7_coat) 1.0 — an order of magnitude of
-        # legitimate disagreement, and it directly sets the BC/POA
-        # lifetime, so it is exposed here as a calibration knob. Held on
+        # Monolayer threshold: 3.0 is what the MAM4 amicphys path
+        # actually receives (via phys_control; the 8.0 in
+        # modal_aero_gasaerexch.F90 belongs to the legacy
+        # modal_aero_coag path), ECHAM-HAM's counterpart (m7_coat) uses
+        # 1.0 — the spread directly sets the BC/POA lifetime, so it is
+        # exposed here as a calibration knob. Held on
         # the instance and passed PER CALL to the core (a static jit
         # argument) — NOT installed into the core's process-global config,
         # which is read at trace time and would make several
