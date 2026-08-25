@@ -247,7 +247,7 @@ class TestCloudOptics:
     def test_effective_radius(self):
         """Test cloud particle effective radius"""
         # Liquid
-        r_liq = effective_radius_liquid(1.0, land_fraction=0.5)
+        r_liq = effective_radius_liquid(1.0)
         assert 5 < r_liq < 20  # Reasonable range in microns
 
         # Ice: Moss/Foot r = 83.8 * IWC^0.216 (in-cloud IWC in g/m3)

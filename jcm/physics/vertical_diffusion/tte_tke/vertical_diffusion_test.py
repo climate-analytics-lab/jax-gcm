@@ -5,6 +5,7 @@ including individual components and integrated behavior.
 """
 
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.constants import PhysicalConstants
 from .vertical_diffusion_types import VDiffParameters, VDiffState
@@ -1204,3 +1205,181 @@ if __name__ == "__main__":
     print("✓ Utility function tests passed")
     
     print("All vertical diffusion tests passed! ✓")
+
+class TestThvVarianceBudget:
+    """The theta_v variance budget — ECHAM ``vdiff.f90`` lines 857-860.
+
+    This budget is what makes ``pthvsig`` a physical quantity rather than a
+    namelist constant, and hence what the convective trigger's ``zlift``
+    stands on. Before it existed the variance had no source at all and the
+    convection scheme had to read a fixed ``cu_thvsig``.
+    """
+
+    def _call(self, prev, grad, kh, tke, ell, dt, **kw):
+        from .tke_budget import echam_thv_variance_source_update
+        f = lambda x: jnp.asarray(x, dtype=jnp.float64 if False else jnp.float32)
+        return echam_thv_variance_source_update(
+            prev_thv_variance=f(prev), thv_gradient=f(grad),
+            exchange_coeff_heat=f(kh), tke=f(tke), mixing_length=f(ell),
+            dt=dt, **kw,
+        )
+
+    def test_production_is_two_kh_gradient_squared(self):
+        """With dissipation switched off, d(var)/dt == 2*K_h*(dthv/dz)^2."""
+        kh, grad, dt = 5.0, 0.01, 100.0
+        # prev = 0 kills the dissipation term (it is linear in the variance).
+        out = float(self._call(0.0, grad, kh, 1.0, 50.0, dt))
+        expected = 2.0 * kh * grad * grad * dt
+        assert abs(out - expected) / expected < 1e-5   # float32
+
+    def test_dissipation_is_linear_in_the_variance_and_uses_c_d_over_l(self):
+        """Zero gradient -> pure decay at sqrt(TKE)*c_d/l."""
+        prev, tke, ell, c_d, dt = 4.0, 0.25, 100.0, 0.19, 10.0
+        out = float(self._call(prev, 0.0, 1.0, tke, ell, dt, c_d=c_d))
+        expected = prev - prev * (tke ** 0.5) * c_d / ell * dt
+        assert abs(out - expected) / expected < 1e-5
+
+    def test_settles_on_the_production_dissipation_equilibrium(self):
+        """Iterated to steady state: var* = 2*K_h*G^2 * l / (c_d*sqrt(TKE)).
+
+        The relaxation rate is ``sqrt(TKE)*c_d/l`` per second, so the step
+        has to be long enough that 500 iterations actually converge — at
+        dt = 1 s this map is still 2 % short after 4000 iterations, which
+        looks exactly like a wrong equilibrium if you do not check.
+        """
+        kh, grad, tke, ell, c_d = 5.0, 0.01, 0.25, 100.0, 0.19
+        var = 0.0
+        for _ in range(500):
+            var = float(self._call(var, grad, kh, tke, ell, 100.0, c_d=c_d))
+        expected = 2.0 * kh * grad * grad * ell / (c_d * tke ** 0.5)
+        assert abs(var - expected) / expected < 0.005
+
+    def test_floored_at_tke_min_and_never_negative(self):
+        """A long step with strong dissipation cannot drive it through zero."""
+        out = self._call(1e-8, 0.0, 1.0, 100.0, 1.0, dt=1.0e6)
+        assert float(out) >= 1.0e-10
+
+    def test_equilibrium_variance_does_not_depend_on_tke(self):
+        """A non-obvious property worth pinning: sigma* is TKE-independent.
+
+        With ``K_h = c_h*l*sqrt(TKE)`` the production carries ``sqrt(TKE)``
+        and the dissipation carries it too, so it cancels:
+
+            var* = 2*c_h*l*sqrt(TKE)*G^2 * l/(c_d*sqrt(TKE))
+                 = 2*c_h*l^2*G^2/c_d
+
+        So at EQUILIBRIUM sigma(theta_v) is set by the mixing length and the
+        ambient gradient alone. What distinguishes a quiescent layer is the
+        RATE (next test), not the fixed point — a fact that is easy to get
+        backwards when reasoning about the convective trigger.
+        """
+        grad, ell, c_h, c_d = 0.004, 100.0, 0.5, 0.19
+        def equilibrium(tke):
+            var = 0.0
+            for _ in range(500):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, 200.0, c_d=c_d))
+            return var
+        expected = 2.0 * c_h * ell * ell * grad * grad / c_d
+        for tke in (0.04, 1.0, 4.0):
+            assert abs(equilibrium(tke) - expected) / expected < 0.01
+
+    def test_scheme_evaluates_both_terms_at_the_pre_source_tke(self):
+        """Wiring pin: the scheme feeds the variance budget PRE-source TKE.
+
+        ECHAM evaluates BOTH variance terms at ``ztkesq = SQRT(ptkem1)``
+        (vdiff.f90:849, 857-858) — the previous time level, the same
+        ``ztkesq`` that built the exchange coefficients; only the transport
+        coefficients (:855-856) rescale to the post-source ``ztkevn``.
+        Passing the post-source TKE into the dissipation while production
+        rode the pre-source exchange coefficient mixed the two turbulent
+        velocity scales and broke the exact equilibrium cancellation
+        var* = 2*c_h*l^2*G^2/c_d (Codex on #690). The unit tests above
+        cannot see this — they pass one ``tke`` — so pin the WIRING: run
+        the column step under a spy and assert the tke argument is the
+        state's, in a regime where the source update changes TKE by >10%.
+        """
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .tke_budget import (
+            echam_thv_variance_source_update as real_update,
+            echam_tke_source_update as real_tke_update,
+        )
+
+        ncol, nlev = 1, 10
+        # Strongly sheared column so the TKE source update moves TKE a lot.
+        z = jnp.linspace(4000.0, 10.0, nlev)[None, :]
+        state_kwargs = dict(
+            u=jnp.linspace(0.0, 25.0, nlev)[None, :],
+            v=jnp.zeros((ncol, nlev)),
+            temperature=jnp.linspace(260.0, 290.0, nlev)[None, :],
+            qv=jnp.full((ncol, nlev), 5e-3),
+            qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
+            pressure_full=jnp.linspace(60000.0, 100000.0, nlev)[None, :],
+            pressure_half=jnp.linspace(58000.0, 101000.0, nlev + 1)[None, :],
+            geopotential=z * 9.81,
+            air_mass=jnp.full((ncol, nlev), 3000.0),
+            surface_temperature=jnp.full((ncol, 1), 291.0),
+            surface_fraction=jnp.ones((ncol, 1)),
+            roughness_length=jnp.full((ncol, 1), 1e-3),
+            roughness_heat=jnp.full((ncol, 1), 1e-4),
+            surface_wetness=jnp.ones((ncol, 1)),
+            height_full=z,
+            height_half=jnp.linspace(4200.0, 0.0, nlev + 1)[None, :],
+            tke=jnp.full((ncol, nlev), 0.05),
+            thv_variance=jnp.full((ncol, nlev), 0.01),
+            ocean_u=jnp.zeros(ncol), ocean_v=jnp.zeros(ncol),
+        )
+        from .vertical_diffusion_types import VDiffState, VDiffParameters
+        state = VDiffState(**state_kwargs)
+        params = VDiffParameters.default()
+
+        captured = {}
+
+        def spy(**kw):
+            captured["variance_tke_arg"] = kw["tke"]
+            return real_update(**kw)
+
+        def tke_spy(**kw):
+            out = real_tke_update(**kw)
+            captured["post_source_tke"] = out
+            return out
+
+        # Call the un-jitted python function so the spies capture concrete
+        # arrays rather than tracers (the module wraps it in @jax.jit).
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
+        with mock.patch.object(
+                vd, "echam_thv_variance_source_update", side_effect=spy), \
+             mock.patch.object(
+                vd, "echam_tke_source_update", side_effect=tke_spy):
+            column_fn(state, params, 900.0)
+
+        np.testing.assert_array_equal(
+            np.asarray(captured["variance_tke_arg"]), np.asarray(state.tke))
+        # Anti-vacuity: the post-source TKE genuinely differs from the
+        # pre-source TKE here, so the assertion above discriminates the two
+        # candidate wirings rather than passing on a quiescent fixture.
+        rel = float(jnp.max(
+            jnp.abs(captured["post_source_tke"] - state.tke) / state.tke))
+        assert rel > 0.1, f"fixture too quiescent to discriminate ({rel:.2%})"
+
+    def test_a_quiescent_layer_builds_variance_far_more_slowly(self):
+        """Spin-up rate, which is what lets the zlift tell the two apart.
+
+        Over a fixed spin-up from the floor the vigorously mixed column
+        reaches a much larger sigma(theta_v) than the quiescent one, because
+        production goes as sqrt(TKE) even though the eventual fixed point
+        does not.
+        """
+        grad, ell, c_h, dt = 0.004, 100.0, 0.5, 60.0
+        def spin(tke, nsteps=30):
+            var = 1e-10
+            for _ in range(nsteps):
+                var = float(self._call(
+                    var, grad, c_h * ell * tke ** 0.5, tke, ell, dt))
+            return var ** 0.5
+        stirred = spin(1.0)          # sqrt(TKE) = 1 m/s
+        quiescent = spin(1.0e-4)     # sqrt(TKE) = 0.01 m/s
+        assert stirred > 5.0 * quiescent

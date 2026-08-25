@@ -6,6 +6,7 @@ and asymmetry parameters for both water and ice clouds.
 Date: 2025-01-10
 """
 
+import pytest
 import jax.numpy as jnp
 from jcm.physics.radiation.cloud_optics import (
     cloud_optics,
@@ -15,25 +16,20 @@ from jcm.physics.radiation.cloud_optics import (
 
 
 def test_effective_radius_liquid():
-    """Test liquid cloud effective radius calculation"""
-    cdnc_factor = jnp.array(1.0)  # No aerosol influence
-    # Test over ocean
-    r_eff_ocean = effective_radius_liquid(cdnc_factor, land_fraction=0.0)
+    """The fallback radius is a constant scaled by the Twomey factor.
 
-    # Test over land
-    r_eff_land = effective_radius_liquid(cdnc_factor, land_fraction=1.0)
-    
-    # Check that we get scalar outputs
-    assert r_eff_ocean.shape == ()
-    assert r_eff_land.shape == ()
-    
-    # Should be positive
-    assert r_eff_ocean > 0
-    assert r_eff_land > 0
-    
-    # Ocean droplets should generally be larger
-    assert r_eff_ocean >= r_eff_land
-    
+    There is deliberately no land/ocean contrast: it was a CCN proxy that
+    double-counted with cdnc_factor, and ECHAM's land term is a 6% spectral
+    breadth factor superseded wherever a droplet number exists (#670).
+    """
+    r_eff_clean = effective_radius_liquid(jnp.array(1.0))
+    assert r_eff_clean.shape == ()
+    assert float(r_eff_clean) == pytest.approx(11.0)
+
+    # More droplets at fixed water -> smaller droplets, as N^(-1/3).
+    r_eff_polluted = effective_radius_liquid(jnp.array(8.0))
+    assert float(r_eff_polluted) == pytest.approx(11.0 / 2.0)
+
 
 def test_effective_radius_ice():
     """Moss/Foot power law: r_eff = 83.8 * IWC^0.216 (in-cloud IWC, g/m3).

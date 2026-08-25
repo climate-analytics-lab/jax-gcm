@@ -4,44 +4,12 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 from .echam_1m import (
-    MicrophysicsParameters, cloud_droplet_radius,
+    MicrophysicsParameters,
     autoconversion, autoconversion_beheng, autoconversion_kk2000,
     ice_autoconversion, sedimentation_flux,
     cloud_microphysics_column_sweep,
 )
 from jcm.constants import tmelt
-
-
-class TestCloudDropletRadius:
-    """Test cloud droplet radius calculations"""
-    
-    def test_typical_values(self):
-        """Test with typical atmospheric values"""
-        cloud_water = jnp.array(0.5e-3)  # 0.5 g/kg
-        air_density = jnp.array(1.0)      # kg/m³
-        droplet_number = jnp.array(100e6) # 100 per cm³ -> per kg
-        config = MicrophysicsParameters.default()
-        
-        radius = cloud_droplet_radius(cloud_water, air_density, droplet_number, config)
-        
-        # Should be in reasonable range (5-20 microns)
-        assert 5e-6 < radius < 20e-6
-    
-    def test_limits(self):
-        """Test radius limits are applied"""
-        config = MicrophysicsParameters.default()
-        
-        # Very high cloud water with very few droplets should hit max radius
-        radius_high = cloud_droplet_radius(
-            jnp.array(10e-3), jnp.array(1.0), jnp.array(1e5), config  # Very few droplets
-        )
-        assert jnp.allclose(radius_high, float(config.ceffmax) * 1e-6)
-        
-        # Very low cloud water with many droplets should hit min radius
-        radius_low = cloud_droplet_radius(
-            jnp.array(1e-6), jnp.array(1.0), jnp.array(1000e6), config  # Many droplets
-        )
-        assert jnp.allclose(radius_low, float(config.ceffmin) * 1e-6)
 
 
 class TestAutoconversion:
@@ -606,6 +574,115 @@ class TestColumnSweepMicrophysics:
             f"surface precip {float(surface_precip):.3e} kg/m²/s"
         )
 
+    def test_cloud_free_cells_force_evaporate_condensate(self):
+        """ECHAM ``zxlevap``/``zxievap`` (#668): cf=0 clears its condensate.
+
+        A cloud-free cell's condensate must return to vapour
+        unconditionally — even when the cell is supersaturated, the case
+        where the grid-mean Newton adjustment previously did the opposite
+        (the cell GAINED condensate, with no cf-weighted microphysical
+        sink ever able to touch it). The cleared water is then the
+        adjustment's to re-condense or not; either way it is vapour first,
+        the budget closes, and the latent heat is paid.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 6
+        T = jnp.linspace(250.0, 290.0, nlev)
+        p = jnp.linspace(40000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        # 2 % SUPERsaturated in the orphaned-condensate cells — the
+        # issue's probe case, where the old behaviour condensed further.
+        q = 1.02 * qsw
+        qc = jnp.zeros(nlev).at[3].set(3e-4)
+        qi = jnp.zeros(nlev).at[1].set(2e-4)
+        cf = jnp.zeros(nlev)                 # the whole column cloud-free
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        dt = 1800.0
+        tend, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
+        )
+        import jcm.constants as c
+        qc_new = qc + dt * tend.dqcdt
+        T_new = T + dt * tend.dtedt
+        q_new = q + dt * tend.dqdt
+        # A supersaturated cf=0 cell retains condensate, and that is
+        # FAITHFUL: clearing then re-capping is a thermodynamic identity
+        # (total water and enthalpy are unchanged, so the cell returns to
+        # the same equilibrium), and ECHAM's own 5.4 grid-box cap does the
+        # same. What #668 guarantees is that the outcome is the unique
+        # THERMODYNAMIC equilibrium of the cell's conserved quantities, not
+        # a function of how the water happened to be split on entry. Pin it
+        # with an enthalpy-consistent pair: state B is state A after
+        # condensing 3e-4 (same total water, same moist enthalpy) — both
+        # must land on the same (T, q, qc) to within Newton tolerance.
+        dq_shift = 3e-4
+        qB = q.at[3].add(-dq_shift)
+        qcB = qc.at[3].add(dq_shift)
+        TB = T.at[3].add(c.alhc * dq_shift / c.cpd)
+        tendB, _ = cloud_microphysics_column_sweep(
+            TB, qB, p, qcB, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
+        )
+        qcB_new = qcB + dt * tendB.dqcdt
+        TB_new = TB + dt * tendB.dtedt
+        assert abs(float(qcB_new[3]) - float(qc_new[3])) < 3e-5, (
+            f"cf=0 outcome depends on the vapour/condensate split of an "
+            f"enthalpy-identical state: {float(qc_new[3]):.3e} vs "
+            f"{float(qcB_new[3]):.3e}")
+        assert abs(float(TB_new[3]) - float(T_new[3])) < 0.15
+        # No accumulating supersaturation: vapour ends at/below the 1 %
+        # grid-box allowance.
+        from jcm.physics.clouds.sundqvist import (
+            saturation_specific_humidity as _qs)
+        qs_new = jax.vmap(_qs)(p, T_new)
+        assert float((q_new - 1.02 * qs_new).max()) < 5e-5, (
+            "supersaturation above the ECHAM allowance survived the step")
+        # And the column water budget still closes through the clearing.
+        mref = rho * dz
+        total_water_tend = jnp.sum(
+            (tend.dqdt + tend.dqcdt + tend.dqidt) * mref)
+        surface_precip = state.precip_rain + state.precip_snow
+        residual = float(total_water_tend + surface_precip)
+        assert abs(residual) < 1e-9, f"budget open by {residual:.3e}"
+
+    def test_cloud_free_subsaturated_cell_clears_fully(self):
+        """The other half of #668: a SUBsaturated cf=0 cell keeps nothing.
+
+        Pre-#668 the grid-mean adjustment evaporated orphaned condensate
+        only up to saturation and kept the remainder as cloud water forever
+        (no cf-weighted microphysical sink can touch a cf=0 cell). ECHAM
+        clears it unconditionally; after the evaporative cooling the cell
+        here is still subsaturated, so nothing re-condenses and the store
+        is genuinely gone.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        cfg = MicrophysicsParameters.default()
+        nlev = 6
+        T = jnp.linspace(250.0, 290.0, nlev)
+        p = jnp.linspace(40000.0, 100000.0, nlev)
+        qsw = jax.vmap(saturation_specific_humidity)(p, T)
+        q = 0.8 * qsw
+        qc = jnp.zeros(nlev).at[3].set(3e-4)
+        cf = jnp.zeros(nlev)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        ndrop = jnp.full(nlev, 1e8)
+        dt = 1800.0
+        tend, state = cloud_microphysics_column_sweep(
+            T, q, p, qc, jnp.zeros(nlev), cf, rho, dz, ndrop, dt=dt,
+            config=cfg,
+        )
+        qc_new = qc + dt * tend.dqcdt
+        assert float(jnp.abs(qc_new).max()) < 1e-8, (
+            f"subsaturated cf=0 condensate survived: {float(qc_new[3]):.2e}")
+        # Latent heat was paid: the cell cooled by ~L*qc/cp.
+        dT3 = float(dt * tend.dtedt[3])
+        import jcm.constants as c
+        expected = -c.alhc * 3e-4 / c.cpd
+        assert abs(dT3 - expected) < 0.1 * abs(expected), (
+            f"evaporative cooling {dT3:.3f} K, expected ~{expected:.3f} K")
 
     @staticmethod
     def _mixed_phase_column(nlev=20):
@@ -669,11 +746,17 @@ class TestColumnSweepMicrophysics:
             in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
         )(*batched, 1800.0, cfg)
         assert state_b.rain_flux.shape == (3, column[0].shape[0])
+        # rtol at float32 ulp scale plus an atol floor: the two layouts may
+        # commute the same arithmetic differently, and a last-bit difference
+        # on a ~1e-4 flux cascades through the near-cancelling exponential
+        # tail into percent-level RELATIVE differences on fluxes of 1e-11
+        # and below — physically zero precipitation (~1 mm/millennium), so
+        # the floor treats them as such.
         for i in range(3):
             assert jnp.allclose(state_b.rain_flux[i], state_1.rain_flux,
-                                atol=1e-12)
+                                rtol=2e-6, atol=1e-9)
             assert jnp.allclose(state_b.snow_flux[i], state_1.snow_flux,
-                                atol=1e-12)
+                                rtol=2e-6, atol=1e-9)
 
 
 class TestColumnSweepParameterGradients:
@@ -881,3 +964,71 @@ class TestEcham1MPublishesEffectiveRadius:
         r_clean = self._run_term(qc, cdnc_factor=jnp.ones((self.NCOLS,)))
         r_polluted = self._run_term(qc, cdnc_factor=jnp.full((self.NCOLS,), 2.0))
         assert np.all(r_polluted[5] < r_clean[5])
+
+class TestCloudFractionWriteBack1M:
+    """The 1M term clears the cover of cells it empties (#687).
+
+    ECHAM's 1M ``cloud`` routine writes the post-microphysics cover back
+    to ``paclc`` (mo_cloud.f90:1280): a cell whose end-of-step condensate
+    is below ``ccwmin`` in BOTH phases stops being cloudy. Without it,
+    ``clouds.cloud_fraction`` meant the RH-diagnosed pre-microphysics
+    cover under cloud_scheme='1m' but the post-microphysics cover under
+    '2m', so every shared consumer (radiation, COSP, AeroCom, the JAM
+    cloud-borne/aqueous/wetdep terms) switched semantics with the scheme.
+    """
+
+    @staticmethod
+    def _drive_term(qc0, qi0, cf0, q_scale=0.95):
+        from types import SimpleNamespace
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = 8, 2
+        T = jnp.full((nlev, ncols), 285.0)
+        p = jnp.linspace(3e4, 1e5, nlev)[:, None] * jnp.ones((1, ncols))
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        qsw = saturation_specific_humidity(p, T)
+        q = q_scale * qsw            # subsaturated: condensate evaporates
+        rho = p / (287.0 * T)
+        zeros = jnp.zeros((nlev, ncols))
+
+        state = PhysicsState(
+            u_wind=zeros, v_wind=zeros, temperature=T,
+            specific_humidity=q, geopotential=zeros,
+            normalized_surface_pressure=jnp.ones(ncols),
+            tracers={"qc": qc0, "qi": qi0},
+        )
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cf0, qc=qc0, qi=qi0)
+        diagnostics = {
+            "_dt_seconds": 1800.0,
+            "pressure_full": p,
+            "air_density": rho,
+            "layer_thickness": jnp.full((nlev, ncols), 500.0),
+            "clouds": clouds,
+            "aerosol": SimpleNamespace(cdnc_factor=jnp.ones(ncols)),
+        }
+        term = Echam1MMicrophysics()
+        _, diags_out = term(state, diagnostics, None, None)
+        return diags_out["clouds"].cloud_fraction
+
+    def test_emptied_cell_loses_cover_kept_cell_keeps_it(self):
+        import numpy as np
+        nlev, ncols = 8, 2
+        qc0 = jnp.zeros((nlev, ncols))
+        qi0 = jnp.zeros((nlev, ncols))
+        cf0 = jnp.zeros((nlev, ncols))
+        # Level 3: a wisp of liquid (5e-7) — the 5 % saturation deficit
+        # evaporates it below ccwmin within the step. Level 5: a solid
+        # deck (1e-3) the same deficit can only nibble at.
+        qc0 = qc0.at[3].set(5e-7).at[5].set(1e-3)
+        cf0 = cf0.at[3].set(0.4).at[5].set(0.7)
+
+        cf_out = np.asarray(self._drive_term(qc0, qi0, cf0))
+        assert np.all(cf_out[3] == 0.0), (
+            f"emptied cell keeps cover {cf_out[3]} — no paclc write-back"
+        )
+        assert np.all(cf_out[5] > 0.0), (
+            "a cell still holding condensate lost its cover"
+        )

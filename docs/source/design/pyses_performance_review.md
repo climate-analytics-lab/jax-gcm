@@ -131,11 +131,47 @@ steps; CRE is a diagnostic — keep it for analysis runs only. One flag.
 **B4. Radiation interval 2 h → 3 h.** Science trade-off; standard in ECHAM
 lineage. Only if B1–B3 are insufficient.
 
-### C. First step before investing in B: one profiled run
+### C. First step before investing in B: one profiled run — DONE
 
-A single `jax.profiler` trace of ~4 steps (1-GPU 2m-jam) would confirm the
-MAM4 : optics : rest split this review infers structurally. Cheap insurance
-(~30 min GPU) before spending effort on B1/B2.
+This section asked for a profiled run to confirm the MAM4 : optics : rest split
+inferred above. `tools/profile_terms.py` now does it as a repeatable
+measurement rather than a one-off (see `jcm.profiling` for how the attribution
+works, and the `jcm-benchmark` skill for when to trust it).
+
+Measured on the **spectral T63L47** arm of the same physics (`ma-t63-l47`,
+1× A100-80GB, two radiation sub-cycles; the dycore differs from ne30, the JAM
+chain does not). Reproduced to within 0.2 % across two independent runs. Device
+time per step:
+
+| component | ms/step | % | ms/call |
+|---|---:|---:|---:|
+| `RRTMGPRadiation` | 116.4 | 44 | 1164 |
+| `JamOpticsTerm` | 40.6 | 15 | 406 |
+| `Mam4JaxMicrophysics` | 36.7 | 14 | 36.7 |
+| dynamics (spectral) | 19.0 | 7 | 19.0 |
+| `TiedtkeConvection` | 14.9 | 6 | 14.9 |
+| all other physics terms | ~34 | 13 | ~34 |
+| dynamics↔physics bridge | 1.8 | 1 | 1.8 |
+
+`ms/step` is amortised over every step; `ms/call` is the cost on a step where
+the component runs. They differ for `RRTMGPRadiation` and `JamOpticsTerm`,
+which both ride the 1-in-10 radiation gate (the optics gate exists precisely
+because its per-band Mie output is consumed only by radiation).
+
+The inferred *ordering* holds: optics and MAM4 are the two largest JAM terms,
+and the 10 remaining JAM terms are collectively small. The correction is that
+**RRTMGP still dominates everything else combined even at a 1-in-10 sub-cycle**
+— it is ~1.16 s on each step it runs. That makes B3 (`compute_cre=False`,
+halving the RRTMGP work) the highest-value lever on this list, ahead of the
+B1/B2 optics and MAM4 work the section was written to gate.
+
+A radiation step is therefore ~1.7 s and an intermediate step ~0.1 s, a 16×
+swing. Anything that reasons about per-step cost — load balancing, a
+memory-pressure estimate, an ensemble scheduler — has two populations to
+account for, not one mean.
+
+The bridge, often assumed to be a real cost of the composable design, is 1 % of
+device time and not worth optimising.
 
 ## 5. Verification round (measured, ne30 2m-jam, 1× A100 unless noted)
 

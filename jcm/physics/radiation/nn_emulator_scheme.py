@@ -132,7 +132,7 @@ def radiation_scheme_emulated(
     r_eff_liq_um, r_eff_ice_um = resolve_effective_radii(
         zeros if r_eff_liq_um is None else r_eff_liq_um,
         zeros if r_eff_ice_um is None else r_eff_ice_um,
-        aerosol_data.cdnc_factor, 0.5,
+        aerosol_data.cdnc_factor,
         ice_in_cloud * air_density * layer_thickness, layer_thickness,
     )
 
@@ -249,7 +249,9 @@ from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
     radiation_should_compute,
+    rescale_cached_radiation,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -490,6 +492,13 @@ class NNEmulatorRadiation(PhysicsTerm):
         """Compute or reuse cached NN-emulated heating rates."""
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
             tend, rad = self._compute_full(state, diagnostics, forcing, params)
@@ -503,14 +512,13 @@ class NNEmulatorRadiation(PhysicsTerm):
             return tend, rad
 
         def _use_cached():
-            tend = cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            )
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
             # Same dtype pin as _compute: under x64 the cached heating ->
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, radiation
+            return tend, rad
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),

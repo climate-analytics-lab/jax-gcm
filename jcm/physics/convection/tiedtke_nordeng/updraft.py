@@ -14,14 +14,16 @@ Date: 2025-01-09
 import jax
 import jax.numpy as jnp
 from jax import lax
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
 import jcm.constants as c
-from .tiedtke_nordeng import ConvectionParameters, saturation_mixing_ratio
-# Analytic (qs, dqs/dT) for the ECHAM cuadjtq-style Newton updraft step; shared
-# with the adjustment module via jcm.physics.convection.saturation.
+from .tiedtke_nordeng import ConvectionParameters
+# The ECHAM cuadjtq-style damped Newton adjustment. It lives in
+# jcm.physics.convection.saturation so that ``calculate_cape_cin`` (in
+# tiedtke_nordeng.py, which this module imports from) can call it too;
+# re-exported here under its historical name for callers and tests.
 from jcm.physics.convection.saturation import (
-    saturation_specific_humidity_and_derivative as _saturation_mixing_ratio_and_derivative,
+    cuadjtq_newton as saturation_adjustment,
 )
 
 
@@ -43,77 +45,6 @@ class UpdatedraftState(NamedTuple):
                          # plume condensate when the updraft terminates.
 
 
-def saturation_adjustment(
-    temperature: jnp.ndarray,
-    total_water: jnp.ndarray,
-    pressure: jnp.ndarray,
-    n_refine: int = 3,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Newton-Raphson saturation adjustment (cuadjtq, kcall=1 flavour).
-
-    Matches ECHAM/ICON ``mo_cuadjust.f90`` ``cuadjtq`` for the
-    "condensation-only" mode used inside updrafts. The first iteration
-    clips the Newton step to be non-negative (only condensation, never
-    evaporation of pre-existing liquid). Subsequent refinement iterations
-    allow both directions so Newton overshoot in one direction can be
-    corrected.
-
-    The Newton step:
-
-        Δq = (q - qs(T)) / (1 + (L/cp) * dqs/dT)
-
-    is the linearised solution to ``q - Δq = qs(T + L·Δq/cp)``. With one
-    refinement the residual ``q - qs(T_adj)`` typically drops to <~0.5%
-    even for strong supersaturation; the old single-pass implementation
-    left parcels 3-30% off, under-releasing latent heat and cooling the
-    mid-troposphere in RCE.
-
-    Args:
-        temperature: Temperature (K)
-        total_water: Total water mixing ratio (kg/kg)
-        pressure: Pressure (Pa)
-        n_refine: Number of refinement iterations after the first
-            condensation-only pass (Fortran cuadjtq uses 1 refinement).
-
-    Returns:
-        Tuple of (T_adj, vapour, liquid) with ``vapour + liquid == total_water``
-        and ``vapour ≈ qs(T_adj)`` to within a fraction of a percent.
-
-    """
-    def _lcp(T):
-        # Phase-consistent latent heat: L_s pairs with the ice saturation
-        # branch below tmelt (review finding 2.7).
-        return jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
-
-    def _first_pass(T, q_vap, liq):
-        """Condensation-only Newton step (kcall=1)."""
-        L_cp = _lcp(T)
-        qs, dqs_dT = _saturation_mixing_ratio_and_derivative(T, pressure)
-        cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
-        cond = jnp.maximum(cond, 0.0)
-        return T + L_cp * cond, q_vap - cond, liq + cond
-
-    def _refine_body(carry, _):
-        """Refinement: allow both directions (kcall=0) to correct Newton
-        overshoot, but only while there's liquid available to re-evaporate.
-        """
-        T, q_vap, liq = carry
-        L_cp = _lcp(T)
-        qs, dqs_dT = _saturation_mixing_ratio_and_derivative(T, pressure)
-        cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
-        # Don't evaporate more than available liquid
-        cond = jnp.maximum(cond, -liq)
-        return (T + L_cp * cond, q_vap - cond, liq + cond), None
-
-    T1, q1, liq1 = _first_pass(temperature,
-                               total_water,
-                               jnp.zeros_like(total_water))
-    (T_adj, vapor, liquid), _ = lax.scan(
-        _refine_body, (T1, q1, liq1), None, length=n_refine
-    )
-    return T_adj, vapor, liquid
-
-
 def calculate_updraft(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -127,6 +58,7 @@ def calculate_updraft(
     config: ConvectionParameters,
     land_fraction: jnp.ndarray = jnp.array(0.0),
     type_weights: jnp.ndarray | None = None,
+    lift: jnp.ndarray = jnp.array(0.0),
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -146,6 +78,13 @@ def calculate_updraft(
             threshold via ``config.cu_dnoprc_ocean`` and
             ``config.cu_dnoprc_land``. Defaults to 0 (ocean) so existing
             single-column tests behave as before.
+        type_weights: Smooth (deep, shallow, mid) weights; ``None`` falls
+            back to the one-hot of ``ktype``.
+        lift: ECHAM ``zlift`` [K], the sub-grid buoyancy excess. Applied to
+            the buoyancy test at the FIRST ascent level above cloud base and
+            ONLY for a mid-level (``ktype == 3``) plume — see the
+            termination comment below for why that is the reference's one
+            legitimate site for it.
 
     Returns:
         UpdatedraftState with computed profiles
@@ -173,32 +112,53 @@ def calculate_updraft(
     # Set cloud base values. The parcel arriving at the LCL has the
     # surface mixing ratio (q is conserved during dry-adiabatic ascent).
     # Where ``find_cloud_base`` picks the first discrete level above the
-    # true LCL, the parcel is already supersaturated there, and we apply
-    # a one-step ``cuadjtq``-style saturation adjustment so the cloud-
-    # base parcel is warmer than the environment by the latent heat of
-    # the excess condensate. This matches the LCL handling in
-    # ``calculate_cape_cin`` and prevents the updraft from terminating
-    # on the very first interior step due to a too-cold initial parcel.
+    # true LCL, the parcel is already supersaturated there, so we run the
+    # same damped ``cuadjtq`` Newton step the interior of the plume uses:
+    # the condensate warms the parcel by L/cp, and the vapour it is left
+    # with is the saturation value at that *warmed* temperature. This is
+    # ECHAM ``cubase`` (mo_cuinitialize.f90:296-314): ``cuadjtq`` with
+    # icall=1 followed by ``plu = plu + zqold - pqu``, i.e. the condensate
+    # stays in the plume and total water is conserved exactly.
+    #
+    # Doing this by hand — condensing all of ``q - qs(T_dry)`` without the
+    # ``1 + (L/cp)·dqs/dT`` denominator, then re-saturating at the warmed
+    # temperature — created water (up to +42% here, worse on coarse grids)
+    # and over-warmed the parcel by several K, so every plume started too
+    # buoyant with invented condensate (issue #661). Assigning
+    # ``qu = qs(T)`` unconditionally also moistened a *sub*saturated parcel
+    # up to saturation with no latent-heat debit at all; the Newton step
+    # leaves such a parcel untouched, which is the correct behaviour and
+    # matches CAM's UW scheme setting ``qv = qt`` when unsaturated.
     surf_idx = jnp.argmax(pressure)
     surf_temp = temperature[surf_idx]
     surf_humid = humidity[surf_idx]
     surf_press = pressure[surf_idx]
 
     parcel_T_dry_at_cb = surf_temp * (pressure[kbase] / surf_press) ** (c.rd / c.cpd)
-    qsat_at_cb = saturation_mixing_ratio(pressure[kbase], parcel_T_dry_at_cb)
-    excess = jnp.maximum(surf_humid - qsat_at_cb, 0.0)
-    tu_cb = parcel_T_dry_at_cb + (c.alhc / c.cpd) * excess
-    # The parcel is exactly saturated at the (warmer) cb temperature;
-    # use that as the cloud-base mixing ratio rather than the raw env q.
-    qu_cb = saturation_mixing_ratio(pressure[kbase], tu_cb)
+    tu_cb, qu_cb, lu_cb = saturation_adjustment(
+        parcel_T_dry_at_cb, surf_humid, pressure[kbase],
+    )
+
+    # A MID-LEVEL plume has no surface connection: ECHAM ``cubasmc`` seeds it
+    # from the ENVIRONMENT at its own base (mo_cuascent.f90:620-622,
+    # ``pqu = pqen(kk)``, ``plu = 0``). Lifting a surface parcel to a base
+    # 3+ km up, as the ``cubase`` branch above does, would be the wrong
+    # parcel entirely — that is the whole point of the separate trigger.
+    #
+    # ECHAM's ``ptu`` is the full-level environmental temperature brought
+    # adiabatically DOWN to the layer's bottom interface, from which the
+    # ascent lifts it back through the layer. On jcm's full-level grid the
+    # base *is* the full level, so the two half-layer displacements are
+    # absent and the seed is the environment there — the scheme-wide
+    # staggering approximation (#530), not something specific to this seed.
+    is_midlevel = (ktype == 3)
+    tu_cb = jnp.where(is_midlevel, temperature[kbase], tu_cb)
+    qu_cb = jnp.where(is_midlevel, humidity[kbase], qu_cb)
+    lu_cb = jnp.where(is_midlevel, 0.0, lu_cb)
 
     tu_init = tu_init.at[kbase].set(tu_cb)
     qu_init = qu_init.at[kbase].set(qu_cb)
-    # The condensate produced by the cloud-base saturation adjustment stays
-    # in the plume (ECHAM cubase, mo_cuinitialize.f90:314:
-    # ``plu = plu + zqold - pqu``) — it was previously discarded, silently
-    # deleting water the T ledger had already released latent heat for.
-    lu_init = lu_init.at[kbase].set(excess)
+    lu_init = lu_init.at[kbase].set(lu_cb)
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
 
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
@@ -445,7 +405,35 @@ def calculate_updraft(
             # exactly like the previous all-or-nothing dump; widths → 0
             # recover the hard termination.
             above_cloud_base = k < kbase
-            surv_buoy = jax.nn.sigmoid(buoy_new / w_term_buoy)
+            # ECHAM's sub-grid buoyancy bonus ``zlift`` applies to exactly
+            # one ascent test: ``IF(klab(jk+1).EQ.1) zbuo = zbuo + zlift``
+            # (mo_cuascent.f90:449) — the level below must still be
+            # SUB-CLOUD. ``cubase`` sets ``klab(kcbot) = 2``, so a
+            # surface-triggered plume never qualifies at any level; the only
+            # ``klab == 1`` above cloud base is the one ``cubasmc`` writes
+            # when it seeds a mid-level plume (mo_cuascent.f90:654). Hence
+            # the bonus here is gated on BOTH ``ktype == 3`` and the first
+            # step above the base, and is otherwise identically zero.
+            #
+            # This is the resolution of #691: an earlier version added the
+            # bonus at EVERY ascent level to keep a plume alive above a
+            # cloud base wrongly picked at the LFC, which relaxed the CLOUD
+            # TOP criterion by ~1 K against a 0.01 K sigmoid width. #684
+            # removed both halves of that (``find_cloud_base`` now does
+            # ECHAM's ``klab`` walk and returns the LCL); this restores the
+            # bonus at the one site the reference actually uses it.
+            #
+            # ``buoy_new`` is an acceleration (g·ΔTv/Tv), ``lift`` a
+            # temperature, so the bonus converts with g/Tv_env.
+            first_step_above_base = jnp.logical_and(
+                above_cloud_base, k == kbase - 1,
+            )
+            lift_accel = jnp.where(
+                jnp.logical_and(first_step_above_base, ktype == 3),
+                c.grav * lift / virtual_temp_e,
+                0.0,
+            )
+            surv_buoy = jax.nn.sigmoid((buoy_new + lift_accel) / w_term_buoy)
             surv_mf = jax.nn.sigmoid(
                 (carry.mfu[next_level] / jnp.maximum(mass_flux_base, 1e-10)
                  - 0.01) / w_term_mf

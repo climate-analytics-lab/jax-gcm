@@ -16,3 +16,4 @@ API
    jcm.physics_interface.PhysicsTendency
    jcm.physics_interface.Physics
    jcm.checkpoint
+   jcm.profiling

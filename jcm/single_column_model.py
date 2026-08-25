@@ -43,6 +43,11 @@ from jcm.physics_interface import (
 )
 from jcm.terrain import TerrainData
 
+#: Prognostic state variables, as opposed to tracers. ``free_evolve`` accepts
+#: either, but the two take different paths through a step: prognostics go
+#: through the nudged/free integrator, tracers through the tendency update.
+_PROGNOSTIC_VARS = ("u_wind", "v_wind", "temperature", "specific_humidity")
+
 
 @tree_math.struct
 class SCMPredictions:
@@ -167,19 +172,27 @@ class SingleColumnModel:
             defaults to ``ForcingData.zeros((1, 1))``.
         dt_seconds: Physics timestep in seconds (default 1800).
         apply_tracer_tendencies: When ``False`` tracers are reported
-            diagnostically but not advanced.
+            diagnostically but not advanced — except any named in
+            ``free_evolve``, which still evolve. Set it ``False`` and list the
+            tracers of interest to hold the column's other fields fixed: a
+            prescribed-state column has no ascent, so a seeded ``qc`` rains out
+            within hours and never re-forms, and any cloud-mediated aerosol
+            sink then goes untested. Prescribing the cloud and freeing the
+            aerosol is the configuration that tests one.
         relaxation_timescales: Optional ``{var_name: tau_seconds}`` mapping.
             Listed prognostic variables (``u_wind``, ``v_wind``,
             ``temperature``, ``specific_humidity``) are nudged toward the
             prescribed state with timescale ``tau`` while still receiving
             their physics tendency.
-        free_evolve: Optional tuple of prognostic-variable names that evolve
-            under their physics tendency alone — no nudging toward the
-            prescribed state. This is what turns the SCM into a free-running
-            single-column model: e.g. ``free_evolve=("temperature",)`` lets
-            temperature seek radiative-convective equilibrium. A variable may
-            be in ``free_evolve`` *or* ``relaxation_timescales`` but not both
-            (free evolution is just relaxation with no nudging term).
+        free_evolve: Optional tuple of names that evolve under their physics
+            tendency alone — no nudging toward the prescribed state. Accepts
+            both prognostic variables and tracers. For a prognostic, e.g.
+            ``free_evolve=("temperature",)`` lets temperature seek
+            radiative-convective equilibrium; a variable may be in
+            ``free_evolve`` *or* ``relaxation_timescales`` but not both (free
+            evolution is just relaxation with no nudging term). For a tracer it
+            only has an effect alongside ``apply_tracer_tendencies=False``,
+            where it exempts that tracer from being held fixed.
         state_closure: Optional ``f(state, forcing) -> state`` applied to the
             assembled column *each step, before physics*. Use it to re-derive
             diagnostic fields from the freely evolving prognostics so the
@@ -225,8 +238,13 @@ class SingleColumnModel:
                 "relaxation_timescales; a variable is either nudged or free, "
                 "not both."
             )
+        # ``free_evolve`` spans prognostics and tracers; only the prognostic
+        # ones take part in the nudged/free integrator below. Which names are
+        # tracers is not known until ``run`` sees the column, so the split
+        # happens there.
         self._evolving_timescales: dict[str, float | None] = {
-            **{name: None for name in self.free_evolve},
+            **{name: None for name in self.free_evolve
+               if name in _PROGNOSTIC_VARS},
             **self.relaxation_timescales,
         }
 
@@ -254,6 +272,7 @@ class SingleColumnModel:
         forcing: ForcingData,
         apply_tendencies: bool,
         tracer_names: tuple[str, ...],
+        free_tracers: tuple[str, ...],
         evolving_var_params: tuple[tuple[str, float | None], ...],
         state_closure: Callable | None,
     ) -> Callable:
@@ -288,16 +307,17 @@ class SingleColumnModel:
             )
             tendencies = _squeeze_tendency(tendencies_grid)
 
-            if apply_tendencies:
-                updated_tracers = {}
-                for name in tracer_names:
-                    tracer = tracers[name]
-                    tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
-                    updated_tracers[name] = jnp.maximum(
-                        tracer + dt_seconds * tracer_tend, 0.0,
-                    )
-            else:
-                updated_tracers = tracers
+            updated_tracers = {}
+            for name in tracer_names:
+                tracer = tracers[name]
+                if not (apply_tendencies or name in free_tracers):
+                    # Held at the value the column prescribes.
+                    updated_tracers[name] = tracer
+                    continue
+                tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
+                updated_tracers[name] = jnp.maximum(
+                    tracer + dt_seconds * tracer_tend, 0.0,
+                )
 
             updated_evolving_vars = {}
             for name, tau in evolving_var_params:
@@ -408,10 +428,23 @@ class SingleColumnModel:
         if times is None:
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
 
+        # Names in free_evolve that are neither prognostics nor tracers of this
+        # column are a typo, not a silent no-op.
+        free_tracers = tuple(n for n in self.free_evolve if n in initial_tracers)
+        unknown = sorted(set(self.free_evolve) - set(initial_tracers)
+                         - set(_PROGNOSTIC_VARS))
+        if unknown:
+            raise ValueError(
+                f"free_evolve names {unknown} are neither prognostic variables "
+                f"{sorted(_PROGNOSTIC_VARS)} nor tracers of this column "
+                f"({sorted(initial_tracers)})"
+            )
+
         step_fn = self._make_step_fn(
             forcing=forcing,
             apply_tendencies=self.apply_tracer_tendencies,
             tracer_names=tuple(initial_tracers.keys()),
+            free_tracers=free_tracers,
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
         )

@@ -29,6 +29,40 @@ class SurfaceOpticsTest(unittest.TestCase):
         )
         np.testing.assert_allclose(vis, [0.30])
 
+    def test_polar_land_flagged_as_sea_ice_stays_a_convex_blend(self):
+        # The bundle carries icec = 1 over Antarctic/Arctic land, where
+        # lsm = 1 as well. Unclipped, the tiles summed to 2 and emissivity
+        # reached 1.90 -- so surface reflectance 1 - eps went negative and
+        # RRTMGP was handed an impossible surface (#703).
+        p = SurfaceOpticsParameters()
+        vis, nir, emis = _surface_optical_properties(
+            jnp.array([1.0]), jnp.array([1.0]), p,
+        )
+        np.testing.assert_allclose(emis, [0.95])
+        np.testing.assert_allclose(vis, [0.15])
+        np.testing.assert_allclose(nir, [0.25])
+
+    def test_blend_is_convex_across_the_whole_fraction_plane(self):
+        # Any (land, ice) pair, including the incoherent ones, must leave
+        # every optical property inside the hull of the three tile values.
+        p = SurfaceOpticsParameters()
+        f = jnp.linspace(0.0, 1.0, 11)
+        land, ice = (x.ravel() for x in jnp.meshgrid(f, f))
+        vis, nir, emis = _surface_optical_properties(land, ice, p)
+        for got, lo, hi in (
+            (vis, 0.05, 0.80), (nir, 0.05, 0.70), (emis, 0.95, 0.98),
+        ):
+            self.assertGreaterEqual(float(jnp.min(got)), lo - 1e-6)
+            self.assertLessEqual(float(jnp.max(got)), hi + 1e-6)
+
+    def test_sea_ice_over_open_ocean_is_untouched_by_the_clip(self):
+        # The clip must only bind where the fractions were incoherent.
+        p = SurfaceOpticsParameters()
+        vis, _, _ = _surface_optical_properties(
+            jnp.array([0.0]), jnp.array([0.5]), p,
+        )
+        np.testing.assert_allclose(vis, [0.5 * 0.80 + 0.5 * 0.05])
+
     def test_parameters_are_differentiable(self):
         # The per-type values must be gradient leaves like every other
         # physics parameter: d(albedo_vis)/d(type value) = type fraction.

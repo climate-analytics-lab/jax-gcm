@@ -68,15 +68,61 @@ class ConvectionParameters:
     # parameter — width → 0 recovers the hard behaviour exactly.
     trigger_cape: float      # CAPE activation threshold (J/kg; ex-hardcoded 100)
     smooth_trigger_j: float  # Sigmoid width of the CAPE trigger (J/kg)
-    smooth_type_j: float     # Width of the deep/other blend at 1000 J/kg (J/kg)
+    cu_dqcv_width: float     # Width [kg/m2/s] of the deep/shallow moisture-
+                             # convergence sigmoid. ECHAM's test is a hard
+                             # switch ``zdqcv > MAX(0, -1.1*pqhfla*g)``
+                             # (mo_cumastr.f90:571); the default keeps this
+                             # hard at atmospheric flux scales (~1% of a
+                             # typical tropical E) while staying
+                             # differentiable. Replaced the non-ECHAM CAPE
+                             # sigmoid at 1000 J/kg (#699).
     smooth_rh: float         # Width of the moist-free-troposphere RH gate
     smooth_term_buoy: float  # Updraft-termination buoyancy width (m/s²; ~3e-4 ≈ 0.01 K)
     smooth_term_mf: float    # Updraft-termination mass-flux-ratio width
     smooth_precip_pa: float  # zdnoprc precip-onset width (Pa)
 
-    # Switches (ECHAM namelist lmfdudv; carried as a traced bool so the
-    # struct stays a plain tree_math pytree)
+    # Cloud-base sub-grid buoyancy excess — ECHAM ``cubase``
+    # (mo_cuinitialize.f90:291) ``zlift = MAX(cminbuoy, MIN(cmaxbuoy,
+    # pthvsig*cbfac))``, then ``MIN(zlift, 1.0)``. This is the thermal
+    # excess of the warmest boundary-layer plumes over the grid mean; it is
+    # what lets a parcel cross the thin negative-buoyancy layer between its
+    # LCL and its LFC. Without it a grid-mean parcel is essentially never
+    # buoyant at its own LCL and no column convects.
+    cu_cminbuoy: float       # Floor on the excess (K) — ECHAM 0.2
+    cu_cmaxbuoy: float       # Ceiling on the excess (K) — ECHAM 1.0
+    cu_cbfac: float          # Multiplier on thvsig (-) — ECHAM 1.0
+    cu_thvsig: float         # FALLBACK sub-grid σ(θ_v) at the lowest half
+                             # level (K), used only when the caller supplies
+                             # no vdiff diagnostic (column-mode tests,
+                             # standalone drivers). The model path takes
+                             # ``thv_sigma`` from vdiff's prognostic θ_v
+                             # variance — see ``cloud_base_lift``.
+
+    # Mid-level convection trigger — ECHAM ``cubasmc`` (mo_cuascent.f90:593).
+    # The SECOND way ECHAM starts a plume: at a level with no surface
+    # connection at all, when the environment there is nearly saturated and
+    # resolved-scale ascent is lifting it. This is what covers elevated
+    # convection above a stable layer, warm-conveyor and frontal ascent, and
+    # nocturnal elevated convection over land — everything the deliberately
+    # strict surface-parcel ``cubase`` walk is not meant to catch.
+    cu_midlev_rh: float      # Environmental RH the candidate level must
+                             # exceed (-) — ECHAM's hard-coded 0.90
+    cu_midlev_zmin: float    # Minimum height of the candidate layer's TOP
+                             # interface above the surface (m) — ECHAM's
+                             # ``pgeoh(kk)/grav > 1500``, which keeps the
+                             # trigger out of the boundary layer that
+                             # ``cubase`` already owns
+    cu_midlev_ptop: float    # Pressure floor for the base (Pa) — ECHAM's
+                             # ``nmctop``, the 300 hPa level, above which a
+                             # mid-level base is not allowed
+
+    # Switches (ECHAM namelist lmfdudv / lmfmid; carried as traced bools so
+    # the struct stays a plain tree_math pytree)
     lmfdudv: jnp.ndarray
+    cu_lmfmid: jnp.ndarray   # ECHAM ``lmfmid`` (setphys.f90:71, default
+                             # .TRUE.): enable the mid-level trigger. Turning
+                             # it off is the escape hatch for a dycore that
+                             # cannot supply omega — see ``TiedtkeConvection``.
 
     @classmethod
     def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4, # FIXME: validate dt_conv
@@ -85,10 +131,14 @@ class ConvectionParameters:
                  cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
                  cmfctop=0.2, cmfdeps=0.3, entrdd=2.0e-4,
                  trigger_cape=100.0, smooth_trigger_j=25.0,
-                 smooth_type_j=100.0, smooth_rh=0.02,
+                 cu_dqcv_width=2.0e-7, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
                  smooth_precip_pa=2.0e3,
-                 lmfdudv=True) -> 'ConvectionParameters':
+                 cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
+                 cu_thvsig=1.0,
+                 cu_midlev_rh=0.90, cu_midlev_zmin=1500.0,
+                 cu_midlev_ptop=30_000.0,
+                 lmfdudv=True, cu_lmfmid=True) -> 'ConvectionParameters':
         """Return default convection parameters"""
         return cls(
             dt_conv=jnp.array(dt_conv),
@@ -110,12 +160,20 @@ class ConvectionParameters:
             entrdd=jnp.array(entrdd),
             trigger_cape=jnp.array(trigger_cape),
             smooth_trigger_j=jnp.array(smooth_trigger_j),
-            smooth_type_j=jnp.array(smooth_type_j),
+            cu_dqcv_width=jnp.array(cu_dqcv_width),
             smooth_rh=jnp.array(smooth_rh),
             smooth_term_buoy=jnp.array(smooth_term_buoy),
             smooth_term_mf=jnp.array(smooth_term_mf),
             smooth_precip_pa=jnp.array(smooth_precip_pa),
+            cu_cminbuoy=jnp.array(cu_cminbuoy),
+            cu_cmaxbuoy=jnp.array(cu_cmaxbuoy),
+            cu_cbfac=jnp.array(cu_cbfac),
+            cu_thvsig=jnp.array(cu_thvsig),
+            cu_midlev_rh=jnp.array(cu_midlev_rh),
+            cu_midlev_zmin=jnp.array(cu_midlev_zmin),
+            cu_midlev_ptop=jnp.array(cu_midlev_ptop),
             lmfdudv=jnp.array(lmfdudv),
+            cu_lmfmid=jnp.array(cu_lmfmid),
         )
 
 

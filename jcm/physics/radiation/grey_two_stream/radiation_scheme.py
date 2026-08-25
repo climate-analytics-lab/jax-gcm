@@ -185,6 +185,7 @@ def prepare_radiation_state(
         pressure_interfaces=pressure_interfaces,
         h2o_vmr=h2o_vmr,
         o3_vmr=ozone_vmr,
+        specific_humidity=q_clipped,
         cloud_fraction=cloud_fraction,
         cloud_water_path=cloud_water_path,
         cloud_ice_path=cloud_ice_path,
@@ -615,7 +616,9 @@ from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
     radiation_should_compute,
+    rescale_cached_radiation,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -678,6 +681,13 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
             tend, rad = self._compute_full(state, diagnostics, forcing, params)
@@ -693,14 +703,13 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             return tend, rad
 
         def _use_cached():
-            tend = cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            )
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
             # Same dtype pin as _compute: under x64 the cached heating ->
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, radiation
+            return tend, rad
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),

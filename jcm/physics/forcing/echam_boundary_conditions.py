@@ -69,7 +69,18 @@ def _surface_optical_properties(
     sea_ice_fraction: jnp.ndarray,
     p: SurfaceOpticsParameters,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Weighted-average ECHAM albedo/emissivity per grid box."""
+    """Weighted-average ECHAM albedo/emissivity per grid box.
+
+    Sea ice is clipped against the land fraction so the three tiles are a
+    partition of the box. The forcing bundle flags permanent land ice as
+    ``icec = 1`` where ``lsm = 1``, and an unclipped blend then sums to 2
+    over polar land: emissivity reaches 1.9 and the surface reflectance
+    ``1 - eps`` goes negative. The other two consumers of ``sice_am``
+    (``surface/echam/surface_physics.py``,
+    ``vertical_diffusion/tte_tke/vertical_diffusion.py``) already clip this
+    way, so radiation and the surface tiles now see one partition (#703).
+    """
+    sea_ice_fraction = jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction)
     ocean_fraction = jnp.maximum(
         1.0 - land_fraction - sea_ice_fraction, 0.0,
     )

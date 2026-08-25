@@ -468,13 +468,13 @@ def _resolved_effective_radii(batch):
         * jnp.asarray(batch["air_density"])
         * jnp.asarray(batch["layer_thickness"])
     )
-    # cdnc_factor = 1 and land_fraction = 0.5 are what the labeller's
-    # AerosolData and prepare_rrtmgp_data's default hand the liquid fallback.
+    # cdnc_factor = 1 is what the labeller's AerosolData hands the liquid
+    # fallback.
     r_liq, r_ice = jax.vmap(
-        resolve_effective_radii, in_axes=(0, 0, None, None, 0, 0),
+        resolve_effective_radii, in_axes=(0, 0, None, 0, 0),
     )(
         jnp.asarray(batch["r_eff_liq"]), jnp.asarray(batch["r_eff_ice"]),
-        jnp.asarray(1.0), 0.5,
+        jnp.asarray(1.0),
         in_cloud_ice_path, jnp.asarray(batch["layer_thickness"]),
     )
     out = dict(batch)

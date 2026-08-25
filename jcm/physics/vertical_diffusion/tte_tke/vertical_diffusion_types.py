@@ -288,6 +288,18 @@ class VerticalDiffusionData:
     # Turbulent kinetic energy
     tke: jnp.ndarray                 # TKE [m²/s²] (nlev, ncols)
 
+    # Variance of virtual potential temperature. PROGNOSTIC — carried from
+    # step to step exactly like TKE (ECHAM ``pthvvar``), because its budget
+    # is a slow balance of production against dissipation and restarting it
+    # from zero each step would leave it permanently near its floor.
+    thv_variance: jnp.ndarray        # σ²(θ_v) [K²] (nlev, ncols)
+
+    # Sub-grid σ(θ_v) at the second-lowest full level — ECHAM
+    # ``pthvsig = SQRT(pthvvar(klev-1))`` (vdiff.f90:1338). This is the
+    # thermal excess of the warmest boundary-layer plumes over the grid
+    # mean, and it is what sets the convective trigger's ``zlift``.
+    thv_sigma: jnp.ndarray           # σ(θ_v) at klev-1 [K] (ncols,)
+
     # Moisture tendency profile applied by this step's vdiff solve
     # (interior mixing + the surface-evaporation bottom boundary row).
     # This is the same-step ECHAM ``pqte``-at-``cucall``-time analog that
@@ -322,6 +334,8 @@ class VerticalDiffusionData:
             surface_exchange_moisture=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_exchange_momentum=jnp.zeros(nodal_shape + (nsfc_type,)),
             tke=jnp.zeros((nlev,) + nodal_shape),
+            thv_variance=jnp.zeros((nlev,) + nodal_shape),
+            thv_sigma=jnp.zeros(nodal_shape),
             qv_tendency=jnp.zeros((nlev,) + nodal_shape),
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
@@ -341,6 +355,8 @@ class VerticalDiffusionData:
             'surface_exchange_moisture': self.surface_exchange_moisture,
             'surface_exchange_momentum': self.surface_exchange_momentum,
             'tke': self.tke,
+            'thv_variance': self.thv_variance,
+            'thv_sigma': self.thv_sigma,
             'qv_tendency': self.qv_tendency,
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,

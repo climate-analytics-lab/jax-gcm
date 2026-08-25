@@ -151,7 +151,13 @@ class RadiationData:
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 
-    # Solar/geometric variables
+    # Cosine solar zenith angle, refreshed on EVERY call including cached
+    # steps -- consumers outside radiation read it as the current solar
+    # geometry (JAM oxidant photolysis, ``aerosol/jam/chemistry/oxidants.py``).
+    #
+    # It doubles as the rescaling reference for the shortwave cache: the
+    # stored shortwave always corresponds to THIS zenith, both after a solve
+    # and after a rescale, so no second field is needed (#671).
     cos_zenith: jnp.ndarray           # Cosine solar zenith angle [1] (ncols,)
 
     # Surface properties
@@ -336,6 +342,11 @@ class RadiationState(NamedTuple):
     # Gas mixing ratios
     h2o_vmr: jnp.ndarray            # Water vapor volume mixing ratio [nlev]
     o3_vmr: jnp.ndarray             # Ozone volume mixing ratio [nlev]
+    # Specific humidity is carried alongside ``h2o_vmr`` so the RRTMGP path
+    # never has to invert the grey scheme's vmr convention. Recovering q from
+    # h2o_vmr used to give back the MIXING RATIO q/(1-q), which the library
+    # then divided by (1-q) a second time (#678).
+    specific_humidity: jnp.ndarray  # Specific humidity (kg/kg) [nlev]
     
     # Cloud properties
     cloud_fraction: jnp.ndarray      # Cloud fraction [nlev]

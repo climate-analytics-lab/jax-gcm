@@ -37,6 +37,35 @@ stable override set** for its grid, not just `physics=`/`grid=` — see
 Runs take tens of minutes; launch with `run_in_background` and watch with a
 Monitor on `run.log`, or the tool call will time out.
 
+## "Which term is it?" — tools/profile_terms.py
+
+`benchmark.py` answers *how fast*; it cannot say *where the time went*, because
+a step is one fused XLA module. For that, same presets, different tool:
+
+```bash
+$PY tools/profile_terms.py --preset ma-t63-l47 --gpu 3
+```
+
+It prints ms/step and ms/call for the dynamical core, each bridge direction and
+every physics term, by joining a profiler trace to the `jax.named_scope` labels
+that `jcm.profiling` puts in the HLO. Three rules when quoting it:
+
+- It disables CUDA graph capture so that kernels stay individually
+  attributable, so its **total** step time is high by design (264 vs 236 ms at
+  T63L47). Never quote it as throughput — that is `benchmark.py`'s number.
+- Read the "mixed kernels" percentage first. That is device time in fusions
+  spanning two components, charged whole to one of them; when it is large the
+  per-term split is soft and only the coarse dynamics/physics/bridge division
+  is safe to quote.
+- **Do not lengthen the window to "get a better average".** The profiler's
+  event buffer holds ~1e6 events and a T63L47 JAM step emits ~19,000 kernels,
+  so ~20 steps is the ceiling there. A one-day window recorded 20 of its 120
+  steps and reported a 4× undercount. The tool now fails instead, but the
+  instinct is the trap. It is also unnecessary: kernel shapes are static and
+  there are no data-dependent branches, so a step costs the same regardless of
+  state — the window only needs to span whole radiation sub-cycles, which the
+  default does.
+
 ## Methodology — the part that matters
 
 **Never quote jcm's `N sim days/hr` log line.** It is *cumulative including

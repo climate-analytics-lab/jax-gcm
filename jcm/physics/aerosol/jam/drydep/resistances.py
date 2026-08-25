@@ -22,6 +22,7 @@ from jcm.constants import ak as _KB  # Boltzmann constant [J/K]
 from jcm.constants import grav as _G
 from jcm.constants import m_air as _MA
 from jcm.constants import r_universal as _RGAS
+from jcm.physics.aerosol.jam.sedimentation.sedi_term import moment_radius
 
 
 def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -83,13 +84,24 @@ def deposition_velocity(
     pressure: jnp.ndarray,
     air_density: jnp.ndarray,
     *,
+    geom_std_dev: float,
+    moment: int,
     z_ref: float = 10.0,
     z0: float = 1.0e-4,
     karman: float = 0.4,
 ) -> jnp.ndarray:
-    """Non-gravitational dry-deposition velocity 1/(r_a + r_b) [m/s]."""
+    """Non-gravitational dry-deposition velocity 1/(r_a + r_b) [m/s].
+
+    ``r_wet`` is the mode's number-median radius and ``moment`` selects which
+    moment is being deposited (0 number, 3 mass). The scaling has to reach
+    the radius and not just ``v_grav``: the Schmidt number that sets Brownian
+    removal is built from the radius directly, and Brownian dominates for
+    submicron modes, so scaling only the Stokes/impaction term would leave
+    the mass and number velocities effectively identical.
+    """
     ra = aerodynamic_resistance(u_star, z_ref=z_ref, z0=z0, karman=karman)
     rb = quasi_laminar_resistance(
-        r_wet, v_grav, u_star, temperature, pressure, air_density,
+        moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment),
+        v_grav, u_star, temperature, pressure, air_density,
     )
     return 1.0 / (ra + rb)
