@@ -5,7 +5,7 @@ Unreleased — provenance records the parameters
 ----------------------------------------------
 
 - **Every output now records the parameter values the run actually
-  used**. The composed Hydra config that #591 stamped is not the
+  used** (#732). The composed Hydra config that #591 stamped is not the
   same thing: each scheme's ``params`` block is deliberately absent from
   the shipped yamls so unspecified fields fall back to
   ``Parameters.default()`` in code, so the config recorded the

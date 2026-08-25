@@ -1,4 +1,4 @@
-"""Run provenance capture (#591).
+"""Run provenance capture (#591, #732).
 
 Records what actually produced an output file — code versions (git SHA +
 dirty state of every editable install *actually imported*), precision and
@@ -14,7 +14,7 @@ are recorded here as they resolve; content hashing of multi-GB inputs is
 opt-in (``JCM_HASH_INPUTS=1``) — size + mtime is the default descriptor.
 
 Parameters are captured separately from the config and by a different
-route, because the config does not determine them. A scheme's
+route, because the config does not determine them (#732). A scheme's
 ``params`` block is deliberately absent from the shipped yamls so each
 field falls back to ``Parameters.default()`` in code, so the composed
 config records the *overrides* and says nothing about the effective

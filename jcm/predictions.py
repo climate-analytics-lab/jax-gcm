@@ -57,7 +57,7 @@ class ModelPredictions:
         self._snapshot_variables = tuple(snapshot_variables)
         self._snapshot_interval_days = snapshot_interval_days
         # Snapshot the parameters this trajectory was produced with, here
-        # at the model-to-user handoff. Eagerly, not on demand: a
+        # at the model-to-user handoff (#732). Eagerly, not on demand: a
         # calibration loop updates the term parameters in place between
         # runs, so a lazy read through ``self._physics`` would report
         # whichever values the *next* iteration installed rather than the
@@ -78,7 +78,7 @@ class ModelPredictions:
 
     @property
     def params(self):
-        """The parameter values behind this trajectory.
+        """The parameter values behind this trajectory (see #732).
 
         Flat dotted keys under ``physics`` / ``dycore`` / ``constants`` —
         read off the built model at construction, so it reflects what ran
@@ -167,7 +167,7 @@ class ModelPredictions:
         """Convert the full prediction trajectory to an xarray.Dataset.
 
         The parameters the run used are stamped into the dataset's global
-        attributes here, so they survive a bare
+        attributes here (#732), so they survive a bare
         ``model.run(...).to_xarray().to_netcdf(...)`` that never goes near
         the Hydra runners. Wrapping rather than stamping inside
         :meth:`_trajectory_dataset` keeps the per-backend return paths

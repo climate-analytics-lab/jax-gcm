@@ -1,4 +1,4 @@
-"""Tests for run provenance capture (#591)."""
+"""Tests for run provenance capture (#591, #732)."""
 import dataclasses
 import hashlib
 import json
@@ -280,7 +280,7 @@ class DescribeValueTest(unittest.TestCase):
 
 
 class DescribePhysicsParamsTest(unittest.TestCase):
-    """The gap: values that live in code, not in the config."""
+    """The gap #732 closes: values that live in code, not in the config."""
 
     def setUp(self):
         from jcm.physics.speedy.speedy_terms import speedy_physics
