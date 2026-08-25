@@ -183,7 +183,11 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         reference value). Smaller ages faster ⇒ shorter BC/POA
         lifetime. A differentiable ``nnx.Param`` leaf — the gradient is
         well-defined (piecewise; zero once the mode saturates) and the
-        upstream core takes it as a traced pytree field.
+        upstream core takes it as a traced pytree field. Must be >= 0
+        (validated here for direct construction); optimizer updates
+        that wander negative are clamped to 0 in the core — where the
+        loss surface is flat (saturated branch, zero gradient) — so
+        keep calibration search bounds positive.
 
         ``enable_x64`` controls the GLOBAL model precision. Both backends are
         float32-safe (the coag ``qv12`` underflow was fixed upstream), so
@@ -271,6 +275,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # time and would make several differently-configured instances
         # order-dependent (Codex P1 on #726). A calibration sweep over
         # it reuses one compile.
+        if float(n_so4_monolayers) < 0.0:
+            raise ValueError(
+                f"n_so4_monolayers must be >= 0, got {n_so4_monolayers} "
+                "(0 means a zero-thickness coating requirement = instant "
+                "full ageing, NOT off — use the core's mdo_pcarbonaging "
+                "toggle to disable ageing)."
+            )
         self.n_so4_monolayers = nnx.Param(
             jnp.asarray(float(n_so4_monolayers)))
 

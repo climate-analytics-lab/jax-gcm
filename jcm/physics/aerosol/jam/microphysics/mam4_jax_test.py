@@ -295,6 +295,14 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertLess(float(g), 0.0,
                         "thicker required coating must age less BC")
 
+    def test_negative_threshold_rejected_at_construction(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        with self.assertRaises(ValueError):
+            Mam4JaxMicrophysics(n_so4_monolayers=-1.0)
+
     def test_core_dtype_scoped_float32(self):
         # The float32 core runs under a SCOPED x64-off context: the global
         # flag (float64 host, e.g. pySES dynamics) must stay untouched, and
