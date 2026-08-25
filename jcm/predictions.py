@@ -8,6 +8,8 @@ analysis-ready :class:`xarray.Dataset`. Returned by :meth:`jcm.model.Model.run`,
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 import jax
@@ -16,9 +18,12 @@ from jax.tree_util import tree_map
 from numpy import timedelta64
 import pandas as pd
 
+from jcm import provenance
 from jcm.dycore.base import Predictions
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPredictions:
@@ -51,6 +56,36 @@ class ModelPredictions:
         self._snapshots = snapshots
         self._snapshot_variables = tuple(snapshot_variables)
         self._snapshot_interval_days = snapshot_interval_days
+        # Snapshot the parameters this trajectory was produced with, here
+        # at the model-to-user handoff. Eagerly, not on demand: a
+        # calibration loop updates the term parameters in place between
+        # runs, so a lazy read through ``self._physics`` would report
+        # whichever values the *next* iteration installed rather than the
+        # ones behind these predictions. Provenance capture must never be
+        # able to fail a completed run, hence the broad guard.
+        #
+        # Skipped entirely with no model to read: the pytree unflatten
+        # rebuilds without coords/physics/dycore by design, and it runs on
+        # every tree_map over a ModelPredictions. There is nothing to
+        # record there, and it should not cost anything either.
+        self._params = {}
+        if physics is not None or dycore is not None:
+            try:
+                self._params = provenance.describe_params(physics, dycore)
+            except Exception:  # noqa: BLE001
+                logger.warning("provenance: parameter capture failed",
+                               exc_info=True)
+
+    @property
+    def params(self):
+        """The parameter values behind this trajectory.
+
+        Flat dotted keys under ``physics`` / ``dycore`` / ``constants`` —
+        read off the built model at construction, so it reflects what ran
+        rather than what the config requested. Empty for predictions
+        reconstructed by a pytree ``tree_map``, which carries no model.
+        """
+        return self._params
 
     @property
     def dynamics(self):
@@ -103,7 +138,8 @@ class ModelPredictions:
             data,
             coords={"snap_time": t, "lon": lon, "lat": lat},
             attrs={"snapshot_interval_days": self._snapshot_interval_days,
-                   "sampling": "instantaneous (post-step)"},
+                   "sampling": "instantaneous (post-step)",
+                   **provenance.params_attrs(self._params)},
         )
 
     def observation_datasets(self):
@@ -130,10 +166,23 @@ class ModelPredictions:
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
 
+        The parameters the run used are stamped into the dataset's global
+        attributes here, so they survive a bare
+        ``model.run(...).to_xarray().to_netcdf(...)`` that never goes near
+        the Hydra runners. Wrapping rather than stamping inside
+        :meth:`_trajectory_dataset` keeps the per-backend return paths
+        from being able to skip it.
+
         Returns:
             An xarray.Dataset ready for analysis and plotting.
 
         """
+        ds = self._trajectory_dataset()
+        ds.attrs.update(provenance.params_attrs(self._params))
+        return ds
+
+    def _trajectory_dataset(self):
+        """Build the trajectory Dataset, before provenance stamping."""
         # Backends whose native horizontal layout is not the separable
         # lat/lon grid the legacy path below assumes (pySES cubed-sphere
         # columns) own their trajectory conversion per the DynamicalCore

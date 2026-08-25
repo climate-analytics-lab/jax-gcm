@@ -1,6 +1,42 @@
 Release Notes
 =============
 
+Unreleased — provenance records the parameters
+----------------------------------------------
+
+- **Every output now records the parameter values the run actually
+  used**. The composed Hydra config that #591 stamped is not the
+  same thing: each scheme's ``params`` block is deliberately absent from
+  the shipped yamls so unspecified fields fall back to
+  ``Parameters.default()`` in code, so the config recorded the
+  *overrides* and said nothing about the effective values. A model built
+  in Python, or one whose parameters a calibration loop replaced after
+  construction, had no config behind it at all. ``jcm_prov_params``
+  (with ``jcm_prov_params_sha``) now carries every ``nnx.Param`` on
+  every physics term, the scalar dycore knobs (timestep, diffusion
+  filter, transport options) and the physical constants, read off the
+  *built* model rather than the requested config. Keys locate the value
+  as ``<term>.<variable>.<field>``
+  (``tiedtke_convection.params.entrpen``). That matches the Hydra
+  override path minus its ``physics.terms.`` prefix wherever a term's
+  constructor keyword and its stored variable share a name, as the ECHAM
+  terms do; the SPEEDY terms do not (``SpeedyConvection`` takes
+  ``convection_params=`` and stores ``params``), so reproducing one of
+  those from the record needs the constructor signature. Arrays over 64
+  elements (embedded NN weights) are summarized by shape/dtype/hash;
+  values captured under ``jit``/``grad`` read ``"<traced>"``.
+- The record is taken at the model-to-user handoff
+  (``ModelPredictions``) and travels on the predictions object, so it is
+  stamped by ``to_xarray`` for a bare
+  ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
+  Hydra runners, and a calibration loop that mutates parameters between
+  iterations cannot retroactively change an earlier run's record. It is
+  also readable directly as ``predictions.params``.
+- **``jcm_prov_run_hash`` values change**, because the parameters are now
+  folded into the hash. They have to be: every member of a parameter
+  sweep shares one code state, config and input set, so without them a
+  sweep produced a single run hash for every member.
+
 Unreleased — transient AMIP forcing
 -----------------------------------
 
