@@ -294,6 +294,12 @@ Key processes:
    - Rain and snow use the simpler instantaneous form
 
 7. **Evaporation / sublimation** of precipitation in subsaturated layers
+8. **Droplet effective radius** for radiation, from the ECHAM law
+   ``r_eff = 1e6 · κ(N) · (3 ρ q_l,in-cloud / (4 π ρ_w N))^(1/3)`` with the Peng &
+   Lohmann (2003) breadth factor — the same
+   :py:func:`~jcm.physics.clouds.cloud_utils.eff_liquid_droplet_radius` helper the
+   2-moment scheme uses. Published as ``clouds.r_eff_liq``; cloud-free cells stay
+   at exactly 0 so radiation falls back to its diagnostic formula there.
 
 The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 

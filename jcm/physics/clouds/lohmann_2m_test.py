@@ -1062,6 +1062,26 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         base["ice_crystal_number"] = _zeros(n)
         return base
 
+    def test_nic_cirrus_1_diagnoses_a_physical_crystal_number(self):
+        """The DEFAULT branch: N = rho*q_i / ((4/3)*pi*prid^3*rho_ice).
+
+        ``prid`` is a volume-mean radius in METRES, so with the fixture's
+        20e-6 m the candidate is ~7.7e6 /m^3. Regression guard for #725: the
+        divide-by-zero floor here must be ``d_epsilon``, not ``eps`` (~1.2e-7),
+        which exceeds a realistic ``prid**3`` (~8e-15) and would clamp the
+        candidate to ~0.5 /m^3, pinning ICNC at ``icemin``.
+        """
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        _, icnc_o, *_ = update_in_cloud_water(**inputs)
+        expected = (
+            0.75 / (jnp.pi * _P.rhoice) * 1.2 * 2e-4 / (20e-6) ** 3
+        )
+        assert jnp.allclose(icnc_o, expected, rtol=1e-4), (icnc_o, expected)
+        # Far above the floor — the bug made this branch indistinguishable
+        # from "no crystals diagnosed at all".
+        assert jnp.all(icnc_o > 1.0e5 * _P.icemin)
+
     def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
         n = 3
         inputs = self._inputs_with_ice(n)
@@ -1360,6 +1380,63 @@ class TestUpdateTendencies_2M:
 
         assert jnp.all(out[9] == 0.0)   # liq_eff_radius
         assert jnp.all(out[10] == 0.0)  # ice_eff_radius
+
+    def test_liq_eff_radius_matches_inline_echam_law(self):
+        """``preffl`` is bit-identical to the ECHAM law written out in place.
+
+        The law lives in the shared ``eff_liquid_droplet_radius`` helper (also
+        used by the 1M scheme, #717); this pins the 2M numbers against an
+        independent transcription of the same expression.
+        """
+        n = 3
+        dt = jnp.array(60.0, dtype=jnp.float32)
+        air_density = _full(n, 1.2)
+        cdnc = _full(n, 1e8)
+        liq_in_cloud = jnp.array([0.0, 1e-4, 5e-4], dtype=jnp.float32)
+
+        out = update_tendencies_and_important_vars(
+            icnc=_zeros(n), cdnc=cdnc,
+            ice_mmr_prev=_zeros(n), liq_mmr_prev=_zeros(n),
+            tracer_tm1_cdnc=_zeros(n), tracer_tm1_icnc=_zeros(n),
+            condensation_rate=_zeros(n), deposition_rate=_zeros(n),
+            rain_evap_mmr=_zeros(n), freezing_rate=_zeros(n),
+            tompkins_ice=_zeros(n), tompkins_liq=_zeros(n),
+            incloud_ice_melt=_zeros(n),
+            lsdcp=_full(n, 2.836e6 / 1004.0), lvdcp=_full(n, 2.501e6 / 1004.0),
+            air_density=air_density, inv_air_density=1.0 / air_density,
+            rain_formation=_zeros(n), snow_accretion=_zeros(n),
+            snow_formation=_zeros(n), cloud_ice_evap=_zeros(n),
+            ice_flux_melt=_zeros(n), pxitec=_zeros(n), pxlevap=_zeros(n),
+            pxltec=_zeros(n), pxisub=_zeros(n),
+            snow_sublimation_mmr=_zeros(n), snow_melt=_zeros(n),
+            cloud_ice_in_cloud=_zeros(n), cloud_liquid_in_cloud=liq_in_cloud,
+            temp_tmp=_full(n, 285.0),
+            liquid_cloud_flag=jnp.ones((n,), dtype=bool),
+            ice_cloud_flag=jnp.zeros((n,), dtype=bool),
+            cloud_fraction=_full(n, 0.6),
+            specific_humidity_tendency=_zeros(n), temp_tendency=_zeros(n),
+            ice_tendency=_zeros(n), liq_tendency=_zeros(n),
+            tracer_tendency_cdnc=_zeros(n), tracer_tendency_icnc=_zeros(n),
+            incloud_liq_before_rain=liq_in_cloud,
+            incloud_ice_before_snow=_zeros(n),
+            dt=dt,
+            params=_P,
+        )
+
+        breadth = 4.5e-10 * cdnc + 1.18
+        has_liquid = liq_in_cloud > 0.0
+        base = jnp.where(
+            has_liquid,
+            (3.0 / (4.0 * pi * rhow)) * liq_in_cloud * air_density
+            / jnp.maximum(cdnc, _P.eps),
+            1.0,
+        )
+        expected = jnp.where(
+            has_liquid, 1.0e6 * breadth * base ** (1.0 / 3.0), 0.0,
+        )
+
+        assert float(out[9][0]) == 0.0
+        np.testing.assert_array_equal(np.asarray(out[9]), np.asarray(expected))
 
 
 class TestIcon2MPipeline:

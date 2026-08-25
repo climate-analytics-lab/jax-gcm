@@ -12,8 +12,8 @@ import jcm.constants as c
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    breadth_factor,
     eff_ice_crystal_radius,
+    eff_liquid_droplet_radius,
     minimum_CDNC,
 )
 from .types import microphysics_dt_constants
@@ -229,28 +229,12 @@ def update_tendencies_and_important_vars(
     specific_humidity_tendency = specific_humidity_tendency - zdxlcor - zdxicor
     temp_tendency = temp_tendency + lvdcp * zdxlcor + lsdcp * zdxicor
 
-    # --- 6) effective liquid droplet radius [um] (preffl)
-    # breadth_factor returns dimensionless breadth parameter (Fortran breadth_factor)
-    breadth = breadth_factor(cdnc)
-    # convert to effective radius (um): 1e6 * breadth * ((3/(4*pi*rhoh2o)) * pxlb * prho / pcdnc)^(1/3)
-    # Double-where guard on the cube root, whose derivative is infinite when the
-    # base is 0. The mask must be "there is liquid to speak of", NOT
-    # ``liquid_cloud_flag``: that flag is ``temperature > tmelt`` (scheme.py), so
-    # it is True in every warm cell, including the cloud-free majority where
-    # ``cloud_liquid_in_cloud == 0`` puts a 0 on the *differentiated* branch.
-    # The forward is unchanged either way (the radius is masked to 0 there), but
-    # the reverse pass multiplies that infinite local derivative by the incoming
-    # cotangent, and a zero cotangent gives 0 * inf = NaN. That NaN reaches the
-    # gradient only once radiation consumes these radii from the cloud carry,
-    # i.e. from the second step of a rollout onwards.
-    has_liquid = jnp.logical_and(liquid_cloud_flag, cloud_liquid_in_cloud > 0.0)
-    liq_radius_base = jnp.where(
-        has_liquid,
-        (3.0 / (4.0 * pi * c.rhow)) * cloud_liquid_in_cloud * air_density / jnp.maximum(cdnc, params.eps),
-        1.0,
+    # --- 6) effective liquid droplet radius [um] (preffl); the ECHAM law and its
+    # cube-root gradient guard live in the shared helper the 1M scheme also uses.
+    liq_eff_radius = eff_liquid_droplet_radius(
+        cloud_liquid_in_cloud, air_density, cdnc, params.eps,
+        liquid_cloud_flag=liquid_cloud_flag,
     )
-    liq_eff_radius = 1.0e6 * breadth * liq_radius_base ** (1.0 / 3.0)
-    liq_eff_radius = jnp.where(has_liquid, liq_eff_radius, 0.0)
 
     # --- 7) ice crystal effective radius [um] (preffi)
     # convert in-cloud ice kg/kg -> g/m^3: 1000 * pxib * prho
@@ -298,7 +282,7 @@ def update_in_cloud_water(
     specific_humidity_tmp: jnp.ndarray,  # Original: pqp1tmp
     sat_spec_humidity_tmp: jnp.ndarray,  # Original: pqsp1tmp
     air_density: jnp.ndarray,            # Original: prho
-    ice_radius_mean: jnp.ndarray,        # Original: prid
+    ice_radius_mean: jnp.ndarray,        # Original: prid — volume-mean, METRES
     temp_prev: jnp.ndarray,              # Original: ptm1
     cloud_flag: jnp.ndarray,             # Original: ld_cc (INOUT)
     ice_crystal_number: jnp.ndarray,     # Original: picnc (INOUT)
@@ -444,8 +428,12 @@ def update_in_cloud_water(
 
     # compute candidate ICNC depending on nic_cirrus
     if params.nic_cirrus == 1:
-        # 0.75 / (pi * rhoice) * prho * pxib / prid^3  (note units)
-        icnc_candidate = 0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, params.eps)
+        # N = rho*q_i / ((4/3)*pi*prid^3*rho_ice): crystal number from ice mass
+        # and the volume-mean radius ``prid``, which is in METRES.
+        # The floor must be a pure divide-by-zero guard: a realistic prid^3 is
+        # ~1e-13 m^3, so ``eps`` (~1e-7) would clamp every cell and force the
+        # candidate to zero. ``d_epsilon`` (1e-30) sits below any physical value.
+        icnc_candidate = 0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, params.d_epsilon)
     elif params.nic_cirrus == 2:
         # min(pnicex, pap*1e6)
         icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)

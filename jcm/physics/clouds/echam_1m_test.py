@@ -2,6 +2,7 @@
 
 import jax.numpy as jnp
 import jax
+import numpy as np
 from .echam_1m import (
     MicrophysicsParameters, cloud_droplet_radius,
     autoconversion, autoconversion_beheng, autoconversion_kk2000,
@@ -789,3 +790,94 @@ class TestColumnSweepParameterGradients:
         assert jnp.isclose(d_cvtfall, fd, rtol=0.05), (
             f"AD {float(d_cvtfall)} vs FD {fd}"
         )
+
+
+class TestEcham1MPublishesEffectiveRadius:
+    """The term must publish an LWC-dependent ``clouds.r_eff_liq`` (#717).
+
+    Without it RRTMGP falls back to ``effective_radius_liquid``, a constant
+    ~11 um independent of liquid water content.
+    """
+
+    NLEV = 8
+    NCOLS = 3
+
+    def _run_term(self, qc_profile, cdnc_factor=None):
+        from .echam_1m import Echam1MMicrophysics
+        from .cloud_data import CloudData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics_interface import PhysicsState
+
+        from .sundqvist import saturation_specific_humidity
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        # Warm, saturated column so the sweep's saturation adjustment neither
+        # evaporates the prescribed cloud nor freezes it.
+        p_col = jnp.linspace(4e4, 1e5, nlev)
+        t_col = jnp.linspace(280.0, 295.0, nlev)
+        q_col = jax.vmap(saturation_specific_humidity)(p_col, t_col)
+        pressure = p_col[:, None] * jnp.ones((1, ncols))
+        temperature = t_col[:, None] * jnp.ones((1, ncols))
+        specific_humidity = q_col[:, None] * jnp.ones((1, ncols))
+        air_density = pressure / (287.05 * temperature)
+        qc = jnp.asarray(qc_profile)
+        cloud_fraction = jnp.where(qc > 0.0, 0.6, 0.0)
+
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cloud_fraction, qc=qc, qi=jnp.zeros(shape),
+        )
+        aerosol = AerosolData.zeros((ncols,), nlev)
+        if cdnc_factor is not None:
+            aerosol = aerosol.copy(cdnc_factor=jnp.asarray(cdnc_factor))
+
+        state = PhysicsState.zeros(
+            shape,
+            temperature=temperature,
+            specific_humidity=specific_humidity,
+            tracers={"qc": qc, "qi": jnp.zeros(shape)},
+        )
+        diagnostics = {
+            "_dt_seconds": 600.0,
+            "pressure_full": pressure,
+            "air_density": air_density,
+            "layer_thickness": jnp.full(shape, 500.0),
+            "clouds": clouds,
+            "aerosol": aerosol,
+        }
+        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
+        return np.asarray(out["clouds"].r_eff_liq)
+
+    def test_cloud_free_levels_are_exactly_zero(self):
+        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
+        r_eff = self._run_term(qc)
+        cloudy = np.zeros((self.NLEV, self.NCOLS), dtype=bool)
+        cloudy[5] = True
+        assert (r_eff[~cloudy] == 0.0).all()
+        assert (r_eff[cloudy] > 0.0).all()
+
+    def test_radius_is_not_the_constant_fallback(self):
+        # ``effective_radius_liquid(1.0, 0.5)`` = 14*0.5 + 8*0.5 = 11 um.
+        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
+        r_eff = self._run_term(qc)
+        assert not np.allclose(r_eff[5], 11.0)
+        assert np.all((r_eff[5] > 2.0) & (r_eff[5] < 30.0))
+
+    def test_radius_increases_with_liquid_water_content(self):
+        # Same CDNC in every column; only the LWC differs.
+        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(
+            jnp.array([5e-5, 2e-4, 8e-4])
+        )
+        r_eff = self._run_term(qc)
+        assert np.all(np.diff(r_eff[5]) > 0.0)
+
+    def test_radius_varies_in_the_vertical(self):
+        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[3].set(1e-4).at[5].set(6e-4)
+        r_eff = self._run_term(qc)
+        assert np.all(r_eff[5] > r_eff[3])
+
+    def test_twomey_smaller_droplets_for_more_aerosol(self):
+        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
+        r_clean = self._run_term(qc, cdnc_factor=jnp.ones((self.NCOLS,)))
+        r_polluted = self._run_term(qc, cdnc_factor=jnp.full((self.NCOLS,), 2.0))
+        assert np.all(r_polluted[5] < r_clean[5])

@@ -24,7 +24,7 @@ from jcm.terrain import TerrainData
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    eff_ice_crystal_radius,
+    ice_volume_mean_radius,
     minimum_CDNC,
 )
 from .types import MicrophysicsTendencies_2M
@@ -269,8 +269,16 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     cloud_flag = cloud_fraction > 0.0
 
-    # Mean ice crystal radius for ICNC nucleation path.
-    ice_radius = eff_ice_crystal_radius(qi * air_density, icnc, params)
+    # ECHAM's ``prid``: the VOLUME-mean crystal radius in METRES. The ICNC
+    # diagnostic in update_in_cloud_water inverts it as
+    # N = rho*q_i / ((4/3)*pi*prid^3*rho_ice), so metres is load-bearing --
+    # microns here understate N by ~1e18 and pin it at ``icemin``, which is
+    # what saturated r_eff_ice at ``ceffmax`` (#725).
+    # eff_ice_crystal_radius takes IN-CLOUD g/m^3 and returns microns, so the
+    # mass conversion and the Schumann (2011) effective -> volume-mean step are
+    # both required (same chain as precip.py and deposition_freezing.py).
+    ice_gm3 = 1000.0 * qi * air_density / jnp.maximum(cloud_fraction, params.clc_min)
+    ice_radius = ice_volume_mean_radius(ice_gm3, icnc, params)
 
     (
         cloud_flag, icnc_uicw, _nucleation_rate, cdnc_uicw,
@@ -657,6 +665,10 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     # update_tendencies_and_important_vars: full ECHAM6 accounting step
     # ------------------------------------------------------------------
+    # This also gates the published droplet effective radius, so supercooled
+    # liquid gets r_eff_liq = 0 and radiation falls back to a constant 11 um
+    # over ~66% of in-cloud liquid — see #727, which needs the ECHAM reference
+    # to settle whether ld_liqcl belongs on the radius at all.
     liquid_cloud_flag = temperature > params.tmelt
     ice_cloud_flag = temperature <= params.tmelt
     cloud_fraction_in = cloud_fraction
