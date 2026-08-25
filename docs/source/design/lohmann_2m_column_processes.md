@@ -1,8 +1,6 @@
 # The Lohmann 2M scheme is ECHAM's `column_processes` loop
 
-*(2026-08; issues #662, #667, #685, #686, #687, #688, #689; parent audit #614)*
-
-## The decision
+## The design
 
 `cloud_microphysics_2m` runs the **entire** two-moment process chain inside one
 top-down `lax.scan`, one scan step per level, in the section order of ECHAM's
@@ -10,32 +8,20 @@ top-down `lax.scan`, one scan step per level, in the section order of ECHAM's
 ledger, `update_tendencies_and_important_vars`) has no cross-level coupling and
 runs vectorized on the stacked per-level outputs afterwards.
 
-The previous layout split the chain: "level-independent" processes
-(condensation partition, freezing, WBF, warm/cold precipitation formation) ran
-vectorized outside the sweep, and only sedimentation/melting/sublimation ran
-inside it. That looked like a harmless performance-friendly factorization. It
-was not, because in the reference **every process at level `jk` consumes the
-precipitation state the levels above produced *this step*** — the rain/snow
-fluxes (`prfl`/`pssfl`), the precipitation cover (`zclcpre`), and the falling
-ice flux (`zxiflux`) are loop-carried. Splitting the chain silently severed
-those couplings:
-
-- accretion by rain/snow from above read `qr`/`qs` tracers that no term
-  declared any more — both identically zero, so the pathway was dead code and
-  precipitation formation was understated ~3× (#662 finding 5, and through
-  `rate_cb = p_form/(qc+qi)` the leading suspect for the cloud-borne aerosol
-  drainage failure in #658);
-- the cloud∩precipitation overlap `zclcstar = min(paclc, zclcpre)` could not
-  be formed, so accretion geometry fell back to `paclc` (#685);
-- ice created mid-step (deposition, freezing, WBF) never met its
-  aggregation/riming sink that step (#686);
-- warm rain ran *first*, before condensation and activation, matching neither
-  ECHAM nor CAM (#667 finding 4).
-
-The restructure is therefore not an optimization choice reversed — it is the
-minimal faithful shape. Wall-clock cost is unchanged at leading order: the
-same arithmetic moves from a `(nlev,)`-vectorized context into the scan body,
-and the scan already existed.
+The monolithic sweep is forced by the reference's data flow: every process at
+level `jk` consumes the precipitation state the levels above produced *this
+step* — the rain/snow fluxes (`prfl`/`pssfl`), the precipitation cover
+(`zclcpre`), and the falling ice flux (`zxiflux`) are loop-carried. Lifting
+apparently "level-independent" processes (the condensation partition,
+freezing, WBF, precipitation formation) out of the sweep severs those
+couplings: accretion by rain and snow from above loses its collector fluxes,
+the cloud∩precipitation overlap `zclcstar = min(paclc, zclcpre)` cannot be
+formed, ice created mid-step (by deposition, freezing, or WBF) never meets
+its aggregation/riming sink that step, and warm rain cannot run after
+condensation and activation, which is where both ECHAM and CAM place it. The
+whole chain therefore lives in the scan. Wall-clock cost is unchanged at
+leading order: the same arithmetic runs inside the scan body rather than in a
+`(nlev,)`-vectorized context.
 
 ## What the sweep does per level
 
@@ -48,10 +34,26 @@ geometry (`zclcstar`, `zauloc`, the Marshall–Palmer inversions
 `zxrp1`/`zxsp1`) → 7.1 warm rain → 7.2 cold precipitation → 7.3 flux update.
 
 One deliberate deviation, reviewed and kept: sedimentation runs **before**
-melting (MG/PUMAS order, `micro_pumas_v1.F90`), with the running ice tendency
-threaded through the melt routine so the two sinks cannot claim the same mass
-(#662 finding 2). ECHAM melts first; both orderings are internally consistent
+melting (the MG/PUMAS order, `micro_pumas_v1.F90`), with the running ice
+tendency threaded through the melt routine so the two sinks cannot claim the
+same mass. ECHAM melts first; both orderings are internally consistent
 ledgers.
+
+Formulation choices inside the sweep, for provenance:
+
+- Grid-scale condensation/evaporation is the section-5 `zqcdif` closure with
+  ECHAM's Newton saturation damper (`zqcon`; 0.36–0.93 through the
+  troposphere), so no external saturation adjustment is composed alongside
+  the scheme and no supersaturation survives a step.
+- Clear-sky condensate — including cells whose cover reached zero this step —
+  evaporates through `zxlevap`/`zxievap` verbatim.
+- Accretion by rain and snow from above converts the loop-carried fluxes to
+  local mixing ratios with the Marshall–Palmer inversions (`zxrp1`/`zxsp1`).
+- The WBF threshold updraft `peta` is ECHAM's diffusional-growth ζ
+  (`mo_cloud_micro_2m.f90` line 856), recomputed after freezing so the
+  post-freezing crystal population sets the threshold.
+- Diagnostic cirrus ICNC (`nic_cirrus = 1`) uses the Schumann volume-mean
+  radius, in metres.
 
 ## The state-splitting convention
 
@@ -75,18 +77,6 @@ The ledger reconstruction is identical either way:
 guard bounds the true end-of-step state and the host's tendency sum
 telescopes exactly as ECHAM's INOUT accumulation.
 
-## What this made live (previously inert or miscalibrated)
-
-| pathway | before | after |
-|---|---|---|
-| internal saturation adjustment | `zqcon ≈ 1/50…1/650` (zdqsdt ×1000; #667.1) | Newton damper 0.36–0.93; 10 % supersat → 1 % in one step |
-| grid-scale condensation | external Sundqvist bolt-on (double-adjustment risk) | ECHAM section-5 `zqcdif` closure in-scheme; bolt-on removed |
-| clear-sky condensate sink | none (`pxlevap = pxievap = 0`) | `zxlevap`/`zxievap` verbatim; cf=0 cells evaporate in one step |
-| rain/snow-from-above accretion | dead (`qr`/`qs` ≡ 0) | Marshall–Palmer inversion of carry fluxes |
-| WBF threshold updraft | fed a 0–1 clip as `peta` | ECHAM's diffusional-growth ζ (line 856); recomputed post-freezing |
-| diagnostic ICNC (`nic_cirrus=1`) | `prid` in µm (r³ off by 10¹⁸) → pinned at floor | Schumann volume-mean radius in metres |
-| cold-chain gate | step-start `qi > ccwmin` | `ll_cc` + in-scan `zxib > cqtmin` (#686) |
-
 ## Deliberate omissions (tracked)
 
 - **Large-scale vertical velocity is not plumbed** (`zvervx` is TKE-only; the
@@ -105,52 +95,52 @@ telescopes exactly as ECHAM's INOUT accumulation.
 (modelled on CAM's `check_energy_chng`) close the water and enthalpy budgets
 against the surface fluxes for warm-liquid, WBF, cold-fallout, and
 melt-in-place fixtures. `TestSaturationGate2M` pins that no supersaturation
-survives a step (the property whose absence let the double adjustment hide);
-`TestColdChainSameStepCoupling2M` pins that a deck glaciating via WBF exports
-a frozen flux the same step. Budget tests pin the ledger's self-consistency —
-a defect that mis-states the in-cloud state on both sides of a transfer needs
-a *state* assertion, which is why the het-INP test bounds the per-level
-fusion heat from below rather than trusting closure alone.
+survives a step; `TestColdChainSameStepCoupling2M` pins that a deck
+glaciating via WBF exports a frozen flux the same step. Budget tests pin the
+ledger's self-consistency — a defect that mis-states the in-cloud state on
+both sides of a transfer needs a *state* assertion, which is why the het-INP
+test bounds the per-level fusion heat from below rather than trusting closure
+alone.
 
-`clouds.cloud_fraction` now means the post-microphysics cover under both the
-1M and 2M schemes (#687; documented on `CloudData`), and the 2M
-negative-mass repair is exported as `clouds.negative_mass_repair` [W/m²]
-(#689) so its sign-definite heating is measurable in any run.
+`clouds.cloud_fraction` is the post-microphysics cover under both the 1M and
+2M schemes (documented on `CloudData`), and the 2M negative-mass repair is
+exported as `clouds.negative_mass_repair` [W/m²] so its sign-definite heating
+is measurable in any run.
 
-## The wet-scavenging interface (#708)
+## The wet-scavenging interface
 
-ECHAM-HAM does not reconstruct aerosol scavenging from cover × grid-mean
-state: after `column_processes`, `cloud_subm_2` receives the ledger the
-microphysics itself integrated — `zmlwc`/`zmiwc` (in-cloud condensate
-captured at section 7, before precipitation formation depletes it), the
-in-cloud formation rates `zmratepr`/`zmrateps`/`zmsnowacl` (with `zmrateps`
-seeded from `sedimentation_ice`: sedimenting ice **is** a scavenging carrier
-in ECHAM-HAM), and `paclc`. The scan already computed all of these; they are
-now published on `CloudData` (`incloud_*`, `process_cloud_fraction`,
-`condensate_evaporation_rate` — see `ScavengingLedger` in
-`lohmann_2m/types.py`) and the JAM wet-deposition and cloud-borne exchange
-terms key to them:
+The scheme publishes the same process-time ledger that ECHAM-HAM's
+`cloud_subm_2` receives from `column_processes`: `zmlwc`/`zmiwc` (in-cloud
+condensate captured at section 7, before precipitation formation depletes
+it), the in-cloud formation rates `zmratepr`/`zmrateps`/`zmsnowacl`
+(`zmrateps` seeded from `sedimentation_ice`: sedimenting ice **is** a
+scavenging carrier in ECHAM-HAM), the cover the processes ran under, and the
+condensate-evaporation ledger (`zxlevap + zxievap`). These appear on
+`CloudData` as `incloud_*`, `process_cloud_fraction`, and
+`condensate_evaporation_rate` (see `ScavengingLedger` in
+`lohmann_2m/types.py`), and the JAM wet-deposition and cloud-borne exchange
+terms key to them — the ledger is why `aerosol_module="jam"` requires the 2M
+scheme:
 
 - **In-cloud removal** is HAMMOZ `prep_wetdep_hydro`'s
   `peffwat = (zmratepr+zmsnowacl)·Δt/zmlwc` and `peffice = zmrateps·Δt/zmiwc`
   (clipped to [0, 1]), split by the in-cloud ice mass fraction. Numerator and
   denominator are both captured at process time, so the fraction is bounded
-  by construction — no unbounded rate ratio, no floor being "accidentally
-  correct" in near-empty cells.
+  by construction in every cell, including near-empty ones.
 - **Resuspension** of cloud-borne aerosol keys to the condensate-evaporation
-  ledger (`zxlevap + zxievap`): a sky cleared by evaporation releases the
-  reservoir in one step, a sky cleared by rainout releases nothing (that
-  aerosol leaves with the precip), and the same step's rainout claim caps the
-  released share so the two sinks cannot jointly overdraw. Cover alone
-  cannot make this distinction — both endings read `cloud_fraction = 0`.
+  ledger: a sky cleared by evaporation releases the reservoir in one step, a
+  sky cleared by rainout releases nothing (that aerosol leaves with the
+  precip), and the same step's rainout claim caps the released share so the
+  two sinks cannot jointly overdraw. The end-of-step cover cannot make this
+  distinction — both endings read `cloud_fraction = 0` — which is why the
+  ledger, not the cover, is the interface.
 
 One documented deviation from the reference: ECHAM-HAM zeroes `zmlwc`/`zmiwc`
 *after* the `paclc` write-back (mo_cloud_micro_2m.f90:3655 → 3660), so a cell
 whose condensate fully converted to precipitation reaches `cloud_subm_2` with
 a zero pool, `peffwat = 0`, and **no scavenging in exactly the step with the
 largest removal** — the reference has the dead zone itself. jcm keeps the
-faithful zeroing (the marker is information: zero pool + positive formation
-identifies the fully-converting cell) but maps the marker to scavenged
-fraction **1**, not 0. The 1M scheme does not publish the ledger yet (#712);
-the factory statically wires the JAM terms back to the legacy cover-keyed
-reconstruction under `cloud_scheme: 1m`.
+faithful zeroing, because the marker is information — a zero pool with a
+positive formation rate identifies the fully-converting cell — but maps the
+marker to scavenged fraction **1**, not 0: the droplets became precipitation,
+and everything they carried went with them.

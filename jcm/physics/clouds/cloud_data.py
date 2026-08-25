@@ -82,10 +82,11 @@ class CloudData:
     negative_mass_repair: jnp.ndarray  # (ncols,)
 
     # The ECHAM-HAM wet-scavenging interface (#708): the process-time
-    # ledger ``cloud_subm_2`` receives, written by the 2M scheme (zero
-    # under 1M — the mo_cloud ledger port is #712; the JAM terms that read
-    # these are wired by the factory to fall back to the condensate-ratio
-    # pathway under 1M). ``incloud_liquid``/``incloud_ice`` are ECHAM's
+    # ledger ``cloud_subm_2`` receives, written by the 2M scheme. The 1M
+    # scheme leaves these zero, which is why the factory rejects
+    # aerosol_module='jam' with cloud_scheme='1m' — the JAM terms that
+    # read them would silently scavenge nothing.
+    # ``incloud_liquid``/``incloud_ice`` are ECHAM's
     # zmlwc/zmiwc — IN-CLOUD condensate captured before precipitation
     # formation, zeroed (faithfully) where the post-write-back cover fell
     # below clc_min; a zeroed pool with a positive formation rate marks a

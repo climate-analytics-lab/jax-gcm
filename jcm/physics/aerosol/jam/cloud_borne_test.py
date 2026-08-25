@@ -40,8 +40,8 @@ class _Clouds:
     """CloudData stub: cover plus the #708 scavenging-ledger fields.
 
     All-zero ledger fields mean "no cloud process this step", which routes
-    the exchange term's downward direction to the slow timescale drain —
-    the pre-#708 behaviour the legacy tests were written against.
+    the exchange term's downward direction to the slow timescale drain,
+    so tests of the timescale relaxation can leave them defaulted.
     """
 
     def __init__(self, cloud_fraction, **ledger):

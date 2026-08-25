@@ -11,7 +11,6 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetDepParameters,
     below_cloud_rate,
     conv_in_cloud_rate,
-    in_cloud_rate,
     reinjection_budget,
 )
 
@@ -61,13 +60,6 @@ class ScavengingFunctionTest(unittest.TestCase):
         reinjected, surface = reinjection_budget(none, formed, evap_frac)
         np.testing.assert_allclose(np.asarray(reinjected), 0.0)
         np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.0)
-
-    def test_in_cloud_rate_scales_with_activation(self):
-        pf = jnp.full((1, 1), 1.0e-6)
-        qc = jnp.full((1, 1), 1.0e-3)
-        lo = in_cloud_rate(jnp.full((1, 1), 0.2), pf, qc)
-        hi = in_cloud_rate(jnp.full((1, 1), 0.9), pf, qc)
-        self.assertGreater(float(hi[0, 0]), float(lo[0, 0]))
 
     def test_below_cloud_size_dependence(self):
         precip = jnp.full((1, 1), 1.0e-4)
@@ -702,8 +694,8 @@ class FormationLedgerTest(unittest.TestCase):
     cell whose condensate fully converted to precipitation — which ends
     the step with cover 0, condensate 0, and a ZEROED in-cloud pool but a
     positive formation ledger — still scavenges, in exactly the step with
-    the largest removal. The legacy cover x p_form/condensate path reads
-    zero there (the dead zone this issue was about).
+    the largest removal (a cover-keyed reconstruction would read zero
+    there — the dead zone the ledger interface exists to close).
     """
 
     @staticmethod
@@ -787,14 +779,6 @@ class FormationLedgerTest(unittest.TestCase):
         self.assertLess(q1[1].max(), 2e-6 * q0[1].max())
         # ...and untouched levels keep theirs.
         np.testing.assert_allclose(q1[0], q0[0], rtol=1e-6)
-
-        # The legacy reconstruction reads cover 0 x condensate 0 there and
-        # removes nothing — the documented dead zone this path replaces.
-        _, out_legacy = WetScavenging(
-            params=params, formation_ledger=False)(
-            state, diagnostics, None, None)
-        np.testing.assert_allclose(
-            np.asarray(out_legacy[CARRY_KEY][cb_key]), q0, rtol=1e-6)
 
     def test_interstitial_share_keys_to_process_cover(self):
         # The implicit (no explicit phase) pathway must weight by the

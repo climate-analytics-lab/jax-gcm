@@ -162,7 +162,6 @@ def jam_aerosol_physics(
     tracer_diffusion: TracerDiffusionParameters | None = None,
     convective_transport: bool = True,
     conv_transport: ConvTransportParameters | None = None,
-    scavenging_ledger: bool = True,
 ) -> list[PhysicsTerm]:
     """Build the ordered JAM harness term list.
 
@@ -217,14 +216,12 @@ def jam_aerosol_physics(
             is entangled with convective scavenging and neither reference
             model transports a stratiform cloud-borne phase convectively.
             On by default.
-        scavenging_ledger: key stratiform in-cloud wet removal and
-            cloud-borne resuspension to the cloud scheme's process-time
-            scavenging ledger (#708 — the ECHAM-HAM ``cloud_subm``
-            interface). Requires a cloud scheme that publishes the
-            ``CloudData`` ledger fields (the 2M scheme); set False for the
-            1M scheme, which does not yet (#712), so both terms fall back to the
-            legacy cover-keyed reconstruction. Static by design — the
-            fallback must never be a silent per-cell branch.
+
+    Stratiform in-cloud wet removal and cloud-borne resuspension key to
+    the cloud scheme's process-time scavenging ledger (#708 — the
+    ECHAM-HAM ``cloud_subm`` interface), so the harness requires a cloud
+    scheme that publishes the ``CloudData`` ledger fields (the 2M
+    scheme); ``echam_physics`` enforces this at compose time.
 
     Returns:
         The ordered term list: natural emissions, prescribed oxidants and
@@ -334,7 +331,7 @@ def jam_aerosol_physics(
     post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
         # Heterogeneous ice nucleation on dust/BC → ``ice_nuclei`` for the 2M
-        # cloud scheme (#494). Harmless with the 1M scheme (diagnostic unused).
+        # cloud scheme (#494).
         IceNucleation(
             params=ice_nucleation_params, spec=spec, scheme=ice_scheme,
         ),
@@ -345,15 +342,13 @@ def jam_aerosol_physics(
         # post-cloud block, before the aqueous chemistry that splits its
         # product by cloud-borne number and the scavenging that drains the
         # reservoir. Only composed when the population prognoses the phase.
-        *([CloudBorneExchange(params=cloud_borne_exchange, spec=spec,
-                              evaporation_ledger=scavenging_ledger)]
+        *([CloudBorneExchange(params=cloud_borne_exchange, spec=spec)]
           if spec.cloud_borne else []),
         # In-cloud aqueous SO2 oxidation → cloud-borne sulfate; runs in the
         # post-cloud block (needs current clouds), just before wet scavenging.
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
         WetScavenging(params=wetdep, spec=spec,
-                      in_plume_convective=convective_transport,
-                      formation_ledger=scavenging_ledger),
+                      in_plume_convective=convective_transport),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms
