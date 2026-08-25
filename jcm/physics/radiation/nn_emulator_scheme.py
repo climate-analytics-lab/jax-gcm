@@ -331,6 +331,19 @@ def _validate_weights_file(
         ("SW", n_bnd_sw, "n_bnd_sw", weights.sw, sw_scaling),
         ("LW", n_bnd_lw, "n_bnd_lw", weights.lw, lw_scaling),
     ):
+        # The input-width check below cannot see a band-count mismatch
+        # under band_mode='broadband' (the width is band-count-independent,
+        # but _band_features sums/AOD-weights the supplied bands, so the
+        # partition still changes every feature value). The trainer stores
+        # the counts in metadata; hold the file to them when present.
+        file_n_bnd = metadata.get(band_key)
+        if file_n_bnd is not None and int(file_n_bnd) != n_bnd:
+            raise ValueError(
+                f"Emulator weights file {filepath!r} was trained with "
+                f"{band_key}={int(file_n_bnd)} but the term supplies "
+                f"{n_bnd} {side} aerosol bands. Match the band structure "
+                f"or train weights for it."
+            )
         stored = int(w.gru_fwd.kernel.shape[0])
         expected = n_input_features(band_mode, n_bnd)
         if stored != expected:

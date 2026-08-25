@@ -467,6 +467,32 @@ class WeightsFileTest(unittest.TestCase):
         )
         return weights
 
+    def test_rejects_broadband_weights_trained_on_other_band_counts(self):
+        # Under band_mode='broadband' the input width is band-count
+        # independent, so only the stored metadata can catch a checkpoint
+        # trained on a different band partition — which silently changes
+        # every aerosol feature value (PR #730 review).
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        n_sw = n_input_features("broadband", 10)
+        n_lw = n_input_features("broadband", 12)
+        weights = init_emulator_weights(
+            sw_features=n_sw, lw_features=n_lw, units=8,
+            key=jax.random.key(9))
+        save_emulator_weights(
+            self.path, weights,
+            InputScaling(x_max=jnp.ones(n_sw)),
+            InputScaling(x_max=jnp.ones(n_lw)),
+            metadata={"band_mode": "broadband",
+                      "n_bnd_sw": 10, "n_bnd_lw": 12},
+        )
+        with self.assertRaises(ValueError) as ctx:
+            NNEmulatorRadiation(
+                band_mode="broadband", weights_file=self.path,
+                n_bnd_sw=N_BND_SW, n_bnd_lw=N_BND_LW,
+            )
+        self.assertIn("n_bnd_sw", str(ctx.exception))
+
     def test_rejects_weights_without_clear_sky_channels(self):
         # A pre-clear-sky checkpoint has 2 output channels; JAX clamps the
         # out-of-bounds gather for channels 2/3, so without this check it
