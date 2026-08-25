@@ -168,23 +168,38 @@ class _FakeDiffusion:
 
 @dataclasses.dataclass
 class _FakeCoords:
-    """Stands in for a CoordinateSystem: carries grid arrays, not knobs."""
+    """Stands in for a CoordinateSystem: grid arrays beside scalar identity."""
 
     latitudes: object = None
     layers: int = 8
 
 
+class _OpaqueBackendObject:
+    """No fields worth recording, and a default repr carrying an address."""
+
+
 class _FakeDycore:
+    """Mirrors the shapes a real backend presents.
+
+    In particular ``hypervis`` mixes 0-d array coefficients with a bulk
+    profile in one container, the way pySES's ``diffusion_config`` does.
+    """
+
     def __init__(self, constants=None):
+        import jax.numpy as jnp
         import numpy as np
         self.dt_seconds = 900.0
         self.compute_omega = True
         self.diffusion = _FakeDiffusion()
         self._sl_options = {"interpolation_order": "cubic",
                             "off_centering": 0.5}
+        self.hypervis = {"nu": jnp.asarray(2.5e-9),
+                         "nu_top": jnp.asarray(250000.0),
+                         "nu_ramp": jnp.arange(8.0)}
         self.coords = _FakeCoords(latitudes=np.linspace(-90, 90, 32))
         self.orography = np.zeros((32, 16))
         self.step_fn = lambda s: s
+        self.colmap = _OpaqueBackendObject()
         if constants is not None:
             self.constants = constants
 
@@ -352,13 +367,63 @@ class DescribeDycoreParamsTest(unittest.TestCase):
         self.assertEqual(self.params["_sl_options.interpolation_order"],
                          "cubic")
 
-    def test_grid_data_and_callables_dropped(self):
-        # coords/terrain carry arrays: grid data, not knobs. They must be
-        # rejected on the array *without* being pulled off the device.
-        for key in self.params:
-            self.assertFalse(key.startswith("coords"), key)
-            self.assertNotEqual(key, "orography")
-            self.assertNotEqual(key, "step_fn")
+    def test_mixed_container_keeps_its_knobs_and_drops_its_arrays(self):
+        # The #733 review: a backend may hold tuning coefficients and a
+        # grid profile in ONE container (pySES's diffusion_config), so an
+        # all-or-nothing rule on the container silently dropped the whole
+        # hyperviscosity setting.
+        # Approximate because a float32 0-d array widens to the exact
+        # float64 it represents, which is the value the model held.
+        self.assertAlmostEqual(self.params["hypervis.nu"], 2.5e-9, places=16)
+        self.assertEqual(self.params["hypervis.nu_top"], 250000.0)
+        self.assertNotIn("hypervis.nu_ramp", self.params)
+
+    def test_zero_dim_arrays_are_knobs(self):
+        # pySES stores nu/nu_top as 0-d arrays; an isinstance-scalar test
+        # would drop exactly the coefficients worth recording.
+        self.assertIsInstance(self.params["hypervis.nu"], float)
+
+    def test_scalar_grid_identity_kept_but_not_the_grid(self):
+        self.assertEqual(self.params["coords.layers"], 8)
+        self.assertNotIn("coords.latitudes", self.params)
+        self.assertNotIn("orography", self.params)
+        self.assertNotIn("step_fn", self.params)
+
+    def test_opaque_backend_objects_are_skipped(self):
+        # Their repr carries no setting, and it embeds an address that
+        # would make the record differ between two identical runs.
+        self.assertNotIn("colmap", self.params)
+        self.assertNotIn("0x", json.dumps(self.params))
+
+    def test_record_is_reproducible(self):
+        # params_sha feeds run_hash, so a second identical model must
+        # produce a byte-identical record.
+        again = provenance.describe_params(dycore=_FakeDycore())["dycore"]
+        self.assertEqual(json.dumps(self.params, sort_keys=True),
+                         json.dumps(again, sort_keys=True))
+
+    def test_frozendict_style_mappings_are_walked(self):
+        # pySES's timestep_config is a frozendict, not a dict subclass;
+        # an isinstance(value, dict) test fell through to the leaf and
+        # recorded the whole mapping's repr instead of its keys.
+        import collections.abc
+
+        class _Frozen(collections.abc.Mapping):
+            def __init__(self, d):
+                self._d = dict(d)
+
+            def __getitem__(self, k):
+                return self._d[k]
+
+            def __iter__(self):
+                return iter(self._d)
+
+            def __len__(self):
+                return len(self._d)
+
+        out = {}
+        provenance._describe_value(_Frozen({"tracer_subcycle": 3}), "ts", out)
+        self.assertEqual(out, {"ts.tracer_subcycle": 3})
 
 
 class DescribeConstantsTest(unittest.TestCase):
@@ -407,12 +472,37 @@ class ParamsAttrsTest(unittest.TestCase):
         self.assertEqual(
             json.loads(attrs["jcm_prov_params"])["physics"]["a.b.c"], 1.0)
 
-    def test_oversized_record_keeps_its_hash_and_points_at_the_sidecar(self):
+    def test_oversized_record_stays_recoverable_from_the_file_itself(self):
+        # The #733 review: an over-cap record used to be replaced by a
+        # pointer to the .provenance.json sidecar, but to_xarray and the
+        # runners' snapshot files stamp these attributes WITHOUT writing
+        # one, so the values became unrecoverable from the only artifact
+        # that held them. Compress in place instead.
         huge = {"physics": {f"term.params.p{i}": float(i)
                             for i in range(20000)}}
         attrs = provenance.params_attrs(huge)
         self.assertRegex(attrs["jcm_prov_params_sha"], r"^[0-9a-f]{12}$")
-        self.assertIn("sidecar", attrs["jcm_prov_params"])
+        self.assertNotIn("sidecar", attrs["jcm_prov_params"])
+        self.assertEqual(provenance.read_params(attrs), huge)
+
+    def test_read_params_handles_both_forms_and_absence(self):
+        small = {"physics": {"t.params.entrpen": 1e-4}}
+        self.assertEqual(
+            provenance.read_params(provenance.params_attrs(small)), small)
+        self.assertEqual(provenance.read_params({}), {})
+
+    def test_oversized_record_survives_a_real_netcdf_round_trip(self):
+        import xarray as xr
+
+        huge = {"physics": {f"term.params.p{i}": float(i)
+                            for i in range(20000)}}
+        ds = xr.Dataset({"t": ("x", [1.0])},
+                        attrs=provenance.params_attrs(huge))
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "big.nc"
+            ds.to_netcdf(path)
+            with xr.open_dataset(path) as back:
+                self.assertEqual(provenance.read_params(back.attrs), huge)
 
     def test_run_hash_separates_parameter_sweep_members(self):
         # Same code, same config, same inputs: without the parameters in

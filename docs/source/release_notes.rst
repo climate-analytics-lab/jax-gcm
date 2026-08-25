@@ -24,7 +24,19 @@ Unreleased — provenance records the parameters
   ``convection_params=`` and stores ``params``), so reproducing one of
   those from the record needs the constructor signature. Arrays over 64
   elements (embedded NN weights) are summarized by shape/dtype/hash;
-  values captured under ``jit``/``grad`` read ``"<traced>"``.
+  values captured under ``jit``/``grad`` read ``"<traced>"``. A record
+  larger than 64 kB is carried compressed in ``jcm_prov_params_zlib`` on
+  the same file rather than dropped; ``jemcal``-style readers should use
+  ``jcm.provenance.read_params(ds.attrs)``, which handles both forms.
+- The dycore filter is per *leaf*, not per attribute, so a backend that
+  mixes tuning knobs and grid data in one container still has its knobs
+  recorded. This matters for pySES, whose ``diffusion_config`` holds
+  ``nu``/``nu_top`` beside a ``nu_ramp`` profile and whose
+  ``timestep_config`` holds the subcycle counts beside per-stage stepper
+  structs: ``hypervis_scale``, ``coupling`` and ``tracer_substeps`` are
+  constructor arguments stored nowhere else, so a container-level rule
+  would have let two materially different pySES models record
+  identically.
 - The record is taken at the model-to-user handoff
   (``ModelPredictions``) and travels on the predictions object, so it is
   stamped by ``to_xarray`` for a bare

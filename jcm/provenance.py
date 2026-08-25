@@ -37,19 +37,25 @@ one that wrote the file need not be the one that ran last.
 
 from __future__ import annotations
 
+import base64
 import getpass
 import hashlib
 import json
 import logging
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+#: ``object.__repr__``'s ``at 0x7f...`` tail, which is run-dependent.
+_ADDRESS_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 
 #: Libraries whose working tree changes what a run computes. Probed only
 #: when already imported — an absent entry means "not part of this run".
@@ -76,9 +82,11 @@ _PARAM_ARRAY_MAX_ELEMS = 64
 #: pathologically nested container, not a real structural limit (the
 #: deepest shipped parameter struct nests two levels).
 _PARAM_MAX_DEPTH = 6
-#: Cap on the parameter JSON carried *in netCDF attributes*. The sidecar
-#: is unconditional; a record over the cap keeps its hash in the
-#: attributes and points at the sidecar for the values.
+#: Size at which the parameter JSON is carried compressed rather than as
+#: plain text in a netCDF attribute. It is never dropped: not every path
+#: that stamps the attributes writes a sidecar, so the values have to stay
+#: recoverable from the file itself. :func:`read_params` handles both
+#: forms.
 _PARAM_ATTR_MAX_CHARS = 64_000
 
 _state: dict = {"base": None, "inputs": {}, "facts": {}}
@@ -175,6 +183,17 @@ def describe_input(path: str) -> dict:
     return d
 
 
+def _stable_repr(value) -> str:
+    """``repr`` with the object address removed.
+
+    The default ``object.__repr__`` embeds ``id(value)``, which differs
+    between two runs of the identical configuration. Left in, it would
+    make ``params_sha`` (and through it ``run_hash``) non-reproducible,
+    which is the opposite of what this record is for.
+    """
+    return _ADDRESS_RE.sub("", repr(value))[:200]
+
+
 def _describe_leaf(value):
     """JSON-safe description of one parameter leaf."""
     import jax
@@ -192,9 +211,9 @@ def _describe_leaf(value):
     try:
         arr = np.asarray(value)
     except Exception:  # noqa: BLE001 — anything unconvertible is described
-        return repr(value)[:200]
+        return _stable_repr(value)
     if arr.dtype == object:
-        return repr(value)[:200]
+        return _stable_repr(value)
     if arr.ndim == 0:
         # ``item()`` on a float32 widens to the exact float64 that value
         # represents (0.1 -> 0.10000000149011612). That is the number the
@@ -211,9 +230,41 @@ def _is_scalar(value) -> bool:
     return value is None or isinstance(value, (bool, int, float, str))
 
 
-def _describe_value(value, prefix: str, out: dict, depth: int = 0) -> None:
-    """Flatten *value* into *out* under the dotted key *prefix*."""
+def _is_knob(value) -> bool:
+    """Report whether a leaf is worth recording as a dycore setting.
+
+    Scalars, enum members (pySES stores its coupling mode as one) and 0-d
+    arrays — pySES keeps its hyperviscosity coefficients as 0-d arrays, so
+    a plain ``isinstance`` scalar test would drop exactly the knobs that
+    matter. Decided by reading ``ndim`` rather than converting, because
+    this runs over the dycore's whole attribute graph and ``np.asarray``
+    on a device array would pull the grid to the host just to discard it.
+
+    Everything else — bulk arrays, callables, opaque backend objects — is
+    skipped rather than described. An opaque object contributes only its
+    ``repr``, which carries no setting anybody can read.
+    """
+    import enum
+
+    if _is_scalar(value) or isinstance(value, enum.Enum):
+        return True
+    return getattr(value, "ndim", None) == 0
+
+
+def _describe_value(value, prefix: str, out: dict, depth: int = 0,
+                    scalars_only: bool = False) -> None:
+    """Flatten *value* into *out* under the dotted key *prefix*.
+
+    With *scalars_only*, bulk arrays and callables are skipped rather than
+    described, and containers are still walked for the scalars inside
+    them. That is the dycore mode: a backend's configuration objects mix
+    tuning knobs with grid data in one container (pySES's
+    ``diffusion_config`` holds ``nu``/``nu_top`` next to a ``nu_ramp``
+    profile), so an all-or-nothing rule on the container drops the knobs
+    along with the grid.
+    """
     import dataclasses
+    from collections.abc import Mapping
 
     if depth > _PARAM_MAX_DEPTH:
         out[prefix] = f"<truncated {type(value).__name__}>"
@@ -225,16 +276,18 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0) -> None:
         # the field name is the entire point of the record.
         for f in dataclasses.fields(value):
             _describe_value(getattr(value, f.name), f"{prefix}.{f.name}",
-                            out, depth + 1)
+                            out, depth + 1, scalars_only)
         return
     if hasattr(value, "_fields") and isinstance(value, tuple):  # NamedTuple
         for name in value._fields:
             _describe_value(getattr(value, name), f"{prefix}.{name}",
-                            out, depth + 1)
+                            out, depth + 1, scalars_only)
         return
-    if isinstance(value, dict):
+    # Mapping, not dict: pySES's timestep_config is a frozendict, which is
+    # not a dict subclass and would otherwise fall through to the leaf.
+    if isinstance(value, Mapping):
         for k, v in value.items():
-            _describe_value(v, f"{prefix}.{k}", out, depth + 1)
+            _describe_value(v, f"{prefix}.{k}", out, depth + 1, scalars_only)
         return
     if isinstance(value, (list, tuple)):
         # A short all-scalar sequence is one value (a per-level profile);
@@ -245,8 +298,13 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0) -> None:
             else:
                 out[prefix] = f"<{len(value)} scalars>"
             return
+        if scalars_only and len(value) > _PARAM_ARRAY_MAX_ELEMS:
+            # An unbounded sequence of structures is grid data, not knobs.
+            return
         for i, v in enumerate(value):
-            _describe_value(v, f"{prefix}.{i}", out, depth + 1)
+            _describe_value(v, f"{prefix}.{i}", out, depth + 1, scalars_only)
+        return
+    if scalars_only and not _is_knob(value):
         return
     out[prefix] = _describe_leaf(value)
 
@@ -305,41 +363,31 @@ def _describe_physics_params(physics) -> dict:
     return out
 
 
-def _all_scalar_leaves(value, depth: int = 0) -> bool:
-    """Report whether *value* is built purely from scalars.
-
-    Screens a dycore attribute *before* describing it, so ``coords`` and
-    ``terrain`` are rejected on the first array field rather than having
-    their grids pulled off the device to be summarized.
-    """
-    import dataclasses
-
-    if _is_scalar(value):
-        return True
-    if depth > _PARAM_MAX_DEPTH:
-        return False
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return all(_all_scalar_leaves(getattr(value, f.name), depth + 1)
-                   for f in dataclasses.fields(value))
-    if isinstance(value, dict):
-        return all(_all_scalar_leaves(v, depth + 1) for v in value.values())
-    if isinstance(value, (list, tuple)):
-        return all(_all_scalar_leaves(v, depth + 1) for v in value)
-    return False
-
-
 def _describe_dycore_params(dycore) -> dict:
-    """Scalar dycore knobs: timestep, diffusion filter, transport options.
+    """Scalar dycore knobs: timestep, diffusion, transport, subcycling.
 
     A dycore declares no parameters the way a physics term does (there is
-    no ``nnx.Param`` to key on), so the rule here is structural: instance
-    attributes that are scalars, or containers built purely from scalars.
-    That keeps ``dt_seconds``, the ``DiffusionFilter`` timescales and
-    orders, the ``compute_*`` flags and the semi-Lagrangian options, and
-    drops ``coords`` / ``terrain`` / the precomputed vertical coefficients,
-    whose arrays are grid data rather than knobs. Private attributes are
-    included (``_sl_options`` is as much a knob as ``dt_seconds``); the
-    leading underscore is kept so the key names a real attribute.
+    no ``nnx.Param`` to key on), so the rule here is structural: keep every
+    scalar leaf reachable from an instance attribute, drop the bulk arrays
+    and callables. That keeps ``dt_seconds``, the ``DiffusionFilter``
+    timescales and orders, the ``compute_*`` flags, the semi-Lagrangian
+    options and the grid's scalar identity, while the orography and the
+    vertical coefficient profiles fall away.
+
+    The filter is per *leaf*, not per attribute (#733 review). A backend
+    is free to mix knobs and grid data in one container, and pySES does:
+    ``diffusion_config`` holds ``nu``, ``nu_phi``, ``nu_tracer`` and
+    ``nu_top`` beside a ``nu_ramp`` profile, and ``timestep_config`` holds
+    the subcycle counts and the coupling mode beside per-stage stepper
+    structs. Rejecting a container wholesale because it contains one array
+    dropped the entire hyperviscosity setting, so two directly-built pySES
+    models differing in ``hypervis_scale`` or ``tracer_substeps`` recorded
+    identically -- the exact failure this record exists to prevent, since
+    those constructor arguments are stored nowhere else.
+
+    Private attributes are included (``_sl_options`` is as much a knob as
+    ``dt_seconds``); the leading underscore is kept so the key names a real
+    attribute.
     """
     if dycore is None:
         return {}
@@ -351,9 +399,7 @@ def _describe_dycore_params(dycore) -> dict:
     for name, value in sorted(attributes.items()):
         if name.startswith("__") or name == "constants":
             continue  # constants get their own block
-        if not _all_scalar_leaves(value):
-            continue
-        _describe_value(value, name, out)
+        _describe_value(value, name, out, scalars_only=True)
     return out
 
 
@@ -421,11 +467,39 @@ def params_attrs(params: dict | None) -> dict:
            hashlib.sha256(blob.encode()).hexdigest()[:12]}
     if len(blob) <= _PARAM_ATTR_MAX_CHARS:
         out["jcm_prov_params"] = blob
-    else:
-        out["jcm_prov_params"] = (
-            f"<{len(blob)} chars, over the {_PARAM_ATTR_MAX_CHARS}-char "
-            "attribute cap; full record in the .provenance.json sidecar>")
+        return out
+    # Over the cap, compress into the same file rather than referring the
+    # reader elsewhere (#733 review). Not every path that stamps these
+    # attributes writes a sidecar -- ``to_xarray`` on the bare
+    # ``model.run(...).to_netcdf(...)`` route does not, nor do the runners'
+    # separately-written snapshot files -- so a pointer to one would send
+    # the reader to a file that does not exist, and the values would be
+    # unrecoverable from the only artifact they hold. Keys are repetitive
+    # dotted paths, so this compresses roughly tenfold.
+    packed = base64.b64encode(zlib.compress(blob.encode(), 9)).decode()
+    out["jcm_prov_params"] = (
+        f"<{len(blob)} chars, over the {_PARAM_ATTR_MAX_CHARS}-char "
+        "attribute cap; the full record is in jcm_prov_params_zlib "
+        "(base64 of zlib-compressed JSON) on this file>")
+    out["jcm_prov_params_zlib"] = packed
     return out
+
+
+def read_params(attrs) -> dict:
+    """Recover a parameter record from a dataset's global attributes.
+
+    Handles both forms so callers need not know which one a given file
+    got: the plain JSON, or the compressed attribute written when the
+    record exceeded the size cap. Returns ``{}`` when the file carries no
+    parameter record (anything written before #732).
+    """
+    packed = attrs.get("jcm_prov_params_zlib")
+    if packed:
+        return json.loads(zlib.decompress(base64.b64decode(packed)))
+    blob = attrs.get("jcm_prov_params")
+    if not blob or blob.startswith("<"):
+        return {}
+    return json.loads(blob)
 
 
 def start_run(cfg=None) -> None:
