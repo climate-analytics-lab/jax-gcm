@@ -101,7 +101,13 @@ def radiation_scheme_emulated(
         orbital_time, longitude, latitude, parameters.solar_constant
     )
     sin_altitude = get_solar_sin_altitude(orbital_time, longitude, latitude)
-    cos_zenith = jnp.maximum(sin_altitude, parameters.min_cos_zenith)
+    # The ACTUAL cosine is what RadiationData must carry: the cached-step
+    # rescale divides by it, so storing the clipped value would rescale
+    # twilight columns by mu_now/min_cos_zenith instead of mu_now/mu_at_solve
+    # (PR #730 review). The clip exists only to keep the network FEATURE in
+    # its trained range.
+    cos_zenith = sin_altitude
+    mu0_feature = jnp.maximum(sin_altitude, parameters.min_cos_zenith)
 
     # --- Prepare inputs common to SW and LW ---
     # Water vapour mixing ratio
@@ -150,7 +156,7 @@ def radiation_scheme_emulated(
     # --- Shortwave ---
     sw_input = preprocess_sw_inputs(
         temperature, pressure_levels, h2o_vmr, ozone_vmr,
-        cwp, cip, cloud_fraction, cos_zenith, sw_scaling,
+        cwp, cip, cloud_fraction, mu0_feature, sw_scaling,
         r_eff_liq_um, r_eff_ice_um,
         aerosol_data.aod_sw_per_band, aerosol_data.ssa_sw_per_band,
         aerosol_data.asy_sw_per_band, band_mode,
@@ -441,6 +447,22 @@ class NNEmulatorRadiation(PhysicsTerm):
         self._band_mode = band_mode
         self._zero_tendency = bool(zero_tendency)
         self._coords_cached = False
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """Hide the aerosol-free slots the emulator never fills.
+
+        The network makes no aerosol-free prediction, so the ``*_noa``
+        fluxes and ``noa_frac_*`` ratios sit at their zero defaults.
+        Publishing them turns a downstream ERFari (``rsut - rsutnoa``)
+        into the entire all-sky flux (jax-gcm#647; same contract as
+        ``RRTMGPRadiation.withheld_output_keys``). The clear-sky fluxes
+        are NOT withheld: they come from dedicated network output
+        channels, so CRE is a real difference here.
+        """
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        return tuple(f"radiation.{k}_noa" for k in NOA_KEYS) + tuple(
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
 
     def _zero_if_requested(self, tendency: PhysicsTendency) -> PhysicsTendency:
         """Drop the heating under ``zero_tendency``, leaving the cost paid.

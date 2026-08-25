@@ -168,6 +168,68 @@ class SolarBoundaryTest(unittest.TestCase):
             places=4)
 
 
+class DiagnosticsContractTest(unittest.TestCase):
+    """The published RadiationData must honour the cross-scheme contracts."""
+
+    def test_stored_zenith_is_the_actual_cosine_not_the_feature_clip(self):
+        # The cached-step rescale divides by the stored cos_zenith, so it
+        # must be the ACTUAL solve-time cosine (matching RRTMGP and
+        # current_cos_zenith), not the min_cos_zenith clip the network
+        # feature uses — the clip made twilight columns rescale by
+        # mu_now/0.035 (PR #730 review). Longitude 180 at the fixture's
+        # noon is midnight: the actual cosine is negative, which the
+        # clipped value never is.
+        from jax_solar import get_solar_sin_altitude
+
+        col = _column()
+        weights = init_emulator_weights(
+            sw_features=n_input_features("per_band", N_BND_SW),
+            lw_features=n_input_features("per_band", N_BND_LW),
+        )
+        solar = _solar()
+        ot = OrbitalTime(
+            orbital_phase=solar.orbital_phase,
+            synodic_phase=solar.synodic_phase,
+        )
+        for lon in (0.0, 180.0):
+            with self.subTest(lon=lon):
+                _, diag = radiation_scheme_emulated(
+                    col["temperature"], col["specific_humidity"],
+                    col["pressure_levels"], col["pressure_interfaces"],
+                    col["layer_thickness"], col["air_density"],
+                    col["cloud_water"], col["cloud_ice"],
+                    col["cloud_fraction"], col["surface_temperature"],
+                    col["surface_albedo_vis"], col["surface_albedo_nir"],
+                    col["surface_emissivity"], solar, lon, 0.0,
+                    RadiationParameters.default(), _aerosol(),
+                    col["ozone_vmr"], 400e-6, weights, None, None,
+                    "per_band",
+                )
+                expected = get_solar_sin_altitude(ot, lon, 0.0)
+                np.testing.assert_allclose(
+                    np.asarray(diag.cos_zenith), np.asarray(expected),
+                    rtol=1e-6,
+                )
+        self.assertLess(float(get_solar_sin_altitude(ot, 180.0, 0.0)), 0.0)
+
+    def test_aerosol_free_slots_are_withheld(self):
+        # The emulator never runs an aerosol-free solve; publishing the
+        # zero defaults turns a downstream ERFari into the whole all-sky
+        # flux (jax-gcm#647). Clear-sky keys are real network outputs and
+        # must NOT be withheld.
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        from jcm.physics.radiation.nn_emulator_scheme import (
+            NNEmulatorRadiation,
+        )
+
+        keys = set(NNEmulatorRadiation().withheld_output_keys())
+        for k in NOA_KEYS:
+            self.assertIn(f"radiation.{k}_noa", keys)
+            self.assertIn(f"radiation.noa_frac_{k}", keys)
+        self.assertNotIn("radiation.toa_sw_up_clear", keys)
+        self.assertNotIn("radiation.sw_flux_up_clear", keys)
+
+
 class NegativeHumidityTest(unittest.TestCase):
     """Regression for jax-gcm#702 defect 3.
 

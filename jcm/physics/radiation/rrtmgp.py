@@ -1152,6 +1152,11 @@ class RRTMGPRadiation(PhysicsTerm):
         """
         withheld = () if self._aerosol_free else tuple(
             f"radiation.{k}_noa" for k in NOA_KEYS
+        ) + tuple(
+            # The persisted ratios are placeholders too without the
+            # companion solve; a published 0 reads as "aerosol removes
+            # the entire flux" through the fraction-based ERFari path.
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
         )
         if not self._compute_cre:
             withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
