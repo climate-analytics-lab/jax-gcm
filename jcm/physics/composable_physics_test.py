@@ -1003,7 +1003,12 @@ class TestWithheldOutputKeys:
         from jcm.physics.radiation.aerosol_free import NOA_KEYS
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
-        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS)
+        # Both the fluxes and the persisted noa_frac_* ratios: a published
+        # zero fraction reads as "aerosol removes the entire flux" through
+        # the fraction-based ERFari path (PR #730 review).
+        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS) + tuple(
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
         assert RRTMGPRadiation(
             aerosol_free_interval=None).withheld_output_keys() == expected
         for on in (1, 2, 4):
