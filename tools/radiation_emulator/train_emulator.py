@@ -195,9 +195,11 @@ def build_features(ds, band_mode):
     h2o_vmr = q / (c.eps * (1.0 - q) + q)
     ozone_vmr = f32("ozone_vmr")
     cf = f32("cloud_fraction")
-    # In-cloud water paths, exactly as the scheme derives them.
-    cwp = f32("cloud_water") * f32("air_density") * f32("layer_thickness") * cf
-    cip = f32("cloud_ice") * f32("air_density") * f32("layer_thickness") * cf
+    # GRID-MEAN water paths, exactly as the scheme derives them
+    # (``cloud_water`` in the training files is the grid-mean mixing ratio;
+    # multiplying by cf again would make the feature scale as cf^2).
+    cwp = f32("cloud_water") * f32("air_density") * f32("layer_thickness")
+    cip = f32("cloud_ice") * f32("air_density") * f32("layer_thickness")
 
     # Already RESOLVED by the generator (microphysical where the source had a
     # value, diagnostic fallback elsewhere) and strictly positive, and the

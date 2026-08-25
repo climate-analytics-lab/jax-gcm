@@ -209,6 +209,22 @@ class BuildFeaturesTest(unittest.TestCase):
                 data[f"{prefix}_flux_{channel}"] = iface(200.0)
         return xr.Dataset(data)
 
+    def test_cloud_path_features_are_grid_mean_not_cf_weighted(self):
+        # ``cloud_water`` in the training files is already the grid-mean
+        # mixing ratio, so the path features must not pick up another
+        # cloud_fraction factor (that made them scale as cf^2 — PR #730
+        # review). Two batches differing ONLY in cover must produce
+        # identical path channels; cover is its own feature (channel 6).
+        lo = self._dataset()
+        hi = self._dataset()
+        hi["cloud_fraction"] = hi["cloud_fraction"] * 0.0 + 0.9
+        lo["cloud_fraction"] = lo["cloud_fraction"] * 0.0 + 0.1
+        x_lo = np.asarray(build_features(lo, "per_band")["x_sw"])
+        x_hi = np.asarray(build_features(hi, "per_band")["x_sw"])
+        for ch in (4, 5):  # cwp, cip
+            np.testing.assert_array_equal(x_lo[..., ch], x_hi[..., ch])
+        self.assertTrue((x_hi[..., 6] > x_lo[..., 6]).all())
+
     def test_effective_radii_reach_both_networks(self):
         from jcm.physics.radiation.nn_emulator import n_input_features
 

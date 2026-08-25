@@ -112,9 +112,13 @@ def radiation_scheme_emulated(
     if ozone_vmr is None:
         ozone_vmr = jnp.full(nlev, 5e-6)
 
-    # Cloud water/ice paths (kg/m^2)
-    cwp = cloud_water * air_density * layer_thickness * cloud_fraction
-    cip = cloud_ice * air_density * layer_thickness * cloud_fraction
+    # GRID-MEAN cloud water/ice paths (kg/m^2). ``cloud_water``/``cloud_ice``
+    # arrive as grid-mean mixing ratios (prognostic qc/qi), so rho*dz alone
+    # gives the grid-mean path; a further cloud_fraction factor would make
+    # the feature scale as cf^2 (cover is its own feature). The trainer
+    # builds the identical quantity — the two must change together.
+    cwp = cloud_water * air_density * layer_thickness
+    cip = cloud_ice * air_density * layer_thickness
 
     # Effective radii, resolved against the same diagnostic fallbacks RRTMGP
     # uses so a feature and the label it was trained against describe the same
