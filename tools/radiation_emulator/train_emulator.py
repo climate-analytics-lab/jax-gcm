@@ -216,10 +216,16 @@ def build_features(ds, band_mode):
 
     # Unscaled here; the divide-by-max scaling is fitted on the TRAIN split
     # alone and applied afterwards, so validation cannot leak into it.
+    # Same feature clip as radiation_scheme_emulated: inference feeds
+    # maximum(sin_altitude, min_cos_zenith), so training on the raw cosine
+    # would fit twilight/night columns to feature values the deployed
+    # network never receives (and skew the fitted max-scaling).
+    from jcm.physics.radiation.radiation_types import RadiationParameters
+    min_mu0 = float(RadiationParameters.default().min_cos_zenith)
     x_sw = jax.vmap(
         lambda *a: preprocess_sw_inputs(*a[:8], unit_sw, *a[8:], band_mode)
     )(temperature, pressure, h2o_vmr, ozone_vmr, cwp, cip, cf,
-      f32("cos_zenith"), r_eff_liq, r_eff_ice,
+      jnp.maximum(f32("cos_zenith"), min_mu0), r_eff_liq, r_eff_ice,
       f32("aod_sw_per_band"), f32("ssa_sw_per_band"),
       f32("asy_sw_per_band"))
     x_lw = jax.vmap(

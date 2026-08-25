@@ -689,7 +689,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     amount and vertical placement, cloud fraction, aerosol loading and
     type, surface temperature, humidity and CO2.
     """
-    u = _latin_hypercube(rng, n_columns, 15)
+    u = _latin_hypercube(rng, n_columns, 17)
 
     # The MODEL's own hybrid levels, not an invented grid. Two earlier
     # versions got this wrong in opposite directions: a logspace grid from
@@ -818,7 +818,10 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     scale_height = 1000.0 + 3000.0 * u[:, 9]
     shape = np.exp(-height_levels / scale_height[:, None]) * layer_thickness
     aod_550 = aod_total[:, None] * shape / shape.sum(axis=1, keepdims=True)
-    ssa550 = 0.80 + 0.20 * u[:, 10]
+    # Own LHS axis — u[:, 10] drives the tropopause pressure, and sharing
+    # an axis would weld SSA to it monotonically across the whole sweep
+    # (PR #730 review).
+    ssa550 = 0.80 + 0.20 * u[:, 15]
     asy550 = 0.55 + 0.20 * rng.random(n_columns)
     angstrom = 0.3 + 2.2 * rng.random(n_columns)
     aod_sw, ssa_sw, asy_sw = _per_band_optics(
@@ -828,7 +831,8 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
 
     # Surface: broadband albedo from ocean to fresh snow, with a sampled
     # vis/nir contrast (snow and vegetation sit at opposite signs of it).
-    albedo = 0.05 + 0.80 * u[:, 11]
+    # Own axis for the same reason: u[:, 11] is the stratopause temperature.
+    albedo = 0.05 + 0.80 * u[:, 16]
     contrast = -0.3 + 0.6 * rng.random(n_columns)
     surface_albedo_vis = np.clip(albedo * (1.0 + contrast), 0.02, 0.95)
     surface_albedo_nir = np.clip(albedo * (1.0 - contrast), 0.02, 0.95)
