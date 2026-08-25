@@ -216,6 +216,16 @@ class DescribeLeafTest(unittest.TestCase):
         self.assertEqual(provenance._describe_leaf(jnp.float32(0.1)),
                          0.10000000149011612)
 
+    def test_unrepresentable_values_are_described_not_raised(self):
+        # A parameter block may hold a callable (a schedule, an
+        # activation) or something numpy cannot convert. Provenance
+        # describes it and moves on rather than failing the record.
+        def relu(x):
+            return x
+
+        self.assertEqual(provenance._describe_leaf(relu), "<callable relu>")
+        self.assertIn("object", provenance._describe_leaf(object()))
+
     def test_tracer_is_marked_not_forced(self):
         import jax
         import jax.numpy as jnp
@@ -228,6 +238,45 @@ class DescribeLeafTest(unittest.TestCase):
 
         jax.jit(f)(jnp.float32(1.0))
         self.assertEqual(seen, ["<traced>"])
+
+
+class DescribeValueTest(unittest.TestCase):
+    def _walk(self, value):
+        out = {}
+        provenance._describe_value(value, "p", out)
+        return out
+
+    def test_short_scalar_sequence_is_one_value(self):
+        # A per-level profile or a tracer-name tuple reads better as one
+        # entry than as p.0, p.1, p.2 ...
+        self.assertEqual(self._walk(["qc", "qi"]), {"p": ["qc", "qi"]})
+        self.assertEqual(self._walk((1.0, 2.0)), {"p": [1.0, 2.0]})
+
+    def test_long_scalar_sequence_is_summarized(self):
+        n = provenance._PARAM_ARRAY_MAX_ELEMS + 1
+        self.assertEqual(self._walk([0.0] * n), {"p": f"<{n} scalars>"})
+
+    def test_container_of_structures_is_walked_by_index(self):
+        walked = self._walk([_FakeDiffusion(), {"k": 2.0}])
+        self.assertEqual(walked["p.0.order"], 2)
+        self.assertEqual(walked["p.1.k"], 2.0)
+
+    def test_namedtuple_fields_are_named(self):
+        import collections
+
+        pair = collections.namedtuple("pair", "lo hi")
+        self.assertEqual(self._walk(pair(1.0, 2.0)),
+                         {"p.lo": 1.0, "p.hi": 2.0})
+
+    def test_runaway_nesting_is_truncated_not_followed(self):
+        deep = value = {}
+        for _ in range(provenance._PARAM_MAX_DEPTH + 3):
+            nxt = {}
+            value["down"] = nxt
+            value = nxt
+        walked = self._walk(deep)
+        self.assertEqual(len(walked), 1)
+        self.assertIn("truncated", next(iter(walked.values())))
 
 
 class DescribePhysicsParamsTest(unittest.TestCase):
@@ -275,6 +324,18 @@ class DescribePhysicsParamsTest(unittest.TestCase):
 
     def test_no_physics_is_not_an_error(self):
         self.assertNotIn("physics", provenance.describe_params(None))
+
+    def test_two_instances_of_one_term_both_survive(self):
+        # A composition may call one scheme twice (the double-radiation
+        # A/B). Keying purely on term name would clobber the first.
+        from jcm.physics.speedy.speedy_terms import SpeedyConvection
+
+        class _Pair:
+            terms = [SpeedyConvection(), SpeedyConvection()]
+
+        params = provenance.describe_params(_Pair())["physics"]
+        self.assertIn("speedy_convection.params.entmax", params)
+        self.assertIn("speedy_convection#1.params.entmax", params)
 
 
 class DescribeDycoreParamsTest(unittest.TestCase):
