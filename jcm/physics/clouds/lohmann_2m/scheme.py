@@ -31,7 +31,7 @@ from ..cloud_utils import (
     minimum_CDNC,
     threshold_vert_vel,
 )
-from .types import MicrophysicsTendencies_2M
+from .types import MicrophysicsTendencies_2M, ScavengingLedger
 from .sedimentation_melt import melting_snow_and_ice, sedimentation_ice
 from .deposition_freezing import (
     demott2010_inp,
@@ -330,7 +330,7 @@ def cloud_microphysics_2m(
         # Acts on the provisional grid-mean ice (ECHAM zxip1 = pxim1 +
         # ztmst·pxite, with the upstream increments folded into qi here).
         (zxip1, icnc_sedi, ice_flux, ice_flux_n, falling_ice_frac,
-         _sedi_rate) = sedimentation_ice(
+         mrateps_sedi_k) = sedimentation_ice(
             cf_k, adc_k, dp_k, rho_k, inv_rho_k,
             jnp.maximum(qi_run_k, 0.0), icnc0_k,
             ice_flux, ice_flux_n, falling_ice_frac,
@@ -659,7 +659,7 @@ def cloud_microphysics_2m(
             & (zxlb > params.cqtmin)
             & (cdnc_w >= cdnc_min_k)
         )
-        (cdnc_p, zxlb, _mratepr, zrpr, _rprn,
+        (cdnc_p, zxlb, mratepr_k, zrpr, _rprn,
          auto_only_k, accr_only_k) = precip_formation_warm(
             ll_warm,
             zauloc,
@@ -679,8 +679,8 @@ def cloud_microphysics_2m(
         # ``zxib > cqtmin`` check runs on the CURRENT in-cloud ice, so
         # ice deposited/frozen/WBF-transferred THIS step meets its
         # aggregation and riming sinks in the same step (#686).
-        (icnc_c, cdnc_c, _mrateps, zxib, zxlb,
-         _sprn, zsacl, _sacln, _msnowacl, zspr) = precip_formation_cold(
+        (icnc_c, cdnc_c, mrateps_k, zxib, zxlb,
+         _sprn, zsacl, _sacln, msnowacl_k, zspr) = precip_formation_cold(
             cloud_flag,
             zauloc,
             paclc,
@@ -694,7 +694,12 @@ def cloud_microphysics_2m(
             cdnc_min_k,
             icnc_het,
             cdnc_p,
-            zero_s,
+            # zmrateps INOUT seed: the in-cloud sedimented-ice amount from
+            # section 4 (ECHAM 1243 → 1703) — ECHAM-HAM counts sedimenting
+            # ice as a scavenging carrier via this ledger entry. Where the
+            # cold chain runs it OVERWRITES the seed (Fortran MERGE at
+            # 3310); elsewhere the seed survives to ``cloud_subm_2``.
+            mrateps_sedi_k,
             zxib, zxlb,
             dt,
             params,
@@ -741,6 +746,7 @@ def cloud_microphysics_2m(
             ice_tend_k, wbf_liq_tend, wbf_ice_tend, wbf_dtedt,
             zxib, zxlb, paclc, icnc_c, cdnc_c, cdnc_min_k, ztp1tmp,
             zmlwc_k, zmiwc_k,
+            mratepr_k, mrateps_k, msnowacl_k,
             auto_only_k, accr_only_k,
             rain_flux, frozen_flux_k,
             wbf_transfer_k, ll_liqcl_k, ll_icecl_k,
@@ -776,6 +782,7 @@ def cloud_microphysics_2m(
      in_cloud_ice_final, in_cloud_liquid_final, paclc_final,
      icnc_final, cdnc_final, cdnc_min_final, ztp1tmp_all,
      zmlwc, zmiwc,
+     zmratepr, zmrateps, zmsnowacl,
      autoconv_only, accretion_only,
      rain_flux_profile, snow_flux_profile,
      wbf_transfer, ll_liqcl, ll_icecl) = scan_outs
@@ -792,7 +799,7 @@ def cloud_microphysics_2m(
         cloud_fraction_final,
         dqdt, dtedt, dqidt, dqcdt,
         dqncdt_perkg, dqnidt_perkg,
-        _incloud_liq, _incloud_ice,
+        incloud_liq_scav, incloud_ice_scav,
         liq_eff_radius, ice_eff_radius,
         zdxlcor, zdxicor,
     ) = update_tendencies_and_important_vars(
@@ -940,6 +947,25 @@ def cloud_microphysics_2m(
     negative_mass_repair = jnp.sum(
         (c.alhc * zdxlcor + c.alhs * zdxicor) * air_mass)
 
+    # The ECHAM-HAM wet-scavenging interface (#708): the process-time
+    # ledger cloud_subm_2 receives, published for the JAM wetdep and
+    # cloud-borne terms (see ScavengingLedger). The pools are the
+    # POST-assembly zmlwc/zmiwc (the Fortran passes them INOUT through
+    # update_tendencies_2, which zeroes them in emptied cells — a zeroed
+    # pool with a positive formation rate is the fraction=1 marker). The
+    # process cover is clipped to the incoming Sundqvist cover for the
+    # same reason the published cloud_fraction is: the RH-raising branch
+    # of update_in_cloud_water is a closure this stack does not use.
+    scav_ledger = ScavengingLedger(
+        incloud_liquid=incloud_liq_scav,
+        incloud_ice=incloud_ice_scav,
+        rain_formation=zmratepr / dt,
+        snow_formation=zmrateps / dt,
+        liquid_riming=zmsnowacl / dt,
+        process_cloud_fraction=jnp.minimum(paclc_final, cloud_fraction_in),
+        condensate_evaporation=(xlevap + xievap) / dt,
+    )
+
     # NOTE the (nlev,) rain / frozen flux profiles stay LAST: call sites and
     # tests unpack them positionally from the end (``*_, rain_b, snow_b``),
     # so new outputs are inserted before them, not appended.
@@ -947,7 +973,7 @@ def cloud_microphysics_2m(
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
         precip_formation_rate, precip_evaporation_rate, cloud_fraction_final, \
-        negative_mass_repair, \
+        negative_mass_repair, scav_ledger, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -1122,12 +1148,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
-         negative_mass_repair_all,
+         negative_mass_repair_all, scav_ledger_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                      None, None, 1, 1, 1, 1),
-            out_axes=(0,) * 16,
+            out_axes=(0,) * 17,
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, qnc, qni,
@@ -1186,6 +1212,18 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # repair [W/m²] (#689): sign-definite spurious warming from
             # returning sub-ccwmin/negative condensate to vapour.
             negative_mass_repair=negative_mass_repair_all,
+            # The ECHAM-HAM wet-scavenging ledger (#708): the process-time
+            # quantities cloud_subm_2 receives, for the JAM wetdep and
+            # cloud-borne terms (see ScavengingLedger in types.py). The
+            # vmap puts the column axis first — transpose like the rest.
+            incloud_liquid=scav_ledger_all.incloud_liquid.T,
+            incloud_ice=scav_ledger_all.incloud_ice.T,
+            incloud_rain_formation=scav_ledger_all.rain_formation.T,
+            incloud_snow_formation=scav_ledger_all.snow_formation.T,
+            incloud_riming=scav_ledger_all.liquid_riming.T,
+            process_cloud_fraction=scav_ledger_all.process_cloud_fraction.T,
+            condensate_evaporation_rate=(
+                scav_ledger_all.condensate_evaporation.T),
         )
         # Advance the running condensate view so terms downstream (the
         # satellite simulators and the AeroCom diagnostics) describe the

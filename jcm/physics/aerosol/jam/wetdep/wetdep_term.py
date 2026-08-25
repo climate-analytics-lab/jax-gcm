@@ -13,9 +13,10 @@ weighted by its per-mode activated fractions (the implicit M7/TOMAS-style
 treatment):
 
 * **In-cloud nucleation scavenging** — aerosol residing in cloud droplets is
-  removed at the local rate cloud condensate converts to precipitation,
-  ``precip_formation_rate / (qc + qi)`` (both grid-mean, so the cloudy-area
-  factor cancels inside the ratio).
+  removed at the fraction cloud condensate converted to precipitation this
+  step, read from the cloud scheme's process-time scavenging ledger
+  (``incloud_scavenged_fractions`` — HAMMOZ's ``peffwat``/``peffice``, #708),
+  which stays alive in cells the microphysics emptied.
 * **Below-cloud impaction scavenging** — precipitation falling through a
   layer collects aerosol in its clear-air part, with a size-dependent
   (∝ r²) collection efficiency. The stratiform contribution uses the
@@ -105,22 +106,89 @@ class WetDepParameters:
         )
 
 
-#: Physical condensate floor for the in-cloud rate [kg/kg]. A cell with less
-#: than this holds no cloud worth scavenging in; it is also what keeps the
-#: division's VJP clear of the float32 squared-underflow window (a 1e-30
-#: epsilon guard here gave a verified NaN gradient in every clear f32 cell:
-#: the cotangent forms p_form/condensate², and 1e-60 flushes to zero).
-_CONDENSATE_FLOOR = 1.0e-12
+#: HAMMOZ ``prep_wetdep_hydro``'s pool floor (``zmin = 1e-10``): below it a
+#: ledger pool counts as absent and the scavenged fraction comes from the
+#: formation-ledger marker instead of the division.
+_LEDGER_POOL_MIN = 1.0e-10
+#: Cap on a per-step scavenged fraction before converting it to an
+#: equivalent decay rate via -log1p(-f)/dt: keeps the rate finite (~14/dt)
+#: while the batched ``1 - exp(-rate*dt)`` still removes >0.999999 of the
+#: tracer in fully-converting cells.
+_FRACTION_CAP = 1.0 - 1.0e-6
 
 
-def in_cloud_rate(
-    activated_fraction: jnp.ndarray,
-    p_form: jnp.ndarray,
-    qc: jnp.ndarray,
-) -> jnp.ndarray:
-    """In-cloud scavenging rate [1/s] applied to in-droplet aerosol."""
-    rate = activated_fraction * p_form / jnp.maximum(qc, _CONDENSATE_FLOOR)
-    return jnp.where(qc > _CONDENSATE_FLOOR, rate, 0.0)
+def incloud_scavenged_fractions(
+    clouds, dt: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Per-step in-cloud scavenged fractions from the process-time ledger.
+
+    The port of HAMMOZ ``prep_wetdep_hydro`` (mo_hammoz_wetdep.f90:405-440):
+
+    * ``f_wat = clip((zmratepr + zmsnowacl)·dt / zmlwc, 0, 1)`` — the
+      fraction of the in-cloud liquid pool converted to precipitation
+      this step (rain formation plus droplets rimed onto falling snow),
+    * ``f_ice = clip(zmrateps·dt / zmiwc, 0, 1)`` — same for ice into
+      snow (including the sedimenting-ice carrier ECHAM-HAM seeds it
+      with),
+    * ``pice`` — the ice mass fraction of the in-cloud pool, splitting a
+      phase-agnostic tracer between the two fractions.
+
+    Both numerator and denominator are captured at process time (the
+    denominator BEFORE formation depletes it), so each fraction is
+    bounded by construction — no unbounded rate ratio, no reliance on a
+    floor to be "accidentally correct" in near-empty cells.
+
+    One documented deviation from HAMMOZ (#708): where the pool is below
+    HAMMOZ's ``zmin`` but the formation ledger is positive, HAMMOZ maps
+    the fraction to 0 — missing the removal in exactly the cells the
+    step fully converted to precipitation (the assembly zeroes
+    zmlwc/zmiwc where the post-write-back cover fell below ``clc_min``).
+    Here that marker maps to fraction 1: the droplets became rain, so
+    everything they carried went with them. ``pice`` falls back to the
+    formation-ledger split in the same cells.
+    """
+    il = jnp.maximum(clouds.incloud_liquid, 0.0)
+    ii = jnp.maximum(clouds.incloud_ice, 0.0)
+    form_wat = jnp.maximum(
+        clouds.incloud_rain_formation + clouds.incloud_riming, 0.0) * dt
+    form_ice = jnp.maximum(clouds.incloud_snow_formation, 0.0) * dt
+
+    live_w = il > _LEDGER_POOL_MIN
+    f_wat = jnp.where(
+        live_w,
+        jnp.clip(form_wat / jnp.maximum(il, _LEDGER_POOL_MIN), 0.0, 1.0),
+        jnp.where(form_wat > 0.0, 1.0, 0.0),
+    )
+    live_i = ii > _LEDGER_POOL_MIN
+    f_ice = jnp.where(
+        live_i,
+        jnp.clip(form_ice / jnp.maximum(ii, _LEDGER_POOL_MIN), 0.0, 1.0),
+        jnp.where(form_ice > 0.0, 1.0, 0.0),
+    )
+
+    pool = il + ii
+    form = form_wat + form_ice
+    pice = jnp.where(
+        pool > _LEDGER_POOL_MIN,
+        ii / jnp.maximum(pool, _LEDGER_POOL_MIN),
+        jnp.where(
+            form > _LEDGER_POOL_MIN,
+            form_ice / jnp.maximum(form, _LEDGER_POOL_MIN),
+            0.0,
+        ),
+    )
+    return f_wat, f_ice, pice
+
+
+def fraction_to_rate(fraction: jnp.ndarray, dt: jnp.ndarray) -> jnp.ndarray:
+    """Equivalent first-order decay rate removing ``fraction`` over ``dt``.
+
+    The batched scavenging update applies ``1 - exp(-rate·dt)``, so the
+    exact inverse is ``-log1p(-f)/dt``; the cap keeps it finite at f = 1
+    (fully-converting cells) while still removing >0.999999 of the tracer.
+    """
+    f = jnp.clip(fraction, 0.0, _FRACTION_CAP)
+    return -jnp.log1p(-f) / dt
 
 
 def below_cloud_rate(
@@ -156,7 +224,8 @@ def conv_in_cloud_rate(
 ) -> jnp.ndarray:
     """Convective in-cloud (nucleation) scavenging rate [1/s].
 
-    The convective mirror of ``in_cloud_rate``: scavenging ratio × (local
+    The convective mirror of the stratiform in-cloud pathway: scavenging
+    ratio × (local
     condensate→precip conversion rate / in-updraft condensate), with the
     per-layer formation flux converted to a mixing-ratio rate by ρ·Δz.
     Zero wherever the updraft carries no condensate.
@@ -238,6 +307,12 @@ class WetScavenging(PhysicsTerm):
         keeping convective below-cloud washout, which is a distinct
         (impaction) pathway — and folds the transport term's published
         surface fluxes into the AeroCom ``wet_*`` ledger.
+
+        The stratiform in-cloud pathways read the cloud scheme's
+        process-time scavenging ledger from ``CloudData``
+        (``incloud_scavenged_fractions`` — the HAMMOZ ``cloud_subm``
+        interface), so this term requires a cloud scheme that publishes
+        it; the physics factory enforces that at compose time.
         """
         self.params = nnx.Param(params or WetDepParameters.default())
         self._in_plume_convective = in_plume_convective
@@ -261,10 +336,6 @@ class WetScavenging(PhysicsTerm):
 
         clouds = diagnostics["clouds"]
         cloud_fraction = clouds.cloud_fraction
-        # Total cloud condensate: the formation ledger spans both the rain
-        # (from qc) and snow (from qc and qi) pathways, so the in-droplet
-        # residence pool is liquid + ice.
-        condensate = jnp.maximum(clouds.qc, 0.0) + jnp.maximum(clouds.qi, 0.0)
         # Per-level stratiform process rates from the cloud scheme (#499):
         # the true local condensate→precip conversion and the falling-precip
         # evaporation. The carrier flux for impaction and the re-evap ledger
@@ -332,20 +403,26 @@ class WetScavenging(PhysicsTerm):
                 # No pressure diagnostic: column-wide washout, not none.
                 conv_below = jnp.ones_like(state.temperature)
 
-        # The implicit stratiform rate is weighted by the cloudy area
-        # fraction: the grid-mean p_form/condensate ratio is the IN-CLOUD
-        # conversion rate (cf cancels between them), but only cf·af of the
-        # grid-mean interstitial tracer is in droplets. ``in_cloud_rate`` is
+        # Stratiform in-cloud (nucleation) scavenging rates from the
+        # process-time ledger (#708): the per-step scavenged fraction of an
+        # in-droplet tracer is HAMMOZ's peffwat/peffice split by the phase
+        # mass fraction — bounded by construction, and alive in cells the
+        # microphysics emptied (post-write-back cover 0). The in-droplet
+        # SHARE of interstitial aerosol is keyed to the cover the
+        # processes actually ran under (process_cloud_fraction), not the
+        # post-write-back cover, for the same reason. The removal is
         # linear in the activated fraction, so keep the unit-fraction base
-        # and apply per-mode, per-quantity fractions below: ARG's number and
-        # mass fractions differ a lot (large particles activate
+        # and apply per-mode, per-quantity fractions below: ARG's number
+        # and mass fractions differ a lot (large particles activate
         # preferentially) and vary by mode. The aggregate fraction is kept
         # only as a fallback for standalone composition without ARG
         # upstream.
-        cf_clip = jnp.clip(cloud_fraction, 0.0, 1.0)
-        rate_ic_unit = params.incloud_scale * cf_clip * in_cloud_rate(
-            jnp.ones_like(state.temperature), p_form, condensate,
-        )
+        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+        f_comb = (1.0 - pice) * f_wat + pice * f_ice
+        rate_ledger = fraction_to_rate(f_comb, dt)
+        cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
+        rate_ic_unit = params.incloud_scale * cf_proc * rate_ledger
+        rate_cb = params.incloud_scale * rate_ledger
         jam_act = diagnostics.get("_jam_activation")
 
         # Build per-tracer scavenging rates and stack with the matching
@@ -385,9 +462,6 @@ class WetScavenging(PhysicsTerm):
         # out). Without it, the implicit treatment stands — the interstitial
         # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
-        rate_cb = params.incloud_scale * in_cloud_rate(
-            jnp.ones_like(state.temperature), p_form, condensate,
-        )
         for i, mode in enumerate(self._spec.modes):
             below_strat = below_cloud_rate(
                 flux_in, cloud_fraction, aer.r_wet[i], params,

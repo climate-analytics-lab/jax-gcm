@@ -217,6 +217,12 @@ def jam_aerosol_physics(
             model transports a stratiform cloud-borne phase convectively.
             On by default.
 
+    Stratiform in-cloud wet removal and cloud-borne resuspension key to
+    the cloud scheme's process-time scavenging ledger (#708 — the
+    ECHAM-HAM ``cloud_subm`` interface), so the harness requires a cloud
+    scheme that publishes the ``CloudData`` ledger fields (the 2M
+    scheme); ``echam_physics`` enforces this at compose time.
+
     Returns:
         The ordered term list: natural emissions, prescribed oxidants and
         gas-phase sulfur chemistry, the microphysics core (optionally followed
@@ -325,7 +331,7 @@ def jam_aerosol_physics(
     post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
         # Heterogeneous ice nucleation on dust/BC → ``ice_nuclei`` for the 2M
-        # cloud scheme (#494). Harmless with the 1M scheme (diagnostic unused).
+        # cloud scheme (#494).
         IceNucleation(
             params=ice_nucleation_params, spec=spec, scheme=ice_scheme,
         ),

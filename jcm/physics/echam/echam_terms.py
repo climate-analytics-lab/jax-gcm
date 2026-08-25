@@ -140,7 +140,11 @@ def echam_physics(
             (two-moment warm-rain).
         aerosol_module: ``"macv2sp"`` (default; prescribed simple plumes) or
             ``"jam"`` (online JAM harness — emissions, microphysics core,
-            ARG activation, deposition, sedimentation; #461). The JAM path
+            ARG activation, deposition, sedimentation; #461). JAM requires
+            ``cloud_scheme="2m"``: its scavenging and resuspension terms
+            read the process-time ledger only the 2M scheme publishes,
+            and only the 2M scheme consumes JAM's activation and
+            ice-nuclei products. The JAM path
             *augments* MACv2-SP rather than replacing it: MACv2-SP is kept for
             the aerosol radiative optics and Twomey factor that radiation and
             the cloud schemes require, while JAM adds the prognostic aerosol
@@ -343,6 +347,20 @@ def echam_physics(
     if aerosol_module == "macv2sp":
         aerosol_terms = [Macv2SpAerosol(params=aerosol_p)]
     elif aerosol_module == "jam":
+        if cloud_scheme != "2m":
+            # The JAM wet-deposition and cloud-borne exchange terms key to
+            # the process-time scavenging ledger only the 2M scheme
+            # publishes on CloudData (#708), and prognostic aerosol without
+            # aerosol-aware microphysics is not a configuration we support:
+            # the 1M scheme would read none of JAM's activation/ice-nuclei
+            # products while the ledger fields stayed all-zero, silently
+            # producing no stratiform in-cloud scavenging.
+            raise ValueError(
+                "aerosol_module='jam' requires cloud_scheme='2m' — the JAM "
+                "scavenging and resuspension terms read the 2M scheme's "
+                f"process-time ledger, and cloud_scheme={cloud_scheme!r} "
+                "does not publish it."
+            )
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,

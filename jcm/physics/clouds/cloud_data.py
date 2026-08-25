@@ -81,6 +81,34 @@ class CloudData:
     # tendencies. Zero under the 1M scheme.
     negative_mass_repair: jnp.ndarray  # (ncols,)
 
+    # The ECHAM-HAM wet-scavenging interface (#708): the process-time
+    # ledger ``cloud_subm_2`` receives, written by the 2M scheme. The 1M
+    # scheme leaves these zero, which is why the factory rejects
+    # aerosol_module='jam' with cloud_scheme='1m' — the JAM terms that
+    # read them would silently scavenge nothing.
+    # ``incloud_liquid``/``incloud_ice`` are ECHAM's
+    # zmlwc/zmiwc — IN-CLOUD condensate captured before precipitation
+    # formation, zeroed (faithfully) where the post-write-back cover fell
+    # below clc_min; a zeroed pool with a positive formation rate marks a
+    # cell fully converted to precipitation, which consumers must read as
+    # scavenged-fraction 1 (see ScavengingLedger in lohmann_2m/types.py).
+    # The formation rates are IN-CLOUD [kg/kg/s]: rain formation
+    # (zmratepr), snow formation (zmrateps, including the ice-
+    # sedimentation carrier), and riming of droplets by snow (zmsnowacl,
+    # a LIQUID sink into frozen precip). ``process_cloud_fraction`` is
+    # the cover the processes ran under (nonzero in cells the write-back
+    # cleared). ``condensate_evaporation_rate`` is the grid-mean
+    # cloud-condensate evaporation ledger (zxlevap+zxievap) — the
+    # resuspension key: evaporated droplets release their aerosol,
+    # rained-out ones do not.
+    incloud_liquid: jnp.ndarray             # (nlev, ncols) [kg/kg]
+    incloud_ice: jnp.ndarray                # (nlev, ncols) [kg/kg]
+    incloud_rain_formation: jnp.ndarray     # (nlev, ncols) [kg/kg/s]
+    incloud_snow_formation: jnp.ndarray     # (nlev, ncols) [kg/kg/s]
+    incloud_riming: jnp.ndarray             # (nlev, ncols) [kg/kg/s]
+    process_cloud_fraction: jnp.ndarray     # (nlev, ncols) [1]
+    condensate_evaporation_rate: jnp.ndarray  # (nlev, ncols) [kg/kg/s]
+
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
@@ -127,6 +155,13 @@ class CloudData:
             rain_formation_warm=jnp.zeros(nodal_shape),
             rain_from_melt=jnp.zeros(nodal_shape),
             negative_mass_repair=jnp.zeros(nodal_shape),
+            incloud_liquid=jnp.zeros((nlev,) + nodal_shape),
+            incloud_ice=jnp.zeros((nlev,) + nodal_shape),
+            incloud_rain_formation=jnp.zeros((nlev,) + nodal_shape),
+            incloud_snow_formation=jnp.zeros((nlev,) + nodal_shape),
+            incloud_riming=jnp.zeros((nlev,) + nodal_shape),
+            process_cloud_fraction=jnp.zeros((nlev,) + nodal_shape),
+            condensate_evaporation_rate=jnp.zeros((nlev,) + nodal_shape),
             droplet_number=jnp.zeros((nlev,) + nodal_shape),
             r_eff_liq=jnp.zeros((nlev,) + nodal_shape),
             r_eff_ice=jnp.zeros((nlev,) + nodal_shape),
@@ -152,6 +187,13 @@ class CloudData:
             'rain_formation_warm': self.rain_formation_warm,
             'rain_from_melt': self.rain_from_melt,
             'negative_mass_repair': self.negative_mass_repair,
+            'incloud_liquid': self.incloud_liquid,
+            'incloud_ice': self.incloud_ice,
+            'incloud_rain_formation': self.incloud_rain_formation,
+            'incloud_snow_formation': self.incloud_snow_formation,
+            'incloud_riming': self.incloud_riming,
+            'process_cloud_fraction': self.process_cloud_fraction,
+            'condensate_evaporation_rate': self.condensate_evaporation_rate,
             'droplet_number': self.droplet_number,
             'r_eff_liq': self.r_eff_liq,
             'r_eff_ice': self.r_eff_ice,
