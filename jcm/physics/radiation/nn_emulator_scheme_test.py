@@ -274,6 +274,46 @@ class TotalCloudCoverTest(unittest.TestCase):
             float(expected_total_cover(separated, dz, "maximum_random", 2.0)),
             0.75, places=6)
 
+    def test_exponential_matches_exact_chain_enumeration(self):
+        # The expectation must be the rank chain's EXACT one: enumerate
+        # every inherit/reset pattern of the sampler (segments share one
+        # uniform; a segment is clear w.p. 1 - max cf) and compare.
+        # Includes the review's counterexample, where the pairwise-blend
+        # approximation gave 0.872 against the exact 0.822.
+        import itertools
+
+        from jcm.physics.radiation.mcica import (
+            _alpha_from_overlap,
+            expected_total_cover,
+        )
+
+        cases = [
+            (np.array([0.69, 0.03, 0.59]), 500.0, 2.0),
+            (np.array([0.2, 0.8, 0.1, 0.5]), 800.0, 1.0),
+            (np.array([0.5, 0.5, 0.5, 0.5, 0.5]), 500.0, 2.0),
+        ]
+        for cf_np, dz_m, dec_km in cases:
+            with self.subTest(cf=list(cf_np)):
+                n = len(cf_np)
+                cf = jnp.asarray(cf_np)
+                dz = jnp.full((n,), dz_m)
+                alpha = np.asarray(_alpha_from_overlap(
+                    cf, dz, "exponential", dec_km))
+                clear = 0.0
+                for pattern in itertools.product([0, 1], repeat=n - 1):
+                    p = np.prod([a if inh else 1.0 - a
+                                 for a, inh in zip(alpha, pattern)])
+                    seg_clear, start = 1.0, 0
+                    for i, inh in enumerate(pattern):
+                        if not inh:
+                            seg_clear *= 1.0 - cf_np[start:i + 1].max()
+                            start = i + 1
+                    seg_clear *= 1.0 - cf_np[start:].max()
+                    clear += p * seg_clear
+                got = float(expected_total_cover(cf, dz, "exponential",
+                                                 dec_km))
+                self.assertAlmostEqual(got, 1.0 - clear, places=6)
+
     def test_scheme_publishes_the_derived_cover(self):
         _, diag = _run()
         # The fixture is 50% cover at every level with 500 m layers and the

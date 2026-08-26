@@ -636,7 +636,13 @@ def _solar_geometry_for_cos_zenith(rng, target_cos_zenith, n_scan=2880):
 
 @functools.lru_cache(maxsize=4)
 def _model_level_pressures(nlev, surface_pressure=101325.0):
-    """Full-level pressures (TOA-first) on the model's own hybrid levels.
+    """``(p_full, p_half)`` (TOA-first) on the model's own hybrid levels.
+
+    The NATIVE half levels are returned alongside the full levels:
+    reconstructing interfaces from full-level midpoints changes the L47
+    bottom-layer pressure thickness from ~780 Pa to ~1370 Pa (and upper
+    layers by 10-18%), putting labels on a different vertical grid from
+    the deployed model (PR #730 review).
 
     Falls back to a log-spaced grid spanning the same range if the level
     definitions are unavailable, so the sweep still runs for level counts
@@ -649,13 +655,17 @@ def _model_level_pressures(nlev, surface_pressure=101325.0):
         a = np.asarray(coords.a_boundaries, dtype=np.float64)
         b = np.asarray(coords.b_boundaries, dtype=np.float64)
         p_half = a + b * surface_pressure
-        p_full = 0.5 * (p_half[:-1] + p_half[1:])
-        if p_full[0] > p_full[-1]:          # keep the TOA-first convention
-            p_full = p_full[::-1]
-        return np.maximum(p_full, _TOP_PRESSURE)
+        if p_half[0] > p_half[-1]:          # keep the TOA-first convention
+            p_half = p_half[::-1]
+        # Full levels floored for RRTMGP; the halves stay native and
+        # unfloored (p_half[0] may be 0), exactly as the trajectory path
+        # exports the model's saved pressure_half.
+        p_full = np.maximum(0.5 * (p_half[:-1] + p_half[1:]), _TOP_PRESSURE)
+        return p_full, p_half
     except Exception:
-        return np.logspace(
+        p_full = np.logspace(
             np.log10(_TOP_PRESSURE), np.log10(surface_pressure), nlev)
+        return p_full, _interfaces_from_levels(p_full)
 
 
 def _latin_hypercube(rng, n_samples, n_dim):
@@ -697,7 +707,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     # every tropospheric layer until per-layer aerosol optical depth reached
     # 21 and ~9% of columns came back with unphysical fluxes. Using the real
     # coefficients keeps layer thicknesses right at every altitude.
-    pressure = _model_level_pressures(nlev)
+    pressure, p_half_native = _model_level_pressures(nlev)
     pressure_levels = np.broadcast_to(pressure, (n_columns, nlev)).copy()
     # Pressure-derived height, so the two stay consistent over five decades
     # of pressure rather than only over a 20 km troposphere.
@@ -764,7 +774,10 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     specific_humidity = np.minimum(specific_humidity, 0.98 * q_sat)
 
     air_density = _air_density(pressure_levels, temperature)
-    pressure_interfaces = _interfaces_from_levels(pressure_levels)
+    # The NATIVE hybrid boundaries, not a midpoint reconstruction — the
+    # deployed model's layer thicknesses and paths are defined on these.
+    pressure_interfaces = np.broadcast_to(
+        p_half_native, (n_columns, nlev + 1)).copy()
     layer_thickness = _layer_thickness(pressure_interfaces, air_density)
 
     # Cloud slab: a contiguous band of levels with a sampled top, depth,
