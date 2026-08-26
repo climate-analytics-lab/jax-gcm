@@ -430,7 +430,8 @@ class NNEmulatorRadiation(PhysicsTerm):
                 trained weights *and* both input scalings, and is
                 validated against ``band_mode`` / the band counts before
                 use. This is jax-gcm's own format, not the upstream
-                rte-rrtmgp-nn one.
+                rte-rrtmgp-nn one. ``"auto"`` resolves the packaged
+                default (``jcm/data/emulator_weights_per_band_u64.nc``).
 
         Raises:
             ValueError: If ``weights_file`` disagrees with ``band_mode``
@@ -438,6 +439,16 @@ class NNEmulatorRadiation(PhysicsTerm):
 
         """
         params = params or RadiationParameters.default()
+        if weights_file == "auto":
+            # The packaged default (same convention as ``ozone_file: auto``):
+            # per_band 14/16-band, 64-unit weights trained on the v3 labels
+            # (provenance in the file's global attributes). Makes
+            # ``physics=echam-emulated-2m`` runnable out of the box.
+            from importlib import resources
+            weights_file = str(
+                resources.files("jcm") / "data"
+                / "emulator_weights_per_band_u64.nc"
+            )
         if weights_file is not None:
             weights, sw_scaling, lw_scaling, metadata = load_emulator_weights(
                 weights_file,

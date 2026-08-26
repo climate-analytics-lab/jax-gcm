@@ -184,6 +184,8 @@ notebooks/model_state.nc
 *.nc
 !jcm/data/bc/**/*.nc
 !jcm/data/test/**/*.nc
+# Packaged NN-emulator weights (weights_file: auto default)
+!jcm/data/emulator_weights_per_band_u64.nc
 
 # Docker remote setup
 startup.sh

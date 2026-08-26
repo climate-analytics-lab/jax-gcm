@@ -94,10 +94,11 @@ Checkpoints trained on the old layout are rejected by the input-width
 validation rather than silently misread. Upstream `rte-rrtmgp-nn` weights
 predate the feature and need `n_input_features(..., n_base=7)`.
 
-`per_band` is the default. It costs essentially nothing: the measured
-throughput at T63L47 is 4.13x over RRTMGP, which is exactly the Amdahl ceiling
-implied by radiation being 75.8% of the step, so the network itself is already
-free and a narrower input would buy no wall time. The same arithmetic is why
+`per_band` is the default. It costs essentially nothing: the settled
+end-to-end throughput at T63L47 is 4.4x over RRTMGP (see "Measured cost"
+below), close to the Amdahl ceiling implied by radiation dominating the step,
+so the network itself is already free and a narrower input would buy no wall
+time. The same arithmetic is why
 width is a free lever: a wider network changes the input tensor and the matmul
 sizes but not the fact that radiation has stopped being the bottleneck.
 
@@ -340,7 +341,7 @@ mass-weighted heating RMSE on validation:
 
 Two things to carry forward. **Width dominates** — it is the only axis that
 moves the number much, and since the network's run-time cost is already in the
-noise (the measured 4.13x speedup over RRTMGP is at the Amdahl ceiling), width
+noise (the settled 4.4x speedup over RRTMGP is near the Amdahl ceiling), width
 is a free lever rather than a trade-off. And **the heating term interacts with
 capacity**: at 32 units it hurts (16.18 to 19.33), at 64 it helps (10.07 to
 8.18). A small network cannot satisfy the flux and heating objectives at once,
@@ -446,14 +447,43 @@ So the field's verdict is consistent: predict fluxes and do something explicit
 at the top, or predict heating rates and penalise energy imbalance — and in
 either case train on the distribution the coupled model produces.
 
+## Measured cost (v3 weights, 2026-08-25)
+
+Settled per-chunk wall clock (`tools/benchmark.py`, T63L47, 5-day chunks,
+last-two-chunks-within-3% convergence gate, same A100):
+
+- RRTMGP control (`t63-echam-rrtmgp-2m`): **22.7 s per sim day**
+- Emulator u64 (`t63-echam-emulated-2m`, packaged weights): **5.13 s per sim
+  day**, NaN-free over 45 days — an end-to-end **4.4x**
+
+Per-term attribution (`tools/profile_terms.py`, same configs): RRTMGP is
+132 ms/step amortised — 82% of device time, 1322 ms per actual call at the
+10-step radiation cadence — while the u64 emulator term is 2.55 ms/step
+(25.5 ms/call), a ~50x cheaper radiation term; the residual step is dominated
+by convection (8.7 ms) and dynamics (5.4 ms). The wall-clock 4.4x sits
+slightly under the profiler-implied ceiling because chunk boundaries (host
+sync, health check, netCDF write) are outside the step.
+
+One negative result worth keeping: the v3 **u256** checkpoint — offline
+metrics indistinguishable from u64's — went 100% temperature-NaN inside five
+coupled days, while u64 ran 45 days clean. v2's u256 was coupled-stable, so
+this is not a width law; it is another instance of "offline skill is not a
+stability criterion" (above), and the reason the packaged default is the
+narrower, stability-proven network.
+
 ## Running a trained emulator
 
+Trained weights ship with the package
+(`jcm/data/emulator_weights_per_band_u64.nc`, resolved by the config default
+`weights_file: auto`; provenance in the file's global attributes), so the
+preset runs out of the box:
+
 ```bash
-python -m jcm.main physics=echam-emulated-2m \
-    +physics.terms.nn_emulator_radiation.weights_file=/path/to/weights.nc \
-    grid=echam_t63_l47_hybrid ...
+python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid ...
 ```
 
+Point `weights_file` at another checkpoint to swap networks; larger
+checkpoints stay out of the repo (stage them on the HF data bundle).
 `weights_file: null` initialises random weights instead. That path exists for
 cost benchmarking and is paired with `zero_tendency: true`, which discards the
 heating so an untrained network cannot NaN the model while its cost is

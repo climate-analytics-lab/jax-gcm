@@ -467,6 +467,18 @@ class WeightsFileTest(unittest.TestCase):
         )
         return weights
 
+    def test_auto_resolves_the_packaged_weights(self):
+        # ``weights_file: auto`` (the config default) must load the shipped
+        # checkpoint and produce the 52-wide feature layout — this is what
+        # makes ``physics=echam-emulated-2m`` runnable out of the box.
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        term = NNEmulatorRadiation(band_mode="per_band", weights_file="auto")
+        w = term.weights.get_value()
+        self.assertEqual(int(w.sw.gru_fwd.kernel.shape[0]),
+                         n_input_features("per_band", N_BND_SW))
+        self.assertEqual(int(w.sw.output_dense.kernel.shape[-1]), 4)
+
     def test_rejects_broadband_weights_trained_on_other_band_counts(self):
         # Under band_mode='broadband' the input width is band-count
         # independent, so only the stored metadata can catch a checkpoint

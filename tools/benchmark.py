@@ -271,6 +271,10 @@ PRESETS: dict[str, list[str]] = {
        for v, p in (("1m", "echam"), ("2m", "echam-rrtmgp-2m"))},
     "t63-echam-rrtmgp": ["physics=echam", *_T63_COMMON],
     "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
+    # NN radiation emulator in the 2M composition (#702). Needs trained
+    # weights via --extra physics.terms.nn_emulator_radiation.weights_file=…
+    # — without them the term builds random weights and the run NaNs.
+    "t63-echam-emulated-2m": ["physics=echam-emulated-2m", *_T63_COMMON],
     "t63-echam-jam": ["physics=echam-jam", *_T63_COMMON],
     "t63-echam-jam-aerocom": ["physics=echam-jam-aerocom", *_T63_COMMON],
     "t63-echam-jam-aerocom-optics": [

@@ -46,8 +46,7 @@ module or directly::
        run.total_time=30 run.save_interval=1
    python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpen=4e-4
    python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
-   python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid \
-       +physics.terms.nn_emulator_radiation.weights_file=weights.nc
+   python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
    python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
        run.column.lat_deg=0 run.column.lon_deg=180
 

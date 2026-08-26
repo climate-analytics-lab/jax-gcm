@@ -115,18 +115,20 @@ See `docs/source/design/data_mirror.md` for the full bundle catalogue.
 ### Emulated radiation
 
 ``physics=echam-emulated-2m`` swaps RRTMGP for a GRU emulator trained to
-reproduce it, which is ~4x faster end to end at T63L47 because RRTMGP is
-about three quarters of the step. It needs a weight file:
+reproduce it — a settled 4.4x end-to-end at T63L47 (22.7 -> 5.1 s per sim day; see `docs/source/design/radiation_nn_emulator.md`). Trained weights ship with the package (``weights_file: auto``
+resolves ``jcm/data/emulator_weights_per_band_u64.nc``), so it runs out of
+the box:
 
 ```bash
-python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid \
-    +physics.terms.nn_emulator_radiation.weights_file=/path/to/weights.nc
+python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
 ```
 
-Generate labels and train with ``tools/radiation_emulator/`` — see
-`docs/source/design/radiation_nn_emulator.md`. Without ``weights_file`` the
-term initialises randomly, which is only useful for cost benchmarking and
-must be paired with ``zero_tendency: true``.
+Point ``physics.terms.nn_emulator_radiation.weights_file`` at another
+checkpoint to swap networks. Generate labels and train with
+``tools/radiation_emulator/`` — see
+`docs/source/design/radiation_nn_emulator.md`. ``weights_file: null``
+initialises randomly, which is only useful for cost benchmarking and must
+be paired with ``zero_tendency: true``.
 
 ## Physics Packages
 
