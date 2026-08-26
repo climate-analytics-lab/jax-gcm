@@ -321,7 +321,17 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0,
             if len(value) <= _PARAM_ARRAY_MAX_ELEMS:
                 out[prefix] = list(value)
             else:
-                out[prefix] = f"<{len(value)} scalars>"
+                # Hashed, not just counted (#733 review). A bare length
+                # made two AerocomDiagnostics terms with different
+                # 100-element ``plev_pa`` tuples record identically, and
+                # those pressures are interpolated to, so they change the
+                # diagnostics. Same treatment as a large array.
+                out[prefix] = {
+                    "length": len(value),
+                    "sha256": hashlib.sha256(
+                        json.dumps(list(value), default=str).encode()
+                    ).hexdigest()[:12],
+                }
             return
         if scalars_only and len(value) > _PARAM_ARRAY_MAX_ELEMS:
             # An unbounded sequence of structures is grid data, not knobs.
@@ -422,7 +432,17 @@ def _describe_term_settings(term, name: str, out: dict, skip=()) -> None:
             continue  # an nnx variable; the variable walk records it
         if any(value is skipped for skipped in skip):
             continue
-        _describe_value(value, f"{name}.{attribute}", out, scalars_only=True)
+        key = f"{name}.{attribute}"
+        _describe_value(value, key, out, scalars_only=True)
+        # An attribute carrying arrays still has to identify itself, the
+        # same way a plain Variable does (#733 review). ``nnx.data``
+        # leaves live here rather than in the variable state — CloudsatCosp
+        # keeps its radar lookup tables as ``self._lut = nnx.data(...)``,
+        # and a different LUT changes the simulated reflectivity, so
+        # dropping its arrays let two LUTs record identically.
+        digest = _aggregate_digest(value)
+        if digest is not None:
+            out[f"{key}.array_digest"] = digest
 
 
 def _describe_physics_params(physics) -> dict:

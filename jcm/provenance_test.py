@@ -274,9 +274,16 @@ class DescribeValueTest(unittest.TestCase):
         self.assertEqual(self._walk(["qc", "qi"]), {"p": ["qc", "qi"]})
         self.assertEqual(self._walk((1.0, 2.0)), {"p": [1.0, 2.0]})
 
-    def test_long_scalar_sequence_is_summarized(self):
+    def test_long_scalar_sequence_is_hashed_not_just_counted(self):
+        # A bare length made two AerocomDiagnostics terms with different
+        # 100-element plev_pa tuples record identically, though those
+        # pressures are interpolated to (#733 review).
         n = provenance._PARAM_ARRAY_MAX_ELEMS + 1
-        self.assertEqual(self._walk([0.0] * n), {"p": f"<{n} scalars>"})
+        one = self._walk([float(i) for i in range(n)])["p"]
+        two = self._walk([float(i) + 1 for i in range(n)])["p"]
+        self.assertEqual(one["length"], n)
+        self.assertRegex(one["sha256"], r"^[0-9a-f]{12}$")
+        self.assertNotEqual(one["sha256"], two["sha256"])
 
     def test_container_of_structures_is_walked_by_index(self):
         walked = self._walk([_FakeDiffusion(), {"k": 2.0}])
@@ -441,6 +448,31 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         self.assertEqual(off["derived._interval"], on["derived._interval"])
         self.assertIs(off["derived._enabled"], False)
         self.assertIs(on["derived._enabled"], True)
+
+    def test_array_bearing_plain_attributes_are_digested(self):
+        # nnx.data leaves live on the instance rather than in the variable
+        # state: CloudsatCosp keeps its radar lookup tables as
+        # ``self._lut = nnx.data(...)``, and the scalars-only attribute
+        # walk dropped their arrays, so two different LUTs recorded
+        # identically despite changing the simulated reflectivity.
+        import jax.numpy as jnp
+
+        def record(offset):
+            class _Term:
+                name = "cosp"
+
+                def __init__(self):
+                    self._lut = {"table": jnp.arange(50.0) + offset}
+
+            class _One:
+                terms = [_Term()]
+
+            return provenance.describe_params(_One())["physics"]
+
+        first, second = record(0.0), record(1.0)
+        self.assertRegex(first["cosp._lut.array_digest"], r"^[0-9a-f]{12}$")
+        self.assertNotEqual(first["cosp._lut.array_digest"],
+                            second["cosp._lut.array_digest"])
 
     def test_container_level_controls_are_recorded(self):
         # ComposablePhysics owns band_config, injected into every step and
