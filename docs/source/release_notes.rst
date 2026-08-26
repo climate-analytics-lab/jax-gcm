@@ -4,95 +4,47 @@ Release Notes
 Unreleased — provenance records the parameters
 ----------------------------------------------
 
-- **Every output now records the parameter values the run actually
-  used** (#732). The composed Hydra config that #591 stamped is not the
-  same thing: each scheme's ``params`` block is deliberately absent from
-  the shipped yamls so unspecified fields fall back to
-  ``Parameters.default()`` in code, so the config recorded the
-  *overrides* and said nothing about the effective values. A model built
-  in Python, or one whose parameters a calibration loop replaced after
-  construction, had no config behind it at all. ``jcm_prov_params``
-  (with ``jcm_prov_params_sha``) now carries every ``nnx.Variable`` on
-  every physics term, the scalar dycore knobs (timestep, diffusion
-  filter, transport options) and the physical constants, read off the
-  *built* model rather than the requested config. Every nnx variable,
-  not only ``nnx.Param``: a parameter block holding a bool cannot be a
-  ``Param``, so ``SpeedySurfaceFlux.surface_params``,
-  ``EchamSurface.params`` and every Held-Suarez tuning constant are
-  plain Variables, and a ``Param``-only filter recorded nothing at all
-  for Held-Suarez. A declared ``nnx.Param`` is recorded in full; a plain
-  Variable only where it is knob-shaped (scalars, 0-d arrays, structs of
-  those), which keeps those parameter blocks while leaving out the
-  coordinate caches terms also hold as Variables. Keys locate the value
-  as ``<term>.<variable>.<field>``
-  (``tiedtke_convection.params.entrpen``). That matches the Hydra
-  override path minus its ``physics.terms.`` prefix wherever a term's
-  constructor keyword and its stored variable share a name, as the ECHAM
-  terms do; the SPEEDY terms do not (``SpeedyConvection`` takes
-  ``convection_params=`` and stores ``params``), so reproducing one of
-  those from the record needs the constructor signature. Arrays over 64
-  elements (embedded NN weights) are summarized by shape/dtype/hash;
-  values captured under ``jit``/``grad`` read ``"<traced>"``. A record
-  larger than 64 kB is carried compressed in ``jcm_prov_params_zlib`` on
-  the same file rather than dropped; ``jemcal``-style readers should use
-  ``jcm.provenance.read_params(ds.attrs)``, which handles both forms.
-- Settings that never reach an nnx variable are recorded too. Terms keep
-  controls as ordinary attributes (``UpperSponge``'s
-  ``sponge_timescale_s``, ``enspodi``, ``damp_temperature``; RRTMGP's
-  ``base_seed``, ``compute_cre`` and the derived ``_aerosol_free``), so
-  every scalar-shaped attribute is taken. Only names with a dunder infix
-  are skipped, being flax bookkeeping and Python name mangling rather
-  than physical settings.
-- A control that survives *only* in derived form is caught by a
-  per-variable ``array_digest``. ``UpperTemperatureRelaxation`` keeps its
-  timescale solely as the grid-shaped ``_inv_tau`` profile, so 3600 s and
-  7200 s recorded identically until the digest distinguished them. It is
-  aggregated per variable rather than per array leaf, which is what keeps
-  it affordable where several terms share one cached coordinate object.
-- The term roster is recorded in order as ``physics.term_order``. A term
-  with no attributes and no nnx variables contributes nothing to the
-  walk, so adding or removing one left the record unchanged even though
-  it changes every step (``ResetEmissionFluxes`` is stateless and zeroes
-  the carried ``emi_*`` accumulators). Order belongs in the record for
-  the same reason it is fixed in the configs: the ECHAM composition
-  requires vdiff before convection so the Tiedtke closure reads the
-  same-step moisture tendency.
-- The composition itself is recorded, not only its terms.
-  ``ComposablePhysics.band_config`` is injected into every step and read
-  by ``Macv2SpAerosol`` for its optics, so two compositions of identical
-  terms with different band centres produce different fields; walking
-  only ``terms`` let them record identically.
-- The dycore filter is per *leaf*, not per attribute, so a backend that
-  mixes tuning knobs and grid data in one container still has its knobs
-  recorded. This matters for pySES, whose ``diffusion_config`` holds
-  ``nu``/``nu_top`` beside a ``nu_ramp`` profile and whose
-  ``timestep_config`` holds the subcycle counts beside per-stage stepper
-  structs: ``hypervis_scale``, ``coupling`` and ``tracer_substeps`` are
-  constructor arguments stored nowhere else, so a container-level rule
-  would have let two materially different pySES models record
-  identically.
+- **Every output now records the physics parameter values the run
+  actually used** (#732). The composed Hydra config that #591 stamped is
+  not the same thing: each scheme's ``params`` block is deliberately
+  absent from the shipped yamls so unspecified fields fall back to
+  ``Parameters.default()`` in code, meaning the config recorded the
+  *overrides* and said nothing about the effective values, and a model
+  built in Python or one whose parameters a calibration loop replaced
+  had no config behind it at all. ``jcm_prov_params`` (with
+  ``jcm_prov_params_sha``) now carries them, read off the *built*
+  physics, keyed as ``<term>.<variable>.<field>``
+  (``tiedtke_convection.params.entrpen``). Read it with
+  ``jcm.provenance.read_params(ds.attrs)``, or off the predictions object
+  as ``predictions.params``. Everything else about a run stays where it
+  was: the term composition, dycore and resolution are already in the
+  config record this sits beside.
+- Both kinds of parameter variable are covered. An ``nnx.Param`` is
+  recorded in full, including tuned arrays such as the MACv2-SP plume
+  shapes. A plain ``nnx.Variable`` is recorded where it is knob-shaped
+  (scalars, 0-d arrays, structs of those), because a parameter block
+  holding a bool cannot be a ``Param`` — ``SpeedySurfaceFlux.surface_params``,
+  ``EchamSurface.params`` and every Held-Suarez tuning constant are plain
+  Variables — while the coordinate caches terms also hold as Variables
+  stay out. Arrays over 64 elements (embedded NN weights) are summarized
+  by shape, dtype and hash; values captured under ``jit``/``grad`` read
+  ``"<traced>"``.
 - **The record is captured at trace time, not from the live module.**
   ``Model._run_from_state`` is jitted with ``self`` static, so parameters
-  are constants inside the compiled executable and changing an
-  ``nnx.Param`` in place afterwards does not reach the computation.
-  Reading the module at the handoff therefore stamped a trajectory with
-  values that never ran. Where the live values now disagree with the
-  compiled ones, the record reports the compiled ones and both a log
-  warning and a ``live_parameters_differ_from_compiled`` key say so:
-  that disagreement means an in-place parameter change did nothing to
-  the run, which is a scientific error rather than a provenance detail.
-  Rebuild the ``Model`` to change parameters.
-- A dycore setting held as a dtype (pySES ``physics_dtype``) is recorded
-  by its canonical name, so float32-physics and float64-physics runs no
-  longer share a record.
-- The record is taken at the model-to-user handoff
-  (``ModelPredictions``) and travels on the predictions object, so it
-  reaches every output stream the object produces (trajectory,
-  snapshots and the per-observer datasets), including a bare
+  are constants inside the compiled executable and changing one in place
+  afterwards does not reach the computation. Reading the module at the
+  handoff would therefore stamp a trajectory with values that never ran.
+  Where the live values disagree with the compiled ones, the record
+  reports the compiled ones and both a log warning and a
+  ``live_parameters_differ_from_compiled`` key say so: that disagreement
+  means an in-place parameter change did nothing to the run. Rebuild the
+  ``Model`` to change parameters.
+- The record travels on the predictions object, so it reaches every
+  output stream that object produces (trajectory, snapshots and the
+  per-observer datasets), including a bare
   ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
-  Hydra runners, and a calibration loop that mutates parameters between
-  iterations cannot retroactively change an earlier run's record. It is
-  also readable directly as ``predictions.params``.
+  Hydra runners, and a later run cannot retroactively change an earlier
+  one's record.
 - **``jcm_prov_run_hash`` values change**, because the parameters are now
   folded into the hash. They have to be: every member of a parameter
   sweep shares one code state, config and input set, so without them a

@@ -62,27 +62,23 @@ class ModelPredictions:
         # ``Model._run_from_state`` and is authoritative when present:
         # ``self`` is a static argument to that jit, so the parameters are
         # constants inside the executable, and reading the live module here
-        # can report values that never reached the computation (#733
-        # review). Falling back to a live read covers a ModelPredictions
-        # built directly, where there is no trace to have captured.
-        #
-        # Skipped entirely with no model to read: the pytree unflatten
-        # rebuilds without coords/physics/dycore by design, and it runs on
-        # every tree_map over a ModelPredictions. There is nothing to
-        # record there, and it should not cost anything either.
+        # can report values that never reached the computation. Falling
+        # back to a live read covers a ModelPredictions built directly,
+        # where there is no trace to have captured. With no physics at all
+        # there is nothing to record: the pytree unflatten rebuilds without
+        # it by design, and runs on every tree_map over a ModelPredictions.
         self._params = {}
         try:
             if params is not None:
-                self._params = self._check_live_matches_traced(
-                    params, physics, dycore)
-            elif physics is not None or dycore is not None:
-                self._params = provenance.describe_params(physics, dycore)
+                self._params = self._check_live_matches_traced(params, physics)
+            elif physics is not None:
+                self._params = provenance.describe_params(physics)
         except Exception:  # noqa: BLE001 — never fail a completed run
             logger.warning("provenance: parameter capture failed",
                            exc_info=True)
 
     @staticmethod
-    def _check_live_matches_traced(traced, physics, dycore):
+    def _check_live_matches_traced(traced, physics):
         """Return *traced*, flagging a live/compiled parameter divergence.
 
         A mismatch means the caller changed a parameter in place and jcm
@@ -92,7 +88,7 @@ class ModelPredictions:
         provenance to paper over by quietly recording the compiled values
         and moving on.
         """
-        live = provenance.describe_params(physics, dycore)
+        live = provenance.describe_params(physics)
         if live == traced:
             return traced
         logger.warning(
@@ -110,12 +106,12 @@ class ModelPredictions:
 
     @property
     def params(self):
-        """The parameter values behind this trajectory (see #732).
+        """The physics parameter values behind this trajectory (#732).
 
-        Flat dotted keys under ``physics`` / ``dycore`` / ``constants`` —
-        read off the built model at construction, so it reflects what ran
-        rather than what the config requested. Empty for predictions
-        reconstructed by a pytree ``tree_map``, which carries no model.
+        Flat ``<term>.<variable>.<field>`` keys, read off the built model
+        rather than the requested config, so they reflect what ran. Empty
+        for predictions reconstructed by a pytree ``tree_map``, which
+        carries no physics.
         """
         return self._params
 
@@ -178,10 +174,7 @@ class ModelPredictions:
         """Per-timestep virtual-observation output as xarray Datasets.
 
         Stamped with the run's parameters like the trajectory and the
-        snapshots (#733 review): an observer stream is often persisted on
-        its own with ``observation_datasets()[name].to_netcdf(...)``, and
-        such a file would otherwise be the one output that cannot say
-        which parameters produced it.
+        snapshots, since an observer stream is often persisted on its own.
 
         Returns:
             Dict ``{observer_name: xarray.Dataset}`` — one Dataset per
@@ -210,8 +203,8 @@ class ModelPredictions:
         attributes here (#732), so they survive a bare
         ``model.run(...).to_xarray().to_netcdf(...)`` that never goes near
         the Hydra runners. Wrapping rather than stamping inside
-        :meth:`_trajectory_dataset` keeps the per-backend return paths
-        from being able to skip it.
+        :meth:`_trajectory_dataset` keeps a per-backend return path from
+        being able to skip it.
 
         Returns:
             An xarray.Dataset ready for analysis and plotting.

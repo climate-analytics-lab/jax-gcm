@@ -461,7 +461,7 @@ class Model:
 
         self.observers = tuple(observers)
         # Parameters as bound into each compiled trace, keyed by a trace
-        # id that the executable itself carries back (#733 review). See the
+        # id that the executable itself carries back (#732). See the
         # capture in ``_run_from_state`` for why the live values will not do.
         self._traced_params: dict = {}
         self._trace_counter: int = 0
@@ -940,21 +940,19 @@ class Model:
         :meth:`Model.resume`).
         """
         # Capture the parameters HERE, at trace time, not from the live
-        # module afterwards (#733 review). ``self`` is a static argument,
-        # so the parameter values are baked into this executable as
-        # constants; mutating an nnx.Param in place afterwards changes
-        # nothing the compiled function does (see the note on the
-        # decorator). Reading the module at the model-to-user handoff
-        # therefore stamped a trajectory with values that did not produce
-        # it — a calibration loop that mutates in place got a confident,
-        # wrong record. On a cache hit this line does not re-run, which is
-        # exactly right: the reused executable still holds the parameters
-        # captured at its own trace.
+        # module afterwards (#732). ``self`` is a static argument, so the
+        # parameter values are baked into this executable as constants and
+        # mutating one in place afterwards changes nothing the compiled
+        # function does (see the note on the decorator). Reading the module
+        # at the model-to-user handoff would therefore stamp a trajectory
+        # with values that did not produce it. On a cache hit this does not
+        # re-run, which is right: the reused executable still holds the
+        # parameters captured at its own trace.
         trace_id = self._trace_counter
         self._trace_counter += 1
         try:
             self._traced_params[trace_id] = provenance.describe_params(
-                self.physics, self.dycore)
+                self.physics)
         except Exception:  # noqa: BLE001 — provenance never fails a run
             logger.warning("provenance: trace-time parameter capture failed",
                            exc_info=True)

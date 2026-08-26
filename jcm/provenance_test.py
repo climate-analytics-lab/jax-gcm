@@ -160,50 +160,10 @@ class ResolveDataPathRecordsTest(unittest.TestCase):
 
 
 @dataclasses.dataclass
-class _FakeDiffusion:
-    """Stands in for a DiffusionFilter: all-scalar, so it is a knob."""
+class _FakeParamBlock:
+    """Stands in for a scheme's parameter struct: named fields."""
 
-    timescale: int = 43200
     order: int = 2
-    level_orders: None = None
-
-
-@dataclasses.dataclass
-class _FakeCoords:
-    """Stands in for a CoordinateSystem: grid arrays beside scalar identity."""
-
-    latitudes: object = None
-    layers: int = 8
-
-
-class _OpaqueBackendObject:
-    """No fields worth recording, and a default repr carrying an address."""
-
-
-class _FakeDycore:
-    """Mirrors the shapes a real backend presents.
-
-    In particular ``hypervis`` mixes 0-d array coefficients with a bulk
-    profile in one container, the way pySES's ``diffusion_config`` does.
-    """
-
-    def __init__(self, constants=None):
-        import jax.numpy as jnp
-        import numpy as np
-        self.dt_seconds = 900.0
-        self.compute_omega = True
-        self.diffusion = _FakeDiffusion()
-        self._sl_options = {"interpolation_order": "cubic",
-                            "off_centering": 0.5}
-        self.hypervis = {"nu": jnp.asarray(2.5e-9),
-                         "nu_top": jnp.asarray(250000.0),
-                         "nu_ramp": jnp.arange(8.0)}
-        self.coords = _FakeCoords(latitudes=np.linspace(-90, 90, 32))
-        self.orography = np.zeros((32, 16))
-        self.step_fn = lambda s: s
-        self.colmap = _OpaqueBackendObject()
-        if constants is not None:
-            self.constants = constants
 
 
 class DescribeLeafTest(unittest.TestCase):
@@ -277,7 +237,7 @@ class DescribeValueTest(unittest.TestCase):
     def test_long_scalar_sequence_is_hashed_not_just_counted(self):
         # A bare length made two AerocomDiagnostics terms with different
         # 100-element plev_pa tuples record identically, though those
-        # pressures are interpolated to (#733 review).
+        # pressures are interpolated to.
         n = provenance._PARAM_ARRAY_MAX_ELEMS + 1
         one = self._walk([float(i) for i in range(n)])["p"]
         two = self._walk([float(i) + 1 for i in range(n)])["p"]
@@ -286,7 +246,7 @@ class DescribeValueTest(unittest.TestCase):
         self.assertNotEqual(one["sha256"], two["sha256"])
 
     def test_container_of_structures_is_walked_by_index(self):
-        walked = self._walk([_FakeDiffusion(), {"k": 2.0}])
+        walked = self._walk([_FakeParamBlock(), {"k": 2.0}])
         self.assertEqual(walked["p.0.order"], 2)
         self.assertEqual(walked["p.1.k"], 2.0)
 
@@ -313,7 +273,7 @@ class DescribePhysicsParamsTest(unittest.TestCase):
 
     def setUp(self):
         from jcm.physics.speedy.speedy_terms import speedy_physics
-        self.params = provenance.describe_params(speedy_physics())["physics"]
+        self.params = provenance.describe_params(speedy_physics())
 
     def test_scheme_defaults_are_recorded_not_just_overrides(self):
         from jcm.physics.speedy.speedy_terms import ConvectionParameters
@@ -327,12 +287,11 @@ class DescribePhysicsParamsTest(unittest.TestCase):
             float(ConvectionParameters.default().entmax), places=12)
 
     def test_keys_locate_the_value_owner_first(self):
-        # A recorded key must say where the value lives, unambiguously,
-        # owner first: <term>.<variable>.<field> for a parameter block,
-        # <term>.<attribute> for a plain setting, and `physics.` for the
-        # composition itself. Note this is NOT always the Hydra override
-        # path — Hydra addresses the constructor keyword, and
-        # SpeedyConvection takes convection_params= but stores `params`.
+        # A recorded key must say where the value lives, unambiguously
+        # and owner first: <term>.<variable>.<field>. Note this is NOT
+        # always the Hydra override path — Hydra addresses the term's
+        # constructor keyword, and SpeedyConvection takes
+        # convection_params= but stores it as `params`.
         for key in self.params:
             self.assertRegex(key, r"^[A-Za-z0-9_#]+\.[A-Za-z0-9_]+")
 
@@ -349,7 +308,7 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         # A parameter block containing a bool cannot be an nnx.Param, so
         # the schemes hold those as plain Variables. Filtering on Param
         # dropped SPEEDY's whole surface-flux set even though changing
-        # e.g. cdl changes the simulation (#733 review).
+        # e.g. cdl changes the simulation.
         self.assertIn("speedy_surface_flux.surface_params.cdl", self.params)
         self.assertIn("speedy_surface_flux.surface_params.fwind0",
                       self.params)
@@ -360,7 +319,7 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
         )
-        params = provenance.describe_params(held_suarez_physics())["physics"]
+        params = provenance.describe_params(held_suarez_physics())
         for knob in ("kf", "ka", "ks", "dTy", "dThz", "sigma_b"):
             self.assertIn(f"held_suarez.{knob}", params)
         # ...while its grid caches, held as plain Variables right beside
@@ -368,180 +327,6 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         # out. This is why the plain-Variable filter is by shape.
         self.assertNotIn("held_suarez.sigma", params)
         self.assertNotIn("held_suarez.latitudes", params)
-
-    def test_constructor_controls_held_as_plain_attributes(self):
-        # Not every run-shaping setting reaches an nnx variable:
-        # UpperSponge keeps its controls as ordinary attributes and turns
-        # them into a grid-shaped _inv_tau the knob filter rejects, so two
-        # sponge timescales recorded identically (#733 review).
-        from jcm.physics.dissipation.upper_sponge import UpperSponge
-
-        def record(timescale):
-            class _One:
-                terms = [UpperSponge(n_sponge_levels=3,
-                                     sponge_timescale_s=timescale,
-                                     enspodi=2.0, damp_temperature=True)]
-
-            return provenance.describe_params(_One())
-
-        slow, fast = record(7200.0), record(3600.0)
-        self.assertEqual(
-            slow["physics"]["upper_sponge.sponge_timescale_s"], 7200.0)
-        self.assertIs(slow["physics"]["upper_sponge.damp_temperature"], True)
-        self.assertEqual(slow["physics"]["upper_sponge.enspodi"], 2.0)
-        self.assertNotEqual(provenance.params_attrs(slow),
-                            provenance.params_attrs(fast))
-
-    def test_controls_surviving_only_in_derived_form_are_distinguished(self):
-        # UpperTemperatureRelaxation stores its timescale ONLY as the
-        # grid-shaped _inv_tau profile, which the knob filter rejects, so
-        # 3600 s and 7200 s recorded identically (#733 review). The
-        # per-variable digest is what tells them apart.
-        from jcm.physics.dissipation.upper_temperature_relaxation import (
-            UpperTemperatureRelaxation,
-        )
-
-        class _Coords:
-            nodal_shape = (8, 64, 32)
-
-        def record(timescale):
-            term = UpperTemperatureRelaxation([250.0] * 8, n_levels=5,
-                                              timescale_s=timescale)
-            term.cache_coords(_Coords())
-
-            class _One:
-                terms = [term]
-
-            return provenance.describe_params(_One())["physics"]
-
-        slow, fast = record(7200.0), record(3600.0)
-        key = "upper_temperature_relaxation._inv_tau.array_digest"
-        self.assertRegex(slow[key], r"^[0-9a-f]{12}$")
-        self.assertNotEqual(slow[key], fast[key])
-        # ...and the digest discriminates rather than just churning: the
-        # variables the timescale does not feed stay equal.
-        for same in ("_t_ref", "_inv_tau_wind"):
-            self.assertEqual(
-                slow[f"upper_temperature_relaxation.{same}.array_digest"],
-                fast[f"upper_temperature_relaxation.{same}.array_digest"])
-
-    def test_derived_scalar_controls_are_recorded(self):
-        # RRTMGP derives `_aerosol_free = interval is not None`, which
-        # decides whether the companion solve runs, while its sibling
-        # `_aerosol_free_interval` collapses None and 1 to the same value.
-        # Keying on the constructor signature missed the derived name.
-        class _Derived:
-            name = "derived"
-
-            def __init__(self, interval):
-                self._interval = interval or 1
-                self._enabled = interval is not None
-
-        class _One:
-            terms = [_Derived(None)]
-
-        class _Other:
-            terms = [_Derived(1)]
-
-        off = provenance.describe_params(_One())["physics"]
-        on = provenance.describe_params(_Other())["physics"]
-        self.assertEqual(off["derived._interval"], on["derived._interval"])
-        self.assertIs(off["derived._enabled"], False)
-        self.assertIs(on["derived._enabled"], True)
-
-    def test_array_bearing_plain_attributes_are_digested(self):
-        # nnx.data leaves live on the instance rather than in the variable
-        # state: CloudsatCosp keeps its radar lookup tables as
-        # ``self._lut = nnx.data(...)``, and the scalars-only attribute
-        # walk dropped their arrays, so two different LUTs recorded
-        # identically despite changing the simulated reflectivity.
-        import jax.numpy as jnp
-
-        def record(offset):
-            class _Term:
-                name = "cosp"
-
-                def __init__(self):
-                    self._lut = {"table": jnp.arange(50.0) + offset}
-
-            class _One:
-                terms = [_Term()]
-
-            return provenance.describe_params(_One())["physics"]
-
-        first, second = record(0.0), record(1.0)
-        self.assertRegex(first["cosp._lut.array_digest"], r"^[0-9a-f]{12}$")
-        self.assertNotEqual(first["cosp._lut.array_digest"],
-                            second["cosp._lut.array_digest"])
-
-    def test_container_level_controls_are_recorded(self):
-        # ComposablePhysics owns band_config, injected into every step and
-        # read by Macv2SpAerosol for its optics, so a composition of
-        # identical terms with different band centres produces different
-        # fields. Walking only `terms` dropped the wrapper (#733 review).
-        from jcm.physics.speedy.speedy_terms import speedy_physics
-
-        params = provenance.describe_params(speedy_physics())["physics"]
-        self.assertTrue(
-            [k for k in params if k.startswith("physics.band_config.")],
-            "no container-level band_config keys recorded")
-
-    def test_stateless_terms_still_register(self):
-        # A term with no attributes and no nnx variables contributes
-        # nothing to the walk, so adding one left the record unchanged
-        # (#733 review) — even though ResetEmissionFluxes zeroes the
-        # carried emi_* accumulators, without which they grow across
-        # timesteps and every emission average is wrong.
-        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
-            ResetEmissionFluxes,
-        )
-        from jcm.physics.composable_physics import ComposablePhysics
-
-        empty = provenance.describe_params(ComposablePhysics(terms=[]))
-        one = provenance.describe_params(
-            ComposablePhysics(terms=[ResetEmissionFluxes()]))
-        self.assertNotEqual(provenance.params_attrs(empty),
-                            provenance.params_attrs(one))
-        self.assertIn("reset_emission_fluxes",
-                      one["physics"]["physics.term_order"])
-
-    def test_term_order_is_recorded(self):
-        # Order is not incidental: the ECHAM composition requires vdiff
-        # before convection so the Tiedtke closure reads the same-step
-        # moisture tendency.
-        from jcm.physics.composable_physics import ComposablePhysics
-        from jcm.physics.speedy.speedy_terms import (
-            SpeedyConvection,
-            SpeedyLargeScaleCondensation,
-        )
-
-        def order(terms):
-            return provenance.describe_params(
-                ComposablePhysics(terms=terms),
-            )["physics"]["physics.term_order"]
-
-        forward = order([SpeedyConvection(), SpeedyLargeScaleCondensation()])
-        reverse = order([SpeedyLargeScaleCondensation(), SpeedyConvection()])
-        self.assertNotEqual(forward, reverse)
-        self.assertEqual(sorted(forward.split(",")),
-                         sorted(reverse.split(",")))
-
-    def test_container_walk_does_not_duplicate_the_terms(self):
-        # nnx.state on the container recurses into its child modules, so
-        # walking the composition re-emitted every term's parameters under
-        # physics.terms.<i>. — 120 duplicate keys and 6 kB on T31L8.
-        self.assertFalse([k for k in self.params
-                          if k.startswith("physics.terms.")])
-
-    def test_framework_bookkeeping_stays_out(self):
-        # Plain attributes are taken generally, so the line held here is
-        # narrower than it once was: names with a dunder infix are flax's
-        # bookkeeping (_pytree__nodes, _object__state) and Python's name
-        # mangling, never a physical setting. Grid-derived attributes like
-        # _nodal_shape DO come along now — accepted, because excluding
-        # them means a denylist, and a denylist fails toward silence.
-        for key in self.params:
-            self.assertNotIn("__", key)
 
     def test_coordinate_caches_do_not_enter_the_record(self):
         # All eleven SPEEDY terms cache the SAME _speedy_coords. Taking
@@ -559,23 +344,21 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         class _One:
             terms = [Macv2SpAerosol()]
 
-        params = provenance.describe_params(_One())["physics"]
+        params = provenance.describe_params(_One())
         theta = params["macv2_sp_aerosol.params.theta"]
         self.assertIn("values", theta)
         self.assertEqual(theta["shape"], [2, 9])
 
-    def test_physics_without_variables_yields_no_block(self):
-        # No composition and no state at all. Note an *empty composition*
-        # is different and does record, as ``physics.term_order = ""``:
-        # "this model ran no physics terms" is a fact, and it is what
-        # distinguishes an empty composition from a bare object.
+    def test_physics_without_variables_yields_no_record(self):
+        # No composition and no state at all: nothing to say, and saying
+        # nothing must not be an error.
         class _Bare:
             pass
 
-        self.assertNotIn("physics", provenance.describe_params(_Bare()))
+        self.assertEqual(provenance.describe_params(_Bare()), {})
 
     def test_no_physics_is_not_an_error(self):
-        self.assertNotIn("physics", provenance.describe_params(None))
+        self.assertEqual(provenance.describe_params(None), {})
 
     def test_two_instances_of_one_term_both_survive(self):
         # A composition may call one scheme twice (the double-radiation
@@ -585,114 +368,9 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         class _Pair:
             terms = [SpeedyConvection(), SpeedyConvection()]
 
-        params = provenance.describe_params(_Pair())["physics"]
+        params = provenance.describe_params(_Pair())
         self.assertIn("speedy_convection.params.entmax", params)
         self.assertIn("speedy_convection#1.params.entmax", params)
-
-
-class DescribeDycoreParamsTest(unittest.TestCase):
-    def setUp(self):
-        self.params = provenance.describe_params(
-            dycore=_FakeDycore())["dycore"]
-
-    def test_scalar_knobs_and_all_scalar_containers_kept(self):
-        self.assertEqual(self.params["dt_seconds"], 900.0)
-        self.assertIs(self.params["compute_omega"], True)
-        self.assertEqual(self.params["diffusion.timescale"], 43200)
-        self.assertIsNone(self.params["diffusion.level_orders"])
-        # Private, but as much a knob as dt_seconds.
-        self.assertEqual(self.params["_sl_options.interpolation_order"],
-                         "cubic")
-
-    def test_mixed_container_keeps_its_knobs_and_drops_its_arrays(self):
-        # The #733 review: a backend may hold tuning coefficients and a
-        # grid profile in ONE container (pySES's diffusion_config), so an
-        # all-or-nothing rule on the container silently dropped the whole
-        # hyperviscosity setting.
-        # Approximate because a float32 0-d array widens to the exact
-        # float64 it represents, which is the value the model held.
-        self.assertAlmostEqual(self.params["hypervis.nu"], 2.5e-9, places=16)
-        self.assertEqual(self.params["hypervis.nu_top"], 250000.0)
-        self.assertNotIn("hypervis.nu_ramp", self.params)
-
-    def test_zero_dim_arrays_are_knobs(self):
-        # pySES stores nu/nu_top as 0-d arrays; an isinstance-scalar test
-        # would drop exactly the coefficients worth recording.
-        self.assertIsInstance(self.params["hypervis.nu"], float)
-
-    def test_scalar_grid_identity_kept_but_not_the_grid(self):
-        self.assertEqual(self.params["coords.layers"], 8)
-        self.assertNotIn("coords.latitudes", self.params)
-        self.assertNotIn("orography", self.params)
-        self.assertNotIn("step_fn", self.params)
-
-    def test_opaque_backend_objects_are_skipped(self):
-        # Their repr carries no setting, and it embeds an address that
-        # would make the record differ between two identical runs.
-        self.assertNotIn("colmap", self.params)
-        self.assertNotIn("0x", json.dumps(self.params))
-
-    def test_record_is_reproducible(self):
-        # params_sha feeds run_hash, so a second identical model must
-        # produce a byte-identical record.
-        again = provenance.describe_params(dycore=_FakeDycore())["dycore"]
-        self.assertEqual(json.dumps(self.params, sort_keys=True),
-                         json.dumps(again, sort_keys=True))
-
-    def test_frozendict_style_mappings_are_walked(self):
-        # pySES's timestep_config is a frozendict, not a dict subclass;
-        # an isinstance(value, dict) test fell through to the leaf and
-        # recorded the whole mapping's repr instead of its keys.
-        import collections.abc
-
-        class _Frozen(collections.abc.Mapping):
-            def __init__(self, d):
-                self._d = dict(d)
-
-            def __getitem__(self, k):
-                return self._d[k]
-
-            def __iter__(self):
-                return iter(self._d)
-
-            def __len__(self):
-                return len(self._d)
-
-        out = {}
-        provenance._describe_value(_Frozen({"tracer_subcycle": 3}), "ts", out)
-        self.assertEqual(out, {"ts.tracer_subcycle": 3})
-
-
-class DescribeConstantsTest(unittest.TestCase):
-    def test_live_constants_recorded(self):
-        import jcm.constants as c
-
-        params = provenance.describe_params()["constants"]
-        self.assertEqual(params["constants.grav"], c.physical_constants.grav)
-
-    def test_dycore_divergence_is_surfaced(self):
-        # jcm.constants is live for attribute-access physics but captured
-        # at construction by the dycore, so an override applied after the
-        # model was built leaves the two genuinely disagreeing. Recording
-        # only the live values would hide exactly that.
-        import jcm.constants as c
-
-        stale = c.physical_constants._replace(grav=1.62)
-        params = provenance.describe_params(
-            dycore=_FakeDycore(constants=stale))["constants"]
-        self.assertEqual(params["constants_dycore.grav"], 1.62)
-        self.assertEqual(params["constants.grav"],
-                         c.physical_constants.grav)
-        # Only the differing fields are repeated.
-        self.assertNotIn("constants_dycore.cpd", params)
-
-    def test_agreeing_constants_are_not_duplicated(self):
-        import jcm.constants as c
-
-        params = provenance.describe_params(
-            dycore=_FakeDycore(constants=c.physical_constants))["constants"]
-        self.assertFalse([k for k in params
-                          if k.startswith("constants_dycore")])
 
 
 class ParamsAttrsTest(unittest.TestCase):
@@ -701,56 +379,30 @@ class ParamsAttrsTest(unittest.TestCase):
         self.assertEqual(provenance.params_attrs(None), {})
 
     def test_values_and_hash_are_netcdf_safe_strings(self):
-        attrs = provenance.params_attrs({"physics": {"a.b.c": 1.0}})
+        attrs = provenance.params_attrs({"a.b.c": 1.0})
         for key, value in attrs.items():
             self.assertTrue(key.startswith("jcm_prov_"), key)
             self.assertIsInstance(value, str)
         self.assertRegex(attrs["jcm_prov_params_sha"], r"^[0-9a-f]{12}$")
         self.assertEqual(
-            json.loads(attrs["jcm_prov_params"])["physics"]["a.b.c"], 1.0)
+            json.loads(attrs["jcm_prov_params"])["a.b.c"], 1.0)
 
-    def test_oversized_record_stays_recoverable_from_the_file_itself(self):
-        # The #733 review: an over-cap record used to be replaced by a
-        # pointer to the .provenance.json sidecar, but to_xarray and the
-        # runners' snapshot files stamp these attributes WITHOUT writing
-        # one, so the values became unrecoverable from the only artifact
-        # that held them. Compress in place instead.
-        huge = {"physics": {f"term.params.p{i}": float(i)
-                            for i in range(20000)}}
-        attrs = provenance.params_attrs(huge)
-        self.assertRegex(attrs["jcm_prov_params_sha"], r"^[0-9a-f]{12}$")
-        self.assertNotIn("sidecar", attrs["jcm_prov_params"])
-        self.assertEqual(provenance.read_params(attrs), huge)
-
-    def test_read_params_handles_both_forms_and_absence(self):
-        small = {"physics": {"t.params.entrpen": 1e-4}}
+    def test_read_params_round_trips_and_tolerates_absence(self):
+        small = {"t.params.entrpen": 1e-4}
         self.assertEqual(
             provenance.read_params(provenance.params_attrs(small)), small)
         self.assertEqual(provenance.read_params({}), {})
-
-    def test_oversized_record_survives_a_real_netcdf_round_trip(self):
-        import xarray as xr
-
-        huge = {"physics": {f"term.params.p{i}": float(i)
-                            for i in range(20000)}}
-        ds = xr.Dataset({"t": ("x", [1.0])},
-                        attrs=provenance.params_attrs(huge))
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "big.nc"
-            ds.to_netcdf(path)
-            with xr.open_dataset(path) as back:
-                self.assertEqual(provenance.read_params(back.attrs), huge)
 
     def test_run_hash_separates_parameter_sweep_members(self):
         # Same code, same config, same inputs: without the parameters in
         # the hash every member of a sweep would share one run_hash.
         provenance.start_run()
-        a = provenance.attrs({"physics": {"t.params.entrpen": 1e-4}})
-        b = provenance.attrs({"physics": {"t.params.entrpen": 4e-4}})
+        a = provenance.attrs({"t.params.entrpen": 1e-4})
+        b = provenance.attrs({"t.params.entrpen": 4e-4})
         self.assertNotEqual(a["jcm_prov_run_hash"], b["jcm_prov_run_hash"])
 
     def test_sidecar_and_attrs_agree_on_the_run_hash(self):
-        params = {"physics": {"t.params.entrpen": 1e-4}}
+        params = {"t.params.entrpen": 1e-4}
         provenance.start_run()
         attrs = provenance.attrs(params)
         with tempfile.TemporaryDirectory() as d:
@@ -767,15 +419,13 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         from jcm.physics.speedy.speedy_terms import speedy_physics
         return speedy_physics()
 
-    def _preds(self, physics, dycore=None):
+    def _preds(self, physics):
         from jcm.predictions import ModelPredictions
-        return ModelPredictions(None, None, physics, dycore=dycore)
+        return ModelPredictions(None, None, physics)
 
     def test_parameters_recorded_on_the_predictions(self):
-        preds = self._preds(self._physics(), _FakeDycore())
-        self.assertIn("speedy_convection.params.entmax",
-                      preds.params["physics"])
-        self.assertEqual(preds.params["dycore"]["dt_seconds"], 900.0)
+        preds = self._preds(self._physics())
+        self.assertIn("speedy_convection.params.entmax", preds.params)
 
     def test_snapshot_does_not_follow_later_mutation(self):
         # Each record belongs to the predictions it was built with: a
@@ -786,21 +436,21 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
 
         physics = self._physics()
         preds = self._preds(physics)
-        before = preds.params["physics"]["speedy_convection.params.entmax"]
+        before = preds.params["speedy_convection.params.entmax"]
 
         term = next(t for t in physics.terms if t.name == "speedy_convection")
         current = term.params.get_value()
         term.params.set_value(current.replace(entmax=jnp.array(0.25)))
 
         after = self._preds(physics).params[
-            "physics"]["speedy_convection.params.entmax"]
+            "speedy_convection.params.entmax"]
         self.assertNotAlmostEqual(before, after, places=6)
         self.assertEqual(
-            preds.params["physics"]["speedy_convection.params.entmax"],
+            preds.params["speedy_convection.params.entmax"],
             before)
 
     def test_traced_record_wins_over_the_live_module(self):
-        # The #733 review's P1. `self` is a static argument to
+        # `self` is a static argument to
         # Model._run_from_state, so the parameters are constants inside
         # the compiled executable and an in-place change afterwards does
         # not reach the computation. Reading the live module at the
@@ -819,8 +469,8 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         with self.assertLogs("jcm.predictions", level="WARNING") as logged:
             preds = ModelPredictions(None, None, physics, params=traced)
         self.assertEqual(
-            preds.params["physics"]["speedy_convection.params.entmax"],
-            traced["physics"]["speedy_convection.params.entmax"])
+            preds.params["speedy_convection.params.entmax"],
+            traced["speedy_convection.params.entmax"])
         # ...and the divergence is surfaced rather than papered over: the
         # user's parameter change did nothing to the run, which is a
         # scientific error they need told about.
@@ -843,7 +493,7 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
 
         Keying the store on the static arguments let a later trace
         overwrite an earlier executable's record, so re-running the first
-        one reported the second's parameters (#733 review). The record is
+        one reported the second's parameters. The record is
         keyed by a trace id the executable itself carries back, so a cache
         hit returns the id of the executable that actually ran.
         """
@@ -858,7 +508,7 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
                       physics=self._physics(), time_step=30.0)
 
         first = model.run(save_interval=0.5, total_time=0.5)
-        original = first.params["physics"][key]
+        original = first.params[key]
 
         term = next(t for t in model.physics.terms
                     if t.name == "speedy_vertical_diffusion")
@@ -866,12 +516,12 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
             term.params.get_value().replace(trvdi=jnp.array(2.0)))
         # A different static signature, so this really is a second trace.
         second = model.run(save_interval=0.25, total_time=0.5)
-        self.assertEqual(second.params["physics"][key], 2.0)
+        self.assertEqual(second.params[key], 2.0)
 
         # Re-running the first signature reuses the FIRST executable,
         # which still holds the original value.
         again = model.run(save_interval=0.5, total_time=0.5)
-        self.assertEqual(again.params["physics"][key], original)
+        self.assertEqual(again.params[key], original)
 
     def test_capture_failure_never_breaks_a_completed_run(self):
         class _Exploding:
@@ -896,8 +546,7 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
 
         ds = _Preds(None, None, self._physics()).to_xarray()
         recorded = json.loads(ds.attrs["jcm_prov_params"])
-        self.assertIn("speedy_convection.params.entmax",
-                      recorded["physics"])
+        self.assertIn("speedy_convection.params.entmax", recorded)
 
     def test_observation_datasets_are_stamped(self):
         # An observer stream is often persisted on its own, and would
@@ -919,7 +568,7 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
             obs_t0_days=0.0, obs_dt_seconds=1800.0)
         ds = preds.observation_datasets()["stations"]
         recorded = json.loads(ds.attrs["jcm_prov_params"])
-        self.assertIn("speedy_convection.params.entmax", recorded["physics"])
+        self.assertIn("speedy_convection.params.entmax", recorded)
 
     def test_pytree_roundtrip_carries_no_model_and_says_so(self):
         import jax
