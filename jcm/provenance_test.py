@@ -497,31 +497,68 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         keyed by a trace id the executable itself carries back, so a cache
         hit returns the id of the executable that actually ran.
         """
+        import dataclasses
+
         import jax.numpy as jnp
 
+        from jcm.forcing import default_forcing, make_time_series
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         key = "speedy_vertical_diffusion.params.trvdi"
-        model = Model(coords=get_speedy_coords(layers=8,
-                                               spectral_truncation=21),
-                      physics=self._physics(), time_step=30.0)
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        model = Model(coords=coords, physics=self._physics(), time_step=30.0)
 
-        first = model.run(save_interval=0.5, total_time=0.5)
+        # The static arguments are held IDENTICAL throughout. The second
+        # run differs only in a dynamic aval: co2_vmr as a scalar
+        # (fixed-CO2) versus as a TimeSeries (historical forcing), which
+        # is a documented pair of real configurations. Varying a static
+        # argument instead would not test anything, since keying the store
+        # on the static arguments — the implementation this regresses —
+        # would separate those two on its own.
+        fixed_co2 = default_forcing(coords.horizontal)
+        co2 = float(fixed_co2.co2_vmr)
+        historical_co2 = dataclasses.replace(
+            fixed_co2,
+            co2_vmr=make_time_series(jnp.array([co2, co2]),
+                                     jnp.array([0.0, 1e12])))
+
+        first = model.run(forcing=fixed_co2, save_interval=0.5,
+                          total_time=0.5)
         original = first.params[key]
 
         term = next(t for t in model.physics.terms
                     if t.name == "speedy_vertical_diffusion")
         term.params.set_value(
             term.params.get_value().replace(trvdi=jnp.array(2.0)))
-        # A different static signature, so this really is a second trace.
-        second = model.run(save_interval=0.25, total_time=0.5)
+        second = model.run(forcing=historical_co2, save_interval=0.5,
+                           total_time=0.5)
         self.assertEqual(second.params[key], 2.0)
 
-        # Re-running the first signature reuses the FIRST executable,
-        # which still holds the original value.
-        again = model.run(save_interval=0.5, total_time=0.5)
+        # Re-running the first forcing reuses the FIRST executable, which
+        # still holds the original value.
+        again = model.run(forcing=fixed_co2, save_interval=0.5,
+                          total_time=0.5)
         self.assertEqual(again.params[key], original)
+
+    def test_traced_parameter_records_are_bounded(self):
+        # A model that keeps meeting new input shapes retraces
+        # indefinitely, and jax.clear_caches() cannot reach this dict, so
+        # an unbounded store would grow for the model's lifetime.
+        from jcm import model as model_module
+        from jcm.model import Model
+
+        cap = model_module._MAX_TRACED_PARAM_RECORDS
+        model = Model.__new__(Model)
+        model._traced_params = {}
+        for trace_id in range(cap + 5):
+            model._remember_traced_params(trace_id, {"a.b.c": trace_id})
+
+        self.assertEqual(len(model._traced_params), cap)
+        # The oldest go, the newest stay: a record is never replaced by a
+        # different executable's values, only by nothing.
+        self.assertNotIn(0, model._traced_params)
+        self.assertEqual(model._traced_params[cap + 4], {"a.b.c": cap + 4})
 
     def test_capture_failure_never_breaks_a_completed_run(self):
         class _Exploding:

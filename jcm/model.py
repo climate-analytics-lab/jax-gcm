@@ -39,6 +39,12 @@ from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 logger = logging.getLogger(__name__)
 
+#: Per-trace parameter records kept for provenance (#732). A model
+#: retraces once per distinct combination of static arguments and dynamic
+#: avals, which is a handful in normal use; the cap bounds the memory a
+#: long-lived model can accumulate. Each record is a few kB.
+_MAX_TRACED_PARAM_RECORDS = 64
+
 
 # ---------------------------------------------------------------------------
 # Explicit-mesh (multi-device) support
@@ -917,6 +923,20 @@ class Model:
 
         return _integrate_fn
 
+    def _remember_traced_params(self, trace_id: int, record: dict) -> None:
+        """Store one trace's parameter record, oldest evicted past the cap.
+
+        Bounded because nothing else here can be: a model that keeps
+        meeting new input shapes retraces indefinitely, and
+        ``jax.clear_caches()`` does not reach this dict (#733 review).
+        Evicting the oldest degrades that executable's record to empty if
+        it is ever run again, which is the safe direction — a missing
+        record, never another executable's values.
+        """
+        self._traced_params[trace_id] = record
+        while len(self._traced_params) > _MAX_TRACED_PARAM_RECORDS:
+            self._traced_params.pop(next(iter(self._traced_params)))
+
     @partial(jax.jit, static_argnums=(0, 4, 5, 6, 8, 9))  # Note: changing fields assumed static won't propagate.
     def _run_from_state(self,
                         initial_state,
@@ -951,8 +971,8 @@ class Model:
         trace_id = self._trace_counter
         self._trace_counter += 1
         try:
-            self._traced_params[trace_id] = provenance.describe_params(
-                self.physics)
+            self._remember_traced_params(
+                trace_id, provenance.describe_params(self.physics))
         except Exception:  # noqa: BLE001 — provenance never fails a run
             logger.warning("provenance: trace-time parameter capture failed",
                            exc_info=True)
