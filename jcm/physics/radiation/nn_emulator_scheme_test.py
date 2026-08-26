@@ -238,32 +238,56 @@ class TotalCloudCoverTest(unittest.TestCase):
     cloud (PR #730 review).
     """
 
-    def test_maximum_random_limits(self):
-        from jcm.physics.radiation.nn_emulator_scheme import (
-            _max_random_total_cover,
-        )
+    def test_overlap_rule_limits(self):
+        from jcm.physics.radiation.mcica import expected_total_cover
 
+        dz = jnp.full((NLEV,), 500.0)
         clear = jnp.zeros((NLEV,))
-        self.assertAlmostEqual(float(_max_random_total_cover(clear)), 0.0)
         overcast = jnp.zeros((NLEV,)).at[3].set(1.0)
-        self.assertAlmostEqual(
-            float(_max_random_total_cover(overcast)), 1.0, places=5)
         single = jnp.zeros((NLEV,)).at[3].set(0.4)
-        self.assertAlmostEqual(
-            float(_max_random_total_cover(single)), 0.4, places=6)
-        # Two separated (random-overlap) half-cover layers combine to 0.75;
-        # two ADJACENT identical layers are maximally overlapped -> 0.5.
         separated = jnp.zeros((NLEV,)).at[2].set(0.5).at[5].set(0.5)
-        self.assertAlmostEqual(
-            float(_max_random_total_cover(separated)), 0.75, places=6)
         adjacent = jnp.zeros((NLEV,)).at[2].set(0.5).at[3].set(0.5)
+        for rule in ("random", "maximum_random", "exponential"):
+            with self.subTest(rule=rule):
+                cov = lambda cf: float(  # noqa: E731
+                    expected_total_cover(cf, dz, rule, 2.0))
+                self.assertAlmostEqual(cov(clear), 0.0)
+                self.assertAlmostEqual(cov(overcast), 1.0, places=5)
+                self.assertAlmostEqual(cov(single), 0.4, places=6)
+        # Rule-dependent combinations: two ADJACENT half-cover layers.
+        mr = float(expected_total_cover(adjacent, dz, "maximum_random", 2.0))
+        self.assertAlmostEqual(mr, 0.5, places=6)
+        rn = float(expected_total_cover(adjacent, dz, "random", 2.0))
+        self.assertAlmostEqual(rn, 0.75, places=6)
+        # Exponential sits strictly between max (0.5) and random (0.75),
+        # closer to max for L >> dz and to random for L << dz.
+        e_long = float(expected_total_cover(adjacent, dz, "exponential", 50.0))
+        e_short = float(expected_total_cover(adjacent, dz, "exponential", 0.05))
+        self.assertLess(0.5, e_long)
+        self.assertLess(e_long, e_short)
+        self.assertLess(e_short, 0.7500001)
+        self.assertAlmostEqual(e_long, 0.5, places=2)
+        self.assertAlmostEqual(e_short, 0.75, places=2)
+        # SEPARATED banks decorrelate across the clear gap under
+        # maximum_random -> the random combination.
         self.assertAlmostEqual(
-            float(_max_random_total_cover(adjacent)), 0.5, places=6)
+            float(expected_total_cover(separated, dz, "maximum_random", 2.0)),
+            0.75, places=6)
 
     def test_scheme_publishes_the_derived_cover(self):
         _, diag = _run()
-        # The fixture is 50% cover at every level -> maximum overlap 0.5.
-        self.assertAlmostEqual(float(diag.total_cloud_cover), 0.5, places=5)
+        # The fixture is 50% cover at every level with 500 m layers and the
+        # default exponential overlap (L = 2 km): cover sits strictly
+        # between the maximum (0.5) and random (1 - 0.5^47) limits.
+        got = float(diag.total_cloud_cover)
+        self.assertGreater(got, 0.5)
+        self.assertLess(got, 1.0 - 0.5 ** NLEV + 1e-6)
+        # And matches the shared closed form for the same configuration.
+        from jcm.physics.radiation.mcica import expected_total_cover
+        want = float(expected_total_cover(
+            jnp.full((NLEV,), 0.5), jnp.full((NLEV,), 500.0),
+            "exponential", 2.0))
+        self.assertAlmostEqual(got, want, places=5)
 
 
 class NegativeHumidityTest(unittest.TestCase):

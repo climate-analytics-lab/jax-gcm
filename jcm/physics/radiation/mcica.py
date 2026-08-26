@@ -226,3 +226,41 @@ def column_total_cover(
             lambda: c_max,       # 2 exponential (max approximation)
         ],
     )
+
+
+def expected_total_cover(
+    cloud_fraction: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    overlap: _OverlapRule = "exponential",
+    decorrelation_km: float = 2.0,
+) -> jnp.ndarray:
+    """Closed-form expectation of the sub-column total cloud cover.
+
+    The diagnostic counterpart of :func:`generate_subcolumns`: it uses the
+    SAME per-interface correlation ``_alpha_from_overlap`` produces for the
+    configured rule, so a scheme that cannot afford sub-column draws (the
+    NN emulator) publishes the cover the McICA sampler would report in
+    expectation rather than a different overlap assumption's answer::
+
+        C = 1 - (1 - cf_0) * prod_k [ a_k (1 - max(cf_k, cf_{k-1})) /
+                                          (1 - cf_{k-1})
+                                      + (1 - a_k)(1 - cf_k) ]
+
+    a = 0 recovers the random product, a = 1 the maximum-random product;
+    exponential blends per interface via ``exp(-dz/L)``. The blend
+    conditions each layer on its neighbour rather than on the full rank
+    segment, the standard closed-form (Hogan & Illingworth 2000 style)
+    approximation of the chain's exact expectation — exact at a = 0 and
+    a = 1, and within a percent of sampled cover for realistic profiles.
+
+    Unlike :func:`column_total_cover` (the grey beam-split's deliberate
+    ``max`` approximation), this is for DIAGNOSTIC output (CMIP ``clt``).
+    """
+    cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    alpha = _alpha_from_overlap(cf, layer_thickness, overlap, decorrelation_km)
+    cf_prev = cf[:-1]
+    maxrand = (1.0 - jnp.maximum(cf[1:], cf_prev)) / jnp.maximum(
+        1.0 - cf_prev, 1e-6,
+    )
+    factors = alpha * maxrand + (1.0 - alpha) * (1.0 - cf[1:])
+    return 1.0 - (1.0 - cf[0]) * jnp.prod(factors, axis=0)
