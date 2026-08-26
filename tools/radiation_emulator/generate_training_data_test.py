@@ -328,6 +328,44 @@ class SweepCoverageTest(unittest.TestCase):
         self.assertLess(t[:, k_trop].mean(), t[:, k_strat].mean())
 
 
+class FileScheduleTest(unittest.TestCase):
+    """Every source file must contribute, even at batch_size > per-file quota.
+
+    The unclamped batch loop overshot several quota boundaries per batch and
+    skipped the files in between — 1024 columns from 16 files at 256-column
+    batches sampled only every fourth file (PR #730 review).
+    """
+
+    def test_every_file_is_sampled(self):
+        from unittest import mock
+        import tools.radiation_emulator.generate_training_data as g
+
+        files_used = []
+
+        def fake_source(n, nlev, rng, *bands, state_file=None,
+                        clip_stats=None):
+            files_used.append(state_file)
+            return {"x": np.zeros((n, 1))}
+
+        with mock.patch.dict(g.COLUMN_SOURCES, {"fake": fake_source}), \
+             mock.patch.object(g, "expand_state_files",
+                               lambda sf: [f"f{i}" for i in range(16)]), \
+             mock.patch.object(g, "make_labeller", lambda seed: None), \
+             mock.patch.object(g, "_finalize_batch",
+                               lambda b, *a, **k: b), \
+             mock.patch.object(g, "label_batch",
+                               lambda b, *a, **k: ({"y": b["x"]}, None)), \
+             mock.patch.object(
+                 g, "label_quality_mask",
+                 lambda b, lab: (np.ones(len(b["x"]), dtype=bool), {})):
+            # 1024 columns / 16 files = 64-column quotas, batch 256: the
+            # unclamped loop visited only files 0, 4, 8, 12.
+            g.generate("fake", 1024, 4, 1, 0, 256, 0, state_file="pat")
+
+        self.assertEqual(sorted(set(files_used)),
+                         sorted(f"f{i}" for i in range(16)))
+
+
 class LabelTest(unittest.TestCase):
     """RRTMGP-driven label properties."""
 

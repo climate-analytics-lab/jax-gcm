@@ -1263,7 +1263,11 @@ def generate(source, n_columns, nlev, n_seeds, base_seed, batch_size,
     while n_kept < n_columns:
         while file_index + 1 < len(files) and n_kept >= quotas[file_index]:
             file_index += 1
-        n_here = min(batch_size, n_columns - n_kept)
+        # Clamp to the current file's remaining quota, or a batch that
+        # overshoots several boundaries at once would skip the files in
+        # between (bites when batch_size > the per-file share).
+        n_here = min(batch_size, n_columns - n_kept,
+                     max(quotas[file_index] - n_kept, 1))
         raw = COLUMN_SOURCES[source](
             n_here, nlev, rng, n_bnd_sw, n_bnd_lw, sw_centers, lw_centers,
             state_file=files[file_index], clip_stats=clip_stats,

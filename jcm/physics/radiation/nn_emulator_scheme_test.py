@@ -230,6 +230,42 @@ class DiagnosticsContractTest(unittest.TestCase):
         self.assertNotIn("radiation.sw_flux_up_clear", keys)
 
 
+class TotalCloudCoverTest(unittest.TestCase):
+    """The published cover must reflect the cf profile, not a placeholder 0.
+
+    aerocom_cmor maps ``radiation.total_cloud_cover`` straight to CMIP
+    ``clt``, so the old hard-coded zero reported a clear sky under full
+    cloud (PR #730 review).
+    """
+
+    def test_maximum_random_limits(self):
+        from jcm.physics.radiation.nn_emulator_scheme import (
+            _max_random_total_cover,
+        )
+
+        clear = jnp.zeros((NLEV,))
+        self.assertAlmostEqual(float(_max_random_total_cover(clear)), 0.0)
+        overcast = jnp.zeros((NLEV,)).at[3].set(1.0)
+        self.assertAlmostEqual(
+            float(_max_random_total_cover(overcast)), 1.0, places=5)
+        single = jnp.zeros((NLEV,)).at[3].set(0.4)
+        self.assertAlmostEqual(
+            float(_max_random_total_cover(single)), 0.4, places=6)
+        # Two separated (random-overlap) half-cover layers combine to 0.75;
+        # two ADJACENT identical layers are maximally overlapped -> 0.5.
+        separated = jnp.zeros((NLEV,)).at[2].set(0.5).at[5].set(0.5)
+        self.assertAlmostEqual(
+            float(_max_random_total_cover(separated)), 0.75, places=6)
+        adjacent = jnp.zeros((NLEV,)).at[2].set(0.5).at[3].set(0.5)
+        self.assertAlmostEqual(
+            float(_max_random_total_cover(adjacent)), 0.5, places=6)
+
+    def test_scheme_publishes_the_derived_cover(self):
+        _, diag = _run()
+        # The fixture is 50% cover at every level -> maximum overlap 0.5.
+        self.assertAlmostEqual(float(diag.total_cloud_cover), 0.5, places=5)
+
+
 class NegativeHumidityTest(unittest.TestCase):
     """Regression for jax-gcm#702 defect 3.
 

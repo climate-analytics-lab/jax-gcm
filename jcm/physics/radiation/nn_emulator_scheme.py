@@ -41,6 +41,27 @@ from jcm.physics.radiation.rrtmgp import _MAX_IN_CLOUD_CONDENSATE
 import jcm.constants as c
 
 
+def _max_random_total_cover(cloud_fraction: jnp.ndarray) -> jnp.ndarray:
+    """Analytic maximum-random total column cover from a cf profile.
+
+    The standard ECHAM diagnostic::
+
+        C = 1 - prod_k (1 - max(cf_k, cf_{k-1})) / (1 - cf_{k-1})
+
+    Adjacency-only, so vertical orientation does not matter. This is the
+    expectation of the McICA sub-column draw RRTMGP's ``total_cloud_cover``
+    reports, without the sampling noise.
+    """
+    cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    cf_prev = jnp.concatenate([cf[:1] * 0.0, cf[:-1]])
+    # An overcast layer above drives the ratio to 0/eps -> product 0 ->
+    # cover 1, which is the correct limit.
+    ratio = (1.0 - jnp.maximum(cf, cf_prev)) / jnp.maximum(
+        1.0 - cf_prev, 1e-6,
+    )
+    return 1.0 - jnp.prod(ratio, axis=0)
+
+
 def radiation_scheme_emulated(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -234,8 +255,15 @@ def radiation_scheme_emulated(
         noa_frac_toa_lw_up_clear=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear_noa=jnp.zeros_like(sw_flux_up[0]),
         toa_lw_up_clear=lw_flux_up_clear[0],
-        # No sub-column machinery in the emulator: McICA cloud cover is 0.
-        total_cloud_cover=jnp.zeros_like(sw_flux_up[0]),
+        # No sub-column machinery here, so column cover is the ANALYTIC
+        # maximum-random total — the expectation of the McICA draw RRTMGP
+        # reports and the overlap its labels assume. Publishing the old
+        # placeholder 0 fed aerocom_cmor's clt a clear sky under full
+        # cloud (PR #730 review).
+        total_cloud_cover=jnp.broadcast_to(
+            _max_random_total_cover(cloud_fraction),
+            jnp.shape(sw_flux_up[0]),
+        ),
         # ``step`` is owned by the enclosing ``NNEmulatorRadiation``
         # carry — the standalone scheme emits 0 and the term bumps it
         # after its compute-vs-cache cond.
