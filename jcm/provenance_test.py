@@ -354,6 +354,38 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         self.assertNotIn("held_suarez.sigma", params)
         self.assertNotIn("held_suarez.latitudes", params)
 
+    def test_constructor_controls_held_as_plain_attributes(self):
+        # Not every run-shaping setting reaches an nnx variable:
+        # UpperSponge keeps its controls as ordinary attributes and turns
+        # them into a grid-shaped _inv_tau the knob filter rejects, so two
+        # sponge timescales recorded identically (#733 review).
+        from jcm.physics.dissipation.upper_sponge import UpperSponge
+
+        def record(timescale):
+            class _One:
+                terms = [UpperSponge(n_sponge_levels=3,
+                                     sponge_timescale_s=timescale,
+                                     enspodi=2.0, damp_temperature=True)]
+
+            return provenance.describe_params(_One())
+
+        slow, fast = record(7200.0), record(3600.0)
+        self.assertEqual(
+            slow["physics"]["upper_sponge.sponge_timescale_s"], 7200.0)
+        self.assertIs(slow["physics"]["upper_sponge.damp_temperature"], True)
+        self.assertEqual(slow["physics"]["upper_sponge.enspodi"], 2.0)
+        self.assertNotEqual(provenance.params_attrs(slow),
+                            provenance.params_attrs(fast))
+
+    def test_constructor_controls_do_not_pull_in_nnx_bookkeeping(self):
+        # Keying on __init__ rather than scanning attributes is what keeps
+        # _pytree__nodes, _coords_cached and _nodal_shape out: nobody
+        # passed those in.
+        for key in self.params:
+            for internal in ("_pytree__", "_coords_cached", "_nodal_shape",
+                             "_object__"):
+                self.assertNotIn(internal, key)
+
     def test_coordinate_caches_do_not_enter_the_record(self):
         # All eleven SPEEDY terms cache the SAME _speedy_coords. Taking
         # plain Variables wholesale put eleven identical copies of the

@@ -309,6 +309,48 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0,
     out[prefix] = _describe_leaf(value)
 
 
+def _describe_term_settings(term, name: str, out: dict) -> None:
+    """Record a term's constructor controls held as plain attributes.
+
+    Not every run-shaping setting reaches an nnx variable (#733 review).
+    ``UpperSponge`` keeps ``sponge_timescale_s``, ``enspodi``,
+    ``damp_temperature`` and ``target_T_K`` as ordinary attributes and
+    turns them into a grid-shaped ``_inv_tau`` profile that the
+    knob-shape filter then (correctly) rejects, so a 3600 s and a 7200 s
+    sponge recorded identically. RRTMGP's ``_base_seed`` and
+    ``_compute_cre`` are the same shape of omission.
+
+    The discriminator is the term's own ``__init__`` signature rather
+    than a scan of its attributes: a constructor parameter *is* the set
+    of choices a caller made, so this picks up a newly added control with
+    no maintenance, while the caches and the nnx bookkeeping
+    (``_pytree__nodes``, ``_coords_cached``, ``_nodal_shape``) are
+    excluded because nobody passed them in. Each name is looked up as
+    itself and then underscore-prefixed, which is where the schemes
+    actually put them. Values already held in an nnx variable are skipped
+    here; the variable walk has them.
+    """
+    import inspect
+
+    try:
+        signature = inspect.signature(type(term).__init__)
+        attributes = vars(term)
+    except (TypeError, ValueError):
+        return
+    for parameter in list(signature.parameters)[1:]:  # skip ``self``
+        if parameter in ("args", "kwargs"):
+            continue
+        for attribute in (parameter, f"_{parameter}"):
+            if attribute not in attributes:
+                continue
+            value = attributes[attribute]
+            if type(value).__module__.startswith("flax."):
+                break  # an nnx variable; the variable walk records it
+            _describe_value(value, f"{name}.{attribute}", out,
+                            scalars_only=True)
+            break
+
+
 def _describe_physics_params(physics) -> dict:
     """Every ``nnx.Variable`` on every physics term, by dotted name.
 
@@ -382,6 +424,7 @@ def _describe_physics_params(physics) -> dict:
             name = f"{name}#{seen[name]}"
         else:
             seen[name] = 0
+        _describe_term_settings(term, name, out)
         try:
             # to_flat_state, not the State.flat_state() method: the latter
             # is deprecated and warns once per call. Present since flax

@@ -36,6 +36,15 @@ Unreleased — provenance records the parameters
   larger than 64 kB is carried compressed in ``jcm_prov_params_zlib`` on
   the same file rather than dropped; ``jemcal``-style readers should use
   ``jcm.provenance.read_params(ds.attrs)``, which handles both forms.
+- A term's constructor controls are recorded even when they never reach
+  an nnx variable, keyed off its ``__init__`` signature.
+  ``UpperSponge`` keeps ``sponge_timescale_s``, ``enspodi``,
+  ``damp_temperature`` and ``target_T_K`` as ordinary attributes and
+  turns them into a grid-shaped profile, so a 3600 s and a 7200 s sponge
+  previously recorded identically; RRTMGP's ``base_seed`` and
+  ``compute_cre`` were the same omission. Keying on the signature rather
+  than scanning attributes keeps the coordinate caches and the nnx
+  bookkeeping out, since nobody passed those in.
 - The dycore filter is per *leaf*, not per attribute, so a backend that
   mixes tuning knobs and grid data in one container still has its knobs
   recorded. This matters for pySES, whose ``diffusion_config`` holds
