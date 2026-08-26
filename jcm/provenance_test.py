@@ -447,6 +447,53 @@ class DescribePhysicsParamsTest(unittest.TestCase):
             [k for k in params if k.startswith("physics.band_config.")],
             "no container-level band_config keys recorded")
 
+    def test_stateless_terms_still_register(self):
+        # A term with no attributes and no nnx variables contributes
+        # nothing to the walk, so adding one left the record unchanged
+        # (#733 review) — even though ResetEmissionFluxes zeroes the
+        # carried emi_* accumulators, without which they grow across
+        # timesteps and every emission average is wrong.
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            ResetEmissionFluxes,
+        )
+        from jcm.physics.composable_physics import ComposablePhysics
+
+        empty = provenance.describe_params(ComposablePhysics(terms=[]))
+        one = provenance.describe_params(
+            ComposablePhysics(terms=[ResetEmissionFluxes()]))
+        self.assertNotEqual(provenance.params_attrs(empty),
+                            provenance.params_attrs(one))
+        self.assertIn("reset_emission_fluxes",
+                      one["physics"]["physics.term_order"])
+
+    def test_term_order_is_recorded(self):
+        # Order is not incidental: the ECHAM composition requires vdiff
+        # before convection so the Tiedtke closure reads the same-step
+        # moisture tendency.
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedyConvection,
+            SpeedyLargeScaleCondensation,
+        )
+
+        def order(terms):
+            return provenance.describe_params(
+                ComposablePhysics(terms=terms),
+            )["physics"]["physics.term_order"]
+
+        forward = order([SpeedyConvection(), SpeedyLargeScaleCondensation()])
+        reverse = order([SpeedyLargeScaleCondensation(), SpeedyConvection()])
+        self.assertNotEqual(forward, reverse)
+        self.assertEqual(sorted(forward.split(",")),
+                         sorted(reverse.split(",")))
+
+    def test_container_walk_does_not_duplicate_the_terms(self):
+        # nnx.state on the container recurses into its child modules, so
+        # walking the composition re-emitted every term's parameters under
+        # physics.terms.<i>. — 120 duplicate keys and 6 kB on T31L8.
+        self.assertFalse([k for k in self.params
+                          if k.startswith("physics.terms.")])
+
     def test_framework_bookkeeping_stays_out(self):
         # Plain attributes are taken generally, so the line held here is
         # narrower than it once was: names with a dunder infix are flax's
@@ -477,8 +524,12 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         self.assertIsInstance(params["macv2_sp_aerosol.params.theta"], list)
 
     def test_physics_without_variables_yields_no_block(self):
+        # No composition and no state at all. Note an *empty composition*
+        # is different and does record, as ``physics.term_order = ""``:
+        # "this model ran no physics terms" is a fact, and it is what
+        # distinguishes an empty composition from a bare object.
         class _Bare:
-            terms = []
+            pass
 
         self.assertNotIn("physics", provenance.describe_params(_Bare()))
 

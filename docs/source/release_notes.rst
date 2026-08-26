@@ -49,6 +49,14 @@ Unreleased — provenance records the parameters
   7200 s recorded identically until the digest distinguished them. It is
   aggregated per variable rather than per array leaf, which is what keeps
   it affordable where several terms share one cached coordinate object.
+- The term roster is recorded in order as ``physics.term_order``. A term
+  with no attributes and no nnx variables contributes nothing to the
+  walk, so adding or removing one left the record unchanged even though
+  it changes every step (``ResetEmissionFluxes`` is stateless and zeroes
+  the carried ``emi_*`` accumulators). Order belongs in the record for
+  the same reason it is fixed in the configs: the ECHAM composition
+  requires vdiff before convection so the Tiedtke closure reads the
+  same-step moisture tendency.
 - The composition itself is recorded, not only its terms.
   ``ComposablePhysics.band_config`` is injected into every step and read
   by ``Macv2SpAerosol`` for its optics, so two compositions of identical

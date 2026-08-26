@@ -363,7 +363,7 @@ def _aggregate_digest(value) -> str | None:
     return digest.hexdigest()[:12] if found else None
 
 
-def _describe_term_settings(term, name: str, out: dict) -> None:
+def _describe_term_settings(term, name: str, out: dict, skip=()) -> None:
     """Record a term's plain-attribute settings (#733 review).
 
     Not every run-shaping setting reaches an nnx variable. ``UpperSponge``
@@ -395,6 +395,8 @@ def _describe_term_settings(term, name: str, out: dict) -> None:
             continue  # flax bookkeeping / name mangling, not a setting
         if type(value).__module__.startswith("flax."):
             continue  # an nnx variable; the variable walk records it
+        if any(value is skipped for skipped in skip):
+            continue
         _describe_value(value, f"{name}.{attribute}", out, scalars_only=True)
 
 
@@ -469,6 +471,7 @@ def _describe_physics_params(physics) -> dict:
         [(physics, None)]
     out: dict = {}
     seen: dict = {}
+    roster: list = []
     for term, forced_name in modules:
         name = forced_name or getattr(term, "name", None) or \
             type(term).__name__
@@ -479,7 +482,13 @@ def _describe_physics_params(physics) -> dict:
             name = f"{name}#{seen[name]}"
         else:
             seen[name] = 0
-        _describe_term_settings(term, name, out)
+        if forced_name is None:
+            roster.append(name)
+        # The container holds the terms; walking that attribute would
+        # re-record every term's parameters a second time under
+        # ``physics.terms.<i>.``. They get walked in their own right.
+        _describe_term_settings(term, name, out,
+                                skip=() if terms is None else (terms,))
         try:
             # to_flat_state, not the State.flat_state() method: the latter
             # is deprecated and warns once per call. Present since flax
@@ -492,6 +501,13 @@ def _describe_physics_params(physics) -> dict:
         except Exception:  # noqa: BLE001 — a non-nnx term has no params
             continue
         for path, var in flat:
+            # nnx.state on the container recurses into its child modules,
+            # so the composition's own walk yields every term's variables
+            # again under ``physics.terms.<i>.``. Each term is walked in
+            # its own right; a second copy under a positional key is just
+            # bulk that moves whenever the composition is reordered.
+            if forced_name is not None and path and path[0] == "terms":
+                continue
             key = ".".join(str(p) for p in (name, *path))
             value = var.get_value()
             if tuple(path) in declared:
@@ -506,6 +522,21 @@ def _describe_physics_params(physics) -> dict:
             digest = _aggregate_digest(value)
             if digest is not None:
                 out[f"{key}.array_digest"] = digest
+    if terms is not None:
+        # The roster, in order, as one entry (#733 review). A term with no
+        # attributes and no nnx variables contributes nothing to the walk
+        # above, so adding or removing one left the record unchanged even
+        # though it changes every step: ResetEmissionFluxes is stateless
+        # and zeroes the carried emi_* accumulators, without which they
+        # accumulate across timesteps and every emission average is wrong.
+        # Order is part of it, not incidental — the ECHAM composition
+        # requires vdiff before convection so the Tiedtke closure reads
+        # the same-step moisture tendency.
+        #
+        # A joined string rather than a list: a list long enough to pass
+        # the array cap would be summarized to a count, which is exactly
+        # the information this key exists to carry.
+        out["physics.term_order"] = ",".join(roster)
     return out
 
 
