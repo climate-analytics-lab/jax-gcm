@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from jcm import provenance
 
 
@@ -214,11 +216,16 @@ class DescribeLeafTest(unittest.TestCase):
         import jax.numpy as jnp
 
         small = provenance._describe_leaf(jnp.arange(5.0))
-        self.assertEqual(small, [0.0, 1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(small["values"], [0.0, 1.0, 2.0, 3.0, 4.0])
+        # Shape and dtype ride along with the values, so a (2, 3) is not
+        # confusable with a (3, 2), nor float32 with float64.
+        self.assertEqual(small["shape"], [5])
+        self.assertEqual(small["dtype"], "float32")
         n = provenance._PARAM_ARRAY_MAX_ELEMS + 1
         big = provenance._describe_leaf(jnp.arange(float(n)))
         self.assertEqual(big["shape"], [n])
         self.assertEqual(big["dtype"], "float32")
+        self.assertNotIn("values", big)
         # The hash has to separate one weight set from another, or a
         # summarized parameter is no record at all.
         other = provenance._describe_leaf(jnp.arange(float(n)) + 1.0)
@@ -521,7 +528,9 @@ class DescribePhysicsParamsTest(unittest.TestCase):
             terms = [Macv2SpAerosol()]
 
         params = provenance.describe_params(_One())["physics"]
-        self.assertIsInstance(params["macv2_sp_aerosol.params.theta"], list)
+        theta = params["macv2_sp_aerosol.params.theta"]
+        self.assertIn("values", theta)
+        self.assertEqual(theta["shape"], [2, 9])
 
     def test_physics_without_variables_yields_no_block(self):
         # No composition and no state at all. Note an *empty composition*
@@ -795,6 +804,42 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         preds = ModelPredictions(None, None, physics, params=traced)
         self.assertEqual(preds.params, traced)
         self.assertNotIn("live_parameters_differ_from_compiled", preds.params)
+
+    @pytest.mark.slow
+    def test_each_executable_keeps_its_own_traced_record(self):
+        """One static signature can own several compiled executables.
+
+        Keying the store on the static arguments let a later trace
+        overwrite an earlier executable's record, so re-running the first
+        one reported the second's parameters (#733 review). The record is
+        keyed by a trace id the executable itself carries back, so a cache
+        hit returns the id of the executable that actually ran.
+        """
+        import jax.numpy as jnp
+
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        key = "speedy_vertical_diffusion.params.trvdi"
+        model = Model(coords=get_speedy_coords(layers=8,
+                                               spectral_truncation=21),
+                      physics=self._physics(), time_step=30.0)
+
+        first = model.run(save_interval=0.5, total_time=0.5)
+        original = first.params["physics"][key]
+
+        term = next(t for t in model.physics.terms
+                    if t.name == "speedy_vertical_diffusion")
+        term.params.set_value(
+            term.params.get_value().replace(trvdi=jnp.array(2.0)))
+        # A different static signature, so this really is a second trace.
+        second = model.run(save_interval=0.25, total_time=0.5)
+        self.assertEqual(second.params["physics"][key], 2.0)
+
+        # Re-running the first signature reuses the FIRST executable,
+        # which still holds the original value.
+        again = model.run(save_interval=0.5, total_time=0.5)
+        self.assertEqual(again.params["physics"][key], original)
 
     def test_capture_failure_never_breaks_a_completed_run(self):
         class _Exploding:

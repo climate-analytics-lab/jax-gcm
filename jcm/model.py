@@ -460,10 +460,11 @@ class Model:
         self.dt_si = (time_step * units.minute).to(units.second)
 
         self.observers = tuple(observers)
-        # Parameters as bound into each compiled trace, keyed by the static
-        # signature that selects the executable (#733 review). See the
+        # Parameters as bound into each compiled trace, keyed by a trace
+        # id that the executable itself carries back (#733 review). See the
         # capture in ``_run_from_state`` for why the live values will not do.
         self._traced_params: dict = {}
+        self._trace_counter: int = 0
         if len({obs.name for obs in self.observers}) != len(self.observers):
             raise ValueError("Observer names must be unique.")
         if self.observers:
@@ -949,11 +950,11 @@ class Model:
         # wrong record. On a cache hit this line does not re-run, which is
         # exactly right: the reused executable still holds the parameters
         # captured at its own trace.
+        trace_id = self._trace_counter
+        self._trace_counter += 1
         try:
-            self._traced_params[
-                (save_interval, total_time, output_averages,
-                 snapshot_stride, snapshot_fields)
-            ] = provenance.describe_params(self.physics, self.dycore)
+            self._traced_params[trace_id] = provenance.describe_params(
+                self.physics, self.dycore)
         except Exception:  # noqa: BLE001 — provenance never fails a run
             logger.warning("provenance: trace-time parameter capture failed",
                            exc_info=True)
@@ -985,8 +986,15 @@ class Model:
         (final_dycore_state, final_physics_state, predictions, observations,
          snapshots) = integrate(initial_state, initial_physics_state)
 
+        # The id rides back as a traced constant, so a cache hit returns
+        # the id of the executable that actually ran. Keying the store on
+        # the static arguments instead was not enough: one static
+        # signature can own several executables (a forcing of a different
+        # shape or dtype retraces), and the later trace overwrote the
+        # earlier one's record.
         return (final_dycore_state, final_physics_state,
-                predictions.replace(times=times), observations, snapshots)
+                predictions.replace(times=times), observations, snapshots,
+                jnp.int32(trace_id))
 
     def run_from_state(self,
                        initial_state,
@@ -1089,7 +1097,7 @@ class Model:
             )
 
         (final_dycore_state, final_physics_state, predictions, observations,
-         snapshots) = self._run_from_state(
+         snapshots, trace_id) = self._run_from_state(
                 initial_state, initial_physics_state, forcing,
                 save_interval_days, total_time_days,
                 output_averages, observer_xs,
@@ -1101,9 +1109,7 @@ class Model:
             ModelPredictions(
                 predictions, self.coords, self.physics,
                 dycore=self.dycore,
-                params=self._traced_params.get(
-                    (save_interval_days, total_time_days, output_averages,
-                     snapshot_stride, tuple(snapshot_variables))),
+                params=self._traced_params.get(int(trace_id)),
                 observations=observations,
                 observers=self.observers,
                 obs_t0_days=obs_t0_days,

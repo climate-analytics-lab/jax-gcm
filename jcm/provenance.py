@@ -223,11 +223,18 @@ def _describe_leaf(value):
         # represents (0.1 -> 0.10000000149011612). That is the number the
         # model used, so record it rather than a prettier rounding.
         return arr.item()
+    # Shape and dtype travel with the values, not only with the hashed
+    # summary (#733 review). A bare flat list makes a (2, 3) parameter
+    # identical to a (3, 2) one with the same row-major bytes, and a
+    # float32 vector identical to its float64 twin — both of which drive
+    # different computations.
+    described = {"shape": list(arr.shape), "dtype": str(arr.dtype)}
     if arr.size <= _PARAM_ARRAY_MAX_ELEMS:
-        return arr.ravel().tolist()
-    return {"shape": list(arr.shape), "dtype": str(arr.dtype),
-            "sha256": hashlib.sha256(
-                np.ascontiguousarray(arr).tobytes()).hexdigest()[:12]}
+        described["values"] = arr.ravel().tolist()
+    else:
+        described["sha256"] = hashlib.sha256(
+            np.ascontiguousarray(arr).tobytes()).hexdigest()[:12]
+    return described
 
 
 def _is_scalar(value) -> bool:
