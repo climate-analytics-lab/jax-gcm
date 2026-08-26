@@ -312,14 +312,15 @@ class DescribePhysicsParamsTest(unittest.TestCase):
             self.params[key],
             float(ConvectionParameters.default().entmax), places=12)
 
-    def test_keys_locate_the_value_term_variable_field(self):
-        # A recorded key must say where the value lives, unambiguously:
-        # <term name>.<nnx variable>.<field>. Note this is NOT always the
-        # Hydra override path — Hydra addresses the constructor keyword,
-        # and SpeedyConvection takes convection_params= but stores it as
-        # `params`. The record names the variable, not the keyword.
+    def test_keys_locate_the_value_owner_first(self):
+        # A recorded key must say where the value lives, unambiguously,
+        # owner first: <term>.<variable>.<field> for a parameter block,
+        # <term>.<attribute> for a plain setting, and `physics.` for the
+        # composition itself. Note this is NOT always the Hydra override
+        # path — Hydra addresses the constructor keyword, and
+        # SpeedyConvection takes convection_params= but stores `params`.
         for key in self.params:
-            self.assertRegex(key, r"^[a-z0-9_#]+\.[a-z0-9_]+\.")
+            self.assertRegex(key, r"^[A-Za-z0-9_#]+\.[A-Za-z0-9_]+")
 
     def test_variables_not_named_params_are_captured(self):
         # Keying on nnx.Param rather than a `.params` attribute is the
@@ -377,14 +378,84 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         self.assertNotEqual(provenance.params_attrs(slow),
                             provenance.params_attrs(fast))
 
-    def test_constructor_controls_do_not_pull_in_nnx_bookkeeping(self):
-        # Keying on __init__ rather than scanning attributes is what keeps
-        # _pytree__nodes, _coords_cached and _nodal_shape out: nobody
-        # passed those in.
+    def test_controls_surviving_only_in_derived_form_are_distinguished(self):
+        # UpperTemperatureRelaxation stores its timescale ONLY as the
+        # grid-shaped _inv_tau profile, which the knob filter rejects, so
+        # 3600 s and 7200 s recorded identically (#733 review). The
+        # per-variable digest is what tells them apart.
+        from jcm.physics.dissipation.upper_temperature_relaxation import (
+            UpperTemperatureRelaxation,
+        )
+
+        class _Coords:
+            nodal_shape = (8, 64, 32)
+
+        def record(timescale):
+            term = UpperTemperatureRelaxation([250.0] * 8, n_levels=5,
+                                              timescale_s=timescale)
+            term.cache_coords(_Coords())
+
+            class _One:
+                terms = [term]
+
+            return provenance.describe_params(_One())["physics"]
+
+        slow, fast = record(7200.0), record(3600.0)
+        key = "upper_temperature_relaxation._inv_tau.array_digest"
+        self.assertRegex(slow[key], r"^[0-9a-f]{12}$")
+        self.assertNotEqual(slow[key], fast[key])
+        # ...and the digest discriminates rather than just churning: the
+        # variables the timescale does not feed stay equal.
+        for same in ("_t_ref", "_inv_tau_wind"):
+            self.assertEqual(
+                slow[f"upper_temperature_relaxation.{same}.array_digest"],
+                fast[f"upper_temperature_relaxation.{same}.array_digest"])
+
+    def test_derived_scalar_controls_are_recorded(self):
+        # RRTMGP derives `_aerosol_free = interval is not None`, which
+        # decides whether the companion solve runs, while its sibling
+        # `_aerosol_free_interval` collapses None and 1 to the same value.
+        # Keying on the constructor signature missed the derived name.
+        class _Derived:
+            name = "derived"
+
+            def __init__(self, interval):
+                self._interval = interval or 1
+                self._enabled = interval is not None
+
+        class _One:
+            terms = [_Derived(None)]
+
+        class _Other:
+            terms = [_Derived(1)]
+
+        off = provenance.describe_params(_One())["physics"]
+        on = provenance.describe_params(_Other())["physics"]
+        self.assertEqual(off["derived._interval"], on["derived._interval"])
+        self.assertIs(off["derived._enabled"], False)
+        self.assertIs(on["derived._enabled"], True)
+
+    def test_container_level_controls_are_recorded(self):
+        # ComposablePhysics owns band_config, injected into every step and
+        # read by Macv2SpAerosol for its optics, so a composition of
+        # identical terms with different band centres produces different
+        # fields. Walking only `terms` dropped the wrapper (#733 review).
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        params = provenance.describe_params(speedy_physics())["physics"]
+        self.assertTrue(
+            [k for k in params if k.startswith("physics.band_config.")],
+            "no container-level band_config keys recorded")
+
+    def test_framework_bookkeeping_stays_out(self):
+        # Plain attributes are taken generally, so the line held here is
+        # narrower than it once was: names with a dunder infix are flax's
+        # bookkeeping (_pytree__nodes, _object__state) and Python's name
+        # mangling, never a physical setting. Grid-derived attributes like
+        # _nodal_shape DO come along now — accepted, because excluding
+        # them means a denylist, and a denylist fails toward silence.
         for key in self.params:
-            for internal in ("_pytree__", "_coords_cached", "_nodal_shape",
-                             "_object__"):
-                self.assertNotIn(internal, key)
+            self.assertNotIn("__", key)
 
     def test_coordinate_caches_do_not_enter_the_record(self):
         # All eleven SPEEDY terms cache the SAME _speedy_coords. Taking

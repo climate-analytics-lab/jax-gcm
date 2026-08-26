@@ -36,15 +36,24 @@ Unreleased — provenance records the parameters
   larger than 64 kB is carried compressed in ``jcm_prov_params_zlib`` on
   the same file rather than dropped; ``jemcal``-style readers should use
   ``jcm.provenance.read_params(ds.attrs)``, which handles both forms.
-- A term's constructor controls are recorded even when they never reach
-  an nnx variable, keyed off its ``__init__`` signature.
-  ``UpperSponge`` keeps ``sponge_timescale_s``, ``enspodi``,
-  ``damp_temperature`` and ``target_T_K`` as ordinary attributes and
-  turns them into a grid-shaped profile, so a 3600 s and a 7200 s sponge
-  previously recorded identically; RRTMGP's ``base_seed`` and
-  ``compute_cre`` were the same omission. Keying on the signature rather
-  than scanning attributes keeps the coordinate caches and the nnx
-  bookkeeping out, since nobody passed those in.
+- Settings that never reach an nnx variable are recorded too. Terms keep
+  controls as ordinary attributes (``UpperSponge``'s
+  ``sponge_timescale_s``, ``enspodi``, ``damp_temperature``; RRTMGP's
+  ``base_seed``, ``compute_cre`` and the derived ``_aerosol_free``), so
+  every scalar-shaped attribute is taken. Only names with a dunder infix
+  are skipped, being flax bookkeeping and Python name mangling rather
+  than physical settings.
+- A control that survives *only* in derived form is caught by a
+  per-variable ``array_digest``. ``UpperTemperatureRelaxation`` keeps its
+  timescale solely as the grid-shaped ``_inv_tau`` profile, so 3600 s and
+  7200 s recorded identically until the digest distinguished them. It is
+  aggregated per variable rather than per array leaf, which is what keeps
+  it affordable where several terms share one cached coordinate object.
+- The composition itself is recorded, not only its terms.
+  ``ComposablePhysics.band_config`` is injected into every step and read
+  by ``Macv2SpAerosol`` for its optics, so two compositions of identical
+  terms with different band centres produce different fields; walking
+  only ``terms`` let them record identically.
 - The dycore filter is per *leaf*, not per attribute, so a backend that
   mixes tuning knobs and grid data in one container still has its knobs
   recorded. This matters for pySES, whose ``diffusion_config`` holds

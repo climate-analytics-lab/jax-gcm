@@ -309,46 +309,93 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0,
     out[prefix] = _describe_leaf(value)
 
 
-def _describe_term_settings(term, name: str, out: dict) -> None:
-    """Record a term's constructor controls held as plain attributes.
+def _iter_array_leaves(value, depth: int = 0):
+    """Yield the array leaves of *value*, containers walked."""
+    import dataclasses
+    from collections.abc import Mapping
 
-    Not every run-shaping setting reaches an nnx variable (#733 review).
-    ``UpperSponge`` keeps ``sponge_timescale_s``, ``enspodi``,
-    ``damp_temperature`` and ``target_T_K`` as ordinary attributes and
-    turns them into a grid-shaped ``_inv_tau`` profile that the
-    knob-shape filter then (correctly) rejects, so a 3600 s and a 7200 s
-    sponge recorded identically. RRTMGP's ``_base_seed`` and
-    ``_compute_cre`` are the same shape of omission.
-
-    The discriminator is the term's own ``__init__`` signature rather
-    than a scan of its attributes: a constructor parameter *is* the set
-    of choices a caller made, so this picks up a newly added control with
-    no maintenance, while the caches and the nnx bookkeeping
-    (``_pytree__nodes``, ``_coords_cached``, ``_nodal_shape``) are
-    excluded because nobody passed them in. Each name is looked up as
-    itself and then underscore-prefixed, which is where the schemes
-    actually put them. Values already held in an nnx variable are skipped
-    here; the variable walk has them.
-    """
-    import inspect
-
-    try:
-        signature = inspect.signature(type(term).__init__)
-        attributes = vars(term)
-    except (TypeError, ValueError):
+    if depth > _PARAM_MAX_DEPTH or _is_scalar(value):
         return
-    for parameter in list(signature.parameters)[1:]:  # skip ``self``
-        if parameter in ("args", "kwargs"):
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for f in dataclasses.fields(value):
+            yield from _iter_array_leaves(getattr(value, f.name), depth + 1)
+        return
+    if hasattr(value, "_fields") and isinstance(value, tuple):
+        for field in value._fields:
+            yield from _iter_array_leaves(getattr(value, field), depth + 1)
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_array_leaves(item, depth + 1)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_array_leaves(item, depth + 1)
+        return
+    if getattr(value, "ndim", None):
+        yield value
+
+
+def _aggregate_digest(value) -> str | None:
+    """One digest over every array leaf in *value*, or ``None`` if none.
+
+    Lets a variable that holds no readable knob still identify itself.
+    Aggregating per *variable* rather than per leaf is what keeps this
+    affordable: eleven SPEEDY terms share one ``_speedy_coords`` holding
+    ten vectors, so a per-leaf digest costs 110 entries and 8.5 kB where
+    this costs 11 and under 1 kB.
+    """
+    import numpy as np
+    import jax
+
+    digest = hashlib.sha256()
+    found = False
+    for leaf in _iter_array_leaves(value):
+        if isinstance(leaf, jax.core.Tracer):
+            return "<traced>"
+        try:
+            arr = np.ascontiguousarray(np.asarray(leaf))
+        except Exception:  # noqa: BLE001 — undigestible leaves are skipped
             continue
-        for attribute in (parameter, f"_{parameter}"):
-            if attribute not in attributes:
-                continue
-            value = attributes[attribute]
-            if type(value).__module__.startswith("flax."):
-                break  # an nnx variable; the variable walk records it
-            _describe_value(value, f"{name}.{attribute}", out,
-                            scalars_only=True)
-            break
+        digest.update(str(arr.shape).encode())
+        digest.update(arr.tobytes())
+        found = True
+    return digest.hexdigest()[:12] if found else None
+
+
+def _describe_term_settings(term, name: str, out: dict) -> None:
+    """Record a term's plain-attribute settings (#733 review).
+
+    Not every run-shaping setting reaches an nnx variable. ``UpperSponge``
+    keeps ``sponge_timescale_s``, ``enspodi``, ``damp_temperature`` and
+    ``target_T_K`` as ordinary attributes; RRTMGP keeps ``_base_seed``,
+    ``_compute_cre`` and ``_aerosol_free``; ``UpperTemperatureRelaxation``
+    keeps ``damps_wind`` and ``n_levels``.
+
+    Every scalar-shaped attribute is taken, not only those matching a
+    constructor parameter. An earlier revision keyed on the ``__init__``
+    signature, which reads well but misses a control the constructor
+    *derives* under another name: RRTMGP's ``_aerosol_free`` is
+    ``interval is not None``, and it decides whether the companion
+    aerosol-free solve runs at all, while its sibling
+    ``_aerosol_free_interval`` collapses ``None`` and ``1`` to the same
+    value and so cannot tell those two configurations apart.
+
+    Names containing a dunder infix are skipped: that is flax's reserved
+    bookkeeping (``_pytree__nodes``, ``_object__state``) and Python's
+    name mangling, never a physical setting. Arrays are left to the
+    variable walk and its digests.
+    """
+    try:
+        attributes = vars(term)
+    except TypeError:
+        return
+    for attribute, value in sorted(attributes.items()):
+        if "__" in attribute:
+            continue  # flax bookkeeping / name mangling, not a setting
+        if type(value).__module__.startswith("flax."):
+            continue  # an nnx variable; the variable walk records it
+        _describe_value(value, f"{name}.{attribute}", out, scalars_only=True)
 
 
 def _describe_physics_params(physics) -> dict:
@@ -412,11 +459,19 @@ def _describe_physics_params(physics) -> dict:
         return {}
 
     terms = getattr(physics, "terms", None)
-    modules = list(terms) if terms is not None else [physics]
+    # The container is a module in its own right, not just a bag of terms
+    # (#733 review). ComposablePhysics owns `band_config`, injected into
+    # every step and read by Macv2SpAerosol for its optics, so two
+    # compositions of identical terms with different band centres produce
+    # different fields; dropping the wrapper let them record identically.
+    modules = ([(physics, "physics")] +
+               [(t, None) for t in terms]) if terms is not None else \
+        [(physics, None)]
     out: dict = {}
     seen: dict = {}
-    for term in modules:
-        name = getattr(term, "name", None) or type(term).__name__
+    for term, forced_name in modules:
+        name = forced_name or getattr(term, "name", None) or \
+            type(term).__name__
         # A composition may hold two instances of one term (e.g. a
         # double-call radiation A/B); keep both rather than clobbering.
         if name in seen:
@@ -438,8 +493,19 @@ def _describe_physics_params(physics) -> dict:
             continue
         for path, var in flat:
             key = ".".join(str(p) for p in (name, *path))
-            _describe_value(var.get_value(), key, out,
-                            scalars_only=tuple(path) not in declared)
+            value = var.get_value()
+            if tuple(path) in declared:
+                _describe_value(value, key, out)
+                continue
+            _describe_value(value, key, out, scalars_only=True)
+            # A plain Variable whose content is arrays still has to
+            # identify itself, or a control the constructor only ever
+            # stored in derived form is invisible: the temperature
+            # relaxation keeps its timescale solely as the _inv_tau
+            # profile, so 3600 s and 7200 s recorded identically.
+            digest = _aggregate_digest(value)
+            if digest is not None:
+                out[f"{key}.array_digest"] = digest
     return out
 
 
