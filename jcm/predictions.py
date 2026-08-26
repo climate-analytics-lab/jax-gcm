@@ -83,8 +83,8 @@ class ModelPredictions:
 
         A mismatch means the caller changed a parameter in place and jcm
         silently ignored it: the model rebinds parameters only when the
-        jit retraces, so the run used the compiled values. That is a
-        scientific error the user needs told about, not something for
+        jit retraces, so the run used the compiled values (#735). That is
+        a scientific error the user needs told about, not something for
         provenance to paper over by quietly recording the compiled values
         and moving on.
         """

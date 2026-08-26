@@ -38,7 +38,8 @@ Unreleased — provenance records the parameters
   reports the compiled ones and both a log warning and a
   ``live_parameters_differ_from_compiled`` key say so: that disagreement
   means an in-place parameter change did nothing to the run. Rebuild the
-  ``Model`` to change parameters.
+  ``Model`` to change parameters; making the mutation take effect (or
+  fail loudly) is tracked in #735.
 - The record travels on the predictions object, so it reaches every
   output stream that object produces (trajectory, snapshots and the
   per-observer datasets), including a bare
