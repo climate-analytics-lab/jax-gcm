@@ -330,12 +330,54 @@ class DescribePhysicsParamsTest(unittest.TestCase):
         self.assertIn("speedy_upward_longwave.mod_radcon_params.emisfc",
                       self.params)
 
-    def test_physics_without_params_yields_no_block(self):
+    def test_non_differentiable_parameter_variables_are_captured(self):
+        # A parameter block containing a bool cannot be an nnx.Param, so
+        # the schemes hold those as plain Variables. Filtering on Param
+        # dropped SPEEDY's whole surface-flux set even though changing
+        # e.g. cdl changes the simulation (#733 review).
+        self.assertIn("speedy_surface_flux.surface_params.cdl", self.params)
+        self.assertIn("speedy_surface_flux.surface_params.fwind0",
+                      self.params)
+
+    def test_held_suarez_parameters_are_recorded(self):
+        # Every Held-Suarez tuning constant is an nnx.Variable, so under a
+        # Param-only filter this physics recorded NOTHING at all.
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
         )
-        self.assertNotIn("physics",
-                         provenance.describe_params(held_suarez_physics()))
+        params = provenance.describe_params(held_suarez_physics())["physics"]
+        for knob in ("kf", "ka", "ks", "dTy", "dThz", "sigma_b"):
+            self.assertIn(f"held_suarez.{knob}", params)
+        # ...while its grid caches, held as plain Variables right beside
+        # those knobs with no naming convention to tell them apart, stay
+        # out. This is why the plain-Variable filter is by shape.
+        self.assertNotIn("held_suarez.sigma", params)
+        self.assertNotIn("held_suarez.latitudes", params)
+
+    def test_coordinate_caches_do_not_enter_the_record(self):
+        # All eleven SPEEDY terms cache the SAME _speedy_coords. Taking
+        # plain Variables wholesale put eleven identical copies of the
+        # vertical grid in the record, 85% of a T31L8 run's bytes.
+        for key in self.params:
+            self.assertNotIn("_speedy_coords", key)
+
+    def test_declared_params_keep_their_arrays(self):
+        # The knob-shape filter applies to plain Variables only: an
+        # nnx.Param is a declared parameter, so a tuned array on one must
+        # survive in full. MACv2-SP's plume shapes are the shipped case.
+        from jcm.physics.aerosol import Macv2SpAerosol
+
+        class _One:
+            terms = [Macv2SpAerosol()]
+
+        params = provenance.describe_params(_One())["physics"]
+        self.assertIsInstance(params["macv2_sp_aerosol.params.theta"], list)
+
+    def test_physics_without_variables_yields_no_block(self):
+        class _Bare:
+            terms = []
+
+        self.assertNotIn("physics", provenance.describe_params(_Bare()))
 
     def test_no_physics_is_not_an_error(self):
         self.assertNotIn("physics", provenance.describe_params(None))
@@ -587,6 +629,28 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         recorded = json.loads(ds.attrs["jcm_prov_params"])
         self.assertIn("speedy_convection.params.entmax",
                       recorded["physics"])
+
+    def test_observation_datasets_are_stamped(self):
+        # An observer stream is often persisted on its own, and would
+        # otherwise be the one output unable to say what produced it.
+        import numpy as np
+        import xarray as xr
+
+        from jcm.predictions import ModelPredictions
+
+        class _Observer:
+            name = "stations"
+
+            def to_dataset(self, samples, t0, dt):
+                return xr.Dataset({"t": ("time", np.asarray(samples))})
+
+        preds = ModelPredictions(
+            None, None, self._physics(),
+            observations=([1.0, 2.0],), observers=(_Observer(),),
+            obs_t0_days=0.0, obs_dt_seconds=1800.0)
+        ds = preds.observation_datasets()["stations"]
+        recorded = json.loads(ds.attrs["jcm_prov_params"])
+        self.assertIn("speedy_convection.params.entmax", recorded["physics"])
 
     def test_pytree_roundtrip_carries_no_model_and_says_so(self):
         import jax

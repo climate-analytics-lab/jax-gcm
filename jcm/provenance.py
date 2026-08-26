@@ -310,7 +310,7 @@ def _describe_value(value, prefix: str, out: dict, depth: int = 0,
 
 
 def _describe_physics_params(physics) -> dict:
-    """Every ``nnx.Param`` on every physics term, by dotted name.
+    """Every ``nnx.Variable`` on every physics term, by dotted name.
 
     Keyed on the term's own ``name`` (``tiedtke_convection``) and the
     variable it hangs off: ``tiedtke_convection.params.entrpen``.
@@ -325,10 +325,42 @@ def _describe_physics_params(physics) -> dict:
     the value *lives*, which is the thing that must be unambiguous;
     reproducing it may need the constructor signature.
 
-    Keying on ``nnx.Param`` rather than a ``.params`` attribute is
+    Keying on the nnx variable rather than a ``.params`` attribute is
     deliberate — terms also carry ``mod_radcon_params``, ``sw_params``,
     ``surface_optics`` and bare tuning scalars, and a scheme that adds
     another must not silently drop out of the record.
+
+    Plain Variables are included, not just ``nnx.Param`` (#733
+    review). A parameter block containing a bool cannot be an
+    ``nnx.Param``, so the schemes hold those as plain Variables:
+    ``SpeedySurfaceFlux.surface_params`` and ``EchamSurface.params`` are
+    the shipped cases, and every Held-Suarez tuning constant (``kf``,
+    ``ka``, ``ks``, ``dTy``, ``dThz``, ...) is one, so the whole
+    Held-Suarez parameter set was missing. Non-differentiable does not
+    mean it does not change the simulation.
+
+    The two kinds are read differently, because terms also cache their
+    coordinates in plain Variables and those are grid data, not knobs:
+
+    * ``nnx.Param`` in full. It is a *declared* differentiable parameter,
+      so its arrays are tuned quantities worth keeping (the MACv2-SP
+      plume shapes, a per-level profile).
+    * a plain Variable only where it is knob-shaped -- scalars, 0-d
+      arrays, enums, and structs of those. That keeps every case above
+      and drops the caches, which are always grid-shaped arrays.
+
+    Deciding by shape rather than by name is what makes this hold for
+    Held-Suarez, which keeps its knobs (0-d) and its ``sigma`` /
+    ``latitudes`` caches (grid-shaped) side by side as plain Variables
+    with no naming convention between them. It matters more than it
+    looks: all eleven SPEEDY terms cache the *same* ``_speedy_coords``,
+    so including caches wholesale put eleven identical copies of the
+    vertical grid in the record and took a T31L8 run from 6.6 kB to
+    62 kB, with 85% of it duplicated grid vectors.
+
+    Mutable per-step state would be a real problem here, but jcm threads
+    the physics carry as an explicit pytree rather than through nnx
+    variables, so there is none to pick up.
     """
     if physics is None:
         return {}
@@ -354,12 +386,17 @@ def _describe_physics_params(physics) -> dict:
             # to_flat_state, not the State.flat_state() method: the latter
             # is deprecated and warns once per call. Present since flax
             # 0.12.1, which requirements.txt already floors us to.
-            flat = nnx.to_flat_state(nnx.state(term, nnx.Param))
+            # nnx.Param is a Variable subclass, so the second call is a
+            # superset; the difference is what gets the knob-shape filter.
+            flat = nnx.to_flat_state(nnx.state(term, nnx.Variable))
+            declared = {tuple(path) for path, _ in
+                        nnx.to_flat_state(nnx.state(term, nnx.Param))}
         except Exception:  # noqa: BLE001 — a non-nnx term has no params
             continue
         for path, var in flat:
             key = ".".join(str(p) for p in (name, *path))
-            _describe_value(var.get_value(), key, out)
+            _describe_value(var.get_value(), key, out,
+                            scalars_only=tuple(path) not in declared)
     return out
 
 

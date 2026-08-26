@@ -145,6 +145,12 @@ class ModelPredictions:
     def observation_datasets(self):
         """Per-timestep virtual-observation output as xarray Datasets.
 
+        Stamped with the run's parameters like the trajectory and the
+        snapshots (#733 review): an observer stream is often persisted on
+        its own with ``observation_datasets()[name].to_netcdf(...)``, and
+        such a file would otherwise be the one output that cannot say
+        which parameters produced it.
+
         Returns:
             Dict ``{observer_name: xarray.Dataset}`` — one Dataset per
             attached :class:`jcm.observers.Observer`, with dims
@@ -156,12 +162,14 @@ class ModelPredictions:
         if not self._observations:
             return {}
         samples_host = jax.device_get(self._observations)
-        return {
-            obs.name: obs.to_dataset(
-                samples, self._obs_t0_days, self._obs_dt_seconds,
-            )
-            for obs, samples in zip(self._observers, samples_host)
-        }
+        stamp = provenance.params_attrs(self._params)
+        datasets = {}
+        for obs, samples in zip(self._observers, samples_host):
+            ds = obs.to_dataset(samples, self._obs_t0_days,
+                                self._obs_dt_seconds)
+            ds.attrs.update(stamp)
+            datasets[obs.name] = ds
+        return datasets
 
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.

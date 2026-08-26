@@ -12,10 +12,18 @@ Unreleased — provenance records the parameters
   *overrides* and said nothing about the effective values. A model built
   in Python, or one whose parameters a calibration loop replaced after
   construction, had no config behind it at all. ``jcm_prov_params``
-  (with ``jcm_prov_params_sha``) now carries every ``nnx.Param`` on
+  (with ``jcm_prov_params_sha``) now carries every ``nnx.Variable`` on
   every physics term, the scalar dycore knobs (timestep, diffusion
   filter, transport options) and the physical constants, read off the
-  *built* model rather than the requested config. Keys locate the value
+  *built* model rather than the requested config. Every nnx variable,
+  not only ``nnx.Param``: a parameter block holding a bool cannot be a
+  ``Param``, so ``SpeedySurfaceFlux.surface_params``,
+  ``EchamSurface.params`` and every Held-Suarez tuning constant are
+  plain Variables, and a ``Param``-only filter recorded nothing at all
+  for Held-Suarez. A declared ``nnx.Param`` is recorded in full; a plain
+  Variable only where it is knob-shaped (scalars, 0-d arrays, structs of
+  those), which keeps those parameter blocks while leaving out the
+  coordinate caches terms also hold as Variables. Keys locate the value
   as ``<term>.<variable>.<field>``
   (``tiedtke_convection.params.entrpen``). That matches the Hydra
   override path minus its ``physics.terms.`` prefix wherever a term's
@@ -38,8 +46,9 @@ Unreleased — provenance records the parameters
   would have let two materially different pySES models record
   identically.
 - The record is taken at the model-to-user handoff
-  (``ModelPredictions``) and travels on the predictions object, so it is
-  stamped by ``to_xarray`` for a bare
+  (``ModelPredictions``) and travels on the predictions object, so it
+  reaches every output stream the object produces (trajectory,
+  snapshots and the per-observer datasets), including a bare
   ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
   Hydra runners, and a calibration loop that mutates parameters between
   iterations cannot retroactively change an earlier run's record. It is
