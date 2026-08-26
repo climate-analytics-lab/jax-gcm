@@ -1024,7 +1024,12 @@ class TestWithheldOutputKeys:
         from jcm.physics.radiation.radiation_types import CLEAR_SKY_KEYS
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
-        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+        # The clouds sub-struct mirrors of the clear-sky TOA fluxes are the
+        # same zero placeholders without the companion solve (PR #730
+        # review); the *_all mirrors are real and stay.
+        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS) + (
+            "clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear",
+        )
         off = RRTMGPRadiation(
             aerosol_free_interval=1, compute_cre=False,
         ).withheld_output_keys()

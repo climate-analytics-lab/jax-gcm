@@ -1160,6 +1160,11 @@ class RRTMGPRadiation(PhysicsTerm):
         )
         if not self._compute_cre:
             withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+            # __call__ mirrors the clear-sky TOA fluxes onto the clouds
+            # sub-struct for CRE diagnostics; without the companion solve
+            # those mirrors are the same zero placeholders (the all-sky
+            # mirrors stay — they are real).
+            withheld += ("clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear")
         return withheld
 
     def cache_coords(self, coords) -> None:
