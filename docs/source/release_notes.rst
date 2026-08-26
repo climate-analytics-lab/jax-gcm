@@ -71,6 +71,20 @@ Unreleased — provenance records the parameters
   constructor arguments stored nowhere else, so a container-level rule
   would have let two materially different pySES models record
   identically.
+- **The record is captured at trace time, not from the live module.**
+  ``Model._run_from_state`` is jitted with ``self`` static, so parameters
+  are constants inside the compiled executable and changing an
+  ``nnx.Param`` in place afterwards does not reach the computation.
+  Reading the module at the handoff therefore stamped a trajectory with
+  values that never ran. Where the live values now disagree with the
+  compiled ones, the record reports the compiled ones and both a log
+  warning and a ``live_parameters_differ_from_compiled`` key say so:
+  that disagreement means an in-place parameter change did nothing to
+  the run, which is a scientific error rather than a provenance detail.
+  Rebuild the ``Model`` to change parameters.
+- A dycore setting held as a dtype (pySES ``physics_dtype``) is recorded
+  by its canonical name, so float32-physics and float64-physics runs no
+  longer share a record.
 - The record is taken at the model-to-user handoff
   (``ModelPredictions``) and travels on the predictions object, so it
   reaches every output stream the object produces (trajectory,

@@ -44,7 +44,7 @@ class ModelPredictions:
                  dycore=None, observations=None, observers=(),
                  obs_t0_days=None, obs_dt_seconds=None,
                  snapshots=None, snapshot_variables=(),
-                 snapshot_interval_days=None):
+                 snapshot_interval_days=None, params=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
@@ -56,25 +56,57 @@ class ModelPredictions:
         self._snapshots = snapshots
         self._snapshot_variables = tuple(snapshot_variables)
         self._snapshot_interval_days = snapshot_interval_days
-        # Snapshot the parameters this trajectory was produced with, here
-        # at the model-to-user handoff (#732). Eagerly, not on demand: a
-        # calibration loop updates the term parameters in place between
-        # runs, so a lazy read through ``self._physics`` would report
-        # whichever values the *next* iteration installed rather than the
-        # ones behind these predictions. Provenance capture must never be
-        # able to fail a completed run, hence the broad guard.
+        # The parameters this trajectory was produced with (#732).
+        #
+        # ``params`` is the record captured at TRACE time by
+        # ``Model._run_from_state`` and is authoritative when present:
+        # ``self`` is a static argument to that jit, so the parameters are
+        # constants inside the executable, and reading the live module here
+        # can report values that never reached the computation (#733
+        # review). Falling back to a live read covers a ModelPredictions
+        # built directly, where there is no trace to have captured.
         #
         # Skipped entirely with no model to read: the pytree unflatten
         # rebuilds without coords/physics/dycore by design, and it runs on
         # every tree_map over a ModelPredictions. There is nothing to
         # record there, and it should not cost anything either.
         self._params = {}
-        if physics is not None or dycore is not None:
-            try:
+        try:
+            if params is not None:
+                self._params = self._check_live_matches_traced(
+                    params, physics, dycore)
+            elif physics is not None or dycore is not None:
                 self._params = provenance.describe_params(physics, dycore)
-            except Exception:  # noqa: BLE001
-                logger.warning("provenance: parameter capture failed",
-                               exc_info=True)
+        except Exception:  # noqa: BLE001 — never fail a completed run
+            logger.warning("provenance: parameter capture failed",
+                           exc_info=True)
+
+    @staticmethod
+    def _check_live_matches_traced(traced, physics, dycore):
+        """Return *traced*, flagging a live/compiled parameter divergence.
+
+        A mismatch means the caller changed a parameter in place and jcm
+        silently ignored it: the model rebinds parameters only when the
+        jit retraces, so the run used the compiled values. That is a
+        scientific error the user needs told about, not something for
+        provenance to paper over by quietly recording the compiled values
+        and moving on.
+        """
+        live = provenance.describe_params(physics, dycore)
+        if live == traced:
+            return traced
+        logger.warning(
+            "provenance: the live parameters differ from those compiled "
+            "into this run. jcm binds physics parameters at trace time "
+            "(Model._run_from_state takes `self` as a static argument), so "
+            "an in-place parameter change after the first run does NOT "
+            "affect the computation. The record reports the values that "
+            "actually ran. Rebuild the Model to change parameters.")
+        flagged = dict(traced)
+        flagged["live_parameters_differ_from_compiled"] = (
+            "in-place parameter changes did not reach this run; the record "
+            "holds the compiled values")
+        return flagged
 
     @property
     def params(self):

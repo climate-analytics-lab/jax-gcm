@@ -206,6 +206,10 @@ def _describe_leaf(value):
         return "<traced>"
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if _is_dtype(value):
+        # Before the callable check: a dtype class is callable, and its
+        # canonical name is the setting ("float64", not "<callable>").
+        return np.dtype(value).name
     if callable(value):
         return f"<callable {getattr(value, '__name__', type(value).__name__)}>"
     try:
@@ -248,7 +252,21 @@ def _is_knob(value) -> bool:
 
     if _is_scalar(value) or isinstance(value, enum.Enum):
         return True
+    if _is_dtype(value):
+        # pySES stores `physics_dtype` as the jnp.float32/float64 class
+        # itself: callable, no ndim, and the only record of a setting that
+        # casts the physics-facing state for the whole run (#733 review).
+        return True
     return getattr(value, "ndim", None) == 0
+
+
+def _is_dtype(value) -> bool:
+    """Report whether *value* is a numpy/jax dtype or scalar-type object."""
+    import numpy as np
+
+    if isinstance(value, np.dtype):
+        return True
+    return isinstance(value, type) and issubclass(value, np.generic)
 
 
 def _describe_value(value, prefix: str, out: dict, depth: int = 0,

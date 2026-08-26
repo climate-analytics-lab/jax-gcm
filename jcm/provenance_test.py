@@ -737,10 +737,10 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         self.assertEqual(preds.params["dycore"]["dt_seconds"], 900.0)
 
     def test_snapshot_does_not_follow_later_mutation(self):
-        # A calibration loop updates the term parameters in place between
-        # iterations. A lazily-read record would report the *next*
-        # iteration's values against this iteration's trajectory, which is
-        # the failure this capture point exists to prevent.
+        # Each record belongs to the predictions it was built with: a
+        # later mutation must not reach back into an earlier record.
+        # (Whether a mutation reaches the *computation* is a separate
+        # question — see test_traced_record_wins_over_the_live_module.)
         import jax.numpy as jnp
 
         physics = self._physics()
@@ -757,6 +757,44 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         self.assertEqual(
             preds.params["physics"]["speedy_convection.params.entmax"],
             before)
+
+    def test_traced_record_wins_over_the_live_module(self):
+        # The #733 review's P1. `self` is a static argument to
+        # Model._run_from_state, so the parameters are constants inside
+        # the compiled executable and an in-place change afterwards does
+        # not reach the computation. Reading the live module at the
+        # handoff therefore stamped a trajectory with values that never
+        # ran — a confident, wrong record, which is worse than no record.
+        import jax.numpy as jnp
+
+        from jcm.predictions import ModelPredictions
+
+        physics = self._physics()
+        traced = provenance.describe_params(physics)
+        term = next(t for t in physics.terms if t.name == "speedy_convection")
+        term.params.set_value(
+            term.params.get_value().replace(entmax=jnp.array(0.25)))
+
+        with self.assertLogs("jcm.predictions", level="WARNING") as logged:
+            preds = ModelPredictions(None, None, physics, params=traced)
+        self.assertEqual(
+            preds.params["physics"]["speedy_convection.params.entmax"],
+            traced["physics"]["speedy_convection.params.entmax"])
+        # ...and the divergence is surfaced rather than papered over: the
+        # user's parameter change did nothing to the run, which is a
+        # scientific error they need told about.
+        self.assertIn("live_parameters_differ_from_compiled", preds.params)
+        self.assertIn("does NOT affect the computation",
+                      "".join(logged.output))
+
+    def test_no_false_alarm_when_live_matches_compiled(self):
+        from jcm.predictions import ModelPredictions
+
+        physics = self._physics()
+        traced = provenance.describe_params(physics)
+        preds = ModelPredictions(None, None, physics, params=traced)
+        self.assertEqual(preds.params, traced)
+        self.assertNotIn("live_parameters_differ_from_compiled", preds.params)
 
     def test_capture_failure_never_breaks_a_completed_run(self):
         class _Exploding:

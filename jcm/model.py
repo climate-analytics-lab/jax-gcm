@@ -24,7 +24,7 @@ from dinosaur.scales import units
 from functools import partial
 import logging
 
-from jcm import profiling
+from jcm import profiling, provenance
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
@@ -460,6 +460,10 @@ class Model:
         self.dt_si = (time_step * units.minute).to(units.second)
 
         self.observers = tuple(observers)
+        # Parameters as bound into each compiled trace, keyed by the static
+        # signature that selects the executable (#733 review). See the
+        # capture in ``_run_from_state`` for why the live values will not do.
+        self._traced_params: dict = {}
         if len({obs.name for obs in self.observers}) != len(self.observers):
             raise ValueError("Observer names must be unique.")
         if self.observers:
@@ -934,6 +938,26 @@ class Model:
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
         """
+        # Capture the parameters HERE, at trace time, not from the live
+        # module afterwards (#733 review). ``self`` is a static argument,
+        # so the parameter values are baked into this executable as
+        # constants; mutating an nnx.Param in place afterwards changes
+        # nothing the compiled function does (see the note on the
+        # decorator). Reading the module at the model-to-user handoff
+        # therefore stamped a trajectory with values that did not produce
+        # it — a calibration loop that mutates in place got a confident,
+        # wrong record. On a cache hit this line does not re-run, which is
+        # exactly right: the reused executable still holds the parameters
+        # captured at its own trace.
+        try:
+            self._traced_params[
+                (save_interval, total_time, output_averages,
+                 snapshot_stride, snapshot_fields)
+            ] = provenance.describe_params(self.physics, self.dycore)
+        except Exception:  # noqa: BLE001 — provenance never fails a run
+            logger.warning("provenance: trace-time parameter capture failed",
+                           exc_info=True)
+
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
         # Op-split saves end-of-step states (snapshot mode) or post-step
@@ -1077,6 +1101,9 @@ class Model:
             ModelPredictions(
                 predictions, self.coords, self.physics,
                 dycore=self.dycore,
+                params=self._traced_params.get(
+                    (save_interval_days, total_time_days, output_averages,
+                     snapshot_stride, tuple(snapshot_variables))),
                 observations=observations,
                 observers=self.observers,
                 obs_t0_days=obs_t0_days,
