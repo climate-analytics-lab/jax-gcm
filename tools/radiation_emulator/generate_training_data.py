@@ -415,21 +415,19 @@ def _air_density(pressure, temperature):
     return pressure / (float(c.rd) * temperature)
 
 
-def _layer_thickness(pressure, temperature):
-    """Hydrostatic layer thickness dz = dp / (rho g), m, TOA-first.
+def _layer_thickness(pressure_interfaces, air_density):
+    """Hydrostatic layer thickness dz = diff(p_half) / (rho g), m, TOA-first.
 
-    The top layer reuses the thickness of the one below it, matching the
-    helper the radiation tests build synthetic columns with.
+    The EXACT online formula, including the 10 m floor
+    (``MoistAirColumnState``, moist_air_state.py) — a full-level-difference
+    approximation gave relabelled trajectories different cloud-water paths
+    than the deployed path computes from the same state, a direct
+    feature/label mismatch (PR #730 review).
     """
     import jcm.constants as c
 
-    rho = _air_density(pressure, temperature)
-    dp = np.diff(pressure, axis=-1)
-    rho_mid = 0.5 * (rho[..., 1:] + rho[..., :-1])
-    dz = np.zeros_like(pressure)
-    dz[..., 1:] = dp / (rho_mid * float(c.grav))
-    dz[..., 0] = dz[..., 1]
-    return dz
+    dp = np.diff(pressure_interfaces, axis=-1)
+    return np.maximum(dp / (air_density * float(c.grav)), 10.0)
 
 
 def _resolved_effective_radii(batch):
@@ -766,8 +764,8 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     specific_humidity = np.minimum(specific_humidity, 0.98 * q_sat)
 
     air_density = _air_density(pressure_levels, temperature)
-    layer_thickness = _layer_thickness(pressure_levels, temperature)
     pressure_interfaces = _interfaces_from_levels(pressure_levels)
+    layer_thickness = _layer_thickness(pressure_interfaces, air_density)
 
     # Cloud slab: a contiguous band of levels with a sampled top, depth,
     # fraction and in-cloud condensate. The liquid/ice split follows the
@@ -1058,7 +1056,7 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     batch["air_density"] = _air_density(
         batch["pressure_levels"], batch["temperature"])
     batch["layer_thickness"] = _layer_thickness(
-        batch["pressure_levels"], batch["temperature"])
+        batch["pressure_interfaces"], batch["air_density"])
     batch = _resolved_effective_radii(batch)
 
     aod_sw, ssa_sw, asy_sw = _per_band_optics(

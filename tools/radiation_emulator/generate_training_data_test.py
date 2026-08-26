@@ -411,19 +411,23 @@ class LabelTest(unittest.TestCase):
         batch = _cloudy_sunlit_batch()
         labeller = _labeller()
 
-        def toa_sw_up_mean(n_seeds, block):
-            # Disjoint seed blocks so each estimate is independent.
-            draws = [
-                np.asarray(labeller(batch, block * n_seeds + s)["sw_flux_up"])
-                for s in range(n_seeds)
-            ]
-            return np.mean(draws, axis=0)[:, 0]
-
-        spread_1 = np.std([toa_sw_up_mean(1, b) for b in range(4)], axis=0)
-        spread_4 = np.std([toa_sw_up_mean(4, b) for b in range(4)], axis=0)
+        # ONE pool of 16 single draws, compared against 4-draw means of
+        # disjoint quadruples of the SAME pool. The previous disjoint-block
+        # formulation drew fresh seeds for each estimate, so seed-systematic
+        # spread (which averaging cannot remove) landed asymmetrically in
+        # the two sides and the (expected 0.5) ratio brushed its 0.75 bound
+        # on a label-perturbing change as small as the dz-formula fix; the
+        # same-pool form measures the averaging effect alone and sits at
+        # 0.50 to three figures.
+        draws = np.stack([
+            np.asarray(labeller(batch, s)["sw_flux_up"])[:, 0]
+            for s in range(16)
+        ])
+        spread_1 = draws.std(axis=0)
+        spread_4 = draws.reshape(4, 4, -1).mean(axis=1).std(axis=0)
         self.assertGreater(spread_1.mean(), 1.0,
                            "single-draw McICA noise should be O(W/m2)")
-        self.assertLess(spread_4.mean(), 0.75 * spread_1.mean())
+        self.assertLess(spread_4.mean(), 0.6 * spread_1.mean())
 
     def test_identical_seeds_reproduce_bit_for_bit(self):
         batch = _sweep_batch(seed=3)

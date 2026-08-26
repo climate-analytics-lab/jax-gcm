@@ -10,6 +10,7 @@ import pathlib
 import sys
 import unittest
 
+import jax.numpy as jnp
 import numpy as np
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -236,6 +237,34 @@ class BuildFeaturesTest(unittest.TestCase):
             # Features 8 and 9 are the radii; see preprocess_*_inputs.
             np.testing.assert_allclose(x[..., 8], self.R_LIQ, rtol=1e-6)
             np.testing.assert_allclose(x[..., 9], self.R_ICE, rtol=1e-6)
+
+
+class SwLossMaskTest(unittest.TestCase):
+    """The SW flux loss must ignore the reconstructed TOA-down channels.
+
+    Interface-0 down/down_clear are overwritten with the exact incoming
+    flux at inference and their sigmoid-unreachable target is exactly 1,
+    so training on them pollutes the shared output layer (PR #730 review).
+    """
+
+    def _loss_at(self, pred):
+        from unittest import mock
+        import tools.radiation_emulator.train_emulator as t
+
+        loss = t.make_loss(is_sw=True, alpha=0.0, weight_prof=1.0)
+        batch = {"x": None, "aux": None,
+                 "mask": jnp.ones((2,)), "y": jnp.zeros((2, 5, 4))}
+        with mock.patch.object(t, "_predict", lambda w, x, a: pred):
+            val, _ = loss(None, batch)
+        return float(val)
+
+    def test_reconstructed_channels_are_inert_and_others_are_not(self):
+        base = jnp.zeros((2, 5, 4))
+        l_base = self._loss_at(base)
+        l_masked = self._loss_at(base.at[:, 0, 0].set(9.0).at[:, 0, 2].set(9.0))
+        l_live = self._loss_at(base.at[:, 0, 1].set(1.0))
+        self.assertEqual(l_masked, l_base)
+        self.assertGreater(l_live, l_base)
 
 
 class WeightingTest(unittest.TestCase):

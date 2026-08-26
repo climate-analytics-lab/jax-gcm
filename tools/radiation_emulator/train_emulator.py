@@ -402,8 +402,19 @@ def make_loss(is_sw, alpha, weight_prof):
         mask = batch["mask"][:, None, None]
         n = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
         err = (pred - batch["y"]) * weight_prof
-        flux_mse = jnp.sum((err ** 2) * mask) / (
-            n * pred.shape[1] * pred.shape[2])
+        n_elem = pred.shape[1] * pred.shape[2]
+        if is_sw:
+            # Interface-0 down / down_clear are overwritten with the exact
+            # incoming flux at inference (reconstruct_sw_interface_fluxes),
+            # and their normalised target is exactly 1 — unreachable for a
+            # sigmoid. Training on them feeds an irreducible error into the
+            # shared output layer and the checkpoint-selection metric for
+            # predictions that are never used (PR #730 review).
+            elem = jnp.ones((pred.shape[1], pred.shape[2]))
+            elem = elem.at[0, 0].set(0.0).at[0, 2].set(0.0)
+            err = err * elem
+            n_elem = n_elem - 2
+        flux_mse = jnp.sum((err ** 2) * mask) / (n * n_elem)
         if alpha == 0.0:
             return flux_mse, flux_mse
         hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
