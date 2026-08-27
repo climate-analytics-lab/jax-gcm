@@ -70,9 +70,16 @@ harness-side approximation would have fixed neither.
 
 Ageing is ON by default in every JAM run using the `mam4_jax` core (there
 is no Fortran toggle to mirror; the core's `mdo_pcarbonaging` exists for
-fixture parity only). Expected effects: BC/POA lifetimes drop toward the
-observed 5–8 d range, carbonaceous burdens fall accordingly, and SO4 gains
-a small source from the closed repack leak.
+fixture parity only). Carbonaceous lifetimes and burdens both fall, and SO4
+gains a small source from the closed repack leak. 90-day T63L47
+`echam-jam-aerocom` runs (area-weighted global means over days 45–90,
+τ = burden / (dry + wet removal)) put the threshold's sensitivity at roughly
+a factor of two across the reference spread: at `n = 8` BC sits at 0.22 mg/m²
+with τ ≈ 8.4 d and 56 % of its mass already in accumulation, at the default
+`n = 3` at 0.15 mg/m² with τ ≈ 4.8 d and 68 % in accumulation. Both bracket
+the observed 5–8 d, against ~21 d and 0 % with no ageing at all — so the
+threshold is a first-order tuning handle for carbonaceous lifetime, which is
+why it is exposed and differentiable rather than hard-coded.
 
 The pinned core is **mam4-jax 0.4.0**, the first release carrying the ageing
 port; it also carries a float32 fix without which coagulation moved **zero**
