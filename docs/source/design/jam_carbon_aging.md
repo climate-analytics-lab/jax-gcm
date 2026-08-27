@@ -72,6 +72,8 @@ Ageing is ON by default in every JAM run using the `mam4_jax` core (there
 is no Fortran toggle to mirror; the core's `mdo_pcarbonaging` exists for
 fixture parity only). Expected effects: BC/POA lifetimes drop toward the
 observed 5–8 d range, carbonaceous burdens fall accordingly, and SO4 gains
-a small source from the closed repack leak. The mam4-jax pin also carries a
-float32 fix without which coagulation moved **zero** mass between modes in
-f32 runs (`betaij3` underflow) — see the mam4-jax PR for details.
+a small source from the closed repack leak.
+
+The pinned core is **mam4-jax 0.4.0**, the first release carrying the ageing
+port; it also carries a float32 fix without which coagulation moved **zero**
+mass between modes in f32 runs (`betaij3` underflow).

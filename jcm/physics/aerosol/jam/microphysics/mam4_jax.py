@@ -10,7 +10,7 @@ harness does **not** duplicate them.
 
 Carbonaceous ageing (jax-gcm#721)
 ---------------------------------
-The core's ``mam_pcarbon_aging_1subarea`` port (mam4-jax ≥ the #721 pin,
+The core's ``mam_pcarbon_aging_1subarea`` port (mam4-jax ≥ 0.4.0,
 ``mdo_pcarbonaging`` on by default) moves the sulfate-coated fraction of
 the primary-carbon mode — number plus pom/bc/mom mass by the
 monolayer-criterion fraction, condensed so4/soa wholesale — into the
@@ -260,7 +260,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "(AmicphysParams): BC/POA would never leave the "
                 "primary-carbon mode (jax-gcm#721) and so4/soa condensed "
                 "onto it is silently dropped at the state repack. Install "
-                "the pinned version: pip install 'jcm[mam4]'."
+                "the pinned version (mam4-jax 0.4.0): pip install 'jcm[mam4]'."
             )
         # Monolayer threshold: 3.0 is what the MAM4 amicphys path
         # actually receives (via phys_control; the 8.0 in

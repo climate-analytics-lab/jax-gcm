@@ -39,9 +39,16 @@ jcm = [
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
 # tagged release. Install with `pip install jcm[mam4]`.
 mam4 = [
-    # Pinned to the main SHA carrying configure_gas_netprod (#642) until
-    # the requested upstream release is tagged — then flip to the version.
-    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@683b0d6a5b7e04757ba36a77e7fba394ae972ad5",
+    # Exact version, not a floor: the adapter reaches into submodule paths
+    # (mam4_jax.core.data, .coupling.amicphys, .physics.*) for the pieces the
+    # top-level namespace does not re-export, and upstream covers only the
+    # top-level namespace by semantic versioning — 0.3.0 renamed
+    # ``mam4_jax.processes.*`` out of existence with no deprecation. Bumping is
+    # therefore a deliberate act with the JAM adapter tests run behind it.
+    # 0.4.0 is the first release with pcarbon aging (#721) and the float32
+    # coagulation mass-transfer fix; it also carries configure_gas_netprod
+    # (#642).
+    "mam4-jax==0.4.0",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.
