@@ -44,7 +44,9 @@ mam4 = [
     # top-level namespace does not re-export, and upstream covers only the
     # top-level namespace by semantic versioning — 0.3.0 renamed
     # ``mam4_jax.processes.*`` out of existence with no deprecation. Bumping is
-    # therefore a deliberate act with the JAM adapter tests run behind it.
+    # therefore a deliberate act with the JAM adapter tests run behind it;
+    # #737 tracks relaxing this once upstream re-exports what the adapter
+    # drives (not urgent — the exact pin is a fine steady state).
     # 0.4.0 is the first release with pcarbon aging (#721) and the float32
     # coagulation mass-transfer fix; it also carries configure_gas_netprod
     # (#642).
