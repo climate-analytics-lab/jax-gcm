@@ -19,17 +19,8 @@ import pytest
 # the optional dependency is installed. Each test below re-enables x64 (via the
 # term's lazy import) and restores it in tearDown.
 _x64_at_import = jax.config.read("jax_enable_x64")
-# The dotted path also skips (rather than errors) when an OLD pre-0.3
-# mam4-jax layout is installed — the adapter needs the core/coupling/physics
-# package structure plus pcarbon aging (jax-gcm#721); the pinned version has
-# both. The restore MUST be in a finally: importorskip imports the parent
-# ``mam4_jax`` (flipping x64 on) and then raises Skipped when ``coupling``
-# is missing — without the finally, that abandons the whole xdist worker
-# in float64 and unrelated tests' dtype assertions fail.
-try:
-    pytest.importorskip("mam4_jax.coupling")
-finally:
-    jax.config.update("jax_enable_x64", _x64_at_import)
+pytest.importorskip("mam4_jax.coupling")
+jax.config.update("jax_enable_x64", _x64_at_import)
 
 
 def _column_state(nlev=4, ncols=2):
