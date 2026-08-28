@@ -1003,8 +1003,16 @@ class PysesCamSEDycore(DynamicalCore):
         rg = self._regrid_targets()
 
         times = np.asarray(times)
+        # Sim-day floats -> datetime64, the same conversion
+        # ``ModelPredictions._trajectory_dataset`` applies on the dinosaur
+        # path. A numeric axis cannot carry CF reference-time units, so a file
+        # stamped ``Conventions = CF-1.11`` with a bare elapsed-days ``time``
+        # would be undecodable by a CF reader.
+        time_values = (
+            times * (np.timedelta64(1, "D") / np.timedelta64(1, "ns"))
+        ).astype("datetime64[ns]")
         coords = {
-            "time": times,
+            "time": time_values,
             "lon": ("lon", rg["lon_centers"]),
             "lat": ("lat", rg["lat_centers"]),
         }

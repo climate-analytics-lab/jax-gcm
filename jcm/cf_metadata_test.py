@@ -133,6 +133,30 @@ class TestApplyCfAttributes(unittest.TestCase):
     def test_conventions_stamped(self):
         self.assertTrue(self.ds.attrs["Conventions"].startswith("CF-"))
 
+    def test_datetime_time_axis_gets_the_cf_time_attributes(self):
+        ds = _toa_first_dataset().assign_coords(
+            time=("time", np.array(["2000-01-01"], dtype="datetime64[ns]")))
+        ds = cf_metadata.finalize_output(
+            ds, vertical=_hybrid_2level(), p0=1000.0)
+        self.assertEqual(ds["time"].attrs["standard_name"], "time")
+        self.assertEqual(ds["time"].attrs["axis"], "T")
+        # xarray's datetime encoding owns ``units`` on write.
+        self.assertNotIn("units", ds["time"].attrs)
+
+    def test_numeric_time_axis_is_not_claimed_as_a_cf_time_coordinate(self):
+        """A bare elapsed-days axis has no reference-time units to decode.
+
+        Claiming ``standard_name = "time"`` on it would announce CF
+        conformance a reader cannot honour.
+        """
+        ds = _toa_first_dataset().assign_coords(
+            time=("time", np.array([0.0, 0.5])))
+        ds = cf_metadata.finalize_output(
+            ds, vertical=_hybrid_2level(), p0=1000.0)
+        self.assertNotIn("standard_name", ds["time"].attrs)
+        self.assertEqual(ds["time"].attrs["units"], "d")
+        self.assertEqual(ds["time"].attrs["axis"], "T")
+
     def test_flip_vertical_false_leaves_data_alone(self):
         """The pyses backend emits surface-first already."""
         ds = xr.Dataset({"pressure_half": (("level_i",),

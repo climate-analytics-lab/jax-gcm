@@ -61,10 +61,13 @@ def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
 
     Both output vertical axes run surface-first (#710), so differencing
     ``pressure_half`` along ``level_i`` lands the result already aligned with
-    the ``level`` axis of the tracer fields. Reading a file written before
-    #710, where interfaces were stored TOA-first, gives a vertically reversed
-    Δp: check ``level_i``'s ``positive``/``long_name`` attributes, which only
-    post-#710 files carry.
+    the ``level`` axis of the tracer fields — no orientation guard needed.
+
+    This tool targets current output only. Trajectories written before #710
+    stored interfaces TOA-first under a ``level_i`` bare index (dinosaur) or a
+    ``level_interface`` dim (pyses); they are not supported here, and the
+    convention change is called out in the release notes rather than
+    compensated for at read time.
     """
     ph = ds["pressure_half"]
     if "time" in ph.dims:

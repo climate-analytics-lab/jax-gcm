@@ -134,7 +134,8 @@ _COORD_ATTRS: dict[str, dict[str, str]] = {
         "long_name": "latitude",
     },
     # ``units`` for time is owned by xarray's datetime encoding — setting it
-    # here would collide with the encoding on write.
+    # here would collide with the encoding on write. Applied only to a
+    # datetime64 axis; see ``_time_attrs``.
     "time": {"standard_name": "time", "axis": "T", "long_name": "time"},
     # Axes with no CF standard name; a long_name is all CF asks for.
     "mode": {"long_name": "aerosol mode"},
@@ -213,6 +214,27 @@ def attach_vertical_coordinates(ds, a_boundaries_pa, b_boundaries, p0: float):
     return ds
 
 
+def _time_attrs(time_coord) -> dict[str, str]:
+    """Attributes for the ``time`` axis, honest about what it actually is.
+
+    CF requires a variable with ``standard_name = "time"`` to carry
+    reference-time ``units`` ("days since ..."). xarray supplies those from its
+    encoding only for a **datetime64** coordinate; a bare numeric elapsed-days
+    axis would get the standard name with no decodable units, which is worse
+    than no claim at all — the file would announce CF conformance a reader
+    cannot honour. So a numeric axis is labelled as elapsed time and is *not*
+    claimed to be a CF time coordinate.
+
+    Backends should emit datetime64 (``PysesCamSEDycore.to_xarray`` and
+    ``ModelPredictions._trajectory_dataset`` both do); this is the guard for
+    anything that does not.
+    """
+    if np.issubdtype(np.asarray(time_coord.values).dtype, np.datetime64):
+        return dict(_COORD_ATTRS["time"])
+    return {"axis": "T", "units": "d",
+            "long_name": "elapsed simulation time"}
+
+
 def apply_cf_attributes(ds):
     """Set CF ``standard_name``/``units``/``axis``/``positive`` where known.
 
@@ -222,7 +244,8 @@ def apply_cf_attributes(ds):
     """
     for name, attrs in _COORD_ATTRS.items():
         if name in ds.coords:
-            ds[name].attrs.update(attrs)
+            ds[name].attrs.update(
+                _time_attrs(ds[name]) if name == "time" else attrs)
 
     for name, attrs in _VARIABLE_ATTRS.items():
         if name in ds.variables:
