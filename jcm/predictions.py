@@ -18,7 +18,7 @@ from jax.tree_util import tree_map
 from numpy import timedelta64
 import pandas as pd
 
-from jcm import provenance
+from jcm import cf_metadata, provenance
 from jcm.dycore.base import Predictions
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
@@ -314,15 +314,17 @@ class ModelPredictions:
                 pred_ds[var].attrs["units"] = unit
                 pred_ds[var].attrs["description"] = desc
 
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere.
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
-
-        # Convert sim-day timestamps to datetimes.
+        # Convert sim-day timestamps to datetimes. Done before the CF pass so
+        # ``time`` is already a datetime axis when its attributes are set.
         pred_ds['time'] = (
             times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
         ).astype('datetime64[ns]')
 
-        return pred_ds
+        # Put the file into the output convention: BOTH vertical axes
+        # surface-first, with the sigma/hybrid coordinates and CF attributes
+        # that say so. ``cf_metadata`` owns the flip — doing it inline here is
+        # how ``level`` came to be flipped while ``level_i`` was not (#710).
+        return cf_metadata.finalize_output(pred_ds, vertical=coords.vertical)
 
 
 def _model_predictions_flatten(mp):

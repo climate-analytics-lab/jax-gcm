@@ -810,19 +810,26 @@ class DinosaurDycore(DynamicalCore):
         dinosaur ``CoordinateSystem``. A subsequent PR moves that logic in
         here so a future cubed-sphere backend can supply its own version
         without monkey-patching ``utils``.
+
+        The result is put through :func:`jcm.cf_metadata.finalize_output`, so
+        this shares the surface-first vertical convention and CF metadata with
+        every other backend rather than handing back the physics-internal
+        TOA-first frame.
         """
         # Avoid the otherwise-circular import (utils does not currently depend
         # on dycore, but a top-level import here would still be fine; deferred
         # to keep import-time cost on this module low).
+        from jcm import cf_metadata
         from jcm.utils import data_to_xarray
 
-        return data_to_xarray(
+        ds = data_to_xarray(
             predictions.dynamics.asdict() | predictions.physics,
             coords=self.coords,
             serialize_coords_to_attrs=False,
             times=times - times[0],
             additional_coords=additional_coords or {},
         )
+        return cf_metadata.finalize_output(ds, vertical=self.coords.vertical)
 
     def build_terrain(self, *, source_file=None, **kwargs) -> TerrainData:
         """Construct a :class:`TerrainData` against the dinosaur basis.

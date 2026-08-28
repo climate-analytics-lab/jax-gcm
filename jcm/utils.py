@@ -13,6 +13,8 @@ from typing import Any, Mapping, MutableMapping, Union
 from dinosaur.xarray_utils import _maybe_update_shape_and_dim_with_realization_time_sample
 import xarray
 
+from jcm import cf_metadata
+
 DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
@@ -286,7 +288,13 @@ def _infer_dims_shape_and_coords(
     # Half-level fields (e.g. fluxes, half-pressure) — emit them on a
     # ``level_i`` (interface) axis so they don't clash with the full-level
     # ``level`` coord, which has length nlev.
-    XR_LEVEL_INTERFACE_NAME = 'level_i'
+    #
+    # Both vertical axes are in the physics-internal TOA-first frame here, and
+    # the interface axis is a bare index. ``jcm.cf_metadata.finalize_output``
+    # is what turns a trajectory into the *file* convention (both axes
+    # surface-first, real sigma values, CF attributes) — this function stays
+    # the low-level shape->dims mapper.
+    XR_LEVEL_INTERFACE_NAME = cf_metadata.LEVEL_INTERFACE_DIM
     if XR_LEVEL_INTERFACE_NAME not in all_xr_coords:
         all_xr_coords[XR_LEVEL_INTERFACE_NAME] = np.arange(nlev + 1)
     basic_shape_to_dims[(nlev + 1,) + nodal_shape] = (
