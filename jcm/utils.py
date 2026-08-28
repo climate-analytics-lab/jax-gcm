@@ -475,6 +475,14 @@ def load_states_from_xarray(
 ):
     """Load a ``PhysicsState`` time series from an xarray ``Dataset``.
 
+    .. warning::
+       Values are passed through **unflipped**. A file written by
+       ``ModelPredictions.to_xarray()`` is surface-first (see
+       :mod:`jcm.cf_metadata`) while the physics and dycore are top-first, so
+       loading one here yields a vertically inverted state. Tracked in #741;
+       until it is fixed, reverse the level axis yourself when the source is a
+       trajectory file.
+
     Args:
       ds: Dataset containing the required variables.
       *_var: Variable names in ``ds`` for each ``PhysicsState`` field.
