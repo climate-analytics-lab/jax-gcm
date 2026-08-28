@@ -499,8 +499,11 @@ The model output is a :py:class:`Predictions` object containing the model state 
    # Print variables
    print(ds.data_vars)
 
-   # Plot surface temperature evolution
-   ds['temperature'].isel(level=7).mean(dim='lon').plot()
+   # Plot surface temperature evolution. Select by coordinate value, not by
+   # index: both vertical axes are surface-first (``level`` ~ 1 at the ground,
+   # ~1e-5 at the model top), but say so through ``sel`` rather than baking an
+   # index into the analysis.
+   ds['temperature'].sel(level=1.0, method='nearest').mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 
@@ -508,6 +511,28 @@ The model output is a :py:class:`Predictions` object containing the model state 
    global_mean_temp = ds['temperature'].weighted(
        ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
    ).mean(dim=['lon', 'lat'])
+
+Vertical coordinates in the output
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output files carry two vertical axes: ``level`` (``nlev`` layer mid-levels —
+temperature, tracers, ``pressure_full``) and ``level_i`` (``nlev+1``
+interfaces — ``pressure_half``, radiative fluxes). **Both run surface-first**,
+so index 0 is the level nearest the ground and ``level[k]`` sits between
+``level_i[k]`` and ``level_i[k+1]``. Mixing the two is therefore safe:
+
+.. code-block:: python
+
+   dp = -ds['pressure_half'].diff('level_i').rename(level_i='level')
+   burden = (ds['qc'] * dp / 9.81).sum('level')     # kg/m^2
+
+Both axes are CF-labelled nominal sigma (``a/p0 + b``) and carry
+``positive = "down"``; the hybrid ``(a, b)`` tables travel with the file as the
+``hybrid_a_full`` / ``hybrid_b_full`` / ``hybrid_a_half`` / ``hybrid_b_half``
+coordinates, so ``p = a + b * p_s`` is reproducible from the file alone. See
+:doc:`design/output_vertical_conventions` — including for how to read files
+written before this convention was unified, where the interface axis was
+stored top-first.
 
 Overriding physical constants
 -----------------------------
