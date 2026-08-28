@@ -462,6 +462,32 @@ class ModelIntegrationTest(unittest.TestCase):
         dlon = (lons[0] - lons[1]) % 360.0
         np.testing.assert_allclose(dlon, np.full(3, 7.5), atol=1e-6)
 
+    def test_profile_output_matches_the_file_vertical_convention(self):
+        """A curtain must pair with the trajectory file without a flip (#710).
+
+        Sampling runs top-first (the physics frame); ``to_dataset`` is where
+        that becomes the surface-first file convention, so the observer's
+        ``level`` axis carries the same sigma coordinate as ``to_xarray``'s.
+        """
+        coords = _t21_coords()
+        lat, lon = _grid_lat_lon_deg(coords)
+        station = TrackObserver.stations(
+            [lat[5]], [lon[7]], variables=("temperature",),
+            vertical="profile", name="st")
+        model, _ = self._model([station], coords=coords)
+        dt_days = 30.0 / (60.0 * 24.0)
+        preds = model.run(save_interval=2 * dt_days, total_time=2 * dt_days)
+
+        st = preds.observation_datasets()["st"]
+        np.testing.assert_allclose(
+            st["level"].values, preds.to_xarray()["level"].values, rtol=1e-6)
+        self.assertEqual(st["level"].attrs["positive"], "down")
+        # Sampling is top-first, the dataset surface-first: the same column,
+        # reversed.
+        raw = np.asarray(jax.device_get(preds.observations[0]["temperature"]))
+        np.testing.assert_allclose(
+            st["temperature"].values, raw[:, ::-1], rtol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()
