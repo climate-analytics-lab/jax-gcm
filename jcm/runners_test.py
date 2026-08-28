@@ -1658,3 +1658,32 @@ class TestEmulatorGhgGuard(unittest.TestCase):
 
     def test_absent_forcing_is_not_an_error(self):
         guard_emulator_ghg_forcing(self._physics(True), None)
+
+    def test_transient_timeseries_forcing_is_inspected(self):
+        # A file-based scenario stores the gas as a TimeSeries, which is
+        # exactly the case the guard exists for; np.asarray raises on it,
+        # so an unwrapped check would silently pass the run through.
+        import types
+
+        from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
+
+        rising = make_time_series(
+            np.array([DEFAULT_CH4_VMR_PPMV, 2.4, 3.0]),
+            np.array([0.0, 1.0, 2.0]),
+        )
+        forcing = types.SimpleNamespace(
+            ch4_vmr=rising, n2o_vmr=self._forcing().n2o_vmr)
+        with self.assertRaises(ValueError) as ctx:
+            guard_emulator_ghg_forcing(self._physics(True), forcing)
+        self.assertIn("ch4_vmr", str(ctx.exception))
+
+    def test_constant_default_timeseries_still_passes(self):
+        import types
+
+        from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
+
+        flat = make_time_series(
+            np.full(3, DEFAULT_CH4_VMR_PPMV), np.array([0.0, 1.0, 2.0]))
+        forcing = types.SimpleNamespace(
+            ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
+        guard_emulator_ghg_forcing(self._physics(True), forcing)

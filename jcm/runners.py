@@ -392,7 +392,11 @@ def guard_emulator_ghg_forcing(physics, forcing) -> None:
     """
     import numpy as np
 
-    from jcm.forcing import DEFAULT_CH4_VMR_PPMV, DEFAULT_N2O_VMR_PPMV
+    from jcm.forcing import (
+        DEFAULT_CH4_VMR_PPMV,
+        DEFAULT_N2O_VMR_PPMV,
+        TimeSeries,
+    )
     from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 
     terms = getattr(physics, "terms", None) or []
@@ -405,11 +409,19 @@ def guard_emulator_ghg_forcing(physics, forcing) -> None:
         value = getattr(forcing, name, None)
         if value is None:
             continue
+        # A file-based transient GHG arrives as a TimeSeries, which is
+        # exactly the scenario case this guard exists for — unwrap it
+        # rather than letting np.asarray raise and skip the check.
+        if isinstance(value, TimeSeries):
+            value = value.values
         try:
             arr = np.asarray(value, dtype=float)
         except (TypeError, ValueError):
             continue        # traced/abstract: nothing to check here
-        if arr.size and not np.allclose(arr, default, rtol=0.0, atol=1e-9):
+        # Relative tolerance, not exact equality: a TimeSeries stores the
+        # value as float32, so a default-valued transient round-trips a few
+        # 1e-8 off. Any real scenario change is percent-level.
+        if arr.size and not np.allclose(arr, default, rtol=1e-6, atol=0.0):
             raise ValueError(
                 f"forcing.{name} is {np.unique(arr)[:4]} ppmv but the NN "
                 f"radiation emulator is trained at the fixed default "

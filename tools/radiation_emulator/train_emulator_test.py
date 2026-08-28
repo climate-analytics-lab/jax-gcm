@@ -304,3 +304,19 @@ class MassWeightTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValidationWeightingTest(unittest.TestCase):
+    """A short final validation chunk must not outweigh a full one."""
+
+    def test_chunk_average_is_weighted_by_column_count(self):
+        # 4096 columns at loss 1.0 plus a 1-column tail at loss 5.0: the
+        # plain mean returns 3.0, letting one column decide half of
+        # val_loss (PR #730 review). The weighted average is ~1.001.
+        losses = np.array([1.0, 5.0])
+        sizes = np.array([4096.0, 1.0])
+        self.assertAlmostEqual(float(np.mean(losses)), 3.0)
+        weighted = float(np.average(losses, weights=sizes))
+        self.assertLess(weighted, 1.002)
+        self.assertAlmostEqual(
+            weighted, float((1.0 * 4096 + 5.0) / 4097), places=9)

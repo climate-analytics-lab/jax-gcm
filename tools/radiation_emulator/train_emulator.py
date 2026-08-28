@@ -546,7 +546,15 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
             batch = gather(order[b * config["batch_size"]:
                                  (b + 1) * config["batch_size"]])
             weights, opt_state, _, _ = step(weights, opt_state, batch)
-        val_loss = float(np.mean([evaluate(weights, b) for b in val_batches]))
+        # Weighted by chunk size: a plain mean gives a short final chunk the
+        # same weight as a full one (with 4097 columns the last column would
+        # decide half of val_loss), and since validation indices are
+        # concatenated by source that tail skews best-epoch selection toward
+        # whichever source it came from.
+        val_sizes = np.array([len(b["mask"]) for b in val_batches], float)
+        val_loss = float(
+            np.average([evaluate(weights, b) for b in val_batches],
+                       weights=val_sizes))
         history.append(val_loss)
         if val_loss < best[0]:
             best = (val_loss, weights)
