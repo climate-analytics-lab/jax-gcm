@@ -376,6 +376,50 @@ def _band_config_for_terms(terms):
     return RadiationBandConfig.broadband()
 
 
+def guard_emulator_ghg_forcing(physics, forcing) -> None:
+    """Reject CH4/N2O forcing the NN radiation emulator cannot represent.
+
+    RRTMGP consumes the chemistry methane profile and the prescribed N2O,
+    but the emulator's features carry only ozone and CO2 and its labels are
+    generated at RRTMGP's own CH4/N2O defaults — so a scenario that varies
+    either gas gets fluxes with no trace of its radiative forcing. Absent
+    the features (jax-gcm#738), failing loudly is the honest behaviour:
+    silence here looks exactly like a well-behaved GHG experiment.
+
+    Best-effort by design: it covers the Hydra paths, where forcing is
+    concrete at build time. A direct ``Model.run(forcing=...)`` caller can
+    still hand traced values to the term, which cannot branch on them.
+    """
+    import numpy as np
+
+    from jcm.forcing import DEFAULT_CH4_VMR_PPMV, DEFAULT_N2O_VMR_PPMV
+    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+    terms = getattr(physics, "terms", None) or []
+    if not any(isinstance(t, NNEmulatorRadiation) for t in terms):
+        return
+    if forcing is None:
+        return
+    for name, default in (("ch4_vmr", DEFAULT_CH4_VMR_PPMV),
+                          ("n2o_vmr", DEFAULT_N2O_VMR_PPMV)):
+        value = getattr(forcing, name, None)
+        if value is None:
+            continue
+        try:
+            arr = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            continue        # traced/abstract: nothing to check here
+        if arr.size and not np.allclose(arr, default, rtol=0.0, atol=1e-9):
+            raise ValueError(
+                f"forcing.{name} is {np.unique(arr)[:4]} ppmv but the NN "
+                f"radiation emulator is trained at the fixed default "
+                f"{default} ppmv and takes neither gas as an input feature, "
+                "so its fluxes would ignore this forcing entirely "
+                "(jax-gcm#738). Use physics=echam-rrtmgp-2m for CH4/N2O "
+                f"experiments, or leave forcing.{name} at its default."
+            )
+
+
 def maybe_add_sponge(physics, cfg: DictConfig):
     """Append an ``UpperSponge`` term if ``cfg.run.sponge.levels > 0``."""
     sponge = cfg.run.get("sponge", None)
@@ -1710,6 +1754,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
+    guard_emulator_ghg_forcing(model.physics, forcing)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -1802,6 +1847,7 @@ def _run_prescribed(cfg: DictConfig):
     physics = build_physics(cfg)
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
+    guard_emulator_ghg_forcing(physics, forcing)
     _, states = _load_states_from_cfg(cfg)
 
     model = PrescribedStateModel(

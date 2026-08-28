@@ -447,6 +447,18 @@ So the field's verdict is consistent: predict fluxes and do something explicit
 at the top, or predict heating rates and penalise energy imbalance — and in
 either case train on the distribution the coupled model produces.
 
+## Gases the emulator does not see
+
+The feature vector carries ozone and CO2; **CH4 and N2O are absent**, and the
+labels are generated at RRTMGP's own defaults for both. A scenario that varies
+either gas would get fluxes with no trace of its forcing, so
+`jcm.runners.guard_emulator_ghg_forcing` refuses that combination and points at
+`physics=echam-rrtmgp-2m`. The guard covers the Hydra paths, where forcing is
+concrete at build time; a direct `Model.run(forcing=...)` caller can still hand
+the term traced values it cannot branch on. Adding the features (and *varying*
+both gases in the labels, or they are dead weight) is jax-gcm#738 — worth doing
+once, on whatever feature vector survives the sub-column question (#734).
+
 ## Measured cost (v3 weights, 2026-08-25)
 
 Settled per-chunk wall clock (`tools/benchmark.py`, T63L47, 5-day chunks,

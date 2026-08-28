@@ -23,6 +23,7 @@ from jcm.runners import (
     build_terrain,
     build_tracer_filter,
     configure_host_device_count,
+    guard_emulator_ghg_forcing,
     run,
 )
 
@@ -1610,3 +1611,50 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         import jax_datetime as jdt
         self.assertEqual(
             int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+
+
+class TestEmulatorGhgGuard(unittest.TestCase):
+    """The emulator must refuse CH4/N2O forcing it cannot represent.
+
+    Its features carry only ozone and CO2 and its labels are generated at
+    RRTMGP's defaults, so a scenario varying either gas would get fluxes
+    with no trace of the forcing (jax-gcm#738).
+    """
+
+    def _physics(self, emulated):
+        from jcm.physics.echam.echam_terms import echam_physics
+        return echam_physics(
+            radiation_scheme="emulated" if emulated else "rrtmgp")
+
+    def _forcing(self, **overrides):
+        from jcm.forcing import (
+            DEFAULT_CH4_VMR_PPMV, DEFAULT_N2O_VMR_PPMV,
+        )
+        import types
+        return types.SimpleNamespace(
+            ch4_vmr=np.asarray(overrides.get("ch4", DEFAULT_CH4_VMR_PPMV)),
+            n2o_vmr=np.asarray(overrides.get("n2o", DEFAULT_N2O_VMR_PPMV)),
+        )
+
+    def test_default_greenhouse_gases_pass(self):
+        guard_emulator_ghg_forcing(self._physics(True), self._forcing())
+
+    def test_non_default_ch4_is_rejected_with_an_actionable_message(self):
+        with self.assertRaises(ValueError) as ctx:
+            guard_emulator_ghg_forcing(self._physics(True),
+                                       self._forcing(ch4=3.0))
+        msg = str(ctx.exception)
+        self.assertIn("ch4_vmr", msg)
+        self.assertIn("echam-rrtmgp-2m", msg)
+
+    def test_non_default_n2o_is_rejected(self):
+        with self.assertRaises(ValueError):
+            guard_emulator_ghg_forcing(self._physics(True),
+                                       self._forcing(n2o=0.40))
+
+    def test_rrtmgp_consumes_both_gases_so_it_is_never_guarded(self):
+        guard_emulator_ghg_forcing(self._physics(False),
+                                   self._forcing(ch4=3.0, n2o=0.40))
+
+    def test_absent_forcing_is_not_an_error(self):
+        guard_emulator_ghg_forcing(self._physics(True), None)

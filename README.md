@@ -124,7 +124,9 @@ python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
 ```
 
 Point ``physics.terms.nn_emulator_radiation.weights_file`` at another
-checkpoint to swap networks. Generate labels and train with
+checkpoint to swap networks. The emulator sees ozone and CO2 but **not
+CH4 or N2O**, so runs varying those gases are refused with a pointer to
+``physics=echam-rrtmgp-2m`` (jax-gcm#738). Generate labels and train with
 ``tools/radiation_emulator/`` — see
 `docs/source/design/radiation_nn_emulator.md`. ``weights_file: null``
 initialises randomly, which is only useful for cost benchmarking and must
