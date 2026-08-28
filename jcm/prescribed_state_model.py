@@ -66,9 +66,18 @@ class PrescribedStatePredictions:
         metadata; the intent is to support quick NaN-checks and column
         plots, not production climatology.
 
+        **The ``level`` axis here is the top-first physics frame**, the
+        opposite of the surface-first file convention every other product
+        follows (``jcm.cf_metadata``, #710), and it carries no coordinate
+        values that would say so. That is deliberate for now: this dump
+        round-trips through ``utils.load_states_from_xarray`` back into a
+        ``PhysicsState``, which also does not flip, so the pair is
+        self-consistent — but the shared dim name is a trap for anyone
+        pairing this against a trajectory file. Tracked in #739.
+
         Use ``ModelPredictions.to_xarray()`` when you need the full
         coord-aware serialisation (units, ``additional_coords``,
-        flipped level axis, etc.).
+        surface-first vertical axes with CF metadata, etc.).
         """
         import numpy as np
         import xarray as xr

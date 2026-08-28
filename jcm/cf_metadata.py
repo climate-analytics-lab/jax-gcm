@@ -66,7 +66,11 @@ _SIGMA_COMMON_ATTRS = {
 }
 
 #: Attributes for variables JCM writes that have a CF standard name. Anything
-#: not listed keeps whatever the per-physics units tables gave it.
+#: not listed keeps whatever the per-physics units tables gave it — which for
+#: most physics diagnostics (the radiation fluxes among them) is nothing at
+#: all. Giving each ``PhysicsTerm`` a way to declare units for the keys it
+#: provides is tracked in #740; this table deliberately covers only the
+#: vertical-coordinate neighbourhood and the core prognostics.
 _VARIABLE_ATTRS: dict[str, dict[str, str]] = {
     "pressure_full": {
         "standard_name": "air_pressure",
