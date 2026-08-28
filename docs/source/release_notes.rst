@@ -1,6 +1,44 @@
 Release Notes
 =============
 
+Unreleased — one vertical direction in the output, and CF metadata
+------------------------------------------------------------------
+
+- **Breaking: interface variables are now written surface-first**, the same
+  direction as the full-level fields (#710). Previously an output file ran its
+  two vertical dimensions in *opposite* directions — ``level`` (mid-levels)
+  surface-first, ``level_i`` (interfaces) TOA-first — with nothing in the file
+  to say so. Every natural pairing of the two was therefore silently upside
+  down: a heating rate computed from the saved radiative fluxes and compared
+  against the saved temperature, or a tracer burden mass-weighted with
+  ``diff(pressure_half)``, came out vertically reversed with a plausible
+  magnitude and no error.
+- **Anything reading** ``pressure_half``, ``height_half`` or the radiative
+  fluxes (``radiation.lw_flux_up`` and friends) **gets the opposite order to
+  before.** Code that compensated for the old mismatch must drop that
+  compensation. There is no read-time shim: ``tools/jam_burden_report.py``
+  used to detect the disagreement and flip Δp, and no longer does.
+- **Old files are not converted and are not supported.** A pre-release
+  trajectory is identifiable by ``level_i`` being a bare integer index with no
+  attributes; a current one carries descending nominal sigma plus
+  ``positive = "down"``. Re-run rather than re-read.
+- ``level_interface`` **is gone**: the pyses backend now names its interface
+  axis ``level_i``, matching the dinosaur backend, so a reader needs one name
+  rather than two.
+- **The file is now self-describing.** Both vertical axes are real coordinate
+  variables holding nominal sigma (``a/p0 + b``) with CF ``standard_name``,
+  ``units``, ``axis`` and ``positive``; the hybrid ``(a, b)`` tables travel
+  with the file as the ``hybrid_a_full`` / ``hybrid_b_full`` /
+  ``hybrid_a_half`` / ``hybrid_b_half`` coordinates so ``p = a + b·p_s`` is
+  reproducible from the file alone, and CF ``formula_terms`` names them.
+  ``lat``/``lon``/``time`` and the pressure, height and core prognostic
+  variables gain standard names and units. Files are stamped
+  ``Conventions = CF-1.11``.
+- Observer profile curtains follow the same convention (their ``level`` axis
+  was top-first with no coordinate values), and ``jcm.cf_metadata`` is now the
+  single place any backend converts the physics-internal frame to the file
+  frame. See ``docs/source/design/output_vertical_conventions.md``.
+
 Unreleased — provenance records the parameters
 ----------------------------------------------
 
