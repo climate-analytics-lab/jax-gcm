@@ -459,11 +459,23 @@ def band_metrics(pred_norm, data, idx, is_sw):
         return float(np.sqrt(np.mean(d ** 2))), float(np.mean(d))
 
     p_half = data["pressure_interfaces"][idx]
+    # Score the heating the GCM actually sees: for SW the deployed path
+    # (reconstruct_sw_interface_fluxes) overwrites the TOA downward flux with
+    # the exact incoming value, which a sigmoid can never quite reach. Scoring
+    # the raw output instead charges the model a fictitious flux error across
+    # the near-vacuum top layer, where it becomes a huge K/day error -- and
+    # hr_rmse_worst, which score() ranks --sweep candidates by, is precisely
+    # the metric that error would dominate (PR #730 review).
+    down_pred, up_pred = pred[..., 0].copy(), pred[..., 1]
+    down_true, up_true = truth[..., 0].copy(), truth[..., 1]
+    if is_sw:
+        down_pred[:, 0] = np.asarray(scale)
+        down_true[:, 0] = np.asarray(scale)
     hr_pred = np.asarray(jax.vmap(flux_to_heating_rate)(
-        jnp.asarray(pred[..., 0]), jnp.asarray(pred[..., 1]), p_half,
+        jnp.asarray(down_pred), jnp.asarray(up_pred), p_half,
     )) * SECONDS_PER_DAY
     hr_true = np.asarray(jax.vmap(flux_to_heating_rate)(
-        jnp.asarray(truth[..., 0]), jnp.asarray(truth[..., 1]), p_half,
+        jnp.asarray(down_true), jnp.asarray(up_true), p_half,
     )) * SECONDS_PER_DAY
     # Both weightings are reported because they answer different questions:
     # the mass-weighted one is the energy error, the raw one exposes the

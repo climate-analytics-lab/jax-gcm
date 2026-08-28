@@ -10,6 +10,7 @@ import pathlib
 import sys
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -25,6 +26,9 @@ from train_emulator import (  # noqa: E402
     split_by_source_and_group,
     split_by_group,
     val_chunk_weights,
+    band_metrics,
+    flux_to_heating_rate,
+    SECONDS_PER_DAY,
 )
 
 
@@ -301,6 +305,61 @@ class MassWeightTest(unittest.TestCase):
         w = np.asarray(mass_weights(p_half))[0]
         self.assertLess(w[0], 1e-4)
         self.assertGreater(w[-1], 0.4)
+
+
+class BandMetricsSWBoundaryTest(unittest.TestCase):
+    """SW metrics must score the reconstructed profile, as deployed."""
+
+    @staticmethod
+    def _data(nlev=3, toa=1000.0):
+        # TOA-first interfaces with a near-vacuum top layer, as at T63L47.
+        p_half = np.array([[1.0, 100.0, 5e4, 1.0e5]])
+        down = np.array([toa, 900.0, 800.0, 700.0])
+        up = np.full(nlev + 1, 100.0)
+        labels = np.stack([down, up, down, up], axis=-1)[None]
+        return dict(sw_scale=np.array([toa]), sw_labels=labels,
+                    lit=np.array([True]), pressure_interfaces=p_half)
+
+    def test_unreachable_toa_down_is_not_charged_as_error(self):
+        # A sigmoid cannot emit exactly 1, so the raw output undershoots the
+        # incoming flux; the deployed path overwrites that interface, and an
+        # evaluator that does not would charge 20 W/m^2 across a 99 Pa layer.
+        data = self._data()
+        pred_norm = data["sw_labels"] / 1000.0
+        pred_norm[0, 0, 0] = 0.98          # 980 vs 1000 W/m^2 at TOA down
+        m = band_metrics(pred_norm, data, np.array([0]), True)
+        self.assertLess(m["heating_rmse_worst_level"], 1e-6)
+
+        # What the unreconstructed comparison would have scored instead --
+        # score() ranks --sweep candidates on exactly this number.
+        raw = np.asarray(jax.vmap(flux_to_heating_rate)(
+            jnp.asarray(pred_norm[..., 0] * 1000.0),
+            jnp.asarray(pred_norm[..., 1] * 1000.0),
+            data["pressure_interfaces"])) * SECONDS_PER_DAY
+        true = np.asarray(jax.vmap(flux_to_heating_rate)(
+            jnp.asarray(data["sw_labels"][..., 0]),
+            jnp.asarray(data["sw_labels"][..., 1]),
+            data["pressure_interfaces"])) * SECONDS_PER_DAY
+        self.assertGreater(np.abs(raw - true).max(), 100.0)
+
+    def test_genuine_interior_error_is_still_scored(self):
+        # The override must not be a blanket excuse: an error one interface
+        # down is real and must survive.
+        data = self._data()
+        pred_norm = data["sw_labels"] / 1000.0
+        pred_norm[0, 1, 0] = 0.80          # 800 vs 900 W/m^2 at interface 1
+        m = band_metrics(pred_norm, data, np.array([0]), True)
+        self.assertGreater(m["heating_rmse_worst_level"], 1.0)
+
+    def test_longwave_is_unaffected(self):
+        # LW has no normalising incoming flux and no boundary override.
+        data = self._data()
+        data = dict(lw_scale=data["sw_scale"], lw_labels=data["sw_labels"],
+                    pressure_interfaces=data["pressure_interfaces"])
+        pred_norm = data["lw_labels"] / 1000.0
+        pred_norm[0, 0, 0] = 0.98
+        m = band_metrics(pred_norm, data, np.array([0]), False)
+        self.assertGreater(m["heating_rmse_worst_level"], 100.0)
 
 
 class ValidationWeightingTest(unittest.TestCase):
