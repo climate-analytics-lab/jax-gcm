@@ -40,8 +40,7 @@ _EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
 
 
 def _horizontal_dims(da: xr.DataArray) -> list[str]:
-    return [d for d in da.dims if d not in ("time", "level", "level_i",
-                                            "level_interface", "mode")]
+    return [d for d in da.dims if d not in ("time", "level", "level_i", "mode")]
 
 
 def _area_weights(ds: xr.Dataset):
@@ -60,26 +59,19 @@ def _wmean(da: xr.DataArray, weights) -> float:
 def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
     """Per-layer Δp aligned with the 3-D fields' level orientation.
 
-    ``pressure_half`` may be stored in the opposite vertical order to the
-    full-level fields (dinosaur writes interfaces top-first, fields
-    surface-first); orient by comparing which end is the surface.
+    Both output vertical axes run surface-first (#710), so differencing
+    ``pressure_half`` along ``level_i`` lands the result already aligned with
+    the ``level`` axis of the tracer fields. Reading a file written before
+    #710, where interfaces were stored TOA-first, gives a vertically reversed
+    Δp: check ``level_i``'s ``positive``/``long_name`` attributes, which only
+    post-#710 files carry.
     """
-    iface_dim = next(d for d in ("level_i", "level_interface") if d in ds.dims)
     ph = ds["pressure_half"]
     if "time" in ph.dims:
         ph = ph.isel(time=0)
-    axis = list(ph.dims).index(iface_dim)
+    axis = list(ph.dims).index("level_i")
     dp = np.abs(np.diff(np.asarray(ph.values), axis=axis))
-    half_surface_first = (float(ph.isel({iface_dim: 0}).mean())
-                          > float(ph.isel({iface_dim: -1}).mean()))
-    pf = ds["pressure_full"]
-    if "time" in pf.dims:
-        pf = pf.isel(time=0)
-    full_surface_first = (float(pf.isel(level=0).mean())
-                          > float(pf.isel(level=-1).mean()))
-    if half_surface_first != full_surface_first:
-        dp = np.flip(dp, axis=axis)
-    dims = tuple("level" if d == iface_dim else d for d in ph.dims)
+    dims = tuple("level" if d == "level_i" else d for d in ph.dims)
     return xr.DataArray(dp, dims=dims)
 
 
