@@ -8,6 +8,8 @@ analysis-ready :class:`xarray.Dataset`. Returned by :meth:`jcm.model.Model.run`,
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 import jax
@@ -16,9 +18,12 @@ from jax.tree_util import tree_map
 from numpy import timedelta64
 import pandas as pd
 
+from jcm import provenance
 from jcm.dycore.base import Predictions
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPredictions:
@@ -39,7 +44,7 @@ class ModelPredictions:
                  dycore=None, observations=None, observers=(),
                  obs_t0_days=None, obs_dt_seconds=None,
                  snapshots=None, snapshot_variables=(),
-                 snapshot_interval_days=None):
+                 snapshot_interval_days=None, params=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
@@ -51,6 +56,64 @@ class ModelPredictions:
         self._snapshots = snapshots
         self._snapshot_variables = tuple(snapshot_variables)
         self._snapshot_interval_days = snapshot_interval_days
+        # The parameters this trajectory was produced with (#732).
+        #
+        # ``params`` is the record captured at TRACE time by
+        # ``Model._run_from_state`` and is authoritative when present:
+        # ``self`` is a static argument to that jit, so the parameters are
+        # constants inside the executable, and reading the live module here
+        # can report values that never reached the computation. Falling
+        # back to a live read covers a ModelPredictions built directly,
+        # where there is no trace to have captured. With no physics at all
+        # there is nothing to record: the pytree unflatten rebuilds without
+        # it by design, and runs on every tree_map over a ModelPredictions.
+        self._params = {}
+        try:
+            if params is not None:
+                self._params = self._check_live_matches_traced(params, physics)
+            elif physics is not None:
+                self._params = provenance.describe_params(physics)
+        except Exception:  # noqa: BLE001 — never fail a completed run
+            logger.warning("provenance: parameter capture failed",
+                           exc_info=True)
+
+    @staticmethod
+    def _check_live_matches_traced(traced, physics):
+        """Return *traced*, flagging a live/compiled parameter divergence.
+
+        A mismatch means the caller changed a parameter in place and jcm
+        silently ignored it: the model rebinds parameters only when the
+        jit retraces, so the run used the compiled values (#735). That is
+        a scientific error the user needs told about, not something for
+        provenance to paper over by quietly recording the compiled values
+        and moving on.
+        """
+        live = provenance.describe_params(physics)
+        if live == traced:
+            return traced
+        logger.warning(
+            "provenance: the live parameters differ from those compiled "
+            "into this run. jcm binds physics parameters at trace time "
+            "(Model._run_from_state takes `self` as a static argument), so "
+            "an in-place parameter change after the first run does NOT "
+            "affect the computation. The record reports the values that "
+            "actually ran. Rebuild the Model to change parameters.")
+        flagged = dict(traced)
+        flagged["live_parameters_differ_from_compiled"] = (
+            "in-place parameter changes did not reach this run; the record "
+            "holds the compiled values")
+        return flagged
+
+    @property
+    def params(self):
+        """The physics parameter values behind this trajectory (#732).
+
+        Flat ``<term>.<variable>.<field>`` keys, read off the built model
+        rather than the requested config, so they reflect what ran. Empty
+        for predictions reconstructed by a pytree ``tree_map``, which
+        carries no physics.
+        """
+        return self._params
 
     @property
     def dynamics(self):
@@ -103,11 +166,15 @@ class ModelPredictions:
             data,
             coords={"snap_time": t, "lon": lon, "lat": lat},
             attrs={"snapshot_interval_days": self._snapshot_interval_days,
-                   "sampling": "instantaneous (post-step)"},
+                   "sampling": "instantaneous (post-step)",
+                   **provenance.params_attrs(self._params)},
         )
 
     def observation_datasets(self):
         """Per-timestep virtual-observation output as xarray Datasets.
+
+        Stamped with the run's parameters like the trajectory and the
+        snapshots, since an observer stream is often persisted on its own.
 
         Returns:
             Dict ``{observer_name: xarray.Dataset}`` — one Dataset per
@@ -120,20 +187,35 @@ class ModelPredictions:
         if not self._observations:
             return {}
         samples_host = jax.device_get(self._observations)
-        return {
-            obs.name: obs.to_dataset(
-                samples, self._obs_t0_days, self._obs_dt_seconds,
-            )
-            for obs, samples in zip(self._observers, samples_host)
-        }
+        stamp = provenance.params_attrs(self._params)
+        datasets = {}
+        for obs, samples in zip(self._observers, samples_host):
+            ds = obs.to_dataset(samples, self._obs_t0_days,
+                                self._obs_dt_seconds)
+            ds.attrs.update(stamp)
+            datasets[obs.name] = ds
+        return datasets
 
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
+
+        The parameters the run used are stamped into the dataset's global
+        attributes here (#732), so they survive a bare
+        ``model.run(...).to_xarray().to_netcdf(...)`` that never goes near
+        the Hydra runners. Wrapping rather than stamping inside
+        :meth:`_trajectory_dataset` keeps a per-backend return path from
+        being able to skip it.
 
         Returns:
             An xarray.Dataset ready for analysis and plotting.
 
         """
+        ds = self._trajectory_dataset()
+        ds.attrs.update(provenance.params_attrs(self._params))
+        return ds
+
+    def _trajectory_dataset(self):
+        """Build the trajectory Dataset, before provenance stamping."""
         # Backends whose native horizontal layout is not the separable
         # lat/lon grid the legacy path below assumes (pySES cubed-sphere
         # columns) own their trajectory conversion per the DynamicalCore

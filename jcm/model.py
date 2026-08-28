@@ -24,7 +24,7 @@ from dinosaur.scales import units
 from functools import partial
 import logging
 
-from jcm import profiling
+from jcm import profiling, provenance
 from jcm.date import DateData, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
@@ -38,6 +38,12 @@ from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 
 logger = logging.getLogger(__name__)
+
+#: Per-trace parameter records kept for provenance (#732). A model
+#: retraces once per distinct combination of static arguments and dynamic
+#: avals, which is a handful in normal use; the cap bounds the memory a
+#: long-lived model can accumulate. Each record is a few kB.
+_MAX_TRACED_PARAM_RECORDS = 64
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +466,11 @@ class Model:
         self.dt_si = (time_step * units.minute).to(units.second)
 
         self.observers = tuple(observers)
+        # Parameters as bound into each compiled trace, keyed by a trace
+        # id that the executable itself carries back (#732). See the
+        # capture in ``_run_from_state`` for why the live values will not do.
+        self._traced_params: dict = {}
+        self._trace_counter: int = 0
         if len({obs.name for obs in self.observers}) != len(self.observers):
             raise ValueError("Observer names must be unique.")
         if self.observers:
@@ -912,6 +923,20 @@ class Model:
 
         return _integrate_fn
 
+    def _remember_traced_params(self, trace_id: int, record: dict) -> None:
+        """Store one trace's parameter record, oldest evicted past the cap.
+
+        Bounded because nothing else here can be: a model that keeps
+        meeting new input shapes retraces indefinitely, and
+        ``jax.clear_caches()`` does not reach this dict (#733 review).
+        Evicting the oldest degrades that executable's record to empty if
+        it is ever run again, which is the safe direction — a missing
+        record, never another executable's values.
+        """
+        self._traced_params[trace_id] = record
+        while len(self._traced_params) > _MAX_TRACED_PARAM_RECORDS:
+            self._traced_params.pop(next(iter(self._traced_params)))
+
     @partial(jax.jit, static_argnums=(0, 4, 5, 6, 8, 9))  # Note: changing fields assumed static won't propagate.
     def _run_from_state(self,
                         initial_state,
@@ -934,6 +959,24 @@ class Model:
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
         """
+        # Capture the parameters HERE, at trace time, not from the live
+        # module afterwards (#732). ``self`` is a static argument, so the
+        # parameter values are baked into this executable as constants and
+        # mutating one in place afterwards changes nothing the compiled
+        # function does (see the note on the decorator). Reading the module
+        # at the model-to-user handoff would therefore stamp a trajectory
+        # with values that did not produce it. On a cache hit this does not
+        # re-run, which is right: the reused executable still holds the
+        # parameters captured at its own trace.
+        trace_id = self._trace_counter
+        self._trace_counter += 1
+        try:
+            self._remember_traced_params(
+                trace_id, provenance.describe_params(self.physics))
+        except Exception:  # noqa: BLE001 — provenance never fails a run
+            logger.warning("provenance: trace-time parameter capture failed",
+                           exc_info=True)
+
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
         # Op-split saves end-of-step states (snapshot mode) or post-step
@@ -961,8 +1004,15 @@ class Model:
         (final_dycore_state, final_physics_state, predictions, observations,
          snapshots) = integrate(initial_state, initial_physics_state)
 
+        # The id rides back as a traced constant, so a cache hit returns
+        # the id of the executable that actually ran. Keying the store on
+        # the static arguments instead was not enough: one static
+        # signature can own several executables (a forcing of a different
+        # shape or dtype retraces), and the later trace overwrote the
+        # earlier one's record.
         return (final_dycore_state, final_physics_state,
-                predictions.replace(times=times), observations, snapshots)
+                predictions.replace(times=times), observations, snapshots,
+                jnp.int32(trace_id))
 
     def run_from_state(self,
                        initial_state,
@@ -1065,7 +1115,7 @@ class Model:
             )
 
         (final_dycore_state, final_physics_state, predictions, observations,
-         snapshots) = self._run_from_state(
+         snapshots, trace_id) = self._run_from_state(
                 initial_state, initial_physics_state, forcing,
                 save_interval_days, total_time_days,
                 output_averages, observer_xs,
@@ -1077,6 +1127,7 @@ class Model:
             ModelPredictions(
                 predictions, self.coords, self.physics,
                 dycore=self.dycore,
+                params=self._traced_params.get(int(trace_id)),
                 observations=observations,
                 observers=self.observers,
                 obs_t0_days=obs_t0_days,

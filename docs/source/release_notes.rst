@@ -1,6 +1,56 @@
 Release Notes
 =============
 
+Unreleased — provenance records the parameters
+----------------------------------------------
+
+- **Every output now records the physics parameter values the run
+  actually used** (#732). The composed Hydra config that #591 stamped is
+  not the same thing: each scheme's ``params`` block is deliberately
+  absent from the shipped yamls so unspecified fields fall back to
+  ``Parameters.default()`` in code, meaning the config recorded the
+  *overrides* and said nothing about the effective values, and a model
+  built in Python or one whose parameters a calibration loop replaced
+  had no config behind it at all. ``jcm_prov_params`` (with
+  ``jcm_prov_params_sha``) now carries them, read off the *built*
+  physics, keyed as ``<term>.<variable>.<field>``
+  (``tiedtke_convection.params.entrpen``). Read it with
+  ``jcm.provenance.read_params(ds.attrs)``, or off the predictions object
+  as ``predictions.params``. Everything else about a run stays where it
+  was: the term composition, dycore and resolution are already in the
+  config record this sits beside.
+- Both kinds of parameter variable are covered. An ``nnx.Param`` is
+  recorded in full, including tuned arrays such as the MACv2-SP plume
+  shapes. A plain ``nnx.Variable`` is recorded where it is knob-shaped
+  (scalars, 0-d arrays, structs of those), because a parameter block
+  holding a bool cannot be a ``Param`` — ``SpeedySurfaceFlux.surface_params``,
+  ``EchamSurface.params`` and every Held-Suarez tuning constant are plain
+  Variables — while the coordinate caches terms also hold as Variables
+  stay out. Arrays over 64 elements (embedded NN weights) are summarized
+  by shape, dtype and hash; values captured under ``jit``/``grad`` read
+  ``"<traced>"``.
+- **The record is captured at trace time, not from the live module.**
+  ``Model._run_from_state`` is jitted with ``self`` static, so parameters
+  are constants inside the compiled executable and changing one in place
+  afterwards does not reach the computation. Reading the module at the
+  handoff would therefore stamp a trajectory with values that never ran.
+  Where the live values disagree with the compiled ones, the record
+  reports the compiled ones and both a log warning and a
+  ``live_parameters_differ_from_compiled`` key say so: that disagreement
+  means an in-place parameter change did nothing to the run. Rebuild the
+  ``Model`` to change parameters; making the mutation take effect (or
+  fail loudly) is tracked in #735.
+- The record travels on the predictions object, so it reaches every
+  output stream that object produces (trajectory, snapshots and the
+  per-observer datasets), including a bare
+  ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
+  Hydra runners, and a later run cannot retroactively change an earlier
+  one's record.
+- **``jcm_prov_run_hash`` values change**, because the parameters are now
+  folded into the hash. They have to be: every member of a parameter
+  sweep shares one code state, config and input set, so without them a
+  sweep produced a single run hash for every member.
+
 Unreleased — transient AMIP forcing
 -----------------------------------
 
