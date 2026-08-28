@@ -1098,9 +1098,11 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
 
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
         cfg.init.kind = "from_mars"
-        # A stub model shortcuts build_model: _run_full only touches
-        # ``model.coords`` (for the forcing) before the init dispatch.
-        stub = _types.SimpleNamespace(coords=build_coords(cfg))
+        # A stub model shortcuts build_model: before the init dispatch
+        # _run_full only touches ``model.coords`` (for the forcing) and
+        # ``model.physics`` (for the emulator GHG guard, which returns
+        # immediately when there is no emulator term).
+        stub = _types.SimpleNamespace(coords=build_coords(cfg), physics=None)
         with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
             _run_full(cfg, model=stub)
 
