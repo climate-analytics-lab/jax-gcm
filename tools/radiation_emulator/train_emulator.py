@@ -622,6 +622,11 @@ def score(val):
     the GCM survives is the single worst layer, and ranking on the mean once
     selected a model that scored 0.72 K/day and NaN'd the model in five days
     off a 130 K/day error at the top level alone.
+
+    Sweeps run before band_metrics applied the deployed TOA-downward boundary
+    ranked on a phantom interface-0 shortwave error of the same order as the
+    scores themselves; those results are not comparable with these, and the
+    packaged checkpoint predates the fix (jax-gcm#743).
     """
     return (val["sw"]["heating_rmse_worst_level"]
             + val["lw"]["heating_rmse_worst_level"])

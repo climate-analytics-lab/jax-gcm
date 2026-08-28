@@ -382,7 +382,8 @@ inference, which is a capacity proxy but not the one intended. The
 conclusion below may well survive re-measurement — the feature-count and
 output-channel arguments are independent of this metric — but it has not
 been re-measured. Treat the table as a record of what was run, not as
-evidence, until the sweep is repeated on the corrected score.
+evidence, until the sweep is repeated on the corrected score (jax-gcm#743,
+which also covers re-selecting the packaged checkpoint).
 
 The mass-weighted table in the previous section is not affected: it gives
 the top layer ~1e-5 of the total weight, which is the same property that
