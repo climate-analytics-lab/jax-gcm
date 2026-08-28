@@ -368,6 +368,26 @@ appeared on the earlier, hole-y dataset, and the natural explanation there —
 that capacity was being rewarded for overfitting sparse data in the coverage
 gap — is ruled out by its surviving the fix.
 
+**These four numbers are contaminated and the ranking they support is not
+safe to reuse.** They were measured before `band_metrics` applied the
+deployed TOA-downward boundary, so each includes a phantom shortwave error
+at interface 0: the network's sigmoid cannot emit exactly 1, but the online
+path (`reconstruct_sw_interface_fluxes`) overwrites that interface with the
+exact incoming flux, so the shortfall never reaches the GCM. At ~421 K/day
+per W/m² across the 2 Pa top layer, a 2% shortfall against a 1361 W/m²
+incoming flux is ~11,000 K/day — the same order as the table itself. The
+monotonicity is therefore consistent with the sweep having partly ranked
+candidates on how closely each approaches an output that is discarded at
+inference, which is a capacity proxy but not the one intended. The
+conclusion below may well survive re-measurement — the feature-count and
+output-channel arguments are independent of this metric — but it has not
+been re-measured. Treat the table as a record of what was run, not as
+evidence, until the sweep is repeated on the corrected score.
+
+The mass-weighted table in the previous section is not affected: it gives
+the top layer ~1e-5 of the total weight, which is the same property that
+made it blind to the layer that NaN'd the model in the first place.
+
 The differences that plausibly explain it all make this the larger problem:
 **50-56 input features against his 11**, four output channels against two,
 per-band aerosol optics and McICA cloud variability he did not have (his clouds
