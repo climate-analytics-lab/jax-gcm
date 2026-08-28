@@ -386,6 +386,27 @@ def channel_weights(y_train):
     return 1.0 / jnp.maximum(jnp.mean(y_train, axis=0), _WEIGHT_PROF_FLOOR)
 
 
+def val_chunk_weights(val_batches):
+    """Per-chunk weights for averaging validation objectives.
+
+    A chunk's objective is normalised by its *contributing* sample count
+    (``n = sum(mask)`` in ``make_loss``), so that is what it must be weighted
+    by. A plain mean would give a short final chunk the same weight as a full
+    one -- with 4097 columns the last column decides half of ``val_loss`` --
+    and since validation indices are concatenated by source, that tail skews
+    best-epoch selection toward whichever source it came from.
+
+    For SW the mask is daylight, so a night-heavy chunk cannot outweigh a lit
+    one per lit sample and a fully dark chunk drops out entirely instead of
+    contributing a full chunk of zero loss. For LW the mask is all ones and
+    this reduces to the chunk length.
+    """
+    w = np.array([float(np.sum(b["mask"])) for b in val_batches])
+    if w.sum() == 0.0:          # an SW split with no daylight at all
+        return np.ones_like(w)
+    return w
+
+
 def make_loss(is_sw, alpha, weight_prof):
     """Build the loss for one band, following Ukkonen's hybrid formulation.
 
@@ -546,15 +567,9 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
             batch = gather(order[b * config["batch_size"]:
                                  (b + 1) * config["batch_size"]])
             weights, opt_state, _, _ = step(weights, opt_state, batch)
-        # Weighted by chunk size: a plain mean gives a short final chunk the
-        # same weight as a full one (with 4097 columns the last column would
-        # decide half of val_loss), and since validation indices are
-        # concatenated by source that tail skews best-epoch selection toward
-        # whichever source it came from.
-        val_sizes = np.array([len(b["mask"]) for b in val_batches], float)
         val_loss = float(
             np.average([evaluate(weights, b) for b in val_batches],
-                       weights=val_sizes))
+                       weights=val_chunk_weights(val_batches)))
         history.append(val_loss)
         if val_loss < best[0]:
             best = (val_loss, weights)

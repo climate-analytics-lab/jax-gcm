@@ -24,6 +24,7 @@ from train_emulator import (  # noqa: E402
     solar_group_ids,
     split_by_source_and_group,
     split_by_group,
+    val_chunk_weights,
 )
 
 
@@ -302,21 +303,42 @@ class MassWeightTest(unittest.TestCase):
         self.assertGreater(w[-1], 0.4)
 
 
+class ValidationWeightingTest(unittest.TestCase):
+    """Validation chunks weigh by contributing samples, not chunk length."""
+
+    @staticmethod
+    def _batches(*masks):
+        return [{"mask": np.asarray(m, float)} for m in masks]
+
+    def test_short_tail_chunk_does_not_outweigh_a_full_one(self):
+        # 4096 columns at loss 1.0 plus a 1-column tail at loss 5.0: a plain
+        # mean returns 3.0, letting one column decide half of val_loss.
+        batches = self._batches(np.ones(4096), np.ones(1))
+        losses = np.array([1.0, 5.0])
+        self.assertAlmostEqual(float(np.mean(losses)), 3.0)
+        weighted = float(np.average(
+            losses, weights=val_chunk_weights(batches)))
+        self.assertAlmostEqual(weighted, (1.0 * 4096 + 5.0) / 4097, places=9)
+
+    def test_shortwave_weights_count_lit_columns_not_chunk_length(self):
+        # A night-heavy chunk (10 lit of 1000) against an always-lit one: the
+        # SW objective is per-lit-sample, so weighting by chunk length would
+        # give the 10 lit columns the same say as the 1000 lit ones.
+        night_heavy = np.concatenate([np.ones(10), np.zeros(990)])
+        w = val_chunk_weights(self._batches(night_heavy, np.ones(1000)))
+        np.testing.assert_allclose(w, [10.0, 1000.0])
+
+    def test_fully_dark_chunk_gets_no_weight(self):
+        # Its objective is 0/max(0,1) = 0, which under length weighting would
+        # pull val_loss down as if the model had predicted it perfectly.
+        w = val_chunk_weights(self._batches(np.ones(100), np.zeros(100)))
+        np.testing.assert_allclose(w, [100.0, 0.0])
+
+    def test_all_dark_split_falls_back_to_uniform(self):
+        # Degenerate, but np.average raises on zero total weight.
+        w = val_chunk_weights(self._batches(np.zeros(8), np.zeros(4)))
+        np.testing.assert_allclose(w, [1.0, 1.0])
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class ValidationWeightingTest(unittest.TestCase):
-    """A short final validation chunk must not outweigh a full one."""
-
-    def test_chunk_average_is_weighted_by_column_count(self):
-        # 4096 columns at loss 1.0 plus a 1-column tail at loss 5.0: the
-        # plain mean returns 3.0, letting one column decide half of
-        # val_loss (PR #730 review). The weighted average is ~1.001.
-        losses = np.array([1.0, 5.0])
-        sizes = np.array([4096.0, 1.0])
-        self.assertAlmostEqual(float(np.mean(losses)), 3.0)
-        weighted = float(np.average(losses, weights=sizes))
-        self.assertLess(weighted, 1.002)
-        self.assertAlmostEqual(
-            weighted, float((1.0 * 4096 + 5.0) / 4097), places=9)
