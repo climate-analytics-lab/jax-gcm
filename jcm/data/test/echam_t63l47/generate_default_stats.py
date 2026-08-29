@@ -101,10 +101,9 @@ def _load_spinup_state():
     back to the top-first physics frame the model expects (#741), so the
     returned state is correctly oriented.
 
-    Note: ``default_statistics.nc`` was generated *before* #741, when the
-    loader passed values through unflipped and this state was therefore fed to
-    the model vertically inverted. Those stored bands must be regenerated on a
-    GPU (see #744); the committed file predates this fix.
+    ``default_statistics.nc`` is generated through this orientation-aware loader
+    (#744): the committed bands describe a run started from the correctly
+    top-first initial state.
     """
     import xarray as xr
     from jcm.utils import load_states_from_xarray

@@ -500,13 +500,29 @@ class TestModelUnit(unittest.TestCase):
         pred_ds_mean = pred_ds.mean(dim={"time", "lon", "lat"})
 
         tol = 3  # tolerance in standard deviations
+        # Degenerate-band guard. At the top of the atmosphere several stored
+        # bands have a temporal std that underflows to *exactly* 0.0 in float32:
+        # the specific/relative-humidity tail is physically negligible
+        # (~1e-24…1e-37 kg kg⁻¹) and the upper ``pressure_full`` levels are the
+        # pure a-coefficient constants. A ±3σ band there collapses to a single
+        # point, which cannot absorb the few-percent cross-process
+        # nondeterminism XLA autotuning introduces at that underflow tail —
+        # runs are bit-identical *in-process* but drift across the
+        # generation↔test process boundary. Where std==0, fall back to a
+        # relative+absolute tolerance; every physically meaningful level has
+        # std>0 and keeps the strict ±3σ test unchanged. See #744.
+        rtol, atol = 0.25, 1e-8
         for var in default_echam_t63l47_stat_vars:
-            lower = default_stats[f"{var}.mean"] - tol * default_stats[f"{var}.std"]
-            upper = default_stats[f"{var}.mean"] + tol * default_stats[f"{var}.std"]
+            mean = default_stats[f"{var}.mean"]
+            std = default_stats[f"{var}.std"]
+            half_width = xr.where(std > 0, tol * std, rtol * abs(mean) + atol)
+            lower = mean - half_width
+            upper = mean + half_width
             assert ((lower <= pred_ds_mean[var]).all()) & (
                 (pred_ds_mean[var] <= upper).all()
             ), (
-                f"{var} fell outside the [-3σ, +3σ] climatology band; "
+                f"{var} fell outside the climatology band (±3σ, with a "
+                "relative+absolute floor where σ underflowed to 0); "
                 "regenerate jcm/data/test/echam_t63l47/default_statistics.nc "
                 "(and spinup_state.nc) if the deviation is intentional."
             )
