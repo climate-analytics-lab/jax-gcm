@@ -69,6 +69,36 @@ class TestOrientSurfaceFirst(unittest.TestCase):
             cf_metadata.orient_surface_first(ds)["precip"].values, [0, 1, 2])
 
 
+class TestOrientTopFirst(unittest.TestCase):
+    def test_inverts_orient_surface_first(self):
+        """The reader-side inverse: surface-first → top-first must round-trip.
+
+        Both functions are the same involution, so applying one then the
+        other must recover the original TOA-first dataset exactly.
+        """
+        toa = _toa_first_dataset()
+        surface_first = cf_metadata.orient_surface_first(toa)
+        recovered = cf_metadata.orient_top_first(surface_first)
+        np.testing.assert_allclose(
+            recovered["pressure_full"].values, toa["pressure_full"].values)
+        np.testing.assert_allclose(
+            recovered["pressure_half"].values, toa["pressure_half"].values)
+
+    def test_flips_both_vertical_axes(self):
+        # A surface-first dataset (index 0 = surface) is flipped so index 0
+        # becomes the model top.
+        surface_first = cf_metadata.orient_surface_first(_toa_first_dataset())
+        out = cf_metadata.orient_top_first(surface_first)
+        np.testing.assert_allclose(out["pressure_full"].values, [300.0, 800.0])
+        np.testing.assert_allclose(
+            out["pressure_half"].values, [0.0, 600.0, 1000.0])
+
+    def test_no_vertical_axis_is_a_no_op(self):
+        ds = xr.Dataset({"precip": (("lat",), np.arange(3.0))})
+        np.testing.assert_allclose(
+            cf_metadata.orient_top_first(ds)["precip"].values, [0, 1, 2])
+
+
 class TestAttachVerticalCoordinates(unittest.TestCase):
     def setUp(self):
         ds = cf_metadata.orient_surface_first(_toa_first_dataset())

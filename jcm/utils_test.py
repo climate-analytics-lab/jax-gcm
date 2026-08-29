@@ -20,6 +20,7 @@ from jcm.utils import (
     convert_to_float,
     convert_back,
     data_to_xarray,
+    load_states_from_xarray,
 )
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
 
@@ -703,6 +704,82 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
                 serialize_coords_to_attrs=True
             )
         self.assertIn("not allowed", str(context.exception).lower())
+
+
+class TestLoadStatesFromXarray(unittest.TestCase):
+    """``load_states_from_xarray`` must always return a top-first state.
+
+    Output files are surface-first (``jcm.cf_metadata``, #710); the loader
+    detects that from the ``level`` coordinate values and flips back to the
+    top-first physics frame (#741).
+    """
+
+    @staticmethod
+    def _make_dataset(level_coord, nlev=4, nlon=3, nlat=2):
+        """Build a minimal state Dataset with a distinct value per level.
+
+        ``temperature[k] == 200 + 10*k`` so the vertical profile is
+        unambiguous and a flip is detectable. ``level_coord`` sets (or omits)
+        the ``level`` coordinate; the *data* is written in whatever order
+        matches ``level_coord``.
+        """
+        prof = 200.0 + 10.0 * np.arange(nlev)  # increases with array index
+        col = np.broadcast_to(prof[:, None, None], (nlev, nlon, nlat))
+        surf = np.ones((nlon, nlat))
+        data_vars = {
+            "u_wind": (("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "v_wind": (("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "temperature": (("level", "lon", "lat"), col.copy()),
+            "specific_humidity": (
+                ("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "geopotential": (
+                ("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "normalized_surface_pressure": (("lon", "lat"), surf),
+        }
+        coords = {} if level_coord is None else {"level": level_coord}
+        return xr.Dataset(data_vars=data_vars, coords=coords)
+
+    def test_surface_first_file_is_flipped_to_top_first(self):
+        # Descending sigma coordinate (index 0 ≈ surface) marks a
+        # surface-first file; the loaded state must be reversed relative to it.
+        nlev = 4
+        level = np.linspace(0.99, 0.01, nlev)  # descending → surface-first
+        ds = self._make_dataset(level, nlev=nlev)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile[::-1])
+        # Top-first contract: index 0 is now the model top (smallest value
+        # here, since the file put the largest at index 0).
+        self.assertEqual(loaded_profile[0], file_profile[-1])
+
+    def test_top_first_file_passes_through_unchanged(self):
+        # Ascending sigma coordinate is already top-first; no flip.
+        nlev = 4
+        level = np.linspace(0.01, 0.99, nlev)  # ascending → top-first
+        ds = self._make_dataset(level, nlev=nlev)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile)
+
+    def test_bare_index_level_passes_through_and_warns(self):
+        # No numeric sigma coordinate: orientation cannot be determined, so
+        # the data passes through unflipped and a warning is emitted.
+        ds = self._make_dataset(level_coord=None, nlev=4)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        with self.assertLogs(level="WARNING") as cm:
+            state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile)
+        self.assertTrue(
+            any("orientation" in msg.lower() for msg in cm.output))
 
 
 if __name__ == '__main__':

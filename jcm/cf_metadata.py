@@ -180,6 +180,25 @@ def orient_surface_first(ds):
     return ds.isel(**flip) if flip else ds
 
 
+def orient_top_first(ds):
+    """Reverse both vertical axes of ``ds`` so index 0 is the model top.
+
+    The reader-side inverse of :func:`orient_surface_first`: it converts a
+    file-convention (surface-first) Dataset back into the top-first
+    physics-internal frame that :class:`~jcm.physics_interface.PhysicsState`
+    and the dycore expect. The two functions are the *same* involution — both
+    just reverse the vertical axes — but carrying two names documents at each
+    call site which direction the conversion is going. Axes absent from ``ds``
+    are skipped, so this is safe on a dataset with no interface fields.
+    """
+    flip = {
+        dim: slice(None, None, -1)
+        for dim in (LEVEL_DIM, LEVEL_INTERFACE_DIM)
+        if dim in ds.dims
+    }
+    return ds.isel(**flip) if flip else ds
+
+
 def attach_vertical_coordinates(ds, a_boundaries_pa, b_boundaries, p0: float):
     """Attach surface-first sigma coordinates and the hybrid ``(a, b)`` tables.
 
