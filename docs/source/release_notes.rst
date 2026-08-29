@@ -38,6 +38,19 @@ Unreleased — one vertical direction in the output, and CF metadata
   was top-first with no coordinate values), and ``jcm.cf_metadata`` is now the
   single place any backend converts the physics-internal frame to the file
   frame. See ``docs/source/design/output_vertical_conventions.md``.
+- **Reading states back is orientation-aware** (#741):
+  ``jcm.utils.load_states_from_xarray`` detects a surface-first file from its
+  ``level`` coordinate values and always returns the top-first physics frame —
+  previously a trajectory file loaded through it came back vertically
+  inverted. ``PrescribedStateModel`` output joins the file convention too
+  (#739): its ``level`` axis was top-first under the same dim name every other
+  product now guarantees is surface-first.
+- **Physics diagnostics can carry their own CF metadata** (#740): a
+  ``PhysicsTerm`` declares ``output_attrs`` (units, ``standard_name``,
+  ``long_name``) for the output keys it provides, next to the code that
+  computes them. The radiation flux and heating-rate set, the cloud
+  diagnostics and the convection diagnostics now reach the file with units
+  and CF standard names instead of empty attributes.
 
 Unreleased — provenance records the parameters
 ----------------------------------------------

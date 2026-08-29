@@ -90,6 +90,17 @@ differently (`level_i` vs `level_interface`), so a reader had to try both.
 They now agree on `level_i`, and pySES's interface axis gains the coordinate
 values and attributes it never had.
 
+## Reading states back
+
+`jcm.utils.load_states_from_xarray` is the reader-side counterpart: it detects
+a surface-first file from the `level` coordinate *values* (descending sigma)
+and always returns a `PhysicsState` in the top-first physics frame ([#741]).
+`PrescribedStateModel` output follows the file convention like every other
+product ([#739]), so the pair round-trips. Physics diagnostics beyond the
+vertical-coordinate neighbourhood carry their own units and standard names via
+`PhysicsTerm.output_attrs`, declared next to the code that computes them
+([#740]).
+
 ## Reading pre-#710 files
 
 Output written before this change has `level_i` as a bare integer index with
@@ -98,3 +109,6 @@ no attributes, and interface variables stored TOA-first. The presence of
 interface variables reversed before being paired with anything on `level`.
 
 [#710]: https://github.com/climate-analytics-lab/jax-gcm/issues/710
+[#739]: https://github.com/climate-analytics-lab/jax-gcm/issues/739
+[#740]: https://github.com/climate-analytics-lab/jax-gcm/issues/740
+[#741]: https://github.com/climate-analytics-lab/jax-gcm/issues/741
