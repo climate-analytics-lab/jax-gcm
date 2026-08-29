@@ -158,6 +158,56 @@ class TestPrescribedStateModel(unittest.TestCase):
             ("dim_0", "dim_1", "dim_2", "dim_3", "dim_4"),
         )
 
+    def test_to_xarray_level_is_surface_first_sigma(self):
+        # ``run`` threads the vertical table through, so ``to_xarray`` writes a
+        # real descending sigma ``level`` coordinate with CF metadata (#739).
+        import numpy as np
+
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+        )
+        predictions = model.run([self.state] * 2)
+        ds = predictions.to_xarray()
+
+        level = ds["level"].values
+        # Surface-first file convention: sigma descends from ~1 to ~0.
+        self.assertTrue(np.all(np.diff(level) < 0))
+        self.assertEqual(ds["level"].attrs.get("positive"), "down")
+
+    def test_to_xarray_round_trips_through_load_states(self):
+        # A file written by ``to_xarray`` (surface-first) must come back
+        # top-first via ``load_states_from_xarray`` (#739 + #741), recovering
+        # the original per-level physics-frame values exactly.
+        import numpy as np
+
+        from jcm.utils import load_states_from_xarray
+
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+        )
+        predictions = model.run([self.state] * 2)
+        ds = predictions.to_xarray()
+
+        reloaded = load_states_from_xarray(
+            ds,
+            u_wind_var="state.u_wind",
+            v_wind_var="state.v_wind",
+            temperature_var="state.temperature",
+            specific_humidity_var="state.specific_humidity",
+            geopotential_var="state.geopotential",
+            surface_pressure_var="state.normalized_surface_pressure",
+        )
+        # ``self.state`` is a single (nlev, ...) column; the predictions stack
+        # it over 2 times, so compare each recovered time slice to it.
+        np.testing.assert_allclose(
+            np.asarray(reloaded.temperature)[0],
+            np.asarray(self.state.temperature),
+        )
+        np.testing.assert_allclose(
+            np.asarray(reloaded.temperature)[1],
+            np.asarray(self.state.temperature),
+        )
+
 
 # Slow-marked companion — see jcm/runners_test.py for rationale.
 
