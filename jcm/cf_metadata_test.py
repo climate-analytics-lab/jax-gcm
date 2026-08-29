@@ -145,12 +145,23 @@ class TestApplyCfAttributes(unittest.TestCase):
                 self.assertIn(name, self.ds.variables, msg=f"{dim}: {name}")
 
     def test_formula_terms_omitted_without_surface_pressure(self):
-        """A dynamics-only file must not carry a dangling ``ps:`` reference."""
+        """A dynamics-only file must not carry a dangling ``ps:`` reference.
+
+        And without ``formula_terms`` the parametric ``standard_name`` must be
+        dropped too: CF-1.11 §4.3.3 requires the two together, so advertising
+        ``atmosphere_hybrid_sigma_pressure_coordinate`` alone makes a checker
+        reject the axis. The plain units+positive vertical axis that remains is
+        still CF-conformant.
+        """
         ds = _toa_first_dataset().drop_vars("surface_pressure")
         ds = cf_metadata.finalize_output(
             ds, vertical=_hybrid_2level(), p0=1000.0)
-        self.assertNotIn("formula_terms", ds["level"].attrs)
-        self.assertEqual(ds["level"].attrs["positive"], "down")
+        for dim in ("level", "level_i"):
+            self.assertNotIn("formula_terms", ds[dim].attrs)
+            self.assertNotIn("standard_name", ds[dim].attrs)
+            self.assertEqual(ds[dim].attrs["positive"], "down")
+            self.assertEqual(ds[dim].attrs["axis"], "Z")
+            self.assertEqual(ds[dim].attrs["units"], "1")
 
     def test_pressure_variables_get_standard_names(self):
         for name in ("pressure_full", "pressure_half"):

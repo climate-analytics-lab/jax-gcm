@@ -22,7 +22,12 @@ What makes the file self-describing now:
   pressures at each end;
 * the hybrid ``(a, b)`` tables travel with the file as coordinate variables in
   the file's own (surface-first) order, so ``p = a + b·p_s`` is reproducible
-  from the file alone, and CF ``formula_terms`` names them.
+  from the file alone, and CF ``formula_terms`` names them. The parametric
+  ``standard_name`` (``atmosphere_hybrid_sigma_pressure_coordinate``) is stamped
+  only when those ``formula_terms`` can be emitted — CF-1.11 §4.3.3 requires the
+  two together, so a dynamics-only file (no ``surface_pressure`` to reference)
+  gets a plain units+positive vertical axis, which is still CF-conformant,
+  rather than a parametric coordinate a checker would reject.
 
 ``positive`` describes the direction in which the coordinate *values* increase
 (CF-1.11 §4.3), not the storage order — a sigma coordinate is ``positive =
@@ -57,13 +62,20 @@ HYBRID_A_HALF = "hybrid_a_half"
 HYBRID_B_HALF = "hybrid_b_half"
 
 _SIGMA_COMMON_ATTRS = {
-    # Pure-sigma grids are the ``a = 0`` special case of the hybrid formula, so
-    # one standard_name covers both coordinate families the model supports.
-    "standard_name": "atmosphere_hybrid_sigma_pressure_coordinate",
     "units": "1",
     "positive": "down",
     "axis": "Z",
 }
+
+#: The parametric ``standard_name`` a hybrid/sigma vertical axis carries — but
+#: only when it is accompanied by ``formula_terms``. CF-1.11 §4.3.3 requires a
+#: parametric vertical coordinate to name its ``formula_terms``, so a checker
+#: rejects this ``standard_name`` on an axis that cannot (a dynamics-only file
+#: has no ``surface_pressure`` to reference). Applied conditionally in
+#: :func:`apply_cf_attributes` rather than living in ``_SIGMA_COMMON_ATTRS``.
+#: Pure-sigma grids are the ``a = 0`` special case of the hybrid formula, so one
+#: standard_name covers both coordinate families the model supports.
+_PARAMETRIC_SIGMA_STANDARD_NAME = "atmosphere_hybrid_sigma_pressure_coordinate"
 
 #: Attributes for variables JCM writes that have a CF standard name. Anything
 #: not listed keeps whatever the per-physics units tables gave it — which for
@@ -294,10 +306,15 @@ def apply_cf_attributes(ds):
             f"nominal sigma (a/p0 + b) at {where}, surface-first "
             "(index 0 is the surface)"
         )
+        # The parametric ``standard_name`` is only CF-legal when the axis also
+        # carries ``formula_terms`` (§4.3.3); emit them together or neither.
+        # An axis with only units + positive is still a valid CF vertical
+        # coordinate, so a dynamics-only file stays conformant.
         if has_ps and a_name in ds.coords and b_name in ds.coords:
             attrs["formula_terms"] = (
                 f"ap: {a_name} b: {b_name} ps: surface_pressure"
             )
+            attrs["standard_name"] = _PARAMETRIC_SIGMA_STANDARD_NAME
         ds[dim].attrs.update(attrs)
 
     ds.attrs.setdefault("Conventions", "CF-1.11")
