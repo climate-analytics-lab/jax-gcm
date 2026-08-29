@@ -461,6 +461,19 @@ class ModelIntegrationTest(unittest.TestCase):
         lons = at["longitude"].values
         dlon = (lons[0] - lons[1]) % 360.0
         np.testing.assert_allclose(dlon, np.full(3, 7.5), atol=1e-6)
+        # The 2-D auxiliary coordinates are CF-labelled despite the file
+        # declaring Conventions=CF-1.11 (#710 follow-up): latitude/longitude
+        # carry standard_name + degree units, but no ``axis`` (CF permits it
+        # only on true coordinate variables, not 2-D aux coords).
+        self.assertEqual(at.attrs["Conventions"], "CF-1.11")
+        for ds in (at, st):
+            self.assertEqual(ds["latitude"].attrs["standard_name"], "latitude")
+            self.assertEqual(ds["latitude"].attrs["units"], "degrees_north")
+            self.assertNotIn("axis", ds["latitude"].attrs)
+            self.assertEqual(
+                ds["longitude"].attrs["standard_name"], "longitude")
+            self.assertEqual(ds["longitude"].attrs["units"], "degrees_east")
+            self.assertNotIn("axis", ds["longitude"].attrs)
 
     def test_profile_output_matches_the_file_vertical_convention(self):
         """A curtain must pair with the trajectory file without a flip (#710).

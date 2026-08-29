@@ -26,6 +26,25 @@ from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
 logger = logging.getLogger(__name__)
 
 
+def _apply_term_output_attrs(ds, physics):
+    """Stamp per-term ``output_attrs`` onto matching variables of ``ds`` (#740).
+
+    Each :class:`~jcm.physics.physics_term.PhysicsTerm` declares CF/units
+    attributes for the diagnostics it computes, keyed by their dotted output
+    names; :meth:`ComposablePhysics.output_attrs` merges them for the package.
+    Factored out so BOTH trajectory paths — the dinosaur lat/lon build and the
+    delegated non-modal (pySES) build — apply the identical merge rather than
+    one silently omitting it. A physics predating ``output_attrs`` is tolerated
+    via ``getattr``. Returns ``ds`` (mutated in place).
+    """
+    term_attrs = getattr(physics, "output_attrs", None)
+    if callable(term_attrs):
+        for var, attrs in term_attrs().items():
+            if var in ds:
+                ds[var].attrs.update(attrs)
+    return ds
+
+
 class ModelPredictions:
     """User-facing container for model prediction outputs.
 
@@ -223,7 +242,17 @@ class ModelPredictions:
         if self._dycore is not None and not hasattr(
                 self._coords.horizontal, "modal_axes"):
             times = jax.device_get(self.times)
-            return self._dycore.to_xarray(self._predictions, times)
+            ds = self._dycore.to_xarray(self._predictions, times)
+            # The dycore's ``to_xarray`` has already run
+            # ``cf_metadata.finalize_output`` (CSV attrs and the curated
+            # ``_VARIABLE_ATTRS`` are on). Apply the per-term output metadata
+            # here too, so pySES output carries the radiation/cloud/convection
+            # units the dinosaur path gets (#740). Ordering is safe: the
+            # term-declared names (``radiation.*`` and other diagnostics) are
+            # disjoint from ``cf_metadata._VARIABLE_ATTRS`` (vertical coords,
+            # core prognostics), so stamping term attrs after finalize does not
+            # upset the documented CSV < term < cf_metadata precedence.
+            return _apply_term_output_attrs(ds, self._physics)
 
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
@@ -320,12 +349,9 @@ class ModelPredictions:
         # never listed, notably the whole radiation flux set. Applied AFTER the
         # CSV loop so a term declaration overrides the CSV (more specific wins),
         # but BEFORE ``cf_metadata.finalize_output`` so its own curated names
-        # (vertical coordinates, core prognostics) still win last.
-        term_attrs = getattr(self._physics, "output_attrs", None)
-        if callable(term_attrs):
-            for var, attrs in term_attrs().items():
-                if var in pred_ds:
-                    pred_ds[var].attrs.update(attrs)
+        # (vertical coordinates, core prognostics) still win last. Shared with
+        # the non-modal delegation branch above.
+        _apply_term_output_attrs(pred_ds, self._physics)
 
         # Convert sim-day timestamps to datetimes. Done before the CF pass so
         # ``time`` is already a datetime axis when its attributes are set.

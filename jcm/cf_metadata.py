@@ -151,6 +151,33 @@ _COORD_ATTRS: dict[str, dict[str, str]] = {
     # here would collide with the encoding on write. Applied only to a
     # datetime64 axis; see ``_time_attrs``.
     "time": {"standard_name": "time", "axis": "T", "long_name": "time"},
+    # Observer datasets' 2-D auxiliary coordinates (``jcm.observers``): a
+    # curtain/track is sampled at moving points, so ``latitude``/``longitude``
+    # (and the vertical target ``altitude`` or ``pressure``) are ``(time,
+    # point)`` auxiliary coordinates, not 1-D axes. CF allows ``axis`` ONLY on
+    # true coordinate variables (§5.6), so these carry standard_name + units but
+    # deliberately no ``axis`` — that is what distinguishes them from the ``lat``
+    # /``lon`` gridded axes above.
+    "latitude": {
+        "standard_name": "latitude",
+        "units": "degrees_north",
+        "long_name": "latitude",
+    },
+    "longitude": {
+        "standard_name": "longitude",
+        "units": "degrees_east",
+        "long_name": "longitude",
+    },
+    "altitude": {
+        "standard_name": "altitude",
+        "units": "m",
+        "long_name": "altitude above the geoid",
+    },
+    "pressure": {
+        "standard_name": "air_pressure",
+        "units": "Pa",
+        "long_name": "air pressure",
+    },
     # Axes with no CF standard name; a long_name is all CF asks for.
     "mode": {"long_name": "aerosol mode"},
     "sw_band": {"long_name": "shortwave spectral band index"},
