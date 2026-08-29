@@ -187,16 +187,17 @@ class TestApplyCfAttributes(unittest.TestCase):
     def test_numeric_time_axis_is_not_claimed_as_a_cf_time_coordinate(self):
         """A bare elapsed-days axis has no reference-time units to decode.
 
-        Claiming ``standard_name = "time"`` on it would announce CF
-        conformance a reader cannot honour.
+        Claiming ``standard_name = "time"`` — or ``axis = "T"``, which is
+        equally a CF time-axis marker — would announce conformance a reader
+        cannot honour.
         """
         ds = _toa_first_dataset().assign_coords(
             time=("time", np.array([0.0, 0.5])))
         ds = cf_metadata.finalize_output(
             ds, vertical=_hybrid_2level(), p0=1000.0)
         self.assertNotIn("standard_name", ds["time"].attrs)
+        self.assertNotIn("axis", ds["time"].attrs)
         self.assertEqual(ds["time"].attrs["units"], "d")
-        self.assertEqual(ds["time"].attrs["axis"], "T")
 
     def test_flip_vertical_false_leaves_data_alone(self):
         """The pyses backend emits surface-first already."""

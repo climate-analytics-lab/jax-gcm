@@ -283,7 +283,9 @@ def _time_attrs(time_coord) -> dict[str, str]:
     axis would get the standard name with no decodable units, which is worse
     than no claim at all — the file would announce CF conformance a reader
     cannot honour. So a numeric axis is labelled as elapsed time and is *not*
-    claimed to be a CF time coordinate.
+    claimed to be a CF time coordinate — including ``axis = "T"``, which is
+    itself the CF time-axis marker and would commit the variable to carrying
+    reference-time units it does not have.
 
     Backends should emit datetime64 (``PysesCamSEDycore.to_xarray`` and
     ``ModelPredictions._trajectory_dataset`` both do); this is the guard for
@@ -291,8 +293,7 @@ def _time_attrs(time_coord) -> dict[str, str]:
     """
     if np.issubdtype(np.asarray(time_coord.values).dtype, np.datetime64):
         return dict(_COORD_ATTRS["time"])
-    return {"axis": "T", "units": "d",
-            "long_name": "elapsed simulation time"}
+    return {"units": "d", "long_name": "elapsed simulation time"}
 
 
 def apply_cf_attributes(ds):
