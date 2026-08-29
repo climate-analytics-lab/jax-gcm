@@ -208,6 +208,96 @@ class CloudData:
         return CloudData(**new_data)
 
 
+#: CF/units metadata for the :class:`CloudData` fields as they appear in the
+#: output Dataset — flattened to ``clouds.<field>`` keys (#740). Shared by every
+#: term that writes the ``clouds`` sub-struct (Sundqvist cover, ECHAM 1M and
+#: Lohmann 2M microphysics), which set ``output_attrs = CLOUD_OUTPUT_ATTRS`` on
+#: their PhysicsTerm. Units are taken verbatim from the field comments above;
+#: CF standard names are used only where the match is exact.
+CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
+    "clouds.cloud_fraction": {
+        "standard_name": "cloud_area_fraction_in_atmosphere_layer",
+        "units": "1", "long_name": "cloud fraction"},
+    "clouds.qc": {
+        "standard_name": "mass_fraction_of_cloud_liquid_water_in_air",
+        "units": "kg kg-1", "long_name": "cloud liquid water mixing ratio"},
+    "clouds.qi": {
+        "standard_name": "mass_fraction_of_cloud_ice_in_air",
+        "units": "kg kg-1", "long_name": "cloud ice mixing ratio"},
+    "clouds.precip_rain": {
+        "standard_name": "rainfall_flux",
+        "units": "kg m-2 s-1", "long_name": "surface rainfall flux"},
+    "clouds.precip_snow": {
+        "standard_name": "snowfall_flux",
+        "units": "kg m-2 s-1", "long_name": "surface snowfall flux"},
+    "clouds.rain_flux": {
+        "units": "kg m-2 s-1",
+        "long_name": "large-scale rain flux leaving each layer"},
+    "clouds.snow_flux": {
+        "units": "kg m-2 s-1",
+        "long_name": "large-scale snow (plus ice) flux leaving each layer"},
+    "clouds.precip_formation_rate": {
+        "units": "kg kg-1 s-1",
+        "long_name": "grid-mean condensate-to-precipitation conversion rate"},
+    "clouds.precip_evaporation_rate": {
+        "units": "kg kg-1 s-1",
+        "long_name": "grid-mean falling-precipitation evaporation rate"},
+    "clouds.rain_formation_warm": {
+        "units": "kg m-2 s-1",
+        "long_name": "column rain formed by the warm chain"},
+    "clouds.rain_from_melt": {
+        "units": "kg m-2 s-1",
+        "long_name": "column rain formed by melting snow"},
+    "clouds.negative_mass_repair": {
+        "units": "W m-2",
+        "long_name": "latent heating of the negative-mass repair"},
+    "clouds.incloud_liquid": {
+        "units": "kg kg-1",
+        "long_name": "in-cloud liquid water before precipitation formation"},
+    "clouds.incloud_ice": {
+        "units": "kg kg-1",
+        "long_name": "in-cloud ice before precipitation formation"},
+    "clouds.incloud_rain_formation": {
+        "units": "kg kg-1 s-1", "long_name": "in-cloud rain formation rate"},
+    "clouds.incloud_snow_formation": {
+        "units": "kg kg-1 s-1", "long_name": "in-cloud snow formation rate"},
+    "clouds.incloud_riming": {
+        "units": "kg kg-1 s-1",
+        "long_name": "in-cloud riming of droplets by snow"},
+    "clouds.process_cloud_fraction": {
+        "units": "1", "long_name": "cloud cover the microphysics ran under"},
+    "clouds.condensate_evaporation_rate": {
+        "units": "kg kg-1 s-1",
+        "long_name": "grid-mean cloud-condensate evaporation rate"},
+    "clouds.droplet_number": {
+        "standard_name":
+            "number_concentration_of_cloud_liquid_water_particles_in_air",
+        "units": "m-3", "long_name": "cloud droplet number concentration"},
+    "clouds.r_eff_liq": {
+        "units": "um", "long_name": "cloud droplet effective radius"},
+    "clouds.r_eff_ice": {
+        "units": "um", "long_name": "cloud ice effective radius"},
+    "clouds.qnc_prev": {
+        "units": "kg-1",
+        "long_name": "previous-step cloud droplet number per kg air"},
+    "clouds.qni_prev": {
+        "units": "kg-1",
+        "long_name": "previous-step ice crystal number per kg air"},
+    "clouds.toa_sw_up_all": {
+        "standard_name": "toa_outgoing_shortwave_flux",
+        "units": "W m-2", "long_name": "all-sky TOA outgoing shortwave flux"},
+    "clouds.toa_sw_up_clear": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing shortwave flux"},
+    "clouds.toa_lw_up_all": {
+        "standard_name": "toa_outgoing_longwave_flux",
+        "units": "W m-2", "long_name": "all-sky TOA outgoing longwave flux"},
+    "clouds.toa_lw_up_clear": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing longwave flux"},
+}
+
+
 def radiation_cloud_fields(state, diagnostics):
     """Return ECHAM-ordered cloud fields for radiation.
 

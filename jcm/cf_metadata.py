@@ -77,12 +77,14 @@ _SIGMA_COMMON_ATTRS = {
 #: standard_name covers both coordinate families the model supports.
 _PARAMETRIC_SIGMA_STANDARD_NAME = "atmosphere_hybrid_sigma_pressure_coordinate"
 
-#: Attributes for variables JCM writes that have a CF standard name. Anything
-#: not listed keeps whatever the per-physics units tables gave it — which for
-#: most physics diagnostics (the radiation fluxes among them) is nothing at
-#: all. Giving each ``PhysicsTerm`` a way to declare units for the keys it
-#: provides is tracked in #740; this table deliberately covers only the
-#: vertical-coordinate neighbourhood and the core prognostics.
+#: Attributes for variables JCM writes that have a CF standard name. This table
+#: deliberately covers only the vertical-coordinate neighbourhood and the core
+#: prognostics, and is applied LAST (in ``ModelPredictions._trajectory_dataset``)
+#: so these curated names win over both the per-physics units CSVs and the
+#: per-term declarations. Physics diagnostics (the radiation fluxes among them)
+#: now declare their own units next to the code that computes them via
+#: :attr:`jcm.physics.physics_term.PhysicsTerm.output_attrs` (#740); a variable
+#: absent from every source simply carries whatever attrs it already had.
 _VARIABLE_ATTRS: dict[str, dict[str, str]] = {
     "pressure_full": {
         "standard_name": "air_pressure",

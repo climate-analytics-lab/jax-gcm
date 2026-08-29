@@ -31,6 +31,15 @@ class BettsMillerConvection(PhysicsTerm):
 
     name: ClassVar[str] = "betts_miller_convection"
     category: ClassVar[str] = "convection"
+    # CF/units metadata for the diagnostic this term writes (#740).
+    # ``betts_miller_precip`` is the convective precipitation flux [kg/m^2/s].
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "betts_miller_precip": {
+            "standard_name": "convective_precipitation_flux",
+            "units": "kg m-2 s-1",
+            "long_name": "Betts-Miller convective precipitation flux",
+        },
+    }
 
     def __init__(self, params: BettsMillerParameters | None = None) -> None:
         """Initialize with a :class:`BettsMillerParameters` configuration."""

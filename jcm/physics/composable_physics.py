@@ -586,6 +586,23 @@ class ComposablePhysics(nnx.Module, Physics):
                   if table is not None]
         return tuple(dict.fromkeys(paths))
 
+    def output_attrs(self) -> dict[str, dict[str, str]]:
+        """Merge per-term ``output_attrs`` for the whole package (#740).
+
+        Each term declares CF/units metadata for the output variables it
+        produces, keyed by the dotted names they carry in the xarray Dataset
+        (see :attr:`PhysicsTerm.output_attrs`). This aggregates them in
+        composition order; the FIRST term to declare a given variable wins on
+        a duplicate, matching the units-table precedence rule
+        (``drop_duplicates(keep="first")``). Terms predating the attribute are
+        tolerated via ``getattr``.
+        """
+        merged: dict[str, dict[str, str]] = {}
+        for term in self.terms:
+            for var, attrs in getattr(term, "output_attrs", {}).items():
+                merged.setdefault(var, dict(attrs))
+        return merged
+
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
     ) -> dict[str, Any]:

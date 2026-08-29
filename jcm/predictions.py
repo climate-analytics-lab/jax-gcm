@@ -314,6 +314,19 @@ class ModelPredictions:
                 pred_ds[var].attrs["units"] = unit
                 pred_ds[var].attrs["description"] = desc
 
+        # Per-term output metadata (#740). Each PhysicsTerm declares CF/units
+        # attributes for the diagnostics it computes (``output_attrs``, keyed by
+        # the dotted output names) — the home for metadata the per-physics CSVs
+        # never listed, notably the whole radiation flux set. Applied AFTER the
+        # CSV loop so a term declaration overrides the CSV (more specific wins),
+        # but BEFORE ``cf_metadata.finalize_output`` so its own curated names
+        # (vertical coordinates, core prognostics) still win last.
+        term_attrs = getattr(self._physics, "output_attrs", None)
+        if callable(term_attrs):
+            for var, attrs in term_attrs().items():
+                if var in pred_ds:
+                    pred_ds[var].attrs.update(attrs)
+
         # Convert sim-day timestamps to datetimes. Done before the CF pass so
         # ``time`` is already a datetime axis when its attributes are set.
         pred_ds['time'] = (

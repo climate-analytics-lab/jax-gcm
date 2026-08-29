@@ -279,6 +279,21 @@ class TestWrittenFileConvention(unittest.TestCase):
         for axis, std in (("lat", "latitude"), ("lon", "longitude")):
             self.assertEqual(self.ds[axis].attrs["standard_name"], std)
 
+    def test_radiation_fluxes_carry_units(self):
+        """Per-term ``output_attrs`` reaches the file (#740).
+
+        The radiation flux set used to arrive with ``attrs == {}`` — no
+        units table listed it. Each radiation term now declares
+        ``RADIATION_OUTPUT_ATTRS``, so a flux field carries its CF units and
+        standard name. The grey scheme fills the flux profiles, so
+        ``radiation.lw_flux_up`` is present.
+        """
+        self.assertIn("radiation.lw_flux_up", self.ds.data_vars)
+        attrs = self.ds["radiation.lw_flux_up"].attrs
+        self.assertEqual(attrs["units"], "W m-2")
+        self.assertEqual(
+            attrs["standard_name"], "upwelling_longwave_flux_in_air")
+
 
 if __name__ == "__main__":
     unittest.main()
