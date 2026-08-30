@@ -66,20 +66,28 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
 
-## File an issue for everything you find but don't fix
-Any bug, fidelity gap, missing pathway, or future development option encountered during a
-piece of work that will NOT be dealt with in the current PR must become a GitHub issue
-before that PR merges — a docstring note or PR-body mention is not enough, because nothing
-ever comes back to those. This includes findings from adversarial reviews that are
-triaged as "documented follow-up", pathways deliberately excluded from a term's first
-version, and capability regressions accepted as trade-offs.
+## Related findings get rolled into the PR; only unrelated ones become issues
+When a piece of work surfaces additional defects or gaps, the default is to **fix them in
+the same PR** whenever they are related to the work at hand — same subsystem, same
+convention, same failure class, or anything a reviewer would naturally want to see
+together. The maintainer would much rather review one comprehensive PR than a cluster of
+small follow-ups. (The 2026-08 output-convention PR #742 is the canonical example: four
+adjacent gaps were first filed as issues #739/#740/#741/#744 and every one had to be
+folded back into the PR anyway.) The test is: *would the reviewer be surprised to find
+this fix in the PR?* If not, roll it in.
 
- - One issue per independent piece of work, titled by the gap (not the PR that found it),
-   with enough context to start cold: what is missing, where the hooks already are, and
-   what reference formulation applies.
+File a GitHub issue **only** for findings genuinely unrelated to the current work — a
+different subsystem, something needing its own validation campaign, or something blocked
+on resources or decisions the current PR cannot wait for. When an issue is warranted:
+
+ - Title it by the gap (not the PR that found it), with enough context to start cold:
+   what is missing, where the hooks already are, and what reference formulation applies.
  - Cross-link it from the code comment or docstring that notes the gap, and from the PR.
- - Deliberately parked/rejected directions don't get an issue — record the decision and
-   its evidence where the decision was made instead.
+
+Either way, a docstring note or PR-body mention alone is never the resting place for a
+known defect — it is either fixed in the PR or tracked in an issue. Deliberately
+parked/rejected directions don't get an issue — record the decision and its evidence
+where the decision was made instead.
 
 ## No bespoke run scripts — new configurations go through Hydra
 Every runnable configuration must be expressible as ``python -m jcm.main``
