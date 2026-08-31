@@ -519,7 +519,20 @@ Output files carry two vertical axes: ``level`` (``nlev`` layer mid-levels —
 temperature, tracers, ``pressure_full``) and ``level_i`` (``nlev+1``
 interfaces — ``pressure_half``, radiative fluxes). **Both run surface-first**,
 so index 0 is the level nearest the ground and ``level[k]`` sits between
-``level_i[k]`` and ``level_i[k+1]``. Mixing the two is therefore safe:
+``level_i[k]`` and ``level_i[k+1]``.
+
+To mass-weight a ``level`` field — a column burden, say — use the layer
+pressure thickness ``pressure_thickness`` [Pa], which is written directly on
+the ``level`` axis (positive, already aligned with the tracers) by the ECHAM
+physics stacks:
+
+.. code-block:: python
+
+   burden = (ds['qc'] * ds['pressure_thickness'] / 9.81).sum('level')  # kg/m^2
+
+For a file written before ``pressure_thickness`` existed (or a SPEEDY run,
+which does not compute it), reconstruct Δp from ``pressure_half`` instead —
+mixing the two axes is safe because both run surface-first:
 
 .. code-block:: python
 

@@ -280,6 +280,24 @@ class TestWrittenFileConvention(unittest.TestCase):
         for axis, std in (("lat", "latitude"), ("lon", "longitude")):
             self.assertEqual(self.ds[axis].attrs["standard_name"], std)
 
+    def test_pressure_thickness_is_written_on_the_level_axis(self):
+        """The layer-Δp diagnostic reaches the file, positive and aligned.
+
+        ``pressure_thickness`` is the mass-weight for a ``level`` field, so it
+        must land on the mid-level (``level``) axis — not the interface axis —
+        be strictly positive, carry ``units = "Pa"``, and equal the model's
+        interface difference ``-diff(pressure_half)`` to float32 tolerance.
+        """
+        self.assertIn("pressure_thickness", self.ds.data_vars)
+        dpt = self.ds["pressure_thickness"]
+        self.assertEqual(dpt.dims, ("time", "level", "lon", "lat"))
+        self.assertEqual(dpt.attrs["units"], "Pa")
+        vals = dpt.isel(time=0).values
+        self.assertTrue(np.all(vals > 0))
+        dp_iface = -np.diff(
+            self.ds["pressure_half"].isel(time=0).values, axis=0)
+        np.testing.assert_allclose(vals, dp_iface, rtol=1e-5, atol=1e-2)
+
     def test_radiation_fluxes_carry_units(self):
         """Per-term ``output_attrs`` reaches the file (#740).
 

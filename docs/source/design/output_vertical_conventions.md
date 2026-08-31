@@ -23,6 +23,20 @@ needs no orientation guard. This is the property that makes the file usable:
 pairing an interface quantity with a mid-level one is the natural thing to
 write, so it has to be the correct thing to write.
 
+Better still, the ECHAM physics stacks emit the layer thickness directly on
+the `level` axis as `pressure_thickness` [Pa] (positive), so the mass-weight
+needs no `diff` and no interface axis at all:
+
+```python
+burden = (tracer * ds.pressure_thickness / g).sum("level")   # aligned by construction
+```
+
+`pressure_thickness` is the model's own `diff(pressure_half)` (computed in
+`MoistAirColumnState`), so it lands on `level` and cannot be mis-paired with
+the interface axis — the exact trap the `diff` form invites. It is present
+only where the moist-air prepare term runs (the ECHAM stacks, `rce.py`), not
+in SPEEDY output; for a file without it, fall back to the `diff` form above.
+
 Two other frames exist and are *not* this one, which is why the conversion is
 centralised rather than done per-variable:
 

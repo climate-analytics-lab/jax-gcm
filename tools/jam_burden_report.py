@@ -2,7 +2,8 @@
 
 Reads jcm output netCDF(s), sums interstitial + cloud-borne mass over the
 modes carrying each species, integrates ``q·dp/g`` over the column with the
-file's own ``pressure_half``, and prints time-mean global burdens against
+file's own ``pressure_thickness`` diagnostic (falling back to differencing
+``pressure_half``), and prints time-mean global burdens against
 climatological anchor ranges. With ``--emissions-file`` it also prints each
 primarily-emitted species' inferred lifetime
 (burden / global-mean primary emission rate).
@@ -57,11 +58,17 @@ def _wmean(da: xr.DataArray, weights) -> float:
 
 
 def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
-    """Per-layer Δp aligned with the 3-D fields' level orientation.
+    """Per-layer Δp [Pa] aligned with the 3-D fields' ``level`` orientation.
 
-    Both output vertical axes run surface-first (#710), so differencing
-    ``pressure_half`` along ``level_i`` lands the result already aligned with
-    the ``level`` axis of the tracer fields — no orientation guard needed.
+    Prefer the model's own ``pressure_thickness`` diagnostic when present: it
+    is written directly on the ``level`` axis, already aligned with the tracer
+    fields, so there is no interface/mid-level differencing to get wrong. Take
+    ``abs`` only to be sign-robust — it is emitted positive.
+
+    Fall back to differencing ``pressure_half`` for post-#710 files written
+    before ``pressure_thickness`` existed. Both output vertical axes run
+    surface-first (#710), so differencing along ``level_i`` lands the result
+    already aligned with the ``level`` axis — no orientation guard needed.
 
     This tool targets current output only. Trajectories written before #710
     stored interfaces TOA-first under a ``level_i`` bare index (dinosaur) or a
@@ -69,6 +76,12 @@ def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
     convention change is called out in the release notes rather than
     compensated for at read time.
     """
+    if "pressure_thickness" in ds:
+        dp = ds["pressure_thickness"]
+        if "time" in dp.dims:
+            dp = dp.isel(time=0)
+        return np.abs(dp)
+
     ph = ds["pressure_half"]
     if "time" in ph.dims:
         ph = ph.isel(time=0)

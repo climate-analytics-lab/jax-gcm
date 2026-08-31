@@ -96,6 +96,13 @@ _VARIABLE_ATTRS: dict[str, dict[str, str]] = {
         "units": "Pa",
         "long_name": "air pressure at layer interface",
     },
+    # No CF standard_name: there is no exact standard name for a layer
+    # pressure difference, and inventing one would fail a CF checker. Units +
+    # long_name is all CF asks of a variable without a standard name.
+    "pressure_thickness": {
+        "units": "Pa",
+        "long_name": "pressure thickness of layer",
+    },
     "height_full": {
         "standard_name": "geopotential_height",
         "units": "m",

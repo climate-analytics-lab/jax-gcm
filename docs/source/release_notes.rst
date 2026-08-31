@@ -38,6 +38,13 @@ Unreleased — one vertical direction in the output, and CF metadata
   was top-first with no coordinate values), and ``jcm.cf_metadata`` is now the
   single place any backend converts the physics-internal frame to the file
   frame. See ``docs/source/design/output_vertical_conventions.md``.
+- **New diagnostic** ``pressure_thickness`` **[Pa]** — the per-layer Δp on the
+  ``level`` axis, written by the ECHAM physics stacks. Mass-weight a ``level``
+  field with ``(field * pressure_thickness / g).sum('level')`` instead of
+  reconstructing Δp from ``pressure_half``, which invites the interface/
+  mid-level alignment trap (a documented burden example silently evaluated to
+  ``0.0``). Present wherever the moist-air prepare term runs; SPEEDY output
+  does not carry it.
 - **Reading states back is orientation-aware** (#741):
   ``jcm.utils.load_states_from_xarray`` detects a surface-first file from its
   ``level`` coordinate values and always returns the top-first physics frame —
