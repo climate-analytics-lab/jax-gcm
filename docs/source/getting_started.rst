@@ -523,7 +523,11 @@ so index 0 is the level nearest the ground and ``level[k]`` sits between
 
 .. code-block:: python
 
-   dp = -ds['pressure_half'].diff('level_i').rename(level_i='level')
+   # diff() keeps the *interface* sigma labels, so after renaming the dim the
+   # mid-level coordinate must be assigned explicitly — otherwise xarray's
+   # alignment finds no matching labels and the product is silently empty.
+   dp = (-ds['pressure_half'].diff('level_i')
+         .rename(level_i='level').assign_coords(level=ds['level']))
    burden = (ds['qc'] * dp / 9.81).sum('level')     # kg/m^2
 
 Both axes are CF-labelled nominal sigma (``a/p0 + b``) and carry
