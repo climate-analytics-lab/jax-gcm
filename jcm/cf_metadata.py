@@ -61,6 +61,11 @@ HYBRID_B_FULL = "hybrid_b_full"
 HYBRID_A_HALF = "hybrid_a_half"
 HYBRID_B_HALF = "hybrid_b_half"
 
+#: Name of the full-level pressure diagnostic. Named here because readers use
+#: it to *verify* a file's vertical orientation independently of the ``level``
+#: coordinate — see :func:`jcm.utils.load_states_from_xarray` (#718).
+PRESSURE_FULL = "pressure_full"
+
 _SIGMA_COMMON_ATTRS = {
     "units": "1",
     "positive": "down",
@@ -86,7 +91,7 @@ _PARAMETRIC_SIGMA_STANDARD_NAME = "atmosphere_hybrid_sigma_pressure_coordinate"
 #: :attr:`jcm.physics.physics_term.PhysicsTerm.output_attrs` (#740); a variable
 #: absent from every source simply carries whatever attrs it already had.
 _VARIABLE_ATTRS: dict[str, dict[str, str]] = {
-    "pressure_full": {
+    PRESSURE_FULL: {
         "standard_name": "air_pressure",
         "units": "Pa",
         "long_name": "air pressure at layer mid-level",

@@ -50,6 +50,15 @@ module or directly::
    python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
        run.column.lat_deg=0 run.column.lon_deg=180
 
+The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
+netCDF written by an earlier run. Both the vertical orientation and the tracer
+list are handled for you: output files are surface-first and are flipped into
+the top-first physics frame on load, and with ``run.tracer_vars`` unset (the
+default) every tracer the configured physics declares — ``qc``/``qi`` for the
+one-moment cloud scheme, plus ``qnc``/``qni`` for the two-moment one — is
+loaded from the file when it carries it. Pass an explicit mapping to rename
+variables, or ``run.tracer_vars={}`` to load none.
+
 Inspect the available config groups and the fully-composed config::
 
    python -m jcm.main --help                                   # config-group choices

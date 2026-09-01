@@ -1111,7 +1111,7 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
         cfg.run.mode = "prescribed"
         with self.assertRaisesRegex(ValueError, "state_file"):
-            _load_states_from_cfg(cfg)
+            _load_states_from_cfg(cfg, None)
 
     def test_scm_mode_requires_column(self):
         from jcm.runners import _run_scm
@@ -1122,6 +1122,112 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         cfg.run.column = None
         with self.assertRaisesRegex(ValueError, "run.column"):
             _run_scm(cfg)
+
+
+class TestPrescribedStateTracerLoading(unittest.TestCase):
+    """``prescribed`` / ``scm`` load the tracers the physics declares (#718).
+
+    With ``run.tracer_vars`` unset the condensate a saved state carries used
+    to be dropped, so cloud-aware physics ran against a clear sky and
+    returned plausible, wrong fluxes. The tracer list now comes from the
+    configured physics rather than from the user remembering to write it out.
+    """
+
+    NLEV = 4
+
+    class _StubPhysics:
+        """Stands in for a physics package that declares condensate tracers.
+
+        ``_load_states_from_cfg`` only ever calls ``required_tracers()``, so
+        building a real ECHAM package here would cost seconds to test one
+        line of plumbing.
+        """
+
+        def required_tracers(self):
+            from jcm.physics.physics_term import TracerSpec
+            return (TracerSpec(name="qc"), TracerSpec(name="qi"))
+
+    def _write_state_file(self, path):
+        """Write a minimal JCM-convention state file: surface-first, with qc/qi."""
+        import xarray as xr
+
+        nlev, nlon, nlat = self.NLEV, 3, 2
+        shape = (nlev, nlon, nlat)
+        dims = ("level", "lon", "lat")
+
+        def column(profile):
+            return np.broadcast_to(
+                np.asarray(profile, dtype=float)[:, None, None], shape).copy()
+
+        # Surface-first, as every JCM output file is written: level index 0 is
+        # the surface (sigma ~1, ~1e5 Pa).
+        ds = xr.Dataset(
+            data_vars={
+                "u_wind": (dims, np.zeros(shape)),
+                "v_wind": (dims, np.zeros(shape)),
+                "temperature": (dims, column([288.0, 260.0, 230.0, 200.0])),
+                "specific_humidity": (dims, column([1e-2, 5e-3, 1e-3, 1e-6])),
+                "geopotential": (dims, np.zeros(shape)),
+                "pressure_full": (dims, column([9.9e4, 7e4, 4e4, 1e4])),
+                "qc": (dims, column([2e-4, 1e-4, 0.0, 0.0])),
+                "qi": (dims, column([0.0, 0.0, 3e-5, 1e-5])),
+                "normalized_surface_pressure": (
+                    ("lon", "lat"), np.ones((nlon, nlat))),
+            },
+            coords={"level": np.linspace(0.99, 0.01, nlev)},
+        )
+        ds.to_netcdf(path)
+
+    def _cfg_with_state_file(self, tmpdir):
+        state_file = Path(tmpdir) / "state.nc"
+        self._write_state_file(str(state_file))
+        cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
+        cfg.run.mode = "prescribed"
+        cfg.run.state_file = str(state_file)
+        return cfg
+
+    def test_declared_tracers_are_loaded_when_tracer_vars_is_unset(self):
+        import tempfile
+        from jcm.runners import _load_states_from_cfg
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self._cfg_with_state_file(tmpdir)
+            self.assertIsNone(cfg.run.get("tracer_vars", None))
+            _, states = _load_states_from_cfg(cfg, self._StubPhysics())
+
+        self.assertEqual(set(states.tracers), {"qc", "qi"})
+        # Loaded in the top-first physics frame like the rest of the state:
+        # the file's surface value (index 0) ends up last.
+        self.assertAlmostEqual(
+            float(np.asarray(states.tracers["qc"])[-1, 0, 0]), 2e-4)
+
+    def test_explicit_empty_mapping_still_loads_nothing(self):
+        """``tracer_vars: {}`` is the documented opt-out.
+
+        It must stay distinct from ``null`` -- otherwise, now that ``null``
+        means "infer", there is no way to ask for no tracers at all.
+        """
+        import tempfile
+        from jcm.runners import _load_states_from_cfg
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self._cfg_with_state_file(tmpdir)
+            cfg.run.tracer_vars = {}
+            _, states = _load_states_from_cfg(cfg, self._StubPhysics())
+
+        self.assertEqual(dict(states.tracers), {})
+
+    def test_physics_without_tracers_loads_none(self):
+        import tempfile
+        from jcm.runners import _load_states_from_cfg
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self._cfg_with_state_file(tmpdir)
+            _, states = _load_states_from_cfg(cfg, build_physics(cfg))
+
+        # held_suarez declares no tracers, so nothing is picked up even
+        # though the file carries qc/qi.
+        self.assertEqual(dict(states.tracers), {})
 
 
 class TestOutputPathAndSave(unittest.TestCase):
