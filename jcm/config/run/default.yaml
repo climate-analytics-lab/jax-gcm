@@ -11,7 +11,10 @@ start_date: null
 
 output_averages: false
 output: model_state.nc
-log_level: CRITICAL
+# WARNING, not CRITICAL: jcm warns about results it cannot vouch for
+# (e.g. an in-place physics-parameter change that never reached the
+# computation, #735), and a silent run is not the same as a clean one.
+log_level: WARNING
 
 # Optional upper-sponge layer applied to (u, v) in the topmost ``levels``.
 # Off by default — set ``run.sponge.levels`` to a positive integer to enable.

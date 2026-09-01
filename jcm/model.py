@@ -383,7 +383,7 @@ class Model:
                  start_date: jdt.Datetime | None = None,
                  calendar: str = "365_day",
                  observers=(),
-                 log_level=logging.CRITICAL) -> None:
+                 log_level=logging.WARNING) -> None:
         """Initialise the model.
 
         Args:
@@ -440,10 +440,22 @@ class Model:
                 automatically so state fields are sampleable. Results ride
                 on :class:`~jcm.predictions.ModelPredictions` — see
                 :meth:`~jcm.predictions.ModelPredictions.observation_datasets`.
-            log_level: Logging verbosity level.
+            log_level: Verbosity applied to the ``jcm`` logger hierarchy.
+                Defaults to ``logging.WARNING`` so that warnings jcm raises
+                about a run stay audible — notably the one saying an
+                in-place parameter change did not reach the computation
+                (#735), which the previous ``CRITICAL`` default silenced.
+                Only the ``jcm`` logger is set, not the root logger, so
+                constructing a Model neither clobbers an application's own
+                logging configuration nor lets an application-wide filter
+                suppress jcm's warnings about its own results. Pass
+                ``logging.CRITICAL`` to quieten jcm.
 
         """
-        logging.getLogger().setLevel(log_level)
+        # The ``jcm`` package logger, not the root logger: every jcm module
+        # logs through ``logging.getLogger(__name__)``, so this reaches all
+        # of them without deciding logging policy for the host application.
+        logging.getLogger("jcm").setLevel(log_level)
         self.calendar = calendar
         # Default built HERE, not as a def-time default: a def-time
         # ``jdt.to_datetime(...)`` freezes its array dtypes at import time,

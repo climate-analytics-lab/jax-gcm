@@ -1,3 +1,4 @@
+import logging
 import unittest
 import jax
 import jax.tree_util as jtu
@@ -1025,3 +1026,54 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
         # so a flat response (the signature of a parameter that never
         # reached the computation) fails here.
         self.assertLess(g1 * g2, 0.0)
+
+
+class TestModelLogging(unittest.TestCase):
+    """Warnings jcm raises about a run have to reach the user.
+
+    The default was ``logging.CRITICAL`` applied to the ROOT logger, which
+    silenced every jcm warning — including the one saying an in-place
+    parameter change never reached the computation (#735) — and
+    reconfigured logging for the host application as a side effect. Both
+    halves of that are tested here: the default is audible, and it is
+    scoped to the ``jcm`` hierarchy.
+    """
+
+    def setUp(self):
+        self._jcm_level = logging.getLogger("jcm").level
+        self._root_level = logging.getLogger().level
+
+    def tearDown(self):
+        logging.getLogger("jcm").setLevel(self._jcm_level)
+        logging.getLogger().setLevel(self._root_level)
+
+    def _model(self, **kwargs):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        return Model(coords=get_speedy_coords(layers=8,
+                                              spectral_truncation=21),
+                     time_step=30.0, **kwargs)
+
+    def test_warnings_are_audible_even_from_a_quiet_application(self):
+        # An application that has silenced the root logger still hears
+        # jcm's warnings about its own results, because the level is set
+        # on the jcm logger: level lookup stops at the first logger with
+        # one set, and propagation to handlers does not consult the root
+        # logger's level.
+        logging.getLogger().setLevel(logging.CRITICAL)
+        self._model()
+        self.assertTrue(
+            logging.getLogger("jcm.predictions").isEnabledFor(
+                logging.WARNING))
+
+    def test_construction_leaves_the_root_logger_alone(self):
+        logging.getLogger().setLevel(logging.DEBUG)
+        self._model()
+        self.assertEqual(logging.getLogger().level, logging.DEBUG)
+        self.assertEqual(logging.getLogger("jcm").level, logging.WARNING)
+
+    def test_log_level_argument_still_quietens_jcm(self):
+        self._model(log_level=logging.CRITICAL)
+        self.assertFalse(
+            logging.getLogger("jcm.predictions").isEnabledFor(
+                logging.WARNING))
