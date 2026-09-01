@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import pathlib
 import sys
 import time
@@ -386,29 +387,72 @@ def channel_weights(y_train):
     return 1.0 / jnp.maximum(jnp.mean(y_train, axis=0), _WEIGHT_PROF_FLOOR)
 
 
-def val_chunk_weights(val_batches):
-    """Per-chunk weights for averaging validation objectives.
+def _loss_terms(is_sw, weight_prof, weights, batch):
+    """Un-normalised numerators of the hybrid objective on one batch.
 
-    A chunk's objective is normalised by its *contributing* sample count
-    (``n = sum(mask)`` in ``make_loss``), so that is what it must be weighted
-    by. A plain mean would give a short final chunk the same weight as a full
-    one -- with 4097 columns the last column decides half of ``val_loss`` --
-    and since validation indices are concatenated by source, that tail skews
-    best-epoch selection toward whichever source it came from.
+    Returns ``(hr_sse, flux_sse, n, n_elem)``, the raw sums from which the
+    objective is assembled by :func:`hybrid_objective`. The WHOLE-SPLIT
+    objective is
 
-    For SW the mask is daylight, so a night-heavy chunk cannot outweigh a lit
-    one per lit sample and a fully dark chunk drops out entirely instead of
-    contributing a full chunk of zero loss. For LW the mask is all ones and
-    this reduces to the chunk length.
+        alpha * sqrt(sum(hr_sse) / sum(n))
+              + (1 - alpha) * sum(flux_sse) / (sum(n) * n_elem)
+
+    Returning the numerators rather than the reduced per-chunk objective is
+    what makes the validation metric partition-invariant. The heating term is
+    an RMSE, and ``sqrt`` is nonlinear, so a per-chunk RMSE averaged with any
+    per-chunk weight is NOT the split-wide RMSE -- equal chunks with heating
+    MSEs 0 and 4 average to 1.0 rather than the true sqrt(2) ~ 1.41, which
+    would let checkpoint selection and sweep rankings move with where the
+    evaluation chunk boundaries happen to fall (PR #730 review). Accumulating
+    ``hr_sse`` and ``n`` across the split and rooting once removes that
+    dependence. ``n`` is the raw contributing-sample count ``sum(mask)``,
+    UNCLAMPED, so an all-dark shortwave chunk (n = 0) contributes nothing to
+    either the numerators or the denominator when the totals are formed.
     """
-    w = np.array([float(np.sum(b["mask"])) for b in val_batches])
-    if w.sum() == 0.0:          # an SW split with no daylight at all
-        return np.ones_like(w)
-    return w
+    pred = _predict(weights, batch["x"], batch["aux"])
+    mask = batch["mask"][:, None, None]
+    n = jnp.sum(batch["mask"])
+    err = (pred - batch["y"]) * weight_prof
+    n_elem = pred.shape[1] * pred.shape[2]
+    if is_sw:
+        # Interface-0 down / down_clear are overwritten with the exact
+        # incoming flux at inference (reconstruct_sw_interface_fluxes),
+        # and their normalised target is exactly 1 — unreachable for a
+        # sigmoid. Training on them feeds an irreducible error into the
+        # shared output layer and the checkpoint-selection metric for
+        # predictions that are never used (PR #730 review).
+        elem = jnp.ones((pred.shape[1], pred.shape[2]))
+        elem = elem.at[0, 0].set(0.0).at[0, 2].set(0.0)
+        err = err * elem
+        n_elem = n_elem - 2
+    flux_sse = jnp.sum((err ** 2) * mask)
+    hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
+    hr_true = _heating(batch["y"], batch["scale"], batch["p_half"], is_sw)
+    w = uniform_weights(batch["p_half"]) * batch["mask"][:, None]
+    hr_sse = jnp.sum(((hr_pred - hr_true) ** 2) * w)
+    return hr_sse, flux_sse, n, n_elem
+
+
+def hybrid_objective(alpha, hr_sse, flux_sse, n, n_elem):
+    """Assemble the hybrid objective from accumulated :func:`_loss_terms` sums.
+
+    ``alpha * sqrt(hr_sse / n) + (1 - alpha) * flux_sse / (n * n_elem)``. Fed a
+    single batch's numerators this is that batch's objective; fed the totals
+    over a whole validation split it is the split-wide objective, formed ONCE
+    after the sums are accumulated so the root is taken over the full split
+    (see :func:`_loss_terms` for why per-chunk aggregation is wrong). The
+    numpy/scalar mirror of the jitted form in :func:`make_loss` -- both compute
+    the same expression, one on tracers and one on accumulated Python floats.
+    """
+    n = max(float(n), 1.0)
+    flux_mse = float(flux_sse) / (n * n_elem)
+    if alpha == 0.0:
+        return flux_mse
+    return alpha * math.sqrt(float(hr_sse) / n) + (1.0 - alpha) * flux_mse
 
 
 def make_loss(is_sw, alpha, weight_prof):
-    """Build the loss for one band, following Ukkonen's hybrid formulation.
+    """Build the per-batch loss, following Ukkonen's hybrid formulation.
 
     ``alpha * RMSE(heating) + (1 - alpha) * MSE(weighted flux)``, with the
     heating term in K/day computed from denormalised fluxes and the TRUE dp,
@@ -417,31 +461,19 @@ def make_loss(is_sw, alpha, weight_prof):
     from vanishing as it converges, while alpha = 1e-4 is unit-balancing --
     the flux MSE is O(1e-4) on O(1) targets and the heating RMSE is O(1) in
     K/day, so the two contribute comparably rather than one dominating.
+
+    Used for the training gradient, which is per single batch, so rooting the
+    heating term per batch is correct here. Validation instead accumulates
+    :func:`_loss_terms` across chunks and roots once (partition-invariant).
     """
     def loss_fn(weights, batch):
-        pred = _predict(weights, batch["x"], batch["aux"])
-        mask = batch["mask"][:, None, None]
-        n = jnp.maximum(jnp.sum(batch["mask"]), 1.0)
-        err = (pred - batch["y"]) * weight_prof
-        n_elem = pred.shape[1] * pred.shape[2]
-        if is_sw:
-            # Interface-0 down / down_clear are overwritten with the exact
-            # incoming flux at inference (reconstruct_sw_interface_fluxes),
-            # and their normalised target is exactly 1 — unreachable for a
-            # sigmoid. Training on them feeds an irreducible error into the
-            # shared output layer and the checkpoint-selection metric for
-            # predictions that are never used (PR #730 review).
-            elem = jnp.ones((pred.shape[1], pred.shape[2]))
-            elem = elem.at[0, 0].set(0.0).at[0, 2].set(0.0)
-            err = err * elem
-            n_elem = n_elem - 2
-        flux_mse = jnp.sum((err ** 2) * mask) / (n * n_elem)
+        hr_sse, flux_sse, n_raw, n_elem = _loss_terms(
+            is_sw, weight_prof, weights, batch)
+        n = jnp.maximum(n_raw, 1.0)
+        flux_mse = flux_sse / (n * n_elem)
         if alpha == 0.0:
             return flux_mse, flux_mse
-        hr_pred = _heating(pred, batch["scale"], batch["p_half"], is_sw)
-        hr_true = _heating(batch["y"], batch["scale"], batch["p_half"], is_sw)
-        w = uniform_weights(batch["p_half"]) * batch["mask"][:, None]
-        hr_rmse = jnp.sqrt(jnp.sum(((hr_pred - hr_true) ** 2) * w) / n)
+        hr_rmse = jnp.sqrt(hr_sse / n)
         return alpha * hr_rmse + (1.0 - alpha) * flux_mse, flux_mse
     return loss_fn
 
@@ -559,14 +591,16 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
         return optax.apply_updates(weights, updates), opt_state, total, flux
 
     @jax.jit
-    def evaluate(weights, batch):
-        # The FULL objective, including the heating term -- not the flux part
-        # alone. Selecting the best epoch by flux while ranking and reporting
-        # by heating lets a longer run pick a checkpoint that is better on the
-        # selection metric and worse on the reported one, which is how a
-        # 300-epoch 128-unit model ended up with worse longwave heating than a
-        # 40-epoch 64-unit one.
-        return loss_fn(weights, batch)[0]
+    def eval_terms(weights, batch):
+        # The RAW objective numerators, per chunk -- NOT the reduced per-chunk
+        # objective. The full split's objective is assembled once from the
+        # totals (below), which keeps it partition-invariant: the heating
+        # RMSE's sqrt is nonlinear, so no per-chunk average reproduces the
+        # split-wide root (PR #730 review). It is the FULL objective, heating
+        # term included -- selecting the best epoch by flux alone while
+        # ranking and reporting by heating let a 300-epoch 128-unit model pick
+        # a checkpoint worse on longwave heating than a 40-epoch 64-unit one.
+        return _loss_terms(is_sw, weight_prof, weights, batch)
 
     rng = np.random.default_rng(config["seed"])
     best = (np.inf, weights)
@@ -579,9 +613,15 @@ def train_band(data, splits, is_sw, config, key, log_prefix=""):
             batch = gather(order[b * config["batch_size"]:
                                  (b + 1) * config["batch_size"]])
             weights, opt_state, _, _ = step(weights, opt_state, batch)
-        val_loss = float(
-            np.average([evaluate(weights, b) for b in val_batches],
-                       weights=val_chunk_weights(val_batches)))
+        # Accumulate the numerators across the whole validation split, then
+        # form the hybrid objective once -- see eval_terms / _loss_terms.
+        terms = [eval_terms(weights, b) for b in val_batches]
+        hr_sse = sum(float(t[0]) for t in terms)
+        flux_sse = sum(float(t[1]) for t in terms)
+        n_tot = sum(float(t[2]) for t in terms)
+        n_elem = int(terms[0][3])
+        val_loss = hybrid_objective(
+            config["alpha"], hr_sse, flux_sse, n_tot, n_elem)
         history.append(val_loss)
         if val_loss < best[0]:
             best = (val_loss, weights)

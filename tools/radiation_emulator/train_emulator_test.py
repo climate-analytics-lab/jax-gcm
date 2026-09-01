@@ -25,7 +25,7 @@ from train_emulator import (  # noqa: E402
     solar_group_ids,
     split_by_source_and_group,
     split_by_group,
-    val_chunk_weights,
+    hybrid_objective,
     band_metrics,
     flux_to_heating_rate,
     SECONDS_PER_DAY,
@@ -257,8 +257,12 @@ class SwLossMaskTest(unittest.TestCase):
         import tools.radiation_emulator.train_emulator as t
 
         loss = t.make_loss(is_sw=True, alpha=0.0, weight_prof=1.0)
+        # scale/p_half are part of the batch contract that _loss_terms reads;
+        # alpha=0 drops the heating term but the numerators are still traced.
         batch = {"x": None, "aux": None,
-                 "mask": jnp.ones((2,)), "y": jnp.zeros((2, 5, 4))}
+                 "mask": jnp.ones((2,)), "y": jnp.zeros((2, 5, 4)),
+                 "scale": jnp.ones((2,)),
+                 "p_half": jnp.asarray([[1.0, 100.0, 5e3, 5e4, 1e5]] * 2)}
         with mock.patch.object(t, "_predict", lambda w, x, a: pred):
             val, _ = loss(None, batch)
         return float(val)
@@ -362,41 +366,63 @@ class BandMetricsSWBoundaryTest(unittest.TestCase):
         self.assertGreater(m["heating_rmse_worst_level"], 100.0)
 
 
-class ValidationWeightingTest(unittest.TestCase):
-    """Validation chunks weigh by contributing samples, not chunk length."""
+class ObjectiveAggregationTest(unittest.TestCase):
+    """The validation objective must not depend on how the split is chunked.
 
-    @staticmethod
-    def _batches(*masks):
-        return [{"mask": np.asarray(m, float)} for m in masks]
+    The heating term is an RMSE and ``sqrt`` is nonlinear, so averaging
+    per-chunk objectives -- by any per-chunk weight -- is not the split-wide
+    objective. ``_loss_terms`` returns the raw numerators and
+    ``hybrid_objective`` roots once over the accumulated totals, which removes
+    the dependence on chunk boundaries (PR #730 review).
+    """
 
-    def test_short_tail_chunk_does_not_outweigh_a_full_one(self):
-        # 4096 columns at loss 1.0 plus a 1-column tail at loss 5.0: a plain
-        # mean returns 3.0, letting one column decide half of val_loss.
-        batches = self._batches(np.ones(4096), np.ones(1))
-        losses = np.array([1.0, 5.0])
-        self.assertAlmostEqual(float(np.mean(losses)), 3.0)
-        weighted = float(np.average(
-            losses, weights=val_chunk_weights(batches)))
-        self.assertAlmostEqual(weighted, (1.0 * 4096 + 5.0) / 4097, places=9)
+    def test_hybrid_objective_roots_the_pooled_sums_not_per_chunk(self):
+        # Two equal chunks with heating SSEs 0 and 8 over n = 2 each: the true
+        # split-wide heating RMSE is sqrt((0 + 8) / 4) = sqrt(2) ~ 1.414. The
+        # old sample-weighted average of per-chunk RMSEs gives
+        # (2*sqrt(0/2) + 2*sqrt(8/2)) / 4 = 1.0 -- the value this fix rejects.
+        alpha, n_elem = 1.0, 4          # flux term zeroed out via flux_sse = 0
+        pooled = hybrid_objective(alpha, hr_sse=8.0, flux_sse=0.0,
+                                  n=4.0, n_elem=n_elem)
+        self.assertAlmostEqual(pooled, np.sqrt(2.0), places=6)
+        per_chunk = (2 * np.sqrt(0.0 / 2) + 2 * np.sqrt(8.0 / 2)) / 4
+        self.assertAlmostEqual(per_chunk, 1.0, places=6)
+        self.assertNotAlmostEqual(pooled, per_chunk, places=2)
 
-    def test_shortwave_weights_count_lit_columns_not_chunk_length(self):
-        # A night-heavy chunk (10 lit of 1000) against an always-lit one: the
-        # SW objective is per-lit-sample, so weighting by chunk length would
-        # give the 10 lit columns the same say as the 1000 lit ones.
-        night_heavy = np.concatenate([np.ones(10), np.zeros(990)])
-        w = val_chunk_weights(self._batches(night_heavy, np.ones(1000)))
-        np.testing.assert_allclose(w, [10.0, 1000.0])
+    def _aggregate(self, chunks, is_sw, alpha):
+        # _predict is mocked to echo the batch's stored prediction, so
+        # splitting the rows into chunks is a pure partition of the same data.
+        from unittest import mock
+        import tools.radiation_emulator.train_emulator as t
 
-    def test_fully_dark_chunk_gets_no_weight(self):
-        # Its objective is 0/max(0,1) = 0, which under length weighting would
-        # pull val_loss down as if the model had predicted it perfectly.
-        w = val_chunk_weights(self._batches(np.ones(100), np.zeros(100)))
-        np.testing.assert_allclose(w, [100.0, 0.0])
+        with mock.patch.object(t, "_predict", lambda w, x, a: x):
+            terms = [t._loss_terms(is_sw, 1.0, None, b) for b in chunks]
+        hr = sum(float(x[0]) for x in terms)
+        fl = sum(float(x[1]) for x in terms)
+        n = sum(float(x[2]) for x in terms)
+        return hybrid_objective(alpha, hr, fl, n, int(terms[0][3]))
 
-    def test_all_dark_split_falls_back_to_uniform(self):
-        # Degenerate, but np.average raises on zero total weight.
-        w = val_chunk_weights(self._batches(np.zeros(8), np.zeros(4)))
-        np.testing.assert_allclose(w, [1.0, 1.0])
+    def test_loss_terms_aggregate_identically_across_partitions(self):
+        # A longwave split of 6 columns: evaluated whole vs split into an
+        # unequal 1 + 5 must give the identical objective, whereas the previous
+        # per-chunk-averaged val_loss did not.
+        rng = np.random.default_rng(0)
+        ncol, nlev = 6, 4
+        pred = jnp.asarray(rng.uniform(0.2, 0.8, (ncol, nlev + 1, 4)))
+        y = jnp.asarray(rng.uniform(0.2, 0.8, (ncol, nlev + 1, 4)))
+        p_half = jnp.asarray(np.sort(
+            rng.uniform(1.0, 1.0e5, (ncol, nlev + 1)), axis=1))
+        scale = jnp.asarray(rng.uniform(200.0, 500.0, (ncol,)))
+        mask = jnp.ones((ncol,))
+
+        def batch(sl):
+            return {"x": pred[sl], "aux": None, "y": y[sl],
+                    "scale": scale[sl], "p_half": p_half[sl], "mask": mask[sl]}
+
+        whole = self._aggregate([batch(slice(0, 6))], False, alpha=1e-3)
+        split = self._aggregate(
+            [batch(slice(0, 1)), batch(slice(1, 6))], False, alpha=1e-3)
+        self.assertAlmostEqual(whole, split, places=6)
 
 
 if __name__ == "__main__":
