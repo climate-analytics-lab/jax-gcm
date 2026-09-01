@@ -437,6 +437,52 @@ class LabelTest(unittest.TestCase):
             np.testing.assert_array_equal(first[name], second[name], name)
 
 
+class FrozenSeedGuardTest(unittest.TestCase):
+    """The frozen-McICA guard fires only where the draws must differ.
+
+    McICA subcolumns vary only for PARTIAL cloud; a cloud-free or a fully
+    overcast column is deterministic and identical draws there are correct,
+    not a frozen step (PR #730 review).
+    """
+
+    @staticmethod
+    def _frozen_labeller(ncol, nlev):
+        # Ignores the seed, so every draw is bit-identical -- exactly what a
+        # frozen mcica_freeze_step would produce.
+        def lab(batch, seed):
+            out = {k: np.ones((ncol, nlev + 1)) for k in LABEL_FIELDS}
+            out["cos_zenith"] = np.ones(ncol)
+            out["total_cloud_cover"] = np.ones(ncol)
+            return out
+        return lab
+
+    def test_fully_overcast_batch_does_not_trip_the_guard(self):
+        # Every cloudy layer at cover 1: subcolumns are legitimately identical
+        # for every seed, so label generation must succeed.
+        batch = {"cloud_fraction": np.ones((3, 4))}
+        labels, _ = label_batch(
+            batch, n_seeds=2, labeller=self._frozen_labeller(3, 4))
+        self.assertEqual(labels["lw_flux_up"].shape, (3, 5))
+
+    def test_partial_cloud_frozen_seed_batch_still_aborts(self):
+        # A genuinely partial layer (cover 0.5) must vary across McICA seeds;
+        # identical draws there mean the step is frozen and must be caught.
+        cf = np.ones((3, 4))
+        cf[:, 1] = 0.5
+        batch = {"cloud_fraction": cf}
+        with self.assertRaises(ValueError) as ctx:
+            label_batch(batch, n_seeds=2,
+                        labeller=self._frozen_labeller(3, 4))
+        self.assertIn("partial", str(ctx.exception))
+
+    def test_cloud_free_batch_does_not_trip_the_guard(self):
+        # No cloud at all: identical draws are correct, as before this fix.
+        batch = {"cloud_fraction": np.zeros((3, 4))}
+        labels, _ = label_batch(
+            batch, n_seeds=2, labeller=self._frozen_labeller(3, 4))
+        self.assertEqual(labels["lw_flux_up"].shape, (3, 5))
+
+
 class InputSanitisationTest(unittest.TestCase):
     """Guards against out-of-range inputs reaching RRTMGP.
 

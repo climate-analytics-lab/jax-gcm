@@ -244,19 +244,27 @@ def label_batch(batch, n_seeds: int, base_seed: int = 0, labeller=None):
     # A frozen McICA step makes every draw identical, so the averaging
     # silently becomes a no-op that still returns plausible labels. Catch it
     # on the data rather than trusting the parameter default -- but only where
-    # the draws are *required* to differ. A cloud-free batch legitimately
-    # yields identical draws, and it does occur for small batches, so
-    # conditioning on cloud is what keeps this a correctness check rather than
-    # a random abort partway through a long generation. The comparison is on
-    # the longwave over the meaningfully-cloudy columns only: the shortwave is
-    # identically zero at night whatever the draw, so comparing it would trip
-    # on any batch whose cloudy columns all happen to be in darkness.
-    cloudy = np.max(batch["cloud_fraction"], axis=1) > 0.01
-    if n_seeds > 1 and cloudy.any() and np.array_equal(
-            draws[0]["lw_flux_up"][cloudy], draws[-1]["lw_flux_up"][cloudy]):
+    # the draws are *required* to differ. McICA sampling only varies the
+    # subcolumns of PARTIAL cloud: a cloud-free column, and equally a fully
+    # OVERCAST one (every cloudy layer at cover 1), makes every subcolumn
+    # identical for every seed, so identical draws there are correct, not a
+    # frozen step (the test helper notes the same for its overcast deck).
+    # Requiring variation on those columns would abort a legitimate overcast
+    # batch, which is reproducible with small batches or overcast trajectory
+    # files. So the check keys on columns with a genuinely partial layer,
+    # 0.01 < cover < 0.99 -- below 0.01 is effectively clear (the existing
+    # floor) and at/above 0.99 the layer is effectively overcast, either way
+    # giving deterministic subcolumns. The comparison is on the longwave: the
+    # shortwave is identically zero at night whatever the draw, so comparing
+    # it would trip on any batch whose partial-cloud columns are in darkness.
+    partial = np.any((batch["cloud_fraction"] > 0.01) &
+                     (batch["cloud_fraction"] < 0.99), axis=1)
+    if n_seeds > 1 and partial.any() and np.array_equal(
+            draws[0]["lw_flux_up"][partial],
+            draws[-1]["lw_flux_up"][partial]):
         raise ValueError(
             "McICA draws are identical across seeds for a batch containing "
-            "cloud, so seed averaging is doing nothing. Check that "
+            "partial cloud, so seed averaging is doing nothing. Check that "
             "RadiationParameters.mcica_freeze_step is 0."
         )
     per_seed = {
