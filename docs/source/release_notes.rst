@@ -1,6 +1,114 @@
 Release Notes
 =============
 
+Unreleased — one vertical direction in the output, and CF metadata
+------------------------------------------------------------------
+
+- **Breaking: interface variables are now written surface-first**, the same
+  direction as the full-level fields (#710). Previously an output file ran its
+  two vertical dimensions in *opposite* directions — ``level`` (mid-levels)
+  surface-first, ``level_i`` (interfaces) TOA-first — with nothing in the file
+  to say so. Every natural pairing of the two was therefore silently upside
+  down: a heating rate computed from the saved radiative fluxes and compared
+  against the saved temperature, or a tracer burden mass-weighted with
+  ``diff(pressure_half)``, came out vertically reversed with a plausible
+  magnitude and no error.
+- **Anything reading** ``pressure_half``, ``height_half`` or the radiative
+  fluxes (``radiation.lw_flux_up`` and friends) **gets the opposite order to
+  before.** Code that compensated for the old mismatch must drop that
+  compensation. There is no read-time shim: ``tools/jam_burden_report.py``
+  used to detect the disagreement and flip Δp, and no longer does.
+- **Old files are not converted and are not supported.** A pre-release
+  trajectory is identifiable by ``level_i`` being a bare integer index with no
+  attributes; a current one carries descending nominal sigma plus
+  ``positive = "down"``. Re-run rather than re-read.
+- ``level_interface`` **is gone**: the pyses backend now names its interface
+  axis ``level_i``, matching the dinosaur backend, so a reader needs one name
+  rather than two.
+- **The file is now self-describing.** Both vertical axes are real coordinate
+  variables holding nominal sigma (``a/p0 + b``) with CF ``standard_name``,
+  ``units``, ``axis`` and ``positive``; the hybrid ``(a, b)`` tables travel
+  with the file as the ``hybrid_a_full`` / ``hybrid_b_full`` /
+  ``hybrid_a_half`` / ``hybrid_b_half`` coordinates so ``p = a + b·p_s`` is
+  reproducible from the file alone, and CF ``formula_terms`` names them.
+  ``lat``/``lon``/``time`` and the pressure, height and core prognostic
+  variables gain standard names and units. Files are stamped
+  ``Conventions = CF-1.11``.
+- Observer profile curtains follow the same convention (their ``level`` axis
+  was top-first with no coordinate values), and ``jcm.cf_metadata`` is now the
+  single place any backend converts the physics-internal frame to the file
+  frame. See ``docs/source/design/output_vertical_conventions.md``.
+- **New diagnostic** ``pressure_thickness`` **[Pa]** — the per-layer Δp on the
+  ``level`` axis, written by the ECHAM physics stacks. Mass-weight a ``level``
+  field with ``(field * pressure_thickness / g).sum('level')`` instead of
+  reconstructing Δp from ``pressure_half``, which invites the interface/
+  mid-level alignment trap (a documented burden example silently evaluated to
+  ``0.0``). Present wherever the moist-air prepare term runs; SPEEDY output
+  does not carry it.
+- **Reading states back is orientation-aware** (#741):
+  ``jcm.utils.load_states_from_xarray`` detects a surface-first file from its
+  ``level`` coordinate values and always returns the top-first physics frame —
+  previously a trajectory file loaded through it came back vertically
+  inverted. ``PrescribedStateModel`` output joins the file convention too
+  (#739): its ``level`` axis was top-first under the same dim name every other
+  product now guarantees is surface-first.
+- **Physics diagnostics can carry their own CF metadata** (#740): a
+  ``PhysicsTerm`` declares ``output_attrs`` (units, ``standard_name``,
+  ``long_name``) for the output keys it provides, next to the code that
+  computes them. The radiation flux and heating-rate set, the cloud
+  diagnostics and the convection diagnostics now reach the file with units
+  and CF standard names instead of empty attributes.
+
+Unreleased — provenance records the parameters
+----------------------------------------------
+
+- **Every output now records the physics parameter values the run
+  actually used** (#732). The composed Hydra config that #591 stamped is
+  not the same thing: each scheme's ``params`` block is deliberately
+  absent from the shipped yamls so unspecified fields fall back to
+  ``Parameters.default()`` in code, meaning the config recorded the
+  *overrides* and said nothing about the effective values, and a model
+  built in Python or one whose parameters a calibration loop replaced
+  had no config behind it at all. ``jcm_prov_params`` (with
+  ``jcm_prov_params_sha``) now carries them, read off the *built*
+  physics, keyed as ``<term>.<variable>.<field>``
+  (``tiedtke_convection.params.entrpen``). Read it with
+  ``jcm.provenance.read_params(ds.attrs)``, or off the predictions object
+  as ``predictions.params``. Everything else about a run stays where it
+  was: the term composition, dycore and resolution are already in the
+  config record this sits beside.
+- Both kinds of parameter variable are covered. An ``nnx.Param`` is
+  recorded in full, including tuned arrays such as the MACv2-SP plume
+  shapes. A plain ``nnx.Variable`` is recorded where it is knob-shaped
+  (scalars, 0-d arrays, structs of those), because a parameter block
+  holding a bool cannot be a ``Param`` — ``SpeedySurfaceFlux.surface_params``,
+  ``EchamSurface.params`` and every Held-Suarez tuning constant are plain
+  Variables — while the coordinate caches terms also hold as Variables
+  stay out. Arrays over 64 elements (embedded NN weights) are summarized
+  by shape, dtype and hash; values captured under ``jit``/``grad`` read
+  ``"<traced>"``.
+- **The record is captured at trace time, not from the live module.**
+  ``Model._run_from_state`` is jitted with ``self`` static, so parameters
+  are constants inside the compiled executable and changing one in place
+  afterwards does not reach the computation. Reading the module at the
+  handoff would therefore stamp a trajectory with values that never ran.
+  Where the live values disagree with the compiled ones, the record
+  reports the compiled ones and both a log warning and a
+  ``live_parameters_differ_from_compiled`` key say so: that disagreement
+  means an in-place parameter change did nothing to the run. Rebuild the
+  ``Model`` to change parameters; making the mutation take effect (or
+  fail loudly) is tracked in #735.
+- The record travels on the predictions object, so it reaches every
+  output stream that object produces (trajectory, snapshots and the
+  per-observer datasets), including a bare
+  ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
+  Hydra runners, and a later run cannot retroactively change an earlier
+  one's record.
+- **``jcm_prov_run_hash`` values change**, because the parameters are now
+  folded into the hash. They have to be: every member of a parameter
+  sweep shares one code state, config and input set, so without them a
+  sweep produced a single run hash for every member.
+
 Unreleased — transient AMIP forcing
 -----------------------------------
 

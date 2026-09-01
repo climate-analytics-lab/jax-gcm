@@ -47,6 +47,13 @@ class PrescribedStatePredictions:
         tendencies: Physics tendencies for each step.
         physics_data: Per-step diagnostics dict from the physics package.
         times: Times in days since the start of the run.
+        a_boundaries_pa: TOA-first hybrid ``a`` interface table [Pa], as
+            :func:`jcm.cf_metadata.hybrid_boundaries` returns it. ``None`` when
+            the predictions were built without a vertical coordinate table
+            (e.g. constructed directly in a test); ``to_xarray`` then falls
+            back to a bare (flipped) ``level`` index.
+        b_boundaries: TOA-first hybrid ``b`` interface table, paired with
+            ``a_boundaries_pa``.
 
     """
 
@@ -54,24 +61,50 @@ class PrescribedStatePredictions:
     tendencies: PhysicsTendency
     physics_data: Any
     times: Any
+    # Vertical coordinate tables threaded through so ``to_xarray`` can write
+    # the file convention (#739). Default ``None`` keeps direct constructions
+    # (tests, callers that don't have ``coords``) working.
+    a_boundaries_pa: Any = None
+    b_boundaries: Any = None
 
     def to_xarray(self):
         """Dump states + tendencies + physics_data into an ``xr.Dataset``.
 
         Minimal serialiser for offline diagnostics — does NOT use the
         coord-aware ``data_to_xarray`` path that ``ModelPredictions``
-        uses (which would require threading ``coords`` + ``physics``
-        through the predictions struct). Variables are emitted with raw
-        positional dim names ``time, level, lon, lat`` and no units
-        metadata; the intent is to support quick NaN-checks and column
-        plots, not production climatology.
+        uses (which would require threading ``physics`` and the full
+        ``additional_coords`` machinery through the predictions struct).
+        Variables are emitted with raw positional dim names
+        ``time, level, lon, lat`` and no per-variable units metadata; the
+        intent is to support quick NaN-checks and column plots, not
+        production climatology.
+
+        The ``level`` axis follows the **surface-first** file convention
+        every JCM product uses (``jcm.cf_metadata``, #710, #739). The data
+        is built in the top-first physics frame and then finalised through
+        :func:`jcm.cf_metadata.finalize_output`, which flips both vertical
+        axes surface-first and — when the hybrid ``(a, b)`` tables were
+        threaded in (``a_boundaries_pa``/``b_boundaries``, set by
+        ``PrescribedStateModel.run``) — attaches real descending sigma
+        coordinates and CF attributes. A file written this way round-trips
+        through :func:`jcm.utils.load_states_from_xarray`, which detects the
+        surface-first orientation and returns a top-first ``PhysicsState``.
+
+        When the tables are absent (a struct built directly, e.g. in a
+        test), the ``level`` axis is still flipped so its *direction*
+        matches the file convention, but it stays a bare (flipped) integer
+        index with no sigma values — orientation is then not self-describing
+        and ``load_states_from_xarray`` cannot auto-detect it.
 
         Use ``ModelPredictions.to_xarray()`` when you need the full
         coord-aware serialisation (units, ``additional_coords``,
-        flipped level axis, etc.).
+        surface-first vertical axes with CF metadata, etc.).
         """
         import numpy as np
         import xarray as xr
+
+        from jcm import cf_metadata
+        from jcm import constants as c
 
         # Hardcoded positional dim names matching the prescribed-mode
         # vmap layout: (time, level, lon, lat) for column variables,
@@ -111,10 +144,29 @@ class PrescribedStatePredictions:
                     arr = np.asarray(v)
                     data_vars[f"diag.{k}"] = (_dims_for(arr), arr)
 
-        return xr.Dataset(
+        ds = xr.Dataset(
             data_vars=data_vars,
             coords={"time": np.asarray(self.times)},
         )
+
+        # Data is still top-first here. Bring it into the file convention.
+        if self.a_boundaries_pa is not None:
+            ds = cf_metadata.finalize_output(
+                ds,
+                a_boundaries_pa=self.a_boundaries_pa,
+                b_boundaries=self.b_boundaries,
+                p0=float(c.p0),
+                flip_vertical=True,
+            )
+        else:
+            # No vertical table available: still flip the level axis so its
+            # direction matches the surface-first file convention, but without
+            # the table the ``level`` axis stays a bare (flipped) integer index
+            # with no sigma coordinate values to make the orientation
+            # self-describing.
+            ds = cf_metadata.orient_surface_first(ds)
+            ds = cf_metadata.apply_cf_attributes(ds)
+        return ds
 
 
 class PrescribedStateModel:
@@ -225,9 +277,15 @@ class PrescribedStateModel:
             return jax.vmap(step)(states, sim_times)
 
         tendencies, physics_data = vmapped()
+        # Carry the TOA-first hybrid (a, b) interface tables so ``to_xarray``
+        # can write real surface-first sigma coordinates + CF metadata (#739).
+        from jcm import cf_metadata
+        a_half, b_half = cf_metadata.hybrid_boundaries(self.coords.vertical)
         return PrescribedStatePredictions(
             states=states,
             tendencies=tendencies,
             physics_data=physics_data,
             times=times,
+            a_boundaries_pa=a_half,
+            b_boundaries=b_half,
         )

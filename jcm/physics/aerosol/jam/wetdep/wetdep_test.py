@@ -11,7 +11,6 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetDepParameters,
     below_cloud_rate,
     conv_in_cloud_rate,
-    in_cloud_rate,
     reinjection_budget,
 )
 
@@ -61,13 +60,6 @@ class ScavengingFunctionTest(unittest.TestCase):
         reinjected, surface = reinjection_budget(none, formed, evap_frac)
         np.testing.assert_allclose(np.asarray(reinjected), 0.0)
         np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.0)
-
-    def test_in_cloud_rate_scales_with_activation(self):
-        pf = jnp.full((1, 1), 1.0e-6)
-        qc = jnp.full((1, 1), 1.0e-3)
-        lo = in_cloud_rate(jnp.full((1, 1), 0.2), pf, qc)
-        hi = in_cloud_rate(jnp.full((1, 1), 0.9), pf, qc)
-        self.assertGreater(float(hi[0, 0]), float(lo[0, 0]))
 
     def test_below_cloud_size_dependence(self):
         precip = jnp.full((1, 1), 1.0e-4)
@@ -152,6 +144,13 @@ class WetDepTermTest(unittest.TestCase):
             precip_rain=jnp.full((ncols,), precip),
             precip_formation_rate=form,
             rain_flux=rain_flux,
+            # The process-time scavenging ledger (#708), consistent with
+            # the grid-mean fields above: in-cloud pool = qc/cf, in-cloud
+            # formation = grid-mean formation/cf, and the process cover
+            # equal to the published cover (nothing emptied here).
+            incloud_liquid=jnp.full((nlev, ncols), 1.0e-3 / 0.6),
+            incloud_rain_formation=form / 0.6,
+            process_cloud_fraction=jnp.full((nlev, ncols), 0.6),
         )
         diagnostics = {
             CARRY_KEY: carry,
@@ -429,6 +428,11 @@ class WetDepTermTest(unittest.TestCase):
             qc=jnp.zeros((nlev, ncols)).at[0:2].set(1.0e-3),
             precip_formation_rate=form,
             precip_evaporation_rate=evap,
+            # Ledger fields (#708) consistent with the grid-mean ones.
+            incloud_liquid=jnp.zeros((nlev, ncols)).at[0:2].set(
+                1.0e-3 / 0.6),
+            incloud_rain_formation=form / 0.6,
+            process_cloud_fraction=cf,
         )
         # Isolate the in-cloud pathway: no impaction.
         params = WetDepParameters(
@@ -680,3 +684,148 @@ class WetDepTermTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FormationLedgerTest(unittest.TestCase):
+    """The process-time scavenging ledger pathway (#708).
+
+    The in-cloud removal keys to the cloud scheme's HAMMOZ-interface
+    ledger (bounded per-step fractions captured at process time), so a
+    cell whose condensate fully converted to precipitation — which ends
+    the step with cover 0, condensate 0, and a ZEROED in-cloud pool but a
+    positive formation ledger — still scavenges, in exactly the step with
+    the largest removal (a cover-keyed reconstruction would read zero
+    there — the dead zone the ledger interface exists to close).
+    """
+
+    @staticmethod
+    def _emptied_cell():
+        """Build a one-step full conversion: ledger positive, pools zero."""
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import (
+            mass_name, number_name)
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+
+        nlev, ncols = 4, 2
+        spec = MAM4_SPEC
+        tracers, carry = {}, {}
+        for mode in spec.modes:
+            tracers[number_name(mode.short)] = jnp.full(
+                (nlev, ncols), 1e8)
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), 1e7)
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full(
+                    (nlev, ncols), 1e-9)
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = (
+                    jnp.full((nlev, ncols), 1e-10))
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 275.0), tracers=tracers)
+        shape = (spec.n_modes(), nlev, ncols)
+        aer = JamAerosolState(
+            r_dry=jnp.full(shape, 0.1e-6),
+            r_wet=jnp.full(shape, 0.2e-6),
+            rho=jnp.full(shape, 1800.0),
+            kappa=jnp.full(shape, 0.5),
+            mass=jnp.full(shape, 1e-9),
+            number=jnp.full(shape, 1.0e8),
+        )
+        form_gm = jnp.zeros((nlev, ncols)).at[1].set(1.0e-7)
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            # POST-microphysics state of the emptied cell: no cover, no
+            # condensate, zeroed pools — only the formation ledger and
+            # the process-time cover remember what happened.
+            precip_formation_rate=form_gm,
+            rain_flux=jnp.cumsum(form_gm * 200.0, axis=0),
+            precip_rain=(form_gm * 200.0).sum(axis=0),
+            incloud_rain_formation=form_gm / 0.5,
+            process_cloud_fraction=jnp.zeros(
+                (nlev, ncols)).at[1].set(0.5),
+        )
+        diagnostics = {
+            CARRY_KEY: carry,
+            "_jam_state": aer,
+            "activated_fraction": jnp.full((nlev, ncols), 0.7),
+            "air_density": jnp.full((nlev, ncols), 1.0),
+            "layer_thickness": jnp.full((nlev, ncols), 200.0),
+            "clouds": clouds,
+            "_dt_seconds": 1800.0,
+        }
+        return state, diagnostics, spec
+
+    def test_emptied_cell_still_scavenges_cloud_borne(self):
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name
+
+        state, diagnostics, spec = self._emptied_cell()
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0),
+            below_coeff=jnp.asarray(0.0),        # isolate in-cloud
+            below_radius_ref=jnp.asarray(1.0e-7),
+            conv_scav_ratio=jnp.asarray(0.99),
+        )
+        cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
+                           cloud_borne=True)
+        q0 = np.asarray(diagnostics[CARRY_KEY][cb_key])
+
+        _, out = WetScavenging(params=params)(
+            state, diagnostics, None, None)
+        q1 = np.asarray(out[CARRY_KEY][cb_key])
+        # Fraction-1 marker: essentially ALL cloud-borne mass in the
+        # emptied level leaves with the precip it formed...
+        self.assertLess(q1[1].max(), 2e-6 * q0[1].max())
+        # ...and untouched levels keep theirs.
+        np.testing.assert_allclose(q1[0], q0[0], rtol=1e-6)
+
+    def test_interstitial_share_keys_to_process_cover(self):
+        # The implicit (no explicit phase) pathway must weight by the
+        # PROCESS-TIME cover: post-write-back cover is 0 in the emptied
+        # cell, so keying to it would zero the removal.
+        import dataclasses
+        from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name
+
+        state, diagnostics, spec = self._emptied_cell()
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0),
+            below_coeff=jnp.asarray(0.0),
+            below_radius_ref=jnp.asarray(1.0e-7),
+            conv_scav_ratio=jnp.asarray(0.99),
+        )
+        implicit = WetScavenging(
+            params=params,
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False),
+        )
+        tend, _ = implicit(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        dq = np.asarray(tend.tracers[key])
+        self.assertLess(dq[1].max(), 0.0)          # removal in the cell
+        np.testing.assert_array_equal(dq[0], 0.0)  # none where no process
+
+    def test_ledger_fractions_bounded(self):
+        from types import SimpleNamespace
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+            incloud_scavenged_fractions)
+
+        dt = 1800.0
+        shape = (5,)
+        clouds = SimpleNamespace(
+            incloud_liquid=jnp.array([1e-3, 1e-3, 0.0, 0.0, 1e-15]),
+            incloud_ice=jnp.array([0.0, 1e-4, 0.0, 1e-4, 0.0]),
+            # Formation far exceeding the pool per step must clip at 1.
+            incloud_rain_formation=jnp.array([1e-2, 1e-7, 1e-7, 0.0, 0.0]) / dt,
+            incloud_snow_formation=jnp.array([0.0, 1e-5, 0.0, 1e-3, 0.0]) / dt,
+            incloud_riming=jnp.zeros(shape),
+        )
+        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+        for arr in (f_wat, f_ice, pice):
+            self.assertTrue(bool(jnp.all((arr >= 0.0) & (arr <= 1.0))))
+        self.assertAlmostEqual(float(f_wat[0]), 1.0)   # clipped
+        self.assertAlmostEqual(float(f_wat[2]), 1.0)   # emptied-pool marker
+        self.assertAlmostEqual(float(f_ice[3]), 1.0)   # ice clip
+        self.assertAlmostEqual(float(f_wat[4]), 0.0)   # sub-floor pool, no formation
+        # Phase split falls back to the formation ledger in emptied cells.
+        self.assertAlmostEqual(float(pice[2]), 0.0)

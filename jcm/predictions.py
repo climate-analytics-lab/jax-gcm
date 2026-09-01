@@ -8,6 +8,8 @@ analysis-ready :class:`xarray.Dataset`. Returned by :meth:`jcm.model.Model.run`,
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 import jax
@@ -16,9 +18,31 @@ from jax.tree_util import tree_map
 from numpy import timedelta64
 import pandas as pd
 
+from jcm import cf_metadata, provenance
 from jcm.dycore.base import Predictions
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
+
+logger = logging.getLogger(__name__)
+
+
+def _apply_term_output_attrs(ds, physics):
+    """Stamp per-term ``output_attrs`` onto matching variables of ``ds`` (#740).
+
+    Each :class:`~jcm.physics.physics_term.PhysicsTerm` declares CF/units
+    attributes for the diagnostics it computes, keyed by their dotted output
+    names; :meth:`ComposablePhysics.output_attrs` merges them for the package.
+    Factored out so BOTH trajectory paths — the dinosaur lat/lon build and the
+    delegated non-modal (pySES) build — apply the identical merge rather than
+    one silently omitting it. A physics predating ``output_attrs`` is tolerated
+    via ``getattr``. Returns ``ds`` (mutated in place).
+    """
+    term_attrs = getattr(physics, "output_attrs", None)
+    if callable(term_attrs):
+        for var, attrs in term_attrs().items():
+            if var in ds:
+                ds[var].attrs.update(attrs)
+    return ds
 
 
 class ModelPredictions:
@@ -39,7 +63,7 @@ class ModelPredictions:
                  dycore=None, observations=None, observers=(),
                  obs_t0_days=None, obs_dt_seconds=None,
                  snapshots=None, snapshot_variables=(),
-                 snapshot_interval_days=None):
+                 snapshot_interval_days=None, params=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
@@ -51,6 +75,64 @@ class ModelPredictions:
         self._snapshots = snapshots
         self._snapshot_variables = tuple(snapshot_variables)
         self._snapshot_interval_days = snapshot_interval_days
+        # The parameters this trajectory was produced with (#732).
+        #
+        # ``params`` is the record captured at TRACE time by
+        # ``Model._run_from_state`` and is authoritative when present:
+        # ``self`` is a static argument to that jit, so the parameters are
+        # constants inside the executable, and reading the live module here
+        # can report values that never reached the computation. Falling
+        # back to a live read covers a ModelPredictions built directly,
+        # where there is no trace to have captured. With no physics at all
+        # there is nothing to record: the pytree unflatten rebuilds without
+        # it by design, and runs on every tree_map over a ModelPredictions.
+        self._params = {}
+        try:
+            if params is not None:
+                self._params = self._check_live_matches_traced(params, physics)
+            elif physics is not None:
+                self._params = provenance.describe_params(physics)
+        except Exception:  # noqa: BLE001 — never fail a completed run
+            logger.warning("provenance: parameter capture failed",
+                           exc_info=True)
+
+    @staticmethod
+    def _check_live_matches_traced(traced, physics):
+        """Return *traced*, flagging a live/compiled parameter divergence.
+
+        A mismatch means the caller changed a parameter in place and jcm
+        silently ignored it: the model rebinds parameters only when the
+        jit retraces, so the run used the compiled values (#735). That is
+        a scientific error the user needs told about, not something for
+        provenance to paper over by quietly recording the compiled values
+        and moving on.
+        """
+        live = provenance.describe_params(physics)
+        if live == traced:
+            return traced
+        logger.warning(
+            "provenance: the live parameters differ from those compiled "
+            "into this run. jcm binds physics parameters at trace time "
+            "(Model._run_from_state takes `self` as a static argument), so "
+            "an in-place parameter change after the first run does NOT "
+            "affect the computation. The record reports the values that "
+            "actually ran. Rebuild the Model to change parameters.")
+        flagged = dict(traced)
+        flagged["live_parameters_differ_from_compiled"] = (
+            "in-place parameter changes did not reach this run; the record "
+            "holds the compiled values")
+        return flagged
+
+    @property
+    def params(self):
+        """The physics parameter values behind this trajectory (#732).
+
+        Flat ``<term>.<variable>.<field>`` keys, read off the built model
+        rather than the requested config, so they reflect what ran. Empty
+        for predictions reconstructed by a pytree ``tree_map``, which
+        carries no physics.
+        """
+        return self._params
 
     @property
     def dynamics(self):
@@ -103,11 +185,15 @@ class ModelPredictions:
             data,
             coords={"snap_time": t, "lon": lon, "lat": lat},
             attrs={"snapshot_interval_days": self._snapshot_interval_days,
-                   "sampling": "instantaneous (post-step)"},
+                   "sampling": "instantaneous (post-step)",
+                   **provenance.params_attrs(self._params)},
         )
 
     def observation_datasets(self):
         """Per-timestep virtual-observation output as xarray Datasets.
+
+        Stamped with the run's parameters like the trajectory and the
+        snapshots, since an observer stream is often persisted on its own.
 
         Returns:
             Dict ``{observer_name: xarray.Dataset}`` — one Dataset per
@@ -120,20 +206,35 @@ class ModelPredictions:
         if not self._observations:
             return {}
         samples_host = jax.device_get(self._observations)
-        return {
-            obs.name: obs.to_dataset(
-                samples, self._obs_t0_days, self._obs_dt_seconds,
-            )
-            for obs, samples in zip(self._observers, samples_host)
-        }
+        stamp = provenance.params_attrs(self._params)
+        datasets = {}
+        for obs, samples in zip(self._observers, samples_host):
+            ds = obs.to_dataset(samples, self._obs_t0_days,
+                                self._obs_dt_seconds)
+            ds.attrs.update(stamp)
+            datasets[obs.name] = ds
+        return datasets
 
     def to_xarray(self):
         """Convert the full prediction trajectory to an xarray.Dataset.
+
+        The parameters the run used are stamped into the dataset's global
+        attributes here (#732), so they survive a bare
+        ``model.run(...).to_xarray().to_netcdf(...)`` that never goes near
+        the Hydra runners. Wrapping rather than stamping inside
+        :meth:`_trajectory_dataset` keeps a per-backend return path from
+        being able to skip it.
 
         Returns:
             An xarray.Dataset ready for analysis and plotting.
 
         """
+        ds = self._trajectory_dataset()
+        ds.attrs.update(provenance.params_attrs(self._params))
+        return ds
+
+    def _trajectory_dataset(self):
+        """Build the trajectory Dataset, before provenance stamping."""
         # Backends whose native horizontal layout is not the separable
         # lat/lon grid the legacy path below assumes (pySES cubed-sphere
         # columns) own their trajectory conversion per the DynamicalCore
@@ -141,7 +242,17 @@ class ModelPredictions:
         if self._dycore is not None and not hasattr(
                 self._coords.horizontal, "modal_axes"):
             times = jax.device_get(self.times)
-            return self._dycore.to_xarray(self._predictions, times)
+            ds = self._dycore.to_xarray(self._predictions, times)
+            # The dycore's ``to_xarray`` has already run
+            # ``cf_metadata.finalize_output`` (CSV attrs and the curated
+            # ``_VARIABLE_ATTRS`` are on). Apply the per-term output metadata
+            # here too, so pySES output carries the radiation/cloud/convection
+            # units the dinosaur path gets (#740). Ordering is safe: the
+            # term-declared names (``radiation.*`` and other diagnostics) are
+            # disjoint from ``cf_metadata._VARIABLE_ATTRS`` (vertical coords,
+            # core prognostics), so stamping term attrs after finalize does not
+            # upset the documented CSV < term < cf_metadata precedence.
+            return _apply_term_output_attrs(ds, self._physics)
 
         # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
         # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
@@ -232,15 +343,27 @@ class ModelPredictions:
                 pred_ds[var].attrs["units"] = unit
                 pred_ds[var].attrs["description"] = desc
 
-        # Flip the vertical dimension so that it goes from the surface to the top of the atmosphere.
-        pred_ds = pred_ds.isel(level=slice(None, None, -1))
+        # Per-term output metadata (#740). Each PhysicsTerm declares CF/units
+        # attributes for the diagnostics it computes (``output_attrs``, keyed by
+        # the dotted output names) — the home for metadata the per-physics CSVs
+        # never listed, notably the whole radiation flux set. Applied AFTER the
+        # CSV loop so a term declaration overrides the CSV (more specific wins),
+        # but BEFORE ``cf_metadata.finalize_output`` so its own curated names
+        # (vertical coordinates, core prognostics) still win last. Shared with
+        # the non-modal delegation branch above.
+        _apply_term_output_attrs(pred_ds, self._physics)
 
-        # Convert sim-day timestamps to datetimes.
+        # Convert sim-day timestamps to datetimes. Done before the CF pass so
+        # ``time`` is already a datetime axis when its attributes are set.
         pred_ds['time'] = (
             times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
         ).astype('datetime64[ns]')
 
-        return pred_ds
+        # Put the file into the output convention: BOTH vertical axes
+        # surface-first, with the sigma/hybrid coordinates and CF attributes
+        # that say so. ``cf_metadata`` owns the flip — doing it inline here is
+        # how ``level`` came to be flipped while ``level_i`` was not (#710).
+        return cf_metadata.finalize_output(pred_ds, vertical=coords.vertical)
 
 
 def _model_predictions_flatten(mp):

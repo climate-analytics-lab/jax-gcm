@@ -309,6 +309,9 @@ class TestPysesDycoreProtocol(unittest.TestCase):
             "radiation": {
                 "toa_lw_up": jnp.ones((2, self.ncol)) * 240.0,
                 "sw_heating": jnp.zeros((2, 47, self.ncol)),
+                # An interface-shaped field, to pin the axis name and its
+                # orientation alongside the full-level ones.
+                "lw_flux_up": jnp.zeros((2, 48, self.ncol)),
             },
             "skipped_scalar": jnp.zeros((2,)),
         }
@@ -320,9 +323,19 @@ class TestPysesDycoreProtocol(unittest.TestCase):
         self.assertEqual(ds["temperature"].dims, ("time", "level", "lon", "lat"))
         self.assertTrue(np.isfinite(ds["temperature"].values).all())
         self.assertTrue(np.isfinite(ds["normalized_surface_pressure"].values).all())
-        # Output is surface-first per the repo convention: level[0] ~ sigma 1.
+        # Output is surface-first per the repo convention, on *both* vertical
+        # axes: level[0] ~ sigma 1 and level_i[0] == sigma 1 exactly (#710).
         self.assertGreater(float(ds["level"][0]), 0.9)
         self.assertLess(float(ds["level"][-1]), 1e-4)
+        self.assertAlmostEqual(float(ds["level_i"][0]), 1.0)
+        # The lid is finite, not zero — ``full_echam_hybrid`` replaces the
+        # raw table's singular p_top with ~1 Pa for the explicit core.
+        self.assertLess(float(ds["level_i"][-1]), 1e-4)
+        self.assertEqual(ds["level_i"].attrs["positive"], "down")
+        # Each mid-level sits strictly between its two interfaces.
+        sigma_full, sigma_half = ds["level"].values, ds["level_i"].values
+        self.assertTrue(np.all(sigma_half[:-1] > sigma_full))
+        self.assertTrue(np.all(sigma_full > sigma_half[1:]))
         # Selecting a level by coordinate value works (no blind indexing).
         surf_T = ds["temperature"].sel(level=1.0, method="nearest")
         self.assertGreater(float(surf_T.mean()), 240.0)
@@ -331,6 +344,10 @@ class TestPysesDycoreProtocol(unittest.TestCase):
         self.assertIn("radiation.toa_lw_up", ds)
         self.assertEqual(ds["radiation.sw_heating"].dims,
                          ("time", "level", "lon", "lat"))
+        # The interface axis is ``level_i``, the same name the dinosaur
+        # backend uses — a reader needs one name, not two.
+        self.assertEqual(ds["radiation.lw_flux_up"].dims,
+                         ("time", "level_i", "lon", "lat"))
         self.assertNotIn("skipped_scalar", ds)
 
 

@@ -43,6 +43,7 @@ from jcm.physics.convection.saturation import (  # noqa: F401
 # existing imports (updraft.py, downdraft.py, flux_tendencies.py, tests)
 # keep working unchanged.
 from jcm.physics.convection.tiedtke_nordeng.types import (  # noqa: F401
+    CONVECTION_OUTPUT_ATTRS,
     ConvectionData,
     ConvectionParameters,
     ConvectionState,
@@ -1456,6 +1457,8 @@ class TiedtkeConvection(PhysicsTerm):
         "pressure_full", "layer_thickness", "air_density", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("convection", "clouds")
+    # CF/units metadata for the ``convection.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = CONVECTION_OUTPUT_ATTRS
 
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 

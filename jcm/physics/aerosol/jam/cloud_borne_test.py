@@ -37,8 +37,20 @@ class TracerLayoutSwitchTest(unittest.TestCase):
 
 
 class _Clouds:
-    def __init__(self, cloud_fraction):
+    """CloudData stub: cover plus the #708 scavenging-ledger fields.
+
+    All-zero ledger fields mean "no cloud process this step", which routes
+    the exchange term's downward direction to the slow timescale drain,
+    so tests of the timescale relaxation can leave them defaulted.
+    """
+
+    def __init__(self, cloud_fraction, **ledger):
         self.cloud_fraction = cloud_fraction
+        zeros = jnp.zeros_like(cloud_fraction)
+        for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
+                  "incloud_snow_formation", "incloud_riming",
+                  "process_cloud_fraction", "condensate_evaporation_rate"):
+            setattr(self, f, ledger.get(f, zeros))
 
 
 class CloudBorneExchangeTest(unittest.TestCase):
@@ -276,6 +288,122 @@ class CloudBorneExchangeTest(unittest.TestCase):
         self.assertNotEqual(float(g), 0.0)
 
 
+    # ----- The evaporation-ledger keying (#708) ------------------------
+
+    def _ledger_setup(self, *, e_gm=0.0, pool_ic=0.0, form_ic=0.0,
+                      cf_proc=0.5, q_cb=1.0e-10, n_cb=1.0e7):
+        """Clear post-microphysics sky (cf=0) with a chosen process ledger."""
+        state, diagnostics = self._setup(
+            cloud_fraction=0.0, q_cb=q_cb, n_cb=n_cb,
+        )
+        shape = state.temperature.shape
+        dt = 1800.0
+        clouds = diagnostics["clouds"]
+        clouds.condensate_evaporation_rate = jnp.full(shape, e_gm / dt)
+        clouds.incloud_liquid = jnp.full(shape, pool_ic)
+        clouds.incloud_rain_formation = jnp.full(shape, form_ic / dt)
+        clouds.process_cloud_fraction = jnp.full(shape, cf_proc)
+        return state, diagnostics
+
+    def test_rained_out_cell_does_not_resuspend(self):
+        # A cell whose condensate fully converted to precipitation ends
+        # with cover 0 AND a zeroed pool — indistinguishable from an
+        # evaporated cell by cover alone. The formation ledger marks it
+        # live with f_evap = 0: the exchange term must leave q_cb for the
+        # wetdep term (running just after) to rain out, instead of
+        # resuspending ~86% of it into the interstitial phase in the same
+        # step (the #708 race).
+        state, diagnostics = self._ledger_setup(form_ic=1.0e-4)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        np.testing.assert_allclose(
+            np.asarray(out[CARRY_KEY][nm]),
+            np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
+        )
+
+    def test_evaporated_cell_resuspends_fully(self):
+        # A cell cleared by evaporation (positive evaporation ledger,
+        # nothing formed, pool gone) releases the WHOLE reservoir in one
+        # step — CAM's instant resuspension, not a 900 s relaxation.
+        state, diagnostics = self._ledger_setup(e_gm=5.0e-4)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q1 = np.asarray(out[CARRY_KEY][nm])
+        self.assertLess(q1.max(), 1e-6 * 1.0e-10)
+
+    def test_partial_evaporation_releases_that_share(self):
+        # E = pool: half the droplet population evaporated, half persists
+        # -> release half the reservoir (target 0 under cf=0).
+        state, diagnostics = self._ledger_setup(
+            e_gm=1.0e-4, pool_ic=2.0e-4, cf_proc=0.5,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q1 = np.asarray(out[CARRY_KEY][nm])
+        np.testing.assert_allclose(q1, 0.5e-10, rtol=1e-5)
+
+    def test_rainout_claim_caps_resuspension(self):
+        # Evaporation and rainout both claimed condensate this step; the
+        # rainout fraction (which wetdep will remove right after) caps the
+        # released share so the two sinks cannot jointly overdraw:
+        # f_evap = 0.5 but f_form = 1 -> nothing resuspends.
+        state, diagnostics = self._ledger_setup(
+            e_gm=1.0e-4, pool_ic=2.0e-4, form_ic=4.0e-4, cf_proc=0.5,
+        )
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        np.testing.assert_allclose(
+            np.asarray(out[CARRY_KEY][nm]),
+            np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
+        )
+
+    def test_persistent_cloud_still_relaxes_excess_down(self):
+        # THE anti-ratchet gate: under PERSISTENT cloud (target > 0) the
+        # downward direction is the equilibrium relaxation and must keep
+        # its timescale even when nothing evaporated this step. Keying it
+        # to the evaporation ledger zeroed it in every non-evaporating
+        # cloudy cell, making the reservoir a ratchet (rise toward the
+        # activation target, never fall) — measured blowing up every
+        # activatable species exponentially in a 60-day T63 run.
+        state, diagnostics = self._setup(
+            cloud_fraction=0.5, q_cb=1.0e-9, n_cb=1.0e8,
+            q_int=1.0e-12, n_int=1.0e3,   # target << q_cb
+        )
+        shape = state.temperature.shape
+        clouds = diagnostics["clouds"]
+        # Persistent, non-evaporating, non-precipitating cloud.
+        clouds.incloud_liquid = jnp.full(shape, 1.0e-3)
+        clouds.process_cloud_fraction = jnp.full(shape, 0.5)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        q0 = np.asarray(diagnostics[CARRY_KEY][nm])
+        q1 = np.asarray(out[CARRY_KEY][nm])
+        # Excess above target must relax by the 900 s fraction
+        # (phi = 1 - exp(-1800/900) ~ 0.86) toward the activation target
+        # (0.9 x q_tot here), not stay ratcheted (phi_down = 0).
+        q_int0 = 1.0e-12
+        target = 0.9 * (q_int0 + q0)
+        phi = -np.expm1(-1800.0 / 900.0)
+        expected = q0 + (target - q0) * phi
+        np.testing.assert_allclose(q1, expected, rtol=1e-3)
+        self.assertTrue((q1 < 0.999 * q0).all(),
+                        f"reservoir ratcheted: {q1.max()} vs {q0.max()}")
+
+    def test_phase_transfer_is_not_evaporation(self):
+        # WBF / freezing move condensate between phases WITHIN the pool
+        # (liquid pool empty, ice pool full, no evaporation ledger): the
+        # aerosol rides into the ice — no resuspension, even at cover 0.
+        state, diagnostics = self._ledger_setup()
+        shape = state.temperature.shape
+        diagnostics["clouds"].incloud_ice = jnp.full(shape, 2.0e-4)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        np.testing.assert_allclose(
+            np.asarray(out[CARRY_KEY][nm]),
+            np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
+        )
+
+
 class FactorySwitchTest(unittest.TestCase):
     def test_default_composes_exchange_and_store(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
@@ -322,7 +450,6 @@ class FactorySwitchTest(unittest.TestCase):
         self.assertIn(
             "jam_cloud_borne_store", [t.name for t in terms],
         )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1833,7 +1833,13 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
 
 def _load_states_from_cfg(cfg: DictConfig):
-    """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``."""
+    """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``.
+
+    ``state_file`` is a netCDF from a previous JCM run, i.e. surface-first;
+    ``load_states_from_xarray`` detects that and returns a top-first
+    physics-frame state (#741), which is what the SCM / prescribed-state
+    runners expect.
+    """
     state_file = _resolve_data_path(cfg.run.get("state_file", None))
     if not state_file:
         raise ValueError(
@@ -2163,16 +2169,21 @@ def run_chunked(
                       "down to that floor (run float64 to verify further).")
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
-        ds.attrs.update(provenance.attrs())
+        # The parameters ride on the predictions object, not the module
+        # registry, so the record belongs to the model that produced THIS
+        # chunk; pass them to both calls or the sidecar's run_hash will not
+        # match the one in the attributes.
+        params = getattr(preds, "params", None)
+        ds.attrs.update(provenance.attrs(params))
         ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
         ds.to_netcdf(nc_path)
-        provenance.write_sidecar(nc_path)
+        provenance.write_sidecar(nc_path, params)
         print(f"  Saved {nc_path}")
         snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
             snap_path = (f"{output_prefix}_day{int(elapsed_sim_days)}"
                          "_snapshots.nc")
-            snap_ds.attrs.update(provenance.attrs())
+            snap_ds.attrs.update(provenance.attrs(params))
             snap_ds.to_netcdf(snap_path)
             print(f"  Saved {snap_path}")
 
@@ -2265,10 +2276,11 @@ def save_predictions(predictions, output_path: Path) -> None:
             "aggregate save_predictions for %s", output_path,
         )
         return
+    params = getattr(predictions, "params", None)
     ds = predictions.to_xarray()
-    ds.attrs.update(provenance.attrs())
+    ds.attrs.update(provenance.attrs(params))
     ds.to_netcdf(str(output_path))
-    provenance.write_sidecar(output_path)
+    provenance.write_sidecar(output_path, params)
     logger.info("Wrote %s", output_path)
     # Interval-instantaneous snapshot stream (jax-gcm#586): a separate
     # file with its own (finer) time axis — folding a second cadence into
@@ -2276,6 +2288,6 @@ def save_predictions(predictions, output_path: Path) -> None:
     snap_ds = getattr(predictions, "snapshot_dataset", lambda: None)()
     if snap_ds is not None:
         snap_path = output_path.with_name(output_path.stem + "_snapshots.nc")
-        snap_ds.attrs.update(provenance.attrs())
+        snap_ds.attrs.update(provenance.attrs(params))
         snap_ds.to_netcdf(str(snap_path))
         logger.info("Wrote %s", snap_path)

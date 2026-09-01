@@ -27,7 +27,11 @@ Design (see ``docs/source/design/observers.md``):
 - **Vertical**: linear in geometric height against the sampled ``z_full``
   profile (``vertical="altitude"``), linear in log-pressure
   (``vertical="pressure"``), no interpolation (``vertical="profile"`` returns
-  whole columns), or 2-D fields only (``vertical="surface"``).
+  whole columns), or 2-D fields only (``vertical="surface"``). Sampling runs
+  in the top-first physics frame; :meth:`Observer.to_dataset` turns profile
+  output into the file convention (surface-first, with the sigma coordinate
+  and CF attributes) so a curtain pairs with the trajectory file — see
+  ``docs/source/design/output_vertical_conventions.md``.
 - **Variables** come from the physics diagnostics dict: top-level diagnostic
   keys (e.g. ``"cloud_fraction"``), dotted sub-struct fields (e.g.
   ``"radiation.tsr"``), and — via the :class:`~jcm.physics.diagnostics.
@@ -49,6 +53,8 @@ import xarray as xr
 
 import jax
 import jax.numpy as jnp
+
+from jcm import cf_metadata
 
 _EPOCH = np.datetime64("1970-01-01", "ns")
 _DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
@@ -167,6 +173,12 @@ class Observer:
             # sorting permutation so searchsorted sees an ascending array.
             self._lat_order = np.argsort(self._grid_lat)
             self._lat_sorted = self._grid_lat[self._lat_order]
+        # Vertical table, kept so profile-mode output can be written in the
+        # same surface-first frame with the same sigma coordinate as the
+        # trajectory file (#710) — sampling itself stays in the top-first
+        # physics frame.
+        self._a_half, self._b_half = cf_metadata.hybrid_boundaries(
+            coords.vertical)
         self._grid_cached = True
 
     # ------------------------------------------------------------------
@@ -440,6 +452,12 @@ class Observer:
             arr = np.asarray(arr)
             dims = (("time", "point") if arr.ndim == 2
                     else ("time", "level", "point"))
+            # Profile-mode columns arrive in the top-first physics frame;
+            # the *file* convention is surface-first on every vertical axis
+            # (#710), so an observer curtain can be paired with the
+            # trajectory file without a per-product orientation check.
+            if len(dims) == 3:
+                arr = arr[:, ::-1]
             # Dots in dotted sub-struct names are xarray-hostile; flatten.
             data_vars[name.replace(".", "_")] = (dims, arr)
 
@@ -456,7 +474,15 @@ class Observer:
         ds = xr.Dataset(data_vars, coords=coords)
         ds.attrs["observer"] = self.name
         ds.attrs["vertical"] = self.vertical
-        return ds
+        # Data is already surface-first above, so only the coordinates and CF
+        # attributes are attached here. ``a_half`` is absent only if
+        # ``cache_grid`` was never called, in which case there is no vertical
+        # table to describe.
+        a_half = getattr(self, "_a_half", None)
+        return cf_metadata.finalize_output(
+            ds, a_boundaries_pa=a_half, b_boundaries=getattr(self, "_b_half",
+                                                             None),
+            flip_vertical=False)
 
 
 def _interpolate_columns(target, coord_profile, field_profile, increasing):

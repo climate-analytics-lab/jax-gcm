@@ -15,13 +15,17 @@ number fraction) define the grid-mean equilibrium cloud-borne amount
     q_cb* = cloud_fraction · f_act · (q_int + q_cb)
 
 and the pair relaxes toward it with a tunable timescale, activation and
-resuspension each getting their own knob. Both directions come out of the one
-expression: a growing or persistent cloud pulls ``q_cb`` up toward the
-activated partition, and a cleared sky (``cloud_fraction → 0``) returns the
-whole reservoir to interstitial. The per-step transfer uses the exponential
-relaxation factor ``1 − exp(−Δt/τ)``, so it is unconditionally bounded by the
-donor phase's content and exactly conserving (the two tendencies are equal
-and opposite).
+resuspension each getting their own knob. A growing or persistent cloud pulls
+``q_cb`` up toward the activated partition; the downward direction is keyed
+to the microphysics' condensate-evaporation ledger (#708): the reservoir
+share released each step is the share of the droplet population that
+EVAPORATED — a sky cleared by evaporation resuspends everything, a sky
+cleared by rainout resuspends nothing (that aerosol leaves with the precip,
+removed by the wetdep term running just after this one), and only cells with
+no cloud process at all (advected-in ``q_cb`` in clear air) fall back to the
+slow ``resuspension_timescale`` drain. Every per-step transfer factor lies in
+[0, 1], so the move is unconditionally bounded by the donor phase's content
+and exactly conserving (the two tendencies are equal and opposite).
 
 This is deliberately simpler than CAM's ``dropmixnuc``, which couples the
 transfer to an implicit turbulent-mixing solve; jcm has no physics-side
@@ -65,6 +69,9 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     carry_mode,
     tracer_view,
 )
+from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+    incloud_scavenged_fractions,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
@@ -76,6 +83,13 @@ from jcm.physics_interface import PhysicsTendency
 #: cloud-borne reservoir drains. Also floors the 1/cf stretch of the activation
 #: timescale, so a vanishingly thin cloud cannot make it infinite.
 _MIN_CLOUD_FRACTION = 1.0e-3
+
+#: Grid-mean condensate floor [kg/kg] deciding whether the cell saw any cloud
+#: process this step (evaporation + surviving pool + formation); below it the
+#: evaporation-ledger keying falls back to the slow timescale drain. Physical
+#: floor, not an epsilon, for the same f32 VJP reason as wetdep's
+#: ``_CONDENSATE_FLOOR``.
+_PROCESS_FLOOR = 1.0e-12
 
 
 @tree_math.struct
@@ -110,7 +124,20 @@ class CloudBorneExchange(PhysicsTerm):
         *,
         spec: ModalAerosolSpec | None = None,
     ):
-        """Hold params and the population (which must prognose the phase)."""
+        """Hold params and the population (which must prognose the phase).
+
+        Resuspension keys to the cloud scheme's condensate-evaporation
+        ledger (#708) — the physical discriminator between "the cloud
+        evaporated, release the aerosol" and "the cloud rained out, the
+        aerosol left with it". Cover alone cannot distinguish the two: a
+        fully-rained-out cell also ends with cover 0, and a timescale
+        drain there would race the same step's rainout (with this term
+        running before wetdep, up to ``1-exp(-dt/τ)`` ≈ 86% at Δt=1800 s
+        of the reservoir would escape scavenging through exactly the
+        cells with the largest removal). This term therefore requires a
+        cloud scheme that publishes the ``CloudData`` ledger fields; the
+        physics factory enforces that at compose time.
+        """
         self.params = nnx.Param(
             params or CloudBorneExchangeParameters.default()
         )
@@ -200,14 +227,65 @@ class CloudBorneExchange(PhysicsTerm):
             jnp.stack(fracs) * (q_int_arr + q_cb_arr),
             0.0,
         )
-        tau = jnp.where(
-            target > q_cb_arr,
-            params.activation_timescale / cloudy_cf,
-            params.resuspension_timescale,
+        phi_up = -jnp.expm1(
+            -dt / jnp.maximum(params.activation_timescale / cloudy_cf, 1.0)
         )
-        # 1 − exp(−Δt/τ) ∈ [0, 1]: the move never overshoots the target, so
-        # neither phase can go negative (|Δ| ≤ |target − q_cb| ≤ donor).
-        phi = -jnp.expm1(-dt / jnp.maximum(tau, 1.0))
+        phi_slow = -jnp.expm1(
+            -dt / jnp.maximum(params.resuspension_timescale, 1.0)
+        )
+        # Resuspension keyed to the microphysics' own evaporation ledger
+        # (#708). The per-step fraction of the droplet population that
+        # evaporated is E/(E + pool): E is the grid-mean condensate
+        # returned to vapour this step (zxlevap+zxievap) and pool the
+        # grid-mean in-cloud condensate that survived to the
+        # precipitation-formation stage — that fraction of the cloud-borne
+        # reservoir is released. The rainout claim of the SAME step (the
+        # formation-ledger fraction wetdep removes, running after this
+        # term) caps it, so the two sinks cannot jointly overdraw the
+        # reservoir: evaporated + rained fractions of one droplet
+        # population sum to at most 1. WBF and freezing move condensate
+        # between phases WITHIN the pool, so they neither evaporate nor
+        # rain out cloud-borne aerosol here — the aerosol rides into the
+        # ice and meets the snow pathway (#686) in the ledger instead.
+        e_gm = jnp.maximum(clouds.condensate_evaporation_rate, 0.0) * dt
+        cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
+        pool_gm = cf_proc * (
+            jnp.maximum(clouds.incloud_liquid, 0.0)
+            + jnp.maximum(clouds.incloud_ice, 0.0)
+        )
+        formed_gm = cf_proc * dt * jnp.maximum(
+            clouds.incloud_rain_formation + clouds.incloud_riming
+            + clouds.incloud_snow_formation, 0.0,
+        )
+        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+        f_form = (1.0 - pice) * f_wat + pice * f_ice
+        live = (e_gm + pool_gm + formed_gm) > _PROCESS_FLOOR
+        f_evap = jnp.where(
+            live,
+            e_gm / jnp.maximum(e_gm + pool_gm, _PROCESS_FLOOR),
+            0.0,
+        )
+        # The ledger keying applies ONLY where the sky has cleared
+        # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0): a rained-out cell
+        # is ``live`` through its formation ledger with f_evap ≈ 0 (no
+        # resuspension racing the rainout), an evaporated cell releases
+        # everything in one step, and a no-process cell (advected-in q_cb
+        # in clear air) keeps the slow CAM-style timescale drain.
+        #
+        # Where cloud PERSISTS, the downward direction is the equilibrium
+        # relaxation toward the (nonzero) target and MUST keep its
+        # timescale: keying it to the evaporation ledger zeroes it in any
+        # non-evaporating cloudy cell, which turns the reservoir into a
+        # ratchet — q_cb can rise toward the activation target but never
+        # fall, loading the cloud-borne phase without bound at cloud
+        # levels. The under-cloud relaxation is what bounds the reservoir
+        # by the activation equilibrium.
+        cleared = cf <= _MIN_CLOUD_FRACTION
+        release = jnp.minimum(f_evap, jnp.maximum(1.0 - f_form, 0.0))
+        phi_down = jnp.where(cleared & live, release, phi_slow)
+        # phi ∈ [0, 1]: the move never overshoots the target, so neither
+        # phase can go negative (|Δ| ≤ |target − q_cb| ≤ donor).
+        phi = jnp.where(target > q_cb_arr, phi_up, phi_down)
         transfer = (target - q_cb_arr) * phi / dt   # [.../s], + toward cloud-borne
 
         # Cloud-borne side to the active store (carry mode integrates it

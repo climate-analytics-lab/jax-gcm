@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import logging
 import numpy as np
 from jax.tree_util import tree_map
 from importlib import resources
@@ -12,6 +13,8 @@ from dinosaur import typing
 from typing import Any, Mapping, MutableMapping, Union
 from dinosaur.xarray_utils import _maybe_update_shape_and_dim_with_realization_time_sample
 import xarray
+
+from jcm import cf_metadata
 
 DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
@@ -286,7 +289,13 @@ def _infer_dims_shape_and_coords(
     # Half-level fields (e.g. fluxes, half-pressure) — emit them on a
     # ``level_i`` (interface) axis so they don't clash with the full-level
     # ``level`` coord, which has length nlev.
-    XR_LEVEL_INTERFACE_NAME = 'level_i'
+    #
+    # Both vertical axes are in the physics-internal TOA-first frame here, and
+    # the interface axis is a bare index. ``jcm.cf_metadata.finalize_output``
+    # is what turns a trajectory into the *file* convention (both axes
+    # surface-first, real sigma values, CF attributes) — this function stays
+    # the low-level shape->dims mapper.
+    XR_LEVEL_INTERFACE_NAME = cf_metadata.LEVEL_INTERFACE_DIM
     if XR_LEVEL_INTERFACE_NAME not in all_xr_coords:
         all_xr_coords[XR_LEVEL_INTERFACE_NAME] = np.arange(nlev + 1)
     basic_shape_to_dims[(nlev + 1,) + nodal_shape] = (
@@ -467,6 +476,23 @@ def load_states_from_xarray(
 ):
     """Load a ``PhysicsState`` time series from an xarray ``Dataset``.
 
+    The returned state is **always** in the top-first physics-internal frame
+    (index 0 = model top), which is what ``PhysicsState`` and the dycore
+    expect. Because every JCM output file is written surface-first (see
+    :mod:`jcm.cf_metadata`), the file's vertical orientation is detected and
+    the Dataset is flipped to top-first before values are extracted (#741).
+
+    Orientation is inferred from the ``level`` coordinate **values**, not its
+    attributes — attributes do not survive all xarray operations. A ``level``
+    coordinate that is numeric, longer than one element, and *descending*
+    (``level[0] > level[-1]``, i.e. sigma falling from ~1 at the surface to ~0
+    at the top) marks a surface-first file, which is reversed via
+    :func:`jcm.cf_metadata.orient_top_first`. An ascending ``level`` is already
+    top-first and passes through. If the ``level`` coordinate is absent or
+    non-numeric (a bare integer index), orientation cannot be determined; the
+    data passes through unflipped, top-first is assumed, and a warning is
+    logged.
+
     Args:
       ds: Dataset containing the required variables.
       *_var: Variable names in ``ds`` for each ``PhysicsState`` field.
@@ -474,10 +500,37 @@ def load_states_from_xarray(
         tracers beyond ``specific_humidity``.
 
     Returns:
-      ``PhysicsState`` whose leading axis is time.
+      ``PhysicsState`` whose leading axis is time, in the top-first physics
+      frame.
 
     """
     from jcm.physics_interface import PhysicsState
+
+    # Detect the file's vertical orientation from the ``level`` coordinate
+    # values (attributes do not survive all xarray ops) and convert to the
+    # top-first physics frame. A descending numeric ``level`` (sigma falling
+    # from the surface to the top) is a surface-first file; anything else is
+    # left as-is with top-first assumed.
+    if cf_metadata.LEVEL_DIM in ds.coords:
+        level = np.asarray(ds[cf_metadata.LEVEL_DIM].values)
+        if np.issubdtype(level.dtype, np.number) and level.size > 1:
+            if level[0] > level[-1]:
+                ds = cf_metadata.orient_top_first(ds)
+            # else: ascending sigma is already top-first; pass through.
+        else:
+            logging.warning(
+                "load_states_from_xarray: %r coordinate is non-numeric or "
+                "size<=1; cannot determine vertical orientation. Assuming the "
+                "Dataset is already top-first (physics frame).",
+                cf_metadata.LEVEL_DIM,
+            )
+    else:
+        logging.warning(
+            "load_states_from_xarray: no %r coordinate present; cannot "
+            "determine vertical orientation. Assuming the Dataset is already "
+            "top-first (physics frame).",
+            cf_metadata.LEVEL_DIM,
+        )
 
     tracers = {}
     if tracer_vars:

@@ -500,8 +500,9 @@ The model output is a :py:class:`Predictions` object containing the model state 
    # Print variables
    print(ds.data_vars)
 
-   # Plot surface temperature evolution
-   ds['temperature'].isel(level=7).mean(dim='lon').plot()
+   # Plot surface temperature evolution. Output is surface-first, so index 0
+   # is the level nearest the ground on both vertical axes.
+   ds['temperature'].isel(level=0).mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 
@@ -509,6 +510,45 @@ The model output is a :py:class:`Predictions` object containing the model state 
    global_mean_temp = ds['temperature'].weighted(
        ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
    ).mean(dim=['lon', 'lat'])
+
+Vertical coordinates in the output
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output files carry two vertical axes: ``level`` (``nlev`` layer mid-levels —
+temperature, tracers, ``pressure_full``) and ``level_i`` (``nlev+1``
+interfaces — ``pressure_half``, radiative fluxes). **Both run surface-first**,
+so index 0 is the level nearest the ground and ``level[k]`` sits between
+``level_i[k]`` and ``level_i[k+1]``.
+
+To mass-weight a ``level`` field — a column burden, say — use the layer
+pressure thickness ``pressure_thickness`` [Pa], which is written directly on
+the ``level`` axis (positive, already aligned with the tracers) by the ECHAM
+physics stacks:
+
+.. code-block:: python
+
+   burden = (ds['qc'] * ds['pressure_thickness'] / 9.81).sum('level')  # kg/m^2
+
+For a file written before ``pressure_thickness`` existed (or a SPEEDY run,
+which does not compute it), reconstruct Δp from ``pressure_half`` instead —
+mixing the two axes is safe because both run surface-first:
+
+.. code-block:: python
+
+   # diff() keeps the *interface* sigma labels, so after renaming the dim the
+   # mid-level coordinate must be assigned explicitly — otherwise xarray's
+   # alignment finds no matching labels and the product is silently empty.
+   dp = (-ds['pressure_half'].diff('level_i')
+         .rename(level_i='level').assign_coords(level=ds['level']))
+   burden = (ds['qc'] * dp / 9.81).sum('level')     # kg/m^2
+
+Both axes are CF-labelled nominal sigma (``a/p0 + b``) and carry
+``positive = "down"``; the hybrid ``(a, b)`` tables travel with the file as the
+``hybrid_a_full`` / ``hybrid_b_full`` / ``hybrid_a_half`` / ``hybrid_b_half``
+coordinates, so ``p = a + b * p_s`` is reproducible from the file alone. See
+:doc:`design/output_vertical_conventions` — including for how to read files
+written before this convention was unified, where the interface axis was
+stored top-first.
 
 Overriding physical constants
 -----------------------------

@@ -985,38 +985,38 @@ class PysesCamSEDycore(DynamicalCore):
         """Regrid a saved trajectory onto a regular lat/lon xarray Dataset.
 
         Dynamics fields (and tracers) come out with dims
-        ``(time, level, lon, lat)`` / ``(time, lon, lat)``. Following the
-        repo-wide output convention the level axis is flipped to
-        **surface-first** (level index 0 ≈ σ 0.996) — the physics-internal /
-        pyses-native frame is top-first — and both a nominal-σ ``level``
-        coordinate and the hybrid ``(a, b)`` mid-level tables are attached so
-        analysis selects by coordinate value, never by blind index. Physics
-        diagnostics from ``predictions.physics`` are included wherever their
-        trailing shape matches the column layout (``(1, ncol)``, or a
-        level/interface axis followed by it); other leaves are skipped.
+        ``(time, level, lon, lat)`` / ``(time, lon, lat)``. Both vertical axes
+        are written **surface-first** (level index 0 ≈ σ 0.996) — the
+        physics-internal / pyses-native frame is top-first — and the sigma
+        coordinates plus hybrid ``(a, b)`` tables are attached by
+        :func:`jcm.cf_metadata.finalize_output` so analysis selects by
+        coordinate value, never by blind index. Physics diagnostics from
+        ``predictions.physics`` are included wherever their trailing shape
+        matches the column layout (``(1, ncol)``, or a level/interface axis
+        followed by it); other leaves are skipped.
         """
         import xarray as xr
         from jax.tree_util import tree_flatten_with_path
 
+        from jcm import cf_metadata
+
         rg = self._regrid_targets()
-        a_full = 0.5 * (self._a_boundaries_pa[:-1] + self._a_boundaries_pa[1:])
-        b_full = 0.5 * (self._b_boundaries[:-1] + self._b_boundaries[1:])
-        # Nominal σ at mid-levels, flipped surface-first for the output file.
-        sigma_full = (a_full / self.p0 + b_full)[::-1]
 
         times = np.asarray(times)
+        # Sim-day floats -> datetime64, the same conversion
+        # ``ModelPredictions._trajectory_dataset`` applies on the dinosaur
+        # path. A numeric axis cannot carry CF reference-time units, so a file
+        # stamped ``Conventions = CF-1.11`` with a bare elapsed-days ``time``
+        # would be undecodable by a CF reader.
+        time_values = (
+            times * (np.timedelta64(1, "D") / np.timedelta64(1, "ns"))
+        ).astype("datetime64[ns]")
         coords = {
-            "time": times,
-            "level": ("level", sigma_full),
+            "time": time_values,
             "lon": ("lon", rg["lon_centers"]),
             "lat": ("lat", rg["lat_centers"]),
-            "hybrid_a_full": ("level", a_full[::-1]),
-            "hybrid_b_full": ("level", b_full[::-1]),
         }
         ds = xr.Dataset(coords=coords)
-        ds["level"].attrs["long_name"] = (
-            "nominal sigma (a/p0 + b) at layer mid-level, surface-first"
-        )
 
         n_time = times.shape[0]
         ncol = self.colmap.num_cols
@@ -1038,11 +1038,13 @@ class PysesCamSEDycore(DynamicalCore):
             surf_ok = trailing[1:] in ((1, ncol), (ncol,)) if len(trailing) > 1 else False
             if surf_ok and trailing[0] in (self.nlev, self.nlev + 1):
                 data = self._regrid_columns(arr.reshape(n_time, trailing[0], ncol))
-                if trailing[0] == self.nlev:
-                    ds[name] = (("time", "level", "lon", "lat"), data[:, ::-1])
-                else:
-                    ds[name] = (("time", "level_interface", "lon", "lat"),
-                                data[:, ::-1])
+                # Both axes flip: full levels and interfaces run the same way
+                # in the file (#710). The interface dim is ``level_i`` — the
+                # same name the dinosaur backend uses, so a reader needs one
+                # name, not two.
+                dim = ("level" if trailing[0] == self.nlev
+                       else cf_metadata.LEVEL_INTERFACE_DIM)
+                ds[name] = (("time", dim, "lon", "lat"), data[:, ::-1])
 
         dyn = predictions.dynamics
         for field in ("u_wind", "v_wind", "temperature", "specific_humidity",
@@ -1063,4 +1065,13 @@ class PysesCamSEDycore(DynamicalCore):
 
         for key, value in (additional_coords or {}).items():
             ds.coords[key] = value
-        return ds
+
+        # ``add_field`` already emitted the data surface-first, so only the
+        # coordinates and CF metadata are left to attach.
+        return cf_metadata.finalize_output(
+            ds,
+            a_boundaries_pa=self._a_boundaries_pa,
+            b_boundaries=self._b_boundaries,
+            p0=float(self.p0),
+            flip_vertical=False,
+        )

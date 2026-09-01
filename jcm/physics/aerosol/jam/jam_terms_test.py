@@ -102,11 +102,14 @@ class EchamPhysicsWiringTest(unittest.TestCase):
             cats.index("aerosol_activation"), cats.index("clouds")
         )
 
-    def test_jam_module_builds_with_1m(self):
+    def test_jam_module_rejects_1m(self):
+        # JAM's scavenging/resuspension terms read the process-time ledger
+        # only the 2M scheme publishes; the combination must fail loudly
+        # at compose time rather than silently scavenge nothing.
         from jcm.physics.echam.echam_terms import echam_physics
 
-        phys = echam_physics(aerosol_module="jam", cloud_scheme="1m")
-        self.assertIn("aerosol_microphysics", [t.category for t in phys.terms])
+        with self.assertRaisesRegex(ValueError, "cloud_scheme='2m'"):
+            echam_physics(aerosol_module="jam", cloud_scheme="1m")
 
     def test_default_is_macv2sp_only(self):
         from jcm.physics.echam.echam_terms import echam_physics

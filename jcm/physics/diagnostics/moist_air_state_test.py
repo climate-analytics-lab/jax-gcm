@@ -98,9 +98,23 @@ class TestDiagnosticValues(unittest.TestCase):
 
     def test_expected_keys_are_published(self):
         for key in ("pressure_full", "pressure_half", "height_full",
-                    "height_half", "air_density", "layer_thickness",
-                    "surface_pressure"):
+                    "height_half", "air_density", "pressure_thickness",
+                    "layer_thickness", "surface_pressure"):
             self.assertIn(key, self.diags)
+
+    def test_pressure_thickness_is_positive_dp_summing_to_the_column(self):
+        # pressure_thickness is the per-layer Δp [Pa] on the level axis, the
+        # weight for mass-integrating a level field. It must be positive, share
+        # the mid-level (nlev) shape, and telescope to the column pressure span
+        # surface_pressure - pressure_half[top] per column (axis 0 is top-first
+        # in the physics frame, so index 0 of the interface axis is the top).
+        dp = np.asarray(self.diags["pressure_thickness"])
+        ph = np.asarray(self.diags["pressure_half"])
+        ps = np.asarray(self.diags["surface_pressure"])
+        self.assertEqual(dp.shape, np.asarray(self.diags["pressure_full"]).shape)
+        self.assertTrue((dp > 0).all())
+        np.testing.assert_allclose(
+            dp.sum(axis=0), ps - ph[0], rtol=1e-5, atol=1e-3)
 
     def test_half_levels_bracket_full_levels(self):
         pf = np.asarray(self.diags["pressure_full"])

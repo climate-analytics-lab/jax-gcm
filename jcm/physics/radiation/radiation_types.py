@@ -327,6 +327,100 @@ class RadiationData:
         return RadiationData(**new_data)
 
 
+#: CF/units metadata for the :class:`RadiationData` fields as they appear in the
+#: output Dataset — flattened to ``radiation.<field>`` keys (#740). Shared by
+#: every scheme that fills this struct (grey two-stream, RRTMGP, NN emulator),
+#: which set ``output_attrs = RADIATION_OUTPUT_ATTRS`` on their PhysicsTerm.
+#: SPEEDY radiation uses its own ``SWRadiationData``/``LWRadiationData`` structs
+#: and is not covered here. Units are taken from the field comments above.
+#:
+#: CF standard names are used only where the match is exact; fields without an
+#: exact CF name carry ``units`` + ``long_name`` only. Flux-profile and
+#: heating-rate orientation follows the file convention (surface-first) set by
+#: ``cf_metadata``; the standard names describe the quantity, not the storage.
+RADIATION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
+    # Solar geometry / surface optical properties (dimensionless).
+    "radiation.cos_zenith": {
+        "units": "1", "long_name": "cosine of solar zenith angle"},
+    "radiation.surface_albedo_vis": {
+        "units": "1", "long_name": "surface albedo (visible)"},
+    "radiation.surface_albedo_nir": {
+        "units": "1", "long_name": "surface albedo (near-infrared)"},
+    "radiation.surface_emissivity": {
+        "units": "1", "long_name": "surface longwave emissivity"},
+    # Shortwave / longwave flux profiles on layer interfaces (W m-2).
+    "radiation.sw_flux_up": {
+        "standard_name": "upwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "upwelling shortwave flux"},
+    "radiation.sw_flux_down": {
+        "standard_name": "downwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "downwelling shortwave flux"},
+    "radiation.lw_flux_up": {
+        "standard_name": "upwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "upwelling longwave flux"},
+    "radiation.lw_flux_down": {
+        "standard_name": "downwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "downwelling longwave flux"},
+    # Heating rates on layer mid-levels (K s-1).
+    "radiation.sw_heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_shortwave_heating",
+        "units": "K s-1", "long_name": "shortwave heating rate"},
+    "radiation.lw_heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_longwave_heating",
+        "units": "K s-1", "long_name": "longwave heating rate"},
+    # Surface fluxes (W m-2).
+    "radiation.surface_sw_down": {
+        "standard_name": "surface_downwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface downwelling shortwave flux"},
+    "radiation.surface_lw_down": {
+        "standard_name": "surface_downwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface downwelling longwave flux"},
+    "radiation.surface_sw_up": {
+        "standard_name": "surface_upwelling_shortwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface upwelling shortwave flux"},
+    "radiation.surface_lw_up": {
+        "standard_name": "surface_upwelling_longwave_flux_in_air",
+        "units": "W m-2", "long_name": "surface upwelling longwave flux"},
+    # Top-of-atmosphere fluxes (W m-2).
+    "radiation.toa_sw_up": {
+        "standard_name": "toa_outgoing_shortwave_flux",
+        "units": "W m-2", "long_name": "TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up": {
+        "standard_name": "toa_outgoing_longwave_flux",
+        "units": "W m-2", "long_name": "TOA outgoing longwave flux (OLR)"},
+    "radiation.toa_sw_down": {
+        "standard_name": "toa_incoming_shortwave_flux",
+        "units": "W m-2", "long_name": "TOA incoming shortwave flux"},
+    "radiation.toa_sw_up_clear": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_clear": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "units": "W m-2", "long_name": "clear-sky TOA outgoing longwave flux"},
+    # Aerosol-free (*noa) TOA fluxes: no exact CF standard name, so units +
+    # long_name only. Present in output only when aerosol_free_interval is set.
+    "radiation.toa_sw_up_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free TOA outgoing longwave flux"},
+    "radiation.toa_sw_up_clear_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free clear-sky TOA outgoing shortwave flux"},
+    "radiation.toa_lw_up_clear_noa": {
+        "units": "W m-2",
+        "long_name": "aerosol-free clear-sky TOA outgoing longwave flux"},
+    # McICA total cloud cover as the flux solve integrates it.
+    "radiation.total_cloud_cover": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1", "long_name": "total cloud cover seen by radiation"},
+    # Internal sub-stepping counter, dimensionless.
+    "radiation.step": {
+        "units": "1", "long_name": "radiation sub-stepping counter"},
+}
+
+
 class RadiationState(NamedTuple):
     """State variables for radiation calculations"""
     

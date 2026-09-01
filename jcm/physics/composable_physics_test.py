@@ -232,6 +232,54 @@ class TestComposablePhysics(unittest.TestCase):
             physics.replace("nonexistent", LinearHeating())
 
 
+class TestOutputAttrs(unittest.TestCase):
+    """``ComposablePhysics.output_attrs`` merges per-term declarations (#740)."""
+
+    def test_merges_declarations_first_wins(self):
+        """Both terms' vars appear; the first term wins a duplicated key."""
+
+        class DeclaringA(PhysicsTerm):
+            name: ClassVar[str] = "declaring_a"
+            category: ClassVar[str] = "radiation"
+            provides: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "radiation.lw_flux_up": {"units": "W m-2"},
+                "shared": {"units": "from_a"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics, "heating_rate": state.temperature}
+
+        class DeclaringB(PhysicsTerm):
+            name: ClassVar[str] = "declaring_b"
+            category: ClassVar[str] = "convection"
+            requires: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "convection.precip": {"units": "kg m-2 s-1"},
+                # Collides with DeclaringA — the FIRST term must win.
+                "shared": {"units": "from_b"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[DeclaringA(), DeclaringB()])
+        merged = physics.output_attrs()
+        self.assertEqual(merged["radiation.lw_flux_up"]["units"], "W m-2")
+        self.assertEqual(merged["convection.precip"]["units"], "kg m-2 s-1")
+        # First term (DeclaringA) wins the duplicated "shared" key.
+        self.assertEqual(merged["shared"]["units"], "from_a")
+
+    def test_terms_without_output_attrs_are_tolerated(self):
+        """A term predating the attribute contributes nothing, no error."""
+        # ``LinearHeating`` declares no ``output_attrs``; the base default {}
+        # plus the ``getattr`` guard must keep it out of the merge cleanly.
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), DiagnosticConsumer()])
+        self.assertEqual(physics.output_attrs(), {})
+
+
 class TestDifferentiabilityGate(unittest.TestCase):
     """Phase 2b gating tests: verify gradients flow through ComposablePhysics.
 
