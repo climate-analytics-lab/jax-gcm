@@ -56,8 +56,16 @@ mode: full
 state_file: null
 
 # Tracer variables to load from the state file (mapping tracer name →
-# variable name). Defaults to none; set e.g. ``{qc: qc, qi: qi}`` for the
-# ICON 1-moment scheme.
+# variable name), for ``mode`` ``prescribed`` / ``scm``.
+#
+# ``null`` (the default) means AUTO: every tracer the configured physics
+# declares via ``required_tracers()`` is loaded from the identically-named
+# variable when the file has one. That is what keeps a saved state's cloud
+# condensate from being silently dropped — radiation driven on a state whose
+# ``qc``/``qi`` went missing returns a plausible-looking clear sky (#718).
+#
+# Set an explicit mapping (e.g. ``{qc: qc, qi: qi}``) to override the names,
+# or ``{}`` to deliberately load no tracers at all.
 tracer_vars: null
 
 # Column location for ``mode: scm`` (degrees).

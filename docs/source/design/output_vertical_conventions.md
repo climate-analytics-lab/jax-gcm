@@ -102,6 +102,41 @@ vertical-coordinate neighbourhood carry their own units and standard names via
 `PhysicsTerm.output_attrs`, declared next to the code that computes them
 ([#740]).
 
+### Detection is inferred, so it is also checked
+
+The `level` coordinate is *evidence* of orientation, not proof: a file whose
+`level` is a bare integer index (a pre-#710 product, or a Dataset assembled by
+hand) carries no orientation at all, and the loader then has to assume
+top-first. So the inference is checked against the file's own pressures
+([#718]): after conversion, `pressure_full` must increase with index, and its
+surface entry must be within a factor of two of the surface pressure the state
+itself carries. Either check failing raises rather than handing physics a
+column whose temperature belongs to one level and whose pressure belongs to
+another. Files with no `pressure_full` — a trimmed restart such as
+`spinup_state.nc` — fall back to the `level` inference alone.
+
+The factor of two is deliberately loose: the lowest full level sits within a
+percent or so of the surface, while an inverted column misses by the ratio of
+surface to model-top pressure, four or five orders of magnitude. This is a
+wrong-orientation detector, not a check on the vertical grid.
+
+### Tracers come from the physics, not from the file
+
+The loader cannot tell a prognostic tracer from a diagnostic — both are
+ordinary level-dimensioned variables — so it does not guess. With
+`run.tracer_vars` unset, the names come from the configured physics'
+`required_tracers()`, and every declared tracer the file actually carries is
+loaded; anything declared but absent is warned about. Reading the declarations
+rather than matching a hardcoded `qc`/`qi` list is what makes this work for
+the two-moment scheme (`qnc`/`qni`) and for JAM's per-species tracers.
+
+This was the second half of [#718]: `run.mode=prescribed` dropped a saved
+state's condensate unless every variable was named by hand, so radiation ran
+against a clear sky and returned plausible, wrong fluxes — a global-mean
+surface downward longwave of 95.6 W/m² against an expected ~340, with no error
+and no NaN. An explicit `tracer_vars` mapping still wins outright, and `{}`
+loads nothing.
+
 ## Reading pre-#710 files
 
 Output written before this change has `level_i` as a bare integer index with
@@ -110,6 +145,7 @@ no attributes, and interface variables stored TOA-first. The presence of
 interface variables reversed before being paired with anything on `level`.
 
 [#710]: https://github.com/climate-analytics-lab/jax-gcm/issues/710
+[#718]: https://github.com/climate-analytics-lab/jax-gcm/issues/718
 [#739]: https://github.com/climate-analytics-lab/jax-gcm/issues/739
 [#740]: https://github.com/climate-analytics-lab/jax-gcm/issues/740
 [#741]: https://github.com/climate-analytics-lab/jax-gcm/issues/741
