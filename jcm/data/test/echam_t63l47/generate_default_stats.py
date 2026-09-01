@@ -92,11 +92,17 @@ def _block_until_ready(predictions):
     return predictions
 
 
-def _load_spinup_state():
+def _load_spinup_state(physics):
     """Load the saved spun-up nodal PhysicsState as the initial condition.
 
     Returns the state in the top-first physics frame the model expects;
     ``load_states_from_xarray`` handles the file's on-disk orientation.
+
+    ``physics`` supplies the tracer list: the loader picks up whatever
+    ``required_tracers()`` declares and the file carries, so the spun-up
+    ``qc``/``qi`` arrive rather than starting the run from a clear sky
+    (#718). This used to be a local ``qc``/``qi`` scan here, which left every
+    other caller — and every other tracer — unprotected.
     """
     import xarray as xr
     from jcm.utils import load_states_from_xarray
@@ -109,12 +115,8 @@ def _load_spinup_state():
             "on a GPU to create it."
         )
     ds = xr.open_dataset(spinup_path)
-    tracer_vars = {}
-    for tname in ("qc", "qi"):
-        if tname in ds.data_vars:
-            tracer_vars[tname] = tname
     return load_states_from_xarray(
-        ds, tracer_vars=tracer_vars or None,
+        ds, required_tracers=physics.required_tracers(),
     )
 
 
@@ -152,7 +154,7 @@ def run_default_echam_t63l47_model(save_interval=1.0, total_time=5.0):
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    initial_state = _load_spinup_state()
+    initial_state = _load_spinup_state(physics)
 
     predictions = model.run(
         initial_state=initial_state,

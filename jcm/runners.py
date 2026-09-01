@@ -1766,13 +1766,22 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
 
 
-def _load_states_from_cfg(cfg: DictConfig):
+def _load_states_from_cfg(cfg: DictConfig, physics):
     """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``.
 
     ``state_file`` is a netCDF from a previous JCM run, i.e. surface-first;
     ``load_states_from_xarray`` detects that and returns a top-first
     physics-frame state (#741), which is what the SCM / prescribed-state
-    runners expect.
+    runners expect, and rejects a file whose orientation disagrees with its
+    own pressures rather than handing physics an inverted column (#718).
+
+    ``physics`` is the configured package (``None`` for a caller that has
+    none). Which tracers to load comes from it: with ``run.tracer_vars``
+    unset, every tracer the physics declares via ``required_tracers()`` and
+    that the file actually carries is loaded. Without that the condensate a
+    saved state holds was silently dropped, so cloud-aware physics ran
+    against a clear sky — the second half of #718. ``run.tracer_vars: {}``
+    opts out explicitly; an explicit mapping still wins outright.
     """
     state_file = _resolve_data_path(cfg.run.get("state_file", None))
     if not state_file:
@@ -1786,9 +1795,16 @@ def _load_states_from_cfg(cfg: DictConfig):
 
     tracer_vars = cfg.run.get("tracer_vars", None)
     if tracer_vars is not None:
+        # Keep an explicit empty mapping distinct from ``null``: the former
+        # means "no tracers", the latter "take them from the physics".
         tracer_vars = OmegaConf.to_container(tracer_vars, resolve=True)
     ds = xr.open_dataset(state_file)
-    return ds, load_states_from_xarray(ds, tracer_vars=tracer_vars or None)
+    return ds, load_states_from_xarray(
+        ds,
+        tracer_vars=tracer_vars,
+        required_tracers=(
+            physics.required_tracers() if physics is not None else None),
+    )
 
 
 def _run_prescribed(cfg: DictConfig):
@@ -1799,7 +1815,7 @@ def _run_prescribed(cfg: DictConfig):
     physics = build_physics(cfg)
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
-    _, states = _load_states_from_cfg(cfg)
+    _, states = _load_states_from_cfg(cfg, physics)
 
     model = PrescribedStateModel(
         physics=physics,
@@ -1852,7 +1868,7 @@ def _run_scm(cfg: DictConfig):
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
     coords = build_coords(cfg)
-    ds, states = _load_states_from_cfg(cfg)
+    ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
         states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
     )
