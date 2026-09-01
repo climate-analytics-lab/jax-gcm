@@ -11,6 +11,7 @@ Date: 2026-04-11
 """
 
 import dataclasses
+import warnings
 from typing import Tuple, Optional
 
 import jax.numpy as jnp
@@ -453,6 +454,11 @@ class NNEmulatorRadiation(PhysicsTerm):
 
         """
         params = params or RadiationParameters.default()
+        # Level count the checkpoint was trained on, checked against the run's
+        # grid in cache_coords (see there for why __init__ cannot). None when
+        # the weights did not come from a file, or from a file predating the
+        # metadata field.
+        trained_n_levels = None
         if weights_file == "auto":
             # The packaged default (same convention as ``ozone_file: auto``):
             # per_band 14/16-band, 64-unit weights trained on the v3 labels
@@ -471,6 +477,8 @@ class NNEmulatorRadiation(PhysicsTerm):
                 weights_file, weights, sw_scaling, lw_scaling, metadata,
                 band_mode, n_bnd_sw, n_bnd_lw,
             )
+            trained_n_levels = metadata.get("n_levels")
+            self._weights_file = weights_file
             params = dataclasses.replace(
                 params, emulator_weights=weights,
                 sw_scaling=sw_scaling, lw_scaling=lw_scaling,
@@ -496,6 +504,10 @@ class NNEmulatorRadiation(PhysicsTerm):
         )
         self._band_mode = band_mode
         self._zero_tendency = bool(zero_tendency)
+        self._trained_n_levels = trained_n_levels
+        # Path recorded only for the mismatch message; None unless loaded from
+        # a file (set in the weights_file branch above).
+        self._weights_file = getattr(self, "_weights_file", None)
         self._coords_cached = False
 
     def withheld_output_keys(self) -> tuple[str, ...]:
@@ -552,7 +564,44 @@ class NNEmulatorRadiation(PhysicsTerm):
                 )
 
     def cache_coords(self, coords) -> None:
-        """Cache per-column lat/lon (deg) for the radiation scheme."""
+        """Cache per-column lat/lon (deg) and check the vertical grid.
+
+        The level count is only knowable here, not in ``__init__``: the term
+        is constructed from config before it is bound to a coordinate system,
+        and the run's grid arrives with ``coords``. The check belongs here
+        because a bidirectional GRU consumes any sequence length without a
+        shape error, so an L47-trained checkpoint would otherwise run silently
+        on an L95 or L8 column -- an unvalidated recurrence over the wrong
+        pressure spacing publishing plausible-looking but wrong fluxes and
+        heating rates (PR #730 review). The band structure fixes only the
+        per-level feature width, not the number of levels, so nothing else
+        catches this. Backwards compatibility follows the band-count rule in
+        _validate_weights_file -- hold the file to its recorded ``n_levels``
+        when present (the packaged checkpoint records it), and only warn when a
+        pre-metadata file omits it, since refusing would break existing files.
+        """
+        run_n_levels = int(coords.vertical.layers)
+        if self._trained_n_levels is not None:
+            if int(self._trained_n_levels) != run_n_levels:
+                raise ValueError(
+                    f"Emulator weights file {self._weights_file!r} was "
+                    f"trained on {int(self._trained_n_levels)} vertical "
+                    f"levels but this run has {run_n_levels}. A GRU accepts "
+                    "the different column length silently, so the fluxes "
+                    "would be unvalidated. Train weights for "
+                    f"{run_n_levels} levels, or run on a "
+                    f"{int(self._trained_n_levels)}-level grid via "
+                    f"{_TERM_CONFIG_HINT}."
+                )
+        elif self._weights_file is not None:
+            warnings.warn(
+                f"Emulator weights file {self._weights_file!r} carries no "
+                f"'n_levels' metadata; assuming it matches this run's "
+                f"{run_n_levels}-level grid. Re-save it with "
+                "save_emulator_weights(..., metadata={'n_levels': ...}) so "
+                "the vertical grid can be checked.",
+                stacklevel=2,
+            )
         lat, lon = column_lat_lon(coords.horizontal)
         self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
         self._lons = nnx.Variable(lon * 180.0 / jnp.pi)

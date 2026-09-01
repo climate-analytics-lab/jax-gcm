@@ -696,6 +696,62 @@ class WeightsFileTest(unittest.TestCase):
         self.assertIn("band_mode", str(ctx.exception))
         self.assertIn("save_emulator_weights", str(ctx.exception))
 
+    @staticmethod
+    def _coords(nlev):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+        from jcm.utils import get_coords
+        return get_coords(
+            SigmaCoordinates.equidistant(nlev), spectral_truncation=21)
+
+    def test_matching_level_count_passes_cache_coords(self):
+        # A checkpoint recording its training level count binds cleanly to a
+        # grid with the same number of levels.
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        self._write(metadata={"band_mode": "per_band", "n_levels": 8})
+        term = NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        term.cache_coords(self._coords(8))          # must not raise
+        self.assertTrue(term._coords_cached)
+
+    def test_mismatched_level_count_raises_before_first_solve(self):
+        # A GRU consumes any sequence length silently, so an L47-trained
+        # checkpoint would run unvalidated on an L8 grid without this check
+        # (PR #730 review). It must fail at cache_coords, before any solve.
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        self._write(metadata={"band_mode": "per_band", "n_levels": 47})
+        term = NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        with self.assertRaises(ValueError) as ctx:
+            term.cache_coords(self._coords(8))
+        message = str(ctx.exception)
+        self.assertIn("47", message)
+        self.assertIn("8", message)
+        self.assertIn("level", message.lower())
+
+    def test_missing_n_levels_metadata_warns_and_assumes_match(self):
+        # Pre-metadata checkpoints omit n_levels; refusing them would break
+        # existing files, so the grid is assumed to match with a warning.
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        self._write(metadata={"band_mode": "per_band"})
+        term = NNEmulatorRadiation(band_mode="per_band", weights_file=self.path)
+        with self.assertWarns(UserWarning) as ctx:
+            term.cache_coords(self._coords(8))
+        self.assertIn("n_levels", str(ctx.warning))
+        self.assertTrue(term._coords_cached)
+
+    def test_randomly_initialised_weights_skip_the_level_check(self):
+        # No file, no recorded level count: the cost-only / from-scratch path
+        # must bind to any grid without a warning or error.
+        import warnings as _warnings
+        from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+        term = NNEmulatorRadiation(band_mode="per_band")
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            term.cache_coords(self._coords(8))      # no warning, no raise
+        self.assertTrue(term._coords_cached)
+
 
 class GradientTest(unittest.TestCase):
     """A differentiable scheme is the whole point; gradients must reach it."""
