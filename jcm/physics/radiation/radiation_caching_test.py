@@ -194,5 +194,37 @@ class PerColumnTest(unittest.TestCase):
         )
 
 
+class CachedFieldCoverageTest(unittest.TestCase):
+    def test_every_shortwave_flux_field_is_rescaled(self):
+        # The cache list must track RadiationData: a SW flux left off it keeps
+        # its compute-step value while its all-sky partner rescales, silently
+        # corrupting cached-step CRE diagnostics (PR #730 review: the
+        # clear-sky profiles were missing). Every field whose name marks it as
+        # a shortwave flux/heating quantity must be rescaled, except the
+        # noa_frac_* ratios, which are zenith-independent by construction.
+        import dataclasses
+
+        names = {f.name for f in dataclasses.fields(RadiationData)}
+        sw_flux_like = {
+            n for n in names
+            if ("sw" in n.split("_")) and not n.startswith("noa_frac")
+        }
+        missing = sw_flux_like - set(_CACHED_SW_FIELDS)
+        self.assertFalse(
+            missing,
+            f"shortwave fields absent from _CACHED_SW_FIELDS: {sorted(missing)}",
+        )
+
+    def test_clear_sky_profiles_rescale_with_the_all_sky_ones(self):
+        rad = _solved_at([0.8] * NCOLS)
+        out = rescale_cached_radiation(rad, jnp.full((NCOLS,), 0.4))
+        for name in ("sw_flux_up_clear", "sw_flux_down_clear"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(out, name)),
+                np.asarray(getattr(rad, name)) * 0.5,
+                rtol=1e-6, err_msg=name,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

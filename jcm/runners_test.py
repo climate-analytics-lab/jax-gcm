@@ -23,6 +23,7 @@ from jcm.runners import (
     build_terrain,
     build_tracer_filter,
     configure_host_device_count,
+    guard_emulator_ghg_forcing,
     run,
 )
 
@@ -1097,9 +1098,11 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
 
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
         cfg.init.kind = "from_mars"
-        # A stub model shortcuts build_model: _run_full only touches
-        # ``model.coords`` (for the forcing) before the init dispatch.
-        stub = _types.SimpleNamespace(coords=build_coords(cfg))
+        # A stub model shortcuts build_model: before the init dispatch
+        # _run_full only touches ``model.coords`` (for the forcing) and
+        # ``model.physics`` (for the emulator GHG guard, which returns
+        # immediately when there is no emulator term).
+        stub = _types.SimpleNamespace(coords=build_coords(cfg), physics=None)
         with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
             _run_full(cfg, model=stub)
 
@@ -1716,3 +1719,79 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         import jax_datetime as jdt
         self.assertEqual(
             int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+
+
+class TestEmulatorGhgGuard(unittest.TestCase):
+    """The emulator must refuse CH4/N2O forcing it cannot represent.
+
+    Its features carry only ozone and CO2 and its labels are generated at
+    RRTMGP's defaults, so a scenario varying either gas would get fluxes
+    with no trace of the forcing (jax-gcm#738).
+    """
+
+    def _physics(self, emulated):
+        from jcm.physics.echam.echam_terms import echam_physics
+        return echam_physics(
+            radiation_scheme="emulated" if emulated else "rrtmgp")
+
+    def _forcing(self, **overrides):
+        from jcm.forcing import (
+            DEFAULT_CH4_VMR_PPMV, DEFAULT_N2O_VMR_PPMV,
+        )
+        import types
+        return types.SimpleNamespace(
+            ch4_vmr=np.asarray(overrides.get("ch4", DEFAULT_CH4_VMR_PPMV)),
+            n2o_vmr=np.asarray(overrides.get("n2o", DEFAULT_N2O_VMR_PPMV)),
+        )
+
+    def test_default_greenhouse_gases_pass(self):
+        guard_emulator_ghg_forcing(self._physics(True), self._forcing())
+
+    def test_non_default_ch4_is_rejected_with_an_actionable_message(self):
+        with self.assertRaises(ValueError) as ctx:
+            guard_emulator_ghg_forcing(self._physics(True),
+                                       self._forcing(ch4=3.0))
+        msg = str(ctx.exception)
+        self.assertIn("ch4_vmr", msg)
+        self.assertIn("echam-rrtmgp-2m", msg)
+
+    def test_non_default_n2o_is_rejected(self):
+        with self.assertRaises(ValueError):
+            guard_emulator_ghg_forcing(self._physics(True),
+                                       self._forcing(n2o=0.40))
+
+    def test_rrtmgp_consumes_both_gases_so_it_is_never_guarded(self):
+        guard_emulator_ghg_forcing(self._physics(False),
+                                   self._forcing(ch4=3.0, n2o=0.40))
+
+    def test_absent_forcing_is_not_an_error(self):
+        guard_emulator_ghg_forcing(self._physics(True), None)
+
+    def test_transient_timeseries_forcing_is_inspected(self):
+        # A file-based scenario stores the gas as a TimeSeries, which is
+        # exactly the case the guard exists for; np.asarray raises on it,
+        # so an unwrapped check would silently pass the run through.
+        import types
+
+        from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
+
+        rising = make_time_series(
+            np.array([DEFAULT_CH4_VMR_PPMV, 2.4, 3.0]),
+            np.array([0.0, 1.0, 2.0]),
+        )
+        forcing = types.SimpleNamespace(
+            ch4_vmr=rising, n2o_vmr=self._forcing().n2o_vmr)
+        with self.assertRaises(ValueError) as ctx:
+            guard_emulator_ghg_forcing(self._physics(True), forcing)
+        self.assertIn("ch4_vmr", str(ctx.exception))
+
+    def test_constant_default_timeseries_still_passes(self):
+        import types
+
+        from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
+
+        flat = make_time_series(
+            np.full(3, DEFAULT_CH4_VMR_PPMV), np.array([0.0, 1.0, 2.0]))
+        forcing = types.SimpleNamespace(
+            ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
+        guard_emulator_ghg_forcing(self._physics(True), forcing)

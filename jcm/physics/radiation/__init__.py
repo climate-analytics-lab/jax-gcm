@@ -63,6 +63,7 @@ def cached_radiation_tendency(
 # zenith-independent. Longwave is absent because it does not see the sun.
 _CACHED_SW_FIELDS = (
     "sw_flux_up", "sw_flux_down", "sw_heating_rate",
+    "sw_flux_up_clear", "sw_flux_down_clear",
     "surface_sw_down", "surface_sw_up",
     "toa_sw_up", "toa_sw_down", "toa_sw_up_clear", "toa_sw_up_noa",
     "toa_sw_up_clear_noa",

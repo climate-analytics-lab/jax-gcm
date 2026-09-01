@@ -112,6 +112,26 @@ python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
 
 See `docs/source/design/data_mirror.md` for the full bundle catalogue.
 
+### Emulated radiation
+
+``physics=echam-emulated-2m`` swaps RRTMGP for a GRU emulator trained to
+reproduce it — a settled 4.4x end-to-end at T63L47 (22.7 -> 5.1 s per sim day; see `docs/source/design/radiation_nn_emulator.md`). Trained weights ship with the package (``weights_file: auto``
+resolves ``jcm/data/emulator_weights_per_band_u64.nc``), so it runs out of
+the box:
+
+```bash
+python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
+```
+
+Point ``physics.terms.nn_emulator_radiation.weights_file`` at another
+checkpoint to swap networks. The emulator sees ozone and CO2 but **not
+CH4 or N2O**, so runs varying those gases are refused with a pointer to
+``physics=echam-rrtmgp-2m`` (jax-gcm#738). Generate labels and train with
+``tools/radiation_emulator/`` — see
+`docs/source/design/radiation_nn_emulator.md`. ``weights_file: null``
+initialises randomly, which is only useful for cost benchmarking and must
+be paired with ``zero_tendency: true``.
+
 ## Physics Packages
 
 **SPEEDY** provides a compact climate-physics package for development,

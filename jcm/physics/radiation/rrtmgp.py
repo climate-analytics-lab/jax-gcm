@@ -30,6 +30,7 @@ from jax import lax
 from jax_solar import OrbitalTime, direct_solar_irradiance, get_solar_sin_altitude
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields
 from jcm.physics.radiation.radiation_types import (
+    CLEAR_SKY_KEYS,
     RADIATION_OUTPUT_ATTRS,
     RadiationParameters,
     RadiationTendencies,
@@ -42,10 +43,7 @@ from jcm.physics.radiation.mcica import (
     in_cloud_path,
 )
 from jcm.physics.radiation.radiation_types import cloud_overlap_name
-from jcm.physics.radiation.cloud_optics import (
-    effective_radius_liquid,
-    effective_radius_ice,
-)
+from jcm.physics.radiation.cloud_optics import resolve_effective_radii
 import jcm.constants as c
 
 import rrtmgp
@@ -231,6 +229,33 @@ def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
     return pressure[0] < pressure[-1]
 
 
+def _flux_profiles(
+    rrtmgp_data: dict, needs_reversal: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return ``(sw_up, sw_down, lw_up, lw_down)`` interface profiles, ICON order.
+
+    RRTMGP emits ``(1, ngpt, nlev+1)``; the g-point axis is summed out
+    here — before the per-column vmap bundles the result — so the
+    diagnostic stays ``(ncols, nlev+1)`` instead of blowing up to
+    ``(ncols, nlev+1, ngpt)`` (ngpt is 128 LW / 112 SW, a ~120x memory
+    saving), then flipped back to the caller's TOA-first ordering.
+
+    Shared by the all-sky and clear-sky solves so both land on identical
+    g-point handling and vertical orientation and can be differenced.
+    """
+    flip = lambda a: a[::-1]  # noqa: E731
+    identity = lambda a: a  # noqa: E731
+    profiles = tuple(
+        lax.cond(
+            needs_reversal, flip, identity,
+            rrtmgp_data[key][0, :, :].sum(axis=0),
+        )
+        for key in ("sw_flux_up_full", "sw_flux_down_full",
+                    "lw_flux_up_full", "lw_flux_down_full")
+    )
+    return profiles
+
+
 # ---------------------------------------------------------------------------
 # Data conversion: ICON -> RRTMGP
 # ---------------------------------------------------------------------------
@@ -331,14 +356,10 @@ def prepare_rrtmgp_data(
     # The jax-rrtmgp library clips both radii to its LUT bounds internally
     # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
     # here.
-    fallback_liq = jnp.broadcast_to(
-        jnp.asarray(effective_radius_liquid(cdnc_factor)),
-        (nlev,),
+    r_eff_liq, r_eff_ice = resolve_effective_radii(
+        r_eff_liq_um, r_eff_ice_um, cdnc_factor,
+        cip_1d, layer_thickness,
     )
-    iwc_gm3 = cip_1d / jnp.maximum(layer_thickness, 1.0) * 1e3
-    fallback_ice = effective_radius_ice(iwc_gm3)
-    r_eff_liq = jnp.where(r_eff_liq_um > 0.0, r_eff_liq_um, fallback_liq)
-    r_eff_ice = jnp.where(r_eff_ice_um > 0.0, r_eff_ice_um, fallback_ice)
     cloud_r_eff_liq = r_eff_liq * 1e-6
     cloud_r_eff_ice = r_eff_ice * 1e-6
 
@@ -415,24 +436,11 @@ def prepare_icon_data(
     toa_sw_up = rrtmgp_data["toa_sw_flux_outgoing_2d_xy"][0, 0]
     toa_lw_up = rrtmgp_data["toa_lw_flux_outgoing_2d_xy"][0, 0]
 
-    # Full flux profiles. RRTMGP returns shape (1, ngpt, nlev+1); we sum
-    # over the ngpt (g-point) axis here — *before* the per-column vmap
-    # bundles the result — so the vmapped diagnostic stays at
-    # (ncols, nlev+1) instead of blowing up to (ncols, nlev+1, ngpt).
-    # ngpt is 128 (LW) / 112 (SW), so this is a ~120× memory saving on
-    # the radiation flux outputs. The downstream RadiationData consumer
-    # (`echam_physics._apply_radiation_rrtmgp_inner`) already calls
-    # `.sum(axis=-1)` on these, so the per-gpoint detail was being
-    # discarded immediately anyway.
-    sw_flux_up = rrtmgp_data["sw_flux_up_full"][0, :, :].sum(axis=0)
-    sw_flux_down = rrtmgp_data["sw_flux_down_full"][0, :, :].sum(axis=0)
-    lw_flux_up = rrtmgp_data["lw_flux_up_full"][0, :, :].sum(axis=0)
-    lw_flux_down = rrtmgp_data["lw_flux_down_full"][0, :, :].sum(axis=0)
-
-    sw_flux_up = lax.cond(needs_reversal, flip, identity, sw_flux_up)
-    sw_flux_down = lax.cond(needs_reversal, flip, identity, sw_flux_down)
-    lw_flux_up = lax.cond(needs_reversal, flip, identity, lw_flux_up)
-    lw_flux_down = lax.cond(needs_reversal, flip, identity, lw_flux_down)
+    # Full flux profiles: g-points summed out and flipped back to ICON
+    # order (see _flux_profiles). No consumer wants the per-gpoint detail.
+    sw_flux_up, sw_flux_down, lw_flux_up, lw_flux_down = _flux_profiles(
+        rrtmgp_data, needs_reversal,
+    )
 
     diagnostics = RadiationData(
         # Match the grey scheme's shape convention so the downstream
@@ -450,6 +458,12 @@ def prepare_icon_data(
         lw_flux_up=lw_flux_up,
         lw_flux_down=lw_flux_down,
         lw_heating_rate=lw_heating,
+        # Clear-sky profiles come from a separate solve the caller runs;
+        # zero placeholders here, overwritten via ``.copy(...)`` below.
+        sw_flux_up_clear=jnp.zeros_like(sw_flux_up),
+        sw_flux_down_clear=jnp.zeros_like(sw_flux_down),
+        lw_flux_up_clear=jnp.zeros_like(lw_flux_up),
+        lw_flux_down_clear=jnp.zeros_like(lw_flux_down),
         surface_sw_down=surf_sw_down,
         surface_lw_down=surf_lw_down,
         surface_sw_up=surf_sw_up,
@@ -529,9 +543,11 @@ def radiation_scheme_rrtmgp(
 
     When ``compute_cre`` is True an extra clear-sky RRTMGP call (with
     zero condensate everywhere) populates ``toa_{sw,lw}_up_clear`` for
-    the cloud radiative effect diagnostic. Costs 2× a McICA call;
-    disable it (e.g. for production runs that only need the all-sky
-    fluxes) for the 1× option.
+    the cloud radiative effect diagnostic, plus the full
+    ``{sw,lw}_flux_{up,down}_clear`` interface profiles used as NN
+    emulator training labels. Costs 2× a McICA call; disable it (e.g.
+    for production runs that only need the all-sky fluxes) for the 1×
+    option.
 
     Args (additions over the previous beam-split signature):
         column_index: integer global index of the column being computed,
@@ -542,7 +558,8 @@ def radiation_scheme_rrtmgp(
         base_seed: term-level Python integer seed that the column +
             step indices fold into.
         compute_cre: if True, run an additional clear-sky RRTMGP call
-            and populate ``toa_{sw,lw}_up_clear`` on the returned
+            and populate ``toa_{sw,lw}_up_clear`` and the
+            ``{sw,lw}_flux_{up,down}_clear`` profiles on the returned
             ``RadiationData``.
         r_eff_liq_um / r_eff_ice_um: optional microphysical effective
             radii (um, TOA-first (nlev,)) from the clouds carry (ECHAM
@@ -879,6 +896,12 @@ def radiation_scheme_rrtmgp(
         toa_lw_up_clear = (
             rrtmgp_output_clear["toa_lw_flux_outgoing_2d_xy"][0, 0]
         )
+        # Same g-point sum and vertical flip as the all-sky profiles, so
+        # the clear-sky and all-sky interfaces line up element-wise.
+        (sw_flux_up_clear, sw_flux_down_clear,
+         lw_flux_up_clear, lw_flux_down_clear) = _flux_profiles(
+            rrtmgp_output_clear, _reverse_if_needed(icon_state.pressure),
+        )
     else:
         toa_sw_up_clear = jnp.zeros_like(
             rrtmgp_output["toa_sw_flux_outgoing_2d_xy"][0, 0],
@@ -886,6 +909,16 @@ def radiation_scheme_rrtmgp(
         toa_lw_up_clear = jnp.zeros_like(
             rrtmgp_output["toa_lw_flux_outgoing_2d_xy"][0, 0],
         )
+        # (nlev+1,) zeros in the library's own dtype: one g-point slice of
+        # the all-sky output has the shape and dtype of a summed profile.
+        sw_flux_up_clear = jnp.zeros_like(
+            rrtmgp_output["sw_flux_up_full"][0, 0, :],
+        )
+        sw_flux_down_clear = jnp.zeros_like(sw_flux_up_clear)
+        lw_flux_up_clear = jnp.zeros_like(
+            rrtmgp_output["lw_flux_up_full"][0, 0, :],
+        )
+        lw_flux_down_clear = jnp.zeros_like(lw_flux_up_clear)
 
     tendencies, diagnostics = prepare_icon_data(
         rrtmgp_output, icon_state,
@@ -894,6 +927,10 @@ def radiation_scheme_rrtmgp(
     diagnostics = diagnostics.copy(
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        sw_flux_up_clear=sw_flux_up_clear,
+        sw_flux_down_clear=sw_flux_down_clear,
+        lw_flux_up_clear=lw_flux_up_clear,
+        lw_flux_down_clear=lw_flux_down_clear,
         total_cloud_cover=total_cloud_cover,
     )
     return tendencies, diagnostics
@@ -1102,18 +1139,36 @@ class RRTMGPRadiation(PhysicsTerm):
         _ensure_rrtmgp()
 
     def withheld_output_keys(self) -> tuple[str, ...]:
-        """Hide the ``*noa`` fluxes when no companion solve runs.
+        """Hide the ``*noa`` and clear-sky slots when no companion solve runs.
 
-        ``RadiationData`` carries the four aerosol-free slots in every
-        configuration. With the diagnostic off they stay at their zero
-        default, and publishing that turns a downstream ERFari
+        ``RadiationData`` carries the aerosol-free and clear-sky slots in
+        every configuration. With a diagnostic off they stay at their
+        zero default, and publishing that turns a downstream ERFari
         (``rsut - rsutnoa``) into the entire all-sky flux — ~240 W/m2
         rather than ~-1 — in a file that otherwise looks valid
         (jax-gcm#647). Absent is honest; present-and-zero is not.
+
+        The same trap applies to the clear-sky fluxes without
+        ``compute_cre``: a zero clear-sky flux reads as a CRE equal to
+        the whole all-sky flux, and as an all-zero training label for
+        anything fitted against these fields.
         """
-        if self._aerosol_free:
-            return ()
-        return tuple(f"radiation.{k}_noa" for k in NOA_KEYS)
+        withheld = () if self._aerosol_free else tuple(
+            f"radiation.{k}_noa" for k in NOA_KEYS
+        ) + tuple(
+            # The persisted ratios are placeholders too without the
+            # companion solve; a published 0 reads as "aerosol removes
+            # the entire flux" through the fraction-based ERFari path.
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
+        if not self._compute_cre:
+            withheld += tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS)
+            # __call__ mirrors the clear-sky TOA fluxes onto the clouds
+            # sub-struct for CRE diagnostics; without the companion solve
+            # those mirrors are the same zero placeholders (the all-sky
+            # mirrors stay — they are real).
+            withheld += ("clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear")
+        return withheld
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
@@ -1475,6 +1530,10 @@ class RRTMGPRadiation(PhysicsTerm):
             lw_flux_up=diagnostics_vmapped.lw_flux_up.T,
             lw_flux_down=diagnostics_vmapped.lw_flux_down.T,
             lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.T,
+            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.T,
+            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.T,
+            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.T,
             surface_sw_down=_column_vector_rrtmgp(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),

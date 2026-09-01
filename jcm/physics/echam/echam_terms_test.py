@@ -245,6 +245,17 @@ class TestAerosolFreeValidation(unittest.TestCase):
                                    aerosol_free_interval=1)
             self.assertIn("radiation_scheme='rrtmgp'", str(cm.exception))
 
+    def test_emulated_composition_carries_the_rrtmgp_bands(self):
+        # The per-band emulator expects the RRTMGP band structure
+        # (14 SW / 16 LW); the broadband 1-SW/0-LW layout passes
+        # composition and then fails the emulator's band-count check at
+        # first compute (PR #730 review). Only the Hydra runner path had
+        # the emulator in its band selection; the Python factory must too.
+        physics = self.echam_physics(radiation_scheme="emulated")
+        bc = physics.band_config
+        self.assertEqual(len(bc.sw_band_centers_nm), 14)
+        self.assertEqual(len(bc.lw_band_centers_nm), 16)
+
     def test_nonsensical_interval_is_rejected_before_the_scheme_check(self):
         # A meaningless spacing must name the real problem rather than
         # complain about the radiation scheme, which would send the reader

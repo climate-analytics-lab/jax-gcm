@@ -1051,12 +1051,40 @@ class TestWithheldOutputKeys:
         from jcm.physics.radiation.aerosol_free import NOA_KEYS
         from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 
-        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS)
+        # Both the fluxes and the persisted noa_frac_* ratios: a published
+        # zero fraction reads as "aerosol removes the entire flux" through
+        # the fraction-based ERFari path (PR #730 review).
+        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS) + tuple(
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
         assert RRTMGPRadiation(
             aerosol_free_interval=None).withheld_output_keys() == expected
         for on in (1, 2, 4):
             assert RRTMGPRadiation(
                 aerosol_free_interval=on).withheld_output_keys() == ()
+
+    def test_rrtmgp_withholds_clear_sky_only_without_compute_cre(self):
+        """Clear-sky slots are the same trap as the ``*noa`` ones.
+
+        Without the second cloud-free solve they stay zero, which reads
+        as a CRE equal to the entire all-sky flux.
+        """
+        from jcm.physics.radiation.radiation_types import CLEAR_SKY_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        # The clouds sub-struct mirrors of the clear-sky TOA fluxes are the
+        # same zero placeholders without the companion solve (PR #730
+        # review); the *_all mirrors are real and stay.
+        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS) + (
+            "clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear",
+        )
+        off = RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=False,
+        ).withheld_output_keys()
+        assert off == clear
+        assert RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=True,
+        ).withheld_output_keys() == ()
 
     def test_composable_physics_drops_the_declared_keys(self):
         """The aggregated keys must actually be filtered from the output."""

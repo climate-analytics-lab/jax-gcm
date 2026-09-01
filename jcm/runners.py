@@ -350,21 +350,86 @@ def _build_physics_from_factory(physics_cfg):
 def _band_config_for_terms(terms):
     """Pick a ``RadiationBandConfig`` to match the active radiation backend.
 
-    Walks the term list for an ``RRTMGPRadiation`` instance and reads its
-    band centers; otherwise returns the broadband (single 550 nm SW band)
-    fallback. Centralised here so every wavelength-dependent term — not
-    just the aerosol scheme — sees the same band structure as whatever
-    radiation backend is actually running. The band config is owned by
-    ``ComposablePhysics`` and injected into ``diagnostics["_band_config"]``
-    each step (same pattern as ``_dt_seconds``).
+    Walks the term list for a term that resolves radiation band by band
+    and reads RRTMGP's band centers; otherwise returns the broadband
+    (single 550 nm SW band) fallback. Centralised here so every
+    wavelength-dependent term — not just the aerosol scheme — sees the
+    same band structure as whatever radiation backend is actually
+    running. The band config is owned by ``ComposablePhysics`` and
+    injected into ``diagnostics["_band_config"]`` each step (same pattern
+    as ``_dt_seconds``).
+
+    The NN emulator counts because it is trained on RRTMGP's band-resolved
+    aerosol optics: give it the broadband fallback and the aerosol term
+    feeds it a single 550 nm band, which is not the input its labels were
+    generated under. That costs one load of the RRTMGP tables at
+    construction even though the emulator never solves with them, which is
+    worth it to keep the two arms on identical aerosol input.
     """
     from jcm.physics.radiation.band_config import RadiationBandConfig
+    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
     from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
 
     for t in terms:
-        if isinstance(t, RRTMGPRadiation):
+        if isinstance(t, (RRTMGPRadiation, NNEmulatorRadiation)):
             return RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
     return RadiationBandConfig.broadband()
+
+
+def guard_emulator_ghg_forcing(physics, forcing) -> None:
+    """Reject CH4/N2O forcing the NN radiation emulator cannot represent.
+
+    RRTMGP consumes the chemistry methane profile and the prescribed N2O,
+    but the emulator's features carry only ozone and CO2 and its labels are
+    generated at RRTMGP's own CH4/N2O defaults — so a scenario that varies
+    either gas gets fluxes with no trace of its radiative forcing. Absent
+    the features (jax-gcm#738), failing loudly is the honest behaviour:
+    silence here looks exactly like a well-behaved GHG experiment.
+
+    Best-effort by design: it covers the Hydra paths, where forcing is
+    concrete at build time. A direct ``Model.run(forcing=...)`` caller can
+    still hand traced values to the term, which cannot branch on them.
+    """
+    import numpy as np
+
+    from jcm.forcing import (
+        DEFAULT_CH4_VMR_PPMV,
+        DEFAULT_N2O_VMR_PPMV,
+        TimeSeries,
+    )
+    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
+
+    terms = getattr(physics, "terms", None) or []
+    if not any(isinstance(t, NNEmulatorRadiation) for t in terms):
+        return
+    if forcing is None:
+        return
+    for name, default in (("ch4_vmr", DEFAULT_CH4_VMR_PPMV),
+                          ("n2o_vmr", DEFAULT_N2O_VMR_PPMV)):
+        value = getattr(forcing, name, None)
+        if value is None:
+            continue
+        # A file-based transient GHG arrives as a TimeSeries, which is
+        # exactly the scenario case this guard exists for — unwrap it
+        # rather than letting np.asarray raise and skip the check.
+        if isinstance(value, TimeSeries):
+            value = value.values
+        try:
+            arr = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            continue        # traced/abstract: nothing to check here
+        # Relative tolerance, not exact equality: a TimeSeries stores the
+        # value as float32, so a default-valued transient round-trips a few
+        # 1e-8 off. Any real scenario change is percent-level.
+        if arr.size and not np.allclose(arr, default, rtol=1e-6, atol=0.0):
+            raise ValueError(
+                f"forcing.{name} is {np.unique(arr)[:4]} ppmv but the NN "
+                f"radiation emulator is trained at the fixed default "
+                f"{default} ppmv and takes neither gas as an input feature, "
+                "so its fluxes would ignore this forcing entirely "
+                "(jax-gcm#738). Use physics=echam-rrtmgp-2m for CH4/N2O "
+                f"experiments, or leave forcing.{name} at its default."
+            )
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):
@@ -1701,6 +1766,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
+    guard_emulator_ghg_forcing(model.physics, forcing)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -1815,6 +1881,7 @@ def _run_prescribed(cfg: DictConfig):
     physics = build_physics(cfg)
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
+    guard_emulator_ghg_forcing(physics, forcing)
     _, states = _load_states_from_cfg(cfg, physics)
 
     model = PrescribedStateModel(

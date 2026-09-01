@@ -28,7 +28,7 @@ from jcm.terrain import TerrainData
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    eff_ice_crystal_radius,
+    ice_volume_mean_radius,
     minimum_CDNC,
     threshold_vert_vel,
 )
@@ -196,6 +196,14 @@ def cloud_microphysics_2m(
     # ``cdnc_max_phys`` (1e11 / m^3, well above any realistic activation
     # output) and ``icemax`` (1e7 / m^3) so realistic clouds are
     # unaffected.
+    #
+    # The icnc LOWER bound is deliberately 0, not ECHAM's ``icemin``:
+    # arrivals at or below ``icemin`` are re-diagnosed from ice mass in
+    # ``update_in_cloud_water`` (the ``<=`` test fires either way), so the
+    # floor would only inject a spurious icemin-per-step tracer source into
+    # ice-free cells. Note this floor is NOT why mixed-phase r_eff_ice
+    # saturates at ``ceffmax`` — those cells arrive with ICNC well above
+    # icemin but INP-limited (~1e3 /m^3) — see #728.
     _cdnc_max_phys_per_m3 = 1.0e11
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
     qnc = jnp.clip(qnc, 0.0, _cdnc_max_phys_per_m3 * inv_rho)
@@ -426,13 +434,12 @@ def cloud_microphysics_2m(
 
         # --- Phase decision lo2 (ECHAM section 4 end) ------------------
         # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
-        # computed on the post-sedimentation ice.
+        # computed on the post-sedimentation ice. ``zrice`` is the
+        # volume-mean radius in METRES (ECHAM prid); the shared helper
+        # carries the clip + Schumann conversion so this copy cannot
+        # drift from precip.py / deposition_freezing.py (#725).
         ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
-        zrieff = jnp.clip(
-            eff_ice_crystal_radius(ice_gm3, icnc_melt, params),
-            params.ceffmin, params.ceffmax)
-        zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff ** 3)
-        zrice = 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
+        zrice = ice_volume_mean_radius(ice_gm3, icnc_melt, params)
         zvervmax = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
             icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
@@ -577,12 +584,9 @@ def cloud_microphysics_2m(
 
         # WBF with the threshold updraft recomputed from the
         # post-freezing in-cloud ice (ECHAM 1580-1594).
+        # ``zxib`` is already in-cloud, so no cloud-fraction division here.
         ice_gm3_wbf = 1000.0 * zxib * rho_k
-        zrieff_wbf = jnp.clip(
-            eff_ice_crystal_radius(ice_gm3_wbf, icnc_het, params),
-            params.ceffmin, params.ceffmax)
-        zrih_wbf = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff_wbf ** 3)
-        zrice_wbf = 1.0e-6 * jnp.maximum(zrih_wbf, params.eps) ** (1.0 / 3.0)
+        zrice_wbf = ice_volume_mean_radius(ice_gm3_wbf, icnc_het, params)
         zvervmax_wbf = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
             icnc=icnc_het, ice_radius=zrice_wbf, eta=eta_k, params=params)

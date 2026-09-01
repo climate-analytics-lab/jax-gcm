@@ -511,6 +511,10 @@ def radiation_scheme(
     is_daylight = cos_zenith > 0
     flux_up_sw = jnp.where(is_daylight, flux_up_sw, 0.0)
     flux_down_sw = jnp.where(is_daylight, flux_down_sw, 0.0)
+    # The clear beam is also published as a profile diagnostic, so it
+    # takes the same night mask and stays comparable to the all-sky one.
+    flux_up_sw_clear = jnp.where(is_daylight, flux_up_sw_clear, 0.0)
+    flux_down_sw_clear = jnp.where(is_daylight, flux_down_sw_clear, 0.0)
     
     # Convert fluxes to heating rates
     lw_heating_rate = flux_to_heating_rate(
@@ -538,11 +542,8 @@ def radiation_scheme(
     surface_lw_up = jnp.sum(flux_up_lw[-1, :])
 
     # Clear-sky TOA fluxes from the beam-split's clear branch — exposed
-    # for cloud-radiative-effect diagnostics. SW: zero out at night to
-    # match the all-sky convention used by ``flux_up_sw`` above.
-    toa_sw_up_clear = jnp.where(
-        is_daylight, jnp.sum(flux_up_sw_clear[0, :]), 0.0,
-    )
+    # for cloud-radiative-effect diagnostics.
+    toa_sw_up_clear = jnp.sum(flux_up_sw_clear[0, :])
     toa_lw_up_clear = jnp.sum(flux_up_lw_clear[0, :])
     
     # Create output structures
@@ -566,6 +567,12 @@ def radiation_scheme(
         lw_flux_down=flux_down_lw,
         sw_heating_rate=sw_heating_rate,
         lw_heating_rate=lw_heating_rate,
+        # The beam-split already solves a clear branch, so the clear-sky
+        # profiles are exact here rather than a second solve.
+        sw_flux_up_clear=flux_up_sw_clear,
+        sw_flux_down_clear=flux_down_sw_clear,
+        lw_flux_up_clear=flux_up_lw_clear,
+        lw_flux_down_clear=flux_down_lw_clear,
         toa_sw_down=toa_sw_down,
         toa_sw_up=toa_sw_up,
         toa_lw_up=olr,
@@ -842,6 +849,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
             lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
             lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
             surface_sw_down=_column_vector(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),

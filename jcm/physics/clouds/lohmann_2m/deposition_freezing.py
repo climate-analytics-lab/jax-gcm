@@ -16,7 +16,7 @@ from jcm.physics import thermodynamics
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    eff_ice_crystal_radius,
+    ice_volume_mean_radius,
     threshold_vert_vel,
 )
 from .types import microphysics_dt_constants
@@ -77,7 +77,7 @@ def mixed_phase_deposition_and_corrections(
     2. Update ice mass mixing ratio (`zxip1`) including detrainment, evaporation,
        Tompkins source (`pgenti`), and deposition.
     3. Compute effective ice crystal radius from `zxip1` and `icnc` (via
-       `eff_ice_crystal_radius`), then convert to volume-mean radius using the
+       `ice_volume_mean_radius`, which clips and converts to volume-mean via the
        Schumann et al. (2011) parameterisation.
     4. Compute Bergeron-Findeisen threshold vertical velocity (`zvervmax`) from
        saturation vapour pressures, ICNC, ice radius, and `peta`.
@@ -162,8 +162,7 @@ def mixed_phase_deposition_and_corrections(
     The Fortran lookup table calls (`set_lookup_index`, `tlucua`, `tlucuaw`,
     `tlucub`, `sat_spec_hum`) are replaced here by inline Teten's formula
     computations consistent with the rest of the JAX scheme.
-    The `effective_2_volmean_radius_param_Schuman_2011` and
-    `threshold_vert_vel` helpers must be available in this module or imported.
+    `threshold_vert_vel` must be available in this module or imported.
 
     """
     ztmst = dt
@@ -186,13 +185,7 @@ def mixed_phase_deposition_and_corrections(
     #    Convert: grid-mean kg/kg → in-cloud g/m^3
     # -------------------------------------------------------------------------
     ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, params.clc_min)
-    zrieff = eff_ice_crystal_radius(ice_gm3, icnc, params)   # [µm]
-    zrieff = jnp.clip(zrieff, params.ceffmin, params.ceffmax)
-
-    # Schumann et al. (2011) parameterisation: r_vol from r_eff
-    # zrih = -2261 + sqrt(5113188 + 2809*zrieff^3); zrice = 1e-6 * zrih^(1/3)
-    zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
-    zrice = 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
+    zrice = ice_volume_mean_radius(ice_gm3, icnc, params)   # [m]
 
     # -------------------------------------------------------------------------
     # 4. Bergeron-Findeisen threshold vertical velocity

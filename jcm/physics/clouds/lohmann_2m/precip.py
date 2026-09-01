@@ -14,7 +14,7 @@ import jcm.constants as c
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     consistency_number_to_mass,
-    eff_ice_crystal_radius,
+    ice_volume_mean_radius,
     gridbox_frac_falling_hydrometeor,
 )
 from .types import microphysics_dt_constants
@@ -533,16 +533,8 @@ def precip_formation_cold(
     # Convert in-cloud ice from kg/kg to in-cloud g/m^3: 1000*pxib*prho
     ice_gm3 = 1000.0 * in_cloud_ice * air_density
 
-    # eff_ice_crystal_radius expects (ice_gm3, icnc). If you already have such a helper,
-    # call it; otherwise this will need to be implemented.
-    zrieff = eff_ice_crystal_radius(ice_gm3, ice_number, params)  # [micron] typically (scheme-dependent)
-
-    # Clip effective radius bounds
-    zrieff = jnp.minimum(jnp.maximum(zrieff, params.ceffmin), params.ceffmax)
-
-    # Compute zrih then zris = 1e-6 * zrih**(1/3)
-    zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
-    zris = 1.0e-6 * (zrih ** (1.0 / 3.0))
+    # Volume-mean crystal radius [m] for the aggregation kernel below.
+    zris = ice_volume_mean_radius(ice_gm3, ice_number, params)
 
     # Fortran MERGE(..., 1., ll1): just ensure non-zero where masked off
     zris = jnp.where(ll1, zris, 1.0)

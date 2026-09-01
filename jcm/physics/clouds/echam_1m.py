@@ -23,6 +23,7 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 import jcm.constants as c
+from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
 
 
 @tree_math.struct
@@ -1205,9 +1206,10 @@ class Echam1MMicrophysics(PhysicsTerm):
     Reads ``pressure_full``, ``air_density``, ``layer_thickness`` from
     the moist-air diagnostics dict and the model timestep from
     ``diagnostics["_dt_seconds"]`` (injected by ``ComposablePhysics``).
-    Writes ``precip_rain``, ``precip_snow``, ``droplet_number`` back
-    into the public ``"clouds"`` key (preserving the upstream
-    ``cloud_fraction`` / ``qc`` / ``qi`` fields).
+    Writes ``precip_rain``, ``precip_snow``, ``droplet_number`` and the
+    droplet effective radius ``r_eff_liq`` back into the public
+    ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
+    ``qc`` / ``qi`` fields).
     """
 
     name: ClassVar[str] = "echam_1m_microphysics"
@@ -1372,6 +1374,21 @@ class Echam1MMicrophysics(PhysicsTerm):
             ).T / dm_col.T,
             precip_evaporation_rate=micro_state.rain_evap_flux.T / dm_col.T,
             droplet_number=cdnc_m3,
+            # Droplet effective radius (um) for radiation, from the same ECHAM
+            # law as the 2M scheme. The in-cloud liquid is the POST-microphysics
+            # value, not ``micro_state.qc_in_cloud`` (which the sweep derives
+            # from its INPUT state): radiation must see the size distribution of
+            # the ``qc`` it is given, as on the 2M path. No temperature mask —
+            # supercooled liquid is radiatively active liquid.
+            r_eff_liq=eff_liquid_droplet_radius(
+                jnp.where(
+                    cloud_fraction > params.epsilon,
+                    (qc_interim + micro_tend.dqcdt.T * dt)
+                    / jnp.maximum(cloud_fraction, params.epsilon),
+                    0.0,
+                ),
+                air_density, cdnc_m3, params.epsilon,
+            ),
         )
 
         # Advance the running condensate view so terms downstream (the
