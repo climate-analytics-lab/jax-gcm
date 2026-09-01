@@ -1,0 +1,17 @@
+schema_version = 1
+workspace = "./benchmark-workspace"
+site = "sgp"
+facility = "C1"
+datastream = "sgpmicrobaseC1.c1"
+order_id = "268516"
+
+[download]
+base_url = "https://thredds-ui.svcs.arm.gov/thredds/fileServer/orders/fisherm1/268516/sgpmicrobaseC1.c1"
+cookie_env = "THREDDS_COOKIE"
+expected_minimum_bytes = 600000000
+minimum_free_bytes = 0
+maximum_staged_raw_bytes = 26843545600
+
+[companions.2011]
+atmosphere = "./benchmark/companions/sgparmbeatmC1.c1.20110101.000000.cdf"
+cldrad = "./benchmark/companions/sgparmbecldradC1.c1.20110101.003000.nc"

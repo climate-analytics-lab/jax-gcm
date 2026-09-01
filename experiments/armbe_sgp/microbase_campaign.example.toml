@@ -1,0 +1,28 @@
+schema_version = 1
+workspace = "./workspace"
+site = "sgp"
+facility = "C1"
+datastream = "sgpmicrobaseC1.c1"
+order_id = "268516"
+
+[download]
+base_url = "https://thredds-ui.svcs.arm.gov/thredds/fileServer/orders/fisherm1/268516/sgpmicrobaseC1.c1"
+cookie_env = "THREDDS_COOKIE"
+expected_minimum_bytes = 600000000
+minimum_free_bytes = 32212254720
+maximum_staged_raw_bytes = 26843545600
+
+[companions.2011]
+atmosphere = "./benchmark/companions/sgparmbeatmC1.c1.20110101.000000.cdf"
+cldrad = "./benchmark/companions/sgparmbecldradC1.c1.20110101.003000.nc"
+
+[remote]
+host = "roselab1.ucsd.edu"
+port = 12000
+user = "ubuntu"
+identity = "~/.ssh/mfisher"
+staging_root = "/home/ubuntu/microbase-staging"
+publish_root = "/data/MOSAIC/jax-gcm/experiments/armbe_sgp/outputs/microbase_sgp"
+python = "/data/MOSAIC/tools/python/cpython-3.12.12-linux-x86_64-gnu/bin/python3.12"
+pythonpath = "/data/MOSAIC/jax-gcm:/data/MOSAIC/.venv/lib/python3.12/site-packages"
+pipeline_script = "/data/MOSAIC/jax-gcm/experiments/armbe_sgp/microbase_mac_pipeline.py"
