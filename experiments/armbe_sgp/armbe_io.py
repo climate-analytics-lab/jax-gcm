@@ -40,6 +40,7 @@ import numpy as np
 import xarray as xr
 import jax.numpy as jnp
 
+from microbase_physics import saturation_vapor_pressure_hpa
 from jcm.physics.speedy.speedy_coords import compute_speedy_vertical_coords
 from jcm.constants import p0, rd
 from jcm.forcing import BY_DATE, ForcingData, make_time_series
@@ -130,12 +131,6 @@ def describe_vars(ds: xr.Dataset) -> dict[str, str | None]:
 # moisture
 # --------------------------------------------------------------------------
 
-def _saturation_vapor_pressure_hpa(t_kelvin: np.ndarray) -> np.ndarray:
-    """Magnus/Tetens saturation vapour pressure over water [hPa]."""
-    t_c = t_kelvin - 273.15
-    return 6.112 * np.exp(17.67 * t_c / (t_c + 243.5))
-
-
 def specific_humidity_from_dewpoint(dewpoint_k: np.ndarray,
                                      pressure_hpa: np.ndarray) -> np.ndarray:
     """Specific humidity [kg/kg] from dewpoint [K] and pressure [hPa].
@@ -143,7 +138,7 @@ def specific_humidity_from_dewpoint(dewpoint_k: np.ndarray,
     Vapour pressure at the dewpoint is the actual vapour pressure, so
     ``e = e_sat(Td)`` and ``q = eps*e / (p - (1-eps)*e)`` with eps = 0.622.
     """
-    e = _saturation_vapor_pressure_hpa(dewpoint_k)
+    e = saturation_vapor_pressure_hpa(dewpoint_k)
     eps = 0.622
     return eps * e / np.maximum(pressure_hpa - (1.0 - eps) * e, 1e-6)
 
@@ -151,7 +146,7 @@ def specific_humidity_from_dewpoint(dewpoint_k: np.ndarray,
 def specific_humidity_from_rh(rh_percent: np.ndarray, t_kelvin: np.ndarray,
                                pressure_hpa: np.ndarray) -> np.ndarray:
     """Specific humidity [kg/kg] from RH [%], temperature [K], pressure [hPa]."""
-    e = np.clip(rh_percent, 0.0, 100.0) / 100.0 * _saturation_vapor_pressure_hpa(t_kelvin)
+    e = np.clip(rh_percent, 0.0, 100.0) / 100.0 * saturation_vapor_pressure_hpa(t_kelvin)
     eps = 0.622
     return eps * e / np.maximum(pressure_hpa - (1.0 - eps) * e, 1e-6)
 

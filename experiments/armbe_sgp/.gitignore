@@ -9,3 +9,12 @@ outputs/
 *.nc
 *.npz
 __pycache__/
+.venv-microbase/
+microbase_campaign.toml
+workspace/
+benchmark-workspace/
+pipeline.sqlite3*
+*.part
+packages/
+receipts/
+dist/

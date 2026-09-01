@@ -11,17 +11,17 @@ archive or claim a globally valid ECHAM closure.
 
 ## Stage 0: Freeze The Pilot Question
 
-- [ ] Define the primary target as layer cloud fraction, not column-total cloud.
-- [ ] Define one sample as an aggregated `(site, time window, ECHAM layer)` row.
-- [ ] Select SGP production MICROBASE and overlapping ARMBEATM/ARMBECLDRAD.
-- [ ] Select a limited initial period, preferably one month before expanding to
+- [x] Define the primary target as layer cloud fraction, not column-total cloud.
+- [x] Define one sample as an aggregated `(site, time window, ECHAM layer)` row.
+- [x] Select SGP production MICROBASE and overlapping ARMBEATM/ARMBECLDRAD.
+- [x] Select a limited initial period, preferably one month before expanding to
       one year.
-- [ ] Declare ECHAM 1-moment physics as the online host.
-- [ ] Declare the candidate insertion point: replace Sundqvist cloud fraction
+- [x] Declare ECHAM 1-moment physics as the online host.
+- [x] Declare the candidate insertion point: replace Sundqvist cloud fraction
       before RRTMGP, using only variables available at that point.
-- [ ] State that this is Grundner-inspired feature exploration, not an exact
+- [x] State that this is Grundner-inspired feature exploration, not an exact
       DYAMOND reproduction.
-- [ ] Reserve a fresh outer holdout before inspecting candidate performance.
+- [x] Reserve a fresh outer holdout before inspecting candidate performance.
 
 **Artifact:** `echam_pilot_protocol.md`
 
@@ -30,17 +30,17 @@ primary metrics are fixed before downloading or fitting.
 
 ## Stage 1: Audit MICROBASE Semantics
 
-- [ ] Record datastream name, product generation, file version, cadence, height
+- [x] Record datastream name, product generation, file version, cadence, height
       grid, units, and retrieval documentation.
-- [ ] Identify liquid-water concentration, ice-water concentration, uncertainty,
+- [x] Identify liquid-water concentration, ice-water concentration, uncertainty,
       QC, retrieval, cloud/clear, and precipitation fields.
-- [ ] Determine whether liquid/ice concentrations are in-cloud or grid/time mean.
-- [ ] Determine how clear sky, below-detection condensate, retrieval failure, and
+- [x] Determine whether liquid/ice concentrations are in-cloud or grid/time mean.
+- [x] Determine how clear sky, below-detection condensate, retrieval failure, and
       missing data are encoded.
 - [ ] Determine how mixed-phase and precipitating profiles are treated.
-- [ ] Verify whether uncertainty fields are random-only or include systematic
+- [x] Verify whether uncertainty fields are random-only or include systematic
       retrieval uncertainty.
-- [ ] Confirm that MICROBASE and ARMBE `qc_*` names are not confused: ARMBE
+- [x] Confirm that MICROBASE and ARMBE `qc_*` names are not confused: ARMBE
       `qc_*` fields are quality flags, not cloud-liquid `qc`.
 
 **Artifact:** `microbase_data_dictionary.json`
@@ -50,13 +50,13 @@ sample to valid liquid/ice condensate, clear, missing, or excluded status.
 
 ## Stage 2: Acquire A Bounded Collocated Sample
 
-- [ ] Query only the selected SGP period; do not bulk-download the archive.
+- [x] Query only the selected SGP period; do not bulk-download the archive.
 - [ ] Download matching MICROBASE, ARMBEATM, and ARMBECLDRAD daily files.
-- [ ] Record ARM order/query details and source filenames.
-- [ ] Compute checksums and retain product/version metadata.
-- [ ] Verify UTC timestamps are monotonic and duplicate-free.
-- [ ] Verify height coordinates and identify days with exact 596-level alignment.
-- [ ] Quantify missing, invalid, precipitating, and retrieval-failure fractions.
+- [x] Record ARM order/query details and source filenames.
+- [x] Compute checksums and retain product/version metadata.
+- [x] Verify UTC timestamps are monotonic and duplicate-free.
+- [x] Verify height coordinates and identify days with exact 596-level alignment.
+- [x] Quantify missing, invalid, precipitating, and retrieval-failure fractions.
 - [ ] Produce quick time-height plots for several clear, liquid, ice, mixed-phase,
       and precipitating cases.
 
@@ -67,11 +67,11 @@ automated QC, with no unresolved unit or coordinate ambiguity.
 
 ## Stage 3: Define The Observational Operator
 
-- [ ] Derive cloud occurrence from valid high-frequency radar/lidar masks.
+- [x] Derive cloud occurrence from valid high-frequency radar/lidar masks.
 - [ ] Calculate layer occurrence over 15-, 30-, 60-, 120-, and 360-minute windows.
 - [ ] Aggregate thermodynamic and condensate inputs over the same windows.
 - [ ] Keep valid-sample counts and target standard errors for every layer/window.
-- [ ] Compare derived occurrence with archived hourly ARMBE `cld_frac`.
+- [x] Compare derived occurrence with archived hourly ARMBE `cld_frac`.
 - [ ] Test sensitivity to averaging duration, minimum valid-profile count, and
       precipitation exclusion.
 - [ ] Estimate sampled horizontal distance as wind speed times averaging time.
@@ -88,8 +88,8 @@ comparison uncertainty.
 
 ## Stage 4: Convert To ECHAM-Compatible Profiles
 
-- [ ] Compute collocated air density from pressure, temperature, and moisture.
-- [ ] Convert MICROBASE concentration from `g m-3` to mixing ratio `kg kg-1`:
+- [x] Compute collocated air density from pressure, temperature, and moisture.
+- [x] Convert MICROBASE concentration from `g m-3` to mixing ratio `kg kg-1`:
 
 ```text
 qc = 1e-3 * liquid_water_concentration / air_density
@@ -158,7 +158,7 @@ variant crosses split boundaries.
 - [ ] Fit a train-only calibrated Sundqvist baseline.
 - [ ] Evaluate an RH/temperature-only compact baseline.
 - [ ] Evaluate `qc/qi` without derivatives.
-- [ ] Evaluate the published Grundner equation with verified units and gate.
+- [x] Evaluate the published Grundner equation with verified units and gate.
 - [ ] Train a declared MLP capacity baseline on the richest permitted features.
 - [ ] Report raw and physically bounded predictions separately.
 
@@ -189,12 +189,13 @@ holdout or choosing a preferred equation by eye afterward.
 ## Stage 9: Run Offline Search And Diagnostics
 
 - [ ] Run thermodynamic-only, condensate, and condensate-derivative ablations.
-- [ ] Evaluate all frontier equations on full validation blocks.
+- [x] Evaluate all frontier equations on full validation blocks.
 - [ ] Reject nonfinite, unsafe, unavailable-feature, or shape-invalid equations.
 - [ ] Inspect response derivatives and off-manifold perturbations.
 - [ ] Check monotonicity and behavior near zero condensate and phase transitions.
 - [ ] Check recurrence across seeds/folds and averaging windows.
-- [ ] Compare against Sundqvist, Grundner, and MLP baselines.
+- [x] Compare against Sundqvist and Grundner baselines; the ECHAM-layer MLP
+      baseline remains pending.
 - [ ] Freeze finalists before touching the outer holdout.
 
 **Primary offline metrics:** layer RMSE/Brier score, bias, calibration,
