@@ -60,12 +60,6 @@ from the saved fluxes and compared against the saved temperature, or a
 mass-weighted tracer burden, simply came out vertically reversed with a
 plausible magnitude.
 
-The failure mode is not "someone forgot to flip an array" — it is that the
-flip was expressible per-variable at all. Routing every backend through one
-function means a new interface diagnostic is oriented correctly by
-construction, and `jcm/utils.py::data_to_xarray` can stay what it is: a
-shape→dims mapper with no opinion about direction.
-
 ## Self-describing metadata
 
 Orientation used to be discoverable only by reading pressure values off each
@@ -96,13 +90,6 @@ coordinate values themselves (they descend from ~1 towards 0) and is stated in
 `height_*`: CF defines it for vertical coordinate variables, and those are data
 variables. Their orientation is that of the axis they sit on, and both axes now
 agree.
-
-## Both backends, one name
-
-The dinosaur and pySES backends previously named the interface axis
-differently (`level_i` vs `level_interface`), so a reader had to try both.
-They now agree on `level_i`, and pySES's interface axis gains the coordinate
-values and attributes it never had.
 
 ## Reading states back
 

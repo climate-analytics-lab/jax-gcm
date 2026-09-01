@@ -499,11 +499,9 @@ The model output is a :py:class:`Predictions` object containing the model state 
    # Print variables
    print(ds.data_vars)
 
-   # Plot surface temperature evolution. Select by coordinate value, not by
-   # index: both vertical axes are surface-first (``level`` ~ 1 at the ground,
-   # ~1e-5 at the model top), but say so through ``sel`` rather than baking an
-   # index into the analysis.
-   ds['temperature'].sel(level=1.0, method='nearest').mean(dim='lon').plot()
+   # Plot surface temperature evolution. Output is surface-first, so index 0
+   # is the level nearest the ground on both vertical axes.
+   ds['temperature'].isel(level=0).mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 

@@ -95,15 +95,8 @@ def _block_until_ready(predictions):
 def _load_spinup_state():
     """Load the saved spun-up nodal PhysicsState as the initial condition.
 
-    ``spinup_state.nc`` is written by ``ModelPredictions.to_xarray()`` and is
-    therefore surface-first with a real descending ``level`` sigma coordinate.
-    ``load_states_from_xarray`` detects that orientation and flips the Dataset
-    back to the top-first physics frame the model expects (#741), so the
-    returned state is correctly oriented.
-
-    ``default_statistics.nc`` is generated through this orientation-aware loader
-    (#744): the committed bands describe a run started from the correctly
-    top-first initial state.
+    Returns the state in the top-first physics frame the model expects;
+    ``load_states_from_xarray`` handles the file's on-disk orientation.
     """
     import xarray as xr
     from jcm.utils import load_states_from_xarray
