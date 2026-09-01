@@ -47,6 +47,13 @@ Vertical modes: `"altitude"` (linear in height against the sampled `z_full`
 profile; heights above the geoid), `"pressure"` (linear in log-p), `"surface"`
 (2-D fields only), `"profile"` (whole columns — e.g. for satellite curtains).
 
+In `"profile"` mode the sampler returns columns in the top-first physics frame
+(`preds.observations` is raw), and `to_dataset` reverses them so the emitted
+`level` axis is **surface-first**, carrying the same sigma coordinate and CF
+attributes as the trajectory file. A curtain and the gridded output can
+therefore be compared level-for-level without an orientation check — see
+[output_vertical_conventions](output_vertical_conventions.md).
+
 ## Design decisions
 
 **Time is snapped to the model timestep in the scan; exact obs times are a

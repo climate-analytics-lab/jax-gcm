@@ -605,7 +605,10 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
-from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
+from jcm.physics.radiation.radiation_types import (  # noqa: E402
+    RADIATION_OUTPUT_ATTRS,
+    RadiationData,
+)
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
@@ -650,6 +653,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
+    # CF/units metadata for the ``radiation.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = RADIATION_OUTPUT_ATTRS
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""

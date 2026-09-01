@@ -629,7 +629,10 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.clouds.cloud_data import CloudData  # noqa: E402
+from jcm.physics.clouds.cloud_data import (  # noqa: E402
+    CLOUD_OUTPUT_ATTRS,
+    CloudData,
+)
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -671,6 +674,9 @@ class SundqvistCloudFraction(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds", "relative_humidity")
+    # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
+    # the microphysics terms that fill the rest of the CloudData struct.
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
     # step from RH and the dynamics tracers, so the zero seed is
     # overwritten on the first compute call. Downstream microphysics

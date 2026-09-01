@@ -137,6 +137,56 @@ class TestFakeCubedSphereDycoreProtocol(unittest.TestCase):
         self.assertTrue(jnp.allclose(scaled.temperature, 0.0))
 
 
+class TestNonModalTrajectoryAppliesTermAttrs(unittest.TestCase):
+    """A non-modal (delegated) trajectory must still get per-term metadata.
+
+    ``ModelPredictions._trajectory_dataset`` short-circuits to the dycore's own
+    ``to_xarray`` for a backend whose horizontal grid has no ``modal_axes``
+    (pySES cubed-sphere columns). That early return must still stamp the
+    per-term ``output_attrs`` (#740) — otherwise pySES output loses the
+    radiation/cloud/convection units the dinosaur path applies.
+    """
+
+    def test_delegated_path_stamps_output_attrs(self):
+        import numpy as np
+        import xarray as xr
+
+        from jcm.dycore.base import Predictions
+        from jcm.predictions import ModelPredictions
+
+        class _FakeDycore:
+            def to_xarray(self, predictions, times, **kwargs):
+                # Stand-in for a backend that has already run
+                # cf_metadata.finalize_output; carries a term-declared name.
+                return xr.Dataset(
+                    {"radiation.lw_flux_up": ("time", np.zeros(len(times)))},
+                    coords={"time": np.asarray(times)},
+                )
+
+        class _FakeHorizontal:  # no ``modal_axes`` -> delegation branch
+            pass
+
+        class _FakeCoords:
+            horizontal = _FakeHorizontal()
+
+        class _FakePhysics:
+            def output_attrs(self):
+                return {"radiation.lw_flux_up": {
+                    "units": "W m-2",
+                    "standard_name": "upwelling_longwave_flux_in_air",
+                    "long_name": "upward longwave flux"}}
+
+        preds = Predictions(dynamics=None, physics=None,
+                            times=np.array([0.0]))
+        mp = ModelPredictions(preds, _FakeCoords(), _FakePhysics(),
+                              dycore=_FakeDycore())
+        ds = mp._trajectory_dataset()
+        attrs = ds["radiation.lw_flux_up"].attrs
+        self.assertEqual(attrs["units"], "W m-2")
+        self.assertEqual(attrs["standard_name"],
+                         "upwelling_longwave_flux_in_air")
+
+
 class TestVerifyStatePreservesCubedSphereShape(unittest.TestCase):
     """``verify_state`` is dycore-agnostic; it must not reshape on output."""
 

@@ -20,6 +20,7 @@ import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics import thermodynamics
 from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -1017,6 +1018,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "autoconv", "accretn", "wbf", "clouds",
     )
+    # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
+    # the cover term; this term fills the precip / 2M / process-rate fields.
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
     def __init__(self, params: 'CloudParams2M | None' = None):
         """Hold the scheme-native :class:`CloudParams2M`."""

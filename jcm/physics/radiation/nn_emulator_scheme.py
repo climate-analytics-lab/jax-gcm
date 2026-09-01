@@ -17,6 +17,7 @@ import jax.numpy as jnp
 from jcm.physics.coords_util import column_lat_lon
 
 from jcm.physics.radiation.radiation_types import (
+    RADIATION_OUTPUT_ATTRS,
     RadiationParameters,
     RadiationTendencies,
     RadiationData,
@@ -234,6 +235,8 @@ class NNEmulatorRadiation(PhysicsTerm):
         "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
+    # CF/units metadata for the ``radiation.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = RADIATION_OUTPUT_ATTRS
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters` (with NN weights)."""

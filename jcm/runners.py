@@ -1767,7 +1767,13 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
 
 
 def _load_states_from_cfg(cfg: DictConfig):
-    """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``."""
+    """Open ``cfg.run.state_file`` and return a stacked ``PhysicsState``.
+
+    ``state_file`` is a netCDF from a previous JCM run, i.e. surface-first;
+    ``load_states_from_xarray`` detects that and returns a top-first
+    physics-frame state (#741), which is what the SCM / prescribed-state
+    runners expect.
+    """
     state_file = _resolve_data_path(cfg.run.get("state_file", None))
     if not state_file:
         raise ValueError(

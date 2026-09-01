@@ -13,7 +13,7 @@ Date: 2026-04-12
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping
 
 import jax.numpy as jnp
 from flax import nnx
@@ -90,6 +90,23 @@ class PhysicsTerm(nnx.Module):
     # descriptions, which ``ModelPredictions.to_xarray`` attaches to the
     # dataset. Columns: Variable, Units, <source name>, Description.
     UNITS_TABLE_CSV_PATH: ClassVar = None
+
+    # CF/units metadata for the OUTPUT variables this term produces, keyed by
+    # the variable names as they appear in the xarray Dataset — a top-level
+    # diagnostic key (e.g. ``"cloud_fraction"``) or a dotted sub-struct key
+    # (e.g. ``"radiation.lw_flux_up"``, the flattening of the ``radiation``
+    # diagnostic's ``lw_flux_up`` field). Each value is an attribute dict:
+    # ``units`` (required), and optionally ``standard_name`` / ``long_name``.
+    #
+    # This is the home for a diagnostic's metadata: it lives next to the code
+    # that computes the field, not in a separate drifting CSV. ``predictions``
+    # aggregates it across terms (see ``ComposablePhysics.output_attrs``) and
+    # applies it to the Dataset AFTER the per-physics units CSVs — so a term
+    # declaration overrides the CSV — but BEFORE ``cf_metadata``, whose few
+    # curated names (the vertical-coordinate neighbourhood, core prognostics)
+    # win last (#740). Only claim units the code actually documents; a wrong
+    # unit is worse than an absent one.
+    output_attrs: ClassVar[Mapping[str, Mapping[str, str]]] = {}
 
     def withheld_output_keys(self) -> tuple[str, ...]:
         """``<struct>.<field>`` keys this configuration never populates.

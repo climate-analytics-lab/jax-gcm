@@ -1184,6 +1184,7 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -1218,6 +1219,9 @@ class Echam1MMicrophysics(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "autoconv", "accretn", "wbf", "clouds",
     )
+    # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
+    # the cover term; this term fills the precip/process-rate fields.
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
     def __init__(self, params: MicrophysicsParameters | None = None):
         """Hold the scheme-native :class:`MicrophysicsParameters`."""

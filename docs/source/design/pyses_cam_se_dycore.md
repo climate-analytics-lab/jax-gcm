@@ -87,9 +87,12 @@ forcing interpolation, output regrid weights).
   for higher-resolution forcing.
 - **Output.** `to_xarray` bin-averages the columns onto a regular lat/lon
   grid sized to ~1 column per box (empty boxes filled from the nearest
-  column), flips levels to the repo's surface-first output convention, and
-  attaches nominal-σ and hybrid (a, b) level coordinates so analysis selects
-  by value, never by blind index.
+  column), flips both vertical axes to the repo's surface-first output
+  convention, and hands off to `jcm.cf_metadata.finalize_output` for the
+  nominal-σ / hybrid (a, b) coordinates and CF attributes, so analysis selects
+  by value, never by blind index. The interface axis is named `level_i`, the
+  same as the dinosaur backend's — see
+  [output_vertical_conventions](output_vertical_conventions.md).
 
 ## Usage
 

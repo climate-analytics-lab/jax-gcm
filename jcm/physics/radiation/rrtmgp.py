@@ -30,6 +30,7 @@ from jax import lax
 from jax_solar import OrbitalTime, direct_solar_irradiance, get_solar_sin_altitude
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields
 from jcm.physics.radiation.radiation_types import (
+    RADIATION_OUTPUT_ATTRS,
     RadiationParameters,
     RadiationTendencies,
     RadiationData,
@@ -1026,6 +1027,8 @@ class RRTMGPRadiation(PhysicsTerm):
         "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
+    # CF/units metadata for the ``radiation.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = RADIATION_OUTPUT_ATTRS
 
     def __init__(
         self,

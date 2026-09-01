@@ -295,3 +295,49 @@ class ConvectionData:
             heating_rate=jnp.zeros((nlev,) + nodal_shape),
             moistening_rate=jnp.zeros((nlev,) + nodal_shape),
         )
+
+
+#: CF/units metadata for the :class:`ConvectionData` fields as they appear in
+#: the output Dataset — flattened to ``convection.<field>`` keys (#740). Set as
+#: ``output_attrs`` on :class:`TiedtkeConvection`. Units are taken verbatim from
+#: the field comments above; CF standard names are used only where exact.
+CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
+    "convection.mass_flux_up": {
+        "standard_name": "atmosphere_updraft_convective_mass_flux",
+        "units": "kg m-2 s-1", "long_name": "updraft convective mass flux"},
+    "convection.mass_flux_down": {
+        "standard_name": "atmosphere_downdraft_convective_mass_flux",
+        "units": "kg m-2 s-1", "long_name": "downdraft convective mass flux"},
+    "convection.entrain_up": {
+        "units": "kg m-2 s-1",
+        "long_name": "updraft entrainment flux per layer"},
+    "convection.entrain_down": {
+        "units": "kg m-2 s-1",
+        "long_name": "downdraft entrainment flux per layer"},
+    "convection.cloud_base": {
+        "units": "1", "long_name": "convective cloud base level index"},
+    "convection.cloud_top": {
+        "units": "1", "long_name": "convective cloud top level index"},
+    "convection.cape": {
+        "units": "J kg-1",
+        "long_name": "convective available potential energy"},
+    "convection.ktype": {
+        "units": "1",
+        "long_name": "convection type (0=off, 1=deep, 2=shallow, 3=mid)"},
+    "convection.precip_conv": {
+        "standard_name": "convective_precipitation_flux",
+        "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.qc_conv": {
+        "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
+    "convection.precip_formation": {
+        "units": "kg m-2 s-1",
+        "long_name": "per-layer updraft precipitation generation"},
+    "convection.qi_conv": {
+        "units": "kg kg-1", "long_name": "convective cloud ice mixing ratio"},
+    "convection.heating_rate": {
+        "standard_name": "tendency_of_air_temperature_due_to_convection",
+        "units": "K s-1", "long_name": "convective heating rate"},
+    "convection.moistening_rate": {
+        "standard_name": "tendency_of_specific_humidity_due_to_convection",
+        "units": "kg kg-1 s-1", "long_name": "convective moistening rate"},
+}
