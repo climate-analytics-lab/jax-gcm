@@ -2089,6 +2089,13 @@ class TestEmissionAutoResolution(unittest.TestCase):
         self.assertEqual(_resolve_grid_placeholders("/a/b.nc", coords),
                          "/a/b.nc")
         self.assertIsNone(_resolve_grid_placeholders(None, coords))
+        # A {year} pattern must survive grid resolution intact: grid runs
+        # before _expand_years, so a blanket str.format would raise
+        # KeyError: 'year' and break the year-matched-emissions workflow.
+        self.assertEqual(
+            _resolve_grid_placeholders(
+                "hf://bundles/{grid}/emissions/{year}.nc", coords),
+            "hf://bundles/t63/emissions/{year}.nc")
 
     def test_auto_builds_per_grid_bundle_for_jam(self):
         from unittest import mock
@@ -2164,3 +2171,54 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             with self.assertRaises(FileNotFoundError) as ctx:
                 build_forcing(cfg, coords)
         self.assertIn("hf://bundles/t42/", str(ctx.exception))
+
+    def test_grid_and_year_placeholders_resolve_end_to_end(self):
+        """``{grid}`` + ``{year}`` in an emissions path survive to the loader.
+
+        Grid resolution runs before ``_expand_years``; a year-varying emissions
+        input must keep its ``{year}`` through grid substitution so the yearly
+        expansion (issue #610) then produces one grid-resolved file per year.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey",
+            *_NULL_EMISSIONS,
+        ])
+        # Set the placeholder path and year range directly: the Hydra override
+        # grammar treats the ``{`` in ``{grid}``/``{year}`` as syntax, so it
+        # cannot be passed on the command line — but a preset yaml carries it
+        # verbatim. ``years`` is likewise not in the base forcing struct.
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.emissions_file = "hf://bundles/{grid}/emis/{year}.nc"
+        cfg.forcing.years = [2000, 2001]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                           return_value={"sector": object()}), \
+                mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                           return_value=None), \
+                mock.patch("jcm.forcing.validate_emissions_grid"):
+            build_forcing(cfg, coords)
+
+        # {grid} resolved to t42, {year} expanded to the inclusive range.
+        self.assertEqual(
+            seen["paths"],
+            ["hf://bundles/t42/emis/2000.nc", "hf://bundles/t42/emis/2001.nc"])

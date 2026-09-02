@@ -902,11 +902,18 @@ def _resolve_grid_placeholders(path, coords):
     level count, so one config path serves every resolution (e.g.
     ``hf://bundles/{grid}_l{nlev}/oxidants_pd.nc``). Non-string or
     placeholder-free paths pass through unchanged.
+
+    Only these two recognised placeholders are substituted; any *other* brace
+    token is left verbatim. This matters because grid resolution runs *before*
+    ``_expand_years`` sees the path, so a year-varying transient input like
+    ``hf://bundles/{grid}/forcing_amip/{year}.nc`` must keep its ``{year}`` for
+    the later yearly-file expansion — a blanket ``str.format`` would raise
+    ``KeyError: 'year'`` here and break the year-matched-emissions workflow.
     """
     if not (isinstance(path, str) and "{" in path):
         return path
-    return path.format(grid=_grid_token(coords),
-                       nlev=int(coords.nodal_shape[0]))
+    return (path.replace("{grid}", _grid_token(coords))
+                .replace("{nlev}", str(int(coords.nodal_shape[0]))))
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
