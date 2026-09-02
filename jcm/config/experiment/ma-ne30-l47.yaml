@@ -1,0 +1,31 @@
+# @package _global_
+#
+# pySES CAM-SE ne30L47 with ECHAM+JAM physics — dycore comparison.
+#
+# Compose it with a single command:
+#
+#   python -m jcm.main +experiment=ma-ne30-l47
+#
+# WHY each setting (mined from tools/benchmark.py's validated PRESETS):
+#  - physics=echam-jam: same physics as the spectral MA sweep.
+#  - dycore=pyses_ne30l47: pySES CAM-SE backend. Resolution comes from
+#    the dycore config (nx/npt/nlev), so there is NO grid= override.
+#  - init is left at the config default (isothermal): pySES REJECTS the
+#    dinosaur-specific JW init and initialises from its own USSA-1976
+#    resting state.
+#  - NO run.time_step: the Model adopts the dycore's dt_seconds (900 s).
+#  - NO sl_off_centering: pySES does its own tracer sub-cycling.
+#  - terrain is NOT overridden: pySES bilinearly interpolates the packaged
+#    T63 field onto its columns, matching the validated 2026-07 campaign.
+#  - forcing=from_file + hf:// present-day T63 SST bundle; ozone from the
+#    level-matched mirror bundle (L47). run=pyses_year carries the
+#    finite-lid sponge (dycore.lid_sponge) + health-gated chunking.
+defaults:
+  - override /physics: echam-jam
+  - override /dycore: pyses_ne30l47
+  - override /forcing: from_file
+  - override /run: pyses_year
+
+forcing:
+  file: hf://bundles/t63/forcing_pd.nc
+  ozone_file: hf://bundles/t63_l47/ozone_pd.nc

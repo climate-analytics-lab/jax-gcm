@@ -138,6 +138,80 @@ class TestConfigComposition(unittest.TestCase):
         self.assertEqual(cfg.init.kind, "jw")
 
 
+class TestExperimentGroup(unittest.TestCase):
+    """The ``experiment`` group promotes each validated benchmark preset to a
+    first-class ``python -m jcm.main +experiment=<name>`` composition (#640
+    smell 2), so users get a validated configuration instead of a cold start.
+    """
+
+    EXPERIMENT_DIR = Path(__file__).parent / "config" / "experiment"
+
+    def _compose_hydra(self, name):
+        # ``return_hydra_config`` exposes ``cfg.hydra.runtime.choices`` so we
+        # can assert which group option each experiment selected.
+        with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+            return compose(config_name="config",
+                           overrides=[f"+experiment={name}"],
+                           return_hydra_config=True)
+
+    def test_every_experiment_composes(self):
+        names = sorted(p.stem for p in self.EXPERIMENT_DIR.glob("*.yaml"))
+        self.assertTrue(names, "experiment group is empty")
+        for name in names:
+            with self.subTest(experiment=name):
+                cfg = self._compose_hydra(name)
+                self.assertIn("physics", cfg.hydra.runtime.choices)
+                # The run schema is complete, so ``time_step`` always exists.
+                self.assertIn("time_step", cfg.run)
+
+    def test_load_bearing_values(self):
+        cases = {
+            "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
+                               init="isothermal", run="default", time_step=15),
+            "t63-echam-jam": dict(physics="echam-jam",
+                                  grid="echam_t63_l47_hybrid", init="jw",
+                                  run="longrun", time_step=12),
+            "ma-t63-l95": dict(physics="echam-jam",
+                               grid="echam_t63_l95_hybrid", init="jw",
+                               run="longrun", time_step=12),
+        }
+        for name, want in cases.items():
+            with self.subTest(experiment=name):
+                cfg = self._compose_hydra(name)
+                ch = cfg.hydra.runtime.choices
+                self.assertEqual(ch["physics"], want["physics"])
+                self.assertEqual(ch["grid"], want["grid"])
+                self.assertEqual(cfg.init.kind, want["init"])
+                self.assertEqual(ch["run"], want["run"])
+                self.assertEqual(cfg.run.time_step, want["time_step"])
+
+    def test_echam_experiments_use_dry_jw_and_sl_offcentering(self):
+        # The L47 stability recipe: fully-dry JW init + SL off-centering.
+        cfg = self._compose_hydra("t63-echam-rrtmgp")
+        self.assertEqual(cfg.init.kind, "jw")
+        self.assertEqual(cfg.init.rh, 0.0)
+        self.assertEqual(cfg.sl_off_centering, 0.2)
+
+    def test_pyses_experiment_keeps_isothermal_and_no_timestep(self):
+        # pySES rejects the dinosaur JW init and adopts the dycore dt_seconds,
+        # so its experiments override neither init nor run.time_step.
+        cfg = self._compose_hydra("ma-ne30-l47")
+        self.assertEqual(cfg.hydra.runtime.choices["dycore"], "pyses_ne30l47")
+        self.assertEqual(cfg.init.kind, "isothermal")
+        self.assertIsNone(cfg.run.time_step)
+
+    def test_speedy_experiment_builds_model(self):
+        # Cheap model-construction smoke on the smallest experiment. The big
+        # JAM/pySES experiments are deliberately NOT built here (too expensive
+        # and network-dependent); terrain/forcing are overridden to aquaplanet
+        # so the build needs no boundary-file fetch.
+        cfg = _compose(["+experiment=speedy-t31",
+                        "terrain=aquaplanet", "forcing=default"])
+        model = build_model(cfg)
+        self.assertIsNotNone(model)
+
+
+
 class TestBuilders(unittest.TestCase):
     def test_build_coords_speedy(self):
         cfg = _compose()

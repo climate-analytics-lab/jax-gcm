@@ -63,6 +63,24 @@ def jam_aux(grid: str, levels: str) -> list[str]:
     return ov
 
 
+def _preset_grid(preset_name: str) -> str | None:
+    """Return the grid config a preset composes to.
+
+    PRESETS entries are now a thin ``+experiment=<name>`` shim, so the grid is
+    inside the experiment yaml rather than a ``grid=`` override string. Compose
+    the preset (pure Hydra, no model build) and read the chosen grid group.
+    """
+    from pathlib import Path
+
+    import jcm
+    from hydra import compose, initialize_config_dir
+    cfgdir = str(Path(jcm.__file__).resolve().parent / "config")
+    with initialize_config_dir(config_dir=cfgdir, version_base=None):
+        cfg = compose(config_name="config", overrides=PRESETS[preset_name],
+                      return_hydra_config=True)
+    return cfg.hydra.runtime.choices.get("grid")
+
+
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     # Presets may carry their own output plumbing (the pyses ones set
     # run.checkpoint_path); ours must win, so strip conflicting keys
@@ -70,11 +88,10 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     preset = [o for o in PRESETS[m["preset"]]
               if not o.startswith(("run.checkpoint_path", "run.output",
                                    "hydra.run.dir"))]
-    grid = next((o.split("=", 1)[1] for o in preset
-                 if o.startswith("grid=")), None)
+    grid = _preset_grid(m["preset"]) if m.get("jam_inputs") else None
     if m.get("jam_inputs") and grid is None:
         raise SystemExit(
-            f"preset {m['preset']} declares no grid= override; JAM aux "
+            f"preset {m['preset']} composes no grid; JAM aux "
             "input resolution needs one.")
     ovs = [*preset,
            f"run.total_time={d['days']}.0",
@@ -83,9 +100,9 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            "run.output_averages=true", "run.log_level=INFO",
            f"run.output={name}.nc",
            f"run.output_prefix={rundir}/{name}",
-           # ++: defined by some run groups but not others (benchmark.py's
-           # bail_on_unhealthy note) — same for checkpoint_path.
-           f"++run.checkpoint_path={rundir}/checkpoint.msgpack"]
+           # checkpoint_path is now a universal run key (the run schema is one
+           # base -- #640), so a plain override sets it on every run group.
+           f"run.checkpoint_path={rundir}/checkpoint.msgpack"]
     if m.get("jam_inputs"):
         ovs += jam_aux(grid, m["jam_inputs"])
     return ovs

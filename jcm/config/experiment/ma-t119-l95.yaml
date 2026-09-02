@@ -1,0 +1,43 @@
+# @package _global_
+#
+# Middle-atmosphere JAM sweep at T119L95 — full JAM + semi-Lagrangian.
+#
+# Compose it with a single command:
+#
+#   python -m jcm.main +experiment=ma-t119-l95
+#
+# WHY each setting (mined from tools/benchmark.py's validated PRESETS):
+#  - physics=echam-jam: ECHAM + JAM modal aerosol (auto emission inputs).
+#  - grid=echam_t119_l95_hybrid: highest-resolution sweep member.
+#  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
+#    fully DRY start. An isothermal cold start goes NaN within days at L47;
+#    the dry-JW init lets radiation + surface fluxes moisten the column and
+#    avoids the moist-init day-12 blow-up.
+#  - terrain=from_file: T119 has NO mirror bundle. Supply a native T119
+#    orography file at run time (terrain.file=/path/to/T119_terrain.nc);
+#    left as the group's ??? so a missing path fails loudly.
+#  - forcing=from_file + hf:// present-day T63 SST bundle, interpolated to
+#    T119 by the loader. forcing.ozone_file: supply a level-matched L95
+#    T119 ozone file (no mirror bundle exists); left as auto here, which
+#    warns + falls back to the analytic profile if none is packaged.
+#  - run=longrun: 30-day health-gated chunks with the settled production
+#    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
+#    stratosphere; run.time_step=12 min is the conservative L47/L95 step.
+#  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
+#    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
+#    stated explicitly so the recorded config documents the value used.
+defaults:
+  - override /physics: echam-jam
+  - override /grid: echam_t119_l95_hybrid
+  - override /init: jw
+  - override /terrain: from_file
+  - override /forcing: from_file
+  - override /run: longrun
+
+init:
+  rh: 0.0
+forcing:
+  file: hf://bundles/t63/forcing_pd.nc
+run:
+  time_step: 12
+sl_off_centering: 0.2

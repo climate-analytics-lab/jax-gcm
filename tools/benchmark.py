@@ -85,212 +85,101 @@ _UNHEALTHY_RE = re.compile(r"atmosphere unhealthy|FAILED: T_min|FAILED: T_max"
                            r"|q_max=", re.I)
 _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 
-# Validated stable configurations. Each is the *known-good* override set for
-# that grid: an isothermal cold start with no sponge goes NaN within days at
-# L47, so these are not interchangeable with a bare `grid=` override.
-_T63_COMMON = [
-    "grid=echam_t63_l47_hybrid",
-    "init=jw", "init.rh=0.0",
-    "terrain=from_file", f"terrain.file={REPO}/jcm/data/bc/t63/terrain.nc",
-    "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-    # run=longrun already carries the settled production sponge config
-    # (levels=10, timescale_h=1.5, enspodi=2.0, damp_temperature=true,
-    # target_T_K=250 -- see the rationale in run/longrun.yaml). Do NOT
-    # re-specify those here: duplicating them invites drift from the
-    # validated values, which is how this preset briefly ran with
-    # target_T_K=270 against the repo's settled 250.
-    "run=longrun",
-    "run.time_step=12",
-]
-
-# No ozone override: `forcing.ozone_file: auto` is the shipped default and
-# resolves the packaged CMIP6 climatology `jcm/data/bc/t63/ozone.nc`, which
-# is already on the L47 model levels and already S->N. Confirm it in the log
-# ("forcing.ozone_file=auto resolved to ..."); a run that instead warns about
-# the ANALYTIC profile is NOT a valid benchmark of the radiation, since that
-# surrogate has ~7.6x the tropospheric ozone column.
-
-# Boundary data comes from the project's Hugging Face mirror (jax-gcm#515,
-# merged as #590) as ``hf://bundles/<grid>/<file>`` paths, which
-# ``jcm.runners._resolve_data_path`` fetches into the local HF cache. This
-# replaced a set of dev-box scratch paths that made every non-T63 preset
-# unrunnable anywhere else -- a container had no way to see them, which is
-# what kept T106+ out of the Nautilus sweep.
+# The experiment-group Hydra compositions (jcm/config/experiment/*.yaml) are the
+# single home of the validated override sets -- physics x grid x radiation
+# pairing x init x forcing -- each carrying a comment for WHY every setting is
+# what it is (an isothermal cold start with no sponge goes NaN within days at
+# L47, so these are not interchangeable with a bare ``grid=`` override). This
+# table is only a thin shim: it maps each benchmark id to ``+experiment=<name>``
+# plus the benchmark-ONLY overrides the yaml deliberately leaves out. Keeping
+# the science in the yamls means a hand-composed ``python -m jcm.main
+# +experiment=<name>`` and a benchmark run share one validated definition rather
+# than drifting apart.
 #
-# Every entry is grid-AND-level matched: terrain is horizontally resolved,
-# ozone is both. Getting this wrong does not fail loudly -- a mismatched
-# ozone silently falls back to the analytic profile (~7.6x the tropospheric
-# column) and a benchmark then measures the wrong radiative workload.
-#
-# The mirror carries t63 and t106 only. T119 has no bundle, so those presets
-# still point at prepared dev-box files and remain machine-local;
-# $JCM_BC_DIR overrides where they live.
-_ERA = "pd"                                  # present-day climatology bundles
-_MIRROR_GRIDS = ("t63", "t106")
+# The only benchmark-only overrides are machine-local data with no data-mirror
+# bundle (T119 native terrain + level-matched ozone under $JCM_BC_DIR) and
+# disposable output plumbing (the multi-GB pySES checkpoint, sent to scratch).
 _BC = pathlib.Path(os.environ.get("JCM_BC_DIR", "/scr/dwatsonparris/bc_l95"))
-_TERRAIN = {
-    "t63": "hf://bundles/t63/terrain.nc",
-    "t106": "hf://bundles/t106/terrain.nc",
-    "t119": str(_BC / "T119_terrain.nc"),
-}
 
 
-def _ma_preset(trunc: str, levels: int) -> list[str]:
-    """Middle-atmosphere sweep config: full JAM + 2M + semi-Lagrangian.
-
-    Mirrors the original MA L95 benchmark so numbers stay comparable, with
-    the boundary data moved onto the mirror. Terrain, SST forcing and ozone
-    are all grid-native now rather than a T63 field upsampled -- that costs
-    nothing at runtime (the loader interpolates once at startup, and the
-    arrays are the same shape either way) but it is the correct science, so
-    there is no reason to keep the downscale.
-    """
-    ov = [
-        "physics=echam-jam",
-        f"grid=echam_{trunc}_l{levels}_hybrid",
-        "init=jw", "init.rh=0.0",
-        "terrain=from_file", f"terrain.file={_TERRAIN[trunc]}",
-        "run=longrun", "run.time_step=12",
-        # Transport is always semi-Lagrangian now (the Eulerian path was
-        # removed); the SL dinosaur must be importable (--pythonpath or the
-        # requirements install), else the dycore raises. The off-centering
-        # matches the constructor/runner default — kept explicit so the
-        # recorded config documents the value the sweep ran with.
-        "+sl_off_centering=0.2",
-    ]
-    if trunc in _MIRROR_GRIDS:
-        ov += [
-            "forcing=from_file",
-            f"forcing.file=hf://bundles/{trunc}/forcing_{_ERA}.nc",
-            "forcing.ozone_file="
-            f"hf://bundles/{trunc}_l{levels}/ozone_{_ERA}.nc",
-        ]
-    else:
-        # T119: no mirror bundle. SSTs are upsampled from the packaged T63
-        # file by the forcing loader; ozone must still be grid-and-level
-        # matched, so it comes from prepared local files.
-        ov += [
-            "forcing=from_file",
-            f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-            f"forcing.ozone_file={_BC}/{trunc}_ozone_l{levels}.nc",
-        ]
-    return ov
-
-
-def _pyses_preset(levels: int) -> list[str]:
-    """PySES CAM-SE ne30 at the requested level count, same physics as the MA sweep.
-
-    Deliberately NOT shaped like the spectral presets:
-
-    * no ``grid=`` — the group is IGNORED by this backend; resolution comes
-      from nx/npt/nlev in the dycore config;
-    * no ``run.time_step`` — the Model adopts the dycore's dt_seconds (900 s);
-    * no ``+sl_off_centering`` — that tunes the dinosaur SL integrator;
-      pySES does its own tracer sub-cycling (tracer_substeps=5);
-    * no ``init=jw`` — that is dinosaur-specific and pySES REJECTS it; this
-      backend initializes from its own resting USSA-1976 state, so the
-      default ``init=isothermal`` is required. (Carried over from the
-      spectral presets on the first attempt; ``--cfg job`` did not catch it
-      because composing a config is not the same as building the model.)
-    * no TERRAIN override — pySES bilinearly interpolates the packaged T63
-      field onto its columns, so the horizontal grid need not match. The
-      assembled native ``hf://bundles/ne30pg3/terrain.nc`` (real LANDFRAC
-      land fraction + exact GLL orography; the fix for jax-gcm#596) is
-      deliberately not used here so the sweep stays comparable with the
-      validated 2026-07 campaign, which ran on the packaged T63 downscale.
-    * but ozone IS still level-validated. "Column sampling has no exact-grid
-      requirement" covers the HORIZONTAL grid only — an L47 ozone file is
-      rejected by an L95 run whatever the backend. L95 therefore needs the
-      95-level file, whose T63 horizontal grid pySES interpolates as usual.
-
-    ``run=pyses_year`` carries the production-validated settings (the finite
-    lid sponge lives in ``dycore.lid_sponge``, not ``run.sponge``).
-    """
-    return [
-        "physics=echam-jam",
-        f"dycore=pyses_ne30l{levels}",
-        "forcing=from_file",
-        f"forcing.file=hf://bundles/t63/forcing_{_ERA}.nc",
-        # REAL ozone, unlike the first ne30 timing attempt. That one fell
-        # back to the analytic profile because the two prescribed paths then
-        # available were both broken (an L95 file whose "months since" time
-        # units the pySES calendar decode rejected, and an L47 file reaching
-        # RRTMGP shaped (1, nlev)). The mirror bundles carry a plain 1..12
-        # integer month axis and load through the pySES column sampler, so
-        # the radiative workload here is now the same kind as the spectral
-        # sweep's and the numbers are comparable.
-        f"forcing.ozone_file=hf://bundles/t63_l{levels}/ozone_{_ERA}.nc",
-        "run=pyses_year",
-        # run=pyses_year sets a RELATIVE checkpoint_path, so without this the
-        # run drops a multi-GB .ckpt into whatever cwd it was launched from —
-        # the repo worktree, in practice. Send it to the disposable dir with
-        # the rest of the model output.
-        f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt",
-    ]
-
-
-def _macsp_preset(trunc: str, physics: str) -> list[str]:
-    """MACv2-SP configuration on a mirror grid (release matrix members).
-
-    Same validated profile as ``_T63_COMMON`` (JW-dry init + the longrun
-    sponge) with per-grid inputs auto-resolved: ``terrain=auto`` and the
-    shipped ``forcing.ozone_file: auto`` fall back to the data mirror
-    (jcm.runners), so this needs no hand-managed per-grid paths.
-    """
-    return [
-        f"physics={physics}",
-        f"grid=echam_{trunc}_l47_hybrid",
-        "init=jw", "init.rh=0.0",
-        "terrain=auto",
-        "forcing=from_file",
-        f"forcing.file=hf://bundles/{trunc}/forcing_{_ERA}.nc",
-        "run=longrun", "run.time_step=12",
-        "+sl_off_centering=0.2",
-    ]
-
-
-# SPEEDY takes the DEFAULT run group and init: run=longrun's 10-level
-# sponge spans the entire L8 atmosphere and the dry JW init is an ECHAM
-# spin-up device — both NaN SPEEDY within a chunk (first matrix sweep).
-# Interpolated t63 terrain is fine (SPEEDY composes no SSO scheme); no
-# native t31 terrain exists in the package or on the mirror.
-_SPEEDY_T31 = [
-    "physics=speedy", "grid=speedy_t31_l8",
-    "terrain=from_file", f"terrain.file={REPO}/jcm/data/bc/t63/terrain.nc",
-    "forcing=from_file", f"forcing.file={REPO}/jcm/data/bc/t63/forcing.nc",
-    "run.time_step=15",
-]
+def _exp(name: str, *extra: str) -> list[str]:
+    """``+experiment=<name>`` plus any benchmark-only overrides."""
+    return [f"+experiment={name}", *extra]
 
 
 PRESETS: dict[str, list[str]] = {
-    "speedy-t31": _SPEEDY_T31,
-    # Release-matrix MACv2-SP members (#638). t63-echam-rrtmgp below is the
-    # historical benchmark id for the same 1m-T63 configuration.
-    **{f"{t}-echam-{v}": _macsp_preset(t, p)
-       for t in ("t63", "t106")
-       for v, p in (("1m", "echam"), ("2m", "echam-rrtmgp-2m"))},
-    "t63-echam-rrtmgp": ["physics=echam", *_T63_COMMON],
-    "t63-echam-rrtmgp-2m": ["physics=echam-rrtmgp-2m", *_T63_COMMON],
-    # NN radiation emulator in the 2M composition (#702). Needs trained
-    # weights via --extra physics.terms.nn_emulator_radiation.weights_file=…
-    # — without them the term builds random weights and the run NaNs.
-    "t63-echam-emulated-2m": ["physics=echam-emulated-2m", *_T63_COMMON],
-    "t63-echam-jam": ["physics=echam-jam", *_T63_COMMON],
-    "t63-echam-jam-aerocom": ["physics=echam-jam-aerocom", *_T63_COMMON],
-    "t63-echam-jam-aerocom-optics": [
-        "physics=echam-jam-aerocom-optics", *_T63_COMMON],
-    # Middle-atmosphere resolution sweep (T63/T106/T119 x L47/L95).
-    # The historical ``*-eulerian`` presets are gone with the Eulerian
-    # path itself: the released-dinosaur variants would now fail the SL
-    # availability guard, and any that ran would silently execute
-    # semi-Lagrangian transport under an "eulerian" label. The 2026-07
-    # advection-comparison numbers they produced live in
-    # docs/source/design/dinosaur_sl_jam_configuration.md.
-    **{f"ma-{t}-l{lv}": _ma_preset(t, lv)
-       for t in ("t63", "t106", "t119") for lv in (47, 95)},
-    # pySES CAM-SE ne30, same physics, for the dycore comparison.
-    **{f"ma-ne30-l{lv}": _pyses_preset(lv) for lv in (47, 95)},
+    "speedy-t31": _exp("speedy-t31"),
+    # Release-matrix MACv2-SP members (#638): echam-1m/2m at t63/t106.
+    **{f"{t}-echam-{v}": _exp(f"{t}-echam-{v}")
+       for t in ("t63", "t106") for v in ("1m", "2m")},
+    # T63 RRTMGP / JAM family (historical benchmark ids).
+    "t63-echam-rrtmgp": _exp("t63-echam-rrtmgp"),
+    "t63-echam-rrtmgp-2m": _exp("t63-echam-rrtmgp-2m"),
+    "t63-echam-emulated-2m": _exp("t63-echam-emulated-2m"),
+    "t63-echam-jam": _exp("t63-echam-jam"),
+    "t63-echam-jam-aerocom": _exp("t63-echam-jam-aerocom"),
+    "t63-echam-jam-aerocom-optics": _exp("t63-echam-jam-aerocom-optics"),
+    # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
+    # no bundle, so its terrain + level-matched ozone stay machine-local.
+    **{f"ma-{t}-l{lv}": _exp(f"ma-{t}-l{lv}")
+       for t in ("t63", "t106") for lv in (47, 95)},
+    **{f"ma-t119-l{lv}": _exp(
+        f"ma-t119-l{lv}",
+        f"terrain.file={_BC}/T119_terrain.nc",
+        f"forcing.ozone_file={_BC}/t119_ozone_l{lv}.nc") for lv in (47, 95)},
+    # pySES CAM-SE ne30 (dycore comparison); run=pyses_year drops a relative
+    # checkpoint into cwd, so redirect it to the disposable scratch dir.
+    **{f"ma-ne30-l{lv}": _exp(
+        f"ma-ne30-l{lv}",
+        f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt")
+       for lv in (47, 95)},
 }
+
+
+def _compose_preset(overrides: list[str]):
+    """Compose the effective config for a preset's override list.
+
+    Cheap (pure Hydra composition -- no model build, no jcm import), so it is
+    safe to call before a GPU is claimed. Used to enumerate the prescribed-input
+    files a preset resolves to, which since the PRESETS shim now live inside the
+    ``+experiment`` yaml rather than in the override strings.
+    """
+    from hydra import compose, initialize_config_dir
+    cfgdir = str(REPO / "jcm" / "config")
+    with initialize_config_dir(config_dir=cfgdir, version_base=None):
+        return compose(config_name="config", overrides=overrides)
+
+
+def _preset_data_files(overrides: list[str]) -> list[str]:
+    """Explicit prescribed-input paths (hf:// or local) a preset resolves to.
+
+    Walks the COMPOSED forcing/terrain/dycore config for keys ending in
+    ``file`` and returns the concrete paths, skipping ``auto``/``null``/``none``
+    (resolved lazily at build time) and unset ``???`` values.
+    """
+    from omegaconf import OmegaConf
+    cfg = _compose_preset(overrides)
+    out: list[str] = []
+
+    def _add(v):
+        if isinstance(v, str) and v not in ("auto", "null", "none", "???"):
+            out.append(v)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                _add(x)
+
+    for group in ("forcing", "terrain", "dycore"):
+        node = cfg.get(group, None)
+        if node is None:
+            continue
+        cont = OmegaConf.to_container(node, resolve=False,
+                                      throw_on_missing=False)
+        if not isinstance(cont, dict):
+            continue
+        for k, v in cont.items():
+            if str(k).endswith("file"):
+                _add(v)
+    return out
 
 
 def _gpu_sampler(gpu: int, out_path: pathlib.Path, stop: threading.Event):
@@ -501,9 +390,11 @@ def run(args) -> dict:
     # is claimed and the telemetry sampler is running. Pulling them first
     # keeps the download out of the timed region and turns an unreachable
     # mirror into an immediate refusal instead of a stall on a held card.
-    files = [o.split("=", 1)[1] for o in preset
-             if o.split("=", 1)[0].endswith((".file", "_file"))
-             and not o.endswith(("=auto", "=null", "=none"))]
+    #
+    # The validated file references now live inside the ``+experiment`` yaml,
+    # not in the override strings, so enumerate them from the COMPOSED config
+    # (``auto``/``null`` inputs resolve lazily at build time and are skipped).
+    files = _preset_data_files(preset)
     missing = []
     for f in files:
         if f.startswith("hf://"):
