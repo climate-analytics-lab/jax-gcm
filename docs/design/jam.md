@@ -92,16 +92,35 @@ physics = echam_physics(
 )
 ```
 
-For now the JAM path **augments** MACv2-SP rather than replacing it: MACv2-SP
-is kept for the aerosol radiative optics and Twomey factor that radiation and
-the cloud schemes currently read — a temporary fudge in lieu of proper JAM
-aerosol↔radiation and aerosol↔microphysics coupling (#495). Once JAM supplies
-those, MACv2-SP need not be included.
+The JAM path **replaces** MACv2-SP; the two are mutually exclusive aerosol
+sources (#640). MACv2-SP was a stopgap providing the shared `aerosol` optics /
+Twomey diagnostic before JAM had its own coupling — having both on was
+confusing and redundant. JAM now supplies both, so `echam_physics(
+aerosol_module="jam")` no longer composes `Macv2SpAerosol`:
 
-The 2M scheme uses ARG's `activated_cdnc` where it is non-empty and falls back
-to the MACv2-SP SPA floor wherever the online source is ≈0 (e.g. before the
-prognostic JAM tracers spin up from a zero-seeded initial state), so the
-default JAM+2M run always activates droplets.
+- **Optics.** A minimal `AerosolCarrySeeder` runs first and owns the shared
+  `aerosol` slot (which radiation hard-requires and the 2M microphysics reads),
+  resetting it to an all-zero base each step. `JamOpticsTerm` overwrites the
+  per-band SW/LW optics (consumed by RRTMGP) and — for the grey two-stream
+  scheme, which reads a single broadband 550 nm profile — the
+  `aod_profile`/`ssa_profile`/`asy_profile`/`angstrom` fields. With
+  `jam_optics=False` the zero base is left untouched, making the aerosol
+  **radiatively passive** — a clean A/B control for the direct effect.
+- **Activation.** The 2M scheme uses ARG's `activated_cdnc` where it is
+  non-empty and, in the JAM path, falls back where ARG is empty to its own
+  ECHAM-HAM minimum-CDNC (`cdnc_min_fixed`, 40 cm⁻³, or the dynamic max-radius
+  floor; #674) rather than the MACv2-SP SPA floor (which no longer exists in
+  this path — JAM carries no prescribed-plume `Nccn`). The SPA floor remains
+  the `macv2sp`+2M path's Twomey link.
+
+**Output namespaces (#640).** MACv2-SP's diagnostics publish under `macsp.*`
+(CF/AeroCom names where they exist, e.g. `macsp.od550aer`); JAM's column optics
+under `jam_optics.*` (`jam_optics.aod_550` is the band-centre-approx column
+AOD — distinct from the Mie-based `od550aer` of the `aerocom_optics` pass). The
+internal `aerosol` struct radiation/microphysics read by attribute is
+unchanged; only the output keys are namespaced. The old top-level
+`aerosol_optical_depth` key (which collided with a per-band `RadiationInput`
+field) is gone.
 
 ## Prescribed anthropogenic & biomass emissions (#498)
 
