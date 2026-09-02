@@ -144,6 +144,32 @@ def _squeeze_tendency(tend: PhysicsTendency) -> PhysicsTendency:
     return type(tend)(**args)
 
 
+def select_column(states, ds, lat_deg: float, lon_deg: float):
+    """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
+
+    The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
+    JCM run that wrote it; pick by nearest neighbour so users can give
+    physical degrees rather than grid indices.
+    """
+    import numpy as np
+
+    lat = np.asarray(ds["lat"].values)
+    lon = np.asarray(ds["lon"].values)
+    i_lat = int(np.argmin(np.abs(lat - lat_deg)))
+    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
+
+    def slice_field(arr):
+        # JCM xarray output is laid out (time, level, lon, lat) for column
+        # variables and (time, lon, lat) for surface scalars.
+        if arr.ndim == 4:
+            return arr[:, :, i_lon, i_lat]
+        if arr.ndim == 3:
+            return arr[:, i_lon, i_lat]
+        return arr
+
+    return tree_map(slice_field, states), (i_lon, i_lat, float(lat[i_lat]), float(lon[i_lon]))
+
+
 class SingleColumnModel:
     """Evolve physics tracers for one column at one ``(lat, lon)`` location.
 

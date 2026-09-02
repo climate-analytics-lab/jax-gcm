@@ -28,6 +28,7 @@ from jcm.initial_states import (
     inject_jw_profile,
 )
 from jcm.model import Model, ModelPredictions
+from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -1633,31 +1634,9 @@ def _run_prescribed(cfg: DictConfig):
     return model.run(states, forcing=forcing)
 
 
-def _select_column(states, ds, lat_deg: float, lon_deg: float):
-    """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
-
-    The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
-    JCM run that wrote it; pick by nearest neighbour so users can give
-    physical degrees rather than grid indices.
-    """
-    import numpy as np
-    from jax.tree_util import tree_map
-
-    lat = np.asarray(ds["lat"].values)
-    lon = np.asarray(ds["lon"].values)
-    i_lat = int(np.argmin(np.abs(lat - lat_deg)))
-    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
-
-    def slice_field(arr):
-        # JCM xarray output is laid out (time, level, lon, lat) for column
-        # variables and (time, lon, lat) for surface scalars.
-        if arr.ndim == 4:
-            return arr[:, :, i_lon, i_lat]
-        if arr.ndim == 3:
-            return arr[:, i_lon, i_lat]
-        return arr
-
-    return tree_map(slice_field, states), (i_lon, i_lat, float(lat[i_lat]), float(lon[i_lon]))
+#: Nearest-column selection; the science lives in
+#: :func:`jcm.single_column_model.select_column`. Aliased for the SCM runner.
+_select_column = select_column
 
 
 def _run_scm(cfg: DictConfig):
