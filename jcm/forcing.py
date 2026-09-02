@@ -1150,6 +1150,68 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
+def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+    """Read MACv2.0-SP time-varying plume weights into two ``TimeSeries`` leaves.
+
+    The Stevens et al. (2017) "Simple Plumes" file ``MACv2.0-SP_v1.nc`` carries
+    the static plume geometry (consumed separately by
+    :meth:`AerosolParameters.from_dataset`) alongside two time-varying scaling
+    arrays:
+
+    * ``year_weight(plume, year)`` over 1850..2100 — the per-year anthropogenic
+      amplitude. Returned as ``forcing.aerosol_year_weight``: a ``BY_DATE``
+      ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
+      calendar year. The v1 file only has valid data for 1850-2016; 2017-2100
+      are ``_FillValue`` (delivered as NaN), which would inject NaN AOD into a
+      post-2016 run, so the last valid year is forward-filled (a documented jcm
+      convention — the reference STOPs out of range).
+    * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
+      ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
+      ``(week, feature, plume)`` so a ``select(date)`` slice yields the
+      ``(feature, plume)`` the term consumes at the current week.
+
+    ``select(date)`` collapses each leaf to its current-step slice, so nothing
+    extra is needed at run time. Attach both to a :class:`ForcingData` via
+    ``base.copy(aerosol_year_weight=..., aerosol_ann_cycle=...)``.
+    """
+    import jax_datetime as jdt
+    import xarray as xr
+
+    ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
+    try:
+        # year_weight: (plume, year) -> (year, plume). Forward-fill past the
+        # last all-valid year so out-of-range years reuse the last real
+        # amplitude instead of the file's NaN fill.
+        yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
+        valid = ~np.isnan(yw_np).any(axis=1)
+        last_valid = np.where(valid)[0].max()
+        yw_np[last_valid + 1:] = yw_np[last_valid]
+        yw = jnp.asarray(yw_np)
+
+        # Time axis in seconds-since-MODEL_EPOCH (1970-01-01), one sample per
+        # year-start. The file labels year Y with the integer Y; treat it as
+        # Y-01-01 00:00 UTC.
+        years = ds["years"].values.astype(int)
+        epoch_seconds = [
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))))
+            for y in years
+        ]
+        year_weight = make_time_series(
+            yw, jnp.asarray(epoch_seconds), align_mode=BY_DATE)
+
+        # ann_cycle: (plume, week, feature) -> (week, feature, plume). WRAP_YEAR
+        # repeats every year; time_seconds is unused by that indexing but must
+        # be a 1-D coord of matching length, so pass the week index.
+        ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
+        ann_cycle = make_time_series(
+            ac, jnp.arange(ac.shape[0]), align_mode=WRAP_YEAR)
+    finally:
+        if not isinstance(path, xr.Dataset):
+            ds.close()
+    return year_weight, ann_cycle
+
+
 def expand_yearly_files(file_spec, years, available=None):
     """Expand a ``{year}`` file pattern into the yearly-bundle file list.
 

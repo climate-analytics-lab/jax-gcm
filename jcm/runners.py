@@ -955,6 +955,7 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
     forcing = _attach_dms(forcing, forcing_cfg, coords)
     forcing = _attach_dust(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
+    forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -1279,6 +1280,29 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
         validate_oxidant_levels(ds, coords, path)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
+
+
+def _attach_macv2_weights(forcing, forcing_cfg, coords):
+    """Attach time-varying MACv2-SP plume weights from ``forcing.macv2_file``.
+
+    No-op when unset. Loads the ``year_weight``/``ann_cycle`` scalings from a
+    ``MACv2.0-SP_v1.nc`` file (via :func:`jcm.forcing.read_macv2_weights`) onto
+    ``forcing.aerosol_year_weight`` / ``aerosol_ann_cycle`` — the fields the
+    MACv2-SP aerosol term reads for per-year amplitude and the seasonal cycle.
+    Without a file these default to all-ones (perpetual year-2005 amplitude, no
+    seasonal cycle); ``forcing=macv2_sp`` sets the key. The weights are plume-
+    indexed and grid-independent, so no horizontal regridding is needed here.
+    """
+    if forcing_cfg is None:
+        return forcing
+    path = _resolve_data_path(forcing_cfg.get("macv2_file", None))
+    if path in (None, "", "null"):
+        return forcing
+    from jcm.forcing import read_macv2_weights
+    year_weight, ann_cycle = read_macv2_weights(str(path))
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(aerosol_year_weight=year_weight,
+                        aerosol_ann_cycle=ann_cycle)
 
 
 # ---------------------------------------------------------------------------

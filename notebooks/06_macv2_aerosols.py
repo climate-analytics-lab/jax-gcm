@@ -35,16 +35,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 import jax_datetime as jdt
 
 from jcm.forcing import (
-    BY_DATE,
-    WRAP_YEAR,
     ForcingData,
-    make_time_series,
+    read_macv2_weights,
 )
 from jcm.model import Model
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
@@ -86,54 +83,17 @@ def aerosol_parameters_from_macv2(ds: xr.Dataset) -> AerosolParameters:
 # Step 3 — wrap year_weight and ann_cycle as TimeSeries leaves
 # ---------------------------------------------------------------------------
 
-def macv2_year_weight_timeseries(ds: xr.Dataset) :
-    """`year_weight` on the file is `(plume, year)` over 1850..2100.
-
-    For the model we want it as a `TimeSeries` with the time axis at
-    index 0 and `BY_DATE` alignment so the model picks the right year
-    based on its calendar clock.
-    """
-    # Transpose to (year, plume). The v1 file only carries valid data
-    # for 1850-2016; 2017-2100 are _FillValue, which xarray delivers as
-    # NaN — feeding those into a post-2016 run would inject NaN AOD.
-    # Forward-fill the last valid year (a documented convention, not
-    # part of the reference, which STOPs out of range).
-    yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
-    valid = ~np.isnan(yw_np).any(axis=1)
-    last_valid = np.where(valid)[0].max()
-    yw_np[last_valid + 1:] = yw_np[last_valid]
-    yw = jnp.asarray(yw_np)
-
-    # Build a time axis in seconds-since-1970 for each year-start.
-    # The MACv2 file labels year `Y` as the integer Y; we treat that as
-    # `Y-01-01 00:00 UTC`.
-    years = ds["years"].values.astype(int)
-    epoch_seconds = []
-    epoch = jdt.Datetime.from_pydatetime(jdt.to_datetime("1970-01-01"))
-    for y in years:
-        when = jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))
-        delta = when - epoch
-        epoch_seconds.append(float(delta.days) * 86400.0)
-    time_seconds = jnp.asarray(epoch_seconds)
-
-    return make_time_series(yw, time_seconds, align_mode=BY_DATE)
-
-
-def macv2_ann_cycle_timeseries(ds: xr.Dataset) :
-    """`ann_cycle` on the file is `(plume, week, feature)`. The model
-    consumes a per-step shape of `(nfeatures, nplumes)`.
-
-    We arrange the stored array as `(week, feature, plume)` so that
-    `select(date)` slicing axis 0 produces `(feature, plume)` at the
-    current week. We use `WRAP_YEAR` alignment because the seasonal
-    cycle repeats every year.
-    """
-    # netCDF: (plume, week, feature) → (week, feature, plume)
-    ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
-    # `time_seconds` is unused by `WRAP_YEAR` indexing, but we still need
-    # a 1-D coord of the right length; pass the week index for clarity.
-    weeks = jnp.arange(ac.shape[0])
-    return make_time_series(ac, weeks, align_mode=WRAP_YEAR)
+# `year_weight` on the file is `(plume, year)` over 1850..2100; the model
+# wants it as a `TimeSeries` with the time axis at index 0 and `BY_DATE`
+# alignment so it picks the right year from the calendar clock. The v1 file
+# only carries valid data for 1850-2016 (2017-2100 are `_FillValue`, i.e.
+# NaN); `read_macv2_weights` forward-fills the last valid year rather than
+# inject NaN AOD into a post-2016 run.
+#
+# `ann_cycle` is `(plume, week, feature)`; the model consumes `(feature,
+# plume)` per step, so the loader arranges it `(week, feature, plume)` under
+# `WRAP_YEAR` alignment (the seasonal cycle repeats every year). Both leaves
+# now come from the single reusable loader in `jcm.forcing` (issue #680).
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +107,11 @@ def build_forcing(ds: xr.Dataset, nodal_shape: tuple[int, int]) -> ForcingData:
     For a run with realistic SST/sea-ice, replace the bare-array fields
     here with `ForcingData.from_dataset(your_era5_ds, coords=...)`.
     """
+    year_weight, ann_cycle = read_macv2_weights(ds)
     base = ForcingData.zeros(nodal_shape)
     return base.copy(
-        aerosol_year_weight=macv2_year_weight_timeseries(ds),
-        aerosol_ann_cycle=macv2_ann_cycle_timeseries(ds),
+        aerosol_year_weight=year_weight,
+        aerosol_ann_cycle=ann_cycle,
     )
 
 

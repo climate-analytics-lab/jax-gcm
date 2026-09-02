@@ -1877,3 +1877,48 @@ class TestWarnOnConfigTraps:
                 self._physics("macv2_sp_aerosol", "jam_seasalt_emissions"),
                 self._macv2_forcing(loaded=False))
         assert "perpetual year-2005" not in caplog.text
+
+
+class TestAttachMacv2Weights(unittest.TestCase):
+    """``forcing.macv2_file`` loads real MACv2-SP weights onto ForcingData."""
+
+    @staticmethod
+    def _write_macv2(path):
+        import numpy as np
+        import xarray as xr
+        nplume, years, nweek, nfeat = 9, np.array([2004, 2005, 2006]), 52, 2
+        yw = np.arange(nplume * years.size,
+                       dtype=float).reshape(nplume, years.size)
+        ac = np.arange(nplume * nweek * nfeat,
+                       dtype=float).reshape(nplume, nweek, nfeat)
+        xr.Dataset(
+            {"year_weight": (("plume", "years"), yw),
+             "ann_cycle": (("plume", "week", "feature"), ac)},
+            coords={"years": years},
+        ).to_netcdf(path)
+
+    def test_macv2_file_attaches_timeseries(self):
+        import tempfile
+
+        from omegaconf import OmegaConf
+
+        from jcm.forcing import TimeSeries
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import _attach_macv2_weights
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "MACv2.0-SP_v1.nc"
+            self._write_macv2(p)
+            cfg = OmegaConf.create({"kind": "default", "macv2_file": str(p)})
+            forcing = _attach_macv2_weights(None, cfg, coords)
+        self.assertIsInstance(forcing.aerosol_year_weight, TimeSeries)
+        self.assertIsInstance(forcing.aerosol_ann_cycle, TimeSeries)
+        self.assertEqual(forcing.aerosol_year_weight.values.shape, (3, 9))
+
+    def test_macv2_file_unset_is_noop(self):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _attach_macv2_weights
+        cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
+        self.assertIsNone(_attach_macv2_weights(None, cfg, None))
