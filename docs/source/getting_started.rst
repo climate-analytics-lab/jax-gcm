@@ -115,7 +115,11 @@ at build time, so ``python -m jcm.main +experiment=t63-echam-jam`` composes a
 fully-specified online-aerosol run with no hand-managed emission paths. For any
 non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
 bundle to override one, or ``null`` to opt out (the runner then warns the run is
-emission-free).
+emission-free). ``auto`` always resolves the *present-day* ``*_pd`` bundle, so a
+transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
+present-day aerosol emissions over a historical circulation — the runner warns
+and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
+with year-matched products for a consistent transient run.
 
 Quick Start Examples
 --------------------

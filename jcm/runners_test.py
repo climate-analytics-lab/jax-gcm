@@ -1985,6 +1985,45 @@ class TestWarnOnConfigTraps:
                 self._macv2_forcing(loaded=False))
         assert "perpetual year-2005" not in caplog.text
 
+    # 5. Transient (amip/era5) forcing + present-day JAM emissions
+    def test_transient_forcing_present_day_jam_emissions_warns(self, caplog):
+        # amip/era5 encode transience as a `years` range + by_date_interp
+        # align on top of `kind: from_file`; emissions_file/oxidants_file: auto
+        # then resolve the present-day *_pd bundles.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "present-day JAM emissions" in caplog.text
+        assert "emissions_file" in caplog.text
+        assert "oxidants_file" in caplog.text
+
+    def test_transient_forcing_explicit_emission_paths_silent(self, caplog):
+        # Explicit year-matched paths (not `auto`) opt out of the warning.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(
+            terrain="from_file", forcing_kind="from_file",
+            years=[1979, 1983], align="by_date_interp",
+            emissions_file="hf://bundles/t63/emissions_1980.nc",
+            oxidants_file="hf://bundles/t63_l47/oxidants_1980.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_default_forcing_auto_emissions_silent(self, caplog):
+        # Non-transient forcing (no `years`, default align) + auto is the
+        # canonical present-day run — no mismatch, no warning.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="default",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "present-day JAM emissions" not in caplog.text
+
 
 class TestAttachMacv2Weights(unittest.TestCase):
     """``forcing.macv2_file`` loads real MACv2-SP weights onto ForcingData."""

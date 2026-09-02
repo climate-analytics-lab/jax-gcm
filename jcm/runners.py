@@ -1616,6 +1616,40 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
                 "macv2_file set) for real time-varying MACv2-SP weights."
             )
 
+    # 5. Transient (by-date) surface forcing driving JAM off the present-day
+    #    emission bundles. amip/era5 (forcing/{amip,era5}.yaml) are transient
+    #    from_file presets — one file per year, ``align: by_date_interp``, a
+    #    required ``years`` range — so the run's SST/sea-ice track real calendar
+    #    dates. But ``emissions_file``/``oxidants_file: auto`` resolve the
+    #    *present-day* ``*_pd`` bundle (``_resolve_one_emission_input`` — the
+    #    ``dms``/``dust`` climatologies are natural and roughly time-invariant,
+    #    so only these two anthropogenic products are the concern). The result
+    #    is a historical/AMIP circulation breathing present-day aerosol
+    #    emissions. Fires only when ``auto`` is still in place (an explicit
+    #    year-matched path silences it); on the spectral+JAM path ``auto`` is
+    #    exactly what resolved to the ``_pd`` bundle.
+    if has_jam:
+        forcing_cfg = cfg.get("forcing", {})
+        years = forcing_cfg.get("years", None)
+        align = str(forcing_cfg.get("align", "") or "")
+        is_transient = bool(years) or align in ("by_date", "by_date_interp")
+        pd_auto_keys = [k for k in ("emissions_file", "oxidants_file")
+                        if forcing_cfg.get(k, None) == "auto"]
+        if is_transient and pd_auto_keys:
+            logger.warning(
+                "config trap: transient (by-date) forcing with present-day JAM "
+                "emissions — the surface forcing tracks real calendar dates "
+                "(amip/era5: per-year files, by_date_interp) but %s are still "
+                "'auto', which resolved to the present-day *_pd emission "
+                "bundles. A historical/AMIP run is therefore using present-day "
+                "aerosol emissions. Override each with a year-matched product "
+                "(e.g. forcing.emissions_file=hf://bundles/<grid>/"
+                "emissions_<year>.nc, forcing.oxidants_file=hf://bundles/"
+                "<grid>_l<nlev>/oxidants_<year>.nc) for a consistent transient "
+                "run.",
+                ", ".join(pd_auto_keys),
+            )
+
 
 def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if model is None:
