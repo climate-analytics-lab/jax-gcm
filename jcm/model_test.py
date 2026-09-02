@@ -3,6 +3,7 @@ import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
@@ -1077,3 +1078,202 @@ class TestModelLogging(unittest.TestCase):
         self.assertFalse(
             logging.getLogger("jcm.predictions").isEnabledFor(
                 logging.WARNING))
+
+
+class TestObserversUnderJit(unittest.TestCase):
+    """Observers under an enclosing ``jax.jit`` (#735).
+
+    The sampling itself is pure JAX and differentiates with respect to the
+    state; what is not traceable is *building* the sampling tables, which
+    happens on the host and needs the window's absolute start time as a
+    number. That is normally read from the initial state's ``sim_time``,
+    which is a tracer when a caller feeds a per-sample initial state
+    through their own jit — the calibration shape. The caller passes
+    ``observer_t0_days`` instead, and gets told to when they have not.
+    """
+
+    def setUp(self):
+        from jcm.observers import TrackObserver
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.observer = TrackObserver.stations(
+            latitudes=[0.0, 45.0], longitudes=[0.0, 180.0],
+            pressures=[85000.0, 85000.0], variables=("temperature",),
+            name="stations")
+
+    def _model(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        return Model(coords=self.coords, physics=speedy_physics(),
+                     time_step=30.0, observers=[self.observer])
+
+    def _seed_state(self):
+        model = self._model()
+        model.bootstrap_state(None)
+        return model, model._final_dycore_state
+
+    def test_traced_initial_state_asks_for_the_window_start(self):
+        """The error names the argument to pass, not the tracer it met."""
+        model, state = self._seed_state()
+
+        def sample(state):
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        with self.assertRaises(ValueError) as caught:
+            jax.jit(sample)(state)
+        self.assertIn("observer_t0_days", str(caught.exception))
+
+    def test_an_explicit_window_start_makes_the_run_jittable(self):
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        traces = []
+
+        def sample(state):
+            traces.append(state)
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0, observer_t0_days=t0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sample)
+        first = float(jitted(state))
+        second = float(jitted(state))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(np.isfinite(first))
+        self.assertEqual(first, second)
+        # A plausible 850 hPa temperature, i.e. the observer really sampled
+        # the atmosphere rather than returning the NaN of a masked step.
+        self.assertGreater(first, 200.0)
+        self.assertLess(first, 320.0)
+
+    def test_run_from_state_also_takes_the_window_start(self):
+        """The stateless API must accept what the error tells callers to pass.
+
+        ``run_from_state`` reaches the same host-side table build, so an
+        error naming an argument it did not accept would send callers to
+        the lower-level carry API for no reason.
+        """
+        from jcm.forcing import default_forcing
+
+        model, state = self._seed_state()
+        _, preds = model.run_from_state(
+            state, default_forcing(self.coords.horizontal),
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(state))
+        self.assertTrue(np.isfinite(
+            float(jnp.nanmean(preds.observations[0]["temperature"]))))
+
+    def test_a_traced_window_start_points_at_prepared_tables(self):
+        """A per-sample window start cannot be a traced value either.
+
+        Passing it as a traced argument is the natural next thing to try
+        after the traced-initial-state error, and the tables it feeds are
+        host numpy, so it cannot work. Marking it static in the caller's
+        jit would, but at one compilation per window — which is the cost
+        the caller was trying to avoid. So the error names the way out
+        that actually reuses a compilation.
+        """
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+
+        with self.assertRaises(ValueError) as caught:
+            jax.jit(lambda s, t: model.run(
+                s, save_interval=1 / 48.0, total_time=1 / 48.0,
+                observer_t0_days=t))(state, t0)
+        self.assertIn("observer_xs", str(caught.exception))
+        self.assertIn("prepare_observers", str(caught.exception))
+
+    def test_prepared_tables_reuse_one_compilation_across_windows(self):
+        """Different windows, one compilation — the point of the argument.
+
+        The tables are a dynamic argument of the compiled run, so windows
+        that differ only in sampling geometry share an executable. Building
+        them inside the run instead needs a concrete start time, which as a
+        static jit argument would compile once per window.
+        """
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        traces = []
+
+        def sampled(state, xs):
+            traces.append(xs)
+            preds = model.run(state, observer_xs=xs, **kw)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sampled)
+        values = [float(jitted(state, model.prepare_observers(day, **kw)))
+                  for day in (t0, t0 + 30.0, t0 + 400.0)]
+
+        self.assertEqual(len(traces), 1)
+        for value in values:
+            self.assertTrue(np.isfinite(value))
+            self.assertGreater(value, 200.0)
+            self.assertLess(value, 320.0)
+
+    def test_tables_built_for_another_window_are_rejected(self):
+        """A length mismatch is caught here, not deep inside the scan."""
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        mismatched = model.prepare_observers(
+            t0, save_interval=1 / 48.0, total_time=1 / 12.0)
+
+        with self.assertRaises(ValueError) as caught:
+            model.run(state, save_interval=1 / 48.0, total_time=1 / 48.0,
+                      observer_xs=mismatched)
+        self.assertIn("steps", str(caught.exception))
+
+    def test_prepared_tables_still_produce_a_dated_dataset(self):
+        """Prepared tables must not cost the observation output its time axis.
+
+        ``observer_xs`` skips the host-side build, which is where the
+        window start used to be resolved, so a run given tables and no
+        ``observer_t0_days`` had nothing to date its samples by and
+        ``observation_datasets()`` failed on the missing value. The start
+        time is recovered from the state whenever that is possible, which
+        is every use outside a transformation.
+        """
+        model, state = self._seed_state()
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        t0 = model._observer_window_start(state)
+
+        preds = model.run(state, observer_xs=model.prepare_observers(t0, **kw),
+                          **kw)
+        self.assertEqual(preds._obs_t0_days, t0)
+        datasets = model.run(state, **kw).observation_datasets()
+        with_tables = preds.observation_datasets()
+        self.assertIn("stations", with_tables)
+        np.testing.assert_array_equal(
+            with_tables["stations"].time.values,
+            datasets["stations"].time.values)
+
+    def test_undatable_samples_say_so_rather_than_failing_on_none(self):
+        """Name the argument that records a start time, when none exists.
+
+        Under tracing there is nothing to recover it from.
+        """
+        from jcm.predictions import ModelPredictions
+
+        model, state = self._seed_state()
+        preds = ModelPredictions(
+            None, None, None, observations=({"temperature": jnp.zeros((2, 1))},),
+            observers=tuple(model.observers), obs_t0_days=None,
+            obs_dt_seconds=1800.0)
+
+        with self.assertRaises(ValueError) as caught:
+            preds.observation_datasets()
+        self.assertIn("observer_t0_days", str(caught.exception))
+
+    def test_the_recovered_window_start_is_unchanged_by_the_argument(self):
+        """Passing what the model would have read gives the same samples."""
+        model, state = self._seed_state()
+        implicit = model.run(state, save_interval=1 / 48.0,
+                             total_time=1 / 48.0)
+        explicit = model.run(
+            state, save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(state))
+        np.testing.assert_allclose(
+            np.asarray(implicit.observations[0]["temperature"]),
+            np.asarray(explicit.observations[0]["temperature"]))

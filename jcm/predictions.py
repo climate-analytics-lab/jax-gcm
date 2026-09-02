@@ -210,6 +210,16 @@ class ModelPredictions:
         """
         if not self._observations:
             return {}
+        if self._obs_t0_days is None:
+            raise ValueError(
+                "This trajectory has observation samples but no window start "
+                "time, so the per-timestep time axis cannot be built. That "
+                "happens when a run inside a JAX transformation was given "
+                "prepared sampling tables (observer_xs) and no "
+                "observer_t0_days, leaving nothing concrete to date the "
+                "samples by. Pass observer_t0_days alongside observer_xs to "
+                "record it; the raw samples are on `.observations` either "
+                "way.")
         samples_host = jax.device_get(self._observations)
         stamp = provenance.params_attrs(self._params)
         datasets = {}

@@ -1013,6 +1013,8 @@ class Model:
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
+                       observer_t0_days=None,
+                       observer_xs=None,
     ):
         """Run the simulation forward from a given dycore-native initial state.
 
@@ -1035,6 +1037,12 @@ class Model:
                 (float) or a calendar string like ``'1 month'``.
             total_time: Total time to run. Same units as ``save_interval``.
             output_averages: Whether to output time-averaged quantities.
+            observer_t0_days: Optional absolute start time of the window,
+                in days since 1970, for the observers' sampling tables.
+            observer_xs: Optional sampling tables from
+                :meth:`prepare_observers`, used in place of the host-side
+                build. Both are ignored without observers — see
+                :meth:`run_from_state_with_carry`.
 
         Returns:
             A tuple ``(final_dycore_state, ModelPredictions)``.
@@ -1046,8 +1054,140 @@ class Model:
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
         )
         return final_state, predictions
+
+    def _observer_step_count(self, save_interval_days, total_time_days) -> int:
+        """Return the ``dt`` step count: the observers' sampling axis."""
+        dt_days = self.dt_si.to(units.day).m
+        return (int(total_time_days / save_interval_days)
+                * int(save_interval_days / dt_days))
+
+    def prepare_observers(self, t0_days, save_interval=10.0,
+                          total_time=120.0) -> tuple:
+        """Build the observers' sampling tables for one window, on the host.
+
+        The tables ``run`` would build internally, exposed so a caller can
+        build them per window *outside* a jit and pass them back as
+        ``observer_xs``. They are a dynamic argument of the compiled run, so
+        one compilation then serves every window; letting ``run`` build them
+        instead needs a concrete ``observer_t0_days``, which as a static jit
+        argument would compile once per window.
+
+        Args:
+            t0_days: Absolute start time of the window, in days since 1970.
+            save_interval: As :meth:`run` — sets the step count with
+                ``total_time``.
+            total_time: As :meth:`run`.
+
+        Returns:
+            One table dict per attached observer, in ``self.observers``
+            order. Empty when the Model has no observers.
+
+        """
+        if not self.observers:
+            return ()
+        n_steps = self._observer_step_count(
+            parse_duration_days(save_interval, calendar=self.calendar),
+            parse_duration_days(total_time, calendar=self.calendar))
+        return tuple(obs.prepare(float(t0_days), float(self.dt_si.m), n_steps)
+                     for obs in self.observers)
+
+    def _checked_observer_tables(self, observer_xs, n_steps) -> tuple:
+        """Validate caller-supplied sampling tables against this window.
+
+        A table built for a different window length would otherwise fail
+        deep inside the scan, where the shape mismatch says nothing about
+        which call was wrong.
+        """
+        observer_xs = tuple(observer_xs)
+        if len(observer_xs) != len(self.observers):
+            raise ValueError(
+                f"observer_xs has {len(observer_xs)} table(s) but this Model "
+                f"has {len(self.observers)} observer(s); pass one table per "
+                "observer, in Model.observers order (Model.prepare_observers "
+                "returns them that way).")
+        for obs, xs in zip(self.observers, observer_xs):
+            got = next(iter(xs.values())).shape[0]
+            if got != n_steps:
+                raise ValueError(
+                    f"observer_xs for {obs.name!r} covers {got} steps but "
+                    f"this window is {n_steps} steps. Build the tables with "
+                    "the same save_interval and total_time as the run.")
+        return observer_xs
+
+    def _optional_observer_t0(self, observer_t0_days, initial_state):
+        """Return the window start for the output time axis, or ``None``.
+
+        Only metadata: with caller-supplied tables the run itself needs no
+        start time, but :meth:`~jcm.predictions.ModelPredictions.
+        observation_datasets` builds its per-timestep axis from one. Prefer
+        what the caller said, else recover it from the state, which works
+        whenever the state is concrete — so the ordinary non-jit use of
+        prepared tables still serializes without repeating the argument.
+        Under tracing neither is available and there is no axis to record.
+        """
+        if observer_t0_days is not None:
+            return (None if isinstance(observer_t0_days, jax.core.Tracer)
+                    else float(observer_t0_days))
+        try:
+            return self._observer_window_start(initial_state)
+        except ValueError:
+            return None
+
+    def _resolve_observer_t0(self, observer_t0_days, initial_state) -> float:
+        """Return the window start to build tables from, as a host float."""
+        if observer_t0_days is None:
+            return self._observer_window_start(initial_state)
+        if isinstance(observer_t0_days, jax.core.Tracer):
+            raise ValueError(
+                "observer_t0_days is a traced value, and the sampling tables "
+                "it builds are host-side numpy, so it has to be a concrete "
+                "number. Marking it static in your jit would work but "
+                "compiles once per window. To reuse one compilation across "
+                "windows, build the tables outside the jit with "
+                "Model.prepare_observers(t0_days, save_interval, total_time) "
+                "and pass them in as observer_xs, which is a traced argument "
+                "of the compiled run.")
+        return float(observer_t0_days)
+
+    def _observer_window_start(self, initial_state) -> float:
+        """Return this window's absolute start time, in days since 1970.
+
+        Observers resolve all their geometry on the host before the scan:
+        which observation times fall in the window, where a moving platform
+        sits at each step, and the horizontal interpolation weights for
+        those positions. That needs the window's absolute start as a
+        concrete number, and it is normally recovered here from the state's
+        ``sim_time``.
+
+        It is *not* recoverable when ``run`` is called inside a JAX
+        transformation with the initial state as a traced argument — a
+        calibration loop feeding a per-sample initial state through one jit
+        — because ``sim_time`` is then a tracer. Nothing about the
+        observation operator itself needs tracing: the sampling is pure JAX
+        and differentiates with respect to the state, and the start time is
+        window metadata, not something anyone differentiates. So the
+        caller, who knows their window's valid time, passes it as
+        ``observer_t0_days`` rather than the model recovering it.
+        """
+        sim_time = self.dycore.sim_time(initial_state)
+        if isinstance(sim_time, jax.core.Tracer):
+            raise ValueError(
+                "This Model has observers and run() was called inside a JAX "
+                "transformation with a traced initial state, so the window's "
+                "absolute start time is not available on the host, where "
+                "observer sampling tables are built. Pass "
+                "observer_t0_days=<days since 1970> — the valid time of this "
+                "window's initial state — or call run() outside the "
+                "transformation."
+            )
+        return float(
+            self.start_date.delta.days
+            + float(jax.device_get(sim_time)) / 86400.0
+        )
 
     def run_from_state_with_carry(self,
                                   initial_state,
@@ -1058,6 +1198,8 @@ class Model:
                                   initial_physics_state: Any = None,
                                   snapshot_interval=None,
                                   snapshot_variables=(),
+                                  observer_t0_days=None,
+                                  observer_xs=None,
     ):
         """Lower-level ``run_from_state`` that exposes the cross-step physics carry.
 
@@ -1069,6 +1211,18 @@ class Model:
         top-level diagnostics keys or dotted struct fields
         (``"radiation.toa_sw_up"``); retrieve the stream with
         :meth:`ModelPredictions.snapshot_dataset`.
+
+        Two optional observer arguments, both ignored without observers.
+        ``observer_t0_days`` is the window's absolute start time in days
+        since 1970, normally read from the initial state's ``sim_time``;
+        pass it when ``run`` is called inside a JAX transformation with a
+        traced initial state, where that read cannot be made (see
+        :meth:`_observer_window_start`). ``observer_xs`` takes sampling
+        tables built by the caller with :meth:`prepare_observers`, skipping
+        the host-side build entirely; since the tables are a traced
+        argument of the compiled run, that is what lets a sweep over
+        *different* windows reuse one compilation, where a concrete
+        ``observer_t0_days`` per window cannot.
         """
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
@@ -1091,17 +1245,23 @@ class Model:
         # Absolute start time in days since 1970 — the same axis the
         # trajectory ``times`` use — so chunked run/resume sequences slice
         # the observation tracks consistently.
-        observer_xs = ()
         obs_t0_days = None
-        if self.observers:
-            dt_days = self.dt_si.to(units.day).m
-            n_steps = (int(total_time_days / save_interval_days)
-                       * int(save_interval_days / dt_days))
-            obs_t0_days = float(
-                self.start_date.delta.days
-                + float(jax.device_get(self.dycore.sim_time(initial_state)))
-                / 86400.0
-            )
+        if not self.observers:
+            observer_xs = ()
+        elif observer_xs is not None:
+            # Tables built by the caller, outside any jit. They ride in as a
+            # traced argument, so windows that differ only in their sampling
+            # geometry share one compilation.
+            n_steps = self._observer_step_count(save_interval_days,
+                                                total_time_days)
+            observer_xs = self._checked_observer_tables(observer_xs, n_steps)
+            obs_t0_days = self._optional_observer_t0(observer_t0_days,
+                                                     initial_state)
+        else:
+            n_steps = self._observer_step_count(save_interval_days,
+                                                total_time_days)
+            obs_t0_days = self._resolve_observer_t0(observer_t0_days,
+                                                    initial_state)
             observer_xs = tuple(
                 obs.prepare(obs_t0_days, float(self.dt_si.m), n_steps)
                 for obs in self.observers
@@ -1140,6 +1300,8 @@ class Model:
                output_averages=False,
                snapshot_interval=None,
                snapshot_variables=(),
+               observer_t0_days=None,
+               observer_xs=None,
     ) -> ModelPredictions:
         """Continue from end of previous ``run`` / ``resume``.
 
@@ -1164,6 +1326,8 @@ class Model:
             initial_physics_state=self._final_physics_state,
             snapshot_interval=snapshot_interval,
             snapshot_variables=snapshot_variables,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
         )
         jax.debug.callback(lambda: logger.info("Run completed."))
         self._final_dycore_state = final_dycore_state
@@ -1178,6 +1342,8 @@ class Model:
             output_averages=False,
             snapshot_interval=None,
             snapshot_variables=(),
+            observer_t0_days=None,
+            observer_xs=None,
     ) -> ModelPredictions:
         """Set the initial state and run the full simulation forward in time.
 
@@ -1194,6 +1360,8 @@ class Model:
             total_time=total_time, output_averages=output_averages,
             snapshot_interval=snapshot_interval,
             snapshot_variables=snapshot_variables,
+            observer_t0_days=observer_t0_days,
+            observer_xs=observer_xs,
         )
 
     def bootstrap_state(self, initial_state=None) -> None:
