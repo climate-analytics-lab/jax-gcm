@@ -48,7 +48,7 @@ from jcm.physics.radiation.aerosol_free import (
 )
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
+from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
 from jcm.physics.surface.echam.surface_types import SurfaceParameters
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
@@ -297,15 +297,11 @@ def echam_physics(
         )
     # Aerosol and cloud optics need the same band metadata as the selected
     # radiation term, so Python-created RRTMGP compositions must carry the
-    # multi-band config just like the Hydra runner path
-    # (jcm.runners.resolve_band_config). The emulator is included: its
+    # multi-band config just like the Hydra runner path — both resolve it
+    # through RadiationBandConfig.for_terms. The emulator is included: its
     # per-band features expect the RRTMGP band structure, and a broadband
     # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
-    band_config = (
-        RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
-        if isinstance(rad_term, (RRTMGPRadiation, NNEmulatorRadiation))
-        else RadiationBandConfig.broadband()
-    )
+    band_config = RadiationBandConfig.for_terms([rad_term])
 
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(params=microphysics_p)

@@ -562,7 +562,7 @@ class NNEmulatorRadiation(PhysicsTerm):
                     f"{name} bands, giving {got} under band_mode="
                     f"{self._band_mode!r}. The band config follows the "
                     "active radiation backend; a radiation term absent "
-                    "from jcm.runners._band_config_for_terms falls back "
+                    "from RadiationBandConfig.for_terms falls back "
                     "to a single 550 nm SW band and no LW bands."
                 )
 

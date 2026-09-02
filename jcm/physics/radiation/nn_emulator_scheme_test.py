@@ -533,7 +533,7 @@ class BandConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             term._check_band_counts(1, 0)
         self.assertIn("input features", str(ctx.exception))
-        self.assertIn("_band_config_for_terms", str(ctx.exception))
+        self.assertIn("RadiationBandConfig.for_terms", str(ctx.exception))
 
 
 class WeightsFileTest(unittest.TestCase):

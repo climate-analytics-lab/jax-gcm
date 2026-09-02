@@ -28,6 +28,7 @@ from jcm.initial_states import (
     inject_jw_profile,
 )
 from jcm.model import Model, ModelPredictions
+from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
@@ -299,7 +300,7 @@ def build_physics(cfg: DictConfig):
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
-        band_config=_band_config_for_terms(terms),
+        band_config=RadiationBandConfig.for_terms(terms),
     )
     return physics
 
@@ -353,33 +354,10 @@ def _build_physics_from_factory(physics_cfg):
     return factory(**kwargs)
 
 
-def _band_config_for_terms(terms):
-    """Pick a ``RadiationBandConfig`` to match the active radiation backend.
-
-    Walks the term list for a term that resolves radiation band by band
-    and reads RRTMGP's band centers; otherwise returns the broadband
-    (single 550 nm SW band) fallback. Centralised here so every
-    wavelength-dependent term — not just the aerosol scheme — sees the
-    same band structure as whatever radiation backend is actually
-    running. The band config is owned by ``ComposablePhysics`` and
-    injected into ``diagnostics["_band_config"]`` each step (same pattern
-    as ``_dt_seconds``).
-
-    The NN emulator counts because it is trained on RRTMGP's band-resolved
-    aerosol optics: give it the broadband fallback and the aerosol term
-    feeds it a single 550 nm band, which is not the input its labels were
-    generated under. That costs one load of the RRTMGP tables at
-    construction even though the emulator never solves with them, which is
-    worth it to keep the two arms on identical aerosol input.
-    """
-    from jcm.physics.radiation.band_config import RadiationBandConfig
-    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
-    from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
-
-    for t in terms:
-        if isinstance(t, (RRTMGPRadiation, NNEmulatorRadiation)):
-            return RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
-    return RadiationBandConfig.broadband()
+#: Radiation band-config selection; the science lives in
+#: :meth:`jcm.physics.radiation.band_config.RadiationBandConfig.for_terms`.
+#: Aliased for backward compatibility (nn_emulator_scheme_test imports it).
+_band_config_for_terms = RadiationBandConfig.for_terms
 
 
 def guard_emulator_ghg_forcing(physics, forcing) -> None:
