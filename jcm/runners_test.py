@@ -1099,9 +1099,11 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         cfg.init.kind = "from_mars"
         # A stub model shortcuts build_model: before the init dispatch
         # _run_full only touches ``model.coords`` (for the forcing) and
-        # ``model.physics`` (for the emulator GHG guard, which returns
-        # immediately when there is no emulator term).
-        stub = _types.SimpleNamespace(coords=build_coords(cfg), physics=None)
+        # ``model.physics`` (for the emulator GHG guard and the config-trap
+        # check, both of which no-op on an empty term list).
+        stub = _types.SimpleNamespace(
+            coords=build_coords(cfg),
+            physics=_types.SimpleNamespace(terms=[]))
         with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
             _run_full(cfg, model=stub)
 
@@ -1738,3 +1740,140 @@ class TestEmulatorGhgGuard(unittest.TestCase):
         forcing = types.SimpleNamespace(
             ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
         guard_emulator_ghg_forcing(self._physics(True), forcing)
+
+
+class TestWarnOnConfigTraps:
+    """The config cross-validation warnings (invalid-but-runnable combos).
+
+    Uses lightweight stand-ins — a physics object is just something with a
+    ``.terms`` list of named terms, and a forcing is a namespace carrying the
+    two MACv2-SP weight fields — so the checks are exercised without building a
+    real (expensive) model. Every finding is a WARNING; the tests assert both
+    that it fires on its trap combo and that it stays silent on the sane one.
+    """
+
+    @staticmethod
+    def _physics(*names):
+        import types
+        return types.SimpleNamespace(
+            terms=[types.SimpleNamespace(name=n) for n in names])
+
+    @staticmethod
+    def _cfg(terrain="aquaplanet", forcing_kind="default", **forcing_keys):
+        from omegaconf import OmegaConf
+        return OmegaConf.create(
+            {"terrain": {"kind": terrain},
+             "forcing": {"kind": forcing_kind, **forcing_keys}})
+
+    @staticmethod
+    def _macv2_forcing(loaded=False):
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import make_time_series
+        if loaded:
+            yw = make_time_series(jnp.full((2, 9), 0.3), jnp.arange(2.0))
+            ac = make_time_series(jnp.full((2, 2, 9), 0.7), jnp.arange(2.0))
+        else:
+            yw = jnp.ones(9)
+            ac = jnp.ones((2, 9))
+        return types.SimpleNamespace(
+            aerosol_year_weight=yw, aerosol_ann_cycle=ac)
+
+    # 1. JAM + aquaplanet terrain
+    def test_jam_aquaplanet_terrain_warns(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="aquaplanet"),
+                self._physics("jam_seasalt_emissions"), None)
+        assert "terrain=aquaplanet" in caplog.text
+        assert "Gong sea-salt" in caplog.text
+
+    def test_jam_realistic_terrain_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("jam_seasalt_emissions"), None)
+        assert "terrain=aquaplanet" not in caplog.text
+
+    # 2. aquaplanet terrain + from_file forcing
+    def test_aquaplanet_from_file_forcing_warns(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="aquaplanet", forcing_kind="from_file"),
+                self._physics("macv2_sp_aerosol"), None)
+        assert "from_file over terrain=aquaplanet" in caplog.text
+
+    def test_from_file_forcing_with_real_terrain_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file", forcing_kind="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=True))
+        assert "from_file over terrain=aquaplanet" not in caplog.text
+
+    # 3. Prognostic aerosol with every emission input nulled
+    def test_jam_zero_emissions_warns_and_names_keys(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", emissions_file=None,
+                        dms_file=None, dust_file=None, oxidants_file=None)
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" in caplog.text
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            assert key in caplog.text
+
+    def test_jam_with_emissions_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file",
+                        emissions_file="hf://bundles/t63/emissions_pd.nc",
+                        dms_file="hf://bundles/t63/dms.nc",
+                        dust_file="hf://bundles/t63/dust.nc",
+                        oxidants_file="hf://bundles/t63_l47/oxidants_pd.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" not in caplog.text
+
+    # 4. MACv2-SP all-ones default weights
+    def test_macv2_default_weights_warn(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=False))
+        assert "perpetual year-2005" in caplog.text
+
+    def test_macv2_default_weights_warn_when_forcing_none(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"), None)
+        assert "perpetual year-2005" in caplog.text
+
+    def test_macv2_loaded_weights_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=True))
+        assert "perpetual year-2005" not in caplog.text
+
+    def test_macv2_on_jam_path_silent(self, caplog):
+        # JAM keeps MACv2-SP as a passive optics fudge; warning 4 must not
+        # fire there (the all-ones weights are not the concern on that path).
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol", "jam_seasalt_emissions"),
+                self._macv2_forcing(loaded=False))
+        assert "perpetual year-2005" not in caplog.text

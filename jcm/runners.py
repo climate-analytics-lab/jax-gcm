@@ -1381,6 +1381,119 @@ def run(cfg: DictConfig, model: Model | None = None):
     )
 
 
+def _has_jam(physics) -> bool:
+    """Report whether the physics package carries the JAM aerosol chain.
+
+    Every JAM term names itself ``jam_*`` (emissions, deposition, chemistry,
+    microphysics, optics, cloud-borne exchange); the two activation/reset
+    helpers do not, but they never appear without the rest of the chain. So a
+    single ``jam_``-prefixed term is a reliable, config-style detector that does
+    not need to reach into ``cfg.physics`` (which only exists for the
+    factory-built presets, not term-list ones).
+    """
+    return any(getattr(t, "name", "").startswith("jam_") for t in physics.terms)
+
+
+def _has_macv2sp(physics) -> bool:
+    """Report whether the MACv2-SP simple-plumes aerosol term is present."""
+    return any(getattr(t, "name", "") == "macv2_sp_aerosol"
+               for t in physics.terms)
+
+
+def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
+    """Warn (never raise) about config combinations that run but mislead.
+
+    Config-layer cross-validation belongs in the runner (#640): it reads the
+    composed ``cfg`` plus the already-built ``physics``/``forcing`` objects and
+    calls no science. Every finding here is a :func:`logging.Logger.warning`,
+    not an error — the combinations all *run*, they just quietly produce
+    something other than what the config name suggests, and the maintainer
+    chose to keep them runnable (e.g. for controlled idealized experiments).
+
+    ``forcing`` may be ``None`` (``forcing.kind: default``, or the SCM/
+    prescribed paths that build none): the aquaplanet ``default_forcing`` the
+    model then falls back to carries the same all-ones MACv2-SP weights, so it
+    is treated as the all-ones case for warning 4.
+    """
+    import numpy as np
+
+    from jcm.forcing import TimeSeries
+
+    terrain_kind = cfg.get("terrain", {}).get("kind", None)
+    forcing_kind = cfg.get("forcing", {}).get("kind", None)
+    has_jam = _has_jam(physics)
+
+    # 1. Prognostic aerosol over a flat all-ocean planet: Gong sea-salt emits
+    #    everywhere (including where land should be), there is no orography to
+    #    source dust, and the idealized cos²-lat SSTs are not a real surface.
+    if has_jam and terrain_kind == "aquaplanet":
+        logger.warning(
+            "config trap: JAM prognostic aerosol with terrain=aquaplanet — a "
+            "flat all-ocean planet has no land-sea mask, so Gong sea-salt "
+            "emission fires over cells that should be land and there is no "
+            "orography to source dust. Use terrain=auto (native-grid mask) or "
+            "terrain=from_file for a realistic surface."
+        )
+
+    # 2. The inverse mismatch (#640): a real-world boundary file's land-sea
+    #    mask over aquaplanet terrain — SSTs land on cells the terrain calls
+    #    ocean and vice-versa.
+    if terrain_kind == "aquaplanet" and forcing_kind == "from_file":
+        logger.warning(
+            "config trap: forcing.kind=from_file over terrain=aquaplanet — the "
+            "boundary file's real-world SST/land fields carry a land-sea mask "
+            "that disagrees with the flat all-ocean terrain. Pair from_file "
+            "forcing with terrain=from_file (or terrain=auto) so the two masks "
+            "agree (issue #640)."
+        )
+
+    # 3. Prognostic aerosol with every prescribed-emission input nulled: only
+    #    online Gong sea-salt has a source. After commit 3 the JAM presets
+    #    supply the bundles by default, so this fires only when a user has
+    #    explicitly nulled them.
+    if has_jam:
+        forcing_cfg = cfg.get("forcing", {})
+        emission_keys = ("emissions_file", "dms_file", "dust_file",
+                         "oxidants_file")
+        unset = [k for k in emission_keys
+                 if forcing_cfg.get(k, None) in (None, "", "null", "none")]
+        if len(unset) == len(emission_keys):
+            logger.warning(
+                "config trap: zero-emission JAM baseline — %s are all unset, so "
+                "the only online aerosol source is Gong sea salt; sulfur, dust "
+                "and carbonaceous species stay at zero. Leave them at their "
+                "'auto' default (the per-grid HF bundles) or set an explicit "
+                "path (e.g. forcing.emissions_file=hf://bundles/<grid>/"
+                "emissions_pd.nc).",
+                ", ".join(unset),
+            )
+
+    # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
+    #    plume amplitude with no seasonal cycle — not historical forcing. Only
+    #    for a pure MACv2-SP run (the echam* default); on the JAM path MACv2-SP
+    #    is a passive optics fudge whose weights are not the concern.
+    def _is_allones_static(x) -> bool:
+        # A loaded MACv2 timeseries is a ``TimeSeries`` leaf; the untouched
+        # default is a plain all-ones array (ForcingData.zeros).
+        if isinstance(x, TimeSeries):
+            return False
+        return bool(np.allclose(np.asarray(x), 1.0))
+
+    if _has_macv2sp(physics) and not has_jam:
+        # forcing=None → the aquaplanet default_forcing, all-ones weights.
+        all_ones = forcing is None or (
+            _is_allones_static(forcing.aerosol_year_weight)
+            and _is_allones_static(forcing.aerosol_ann_cycle))
+        if all_ones:
+            logger.warning(
+                "config trap: MACv2-SP with the default all-ones "
+                "aerosol_year_weight/aerosol_ann_cycle — this is perpetual "
+                "year-2005 plume amplitude with no seasonal cycle, not "
+                "historical aerosol forcing. Use forcing=macv2_sp (with "
+                "macv2_file set) for real time-varying MACv2-SP weights."
+            )
+
+
 def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if model is None:
         model = build_model(cfg)
@@ -1388,6 +1501,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
+    warn_on_config_traps(cfg, model.physics, forcing)
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -1486,6 +1600,7 @@ def _run_prescribed(cfg: DictConfig):
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
+    warn_on_config_traps(cfg, physics, forcing)
     _, states = _load_states_from_cfg(cfg, physics)
 
     model = PrescribedStateModel(
@@ -1517,6 +1632,10 @@ def _run_scm(cfg: DictConfig):
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
     coords = build_coords(cfg)
+    # The SCM builds no ForcingData; pass None so the config-trap check still
+    # covers this mode (terrain/emission-key traps read cfg, and the None
+    # forcing is the all-ones MACv2-SP default for warning 4).
+    warn_on_config_traps(cfg, physics, None)
     ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
         states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
