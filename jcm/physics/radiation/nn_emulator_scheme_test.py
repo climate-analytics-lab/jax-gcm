@@ -293,7 +293,11 @@ class TotalCloudCoverTest(unittest.TestCase):
             (np.array([0.5, 0.5, 0.5, 0.5, 0.5]), 500.0, 2.0),
         ]
         for cf_np, dz_m, dec_km in cases:
-            with self.subTest(cf=list(cf_np)):
+            # tolist(): subTest params ride in the xdist worker report, and
+            # execnet cannot serialize numpy.float64 — list(cf_np) fails the
+            # whole test under -n with "DumpError: can't serialize" while
+            # passing serially.
+            with self.subTest(cf=cf_np.tolist()):
                 n = len(cf_np)
                 cf = jnp.asarray(cf_np)
                 dz = jnp.full((n,), dz_m)
