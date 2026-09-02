@@ -1373,6 +1373,7 @@ class Model:
             output_averages=False,
             snapshot_interval=None,
             snapshot_variables=(),
+            initial_physics_state: Any = None,
             observer_t0_days=None,
             observer_xs=None,
     ) -> ModelPredictions:
@@ -1384,8 +1385,29 @@ class Model:
               dycore via :meth:`DynamicalCore.initial_state`.
             * a dycore-native state (e.g. ``primitive_equations.State`` for
               the dinosaur backend) — used directly.
+
+        ``initial_physics_state`` seeds the cross-step physics carry (the
+        radiation sub-cycle cache, prior-step TKE, …) that :meth:`resume`
+        threads through the integration. When ``None`` (the default),
+        :meth:`bootstrap_state` builds a fresh carry from the composed physics
+        + coords. When supplied — a warm start off a donor checkpoint whose
+        carry we want to preserve rather than reset — it *replaces* the
+        freshly-built carry after ``bootstrap_state`` and before the first
+        ``resume``. It must be a carry that structurally matches what
+        :meth:`_build_initial_physics_carry` builds for this model (same
+        physics composition + coords): ``resume`` uses the freshly-built carry
+        as the pytree template and unflattens the checkpoint against it, so a
+        carry from a different composition would not line up. In practice this
+        is the value returned by :func:`jcm.initial_states.checkpoint_state`,
+        which loads it through that same template.
         """
         self.bootstrap_state(initial_state)
+        if initial_physics_state is not None:
+            # ``bootstrap_state`` just built a fresh carry; a warm start wants
+            # the donor's restored carry instead so sub-cycled radiation /
+            # prior-step TKE don't reset at the run seam. Replace it before the
+            # first ``resume`` threads ``self._final_physics_state`` in.
+            self._final_physics_state = initial_physics_state
         return self.resume(
             forcing=forcing, save_interval=save_interval,
             total_time=total_time, output_averages=output_averages,

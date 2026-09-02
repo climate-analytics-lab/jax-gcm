@@ -158,6 +158,38 @@ class NudgingConfig:
         )
 
 
+def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
+                    min_pressure_hpa: float = 60.0,
+                    pbl_levels: int = 0):
+    """Per-level inverse-timescale profile for Newtonian relaxation.
+
+    One ``1/tau`` value masked to zero (a) in the bottom ``pbl_levels``
+    layers, and (b) above ``min_pressure_hpa`` — the WB2 ERA5 stores
+    stop at 50 hPa, and values above that clamp, so relaxing the
+    stratosphere toward them would drag it to 50-hPa winds.
+
+    ``vertical`` is a dycore vertical-coordinate object; hybrid coordinates
+    (``a_centers``/``b_centers``) and sigma coordinates (``centers``) are
+    both handled by evaluating reference mid-level pressures at a standard
+    surface pressure of 101325 Pa.
+
+    Returns the ``(nlev,)`` inverse-timescale array (per second).
+    """
+    import numpy as np
+    if hasattr(vertical, "a_centers"):
+        p_ref = (np.asarray(vertical.a_centers)
+                 + np.asarray(vertical.b_centers) * 101325.0)
+    else:
+        p_ref = np.asarray(vertical.centers) * 101325.0
+    nlev = p_ref.size
+    mask = np.ones(nlev)
+    mask[p_ref < float(min_pressure_hpa) * 100.0] = 0.0
+    pbl = int(pbl_levels)
+    if pbl > 0:
+        mask[nlev - pbl:] = 0.0
+    return mask / (float(tau_hours) * 3600.0)
+
+
 # ---------------------------------------------------------------------------
 # Tendency helper (split out so unit tests can call it without a Model)
 # ---------------------------------------------------------------------------

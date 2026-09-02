@@ -41,7 +41,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.runners import inject_balanced_isothermal_profile
+from jcm.initial_states import balanced_isothermal_state
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -83,8 +83,10 @@ def _build_model_and_step(physics_factory, n_steps: int):
     forcing = ForcingData.from_file(_T63_BC_DIR / "forcing.nc", coords=coords)
     physics = physics_factory()
     model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
-    model._final_dycore_state = model._prepare_initial_dycore_state()
-    inject_balanced_isothermal_profile(model)
+    # Bootstrap from the balanced-isothermal start so the step loop below can
+    # ``model.resume(...)`` from it (bootstrap_state builds both the dycore
+    # state and the physics carry the first resume needs).
+    model.bootstrap_state(balanced_isothermal_state(model))
 
     levels = get_echam_levels(47)
     a = np.asarray(levels.a_boundaries)

@@ -41,7 +41,7 @@ from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics.radiation.radiation_types import RadiationParameters
-from jcm.runners import inject_balanced_isothermal_profile
+from jcm.initial_states import balanced_isothermal_state
 from jcm.utils import get_coords
 
 _STEPS = 2
@@ -73,19 +73,18 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_m
         cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
     )
     model = Model(coords=coords, physics=physics, time_step=15.0)
-    inject_balanced_isothermal_profile(model)
-    # Seed the cross-step physics carry exactly as the production rollout /
-    # resume path does (Model.run and Model.resume both build it when None —
-    # model.py). ``inject_*`` only populates ``_final_dycore_state``, leaving
-    # ``_final_physics_state`` at its ``None`` construction default; stepping
-    # with ``None`` synthesises a *zero* carry, so e.g. the TTE-TKE term would
-    # start from TKE=0 instead of its seeded ECHAM 0.01 floor. That is a state
-    # production never produces, so we must seed here to differentiate the same
-    # trajectory the model actually runs. (The #558 poison triggers — SSO
-    # zero-orography denominators, the zero-wind ``sqrt(u**2+v**2)``, and
-    # clear/ice-free fractional powers — are all independent of this carry and
-    # remain exercised.)
-    model._final_physics_state = model._build_initial_physics_carry()
+    # ``bootstrap_state`` populates ``_final_dycore_state`` from the
+    # balanced-isothermal start AND seeds the cross-step physics carry exactly
+    # as the production rollout / resume path does (Model.run and Model.resume
+    # both build it when None — model.py). Stepping with a ``None`` carry would
+    # synthesise a *zero* carry, so e.g. the TTE-TKE term would start from
+    # TKE=0 instead of its seeded ECHAM 0.01 floor — a state production never
+    # produces — so we bootstrap here to differentiate the same trajectory the
+    # model actually runs. (The #558 poison triggers — SSO zero-orography
+    # denominators, the zero-wind ``sqrt(u**2+v**2)``, and clear/ice-free
+    # fractional powers — are all independent of this carry and remain
+    # exercised.)
+    model.bootstrap_state(balanced_isothermal_state(model))
 
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state

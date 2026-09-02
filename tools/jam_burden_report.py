@@ -16,11 +16,25 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import pathlib
+import sys
 
 import numpy as np
 import xarray as xr
 
-GRAV = 9.80665
+# Source-checkout bootstrap: allow ``python tools/jam_burden_report.py`` when
+# jcm is not pip-installed by putting the repo root on sys.path before the jcm
+# import below (mirrors the idiom in tools/radiation_emulator/*).
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from jcm.analysis import (  # noqa: E402
+    area_weights,
+    column_integral,
+    global_mean,
+    layer_pressure_thickness,
+)
 
 # species -> (modes carrying it, (lo, hi) mg/m² global-mean anchor range;
 # HAMMOZ/CESM climatology magnitudes).
@@ -40,55 +54,23 @@ _EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
                  "poa": ("oc", 1.0)}
 
 
-def _horizontal_dims(da: xr.DataArray) -> list[str]:
-    return [d for d in da.dims if d not in ("time", "level", "level_i", "mode")]
+# Weighting / layer-Δp / column integration are the shared post-processing
+# machinery in ``jcm.analysis`` (#640) — kept as thin wrappers here so the
+# report and the release gates (which import them from this module) call one
+# implementation. ``_area_weights`` preserves the tool's "no lat -> None"
+# contract; ``jcm.analysis.area_weights`` returns Gauss-Legendre-exact weights
+# for dinosaur output grids (cos(lat) only for non-Gaussian grids).
+_layer_dp = layer_pressure_thickness
 
 
 def _area_weights(ds: xr.Dataset):
-    if "lat" in ds.coords:
-        return xr.DataArray(np.cos(np.deg2rad(ds["lat"].values)), dims="lat")
+    if "lat" in getattr(ds, "coords", {}):
+        return area_weights(ds)
     return None
 
 
 def _wmean(da: xr.DataArray, weights) -> float:
-    dims = _horizontal_dims(da)
-    if weights is not None and "lat" in dims:
-        return float(da.weighted(weights).mean(dims))
-    return float(da.mean(dims))
-
-
-def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
-    """Per-layer Δp [Pa] aligned with the 3-D fields' ``level`` orientation.
-
-    Prefer the model's own ``pressure_thickness`` diagnostic when present: it
-    is written directly on the ``level`` axis, already aligned with the tracer
-    fields, so there is no interface/mid-level differencing to get wrong. Take
-    ``abs`` only to be sign-robust — it is emitted positive.
-
-    Fall back to differencing ``pressure_half`` for post-#710 files written
-    before ``pressure_thickness`` existed. Both output vertical axes run
-    surface-first (#710), so differencing along ``level_i`` lands the result
-    already aligned with the ``level`` axis — no orientation guard needed.
-
-    This tool targets current output only. Trajectories written before #710
-    stored interfaces TOA-first under a ``level_i`` bare index (dinosaur) or a
-    ``level_interface`` dim (pyses); they are not supported here, and the
-    convention change is called out in the release notes rather than
-    compensated for at read time.
-    """
-    if "pressure_thickness" in ds:
-        dp = ds["pressure_thickness"]
-        if "time" in dp.dims:
-            dp = dp.isel(time=0)
-        return np.abs(dp)
-
-    ph = ds["pressure_half"]
-    if "time" in ph.dims:
-        ph = ph.isel(time=0)
-    axis = list(ph.dims).index("level_i")
-    dp = np.abs(np.diff(np.asarray(ph.values), axis=axis))
-    dims = tuple("level" if d == "level_i" else d for d in ph.dims)
-    return xr.DataArray(dp, dims=dims)
+    return float(global_mean(da, weights))
 
 
 def burden(ds: xr.Dataset, species: str, modes) -> xr.DataArray | None:
@@ -98,7 +80,7 @@ def burden(ds: xr.Dataset, species: str, modes) -> xr.DataArray | None:
     if not present:
         return None
     q = sum(ds[n] for n in present)
-    col = (q * _layer_dp(ds)).sum("level") / GRAV * 1e6   # kg/m² -> mg/m²
+    col = column_integral(q, _layer_dp(ds)) * 1e6   # kg/m² -> mg/m²
     return col.mean("time") if "time" in col.dims else col
 
 

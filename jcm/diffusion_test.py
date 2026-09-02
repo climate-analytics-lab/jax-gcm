@@ -250,5 +250,80 @@ class EchamLmidatmFactoryTest(unittest.TestCase):
         np.testing.assert_array_equal(d.level_orders_temp, d.level_orders_vor_q)
 
 
+class DiffusionFilterAutoTest(unittest.TestCase):
+    """`DiffusionFilter.auto` resolution-aware selection (#579)."""
+
+    def test_hybrid_tabulated_layers_pick_lmidatm(self):
+        # An ECHAM-family hybrid grid at a tabulated level count gets the
+        # level-dependent lmidatm profile matching that (truncation, layers).
+        auto = DiffusionFilter.auto(63, 47, "hybrid")
+        expected = DiffusionFilter.echam_lmidatm(63, 47)
+        npt.assert_array_equal(auto.level_orders_temp,
+                               expected.level_orders_temp)
+
+    def test_hybrid_untabulated_layers_fall_back_and_warn(self):
+        # A hybrid grid at an untabulated level count falls back to the
+        # uniform SPEEDY profile, and must warn since that is unlikely
+        # intended.
+        with self.assertLogs("jcm.diffusion", level="WARNING") as captured:
+            auto = DiffusionFilter.auto(63, 31, "hybrid")
+        self.assertIsNone(auto.level_orders_temp)
+        self.assertEqual(float(auto.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+        self.assertIn("no ECHAM lmidatm profile", "\n".join(captured.output))
+
+    def test_sigma_grid_is_silent_uniform_default(self):
+        # SPEEDY/Held-Suarez sigma grids are tuned for the uniform profile
+        # and must not warn.
+        with self.assertNoLogs("jcm.diffusion", level="WARNING"):
+            auto = DiffusionFilter.auto(31, 8, "sigma")
+        self.assertIsNone(auto.level_orders_temp)
+        self.assertEqual(float(auto.temp_timescale),
+                         float(DiffusionFilter.default().temp_timescale))
+
+
+class DiffusionFilterValidateLayersTest(unittest.TestCase):
+
+    def test_mismatched_profile_length_raises(self):
+        # An L47 level-dependent profile pinned on an L95 grid must fail
+        # with a named error, not an opaque broadcast error downstream.
+        profile = DiffusionFilter.echam_lmidatm(85, 47)
+        with self.assertRaisesRegex(
+                ValueError, r"47 levels .* grid has 95 levels"):
+            profile.validate_layers(95)
+
+    def test_matching_length_passes(self):
+        DiffusionFilter.echam_lmidatm(63, 47).validate_layers(47)
+
+    def test_uniform_profile_has_no_level_constraint(self):
+        # A uniform profile (no per-level orders) matches any level count.
+        DiffusionFilter.default().validate_layers(95)
+
+
+class DiffusionFilterScaledTest(unittest.TestCase):
+
+    def test_scale_one_is_identity(self):
+        base = DiffusionFilter.default()
+        self.assertIs(base.scaled(1.0), base)
+
+    def test_scale_multiplies_all_timescales(self):
+        base = DiffusionFilter.default()
+        scaled = base.scaled(3.0)
+        self.assertEqual(float(scaled.div_timescale),
+                         float(base.div_timescale) * 3.0)
+        self.assertEqual(float(scaled.vor_q_timescale),
+                         float(base.vor_q_timescale) * 3.0)
+        self.assertEqual(float(scaled.temp_timescale),
+                         float(base.temp_timescale) * 3.0)
+        # Orders are unchanged by scaling.
+        self.assertEqual(int(scaled.temp_order), int(base.temp_order))
+
+    def test_scale_preserves_level_orders(self):
+        base = DiffusionFilter.echam_lmidatm(63, 47)
+        scaled = base.scaled(2.0)
+        npt.assert_array_equal(scaled.level_orders_temp,
+                               base.level_orders_temp)
+
+
 if __name__ == "__main__":
     unittest.main()

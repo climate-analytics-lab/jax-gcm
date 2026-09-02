@@ -668,15 +668,14 @@ class TestModeDispatch(unittest.TestCase):
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
     def test_chunked_resume_with_balanced_isothermal_init(self):
-        """Resume path bootstraps the physics carry for inject-based inits.
+        """Resume-from-checkpoint bootstraps a template for state-based inits.
 
-        ``inject_balanced_isothermal_profile`` populates
-        ``_final_dycore_state`` but leaves ``_final_physics_state`` for
-        ``Model.resume`` to lazy-build. The resume-from-checkpoint code
-        path must materialise the carry itself before calling
-        ``load_checkpoint``, otherwise the load raises on the
-        uninitialised template (codex review on PR #479). Held-Suarez is
-        the cheapest physics that supports ``init=balanced_isothermal``.
+        The resume-from-checkpoint path must build both state pytrees (via
+        ``bootstrap_state(balanced_isothermal_state(model))``) as
+        deserialization templates before calling ``load_checkpoint``,
+        otherwise the load raises on the uninitialised template (codex review
+        on PR #479). Held-Suarez is the cheapest physics that supports
+        ``init=balanced_isothermal``.
         """
         import tempfile
 
@@ -1012,7 +1011,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         """The SPEEDY fallback on an ECHAM-family grid must not be silent."""
         from jcm.diffusion import DiffusionFilter
 
-        with self.assertLogs("jcm.runners", level="WARNING") as captured:
+        with self.assertLogs("jcm.diffusion", level="WARNING") as captured:
             diffusion = build_diffusion(self._grid_cfg(layers=31, truncation=63))
         self.assertEqual(float(diffusion.temp_timescale),
                          float(DiffusionFilter.default().temp_timescale))
@@ -1024,7 +1023,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
 
         from jcm.diffusion import DiffusionFilter
 
-        with self.assertNoLogs("jcm.runners", level=logging.WARNING):
+        with self.assertNoLogs("jcm.diffusion", level=logging.WARNING):
             diffusion = build_diffusion(
                 self._grid_cfg(layers=8, truncation=31, vertical="sigma"))
         self.assertEqual(float(diffusion.temp_timescale),
@@ -1038,7 +1037,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         and (47,)", which named neither the config key nor the grid (#579).
         """
         cfg = self._grid_cfg(layers=95, truncation=106, kind="echam_t85_l47")
-        with self.assertRaisesRegex(ValueError, r"47-level .* grid has 95 levels"):
+        with self.assertRaisesRegex(ValueError, r"47 levels .* grid has 95 levels"):
             build_diffusion(cfg)
 
     def test_build_diffusion_unknown_kind_raises(self):
@@ -1304,9 +1303,9 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         model.bootstrap_state()
         return model, terrain
 
-    def _nodal_ps(self, model):
+    def _nodal_ps(self, state, model):
         log_ps_nodal = model.coords.horizontal.to_nodal(
-            model._final_dycore_state.log_surface_pressure
+            state.log_surface_pressure
         )[0]
         from dinosaur.scales import units
         scale = float(
@@ -1315,11 +1314,11 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         return np.exp(np.asarray(log_ps_nodal)) * scale
 
     def test_balanced_isothermal_rebalances_ps_over_orography(self):
-        from jcm.runners import inject_balanced_isothermal_profile
+        from jcm.initial_states import balanced_isothermal_state
 
         model, terrain = self._real_terrain_model()
-        inject_balanced_isothermal_profile(model)
-        ps = self._nodal_ps(model)
+        state = balanced_isothermal_state(model)
+        ps = self._nodal_ps(state, model)
         orog = np.asarray(terrain.orog)
 
         # Surface pressure must drop hydrostatically over high terrain.
@@ -1336,19 +1335,17 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         self.assertEqual(np.argmin(ps), np.argmax(orog))
 
     def test_jw_profile_rebalances_ps_and_injects_humidity(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
 
         model, terrain = self._real_terrain_model()
-        inject_jw_profile(model, rh=0.6)
-        ps = self._nodal_ps(model)
+        state = jw_state(model, rh=0.6)
+        ps = self._nodal_ps(state, model)
         orog = np.asarray(terrain.orog)
         self.assertLess(
             ps[orog > 2000.0].mean(), 0.8 * ps[orog < 1.0].mean(),
         )
 
-        physics_state = model.dycore.to_physics_state(
-            model._final_dycore_state
-        )
+        physics_state = model.dycore.to_physics_state(state)
         q = np.asarray(physics_state.specific_humidity)
         # Moist near the surface, dry above the 200 hPa cap (level 0 is
         # the model top in the physics state layout).
@@ -1361,7 +1358,7 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
         )
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.utils import get_coords
 
         coords = get_coords(
@@ -1369,12 +1366,9 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         )
         model = Model(coords=coords, physics=held_suarez_physics(),
                       time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.5)
+        state = jw_state(model, rh=0.5)
 
-        physics_state = model.dycore.to_physics_state(
-            model._final_dycore_state
-        )
+        physics_state = model.dycore.to_physics_state(state)
         T = np.asarray(physics_state.temperature)
         # Lapse-rate profile bounded by the JW floor and surface values.
         self.assertGreaterEqual(T.min(), 240.0)
@@ -1411,7 +1405,7 @@ class TestMainCLISlow(TestMainCLI):
 
 
 class TestInjectJwHumidityMagnitude(unittest.TestCase):
-    """``inject_jw_profile`` must hand the gridpoint physics a physical
+    """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
     Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
@@ -1424,17 +1418,16 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.6)
+        state = jw_state(model, rh=0.6)
 
-        ps = model.dycore.to_physics_state(model._final_dycore_state)
+        ps = model.dycore.to_physics_state(state)
         qmax = float(np.max(np.asarray(ps.specific_humidity)))
         # rh*q_sat at the warm surface is a few g/kg -> O(1e-2) kg/kg. The units
         # bug produced ~5 (>1 kg/kg); bound it tightly on both sides.
@@ -1449,7 +1442,7 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
 
 
 class TestInjectJwPreservesCloudTracers(unittest.TestCase):
-    """``inject_jw_profile`` must inject only the analytic humidity profile and
+    """``jw_state`` must inject only the analytic humidity profile and
     keep the other prognostic tracers (qc/qi/qnc/qni/qr/qs) the dycore seeded.
 
     Regression for the CRE ≡ 0 bug: overwriting ``state.tracers`` wholesale
@@ -1458,23 +1451,22 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
     """
 
     def test_jw_keeps_2m_cloud_tracers(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.5)
+        state = jw_state(model, rh=0.5)
 
-        keys = set(model._final_dycore_state.tracers.keys())
+        keys = set(state.tracers.keys())
         self.assertIn("specific_humidity", keys)
         # qr/qs are no longer prognostic (2M precipitation is flux-form,
         # review finding 2.18) — the guard covers the four cloud tracers.
         self.assertTrue(
             {"qc", "qi", "qnc", "qni"}.issubset(keys),
-            f"inject_jw_profile dropped cloud tracers; tracers present: {keys}",
+            f"jw_state dropped cloud tracers; tracers present: {keys}",
         )
 
 
@@ -1591,55 +1583,6 @@ class TestAutoInputResolution(unittest.TestCase):
 
 class TestYearExpansionAndStartDate(unittest.TestCase):
     """{year} pattern expansion + run.start_date threading (#610)."""
-
-    def test_pattern_expands_inclusive_range(self):
-        from jcm import runners
-        out = runners._expand_years("hf://bundles/t63/forcing_amip/{year}.nc",
-                                    [1979, 1981])
-        self.assertEqual(out, [
-            "hf://bundles/t63/forcing_amip/1979.nc",
-            "hf://bundles/t63/forcing_amip/1980.nc",
-            "hf://bundles/t63/forcing_amip/1981.nc",
-        ])
-
-    def test_available_years_pads_one_each_side(self):
-        # Mid-month samples need a bracketing December/January from the
-        # neighbouring years, else by_date_interp clamps at the run
-        # boundaries (Codex P1 on #611).
-        from jcm import runners
-        out = runners._expand_years("/x/{year}.nc", [1979, 1980],
-                                    available=[1870, 2022])
-        self.assertEqual(out, ["/x/1978.nc", "/x/1979.nc",
-                               "/x/1980.nc", "/x/1981.nc"])
-
-    def test_available_years_clips_at_coverage_edges(self):
-        from jcm import runners
-        self.assertEqual(
-            runners._expand_years("/x/{year}.nc", [1870, 1871],
-                                  available=[1870, 2022])[0],
-            "/x/1870.nc")
-        self.assertEqual(
-            runners._expand_years("/x/{year}.nc", [2021, 2022],
-                                  available=[1870, 2022])[-1],
-            "/x/2022.nc")
-
-    def test_plain_paths_and_none_pass_through(self):
-        from jcm import runners
-        self.assertEqual(runners._expand_years("/x/forcing.nc", [1979, 1981]),
-                         "/x/forcing.nc")
-        self.assertIsNone(runners._expand_years(None, [1979, 1981]))
-        self.assertEqual(runners._expand_years("/x/forcing.nc", None),
-                         "/x/forcing.nc")
-
-    def test_pattern_without_years_raises(self):
-        from jcm import runners
-        with self.assertRaisesRegex(ValueError, "year range"):
-            runners._expand_years("/x/forcing_{year}.nc", None)
-
-    def test_reversed_range_raises(self):
-        from jcm import runners
-        with self.assertRaisesRegex(ValueError, "reversed"):
-            runners._expand_years("/x/forcing_{year}.nc", [1981, 1979])
 
     def test_amip_preset_composes(self):
         cfg = _compose(["forcing=amip", "forcing.years=[1979,1980]",

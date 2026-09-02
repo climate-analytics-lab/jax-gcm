@@ -36,6 +36,14 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+# Source-checkout bootstrap: repo root on sys.path before importing jcm, so
+# ``python tools/validate_era5_bundle.py`` works without a pip-installed jcm.
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from jcm.analysis import area_weights  # noqa: E402
+
 ROOT = Path(os.environ.get(
     "JCM_MIRROR_ROOT",
     f"/glade/derecho/scratch/{os.environ.get('USER', '')}/hf_mirror"))
@@ -104,7 +112,13 @@ def _land_monthly_stl(year: int) -> xr.DataArray:
         ROOT / "build" / "era5_land_transient" / f"{year}.nc")
     clim = xr.open_dataset(ROOT / "build" /
                            "era5_land_climo_2005-2014_0p25.nc")
-    w = np.cos(np.deg2rad(land.latitude)) * (clim.lsm > 0.5)
+    # Shared area weights (#640). ERA5's regular 0.25° grid is not
+    # Gauss-Legendre, so area_weights returns cos(lat) — value-identical to
+    # the previous inline weighting — carried onto ERA5's ``latitude`` dim and
+    # masked to land.
+    lat_w = xr.DataArray(np.asarray(area_weights(land.latitude.values)),
+                         dims="latitude", coords={"latitude": land.latitude})
+    w = lat_w * (clim.lsm > 0.5)
     return (land.stl1 * w).sum(("latitude", "longitude")) / w.sum()
 
 

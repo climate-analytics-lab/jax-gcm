@@ -16,12 +16,15 @@ reference tables are indexed and what happens off them.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 import jax.numpy as jnp
 import tree_math
 from jax import tree_util
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ECHAM6 lmidatm hyperdiffusion reference tables
@@ -229,6 +232,77 @@ class DiffusionFilter:
             level_orders_div=level_orders,
             level_orders_vor_q=level_orders,
             level_orders_temp=level_orders,
+        )
+
+    @classmethod
+    def auto(cls, truncation: int, layers: int, vertical: str):
+        """Resolution-aware default filter for a grid.
+
+        When the grid is a hybrid grid with a level count ECHAM tabulates
+        (L47 or L95), return the ECHAM ``lmidatm`` level-dependent profile
+        for that ``(truncation, layers)`` — del² near the model top grading
+        to del⁶/del⁸ below, with the ``setdyn.f90`` base timescale. That's
+        the stability stack these grids were tuned for in ECHAM, and it is
+        what the L95 middle-atmosphere grids exist to exploit. Any other grid
+        — SPEEDY T31L8, Held-Suarez, a hybrid grid at an untabulated level
+        count — gets the uniform SPEEDY del² profile, with a warning in the
+        hybrid case since that is unlikely to be what was intended (#579).
+
+        ``vertical`` is the grid's vertical-coordinate kind (``"hybrid"`` or
+        ``"sigma"``).
+        """
+        # Match on the (vertical=hybrid, layers) pair so this fires for every
+        # ECHAM-family grid at any truncation — and stays inert for SPEEDY
+        # T31L8 / Held-Suarez, which have their own tuned uniform damping.
+        if vertical == "hybrid" and layers in ECHAM_LMIDATM_LAYERS:
+            return cls.echam_lmidatm(truncation, layers)
+        if vertical == "hybrid":
+            logger.warning(
+                "diffusion.kind=auto found no ECHAM lmidatm profile for a "
+                "hybrid grid with %d levels, so this run uses the uniform "
+                "SPEEDY profile (24h temp / 12h vor_q / 2h div). ECHAM "
+                "profiles exist for %s levels. Set diffusion.kind "
+                "explicitly to silence this.",
+                layers, sorted(ECHAM_LMIDATM_LAYERS),
+            )
+        return cls.default()
+
+    def validate_layers(self, layers: int) -> None:
+        """Raise if a level-dependent profile does not match the grid.
+
+        A level-dependent profile is a per-level array, so pinning one whose
+        length does not match the grid fails later inside the spectral filter
+        as an opaque broadcast error ("(95, 213, 108) vs (47,)"). Catch it
+        here, where the actual mismatch can be named (#579).
+        """
+        n_orders = (None if self.level_orders_temp is None
+                    else len(self.level_orders_temp))
+        if n_orders is not None and layers and n_orders != layers:
+            raise ValueError(
+                f"diffusion profile has {n_orders} levels but the grid has "
+                f"{layers} levels. Use diffusion.kind=auto (or "
+                "'echam_lmidatm') to get the profile matching this grid, or "
+                "'default' for the uniform SPEEDY profile."
+            )
+
+    def scaled(self, scale: float) -> "DiffusionFilter":
+        """Return a copy with all three timescales multiplied by ``scale``.
+
+        ``scale == 1.0`` returns ``self`` unchanged (identity), so the
+        SPEEDY-tuned configs stay bit-for-bit as before.
+        """
+        if scale == 1.0:
+            return self
+        return DiffusionFilter(
+            div_timescale=self.div_timescale * scale,
+            div_order=self.div_order,
+            vor_q_timescale=self.vor_q_timescale * scale,
+            vor_q_order=self.vor_q_order,
+            temp_timescale=self.temp_timescale * scale,
+            temp_order=self.temp_order,
+            level_orders_div=self.level_orders_div,
+            level_orders_vor_q=self.level_orders_vor_q,
+            level_orders_temp=self.level_orders_temp,
         )
 
     def isnan(self):

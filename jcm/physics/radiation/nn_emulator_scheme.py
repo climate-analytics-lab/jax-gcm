@@ -562,7 +562,7 @@ class NNEmulatorRadiation(PhysicsTerm):
                     f"{name} bands, giving {got} under band_mode="
                     f"{self._band_mode!r}. The band config follows the "
                     "active radiation backend; a radiation term absent "
-                    "from jcm.runners._band_config_for_terms falls back "
+                    "from RadiationBandConfig.for_terms falls back "
                     "to a single 550 nm SW band and no LW bands."
                 )
 
@@ -847,3 +847,61 @@ class NNEmulatorRadiation(PhysicsTerm):
             tracers={},
         )
         return tendency, rad_out
+
+
+def guard_ghg_forcing(physics, forcing) -> None:
+    """Reject CH4/N2O forcing the NN radiation emulator cannot represent.
+
+    RRTMGP consumes the chemistry methane profile and the prescribed N2O,
+    but the emulator's features carry only ozone and CO2 and its labels are
+    generated at RRTMGP's own CH4/N2O defaults — so a scenario that varies
+    either gas gets fluxes with no trace of its radiative forcing. Absent
+    the features (jax-gcm#738), failing loudly is the honest behaviour:
+    silence here looks exactly like a well-behaved GHG experiment. This
+    encodes what the emulator was trained on, so a Model-level Python user
+    needs it as much as the Hydra CLI does.
+
+    Best-effort by design: it covers the Hydra paths, where forcing is
+    concrete at build time. A direct ``Model.run(forcing=...)`` caller can
+    still hand traced values to the term, which cannot branch on them.
+    """
+    import numpy as np
+
+    # Function-local to avoid a module-level jcm.forcing import cycle.
+    from jcm.forcing import (
+        DEFAULT_CH4_VMR_PPMV,
+        DEFAULT_N2O_VMR_PPMV,
+        TimeSeries,
+    )
+
+    terms = getattr(physics, "terms", None) or []
+    if not any(isinstance(t, NNEmulatorRadiation) for t in terms):
+        return
+    if forcing is None:
+        return
+    for name, default in (("ch4_vmr", DEFAULT_CH4_VMR_PPMV),
+                          ("n2o_vmr", DEFAULT_N2O_VMR_PPMV)):
+        value = getattr(forcing, name, None)
+        if value is None:
+            continue
+        # A file-based transient GHG arrives as a TimeSeries, which is
+        # exactly the scenario case this guard exists for — unwrap it
+        # rather than letting np.asarray raise and skip the check.
+        if isinstance(value, TimeSeries):
+            value = value.values
+        try:
+            arr = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            continue        # traced/abstract: nothing to check here
+        # Relative tolerance, not exact equality: a TimeSeries stores the
+        # value as float32, so a default-valued transient round-trips a few
+        # 1e-8 off. Any real scenario change is percent-level.
+        if arr.size and not np.allclose(arr, default, rtol=1e-6, atol=0.0):
+            raise ValueError(
+                f"forcing.{name} is {np.unique(arr)[:4]} ppmv but the NN "
+                f"radiation emulator is trained at the fixed default "
+                f"{default} ppmv and takes neither gas as an input feature, "
+                "so its fluxes would ignore this forcing entirely "
+                "(jax-gcm#738). Use physics=echam-rrtmgp-2m for CH4/N2O "
+                f"experiments, or leave forcing.{name} at its default."
+            )

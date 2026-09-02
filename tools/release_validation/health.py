@@ -26,12 +26,22 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-# Shared burden/weighting machinery lives in tools/jam_burden_report.py —
-# one implementation for the report and the gates (it handles the
-# pressure_half level-orientation dance and includes cloud-borne
-# tracers).
-sys.path.insert(0, str(Path(__file__).parents[1]))
-from jam_burden_report import _SPECIES, _area_weights, _wmean, burden  # noqa: E402
+# Source-checkout bootstrap: put the repo root (for ``jcm``) AND tools/ (for
+# the sibling ``jam_burden_report`` module) on sys.path *before* the imports
+# that need them, so the documented ``python tools/release_validation/health.py``
+# works without a pip-installed jcm.
+_TOOLS = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
+for _p in (str(_REPO), str(_TOOLS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Shared weighting/column-integration machinery lives in jcm.analysis (#640);
+# the species table and the mode-summing burden() are tool domain and stay in
+# tools/jam_burden_report.py (it includes cloud-borne tracers and the
+# pressure_half level-orientation handling).
+from jcm.analysis import area_weights, global_mean  # noqa: E402
+from jam_burden_report import _SPECIES, burden  # noqa: E402
 
 #: Gate slack: the release gate is the climatological anchor range from
 #: the shared species table widened by this factor each way — a "did the
@@ -57,10 +67,10 @@ BURDEN_RANGES = {
 
 
 def wmean(da, weights):
-    """Time-mean, area-weighted global mean (shared _wmean over horiz dims)."""
+    """Time-mean, area-weighted global mean (over the horizontal dims)."""
     if "time" in da.dims:
         da = da.mean("time")
-    return _wmean(da, weights)
+    return float(global_mean(da, weights))
 
 
 def main():
@@ -79,7 +89,7 @@ def main():
     if a.last_n:
         files = files[-a.last_n:]
     ds = xr.open_mfdataset(files, combine="by_coords")
-    weights = _area_weights(ds)
+    weights = area_weights(ds)
 
     ok = True
 
@@ -155,8 +165,8 @@ def main():
             if col is None:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
                 continue
-            check(f"burden_{sp}_mg_m2", _wmean(col.compute(), weights),
-                  lo, hi)
+            check(f"burden_{sp}_mg_m2",
+                  float(global_mean(col.compute(), weights)), lo, hi)
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())

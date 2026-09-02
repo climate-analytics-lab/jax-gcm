@@ -16,15 +16,23 @@ accumulation mode) and m_poa_pcm (insoluble primary carbon). Checks:
   * accumulated wet_so4 deposition is positive.
 """
 import sys
+from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
 from jax.tree_util import tree_map
 
-from jcm.physics.echam.echam_levels import get_echam_levels
-from jcm.physics.echam.echam_terms import echam_physics
-from jcm.rce import rce_initial_state
-from jcm.single_column_model import SingleColumnModel
+# Source-checkout bootstrap: repo root on sys.path before importing jcm, so
+# ``python tools/release_validation/scm_check.py`` works without a
+# pip-installed jcm.
+_REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from jcm.physics.echam.echam_levels import get_echam_levels  # noqa: E402
+from jcm.physics.echam.echam_terms import echam_physics  # noqa: E402
+from jcm.rce import rce_initial_state  # noqa: E402
+from jcm.single_column_model import SingleColumnModel  # noqa: E402
 
 DAYS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 DT = 900.0

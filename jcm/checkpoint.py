@@ -71,10 +71,9 @@ def load_checkpoint(model, path) -> float:
     """Restore ``_final_dycore_state`` + ``_final_physics_state`` from ``path``.
 
     The model must already have been bootstrapped (e.g. by an earlier
-    ``Model.run``, ``Model.bootstrap_state``, or one of the
-    ``inject_*_profile`` helpers in :mod:`jcm.runners`) so that its
-    state pytrees provide a treedef + per-leaf shape/dtype templates
-    that match the checkpoint.
+    ``Model.run``, ``Model.bootstrap_state``, or one of the initial-state
+    builders in :mod:`jcm.initial_states`) so that its state pytrees provide
+    a treedef + per-leaf shape/dtype templates that match the checkpoint.
 
     Args:
         model: A ``jcm.model.Model`` with populated final states to use

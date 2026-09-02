@@ -96,5 +96,56 @@ class UpperTemperatureRelaxationTest(unittest.TestCase):
         self.assertTrue((u_next >= -1e-6).all())  # no sign flip
 
 
+class UpperTemperatureRelaxationFromUssaTest(unittest.TestCase):
+    """`from_ussa` builds a USSA reference profile on a hybrid grid."""
+
+    def _boundaries(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        v = get_echam_levels(47)
+        return (np.asarray(v.a_boundaries, dtype=float),
+                np.asarray(v.b_boundaries, dtype=float))
+
+    def test_t_ref_matches_direct_ussa_at_mid_pressures(self):
+        from jcm.initial_states.ussa1976 import (
+            ussa_pressure, ussa_temperature,
+        )
+
+        a, b = self._boundaries()
+        term = UpperTemperatureRelaxation.from_ussa(
+            a, b, n_levels=8, timescale_s=6.0 * 3600.0)
+
+        # Reproduce the level mid-pressures and the log-p → z → T mapping.
+        p0 = 101325.0
+        p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * p0
+        zs = np.linspace(0.0, 84000.0, 4000)
+        ps = np.asarray(ussa_pressure(zs))
+        z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
+        expected = np.asarray(ussa_temperature(z_of_p))
+
+        t_ref = np.asarray(term._t_ref.get_value())
+        np.testing.assert_allclose(t_ref, expected, rtol=1e-5)
+
+    def test_surface_level_is_near_288K_and_troposphere_decreases(self):
+        a, b = self._boundaries()
+        term = UpperTemperatureRelaxation.from_ussa(
+            a, b, n_levels=8, timescale_s=6.0 * 3600.0)
+        p0 = 101325.0
+        p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * p0
+        t_ref = np.asarray(term._t_ref.get_value())
+
+        # These grids are surface-last in the hybrid boundary order: the
+        # highest-pressure mid-level sits near 1000 hPa at ~USSA surface T.
+        i_sfc = int(np.argmax(p_mid))
+        self.assertGreater(p_mid[i_sfc], 90000.0)
+        self.assertAlmostEqual(float(t_ref[i_sfc]), 288.0, delta=3.0)
+
+        # Through the troposphere (down to the tropopause ~ 200 hPa) T falls
+        # monotonically toward the surface as pressure rises.
+        order = np.argsort(p_mid)
+        trop = order[p_mid[order] >= 20000.0]
+        t_trop = t_ref[trop]
+        self.assertTrue(np.all(np.diff(t_trop) >= -1e-6))
+
+
 if __name__ == "__main__":
     unittest.main()

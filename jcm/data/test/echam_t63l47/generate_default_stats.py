@@ -178,8 +178,8 @@ def generate():
     import sys
     import xarray as xr
 
+    from jcm.initial_states import balanced_isothermal_state
     from jcm.model import Model
-    from jcm.runners import inject_balanced_isothermal_profile
 
     print(f"JAX backend: {jax.default_backend()} on {jax.devices()}")
     if jax.default_backend() == "cpu":
@@ -198,9 +198,8 @@ def generate():
     model = Model(
         coords=coords, terrain=terrain, physics=physics, time_step=12,
     )
-    model._final_dycore_state = model._prepare_initial_dycore_state()
-    inject_balanced_isothermal_profile(model)
-    spin_up = model.resume(
+    spin_up = model.run(
+        initial_state=balanced_isothermal_state(model),
         forcing=forcing, save_interval=5.0, total_time=5.0,
     )
     _block_until_ready(spin_up)

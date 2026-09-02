@@ -5,6 +5,15 @@ construction of ``Model``, ``TerrainData``, ``DiffusionFilter`` and the various
 physics packages. Keeps ``main.py`` minimal so other harnesses (notebooks,
 integration tests) can import the same builders directly without going through
 Hydra's CLI machinery.
+
+By design (#640) this module contains **no science**: it parses config and
+calls the library — the initial-state builders in :mod:`jcm.initial_states`, the weights and
+burdens in :mod:`jcm.analysis`, the forcing helpers in :mod:`jcm.forcing`, the
+relaxation profiles in :mod:`jcm.nudging`, and the various scheme constructors.
+Every scientific choice lives in one of those homes with its own tests, so a
+diff of this file should never need a scientific reviewer — only a config one.
+New behaviour is added by promoting the science into a library home and calling
+it from here, not by growing logic in the runner.
 """
 
 from __future__ import annotations
@@ -17,12 +26,18 @@ from pathlib import Path
 from typing import Any
 
 import jax
-import jax.numpy as jnp
 from omegaconf import DictConfig
 
 from jcm import provenance
-from jcm.diffusion import ECHAM_LMIDATM_LAYERS, DiffusionFilter
+from jcm.diffusion import DiffusionFilter
+from jcm.forcing import expand_yearly_files
+from jcm.initial_states import (
+    balanced_isothermal_state,
+    jw_state,
+)
 from jcm.model import Model, ModelPredictions
+from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
@@ -293,7 +308,7 @@ def build_physics(cfg: DictConfig):
         terms=terms,
         checkpoint_terms=physics_cfg.get("checkpoint_terms", True),
         vectorize_columns=physics_cfg.get("vectorize_columns", False),
-        band_config=_band_config_for_terms(terms),
+        band_config=RadiationBandConfig.for_terms(terms),
     )
     return physics
 
@@ -347,89 +362,18 @@ def _build_physics_from_factory(physics_cfg):
     return factory(**kwargs)
 
 
-def _band_config_for_terms(terms):
-    """Pick a ``RadiationBandConfig`` to match the active radiation backend.
-
-    Walks the term list for a term that resolves radiation band by band
-    and reads RRTMGP's band centers; otherwise returns the broadband
-    (single 550 nm SW band) fallback. Centralised here so every
-    wavelength-dependent term — not just the aerosol scheme — sees the
-    same band structure as whatever radiation backend is actually
-    running. The band config is owned by ``ComposablePhysics`` and
-    injected into ``diagnostics["_band_config"]`` each step (same pattern
-    as ``_dt_seconds``).
-
-    The NN emulator counts because it is trained on RRTMGP's band-resolved
-    aerosol optics: give it the broadband fallback and the aerosol term
-    feeds it a single 550 nm band, which is not the input its labels were
-    generated under. That costs one load of the RRTMGP tables at
-    construction even though the emulator never solves with them, which is
-    worth it to keep the two arms on identical aerosol input.
-    """
-    from jcm.physics.radiation.band_config import RadiationBandConfig
-    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
-    from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
-
-    for t in terms:
-        if isinstance(t, (RRTMGPRadiation, NNEmulatorRadiation)):
-            return RadiationBandConfig.from_rrtmgp(_ensure_rrtmgp())
-    return RadiationBandConfig.broadband()
+#: Radiation band-config selection; the science lives in
+#: :meth:`jcm.physics.radiation.band_config.RadiationBandConfig.for_terms`.
+#: Aliased for backward compatibility (nn_emulator_scheme_test imports it).
+_band_config_for_terms = RadiationBandConfig.for_terms
 
 
-def guard_emulator_ghg_forcing(physics, forcing) -> None:
-    """Reject CH4/N2O forcing the NN radiation emulator cannot represent.
-
-    RRTMGP consumes the chemistry methane profile and the prescribed N2O,
-    but the emulator's features carry only ozone and CO2 and its labels are
-    generated at RRTMGP's own CH4/N2O defaults — so a scenario that varies
-    either gas gets fluxes with no trace of its radiative forcing. Absent
-    the features (jax-gcm#738), failing loudly is the honest behaviour:
-    silence here looks exactly like a well-behaved GHG experiment.
-
-    Best-effort by design: it covers the Hydra paths, where forcing is
-    concrete at build time. A direct ``Model.run(forcing=...)`` caller can
-    still hand traced values to the term, which cannot branch on them.
-    """
-    import numpy as np
-
-    from jcm.forcing import (
-        DEFAULT_CH4_VMR_PPMV,
-        DEFAULT_N2O_VMR_PPMV,
-        TimeSeries,
-    )
-    from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
-
-    terms = getattr(physics, "terms", None) or []
-    if not any(isinstance(t, NNEmulatorRadiation) for t in terms):
-        return
-    if forcing is None:
-        return
-    for name, default in (("ch4_vmr", DEFAULT_CH4_VMR_PPMV),
-                          ("n2o_vmr", DEFAULT_N2O_VMR_PPMV)):
-        value = getattr(forcing, name, None)
-        if value is None:
-            continue
-        # A file-based transient GHG arrives as a TimeSeries, which is
-        # exactly the scenario case this guard exists for — unwrap it
-        # rather than letting np.asarray raise and skip the check.
-        if isinstance(value, TimeSeries):
-            value = value.values
-        try:
-            arr = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            continue        # traced/abstract: nothing to check here
-        # Relative tolerance, not exact equality: a TimeSeries stores the
-        # value as float32, so a default-valued transient round-trips a few
-        # 1e-8 off. Any real scenario change is percent-level.
-        if arr.size and not np.allclose(arr, default, rtol=1e-6, atol=0.0):
-            raise ValueError(
-                f"forcing.{name} is {np.unique(arr)[:4]} ppmv but the NN "
-                f"radiation emulator is trained at the fixed default "
-                f"{default} ppmv and takes neither gas as an input feature, "
-                "so its fluxes would ignore this forcing entirely "
-                "(jax-gcm#738). Use physics=echam-rrtmgp-2m for CH4/N2O "
-                f"experiments, or leave forcing.{name} at its default."
-            )
+# The emulator GHG guard now lives with the scheme whose training it encodes
+# (jax-gcm#738); runners keeps the historical name so existing callers/tests
+# (``from jcm.runners import guard_emulator_ghg_forcing``) keep working.
+from jcm.physics.radiation.nn_emulator_scheme import (  # noqa: E402
+    guard_ghg_forcing as guard_emulator_ghg_forcing,
+)
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):
@@ -450,27 +394,19 @@ def maybe_add_sponge(physics, cfg: DictConfig):
 
 
 def _nudging_inv_tau(nudging_cfg, vertical):
-    """Per-level inverse-timescale profiles from the ``nudging`` config.
+    """Adapt the ``nudging`` config to :func:`jcm.nudging.inv_tau_profile`.
 
-    One ``1/tau`` value masked to zero (a) in the bottom ``pbl_levels``
-    layers, and (b) above ``min_pressure_hpa`` — the WB2 ERA5 stores
-    stop at 50 hPa, and values above that clamp, so relaxing the
-    stratosphere toward them would drag it to 50-hPa winds.
+    Returns ``(inv_tau, nlev)`` for :func:`maybe_add_nudging`.
     """
-    import numpy as np
-    if hasattr(vertical, "a_centers"):
-        p_ref = (np.asarray(vertical.a_centers)
-                 + np.asarray(vertical.b_centers) * 101325.0)
-    else:
-        p_ref = np.asarray(vertical.centers) * 101325.0
-    nlev = p_ref.size
-    mask = np.ones(nlev)
-    mask[p_ref < float(nudging_cfg.get("min_pressure_hpa", 60.0)) * 100.0] = 0.0
-    pbl = int(nudging_cfg.get("pbl_levels", 0))
-    if pbl > 0:
-        mask[nlev - pbl:] = 0.0
-    inv_tau = mask / (float(nudging_cfg.get("tau_hours", 6.0)) * 3600.0)
-    return inv_tau, nlev
+    from jcm.nudging import inv_tau_profile
+
+    inv_tau = inv_tau_profile(
+        vertical,
+        tau_hours=float(nudging_cfg.get("tau_hours", 6.0)),
+        min_pressure_hpa=float(nudging_cfg.get("min_pressure_hpa", 60.0)),
+        pbl_levels=int(nudging_cfg.get("pbl_levels", 0)),
+    )
+    return inv_tau, inv_tau.size
 
 
 def maybe_add_nudging(physics, cfg: DictConfig, coords):
@@ -556,45 +492,10 @@ def _resolve_data_path(path):
     return path
 
 
-def _expand_years(file_spec, years, available=None):
-    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
-
-    The transient AMIP bundles are one file per year (issue #610:
-    download only what you run, append new years without rewriting
-    history), so config points at a pattern plus an inclusive range:
-    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
-    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
-    than silently running with a literal ``{year}`` path. Non-pattern
-    specs (plain paths, lists, ``None``) pass through untouched even when
-    ``years`` is set — a run may mix yearly SST files with a static dust
-    climatology, all sharing one ``forcing.years`` range.
-
-    ``available`` (``forcing.available_years``, the product's inclusive
-    source coverage) widens the expansion by one year on each side,
-    clipped to that coverage: the yearly files hold *mid-month* samples,
-    so a run starting Jan 1 needs the previous December's sample (and a
-    run ending Dec 31 the next January's) for ``by_date_interp`` to
-    bracket the boundary instead of clamping to the nearest mid-month
-    value for ~half a month.
-    """
-    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
-    if not has_pattern:
-        return file_spec
-    if years is None:
-        raise ValueError(
-            f"forcing file pattern {file_spec!r} contains {{year}} but "
-            "no year range is set — add e.g. forcing.years=[1979,1983]")
-    first, last = int(years[0]), int(years[-1])
-    if last < first:
-        raise ValueError(f"forcing.years range is reversed: {years!r}")
-    if available is not None:
-        lo, hi = int(available[0]), int(available[-1])
-        first, last = max(first - 1, lo), min(last + 1, hi)
-        # A requested range entirely outside coverage would invert here
-        # and expand to nothing; clamp to the nearest edge file instead
-        # (the time lookup then clamps to its first/last sample).
-        first, last = min(first, hi), max(last, lo)
-    return [file_spec.format(year=y) for y in range(first, last + 1)]
+#: Yearly ``{year}`` file-pattern expansion; the science lives in
+#: :func:`jcm.forcing.expand_yearly_files`. Aliased for the many call sites
+#: (and TestYearExpansionAndStartDate) that reference the private name.
+_expand_years = expand_yearly_files
 
 
 def _product_available_years(forcing_cfg, key: str):
@@ -670,22 +571,7 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
 
     if kind == "auto":
-        # Match on the (vertical=hybrid, layers) pair so this fires for every
-        # ECHAM-family grid at any truncation — and stays inert for SPEEDY
-        # T31L8 / Held-Suarez, which have their own tuned uniform damping.
-        if vertical == "hybrid" and layers in ECHAM_LMIDATM_LAYERS:
-            base = DiffusionFilter.echam_lmidatm(truncation, layers)
-        else:
-            if vertical == "hybrid":
-                logger.warning(
-                    "diffusion.kind=auto found no ECHAM lmidatm profile for a "
-                    "hybrid grid with %d levels, so this run uses the uniform "
-                    "SPEEDY profile (24h temp / 12h vor_q / 2h div). ECHAM "
-                    "profiles exist for %s levels. Set diffusion.kind "
-                    "explicitly to silence this.",
-                    layers, sorted(ECHAM_LMIDATM_LAYERS),
-                )
-            base = DiffusionFilter.default()
+        base = DiffusionFilter.auto(truncation, layers, vertical)
     elif kind == "default":
         base = DiffusionFilter.default()
     elif kind == "echam_lmidatm":
@@ -701,223 +587,34 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
             "'echam_t85_l47'."
         )
 
-    # A level-dependent profile is a per-level array, so pinning one whose
-    # length does not match the grid fails later inside the spectral filter as
-    # an opaque broadcast error ("(95, 213, 108) vs (47,)"). Catch it here,
-    # where the actual mismatch can be named (#579).
-    n_orders = None if base.level_orders_temp is None else len(base.level_orders_temp)
-    if n_orders is not None and layers and n_orders != layers:
-        raise ValueError(
-            f"diffusion.kind={kind!r} builds a {n_orders}-level hyperdiffusion "
-            f"profile but the grid has {layers} levels. Use "
-            "diffusion.kind=auto (or 'echam_lmidatm') to get the profile "
-            "matching this grid, or 'default' for the uniform SPEEDY profile."
-        )
-
-    if scale == 1.0:
-        return base
-    return DiffusionFilter(
-        div_timescale=base.div_timescale * scale,
-        div_order=base.div_order,
-        vor_q_timescale=base.vor_q_timescale * scale,
-        vor_q_order=base.vor_q_order,
-        temp_timescale=base.temp_timescale * scale,
-        temp_order=base.temp_order,
-        level_orders_div=base.level_orders_div,
-        level_orders_vor_q=base.level_orders_vor_q,
-        level_orders_temp=base.level_orders_temp,
-    )
+    base.validate_layers(layers)
+    return base.scaled(scale)
 
 
 # ---------------------------------------------------------------------------
-# Initial state injection (JW-style lapse-rate profile)
+# Initial state — thin config adapters
+#
+# The state-builder science lives in ``jcm.initial_states.injectors``. The
+# profile builders (JW, balanced-isothermal) take no config and are
+# re-exported unchanged above; the file/era5 states need Hydra-config
+# adaptation and get the thin adapters below. Each returns a state to hand
+# to ``model.run(initial_state=...)``.
 # ---------------------------------------------------------------------------
 
-# Standard-atmosphere lapse rate and surface temperature for the JW init.
-_JW_T_SFC = 288.0       # K, mid-latitude mean surface T
-_JW_LAPSE = 6.5e-3      # K/m, ICAO standard tropospheric lapse rate
-_JW_T_FLOOR = 250.0     # K, cold-tail cap so semi-implicit reference T stays
-                        # close (dycore goes unstable for ΔT ~ 50 K).
-# Reference temperature used for the column-mean hydrostatic balance applied
-# to surface pressure over orography. ~ midpoint between troposphere and
-# stratosphere — exact value matters very little for the surface-pressure
-# field, but the nondimensionalisation is sensitive to changes here.
-_HYDROSTATIC_T_REF = 260.0
 
-# Tetens / Bolton coefficients for saturation vapour pressure over water.
-_ES0 = 611.2     # Pa
-_ES_A = 17.67
-_ES_B = 29.65    # K offset
-_T0_C = 273.15   # K, melting point reference
+def _state_from_file(model: Model, cfg: DictConfig):
+    """Config adapter for the ``init.kind=from_state`` warm start.
 
-# Tropopause cap above which we set RH = 0 in the JW humidity profile.
-_RH_CAP_PRESSURE_PA = 20000.0   # 200 hPa
-
-
-def inject_balanced_isothermal_profile(model: Model) -> None:
-    """Inject an isothermal-rest atmosphere with orography-balanced ``ps``.
-
-    Same ps-rebalance logic as :func:`inject_jw_profile` (so air doesn't
-    end up below ground over tall topography), but keeps the temperature
-    field at a uniform 288 K and humidity at zero. Useful as a robust
-    starting state for moist-physics runs over real terrain when the
-    full JW lapse-rate profile is unstable at the chosen resolution.
-
-    Mutates ``model._final_dycore_state`` in place. Follow with
-    ``model.resume(...)`` rather than ``model.run(...)``.
+    Resolves ``init.file`` to a local path, rejects the case where it
+    collides with ``run.checkpoint_path`` (the first-chunk checkpoint would
+    overwrite the donor init state), then delegates to
+    :func:`jcm.initial_states.checkpoint_state` for the load and clock-reset
+    semantics. Returns ``(state, physics_carry)`` for the caller to hand to
+    ``model.run(initial_state=..., initial_physics_state=...)`` — the donor's
+    physics carry is threaded through so the warm start keeps its radiation
+    sub-cycle cache / prior-step TKE rather than resetting them.
     """
-    from dinosaur.scales import units
-    from jcm.constants import grav, p0s1_bg, rd
-
-    model._final_dycore_state = model._prepare_initial_dycore_state(
-        physics_state=None, random_seed=0,
-    )
-    state = model._final_dycore_state
-    p0_pa = p0s1_bg
-
-    orog = jnp.asarray(model.terrain.orog)
-    if jnp.any(orog > 1.0):
-        # Hydrostatic balance with the actual isothermal T (288 K), not
-        # ``_HYDROSTATIC_T_REF`` (260 K which is appropriate for the
-        # JW lapse-rate profile). Using the matching T avoids an
-        # initial-step pressure-temperature inconsistency.
-        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _JW_T_SFC))
-        scale = float(model.dycore.physics_specs.nondimensionalize(1.0 * units.pascal))
-        log_ps_nodal = jnp.log(ps_pa_nodal * scale)
-        state.log_surface_pressure = model.coords.horizontal.to_modal(
-            log_ps_nodal[None, ...]
-        )
-    model._final_dycore_state = state
-
-
-def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
-    """Inject a Jablonowski-Williamson-style lapse-rate initial condition.
-
-    Replaces ``model._final_dycore_state`` (set up by the default isothermal
-    rest atmosphere) with a vertical profile suitable for moist physics:
-
-    * Temperature: 288 K at the surface, ICAO standard lapse 6.5 K/km, capped
-      at 250 K so the semi-implicit reference temperature stays close.
-    * Surface pressure: hydrostatically balanced against the model's
-      orography when present (otherwise the isothermal init places air below
-      ground on tall mountains and the run blows up).
-    * Humidity: ``rh`` × q_sat(T) below ~200 hPa, zero above; clipped to a
-      sensible range for q.
-
-    Mutates ``model._final_dycore_state`` in place. Follow with
-    ``model.resume(...)`` rather than ``model.run(...)``.
-    """
-    from dinosaur.hybrid_coordinates import HybridCoordinates
-    from dinosaur.scales import units
-
-    from jcm.constants import grav, p0s1_bg, rd
-
-    model._final_dycore_state = model._prepare_initial_dycore_state(
-        physics_state=None, random_seed=0,
-    )
-    state = model._final_dycore_state
-
-    nlon, nlat = model.coords.horizontal.nodal_shape
-    p0_pa = p0s1_bg
-    if isinstance(model.coords.vertical, HybridCoordinates):
-        sigma = jnp.asarray(model.coords.vertical.get_sigma_centers(p0_pa))
-    else:
-        sigma = jnp.asarray(model.coords.vertical.centers)
-    nlev = sigma.size
-
-    # Hypsometric height for an isothermal column at T = 288 K. The scale
-    # height H = R_d * T / g comes out to ~ 8400 m; we use it to convert
-    # sigma to z so the lapse-rate profile can be evaluated.
-    p = sigma * p0_pa
-    scale_height = rd * _JW_T_SFC / grav
-    z = scale_height * jnp.log(p0_pa / p)
-    T_profile = jnp.maximum(_JW_T_SFC - _JW_LAPSE * z, _JW_T_FLOOR)
-
-    # Hydrostatically rebalance surface pressure when there's nontrivial
-    # orography, otherwise the isothermal-rest init produces air below ground.
-    orog = jnp.asarray(model.terrain.orog)
-    if jnp.any(orog > 1.0):
-        ps_pa_nodal = p0_pa * jnp.exp(-grav * orog / (rd * _HYDROSTATIC_T_REF))
-        scale = float(model.dycore.physics_specs.nondimensionalize(1.0 * units.pascal))
-        log_ps_nodal = jnp.log(ps_pa_nodal * scale)
-        state.log_surface_pressure = model.coords.horizontal.to_modal(
-            log_ps_nodal[None, ...]
-        )
-
-    # Humidity: rh * q_sat(T) below the tropopause cap, dry above.
-    es = _ES0 * jnp.exp(_ES_A * (T_profile - _T0_C) / (T_profile - _ES_B))
-    q_sat = 0.622 * es / jnp.maximum(p - es, 1.0)
-    rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
-    q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)
-
-    # Preserve the dry-balanced VIRTUAL temperature. The dynamical core's mass
-    # field is driven by ``Tv = T*(1 + 0.61 q - q_cloud)`` (dinosaur
-    # ``primitive_equations``). Injecting moisture onto the dry-balanced ``T``
-    # raises Tv and breaks the hydrostatic balance the resting state was built
-    # for, seeding a moisture-magnitude-dependent gravity-wave blow-up (rh=0.5
-    # NaNs in ~3 h, rh=0.2 by day 2; the dry init is stable because Tv=T).
-    # Lowering T so the moist Tv equals the dry-balanced value makes the
-    # dynamics see the *identical*, stable state while the moisture is carried
-    # transparently. The temperature change is tiny (~1 K at q~6 g/kg) but it
-    # is exactly what restores the balance. Physics then evolves from a
-    # consistent moist resting state.
-    T_balanced_profile = T_profile / (1.0 + 0.61 * q_profile)
-
-    T_ref = jnp.asarray(model.dycore.primitive.reference_temperature)
-    T_var_profile = T_balanced_profile - T_ref
-    T_var_nodal = jnp.broadcast_to(
-        T_var_profile[:, None, None], (nlev, nlon, nlat)
-    ).astype(state.temperature_variation.dtype)
-    state.temperature_variation = model.coords.horizontal.to_modal(T_var_nodal)
-
-    # Nondimensionalize the humidity exactly as the canonical physics→dynamics
-    # bridge does (``state_bridge.physics_state_to_dynamics_state`` line ~149:
-    # ``nondimensionalize(specific_humidity * gram/kilogram)``). The dynamics
-    # ``State`` stores the *nondimensional* tracer; the forward bridge then
-    # re-dimensionalizes with ``dimensionalize(q, gram/kilogram)`` (≈ ×1000)
-    # when handing the gridpoint state to physics. Injecting the raw kg/kg
-    # ``q_profile`` straight into ``state.tracers`` skipped this scaling, so
-    # the physics saw ``q`` 1000× too large (~5 kg/kg) — the cloud saturation
-    # adjustment (qs ~ 0.008) then read it as ~650× supersaturated, condensed
-    # the whole column, and dumped L·Δq/cp ≈ 7000 K of latent heat in a single
-    # step → instantaneous blow-up of every moist init. Mirroring the bridge's
-    # nondimensionalization makes the gridpoint physics see the intended
-    # ``q_profile`` value and the moist resting state is stable.
-    q_nondim = model.dycore.physics_specs.nondimensionalize(
-        q_profile * units.gram / units.kilogram
-    )
-    q_dtype = state.tracers["specific_humidity"].dtype
-    q_nodal = jnp.broadcast_to(
-        q_nondim[:, None, None], (nlev, nlon, nlat)
-    ).astype(q_dtype)
-    # Preserve the other prognostic tracers (qc, qi, qnc, qni, qr, qs, GHG VMRs,
-    # aerosol modes, ...) that ``bootstrap_state`` seeded — only the JW analytic
-    # humidity profile is injected here. Overwriting the whole dict used to drop
-    # the cloud tracers, so radiation saw zero cloud water for the entire run
-    # (CRE ≡ 0). Cloud water now persists and accumulates; the RRTMGP in-cloud
-    # inflation that previously made this unstable is handled by the mo_psrad
-    # in-cloud zeroing (mcica.in_cloud_path).
-    state.tracers = {
-        **state.tracers,
-        "specific_humidity": model.coords.horizontal.to_modal(q_nodal),
-    }
-    model._final_dycore_state = state
-
-
-def inject_state_file(model: Model, cfg: DictConfig) -> None:
-    """Warm-start: load a saved model state as the initial condition.
-
-    ``init.file`` takes a local or ``hf://`` path to a state written by
-    :func:`jcm.checkpoint.save_checkpoint` (e.g. the hosted equilibrated
-    states under ``bundles/<grid>_<levels>/init_states/``). Unlike a
-    ``run.checkpoint_path`` resume, the recorded elapsed-day count is
-    DISCARDED — the clock starts at zero / ``run.start_date`` — so a
-    hosted state skips the ~9-month from-cold spin-up (#638) without
-    inheriting the donor run's calendar. The state's pytree must match
-    the composed model (grid, levels, physics tracer set);
-    ``load_checkpoint`` fails loudly on any mismatch.
-    """
-    from jcm.checkpoint import load_checkpoint
+    from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
     ckpt = cfg.run.get("checkpoint_path", None)
@@ -927,42 +624,29 @@ def inject_state_file(model: Model, cfg: DictConfig) -> None:
             "first chunk checkpoint would overwrite the donor init state. "
             "Give the run its own checkpoint_path."
         )
-    # bootstrap_state builds both state pytrees, which load_checkpoint
-    # needs as deserialization templates (their values are overwritten).
-    model.bootstrap_state()
-    days = load_checkpoint(model, path)
-    # The checkpoint's dycore state carries the donor's sim_time, and dates,
-    # forcing time-interpolation and output timestamps all derive from it
-    # (Model._date_from_sim_time) — without this reset a day-730 donor
-    # would run with forcing at start_date + 730 d.
-    model._final_dycore_state = model.dycore.with_sim_time(
-        model._final_dycore_state,
-        jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
-    )
+    state, physics_carry, days = checkpoint_state(model, path)
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,
     )
+    return state, physics_carry
 
 
-def inject_era5_state(model: Model, cfg: DictConfig) -> None:
-    """Seed the model from ERA5 (WeatherBench2) at the run start date.
+def _state_from_era5(model: Model, cfg: DictConfig):
+    """Config adapter for the ``init.kind=era5`` initial condition.
 
-    ``init.date`` overrides; otherwise ``run.start_date`` (else the
-    2000-01-01 default) — matching the calendar the run integrates on.
-    The regridded slice comes from :mod:`jcm.data.era5` (cached; needs
-    internet or a prefetched cache). Mutates
-    ``model._final_dycore_state`` — follow with ``model.resume(...)``.
+    Resolves the ERA5 slice date from ``init.date``, else ``run.start_date``,
+    else the 2000-01-01 default — matching the calendar the run integrates on
+    — records provenance, then returns the regridded ``PhysicsState`` from
+    :func:`jcm.data.era5.initial_state` for the caller to run.
     """
-    from jcm.data.era5 import initial_state
+    from jcm.data import era5
 
     date = (cfg.get("init", {}).get("date", None)
             or cfg.get("run", {}).get("start_date", None)
             or "2000-01-01")
-    state = initial_state(model.coords, str(date))
     provenance.record_fact("initial_condition", f"era5:{date}")
-    model._final_dycore_state = model._prepare_initial_dycore_state(
-        physics_state=state)
+    return era5.initial_state(model.coords, str(date))
 
 
 # ---------------------------------------------------------------------------
@@ -1170,31 +854,21 @@ def _pyses_default_bc(filename: str) -> str:
 
 
 def _pyses_lid_sponge_term(dycore, sponge_cfg):
-    """Finite-lid sponge: USSA T relaxation + implicit Rayleigh wind drag.
+    """Config adapter for the pySES finite-lid sponge term.
 
-    The USSA-1976 reference temperature is evaluated at the level reference
-    mid-pressures of the dycore's own hybrid grid — the same profile the
-    backend's resting initial state uses, so the relaxation target is
-    consistent with the initialization.
+    Reads the sponge config keys and builds the term via
+    :meth:`jcm.physics.dissipation.upper_temperature_relaxation.UpperTemperatureRelaxation.from_ussa`,
+    which evaluates the USSA-1976 reference temperature on the dycore's own
+    hybrid grid.
     """
-    import numpy as np
-
-    from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
     from jcm.physics.dissipation.upper_temperature_relaxation import (
         UpperTemperatureRelaxation,
     )
 
-    a = np.asarray(dycore.coords.vertical.a_boundaries, dtype=float)
-    b = np.asarray(dycore.coords.vertical.b_boundaries, dtype=float)
-    p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * 101325.0
-    zs = np.linspace(0.0, 84000.0, 4000)
-    ps = np.asarray(ussa_pressure(zs))
-    z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
-    t_ref = np.asarray(ussa_temperature(z_of_p))
-
     uv_hours = float(sponge_cfg.get("uv_hours", 0.0) or 0.0)
-    return UpperTemperatureRelaxation(
-        t_ref,
+    return UpperTemperatureRelaxation.from_ussa(
+        dycore.coords.vertical.a_boundaries,
+        dycore.coords.vertical.b_boundaries,
         n_levels=int(sponge_cfg.get("levels", 8)),
         timescale_s=float(sponge_cfg.get("t_hours", 6.0)) * 3600.0,
         wind_timescale_s=(uv_hours * 3600.0 if uv_hours > 0 else None),
@@ -1494,6 +1168,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         default_forcing,
         read_anthropogenic_emissions,
         read_prescribed_aerosol_emissions,
+        validate_emissions_grid,
     )
 
     # One path → open_dataset; several → merge by coords (disjoint channels on a
@@ -1513,27 +1188,12 @@ def _attach_emissions(forcing, forcing_cfg, coords):
             "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
             "contract in docs/design/jam.md."
         )
-    _validate_emissions_grid({**(anthro or {}), **(speciated or {})},
-                             coords, path)
+    validate_emissions_grid({**(anthro or {}), **(speciated or {})},
+                            coords, path)
     if forcing is None:
         forcing = default_forcing(coords.horizontal)
     return forcing.copy(anthropogenic_emissions=anthro,
                         prescribed_aerosol_emissions=speciated)
-
-
-def _validate_emissions_grid(mapping, coords, path):
-    """Raise if any emission field's horizontal shape != the model grid."""
-    from jcm.forcing import TimeSeries
-    nodal = tuple(coords.horizontal.nodal_shape)
-    for name, leaf in mapping.items():
-        arr = leaf.values if isinstance(leaf, TimeSeries) else leaf
-        spatial = tuple(arr.shape[-2:])
-        if spatial != nodal:
-            raise ValueError(
-                f"forcing.emissions_file {path!r}: field {name!r} has "
-                f"horizontal shape {spatial}, but the model grid is {nodal}. "
-                "Regrid the file with jcm.data.emissions.prepare first."
-            )
 
 
 def _attach_dms(forcing, forcing_cfg, coords):
@@ -1610,54 +1270,15 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
         return forcing
     import xarray as xr
 
-    from jcm.forcing import read_oxidant_vmr
+    from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
     with xr.open_dataset(str(path)) as ds:
         mapping = read_oxidant_vmr(ds, nlev=nlev,
                                    lat_deg=lat_deg, lon_deg=lon_deg)
-        _validate_oxidant_levels(ds, coords, path)
+        validate_oxidant_levels(ds, coords, path)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
-
-
-def _validate_oxidant_levels(ds, coords, path):
-    """Cross-check the oxidant file's hybrid coefficients against the model.
-
-    Only applies when both the file (``hyam``/``hybm``, plus ``p0`` in Pa for
-    files storing normalized ``hyam``) and the model
-    (:class:`dinosaur.hybrid_coordinates.HybridCoordinates`) define hybrid
-    levels; a sigma-coordinate model only gets the level-count assert in
-    ``read_oxidant_vmr`` (documented assumption: the file matches the model
-    levels). Full-level model coefficients are boundary midpoints, matching
-    the ECHAM ``hyam/hybm`` convention.
-    """
-    import numpy as np
-    from dinosaur.hybrid_coordinates import HybridCoordinates
-    vertical = coords.vertical
-    if not isinstance(vertical, HybridCoordinates):
-        return
-    if "hyam" not in ds or "hybm" not in ds:
-        return
-    hyam = np.asarray(ds["hyam"].values, dtype=float)
-    hybm = np.asarray(ds["hybm"].values, dtype=float)
-    # HAMMOZ files store hyam normalized by the reference pressure p0 [Pa];
-    # dinosaur's a_boundaries are in Pa.
-    if "p0" in ds:
-        hyam = hyam * float(ds["p0"].values)
-    a = np.asarray(vertical.a_boundaries, dtype=float)
-    b = np.asarray(vertical.b_boundaries, dtype=float)
-    a_full = 0.5 * (a[:-1] + a[1:])
-    b_full = 0.5 * (b[:-1] + b[1:])
-    if (not np.allclose(a_full, hyam, atol=1.0)          # Pa
-            or not np.allclose(b_full, hybm, atol=1e-5)):
-        raise ValueError(
-            f"forcing.oxidants_file {path!r}: hybrid-level coefficients "
-            "(hyam/hybm) don't match the model's vertical grid — the file "
-            "must be on the model levels (no vertical interpolation is "
-            "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
-            "with grid=echam_t63_l47_hybrid) or re-interpolate it."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1789,47 +1410,30 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
+    # A warm start (from_state) carries the donor's physics carry through to
+    # ``run``; every other init builds a fresh carry (initial_physics_state
+    # stays None).
+    initial_physics_state = None
     if cfg.init.kind == "jw":
-        inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "balanced_isothermal":
-        inject_balanced_isothermal_profile(model)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "from_state":
-        inject_state_file(model, cfg)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "era5":
-        inject_era5_state(model, cfg)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+    elif cfg.init.kind == "balanced_isothermal":
+        initial_state = balanced_isothermal_state(model)
+    elif cfg.init.kind == "from_state":
+        initial_state, initial_physics_state = _state_from_file(model, cfg)
+    elif cfg.init.kind == "era5":
+        initial_state = _state_from_era5(model, cfg)
+    else:
+        raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+    return model.run(
+        initial_state=initial_state,
+        initial_physics_state=initial_physics_state,
+        forcing=forcing,
+        save_interval=cfg.run.save_interval,
+        total_time=cfg.run.total_time,
+        output_averages=cfg.run.output_averages,
+        snapshot_interval=cfg.run.get("snapshot_interval"),
+        snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+    )
 
 
 def _load_states_from_cfg(cfg: DictConfig, physics):
@@ -1893,31 +1497,9 @@ def _run_prescribed(cfg: DictConfig):
     return model.run(states, forcing=forcing)
 
 
-def _select_column(states, ds, lat_deg: float, lon_deg: float):
-    """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
-
-    The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
-    JCM run that wrote it; pick by nearest neighbour so users can give
-    physical degrees rather than grid indices.
-    """
-    import numpy as np
-    from jax.tree_util import tree_map
-
-    lat = np.asarray(ds["lat"].values)
-    lon = np.asarray(ds["lon"].values)
-    i_lat = int(np.argmin(np.abs(lat - lat_deg)))
-    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
-
-    def slice_field(arr):
-        # JCM xarray output is laid out (time, level, lon, lat) for column
-        # variables and (time, lon, lat) for surface scalars.
-        if arr.ndim == 4:
-            return arr[:, :, i_lon, i_lat]
-        if arr.ndim == 3:
-            return arr[:, i_lon, i_lat]
-        return arr
-
-    return tree_map(slice_field, states), (i_lon, i_lat, float(lat[i_lat]), float(lon[i_lon]))
+#: Nearest-column selection; the science lives in
+#: :func:`jcm.single_column_model.select_column`. Aliased for the SCM runner.
+_select_column = select_column
 
 
 def _run_scm(cfg: DictConfig):
@@ -1976,7 +1558,11 @@ def run_chunked(
     """
     import time
 
-    from jcm.diagnostics import check_health, print_report
+    from jcm.diagnostics import (
+        aerosol_budget_report,
+        check_health,
+        print_report,
+    )
 
     if model is None:
         model = build_model(cfg)
@@ -2001,19 +1587,17 @@ def run_chunked(
         # Mirrors the init-kind branching of the fresh-start path below;
         # the template values are immediately overwritten by the
         # checkpoint's contents.
+        # ``bootstrap_state`` populates both ``_final_dycore_state`` and the
+        # physics carry (eagerly), which ``load_checkpoint`` needs as
+        # deserialization templates; their values are immediately overwritten
+        # by the checkpoint's contents, so the init-kind only decides the
+        # template's pytree structure.
         if cfg.init.kind == "jw":
-            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
+            model.bootstrap_state(jw_state(model, rh=float(cfg.init.get("rh", 0.6))))
         elif cfg.init.kind == "balanced_isothermal":
-            inject_balanced_isothermal_profile(model)
+            model.bootstrap_state(balanced_isothermal_state(model))
         else:
             model.bootstrap_state()
-
-        # ``inject_*_profile`` only populates ``_final_dycore_state`` —
-        # the physics carry is normally built lazily by ``resume``.
-        # ``load_checkpoint`` needs both pytrees as deserialization
-        # templates, so build the carry now if the inject path took it.
-        if model._final_physics_state is None:
-            model._final_physics_state = model._build_initial_physics_carry()
 
         elapsed_sim_days = load_checkpoint(model, ckpt_path)
         resumed_from_ckpt = True
@@ -2031,54 +1615,29 @@ def run_chunked(
 
         t0 = time.perf_counter()
         first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-        if first_fresh_chunk and cfg.init.kind == "jw":
-            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
-            inject_balanced_isothermal_profile(model)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "era5":
-            # Without this branch a chunked run silently ignored init=era5
-            # (the chunked dispatch returns before _run_full's init ladder).
-            inject_era5_state(model, cfg)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "from_state":
-            inject_state_file(model, cfg)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk:
+        if first_fresh_chunk:
+            # First fresh chunk: bootstrap from the configured initial state
+            # and integrate. ``model.run`` = bootstrap_state + resume, so the
+            # cross-step physics carry is built exactly as the plain
+            # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+            # handled here too: the chunked dispatch returns before
+            # ``_run_full``'s init ladder runs.
+            # from_state warm starts thread the donor's physics carry into
+            # the first chunk's ``run``; all other inits build a fresh carry.
+            initial_physics_state = None
+            if cfg.init.kind == "jw":
+                initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+            elif cfg.init.kind == "balanced_isothermal":
+                initial_state = balanced_isothermal_state(model)
+            elif cfg.init.kind == "era5":
+                initial_state = _state_from_era5(model, cfg)
+            elif cfg.init.kind == "from_state":
+                initial_state, initial_physics_state = _state_from_file(model, cfg)
+            else:
+                initial_state = None
             preds = model.run(
+                initial_state=initial_state,
+                initial_physics_state=initial_physics_state,
                 forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,
@@ -2112,77 +1671,15 @@ def run_chunked(
         reports.append(report)
         print_report(report)
 
-        # #713: one greppable aerosol-budget line per species per chunk.
-        # The gauge fields close d(mass)/dt = ptend + dyn in-step, so the
-        # chunk means printed here attribute any drift on the spot:
-        # ``dyn`` is the transport (SL/filters) creation, ``ptend-ledger``
-        # the unledgered physics. All float64 global means — a drift that
-        # takes months to show in burdens is visible in one chunk here.
-        budget_species = sorted(
-            k[len("budget_dyn_"):] for k in ds.data_vars
-            if k.startswith("budget_dyn_"))
-        if budget_species:
-            import numpy as _np
-            _lat = _np.asarray(ds.lat, dtype=_np.float64)
-            # Exact Gaussian quadrature weights when the output grid is
-            # Gauss-Legendre (dinosaur): match the nodes by sin(lat) and
-            # use their weights, so a transport residual whose quadrature
-            # integral should cancel actually reads zero. cos(lat) is
-            # only the leading approximation of those weights and biases
-            # meridionally structured fields. Non-Gaussian grids fall
-            # back to cosine weighting.
-            _nodes, _gw = _np.polynomial.legendre.leggauss(_lat.size)
-            _order = _np.argsort(_np.sin(_np.deg2rad(_lat)))
-            if _np.allclose(_np.sin(_np.deg2rad(_lat))[_order], _nodes,
-                            atol=1e-6):
-                _w = _np.empty_like(_gw)
-                _w[_order] = _gw
-            else:
-                _w = _np.cos(_np.deg2rad(_lat))
-            def _gm(name):
-                v = _np.asarray(ds[name], dtype=_np.float64)
-                # (time, lon, lat) -> weighted global+time mean
-                return float(
-                    (v * _w[None, None, :]).sum(axis=(-1, -2)).mean()
-                    / (_w.sum() * v.shape[-2]))
-            # Closure floor: the gauge's carried expectation quantizes at
-            # the model dtype's epsilon of the column mass each step, so a
-            # |dyn| below eps*mass/dt is rounding, not leak. At float64
-            # (eps ~ 2e-16) the floor is far below anything physical; at
-            # float32 (eps ~ 1.2e-7) it reaches O(0.1-1) ng/m2/s at real
-            # burdens — flag those lines rather than let a noise-level
-            # residual read as either "closed" or "leaking".
-            _eps = float(jnp.finfo(
-                ds[f"budget_dyn_{budget_species[0]}"].dtype).eps)
-            # pySES presets omit run.time_step (the Model adopts the
-            # dycore's dt); the floor is an order-of-magnitude guide, so
-            # a nominal 900 s stands in rather than reaching into the
-            # dycore from here.
-            _dt_cfg = cfg.get("run", {}).get("time_step", None)
-            _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
-            f32_noted = False
-            for sp in budget_species:
-                mass = _gm(f"budget_mass_{sp}")
-                ptend = _gm(f"budget_ptend_{sp}")
-                dyn = _gm(f"budget_dyn_{sp}")
-                ledger = 0.0
-                for fam, sgn in (("emi", 1.0), ("wet", -1.0), ("dry", -1.0)):
-                    key = f"{fam}_{sp}"
-                    if key in ds:
-                        ledger += sgn * _gm(key)
-                floor = _eps * abs(mass) / _dt_s
-                caveat = ""
-                if _eps > 1e-10 and abs(dyn) <= floor:
-                    caveat = f"  [<f32 floor {floor*1e12:.2f} — inconclusive]"
-                    f32_noted = True
-                print(f"  budget {sp:4s}: mass={mass*1e6:10.3f} mg/m2  "
-                      f"ptend={ptend*1e12:+10.2f} dyn={dyn*1e12:+10.2f} "
-                      f"unledgered={(ptend-ledger)*1e12:+10.2f} ng/m2/s"
-                      + caveat)
-            if f32_noted:
-                print("  budget note: float32 run — dyn below the per-species "
-                      "floor is precision noise; closure can only be claimed "
-                      "down to that floor (run float64 to verify further).")
+        # #713: one greppable aerosol-budget line per species per chunk
+        # (jcm.diagnostics.aerosol_budget_report). pySES presets omit
+        # run.time_step (the Model adopts the dycore's dt); the closure
+        # floor is an order-of-magnitude guide, so a nominal 900 s stands
+        # in rather than reaching into the dycore from here.
+        _dt_cfg = cfg.get("run", {}).get("time_step", None)
+        _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
+        for _line in aerosol_budget_report(ds, _dt_s):
+            print(_line)
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         # The parameters ride on the predictions object, not the module

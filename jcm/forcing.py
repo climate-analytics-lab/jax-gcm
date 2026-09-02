@@ -850,6 +850,27 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     return out
 
 
+def validate_emissions_grid(mapping, coords, path):
+    """Raise if any emission field's horizontal shape != the model grid.
+
+    Lives next to the ``read_*_emissions`` loaders so a user assembling a
+    :class:`ForcingData` by hand gets the same guard the CLI does — an
+    off-grid file is a size mismatch the emission terms would otherwise fall
+    back to zero on, which from either entry point would look like the file
+    "did nothing".
+    """
+    nodal = tuple(coords.horizontal.nodal_shape)
+    for name, leaf in mapping.items():
+        arr = leaf.values if isinstance(leaf, TimeSeries) else leaf
+        spatial = tuple(arr.shape[-2:])
+        if spatial != nodal:
+            raise ValueError(
+                f"forcing.emissions_file {path!r}: field {name!r} has "
+                f"horizontal shape {spatial}, but the model grid is {nodal}. "
+                "Regrid the file with jcm.data.emissions.prepare first."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Natural-emission / oxidant climatology readers (HAMMOZ-style files)
 # ---------------------------------------------------------------------------
@@ -1085,6 +1106,89 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         out[key] = make_time_series(arr, time_seconds, align_mode=mode)
     return out
+
+
+def validate_oxidant_levels(ds, coords, path):
+    """Cross-check the oxidant file's hybrid coefficients against the model.
+
+    Lives next to :func:`read_oxidant_vmr` — the hyam/hybm boundary-vs-midpoint
+    comparison is vertical-coordinate science a user assembling
+    :class:`ForcingData` by hand needs as much as the CLI does.
+
+    Only applies when both the file (``hyam``/``hybm``, plus ``p0`` in Pa for
+    files storing normalized ``hyam``) and the model
+    (:class:`dinosaur.hybrid_coordinates.HybridCoordinates`) define hybrid
+    levels; a sigma-coordinate model only gets the level-count assert in
+    :func:`read_oxidant_vmr` (documented assumption: the file matches the model
+    levels). Full-level model coefficients are boundary midpoints, matching
+    the ECHAM ``hyam/hybm`` convention.
+    """
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    vertical = coords.vertical
+    if not isinstance(vertical, HybridCoordinates):
+        return
+    if "hyam" not in ds or "hybm" not in ds:
+        return
+    hyam = np.asarray(ds["hyam"].values, dtype=float)
+    hybm = np.asarray(ds["hybm"].values, dtype=float)
+    # HAMMOZ files store hyam normalized by the reference pressure p0 [Pa];
+    # dinosaur's a_boundaries are in Pa.
+    if "p0" in ds:
+        hyam = hyam * float(ds["p0"].values)
+    a = np.asarray(vertical.a_boundaries, dtype=float)
+    b = np.asarray(vertical.b_boundaries, dtype=float)
+    a_full = 0.5 * (a[:-1] + a[1:])
+    b_full = 0.5 * (b[:-1] + b[1:])
+    if (not np.allclose(a_full, hyam, atol=1.0)          # Pa
+            or not np.allclose(b_full, hybm, atol=1e-5)):
+        raise ValueError(
+            f"forcing.oxidants_file {path!r}: hybrid-level coefficients "
+            "(hyam/hybm) don't match the model's vertical grid — the file "
+            "must be on the model levels (no vertical interpolation is "
+            "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
+            "with grid=echam_t63_l47_hybrid) or re-interpolate it."
+        )
+
+
+def expand_yearly_files(file_spec, years, available=None):
+    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
+
+    The transient AMIP bundles are one file per year (issue #610:
+    download only what you run, append new years without rewriting
+    history), so config points at a pattern plus an inclusive range:
+    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
+    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
+    than silently running with a literal ``{year}`` path. Non-pattern
+    specs (plain paths, lists, ``None``) pass through untouched even when
+    ``years`` is set — a run may mix yearly SST files with a static dust
+    climatology, all sharing one ``forcing.years`` range.
+
+    ``available`` (``forcing.available_years``, the product's inclusive
+    source coverage) widens the expansion by one year on each side,
+    clipped to that coverage: the yearly files hold *mid-month* samples,
+    so a run starting Jan 1 needs the previous December's sample (and a
+    run ending Dec 31 the next January's) for ``by_date_interp`` to
+    bracket the boundary instead of clamping to the nearest mid-month
+    value for ~half a month.
+    """
+    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
+    if not has_pattern:
+        return file_spec
+    if years is None:
+        raise ValueError(
+            f"forcing file pattern {file_spec!r} contains {{year}} but "
+            "no year range is set — add e.g. forcing.years=[1979,1983]")
+    first, last = int(years[0]), int(years[-1])
+    if last < first:
+        raise ValueError(f"forcing.years range is reversed: {years!r}")
+    if available is not None:
+        lo, hi = int(available[0]), int(available[-1])
+        first, last = max(first - 1, lo), min(last + 1, hi)
+        # A requested range entirely outside coverage would invert here
+        # and expand to nothing; clamp to the nearest edge file instead
+        # (the time lookup then clamps to its first/last sample).
+        first, last = min(first, hi), max(last, lo)
+    return [file_spec.format(year=y) for y in range(first, last + 1)]
 
 
 def default_forcing(

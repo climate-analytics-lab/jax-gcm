@@ -378,3 +378,45 @@ class FreeEvolveTracersTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not_a_tracer"):
             scm.run(states, initial_tracers={"free_one": jnp.zeros(4)},
                     times=jnp.arange(2) * 0.01)
+
+
+class TestSelectColumn(unittest.TestCase):
+    """Nearest-neighbour column extraction for the SCM warm start."""
+
+    def _synthetic(self):
+        import xarray as xr
+
+        nt, nlev, nlon, nlat = 3, 4, 5, 6
+        lat = np.linspace(-75.0, 75.0, nlat)
+        lon = np.linspace(0.0, 300.0, nlon)
+        # Distinct per-(lon, lat) signature so the picked column is identifiable.
+        col = np.arange(nlon)[:, None] * 100.0 + np.arange(nlat)[None, :]
+        temperature = np.broadcast_to(
+            col[None, None], (nt, nlev, nlon, nlat)).astype(float)
+        surface = np.broadcast_to(col[None], (nt, nlon, nlat)).astype(float)
+        ds = xr.Dataset(coords={"lat": lat, "lon": lon})
+        states = {
+            "temperature": temperature,   # (time, level, lon, lat)
+            "surface": surface,           # (time, lon, lat)
+        }
+        return states, ds, lat, lon
+
+    def test_nearest_neighbour_pick_and_slicing(self):
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, lon = self._synthetic()
+        # Request a point closest to lon index 2, lat index 4.
+        lat_req = float(lat[4]) + 3.0
+        lon_req = float(lon[2]) - 4.0
+        column, (i_lon, i_lat, actual_lat, actual_lon) = select_column(
+            states, ds, lat_req, lon_req)
+
+        self.assertEqual((i_lon, i_lat), (2, 4))
+        self.assertEqual(actual_lat, float(lat[4]))
+        self.assertEqual(actual_lon, float(lon[2]))
+        # 4D column variable collapses to (time, level); 3D surface to (time,).
+        self.assertEqual(column["temperature"].shape, (3, 4))
+        self.assertEqual(column["surface"].shape, (3,))
+        expected = 2 * 100.0 + 4
+        np.testing.assert_array_equal(column["temperature"], expected)
+        np.testing.assert_array_equal(column["surface"], expected)
