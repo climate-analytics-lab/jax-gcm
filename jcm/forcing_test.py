@@ -6,7 +6,9 @@ Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.forcing import ForcingData, _fixed_ssts, default_forcing
+from jcm.forcing import (
+    ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
+)
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 
@@ -1207,6 +1209,53 @@ class TestYearlyForcingFiles(unittest.TestCase):
         sst_ts = forcing.sea_surface_temperature
         self.assertEqual(sst_ts.values.shape[0], 12)
         self.assertEqual(int(sst_ts.align_mode), BY_DATE_INTERP)
+
+
+class TestExpandYearlyFiles(unittest.TestCase):
+    """{year} pattern expansion for yearly forcing bundles (#610)."""
+
+    def test_pattern_expands_inclusive_range(self):
+        out = expand_yearly_files("hf://bundles/t63/forcing_amip/{year}.nc",
+                                  [1979, 1981])
+        self.assertEqual(out, [
+            "hf://bundles/t63/forcing_amip/1979.nc",
+            "hf://bundles/t63/forcing_amip/1980.nc",
+            "hf://bundles/t63/forcing_amip/1981.nc",
+        ])
+
+    def test_available_years_pads_one_each_side(self):
+        # Mid-month samples need a bracketing December/January from the
+        # neighbouring years, else by_date_interp clamps at the run
+        # boundaries (Codex P1 on #611).
+        out = expand_yearly_files("/x/{year}.nc", [1979, 1980],
+                                  available=[1870, 2022])
+        self.assertEqual(out, ["/x/1978.nc", "/x/1979.nc",
+                               "/x/1980.nc", "/x/1981.nc"])
+
+    def test_available_years_clips_at_coverage_edges(self):
+        self.assertEqual(
+            expand_yearly_files("/x/{year}.nc", [1870, 1871],
+                                available=[1870, 2022])[0],
+            "/x/1870.nc")
+        self.assertEqual(
+            expand_yearly_files("/x/{year}.nc", [2021, 2022],
+                                available=[1870, 2022])[-1],
+            "/x/2022.nc")
+
+    def test_plain_paths_and_none_pass_through(self):
+        self.assertEqual(expand_yearly_files("/x/forcing.nc", [1979, 1981]),
+                         "/x/forcing.nc")
+        self.assertIsNone(expand_yearly_files(None, [1979, 1981]))
+        self.assertEqual(expand_yearly_files("/x/forcing.nc", None),
+                         "/x/forcing.nc")
+
+    def test_pattern_without_years_raises(self):
+        with self.assertRaisesRegex(ValueError, "year range"):
+            expand_yearly_files("/x/forcing_{year}.nc", None)
+
+    def test_reversed_range_raises(self):
+        with self.assertRaisesRegex(ValueError, "reversed"):
+            expand_yearly_files("/x/forcing_{year}.nc", [1981, 1979])
 
 
 if __name__ == '__main__':

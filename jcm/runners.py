@@ -22,6 +22,7 @@ from omegaconf import DictConfig
 
 from jcm import provenance
 from jcm.diffusion import ECHAM_LMIDATM_LAYERS, DiffusionFilter
+from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
     inject_balanced_isothermal_profile,
     inject_jw_profile,
@@ -552,45 +553,10 @@ def _resolve_data_path(path):
     return path
 
 
-def _expand_years(file_spec, years, available=None):
-    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
-
-    The transient AMIP bundles are one file per year (issue #610:
-    download only what you run, append new years without rewriting
-    history), so config points at a pattern plus an inclusive range:
-    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
-    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
-    than silently running with a literal ``{year}`` path. Non-pattern
-    specs (plain paths, lists, ``None``) pass through untouched even when
-    ``years`` is set — a run may mix yearly SST files with a static dust
-    climatology, all sharing one ``forcing.years`` range.
-
-    ``available`` (``forcing.available_years``, the product's inclusive
-    source coverage) widens the expansion by one year on each side,
-    clipped to that coverage: the yearly files hold *mid-month* samples,
-    so a run starting Jan 1 needs the previous December's sample (and a
-    run ending Dec 31 the next January's) for ``by_date_interp`` to
-    bracket the boundary instead of clamping to the nearest mid-month
-    value for ~half a month.
-    """
-    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
-    if not has_pattern:
-        return file_spec
-    if years is None:
-        raise ValueError(
-            f"forcing file pattern {file_spec!r} contains {{year}} but "
-            "no year range is set — add e.g. forcing.years=[1979,1983]")
-    first, last = int(years[0]), int(years[-1])
-    if last < first:
-        raise ValueError(f"forcing.years range is reversed: {years!r}")
-    if available is not None:
-        lo, hi = int(available[0]), int(available[-1])
-        first, last = max(first - 1, lo), min(last + 1, hi)
-        # A requested range entirely outside coverage would invert here
-        # and expand to nothing; clamp to the nearest edge file instead
-        # (the time lookup then clamps to its first/last sample).
-        first, last = min(first, hi), max(last, lo)
-    return [file_spec.format(year=y) for y in range(first, last + 1)]
+#: Yearly ``{year}`` file-pattern expansion; the science lives in
+#: :func:`jcm.forcing.expand_yearly_files`. Aliased for the many call sites
+#: (and TestYearExpansionAndStartDate) that reference the private name.
+_expand_years = expand_yearly_files
 
 
 def _product_available_years(forcing_cfg, key: str):

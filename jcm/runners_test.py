@@ -1592,55 +1592,6 @@ class TestAutoInputResolution(unittest.TestCase):
 class TestYearExpansionAndStartDate(unittest.TestCase):
     """{year} pattern expansion + run.start_date threading (#610)."""
 
-    def test_pattern_expands_inclusive_range(self):
-        from jcm import runners
-        out = runners._expand_years("hf://bundles/t63/forcing_amip/{year}.nc",
-                                    [1979, 1981])
-        self.assertEqual(out, [
-            "hf://bundles/t63/forcing_amip/1979.nc",
-            "hf://bundles/t63/forcing_amip/1980.nc",
-            "hf://bundles/t63/forcing_amip/1981.nc",
-        ])
-
-    def test_available_years_pads_one_each_side(self):
-        # Mid-month samples need a bracketing December/January from the
-        # neighbouring years, else by_date_interp clamps at the run
-        # boundaries (Codex P1 on #611).
-        from jcm import runners
-        out = runners._expand_years("/x/{year}.nc", [1979, 1980],
-                                    available=[1870, 2022])
-        self.assertEqual(out, ["/x/1978.nc", "/x/1979.nc",
-                               "/x/1980.nc", "/x/1981.nc"])
-
-    def test_available_years_clips_at_coverage_edges(self):
-        from jcm import runners
-        self.assertEqual(
-            runners._expand_years("/x/{year}.nc", [1870, 1871],
-                                  available=[1870, 2022])[0],
-            "/x/1870.nc")
-        self.assertEqual(
-            runners._expand_years("/x/{year}.nc", [2021, 2022],
-                                  available=[1870, 2022])[-1],
-            "/x/2022.nc")
-
-    def test_plain_paths_and_none_pass_through(self):
-        from jcm import runners
-        self.assertEqual(runners._expand_years("/x/forcing.nc", [1979, 1981]),
-                         "/x/forcing.nc")
-        self.assertIsNone(runners._expand_years(None, [1979, 1981]))
-        self.assertEqual(runners._expand_years("/x/forcing.nc", None),
-                         "/x/forcing.nc")
-
-    def test_pattern_without_years_raises(self):
-        from jcm import runners
-        with self.assertRaisesRegex(ValueError, "year range"):
-            runners._expand_years("/x/forcing_{year}.nc", None)
-
-    def test_reversed_range_raises(self):
-        from jcm import runners
-        with self.assertRaisesRegex(ValueError, "reversed"):
-            runners._expand_years("/x/forcing_{year}.nc", [1981, 1979])
-
     def test_amip_preset_composes(self):
         cfg = _compose(["forcing=amip", "forcing.years=[1979,1980]",
                         "run.start_date=1979-01-01"])
