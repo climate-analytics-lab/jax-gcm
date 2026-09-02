@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
     ArgActivation,
     ArgParameters,
@@ -315,6 +316,13 @@ def jam_aerosol_physics(
         if carry_mode(spec) else []
     )
     pre_core = [
+        # Own the shared ``aerosol`` carry slot (#640). Radiation hard-requires
+        # it and the 2M microphysics reads ``aerosol.Nccn``; with MACv2-SP gone
+        # from the JAM path this seeder resets it to an all-zero base each step
+        # (JamOpticsTerm overwrites the optics when ``optics=True``; left zero =
+        # radiatively passive when ``optics=False``). Runs first so every
+        # downstream aerosol/radiation consumer sees a well-formed slot.
+        AerosolCarrySeeder(),
         *store_terms,
         *emissions,
         *transport_terms,

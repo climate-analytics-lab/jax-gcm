@@ -395,11 +395,14 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
-    # For now MACv2-SP is kept alongside JAM to provide the ``aerosol``
-    # optics/Twomey diagnostic that radiation and the cloud schemes read — a
-    # temporary fudge in lieu of proper JAM aerosol↔radiation and
-    # aerosol↔microphysics coupling (#495). Once JAM supplies those, MACv2-SP
-    # need not be included in the JAM path.
+    # MACv2-SP and JAM are mutually exclusive aerosol sources (#640): running
+    # both was confusing and redundant, so the JAM composition no longer
+    # includes MACv2-SP. JAM owns the ``aerosol`` slot through its own
+    # ``AerosolCarrySeeder`` (radiatively passive when ``jam_optics=False``,
+    # overwritten by ``JamOpticsTerm`` when on) and supplies the cloud
+    # microphysics activation through ``ArgActivation``; the 2M scheme falls
+    # back to its ECHAM-HAM ``cdnc_min`` floor where ARG is empty rather than to
+    # the (now absent) MACv2-SP SPA floor.
     #
     # Wet deposition is split out and placed *after* the cloud microphysics
     # term so it scavenges against the current step's precip/condensate (the
@@ -470,7 +473,9 @@ def echam_physics(
         jam_pre_cloud_terms = [
             t for t in jam_terms if t.category not in _post_cloud
         ]
-        aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *jam_pre_cloud_terms]
+        # No MACv2-SP in the JAM path (#640): ``jam_pre_cloud_terms`` already
+        # begins with the ``AerosolCarrySeeder`` that owns the ``aerosol`` slot.
+        aerosol_terms = [*jam_pre_cloud_terms]
     else:
         raise ValueError(
             f"Unknown aerosol_module={aerosol_module!r}. Choose 'macv2sp' "

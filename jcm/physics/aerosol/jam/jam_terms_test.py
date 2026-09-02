@@ -10,15 +10,19 @@ class JamFactoryTest(unittest.TestCase):
         terms = jam_aerosol_physics()
         cats = [t.category for t in terms]
         names = [t.name for t in terms]
-        # Default storage is CARRY (#602 item 3 A/B): the store term owns
-        # the carry slot and runs first. Then the emi_* accumulator reset
-        # (which must precede every emitter — the diagnostics dict is
-        # threaded back from the previous step), the natural-emission
+        # The ``aerosol`` carry-slot seeder runs first (#640): radiation and
+        # the 2M microphysics read that slot, so it must be well-formed before
+        # any consumer. Default storage is CARRY (#602 item 3 A/B): the store
+        # term owns the cloud-borne carry and runs next. Then the emi_*
+        # accumulator reset (which must precede every emitter — the diagnostics
+        # dict is threaded back from the previous step), the natural-emission
         # schemes, then the core + processes.
-        self.assertEqual(names[0], "jam_cloud_borne_store")
-        self.assertEqual(names[1], "reset_emission_fluxes")
+        self.assertEqual(names[0], "aerosol_carry_seeder")
+        self.assertEqual(cats[0], "aerosol")
+        self.assertEqual(names[1], "jam_cloud_borne_store")
+        self.assertEqual(names[2], "reset_emission_fluxes")
         self.assertEqual(
-            names[2:5],
+            names[3:6],
             [
                 "jam_seasalt_emissions",
                 "jam_dms_emissions",
@@ -26,7 +30,7 @@ class JamFactoryTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            cats[5:],
+            cats[6:],
             [
                 # Physics-side vertical transport (#602 item 2): turbulent
                 # mixing of every JAM tracer, then convective mass-flux
@@ -48,7 +52,7 @@ class JamFactoryTest(unittest.TestCase):
         )
         # The reset shares the emitters' category — it is part of that
         # block, not a separate stage.
-        self.assertTrue(all(c == "aerosol_emissions" for c in cats[1:5]))
+        self.assertTrue(all(c == "aerosol_emissions" for c in cats[2:6]))
 
     def test_activation_precedes_deposition(self):
         # wetdep requires activated_fraction, so ARG must come first.
@@ -94,12 +98,22 @@ class EchamPhysicsWiringTest(unittest.TestCase):
 
         phys = echam_physics(aerosol_module="jam", cloud_scheme="2m")
         cats = [t.category for t in phys.terms]
-        # MACv2-SP retained for optics, JAM aerosol terms appended.
-        self.assertIn("aerosol", cats)            # MACv2-SP provides "aerosol"
+        names = [t.name for t in phys.terms]
+        # No MACv2-SP in the JAM path (#640): the ``aerosol`` slot is owned by
+        # JAM's own ``AerosolCarrySeeder`` (category "aerosol"), not MACv2-SP.
+        self.assertNotIn("macv2_sp_aerosol", names)
+        self.assertIn("aerosol_carry_seeder", names)
+        self.assertIn("aerosol", cats)            # the seeder provides "aerosol"
         self.assertIn("aerosol_activation", cats)  # JAM ARG present
         # ARG activation must precede the 2M cloud term that reads it.
         self.assertLess(
             cats.index("aerosol_activation"), cats.index("clouds")
+        )
+        # The seeder must precede the radiation term that reads ``aerosol``.
+        self.assertLess(
+            names.index("aerosol_carry_seeder"),
+            next(i for i, t in enumerate(phys.terms)
+                 if t.category == "radiation"),
         )
 
     def test_jam_module_rejects_1m(self):
