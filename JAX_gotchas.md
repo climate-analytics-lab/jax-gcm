@@ -27,3 +27,26 @@ def update_fun(operand):
 
 t,s,u,v = jax.lax.cond(flag, update_fun, pass_fun, operand=(t,s,u,v))
 ```
+
+## Static arguments hold whole objects, and `Model` is one
+
+`Model._run_from_state` is jitted with `self` static. A static argument is a
+Python constant inside the trace, so the entire model (physics terms, their
+`nnx.Param` values, the dycore) is baked into the executable when the physics is
+first traced. `Model` hashes by identity, so an attribute mutated afterwards is
+ignored wherever that executable is reused, and a later retrace may or may not
+pick it up: the per-term `jax.checkpoint` wrapper caches its own jaxpr, so the
+term may not be re-entered at all. An in-place edit is therefore neither
+reliably applied nor reliably ignored:
+
+```python
+term.params.set_value(term.params.get_value().replace(trvdi=jnp.array(2.0)))
+model.run(...)          # may run the OLD trvdi; no error either way
+```
+
+Build a new `Model` to change a parameter, and put the loop that does so inside
+one `jax.jit` so the rebuild is traced once rather than compiled per iteration.
+The corollary for anything on the `run` path: never require a concrete value
+from inside the jitted computation (no `int()`/`float()` on a returned array).
+That is fine at top level and raises `ConcretizationTypeError` the moment a
+caller wraps the run in their own `jit`.
