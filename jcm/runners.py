@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from omegaconf import DictConfig
 
 from jcm import provenance
-from jcm.diffusion import ECHAM_LMIDATM_LAYERS, DiffusionFilter
+from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
     inject_balanced_isothermal_profile,
@@ -632,22 +632,7 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
     vertical = str(grid_cfg.get("vertical", "")) if grid_cfg is not None else ""
 
     if kind == "auto":
-        # Match on the (vertical=hybrid, layers) pair so this fires for every
-        # ECHAM-family grid at any truncation — and stays inert for SPEEDY
-        # T31L8 / Held-Suarez, which have their own tuned uniform damping.
-        if vertical == "hybrid" and layers in ECHAM_LMIDATM_LAYERS:
-            base = DiffusionFilter.echam_lmidatm(truncation, layers)
-        else:
-            if vertical == "hybrid":
-                logger.warning(
-                    "diffusion.kind=auto found no ECHAM lmidatm profile for a "
-                    "hybrid grid with %d levels, so this run uses the uniform "
-                    "SPEEDY profile (24h temp / 12h vor_q / 2h div). ECHAM "
-                    "profiles exist for %s levels. Set diffusion.kind "
-                    "explicitly to silence this.",
-                    layers, sorted(ECHAM_LMIDATM_LAYERS),
-                )
-            base = DiffusionFilter.default()
+        base = DiffusionFilter.auto(truncation, layers, vertical)
     elif kind == "default":
         base = DiffusionFilter.default()
     elif kind == "echam_lmidatm":
@@ -663,32 +648,8 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
             "'echam_t85_l47'."
         )
 
-    # A level-dependent profile is a per-level array, so pinning one whose
-    # length does not match the grid fails later inside the spectral filter as
-    # an opaque broadcast error ("(95, 213, 108) vs (47,)"). Catch it here,
-    # where the actual mismatch can be named (#579).
-    n_orders = None if base.level_orders_temp is None else len(base.level_orders_temp)
-    if n_orders is not None and layers and n_orders != layers:
-        raise ValueError(
-            f"diffusion.kind={kind!r} builds a {n_orders}-level hyperdiffusion "
-            f"profile but the grid has {layers} levels. Use "
-            "diffusion.kind=auto (or 'echam_lmidatm') to get the profile "
-            "matching this grid, or 'default' for the uniform SPEEDY profile."
-        )
-
-    if scale == 1.0:
-        return base
-    return DiffusionFilter(
-        div_timescale=base.div_timescale * scale,
-        div_order=base.div_order,
-        vor_q_timescale=base.vor_q_timescale * scale,
-        vor_q_order=base.vor_q_order,
-        temp_timescale=base.temp_timescale * scale,
-        temp_order=base.temp_order,
-        level_orders_div=base.level_orders_div,
-        level_orders_vor_q=base.level_orders_vor_q,
-        level_orders_temp=base.level_orders_temp,
-    )
+    base.validate_layers(layers)
+    return base.scaled(scale)
 
 
 # ---------------------------------------------------------------------------

@@ -1012,7 +1012,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         """The SPEEDY fallback on an ECHAM-family grid must not be silent."""
         from jcm.diffusion import DiffusionFilter
 
-        with self.assertLogs("jcm.runners", level="WARNING") as captured:
+        with self.assertLogs("jcm.diffusion", level="WARNING") as captured:
             diffusion = build_diffusion(self._grid_cfg(layers=31, truncation=63))
         self.assertEqual(float(diffusion.temp_timescale),
                          float(DiffusionFilter.default().temp_timescale))
@@ -1024,7 +1024,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
 
         from jcm.diffusion import DiffusionFilter
 
-        with self.assertNoLogs("jcm.runners", level=logging.WARNING):
+        with self.assertNoLogs("jcm.diffusion", level=logging.WARNING):
             diffusion = build_diffusion(
                 self._grid_cfg(layers=8, truncation=31, vertical="sigma"))
         self.assertEqual(float(diffusion.temp_timescale),
@@ -1038,7 +1038,7 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         and (47,)", which named neither the config key nor the grid (#579).
         """
         cfg = self._grid_cfg(layers=95, truncation=106, kind="echam_t85_l47")
-        with self.assertRaisesRegex(ValueError, r"47-level .* grid has 95 levels"):
+        with self.assertRaisesRegex(ValueError, r"47 levels .* grid has 95 levels"):
             build_diffusion(cfg)
 
     def test_build_diffusion_unknown_kind_raises(self):
