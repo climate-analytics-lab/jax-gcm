@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import jax
-import jax.numpy as jnp
 from omegaconf import DictConfig
 
 from jcm import provenance
@@ -1663,7 +1662,11 @@ def run_chunked(
     """
     import time
 
-    from jcm.diagnostics import check_health, print_report
+    from jcm.diagnostics import (
+        aerosol_budget_report,
+        check_health,
+        print_report,
+    )
 
     if model is None:
         model = build_model(cfg)
@@ -1799,77 +1802,15 @@ def run_chunked(
         reports.append(report)
         print_report(report)
 
-        # #713: one greppable aerosol-budget line per species per chunk.
-        # The gauge fields close d(mass)/dt = ptend + dyn in-step, so the
-        # chunk means printed here attribute any drift on the spot:
-        # ``dyn`` is the transport (SL/filters) creation, ``ptend-ledger``
-        # the unledgered physics. All float64 global means — a drift that
-        # takes months to show in burdens is visible in one chunk here.
-        budget_species = sorted(
-            k[len("budget_dyn_"):] for k in ds.data_vars
-            if k.startswith("budget_dyn_"))
-        if budget_species:
-            import numpy as _np
-            _lat = _np.asarray(ds.lat, dtype=_np.float64)
-            # Exact Gaussian quadrature weights when the output grid is
-            # Gauss-Legendre (dinosaur): match the nodes by sin(lat) and
-            # use their weights, so a transport residual whose quadrature
-            # integral should cancel actually reads zero. cos(lat) is
-            # only the leading approximation of those weights and biases
-            # meridionally structured fields. Non-Gaussian grids fall
-            # back to cosine weighting.
-            _nodes, _gw = _np.polynomial.legendre.leggauss(_lat.size)
-            _order = _np.argsort(_np.sin(_np.deg2rad(_lat)))
-            if _np.allclose(_np.sin(_np.deg2rad(_lat))[_order], _nodes,
-                            atol=1e-6):
-                _w = _np.empty_like(_gw)
-                _w[_order] = _gw
-            else:
-                _w = _np.cos(_np.deg2rad(_lat))
-            def _gm(name):
-                v = _np.asarray(ds[name], dtype=_np.float64)
-                # (time, lon, lat) -> weighted global+time mean
-                return float(
-                    (v * _w[None, None, :]).sum(axis=(-1, -2)).mean()
-                    / (_w.sum() * v.shape[-2]))
-            # Closure floor: the gauge's carried expectation quantizes at
-            # the model dtype's epsilon of the column mass each step, so a
-            # |dyn| below eps*mass/dt is rounding, not leak. At float64
-            # (eps ~ 2e-16) the floor is far below anything physical; at
-            # float32 (eps ~ 1.2e-7) it reaches O(0.1-1) ng/m2/s at real
-            # burdens — flag those lines rather than let a noise-level
-            # residual read as either "closed" or "leaking".
-            _eps = float(jnp.finfo(
-                ds[f"budget_dyn_{budget_species[0]}"].dtype).eps)
-            # pySES presets omit run.time_step (the Model adopts the
-            # dycore's dt); the floor is an order-of-magnitude guide, so
-            # a nominal 900 s stands in rather than reaching into the
-            # dycore from here.
-            _dt_cfg = cfg.get("run", {}).get("time_step", None)
-            _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
-            f32_noted = False
-            for sp in budget_species:
-                mass = _gm(f"budget_mass_{sp}")
-                ptend = _gm(f"budget_ptend_{sp}")
-                dyn = _gm(f"budget_dyn_{sp}")
-                ledger = 0.0
-                for fam, sgn in (("emi", 1.0), ("wet", -1.0), ("dry", -1.0)):
-                    key = f"{fam}_{sp}"
-                    if key in ds:
-                        ledger += sgn * _gm(key)
-                floor = _eps * abs(mass) / _dt_s
-                caveat = ""
-                if _eps > 1e-10 and abs(dyn) <= floor:
-                    caveat = f"  [<f32 floor {floor*1e12:.2f} — inconclusive]"
-                    f32_noted = True
-                print(f"  budget {sp:4s}: mass={mass*1e6:10.3f} mg/m2  "
-                      f"ptend={ptend*1e12:+10.2f} dyn={dyn*1e12:+10.2f} "
-                      f"unledgered={(ptend-ledger)*1e12:+10.2f} ng/m2/s"
-                      + caveat)
-            if f32_noted:
-                print("  budget note: float32 run — dyn below the per-species "
-                      "floor is precision noise; closure can only be claimed "
-                      "down to that floor (run float64 to verify further).")
+        # #713: one greppable aerosol-budget line per species per chunk
+        # (jcm.diagnostics.aerosol_budget_report). pySES presets omit
+        # run.time_step (the Model adopts the dycore's dt); the closure
+        # floor is an order-of-magnitude guide, so a nominal 900 s stands
+        # in rather than reaching into the dycore from here.
+        _dt_cfg = cfg.get("run", {}).get("time_step", None)
+        _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
+        for _line in aerosol_budget_report(ds, _dt_s):
+            print(_line)
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
         # The parameters ride on the predictions object, not the module

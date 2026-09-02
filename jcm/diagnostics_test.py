@@ -5,7 +5,11 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.diagnostics import check_health, print_report
+from jcm.diagnostics import (
+    aerosol_budget_report,
+    check_health,
+    print_report,
+)
 
 
 def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
@@ -131,3 +135,68 @@ class TestCheckHealthOptionalDiagnostics(unittest.TestCase):
         # Smoke: all optional sections present and printable.
         print_report(report)
 
+
+
+def _budget_dataset(dtype, dyn=0.0, mass=1.0, ptend=5e-12,
+                    emi=3e-12, wet=1e-12, dry=1e-12, species=("so2", "bc")):
+    """Synthetic budget-gauge dataset on a small Gauss-Legendre lat grid.
+
+    All fields are spatially constant, so every area-weighted global mean
+    equals the field's value and the closure arithmetic is exact and
+    hand-checkable. ``budget_dyn_*`` carries ``dtype`` so the float32 floor
+    caveat can be exercised.
+    """
+    nodes, _ = np.polynomial.legendre.leggauss(4)
+    lat = np.rad2deg(np.arcsin(nodes))
+    lon = np.linspace(0.0, 360.0, 3, endpoint=False)
+    nt, nlon, nlat = 1, lon.size, lat.size
+    shape = (nt, nlon, nlat)
+
+    def _field(val, dt=np.float64):
+        return (("time", "lon", "lat"), np.full(shape, val, dtype=dt))
+
+    data = {}
+    for sp in species:
+        data[f"budget_mass_{sp}"] = _field(mass)
+        data[f"budget_ptend_{sp}"] = _field(ptend)
+        data[f"budget_dyn_{sp}"] = _field(dyn, dt=dtype)
+        data[f"emi_{sp}"] = _field(emi)
+        data[f"wet_{sp}"] = _field(wet)
+        data[f"dry_{sp}"] = _field(dry)
+    return xr.Dataset(data, coords={"lat": lat, "lon": lon})
+
+
+class TestAerosolBudgetReport(unittest.TestCase):
+    def test_no_budget_gauges_returns_empty(self):
+        ds = xr.Dataset({"temperature": (("time",), np.zeros(1))})
+        self.assertEqual(aerosol_budget_report(ds, 900.0), [])
+
+    def test_species_discovered_from_variable_names(self):
+        ds = _budget_dataset(np.float64, species=("so2", "bc", "du"))
+        lines = aerosol_budget_report(ds, 900.0)
+        species = [ln.split()[1] for ln in lines if ln.startswith("  budget ")
+                   and "note" not in ln]
+        self.assertEqual(species, sorted(("so2", "bc", "du")))
+
+    def test_closure_arithmetic_unledgered(self):
+        # unledgered = ptend - (emi - wet - dry), all as global means.
+        ptend, emi, wet, dry = 5e-12, 3e-12, 1e-12, 1e-12
+        ds = _budget_dataset(np.float64, ptend=ptend, emi=emi, wet=wet,
+                             dry=dry, species=("so2",))
+        line = aerosol_budget_report(ds, 900.0)[0]
+        expected = (ptend - (emi - wet - dry)) * 1e12
+        self.assertIn(f"unledgered={expected:+10.2f}", line)
+
+    def test_float32_dyn_below_floor_is_flagged_inconclusive(self):
+        ds = _budget_dataset(np.float32, dyn=0.0)
+        lines = aerosol_budget_report(ds, 900.0)
+        self.assertTrue(any("f32 floor" in ln for ln in lines))
+        self.assertTrue(any(ln.startswith("  budget note:") for ln in lines))
+
+    def test_float64_dyn_below_floor_is_not_flagged(self):
+        # At float64 the floor is far below anything physical, so a zero dyn
+        # is not treated as inconclusive.
+        ds = _budget_dataset(np.float64, dyn=0.0)
+        lines = aerosol_budget_report(ds, 900.0)
+        self.assertFalse(any("f32 floor" in ln for ln in lines))
+        self.assertFalse(any(ln.startswith("  budget note:") for ln in lines))
