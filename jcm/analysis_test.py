@@ -98,8 +98,9 @@ def test_layer_pressure_thickness_prefers_pressure_thickness():
         "pressure_half": (("time", "level_i"), ph[None]),
     })
     out = layer_pressure_thickness(ds)
-    assert "level" in out.dims
-    np.testing.assert_allclose(np.asarray(out), dp_level)
+    # The (length-1) time axis is preserved, not squeezed to t=0.
+    assert out.dims == ("time", "level")
+    np.testing.assert_allclose(np.asarray(out), dp_level[None])
 
 
 def test_layer_pressure_thickness_falls_back_to_pressure_half_diff():
@@ -107,8 +108,57 @@ def test_layer_pressure_thickness_falls_back_to_pressure_half_diff():
     ph = _surface_first_half_pressures(dp_level)
     ds = xr.Dataset({"pressure_half": (("time", "level_i"), ph[None])})
     out = layer_pressure_thickness(ds)
-    assert "level" in out.dims
-    np.testing.assert_allclose(np.asarray(out), dp_level)
+    assert out.dims == ("time", "level")
+    np.testing.assert_allclose(np.asarray(out), dp_level[None])
+
+
+def test_layer_pressure_thickness_preserves_time_when_ps_evolves():
+    # Two timesteps with genuinely different layer thicknesses (ps evolved):
+    # the time dim must survive so each timestep gets its own Δp, not a frozen
+    # t=0 profile. Covers the pressure_thickness branch.
+    dp_t0 = np.array([100.0, 150.0, 250.0])
+    dp_t1 = np.array([110.0, 140.0, 260.0])
+    ds = xr.Dataset({
+        "pressure_thickness": (("time", "level"), np.stack([dp_t0, dp_t1])),
+    })
+    out = layer_pressure_thickness(ds)
+    assert out.dims == ("time", "level")
+    np.testing.assert_allclose(np.asarray(out), np.stack([dp_t0, dp_t1]))
+
+
+def test_layer_pressure_thickness_time_varying_pressure_half_fallback():
+    # Same, via the pressure_half differencing fallback.
+    dp_t0 = np.array([100.0, 150.0, 250.0])
+    dp_t1 = np.array([110.0, 140.0, 260.0])
+    ph = np.stack([_surface_first_half_pressures(dp_t0),
+                   _surface_first_half_pressures(dp_t1)])
+    ds = xr.Dataset({"pressure_half": (("time", "level_i"), ph)})
+    out = layer_pressure_thickness(ds)
+    assert out.dims == ("time", "level")
+    # No stale level coordinate is attached after differencing the interfaces.
+    assert "level" not in out.coords
+    np.testing.assert_allclose(np.asarray(out), np.stack([dp_t0, dp_t1]))
+
+
+def test_column_burden_is_time_varying_when_ps_evolves():
+    # The whole point: with ps evolving, the burden of a FIXED mixing ratio
+    # must differ per timestep (dp tracks ps) and equal the hand-computed
+    # per-timestep q·dp/g — not a single frozen-t=0 value repeated.
+    dp_t0 = np.array([100.0, 150.0, 250.0])
+    dp_t1 = np.array([110.0, 140.0, 260.0])
+    ph = np.stack([_surface_first_half_pressures(dp_t0),
+                   _surface_first_half_pressures(dp_t1)])
+    q = np.array([1e-3, 2e-3, 3e-3])
+    ds = xr.Dataset({
+        "so4": (("time", "level"), np.stack([q, q])),
+        "pressure_half": (("time", "level_i"), ph),
+    })
+    burden = column_burden(ds, "so4")
+    assert burden.dims == ("time",)
+    expected = np.array([(q * dp_t0).sum(), (q * dp_t1).sum()]) / c.grav
+    np.testing.assert_allclose(np.asarray(burden), expected)
+    # Genuinely time-varying — a frozen-t=0 dp would make these equal.
+    assert float(burden.isel(time=0)) != float(burden.isel(time=1))
 
 
 def test_column_integral_matches_hand_computation():

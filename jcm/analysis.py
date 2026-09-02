@@ -96,6 +96,17 @@ def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None
 def layer_pressure_thickness(ds: xr.Dataset) -> xr.DataArray:
     """Per-layer Δp [Pa] aligned with the 3-D fields' ``level`` orientation.
 
+    The ``time`` dimension is **preserved** when present: Δp scales with the
+    surface pressure, which evolves over the trajectory, so a single frozen
+    profile would misweight every timestep but the first. Downstream,
+    :func:`column_integral` / :func:`column_burden` then broadcast ``q·dp`` by
+    dimension name and integrate the *correct* per-timestep layer masses.
+    (The ``tools/jam_burden_report.py`` predecessor took ``isel(time=0)`` — a
+    tolerated frozen-``t=0`` approximation in that CLI; as a public library
+    function that would be a defect, so it is not carried over. Consumers that
+    want a single number still reduce over time *after* the mass-weighted
+    product, which is where the reduction belongs.)
+
     Prefer the model's own ``pressure_thickness`` diagnostic when present: it
     is written directly on the ``level`` axis, already aligned with the tracer
     fields, so there is no interface/mid-level differencing to get wrong. Take
@@ -104,7 +115,11 @@ def layer_pressure_thickness(ds: xr.Dataset) -> xr.DataArray:
     Fall back to differencing ``pressure_half`` for post-#710 files written
     before ``pressure_thickness`` existed. Both output vertical axes run
     surface-first (#710), so differencing along ``level_i`` lands the result
-    already aligned with the ``level`` axis — no orientation guard needed.
+    already aligned with the ``level`` axis — no orientation guard needed. The
+    result carries the interface field's non-vertical coordinates (``time``,
+    horizontal) but *no* level coordinate: after differencing, the ``level_i``
+    interface values no longer describe the mid-layers, so attaching them (even
+    renamed) would be a stale label.
 
     This targets current output only. Trajectories written before #710 stored
     interfaces TOA-first under a ``level_i`` bare index (dinosaur) or a
@@ -113,18 +128,18 @@ def layer_pressure_thickness(ds: xr.Dataset) -> xr.DataArray:
     compensated for at read time.
     """
     if "pressure_thickness" in ds:
-        dp = ds["pressure_thickness"]
-        if "time" in dp.dims:
-            dp = dp.isel(time=0)
-        return np.abs(dp)
+        return np.abs(ds["pressure_thickness"])
 
     ph = ds["pressure_half"]
-    if "time" in ph.dims:
-        ph = ph.isel(time=0)
     axis = list(ph.dims).index("level_i")
     dp = np.abs(np.diff(np.asarray(ph.values), axis=axis))
     dims = tuple("level" if d == "level_i" else d for d in ph.dims)
-    return xr.DataArray(dp, dims=dims)
+    # Keep every coordinate that does NOT live on the interface axis (time,
+    # horizontal); drop the level_i coordinate — its interface values do not
+    # apply to the differenced mid-layers.
+    coords = {name: coord for name, coord in ph.coords.items()
+              if "level_i" not in coord.dims}
+    return xr.DataArray(dp, dims=dims, coords=coords)
 
 
 def column_integral(q: xr.DataArray, dp: xr.DataArray) -> xr.DataArray:

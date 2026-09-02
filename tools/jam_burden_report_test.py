@@ -36,9 +36,10 @@ def test_prefers_pressure_thickness_when_present():
         }
     )
     out = jbr._layer_dp(ds)
-    # Must return the diagnostic itself (on the level axis), not the diff.
-    assert "level" in out.dims
-    np.testing.assert_allclose(np.asarray(out), dp_level)
+    # Must return the diagnostic itself (on the level axis), not the diff; the
+    # (length-1) time axis is preserved so Δp can track an evolving ps.
+    assert out.dims == ("time", "level")
+    np.testing.assert_allclose(np.asarray(out), dp_level[None])
 
 
 def test_falls_back_to_diff_of_pressure_half():
@@ -46,8 +47,8 @@ def test_falls_back_to_diff_of_pressure_half():
     ph = _base_vars(dp_level)
     ds = xr.Dataset({"pressure_half": (("time", "level_i"), ph[None])})
     out = jbr._layer_dp(ds)
-    assert "level" in out.dims
-    np.testing.assert_allclose(np.asarray(out), dp_level)
+    assert out.dims == ("time", "level")
+    np.testing.assert_allclose(np.asarray(out), dp_level[None])
 
 
 def test_both_paths_agree():
