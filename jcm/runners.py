@@ -1202,6 +1202,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         default_forcing,
         read_anthropogenic_emissions,
         read_prescribed_aerosol_emissions,
+        validate_emissions_grid,
     )
 
     # One path → open_dataset; several → merge by coords (disjoint channels on a
@@ -1221,27 +1222,12 @@ def _attach_emissions(forcing, forcing_cfg, coords):
             "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
             "contract in docs/design/jam.md."
         )
-    _validate_emissions_grid({**(anthro or {}), **(speciated or {})},
-                             coords, path)
+    validate_emissions_grid({**(anthro or {}), **(speciated or {})},
+                            coords, path)
     if forcing is None:
         forcing = default_forcing(coords.horizontal)
     return forcing.copy(anthropogenic_emissions=anthro,
                         prescribed_aerosol_emissions=speciated)
-
-
-def _validate_emissions_grid(mapping, coords, path):
-    """Raise if any emission field's horizontal shape != the model grid."""
-    from jcm.forcing import TimeSeries
-    nodal = tuple(coords.horizontal.nodal_shape)
-    for name, leaf in mapping.items():
-        arr = leaf.values if isinstance(leaf, TimeSeries) else leaf
-        spatial = tuple(arr.shape[-2:])
-        if spatial != nodal:
-            raise ValueError(
-                f"forcing.emissions_file {path!r}: field {name!r} has "
-                f"horizontal shape {spatial}, but the model grid is {nodal}. "
-                "Regrid the file with jcm.data.emissions.prepare first."
-            )
 
 
 def _attach_dms(forcing, forcing_cfg, coords):
@@ -1318,54 +1304,15 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
         return forcing
     import xarray as xr
 
-    from jcm.forcing import read_oxidant_vmr
+    from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
     with xr.open_dataset(str(path)) as ds:
         mapping = read_oxidant_vmr(ds, nlev=nlev,
                                    lat_deg=lat_deg, lon_deg=lon_deg)
-        _validate_oxidant_levels(ds, coords, path)
+        validate_oxidant_levels(ds, coords, path)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
-
-
-def _validate_oxidant_levels(ds, coords, path):
-    """Cross-check the oxidant file's hybrid coefficients against the model.
-
-    Only applies when both the file (``hyam``/``hybm``, plus ``p0`` in Pa for
-    files storing normalized ``hyam``) and the model
-    (:class:`dinosaur.hybrid_coordinates.HybridCoordinates`) define hybrid
-    levels; a sigma-coordinate model only gets the level-count assert in
-    ``read_oxidant_vmr`` (documented assumption: the file matches the model
-    levels). Full-level model coefficients are boundary midpoints, matching
-    the ECHAM ``hyam/hybm`` convention.
-    """
-    import numpy as np
-    from dinosaur.hybrid_coordinates import HybridCoordinates
-    vertical = coords.vertical
-    if not isinstance(vertical, HybridCoordinates):
-        return
-    if "hyam" not in ds or "hybm" not in ds:
-        return
-    hyam = np.asarray(ds["hyam"].values, dtype=float)
-    hybm = np.asarray(ds["hybm"].values, dtype=float)
-    # HAMMOZ files store hyam normalized by the reference pressure p0 [Pa];
-    # dinosaur's a_boundaries are in Pa.
-    if "p0" in ds:
-        hyam = hyam * float(ds["p0"].values)
-    a = np.asarray(vertical.a_boundaries, dtype=float)
-    b = np.asarray(vertical.b_boundaries, dtype=float)
-    a_full = 0.5 * (a[:-1] + a[1:])
-    b_full = 0.5 * (b[:-1] + b[1:])
-    if (not np.allclose(a_full, hyam, atol=1.0)          # Pa
-            or not np.allclose(b_full, hybm, atol=1e-5)):
-        raise ValueError(
-            f"forcing.oxidants_file {path!r}: hybrid-level coefficients "
-            "(hyam/hybm) don't match the model's vertical grid — the file "
-            "must be on the model levels (no vertical interpolation is "
-            "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
-            "with grid=echam_t63_l47_hybrid) or re-interpolate it."
-        )
 
 
 # ---------------------------------------------------------------------------

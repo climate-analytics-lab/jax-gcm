@@ -1258,5 +1258,63 @@ class TestExpandYearlyFiles(unittest.TestCase):
             expand_yearly_files("/x/forcing_{year}.nc", [1981, 1979])
 
 
+class TestValidateEmissionsGrid(unittest.TestCase):
+    """The public emissions horizontal-grid guard (promoted from runners, #640)."""
+
+    def _coords(self, nlon=8, nlat=4):
+        import types
+        return types.SimpleNamespace(
+            horizontal=types.SimpleNamespace(nodal_shape=(nlon, nlat)))
+
+    def test_matching_grid_passes(self):
+        from jcm.forcing import validate_emissions_grid
+        coords = self._coords()
+        mapping = {"emis_surface_combustion_bc": np.zeros((12, 8, 4))}
+        validate_emissions_grid(mapping, coords, "emis.nc")   # no raise
+
+    def test_mismatched_grid_raises(self):
+        from jcm.forcing import validate_emissions_grid
+        coords = self._coords()
+        mapping = {"emis_surface_combustion_bc": np.zeros((12, 10, 4))}
+        with self.assertRaisesRegex(ValueError, "model grid"):
+            validate_emissions_grid(mapping, coords, "emis.nc")
+
+
+class TestValidateOxidantLevels(unittest.TestCase):
+    """The public oxidant hybrid-coefficient guard (promoted from runners, #640)."""
+
+    def _coords(self):
+        import types
+
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+        a = np.array([0.0, 200.0, 5000.0, 20000.0, 0.0])
+        b = np.array([0.0, 0.02, 0.2, 0.6, 1.0])
+        return types.SimpleNamespace(
+            vertical=HybridCoordinates(a_boundaries=a, b_boundaries=b))
+
+    def _matching_ds(self, coords):
+        import xarray as xr
+        a = np.asarray(coords.vertical.a_boundaries, dtype=float)
+        b = np.asarray(coords.vertical.b_boundaries, dtype=float)
+        a_full = 0.5 * (a[:-1] + a[1:])
+        b_full = 0.5 * (b[:-1] + b[1:])
+        return xr.Dataset({"hyam": (("mlev",), a_full),
+                           "hybm": (("mlev",), b_full)}), a_full, b_full
+
+    def test_matching_hybrid_coefficients_pass(self):
+        from jcm.forcing import validate_oxidant_levels
+        coords = self._coords()
+        ds, _, _ = self._matching_ds(coords)
+        validate_oxidant_levels(ds, coords, "ox.nc")          # no raise
+
+    def test_mismatched_hybrid_coefficients_raise(self):
+        from jcm.forcing import validate_oxidant_levels
+        coords = self._coords()
+        ds, _, b_full = self._matching_ds(coords)
+        ds["hybm"] = (("mlev",), b_full + 0.1)                # shift midpoints
+        with self.assertRaisesRegex(ValueError, "hyam/hybm"):
+            validate_oxidant_levels(ds, coords, "ox.nc")
+
+
 if __name__ == '__main__':
     unittest.main()

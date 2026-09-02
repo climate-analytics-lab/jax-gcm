@@ -850,6 +850,27 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     return out
 
 
+def validate_emissions_grid(mapping, coords, path):
+    """Raise if any emission field's horizontal shape != the model grid.
+
+    Lives next to the ``read_*_emissions`` loaders so a user assembling a
+    :class:`ForcingData` by hand gets the same guard the CLI does — an
+    off-grid file is a size mismatch the emission terms would otherwise fall
+    back to zero on, which from either entry point would look like the file
+    "did nothing".
+    """
+    nodal = tuple(coords.horizontal.nodal_shape)
+    for name, leaf in mapping.items():
+        arr = leaf.values if isinstance(leaf, TimeSeries) else leaf
+        spatial = tuple(arr.shape[-2:])
+        if spatial != nodal:
+            raise ValueError(
+                f"forcing.emissions_file {path!r}: field {name!r} has "
+                f"horizontal shape {spatial}, but the model grid is {nodal}. "
+                "Regrid the file with jcm.data.emissions.prepare first."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Natural-emission / oxidant climatology readers (HAMMOZ-style files)
 # ---------------------------------------------------------------------------
@@ -1085,6 +1106,48 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         out[key] = make_time_series(arr, time_seconds, align_mode=mode)
     return out
+
+
+def validate_oxidant_levels(ds, coords, path):
+    """Cross-check the oxidant file's hybrid coefficients against the model.
+
+    Lives next to :func:`read_oxidant_vmr` — the hyam/hybm boundary-vs-midpoint
+    comparison is vertical-coordinate science a user assembling
+    :class:`ForcingData` by hand needs as much as the CLI does.
+
+    Only applies when both the file (``hyam``/``hybm``, plus ``p0`` in Pa for
+    files storing normalized ``hyam``) and the model
+    (:class:`dinosaur.hybrid_coordinates.HybridCoordinates`) define hybrid
+    levels; a sigma-coordinate model only gets the level-count assert in
+    :func:`read_oxidant_vmr` (documented assumption: the file matches the model
+    levels). Full-level model coefficients are boundary midpoints, matching
+    the ECHAM ``hyam/hybm`` convention.
+    """
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    vertical = coords.vertical
+    if not isinstance(vertical, HybridCoordinates):
+        return
+    if "hyam" not in ds or "hybm" not in ds:
+        return
+    hyam = np.asarray(ds["hyam"].values, dtype=float)
+    hybm = np.asarray(ds["hybm"].values, dtype=float)
+    # HAMMOZ files store hyam normalized by the reference pressure p0 [Pa];
+    # dinosaur's a_boundaries are in Pa.
+    if "p0" in ds:
+        hyam = hyam * float(ds["p0"].values)
+    a = np.asarray(vertical.a_boundaries, dtype=float)
+    b = np.asarray(vertical.b_boundaries, dtype=float)
+    a_full = 0.5 * (a[:-1] + a[1:])
+    b_full = 0.5 * (b[:-1] + b[1:])
+    if (not np.allclose(a_full, hyam, atol=1.0)          # Pa
+            or not np.allclose(b_full, hybm, atol=1e-5)):
+        raise ValueError(
+            f"forcing.oxidants_file {path!r}: hybrid-level coefficients "
+            "(hyam/hybm) don't match the model's vertical grid — the file "
+            "must be on the model levels (no vertical interpolation is "
+            "done). Use the matching L-grid file (e.g. the T63L47 MACC file "
+            "with grid=echam_t63_l47_hybrid) or re-interpolate it."
+        )
 
 
 def expand_yearly_files(file_spec, years, available=None):
