@@ -16,11 +16,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import pathlib
+import sys
 
 import numpy as np
 import xarray as xr
 
-from jcm.analysis import (
+# Source-checkout bootstrap: allow ``python tools/jam_burden_report.py`` when
+# jcm is not pip-installed by putting the repo root on sys.path before the jcm
+# import below (mirrors the idiom in tools/radiation_emulator/*).
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from jcm.analysis import (  # noqa: E402
     area_weights,
     column_integral,
     global_mean,

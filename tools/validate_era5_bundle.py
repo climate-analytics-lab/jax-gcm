@@ -36,7 +36,13 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from jcm.analysis import area_weights
+# Source-checkout bootstrap: repo root on sys.path before importing jcm, so
+# ``python tools/validate_era5_bundle.py`` works without a pip-installed jcm.
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from jcm.analysis import area_weights  # noqa: E402
 
 ROOT = Path(os.environ.get(
     "JCM_MIRROR_ROOT",

@@ -26,13 +26,21 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+# Source-checkout bootstrap: put the repo root (for ``jcm``) AND tools/ (for
+# the sibling ``jam_burden_report`` module) on sys.path *before* the imports
+# that need them, so the documented ``python tools/release_validation/health.py``
+# works without a pip-installed jcm.
+_TOOLS = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
+for _p in (str(_REPO), str(_TOOLS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 # Shared weighting/column-integration machinery lives in jcm.analysis (#640);
 # the species table and the mode-summing burden() are tool domain and stay in
 # tools/jam_burden_report.py (it includes cloud-borne tracers and the
 # pressure_half level-orientation handling).
 from jcm.analysis import area_weights, global_mean  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).parents[1]))
 from jam_burden_report import _SPECIES, burden  # noqa: E402
 
 #: Gate slack: the release gate is the climatological anchor range from
