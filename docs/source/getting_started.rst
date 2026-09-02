@@ -210,6 +210,36 @@ resolved from a single source of truth:
       physics=physics
    )
 
+Parameters must be set **before** the Model is built, as above. jcm binds
+them into the compiled executable when the physics is first traced
+(``Model._run_from_state`` takes ``self`` as a static jit argument), and
+editing the parameters a live model already holds is unreliable: whether a
+later run sees the edit depends on which of JAX's compilation caches it
+hits, so the results cannot be trusted either way. jcm logs a warning and
+flags ``preds.params`` when it detects that. To sweep a parameter, build a
+Model per value inside a single ``jax.jit``, which makes the rebuild a
+trace-time cost paid once instead of a recompile per iteration::
+
+   @jax.jit
+   def forecast(albsea):
+       p = Parameters.default()
+       p = p.replace(mod_radcon=p.mod_radcon.replace(albsea=albsea))
+       model = Model(coords=coords, physics=speedy_physics(parameters=p))
+       return summarize(model.run(save_interval=0.25, total_time=0.25))
+
+A Model with ``observers=`` needs one extra argument under an outer
+``jit``, because the observers' sampling tables are built on the host from
+the window's start time and that is a tracer there: pass a concrete
+``observer_t0_days``, or, to reuse one compilation across *different*
+windows, pass tables from ``model.prepare_observers(t0_days,
+save_interval, total_time)`` as ``observer_xs``.
+
+**Logging**: ``Model(log_level=...)`` defaults to ``logging.WARNING`` and is
+applied to the ``jcm`` logger rather than the root logger, so jcm's warnings
+about a run stay audible without jcm reconfiguring logging for your
+application. Pass ``logging.CRITICAL`` to quieten it. The Hydra CLI exposes
+the same knob as ``run.log_level`` (also ``WARNING`` by default).
+
 **Dynamical core**: Pass a backend explicitly when you need backend-specific
 configuration. ``Model(coords=...)`` remains the shorthand for constructing
 the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also

@@ -768,7 +768,7 @@ def build_model(cfg: DictConfig) -> Model:
     diffusion = build_diffusion(cfg)
     tracer_filter = build_tracer_filter(cfg)
 
-    log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
+    log_level = getattr(logging, cfg.run.log_level.upper(), logging.WARNING)
     # Build the dycore explicitly so the diffusion config flows in via the
     # dycore constructor (Model itself no longer takes a diffusion kwarg —
     # that's a dinosaur-backend concern). The tracer filter is the same kind of
@@ -835,7 +835,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     if sponge is not None and int(sponge.get("levels", 0)) > 0:
         physics = physics + _pyses_lid_sponge_term(dycore, sponge)
 
-    log_level = getattr(logging, cfg.run.log_level.upper(), logging.CRITICAL)
+    log_level = getattr(logging, cfg.run.log_level.upper(), logging.WARNING)
     # No time_step: the Model adopts the dycore's dt_seconds (single source
     # of truth; a conflicting run.time_step would raise).
     return Model(dycore=dycore, physics=physics,
