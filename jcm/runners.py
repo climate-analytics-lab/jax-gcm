@@ -454,27 +454,19 @@ def maybe_add_sponge(physics, cfg: DictConfig):
 
 
 def _nudging_inv_tau(nudging_cfg, vertical):
-    """Per-level inverse-timescale profiles from the ``nudging`` config.
+    """Adapt the ``nudging`` config to :func:`jcm.nudging.inv_tau_profile`.
 
-    One ``1/tau`` value masked to zero (a) in the bottom ``pbl_levels``
-    layers, and (b) above ``min_pressure_hpa`` — the WB2 ERA5 stores
-    stop at 50 hPa, and values above that clamp, so relaxing the
-    stratosphere toward them would drag it to 50-hPa winds.
+    Returns ``(inv_tau, nlev)`` for :func:`maybe_add_nudging`.
     """
-    import numpy as np
-    if hasattr(vertical, "a_centers"):
-        p_ref = (np.asarray(vertical.a_centers)
-                 + np.asarray(vertical.b_centers) * 101325.0)
-    else:
-        p_ref = np.asarray(vertical.centers) * 101325.0
-    nlev = p_ref.size
-    mask = np.ones(nlev)
-    mask[p_ref < float(nudging_cfg.get("min_pressure_hpa", 60.0)) * 100.0] = 0.0
-    pbl = int(nudging_cfg.get("pbl_levels", 0))
-    if pbl > 0:
-        mask[nlev - pbl:] = 0.0
-    inv_tau = mask / (float(nudging_cfg.get("tau_hours", 6.0)) * 3600.0)
-    return inv_tau, nlev
+    from jcm.nudging import inv_tau_profile
+
+    inv_tau = inv_tau_profile(
+        vertical,
+        tau_hours=float(nudging_cfg.get("tau_hours", 6.0)),
+        min_pressure_hpa=float(nudging_cfg.get("min_pressure_hpa", 60.0)),
+        pbl_levels=int(nudging_cfg.get("pbl_levels", 0)),
+    )
+    return inv_tau, inv_tau.size
 
 
 def maybe_add_nudging(physics, cfg: DictConfig, coords):

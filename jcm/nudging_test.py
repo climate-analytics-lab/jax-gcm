@@ -16,7 +16,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.nudging import (
     NudgingConfig, NudgingTarget,
-    nudging_tendency, with_nudging,
+    inv_tau_profile, nudging_tendency, with_nudging,
 )
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.physics.speedy.speedy_terms import speedy_physics
@@ -52,6 +52,54 @@ class TestNudgingConfig(unittest.TestCase):
         cfg = NudgingConfig.winds_only(self.nlev, pbl_levels=2)
         self.assertTrue(jnp.all(cfg.inv_tau_wind[:-2] > 0.0))
         self.assertTrue(jnp.all(cfg.inv_tau_wind[-2:] == 0.0))
+
+
+class TestInvTauProfile(unittest.TestCase):
+
+    def test_sigma_vertical_default_tau(self):
+        vertical = get_speedy_coords().vertical
+        p_ref = np.asarray(vertical.centers) * 101325.0
+        inv_tau = inv_tau_profile(vertical)
+        self.assertEqual(inv_tau.shape, (vertical.layers,))
+        # Levels above the 60 hPa default cap are zeroed (the top SPEEDY
+        # level sits at ~25 hPa); the rest carry the default 6 h tau.
+        self.assertTrue(np.all(inv_tau[p_ref < 6000.0] == 0.0))
+        np.testing.assert_allclose(
+            inv_tau[p_ref >= 6000.0], 1.0 / (6.0 * 3600.0))
+
+    def test_hybrid_vertical_masks_stratosphere(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        vertical = get_echam_levels(47)
+        p_ref = (np.asarray(vertical.a_centers)
+                 + np.asarray(vertical.b_centers) * 101325.0)
+        inv_tau = inv_tau_profile(vertical, min_pressure_hpa=60.0)
+        # Levels above 60 hPa are zeroed; those below carry the tau value.
+        self.assertTrue(np.all(inv_tau[p_ref < 6000.0] == 0.0))
+        np.testing.assert_allclose(
+            inv_tau[p_ref >= 6000.0], 1.0 / (6.0 * 3600.0))
+        # The stratosphere is genuinely present in an L47 grid.
+        self.assertTrue(np.any(inv_tau == 0.0))
+
+    def test_min_pressure_mask_zeroes_top(self):
+        vertical = get_speedy_coords().vertical
+        p_ref = np.asarray(vertical.centers) * 101325.0
+        # Raise the cap above the highest level so everything is masked.
+        cap_hpa = float(p_ref.max()) / 100.0 + 1.0
+        inv_tau = inv_tau_profile(vertical, min_pressure_hpa=cap_hpa)
+        np.testing.assert_allclose(inv_tau, 0.0)
+
+    def test_pbl_levels_mask_bottom(self):
+        vertical = get_speedy_coords().vertical
+        # Disable the min-pressure mask so the pbl mask is isolated.
+        inv_tau = inv_tau_profile(vertical, min_pressure_hpa=0.0, pbl_levels=2)
+        self.assertTrue(np.all(inv_tau[-2:] == 0.0))
+        self.assertTrue(np.all(inv_tau[:-2] > 0.0))
+
+    def test_custom_tau_hours(self):
+        vertical = get_speedy_coords().vertical
+        inv_tau = inv_tau_profile(vertical, tau_hours=12.0)
+        np.testing.assert_allclose(
+            inv_tau[inv_tau > 0.0], 1.0 / (12.0 * 3600.0))
 
 
 class TestNudgingTendencyDirection(unittest.TestCase):
