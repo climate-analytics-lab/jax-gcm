@@ -1115,26 +1115,52 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         else:
             tke = jnp.zeros_like(state.temperature)
 
-        # Activated CDNC source. The inline SPA floor (from the MACv2-SP Nccn)
-        # is always computed as a baseline. An upstream activation term (e.g.
-        # JAM's ARG, #461) may write an explicit ``activated_cdnc``; when it
-        # does we use it, but fall back to the SPA floor wherever that online
-        # source is empty (≈0) — e.g. before the prognostic JAM aerosol tracers
-        # spin up — so the default JAM+2M run still activates droplets. Both
-        # paths are differentiable and produce the same (nlev, ncols) field.
-        Nccn = diagnostics["aerosol"].Nccn
-        spa_floor = spa_activated_cdnc(
-            Nccn=Nccn[jnp.newaxis, :],
-            cloud_fraction=cloud_fraction,
-            prefactor=self._spa_prefactor.get_value(),
-            exponent=self._spa_exponent.get_value(),
-            cap_smoothing=self._spa_cap_smoothing.get_value(),
-        )
+        # Activated CDNC source. Which baseline fills the cells an online
+        # activation model leaves empty depends on the aerosol scheme, and the
+        # presence of the ``activated_cdnc`` diagnostic tells the two apart:
+        #
+        #  * MACv2-SP path (no online activation term, ``activated_cdnc``
+        #    absent): the SPA floor derived from the prescribed-plume
+        #    ``aerosol.Nccn`` IS the activation source — the scheme's only
+        #    Twomey link (Lin et al. 2025, ``jcm.physics.aerosol.spa``).
+        #
+        #  * JAM path (``ArgActivation`` writes ``activated_cdnc``, #461): JAM
+        #    carries no prescribed-plume ``Nccn`` (it was removed from the JAM
+        #    composition in #640), so the SPA floor would be identically zero
+        #    and leave ARG-empty cloudy cells with no droplets. Fall back
+        #    instead to the scheme's OWN minimum-CDNC — the ECHAM-HAM fixed
+        #    ``cdnc_min_fixed`` (40 cm⁻³) or the dynamic max-radius floor,
+        #    selected by ``ldyn_cdnc_min`` (#674). This is the same
+        #    ``minimum_CDNC`` the per-column warm microphysics enforces on the
+        #    droplet number (see ``minimum_CDNC`` below): feeding it as the
+        #    activation *target* here only sets the nucleation source in
+        #    ARG-empty cells; the per-column floor still owns the actual number
+        #    bound, so the droplet number is not doubly floored.
         arg_cdnc = diagnostics.get("activated_cdnc")
         if arg_cdnc is None:
-            activated_cdnc = spa_floor
+            Nccn = diagnostics["aerosol"].Nccn
+            activated_cdnc = spa_activated_cdnc(
+                Nccn=Nccn[jnp.newaxis, :],
+                cloud_fraction=cloud_fraction,
+                prefactor=self._spa_prefactor.get_value(),
+                exponent=self._spa_exponent.get_value(),
+                cap_smoothing=self._spa_cap_smoothing.get_value(),
+            )
         else:
-            activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, spa_floor)
+            # In-cloud liquid mass density (kg/m³) for the dynamic branch of
+            # ``minimum_CDNC``; the fixed branch ignores it. Masked to cloudy
+            # cells so the fallback (like the SPA floor it replaces) is zero in
+            # clear air — the activation gate is cloud-only anyway.
+            inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params_2m.epsec)
+            qc_in_cloud_kgm3 = jnp.where(
+                cloud_fraction > params_2m.epsec,
+                qc_interim * inv_cf_min * air_density, 0.0,
+            )
+            cdnc_min_floor = jnp.where(
+                cloud_fraction > params_2m.epsec,
+                minimum_CDNC(qc_in_cloud_kgm3, params_2m), 0.0,
+            )
+            activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, cdnc_min_floor)
 
         # Online heterogeneous ice nuclei (JAM #494); 0 where absent so the
         # core falls back to its DeMott floor. Immersion drives the mixed-phase
