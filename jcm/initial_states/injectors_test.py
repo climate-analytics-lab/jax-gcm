@@ -1,15 +1,14 @@
-"""Library-level tests for the initial-state injectors.
+"""Library-level tests for the initial-state builders.
 
-The JW and balanced-isothermal *profile* injectors are exercised through
+The JW and balanced-isothermal *profile* builders are exercised through
 ``jcm.runners`` (which re-exports them) in ``runners_test.py``; these tests
-cover the two injectors that the runner adapters wrap rather than mirror:
-the ERA5 seed (no network access) and the checkpoint warm-start's clock reset.
+cover the two entry points that the runner adapters wrap rather than mirror:
+the ERA5 re-export (no network access) and the checkpoint warm-start's
+clock reset.
 """
 
 import numpy as np
 import pytest
-
-from jcm.initial_states import inject_checkpoint_state, inject_era5_state
 
 
 def _held_suarez_model():
@@ -22,27 +21,27 @@ def _held_suarez_model():
     return model
 
 
-def test_inject_era5_state_seeds_from_synthetic_slice(monkeypatch):
-    """inject_era5_state populates the dycore state from era5.initial_state.
+def test_era5_state_reexport_is_accepted_by_run(monkeypatch):
+    """``era5_state`` re-exports ``jcm.data.era5.initial_state``, and the
+    ``PhysicsState`` it returns is accepted by ``model.run``.
 
     The WeatherBench2 fetch is monkeypatched to a synthetic, network-free
-    PhysicsState so the test asserts the injector wiring: it must build
-    ``_final_dycore_state`` from the returned slice and round-trip the
-    injected temperature back through the state bridge.
+    ``PhysicsState``. The test asserts (a) the lazy re-export resolves to
+    ``era5.initial_state`` and (b) ``model.run(initial_state=...)`` integrates
+    the returned gridpoint state without producing non-finite fields.
     """
     import jax.numpy as jnp
 
     import jcm.data.era5 as era5
+    import jcm.initial_states as initial_states
     from jcm.physics_interface import PhysicsState
 
     model = _held_suarez_model()
     nlon, nlat = model.coords.horizontal.nodal_shape
     nlev = model.coords.vertical.centers.size
 
-    # Horizontally-uniform, level-varying temperature: a constant field per
-    # level round-trips through the spectral transform exactly, so the
-    # bridge round-trip below is a clean equality check independent of the
-    # dycore's vertical ordering.
+    # Horizontally-uniform, level-varying temperature: a physically-plausible
+    # seed that projects cleanly onto the dycore.
     t_profile = 250.0 + 5.0 * np.arange(nlev, dtype=np.float64)
     temperature = jnp.asarray(
         np.broadcast_to(t_profile[:, None, None], (nlev, nlon, nlat)))
@@ -66,29 +65,33 @@ def test_inject_era5_state_seeds_from_synthetic_slice(monkeypatch):
 
     monkeypatch.setattr(era5, "initial_state", fake_initial_state)
 
-    inject_era5_state(model, "2001-05-05")
+    # The lazy re-export resolves to the (now-patched) era5.initial_state.
+    assert initial_states.era5_state is era5.initial_state
 
-    assert model._final_dycore_state is not None
+    state = initial_states.era5_state(model.coords, "2001-05-05")
     assert captured["date"] == "2001-05-05"
     assert captured["coords"] is model.coords
+    assert isinstance(state, PhysicsState)
 
-    physics_state = model.dycore.to_physics_state(model._final_dycore_state)
-    round_tripped = np.asarray(physics_state.temperature)
-    np.testing.assert_allclose(
-        round_tripped, np.asarray(temperature), atol=1e-3)
+    # model.run accepts the returned gridpoint state and integrates it.
+    dt_days = 180.0 / 86400.0
+    model.run(initial_state=state, save_interval=dt_days, total_time=dt_days)
+    final = model.dycore.to_physics_state(model._final_dycore_state)
+    assert np.all(np.isfinite(np.asarray(final.temperature)))
 
 
-def test_inject_checkpoint_state_resets_clock(tmp_path):
-    """inject_checkpoint_state loads a donor state but zeros its sim_time.
+def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
+    """``checkpoint_state`` returns ``(state, donor_days)`` with a zeroed clock.
 
     A donor checkpoint written with a nonzero elapsed sim-time must load its
-    fields yet reset the dycore clock to zero (dates, forcing interpolation
-    and output timestamps all derive from sim_time). The returned donor-day
-    count is reported for logging.
+    fields yet reset the *returned* dycore clock to zero (dates, forcing
+    interpolation and output timestamps all derive from sim_time). The donor's
+    elapsed-day count is returned for logging.
     """
     import jax.numpy as jnp
 
     from jcm.checkpoint import save_checkpoint
+    from jcm.initial_states import checkpoint_state
 
     donor = _held_suarez_model()
     donor.bootstrap_state()
@@ -102,8 +105,9 @@ def test_inject_checkpoint_state_resets_clock(tmp_path):
     save_checkpoint(donor, ckpt, elapsed_days=5.0)
 
     warm = _held_suarez_model()
-    days = inject_checkpoint_state(warm, str(ckpt))
+    state, days = checkpoint_state(warm, str(ckpt))
 
     assert days == pytest.approx(5.0)
-    reset_sim_time = np.asarray(warm.dycore.sim_time(warm._final_dycore_state))
+    # The RETURNED state carries the zeroed clock.
+    reset_sim_time = np.asarray(warm.dycore.sim_time(state))
     np.testing.assert_allclose(reset_sim_time, 0.0)

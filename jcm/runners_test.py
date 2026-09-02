@@ -668,15 +668,14 @@ class TestModeDispatch(unittest.TestCase):
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
     def test_chunked_resume_with_balanced_isothermal_init(self):
-        """Resume path bootstraps the physics carry for inject-based inits.
+        """Resume-from-checkpoint bootstraps a template for state-based inits.
 
-        ``inject_balanced_isothermal_profile`` populates
-        ``_final_dycore_state`` but leaves ``_final_physics_state`` for
-        ``Model.resume`` to lazy-build. The resume-from-checkpoint code
-        path must materialise the carry itself before calling
-        ``load_checkpoint``, otherwise the load raises on the
-        uninitialised template (codex review on PR #479). Held-Suarez is
-        the cheapest physics that supports ``init=balanced_isothermal``.
+        The resume-from-checkpoint path must build both state pytrees (via
+        ``bootstrap_state(balanced_isothermal_state(model))``) as
+        deserialization templates before calling ``load_checkpoint``,
+        otherwise the load raises on the uninitialised template (codex review
+        on PR #479). Held-Suarez is the cheapest physics that supports
+        ``init=balanced_isothermal``.
         """
         import tempfile
 
@@ -1304,9 +1303,9 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         model.bootstrap_state()
         return model, terrain
 
-    def _nodal_ps(self, model):
+    def _nodal_ps(self, state, model):
         log_ps_nodal = model.coords.horizontal.to_nodal(
-            model._final_dycore_state.log_surface_pressure
+            state.log_surface_pressure
         )[0]
         from dinosaur.scales import units
         scale = float(
@@ -1315,11 +1314,11 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         return np.exp(np.asarray(log_ps_nodal)) * scale
 
     def test_balanced_isothermal_rebalances_ps_over_orography(self):
-        from jcm.runners import inject_balanced_isothermal_profile
+        from jcm.initial_states import balanced_isothermal_state
 
         model, terrain = self._real_terrain_model()
-        inject_balanced_isothermal_profile(model)
-        ps = self._nodal_ps(model)
+        state = balanced_isothermal_state(model)
+        ps = self._nodal_ps(state, model)
         orog = np.asarray(terrain.orog)
 
         # Surface pressure must drop hydrostatically over high terrain.
@@ -1336,19 +1335,17 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         self.assertEqual(np.argmin(ps), np.argmax(orog))
 
     def test_jw_profile_rebalances_ps_and_injects_humidity(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
 
         model, terrain = self._real_terrain_model()
-        inject_jw_profile(model, rh=0.6)
-        ps = self._nodal_ps(model)
+        state = jw_state(model, rh=0.6)
+        ps = self._nodal_ps(state, model)
         orog = np.asarray(terrain.orog)
         self.assertLess(
             ps[orog > 2000.0].mean(), 0.8 * ps[orog < 1.0].mean(),
         )
 
-        physics_state = model.dycore.to_physics_state(
-            model._final_dycore_state
-        )
+        physics_state = model.dycore.to_physics_state(state)
         q = np.asarray(physics_state.specific_humidity)
         # Moist near the surface, dry above the 200 hPa cap (level 0 is
         # the model top in the physics state layout).
@@ -1361,7 +1358,7 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
         )
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.utils import get_coords
 
         coords = get_coords(
@@ -1369,12 +1366,9 @@ class TestInjectProfilesOrographyAndHybrid(unittest.TestCase):
         )
         model = Model(coords=coords, physics=held_suarez_physics(),
                       time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.5)
+        state = jw_state(model, rh=0.5)
 
-        physics_state = model.dycore.to_physics_state(
-            model._final_dycore_state
-        )
+        physics_state = model.dycore.to_physics_state(state)
         T = np.asarray(physics_state.temperature)
         # Lapse-rate profile bounded by the JW floor and surface values.
         self.assertGreaterEqual(T.min(), 240.0)
@@ -1411,7 +1405,7 @@ class TestMainCLISlow(TestMainCLI):
 
 
 class TestInjectJwHumidityMagnitude(unittest.TestCase):
-    """``inject_jw_profile`` must hand the gridpoint physics a physical
+    """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
     Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
@@ -1424,17 +1418,16 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.6)
+        state = jw_state(model, rh=0.6)
 
-        ps = model.dycore.to_physics_state(model._final_dycore_state)
+        ps = model.dycore.to_physics_state(state)
         qmax = float(np.max(np.asarray(ps.specific_humidity)))
         # rh*q_sat at the warm surface is a few g/kg -> O(1e-2) kg/kg. The units
         # bug produced ~5 (>1 kg/kg); bound it tightly on both sides.
@@ -1449,7 +1442,7 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
 
 
 class TestInjectJwPreservesCloudTracers(unittest.TestCase):
-    """``inject_jw_profile`` must inject only the analytic humidity profile and
+    """``jw_state`` must inject only the analytic humidity profile and
     keep the other prognostic tracers (qc/qi/qnc/qni/qr/qs) the dycore seeded.
 
     Regression for the CRE ≡ 0 bug: overwriting ``state.tracers`` wholesale
@@ -1458,23 +1451,22 @@ class TestInjectJwPreservesCloudTracers(unittest.TestCase):
     """
 
     def test_jw_keeps_2m_cloud_tracers(self):
-        from jcm.runners import inject_jw_profile
+        from jcm.initial_states import jw_state
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
-        model.bootstrap_state()
-        inject_jw_profile(model, rh=0.5)
+        state = jw_state(model, rh=0.5)
 
-        keys = set(model._final_dycore_state.tracers.keys())
+        keys = set(state.tracers.keys())
         self.assertIn("specific_humidity", keys)
         # qr/qs are no longer prognostic (2M precipitation is flux-form,
         # review finding 2.18) — the guard covers the four cloud tracers.
         self.assertTrue(
             {"qc", "qi", "qnc", "qni"}.issubset(keys),
-            f"inject_jw_profile dropped cloud tracers; tracers present: {keys}",
+            f"jw_state dropped cloud tracers; tracers present: {keys}",
         )
 
 

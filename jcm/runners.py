@@ -7,7 +7,7 @@ integration tests) can import the same builders directly without going through
 Hydra's CLI machinery.
 
 By design (#640) this module contains **no science**: it parses config and
-calls the library — the injectors in :mod:`jcm.initial_states`, the weights and
+calls the library — the initial-state builders in :mod:`jcm.initial_states`, the weights and
 burdens in :mod:`jcm.analysis`, the forcing helpers in :mod:`jcm.forcing`, the
 relaxation profiles in :mod:`jcm.nudging`, and the various scheme constructors.
 Every scientific choice lives in one of those homes with its own tests, so a
@@ -32,8 +32,8 @@ from jcm import provenance
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
-    inject_balanced_isothermal_profile,
-    inject_jw_profile,
+    balanced_isothermal_state,
+    jw_state,
 )
 from jcm.model import Model, ModelPredictions
 from jcm.physics.radiation.band_config import RadiationBandConfig
@@ -592,25 +592,26 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
 
 
 # ---------------------------------------------------------------------------
-# Initial state injection — thin config adapters
+# Initial state — thin config adapters
 #
-# The injector science lives in ``jcm.initial_states.injectors``. The
-# profile injectors (JW, balanced-isothermal) take no config and are
-# re-exported unchanged above; the file/era5 injectors need Hydra-config
-# adaptation and get the thin adapters below.
+# The state-builder science lives in ``jcm.initial_states.injectors``. The
+# profile builders (JW, balanced-isothermal) take no config and are
+# re-exported unchanged above; the file/era5 states need Hydra-config
+# adaptation and get the thin adapters below. Each returns a state to hand
+# to ``model.run(initial_state=...)``.
 # ---------------------------------------------------------------------------
 
 
-def inject_state_file(model: Model, cfg: DictConfig) -> None:
+def _state_from_file(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=from_state`` warm start.
 
     Resolves ``init.file`` to a local path, rejects the case where it
     collides with ``run.checkpoint_path`` (the first-chunk checkpoint would
     overwrite the donor init state), then delegates to
-    :func:`jcm.initial_states.inject_checkpoint_state` for the load and
-    clock-reset semantics.
+    :func:`jcm.initial_states.checkpoint_state` for the load and clock-reset
+    semantics. Returns the loaded dycore state for the caller to run.
     """
-    from jcm.initial_states import inject_checkpoint_state
+    from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
     ckpt = cfg.run.get("checkpoint_path", None)
@@ -620,28 +621,29 @@ def inject_state_file(model: Model, cfg: DictConfig) -> None:
             "first chunk checkpoint would overwrite the donor init state. "
             "Give the run its own checkpoint_path."
         )
-    days = inject_checkpoint_state(model, path)
+    state, days = checkpoint_state(model, path)
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,
     )
+    return state
 
 
-def inject_era5_state(model: Model, cfg: DictConfig) -> None:
+def _state_from_era5(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=era5`` initial condition.
 
     Resolves the ERA5 slice date from ``init.date``, else ``run.start_date``,
     else the 2000-01-01 default — matching the calendar the run integrates on
-    — records provenance, then delegates to
-    :func:`jcm.initial_states.injectors.inject_era5_state` for the seeding.
+    — records provenance, then returns the regridded ``PhysicsState`` from
+    :func:`jcm.data.era5.initial_state` for the caller to run.
     """
-    from jcm.initial_states import injectors as _injectors
+    from jcm.data import era5
 
     date = (cfg.get("init", {}).get("date", None)
             or cfg.get("run", {}).get("start_date", None)
             or "2000-01-01")
     provenance.record_fact("initial_condition", f"era5:{date}")
-    _injectors.inject_era5_state(model, str(date))
+    return era5.initial_state(model.coords, str(date))
 
 
 # ---------------------------------------------------------------------------
@@ -1406,46 +1408,24 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
     if cfg.init.kind == "jw":
-        inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "balanced_isothermal":
-        inject_balanced_isothermal_profile(model)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "from_state":
-        inject_state_file(model, cfg)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    if cfg.init.kind == "era5":
-        inject_era5_state(model, cfg)
-        return model.resume(
-            forcing=forcing,
-            save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
-            output_averages=cfg.run.output_averages,
-            snapshot_interval=cfg.run.get("snapshot_interval"),
-            snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
-        )
-    raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+        initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+    elif cfg.init.kind == "balanced_isothermal":
+        initial_state = balanced_isothermal_state(model)
+    elif cfg.init.kind == "from_state":
+        initial_state = _state_from_file(model, cfg)
+    elif cfg.init.kind == "era5":
+        initial_state = _state_from_era5(model, cfg)
+    else:
+        raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
+    return model.run(
+        initial_state=initial_state,
+        forcing=forcing,
+        save_interval=cfg.run.save_interval,
+        total_time=cfg.run.total_time,
+        output_averages=cfg.run.output_averages,
+        snapshot_interval=cfg.run.get("snapshot_interval"),
+        snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
+    )
 
 
 def _load_states_from_cfg(cfg: DictConfig, physics):
@@ -1599,19 +1579,17 @@ def run_chunked(
         # Mirrors the init-kind branching of the fresh-start path below;
         # the template values are immediately overwritten by the
         # checkpoint's contents.
+        # ``bootstrap_state`` populates both ``_final_dycore_state`` and the
+        # physics carry (eagerly), which ``load_checkpoint`` needs as
+        # deserialization templates; their values are immediately overwritten
+        # by the checkpoint's contents, so the init-kind only decides the
+        # template's pytree structure.
         if cfg.init.kind == "jw":
-            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
+            model.bootstrap_state(jw_state(model, rh=float(cfg.init.get("rh", 0.6))))
         elif cfg.init.kind == "balanced_isothermal":
-            inject_balanced_isothermal_profile(model)
+            model.bootstrap_state(balanced_isothermal_state(model))
         else:
             model.bootstrap_state()
-
-        # ``inject_*_profile`` only populates ``_final_dycore_state`` —
-        # the physics carry is normally built lazily by ``resume``.
-        # ``load_checkpoint`` needs both pytrees as deserialization
-        # templates, so build the carry now if the inject path took it.
-        if model._final_physics_state is None:
-            model._final_physics_state = model._build_initial_physics_carry()
 
         elapsed_sim_days = load_checkpoint(model, ckpt_path)
         resumed_from_ckpt = True
@@ -1629,54 +1607,25 @@ def run_chunked(
 
         t0 = time.perf_counter()
         first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-        if first_fresh_chunk and cfg.init.kind == "jw":
-            inject_jw_profile(model, rh=float(cfg.init.get("rh", 0.6)))
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "balanced_isothermal":
-            inject_balanced_isothermal_profile(model)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "era5":
-            # Without this branch a chunked run silently ignored init=era5
-            # (the chunked dispatch returns before _run_full's init ladder).
-            inject_era5_state(model, cfg)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk and cfg.init.kind == "from_state":
-            inject_state_file(model, cfg)
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        elif first_fresh_chunk:
+        if first_fresh_chunk:
+            # First fresh chunk: bootstrap from the configured initial state
+            # and integrate. ``model.run`` = bootstrap_state + resume, so the
+            # cross-step physics carry is built exactly as the plain
+            # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+            # handled here too: the chunked dispatch returns before
+            # ``_run_full``'s init ladder runs.
+            if cfg.init.kind == "jw":
+                initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+            elif cfg.init.kind == "balanced_isothermal":
+                initial_state = balanced_isothermal_state(model)
+            elif cfg.init.kind == "era5":
+                initial_state = _state_from_era5(model, cfg)
+            elif cfg.init.kind == "from_state":
+                initial_state = _state_from_file(model, cfg)
+            else:
+                initial_state = None
             preds = model.run(
+                initial_state=initial_state,
                 forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,

@@ -1,20 +1,25 @@
-"""Initial-condition injectors: analytic profiles, ERA5, and warm starts.
+"""Initial-condition builders: analytic profiles and warm starts.
 
-Each injector takes a built :class:`~jcm.model.Model` and replaces its
-initial dycore state (``model._final_dycore_state``), so the natural call
-pattern from Python is::
+Each builder takes a built :class:`~jcm.model.Model` and RETURNS a starting
+state (a dycore-native state, or — for ERA5, re-exported from
+:mod:`jcm.data.era5` — a :class:`~jcm.physics_interface.PhysicsState`). The
+natural call pattern from Python is to hand the returned state straight to
+``Model.run``::
 
     model = Model(coords=coords, terrain=terrain, physics=echam_physics())
-    inject_jw_profile(model, rh=0.6)
-    predictions = model.resume(total_time=10.0, save_interval=1.0)
+    predictions = model.run(
+        initial_state=jw_state(model, rh=0.6),
+        total_time=10.0, save_interval=1.0,
+    )
 
-Follow every injector with ``model.resume(...)`` rather than
-``model.run(...)`` — ``run`` would rebuild the default isothermal rest
-state and discard the injection.
+``Model.run(initial_state=...)`` accepts ``None``, a ``PhysicsState``, or a
+dycore-native state (``model.py`` ``bootstrap_state``), so there is no longer
+a resume-not-run trap: ``run`` bootstraps from the supplied state and
+integrates it.
 
-These are the library homes of the initial conditions the Hydra CLI
-exposes as ``init.kind={jw,balanced_isothermal,era5,from_state}``;
-``jcm.runners`` calls straight through to them (#640).
+These are the library homes of the initial conditions the Hydra CLI exposes
+as ``init.kind={jw,balanced_isothermal,era5,from_state}``; ``jcm.runners``
+calls straight through to them (#640).
 """
 
 from __future__ import annotations
@@ -51,25 +56,27 @@ _T0_C = 273.15   # K, melting point reference
 _RH_CAP_PRESSURE_PA = 20000.0   # 200 hPa
 
 
-def inject_balanced_isothermal_profile(model: Model) -> None:
-    """Inject an isothermal-rest atmosphere with orography-balanced ``ps``.
+def balanced_isothermal_state(model: Model):
+    """Build an isothermal-rest atmosphere with orography-balanced ``ps``.
 
-    Same ps-rebalance logic as :func:`inject_jw_profile` (so air doesn't
-    end up below ground over tall topography), but keeps the temperature
-    field at a uniform 288 K and humidity at zero. Useful as a robust
-    starting state for moist-physics runs over real terrain when the
-    full JW lapse-rate profile is unstable at the chosen resolution.
+    Same ps-rebalance logic as :func:`jw_state` (so air doesn't end up below
+    ground over tall topography), but keeps the temperature field at a uniform
+    288 K and humidity at zero. Useful as a robust starting state for
+    moist-physics runs over real terrain when the full JW lapse-rate profile
+    is unstable at the chosen resolution.
 
-    Mutates ``model._final_dycore_state`` in place. Follow with
-    ``model.resume(...)`` rather than ``model.run(...)``.
+    Returns a dycore-native state; pass it to
+    ``model.run(initial_state=...)``.
     """
     from dinosaur.scales import units
     from jcm.constants import grav, p0s1_bg, rd
 
-    model._final_dycore_state = model._prepare_initial_dycore_state(
+    # Bootstrap the default rest state so the physics' seeded tracers (cloud
+    # water, GHG VMRs, aerosol modes, ...) are already in place; we only
+    # override the temperature/ps fields below.
+    state = model._prepare_initial_dycore_state(
         physics_state=None, random_seed=0,
     )
-    state = model._final_dycore_state
     p0_pa = p0s1_bg
 
     orog = jnp.asarray(model.terrain.orog)
@@ -84,14 +91,15 @@ def inject_balanced_isothermal_profile(model: Model) -> None:
         state.log_surface_pressure = model.coords.horizontal.to_modal(
             log_ps_nodal[None, ...]
         )
-    model._final_dycore_state = state
+    return state
 
 
-def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
-    """Inject a Jablonowski-Williamson-style lapse-rate initial condition.
+def jw_state(model: Model, rh: float = 0.6):
+    """Build a Jablonowski-Williamson-style lapse-rate initial condition.
 
-    Replaces ``model._final_dycore_state`` (set up by the default isothermal
-    rest atmosphere) with a vertical profile suitable for moist physics:
+    Starts from the default isothermal rest atmosphere (so the physics'
+    seeded tracers are preserved) and overrides T/ps/q with a vertical
+    profile suitable for moist physics:
 
     * Temperature: 288 K at the surface, ICAO standard lapse 6.5 K/km, capped
       at 250 K so the semi-implicit reference temperature stays close.
@@ -101,18 +109,19 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
     * Humidity: ``rh`` × q_sat(T) below ~200 hPa, zero above; clipped to a
       sensible range for q.
 
-    Mutates ``model._final_dycore_state`` in place. Follow with
-    ``model.resume(...)`` rather than ``model.run(...)``.
+    Returns a dycore-native state; pass it to
+    ``model.run(initial_state=...)``.
     """
     from dinosaur.hybrid_coordinates import HybridCoordinates
     from dinosaur.scales import units
 
     from jcm.constants import grav, p0s1_bg, rd
 
-    model._final_dycore_state = model._prepare_initial_dycore_state(
+    # Bootstrap the default rest state; ``_prepare_initial_dycore_state(None)``
+    # is what seeds the physics' prognostic tracers, which we preserve below.
+    state = model._prepare_initial_dycore_state(
         physics_state=None, random_seed=0,
     )
-    state = model._final_dycore_state
 
     nlon, nlat = model.coords.horizontal.nodal_shape
     p0_pa = p0s1_bg
@@ -198,26 +207,10 @@ def inject_jw_profile(model: Model, rh: float = 0.6) -> None:
         **state.tracers,
         "specific_humidity": model.coords.horizontal.to_modal(q_nodal),
     }
-    model._final_dycore_state = state
+    return state
 
 
-def inject_era5_state(model: Model, date: str = "2000-01-01") -> None:
-    """Seed the model from ERA5 (WeatherBench2) at ``date``.
-
-    ``date`` is an ISO date string; pick the calendar date the run
-    integrates from so forcing and initial condition agree. The regridded
-    slice comes from :mod:`jcm.data.era5` (cached; needs internet or a
-    prefetched cache). Mutates ``model._final_dycore_state`` — follow
-    with ``model.resume(...)``.
-    """
-    from jcm.data.era5 import initial_state
-
-    state = initial_state(model.coords, str(date))
-    model._final_dycore_state = model._prepare_initial_dycore_state(
-        physics_state=state)
-
-
-def inject_checkpoint_state(model: Model, path: str) -> float:
+def checkpoint_state(model: Model, path: str):
     """Warm-start: load a saved model state as the initial condition.
 
     ``path`` points at a state written by
@@ -230,9 +223,15 @@ def inject_checkpoint_state(model: Model, path: str) -> float:
     model (grid, levels, physics tracer set); ``load_checkpoint`` fails
     loudly on any mismatch.
 
-    Returns the donor state's elapsed sim-days (before the reset), for
-    logging. Mutates ``model._final_dycore_state`` — follow with
-    ``model.resume(...)``.
+    Returns ``(state, donor_days)``: the loaded dycore state with its clock
+    reset, and the donor state's elapsed sim-days (before the reset, for
+    logging). Pass ``state`` to ``model.run(initial_state=...)``.
+
+    Uses ``model`` as the deserialization template: ``bootstrap_state`` +
+    ``load_checkpoint`` transiently overwrite ``model._final_dycore_state`` /
+    ``_final_physics_state`` with the donor's contents. Nothing is restored —
+    the intended caller immediately re-bootstraps from the returned ``state``
+    (via ``model.run``), so the transiently-mutated template is discarded.
     """
     from jcm.checkpoint import load_checkpoint
 
@@ -244,8 +243,8 @@ def inject_checkpoint_state(model: Model, path: str) -> float:
     # forcing time-interpolation and output timestamps all derive from it
     # (Model._date_from_sim_time) — without this reset a day-730 donor
     # would run with forcing at start_date + 730 d.
-    model._final_dycore_state = model.dycore.with_sim_time(
+    state = model.dycore.with_sim_time(
         model._final_dycore_state,
         jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
     )
-    return days
+    return state, days
