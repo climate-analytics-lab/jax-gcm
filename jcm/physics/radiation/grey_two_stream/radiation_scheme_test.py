@@ -6,6 +6,7 @@ gas and cloud optics integration, flux calculations, and output diagnostics.
 Date: 2025-01-10
 """
 
+import math
 import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     prepare_radiation_state,
@@ -286,6 +287,74 @@ def test_radiation_scheme_basic():
     # Check that key diagnostic values exist and are scalars
     assert jnp.isscalar(diagnostics.toa_sw_down) or diagnostics.toa_sw_down.ndim == 0
     assert jnp.isscalar(diagnostics.toa_sw_up) or diagnostics.toa_sw_up.ndim == 0
+
+
+def test_aerosol_profile_has_direct_effect():
+    """A JAM-style 550 nm AOD profile must attenuate the surface SW (#640).
+
+    Grey radiation reads ``aod_profile``/``ssa_profile``/``asy_profile``/
+    ``angstrom`` from the shared ``AerosolData`` struct and band-scales them
+    itself; ``JamOpticsTerm`` now writes exactly those fields (the SW band
+    nearest 550 nm) so grey+JAM keeps a direct effect. This checks the grey
+    consumer end: the same struct with a non-zero vs zero column burden must
+    give a lower surface SW-down (aerosol extinction).
+    """
+    atm = create_test_atmosphere(nlev=8)
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(atm['pressure_levels'], atm['temperature'])
+    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))
+    parameters = RadiationParameters.default()
+
+    def _run(aod_level):
+        nlev = 8
+        aod_profile = jnp.full((nlev, 1), aod_level)
+        aerosol = AerosolData(
+            aod_profile=aod_profile,
+            # Scattering aerosol (sulfate-like): SSA near 1, moderate asymmetry.
+            ssa_profile=jnp.full((nlev, 1), 0.95),
+            asy_profile=jnp.full((nlev, 1), 0.6),
+            aod_total=jnp.sum(aod_profile, axis=0),
+            aod_anthropogenic=jnp.sum(aod_profile, axis=0),
+            aod_background=jnp.zeros(1),
+            cdnc_factor=jnp.ones(1),
+            Nccn=jnp.zeros(1),
+            angstrom=jnp.full(1, 1.5),
+            aod_sw_per_band=jnp.zeros((1, nlev, 1)),
+            ssa_sw_per_band=jnp.zeros((1, nlev, 1)),
+            asy_sw_per_band=jnp.zeros((1, nlev, 1)),
+            aod_lw_per_band=jnp.zeros((1, nlev, 1)),
+            ssa_lw_per_band=jnp.zeros((1, nlev, 1)),
+            asy_lw_per_band=jnp.zeros((1, nlev, 1)),
+        )
+        _, diag = radiation_scheme(
+            temperature=atm['temperature'],
+            specific_humidity=atm['specific_humidity'],
+            pressure_levels=atm['pressure_levels'],
+            pressure_interfaces=atm['pressure_interfaces'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=atm['cloud_water'],
+            cloud_ice=atm['cloud_ice'],
+            cloud_fraction=atm['cloud_fraction'],
+            solar=_solar_from_dt(date),
+            latitude=0.0,
+            longitude=0.0,
+            parameters=parameters,
+            aerosol_data=aerosol,
+            surface_albedo_nir=jnp.array([0.2]),
+            surface_albedo_vis=jnp.array([0.2]),
+            surface_emissivity=jnp.array([0.95]),
+            surface_temperature=jnp.array([288.0]),
+        )
+        return float(diag.surface_sw_down)
+
+    clean = _run(0.0)
+    dusty = _run(0.1)   # column AOD ~0.8 across 8 levels
+    assert math.isfinite(clean) and math.isfinite(dusty)
+    assert dusty < clean, (
+        f"aerosol profile produced no surface-SW attenuation: "
+        f"clean={clean:.3f} vs dusty={dusty:.3f}"
+    )
 
 
 def test_radiation_scheme_nighttime():

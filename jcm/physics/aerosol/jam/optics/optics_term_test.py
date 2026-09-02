@@ -90,6 +90,36 @@ class JamOpticsTermTest(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(a.aod_lw_per_band[:, 0]), 0.0)
         self.assertGreater(float(jnp.sum(a.aod_sw_per_band[:, 1:])), 0.0)
 
+    def test_writes_grey_profile_fields(self):
+        """The 550 nm profile fields grey radiation reads are populated (#640).
+
+        With MACv2-SP gone from the JAM path, ``JamOpticsTerm`` is the only
+        writer of ``aod_profile``/``ssa_profile``/``asy_profile``/``angstrom``
+        — the fields the grey two-stream scheme band-scales for its direct
+        effect. They must equal the SW band nearest 550 nm (band-centre
+        approximation) and carry a finite Angstrom exponent.
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        term = self._term(band)
+        _, out = term(state, diagnostics, None, None)
+        a = out["aerosol"]
+        idx = term._cache.aod_band_idx
+        np.testing.assert_allclose(
+            np.asarray(a.aod_profile), np.asarray(a.aod_sw_per_band[idx]),
+            rtol=0, atol=0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(a.ssa_profile), np.asarray(a.ssa_sw_per_band[idx]))
+        np.testing.assert_allclose(
+            np.asarray(a.asy_profile), np.asarray(a.asy_sw_per_band[idx]))
+        # A real burden was set up, so the profile carries optical depth.
+        self.assertGreater(float(jnp.sum(a.aod_profile)), 0.0)
+        # Angstrom is finite everywhere (band-ratio where AOD exists, the 1.5
+        # fine-mode default elsewhere); ang_band differs from the 550 band so
+        # the ratio path is exercised.
+        self.assertNotEqual(term._cache.ang_band_idx, term._cache.aod_band_idx)
+        self.assertTrue(bool(np.all(np.isfinite(np.asarray(a.angstrom)))))
+
     def test_radiation_gate_replays_cache_between_compute_steps(self):
         """With the gate configured, non-radiation steps must reuse the
         cached per-band fields (the radiation term can't see fresh optics
