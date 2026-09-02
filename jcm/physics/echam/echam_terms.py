@@ -134,12 +134,18 @@ def echam_physics(
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
             ``"emulated"``, or a custom radiation ``PhysicsTerm``.
         emulator_weights_file: ``radiation_scheme="emulated"`` only — the NN
-            checkpoint. ``"auto"`` (default) loads the packaged trained weights
-            (``jcm/data/emulator_weights_per_band_u64.nc``), so the emulated
-            scheme runs out of the box; a path loads another checkpoint;
-            ``None`` builds RANDOM untrained weights (training-from-scratch /
-            zero_tendency cost benchmarks only — they NaN within a step).
-            Rejected (not silently ignored) with any non-emulated scheme.
+            checkpoint. Case-sensitive value set: ``"auto"`` (default, and what
+            an omitted or ``null`` config key resolves to) loads the packaged
+            trained weights (``jcm/data/emulator_weights_per_band_u64.nc``), so
+            the emulated scheme runs out of the box; the literal string
+            ``"random"`` builds RANDOM untrained weights (training-from-scratch
+            / zero_tendency cost benchmarks only — they NaN within a step, so
+            this must be asked for by name); any other value is a checkpoint
+            path. ``None`` is treated as the ``"auto"`` default — the Hydra
+            builder drops ``null`` kwargs, so ``physics.emulator_weights_file=
+            null`` could not otherwise reach a random init and would silently
+            mean ``auto``; use ``"random"`` to train from scratch. Rejected
+            (not silently ignored) with any non-emulated scheme.
         radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
             for the cloud-radiative-effect diagnostic (default True).
             ``False`` halves the RRTMGP cost on radiation-compute steps;
@@ -267,6 +273,15 @@ def echam_physics(
             f"so radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
 
+    # ``None`` is normalised to the "auto" default: the Hydra builder strips
+    # ``null`` kwargs (so ``physics.emulator_weights_file=null`` never reaches
+    # here and would fall back to the default anyway), and a direct Python
+    # ``None`` must mean the same "unset → packaged weights" as an omitted key.
+    # Train-from-scratch (random init) is reached only via the explicit
+    # ``"random"`` sentinel below, never by an absent/null value.
+    if emulator_weights_file is None:
+        emulator_weights_file = "auto"
+
     # ``emulator_weights_file`` only means anything for the emulator; a value
     # other than the "auto" default paired with another scheme is a silently-
     # ignored argument (the class of bug this factory abolishes — same
@@ -307,14 +322,18 @@ def echam_physics(
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":
-        # Load the packaged trained checkpoint by default ("auto" resolves
-        # jcm/data/emulator_weights_per_band_u64.nc). Passing no weights_file
-        # would build RANDOM untrained weights, which the term's own docs note
-        # drive the model to NaN within a step — never a valid simulation. Pass
-        # emulator_weights_file=None to reach that random-init path deliberately
-        # (training from scratch, or a zero_tendency cost benchmark).
+        # "auto" (default) resolves the packaged trained checkpoint
+        # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
+        # sentinel maps to weights_file=None, which builds RANDOM untrained
+        # weights — the term's own docs note these drive the model to NaN
+        # within a step, so this is training-from-scratch / a zero_tendency
+        # cost benchmark only, never a valid simulation, and must be requested
+        # by name (an absent/null config value means "auto", see above). Any
+        # other value is a checkpoint path validated by the term at load.
+        weights_file = (None if emulator_weights_file == "random"
+                        else emulator_weights_file)
         rad_term = NNEmulatorRadiation(
-            params=radiation_p, weights_file=emulator_weights_file)
+            params=radiation_p, weights_file=weights_file)
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "

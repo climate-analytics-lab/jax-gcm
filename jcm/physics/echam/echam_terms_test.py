@@ -291,11 +291,25 @@ class TestEmulatorWeightsFile(unittest.TestCase):
             str(term._weights_file).endswith(
                 "emulator_weights_per_band_u64.nc"))
 
-    def test_none_reaches_the_random_init_path(self):
+    def test_random_reaches_the_random_init_path(self):
+        # The explicit "random" sentinel is the train-from-scratch value:
+        # weights_file=None on the term (``_weights_file`` stays None).
+        term = self._rad_term(
+            self.echam_physics(radiation_scheme="emulated",
+                               emulator_weights_file="random"))
+        self.assertIsNone(term._weights_file)
+
+    def test_none_falls_back_to_auto(self):
+        # None is treated as the "auto" default (an omitted/null config key,
+        # which the Hydra builder strips, must NOT reach random init) — it
+        # loads the packaged trained checkpoint, exactly like the default.
         term = self._rad_term(
             self.echam_physics(radiation_scheme="emulated",
                                emulator_weights_file=None))
-        self.assertIsNone(term._weights_file)
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(
+            str(term._weights_file).endswith(
+                "emulator_weights_per_band_u64.nc"))
 
     def test_rejected_on_non_emulated_scheme(self):
         # An explicit value with grey/rrtmgp is a silently-ignored argument —
