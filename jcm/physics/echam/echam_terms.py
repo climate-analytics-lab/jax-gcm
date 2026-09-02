@@ -72,6 +72,7 @@ def echam_physics(
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
+    emulator_weights_file: str | None = "auto",
     radiation_compute_cre: bool = True,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
@@ -132,6 +133,13 @@ def echam_physics(
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
             ``"emulated"``, or a custom radiation ``PhysicsTerm``.
+        emulator_weights_file: ``radiation_scheme="emulated"`` only — the NN
+            checkpoint. ``"auto"`` (default) loads the packaged trained weights
+            (``jcm/data/emulator_weights_per_band_u64.nc``), so the emulated
+            scheme runs out of the box; a path loads another checkpoint;
+            ``None`` builds RANDOM untrained weights (training-from-scratch /
+            zero_tendency cost benchmarks only — they NaN within a step).
+            Rejected (not silently ignored) with any non-emulated scheme.
         radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
             for the cloud-radiative-effect diagnostic (default True).
             ``False`` halves the RRTMGP cost on radiation-compute steps;
@@ -259,6 +267,17 @@ def echam_physics(
             f"so radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
 
+    # ``emulator_weights_file`` only means anything for the emulator; a value
+    # other than the "auto" default paired with another scheme is a silently-
+    # ignored argument (the class of bug this factory abolishes — same
+    # precedent as aerosol_free_interval above).
+    if emulator_weights_file != "auto" and radiation_scheme != "emulated":
+        raise ValueError(
+            f"emulator_weights_file={emulator_weights_file!r} needs "
+            "radiation_scheme='emulated' — the grey and rrtmgp schemes load no "
+            f"NN checkpoint, so radiation_scheme={radiation_scheme!r} would "
+            "ignore it.")
+
     convection_p = convection or ConvectionParameters.default()
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
@@ -288,7 +307,14 @@ def echam_physics(
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":
-        rad_term = NNEmulatorRadiation(params=radiation_p)
+        # Load the packaged trained checkpoint by default ("auto" resolves
+        # jcm/data/emulator_weights_per_band_u64.nc). Passing no weights_file
+        # would build RANDOM untrained weights, which the term's own docs note
+        # drive the model to NaN within a step — never a valid simulation. Pass
+        # emulator_weights_file=None to reach that random-init path deliberately
+        # (training from scratch, or a zero_tendency cost benchmark).
+        rad_term = NNEmulatorRadiation(
+            params=radiation_p, weights_file=emulator_weights_file)
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
