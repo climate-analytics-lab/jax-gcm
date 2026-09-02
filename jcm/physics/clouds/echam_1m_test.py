@@ -100,7 +100,7 @@ class TestKK2000Autoconversion:
         (and its gradient path) must be exactly zero.
         """
         config = MicrophysicsParameters.default(
-            ccraut=1e-3, autoconversion_scheme="kk2000",
+            ccraut_kk_threshold=1e-3, autoconversion_scheme="kk2000",
         )
         # qc/cf = 2e-6 in-cloud, ~20 widths below the 1e-3 threshold.
         rate_below = autoconversion_kk2000(
@@ -124,7 +124,7 @@ class TestKK2000Autoconversion:
     def test_dependencies(self):
         """KK2000: rate ∝ qc^2.47, ∝ Nc^-1.79 — same monotonicity as Beheng."""
         config = MicrophysicsParameters.default(
-            ccraut=1e-5, autoconversion_scheme="kk2000",
+            ccraut_kk_threshold=1e-5, autoconversion_scheme="kk2000",
         )
         air_density = jnp.array(1.0)
         cloud_fraction = jnp.array(1.0)
@@ -160,7 +160,7 @@ class TestKK2000Autoconversion:
 
         cfg_beheng = MicrophysicsParameters.default(autoconversion_scheme="beheng")
         cfg_kk2000 = MicrophysicsParameters.default(
-            ccraut=1e-5, autoconversion_scheme="kk2000",
+            ccraut_kk_threshold=1e-5, autoconversion_scheme="kk2000",
         )
 
         rate_via_dispatcher_beheng = autoconversion(
@@ -181,6 +181,42 @@ class TestKK2000Autoconversion:
 
         # Sanity: the two schemes give different rates on the same column
         assert not jnp.allclose(rate_via_dispatcher_beheng, rate_via_dispatcher_kk)
+
+    def test_kk2000_active_at_defaults(self):
+        """Selecting kk2000 WITHOUT overriding any threshold must convert.
+
+        Regression for #674: when one ``ccraut`` field served as both the
+        Beheng prefactor (15.0) and the KK2000 qc threshold, kk2000 at
+        defaults evaluated sigmoid((qc - 15)/5e-5) = 0 for any physical qc
+        — autoconversion silently off. With the split
+        ``ccraut_kk_threshold`` (1e-5 kg/kg) default, physical stratiform
+        cloud water (1e-4..1e-3 kg/kg in-cloud) must produce a clearly
+        nonzero rate.
+        """
+        config = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
+        for qc_grid in (1e-4, 5e-4, 1e-3):
+            rate = autoconversion_kk2000(
+                jnp.array(qc_grid), jnp.array(1.0), jnp.array(1.0),
+                jnp.array(100e6), 1800.0, config,
+            )
+            # The un-split parameter gave exactly 0.0 here; a meaningful
+            # KK2000 rate at these qc is >> 1e-12 kg/kg/s.
+            assert float(rate) > 1e-12, (
+                f"kk2000 autoconversion dead at qc={qc_grid}"
+            )
+
+    def test_beheng_defaults_do_not_read_kk_threshold(self):
+        """The Beheng path at defaults is unaffected by the KK threshold."""
+        qc = jnp.array(0.6e-3)
+        cf = jnp.array(0.5)
+        rho = jnp.array(1.0)
+        nc = jnp.array(100e6)
+        cfg = MicrophysicsParameters.default()
+        cfg_weird_kk = MicrophysicsParameters.default(ccraut_kk_threshold=123.0)
+        r1 = autoconversion(qc, cf, rho, nc, 1800.0, cfg)
+        r2 = autoconversion(qc, cf, rho, nc, 1800.0, cfg_weird_kk)
+        assert float(r1) == float(r2)
+        assert float(r1) > 0.0
 
     def test_scheme_int_alias(self):
         """SCHEME_BEHENG / SCHEME_KK2000 ints round-trip with string aliases."""

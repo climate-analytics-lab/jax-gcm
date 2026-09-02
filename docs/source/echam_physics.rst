@@ -396,8 +396,8 @@ Key processes:
 
 1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
 
-   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is the rate prefactor (default 15.0).
-   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut`` is the qc threshold above which autoconversion fires (small g/kg-scale value, e.g. 1e-5).
+   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is its rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut_kk_threshold`` is the in-cloud qc threshold above which autoconversion fires (default 1e-5 kg/kg).
 
 2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
 3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
@@ -431,8 +431,11 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
      - 0 (Beheng) or 1 (KK2000); accepts ``"beheng"`` / ``"kk2000"``
      - 0 (Beheng)
    * - ``ccraut``
-     - Autoconversion rate prefactor (Beheng) or qc threshold (KK2000)
+     - Beheng autoconversion rate prefactor
      - 15.0
+   * - ``ccraut_kk_threshold``
+     - KK2000 in-cloud qc threshold for autoconversion onset (kg/kg)
+     - 1.0e-5
    * - ``ccracl``
      - Accretion coefficient (cloud → rain)
      - 6.0

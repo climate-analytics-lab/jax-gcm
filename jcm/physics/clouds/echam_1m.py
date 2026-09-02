@@ -30,11 +30,21 @@ from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
 class MicrophysicsParameters:
     """Configuration parameters for cloud microphysics"""
     
-    # Autoconversion parameters
-    ccraut: float        # Critical cloud water for autoconversion (kg/kg)
+    # Autoconversion parameters. ``ccraut`` and ``ccraut_kk_threshold`` are
+    # separate fields because they are physically different quantities: one
+    # field serving as "rate prefactor (Beheng) OR qc threshold (KK2000)"
+    # meant selecting KK2000 without overriding it fed the Beheng 15.0 into
+    # the threshold sigmoid — sigmoid((qc - 15)/5e-5) ≡ 0 for any physical
+    # qc, silently disabling autoconversion (#674).
+    ccraut: float        # Beheng (1994) autoconversion rate prefactor (-);
+                         # ECHAM mo_echam_cloud_params ``ccraut`` (15.0).
+                         # Read only in Beheng mode.
+    ccraut_kk_threshold: float  # KK2000 in-cloud qc threshold (kg/kg) above
+                         # which autoconversion fires. Read only in KK2000
+                         # mode.
     smooth_ccraut: float # Sigmoid width of the KK2000 qc threshold (kg/kg);
-                         # only read in KK2000 mode — Beheng uses ccraut as
-                         # a rate coefficient (already smooth)
+                         # only read in KK2000 mode — Beheng's rate form is
+                         # already smooth
     ccracl: float        # Accretion coefficient (cloud to rain)
     cauloc: float        # ECHAM ``zrac2`` local-rain accretion enhancement.
                          # 0.0 is the ECHAM6.3 default (zrac2 disabled); raise to
@@ -91,20 +101,19 @@ class MicrophysicsParameters:
                          # write-back (mo_cloud.f90:1280, #687)
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
-    # 0 = Beheng (1994) implicit form (default; robust at large dt).
+    # 0 = Beheng (1994) implicit form (default; robust at large dt),
+    #     controlled by ``ccraut``.
     # 1 = Khairoutdinov & Kogan (2000) explicit form (good fit for 2M
-    #     microphysics with prognostic Nc).
-    # ``ccraut`` is interpreted differently by each scheme: in Beheng
-    # it's the rate prefactor (default 15.0); in KK2000 it's the qc
-    # threshold above which autoconversion fires (a small g/kg-scale
-    # value is appropriate, e.g. 1e-5).
+    #     microphysics with prognostic Nc), controlled by
+    #     ``ccraut_kk_threshold`` / ``smooth_ccraut``.
     autoconversion_scheme: int
 
     SCHEME_BEHENG = 0
     SCHEME_KK2000 = 1
 
     @classmethod
-    def default(cls, ccraut=15.0, smooth_ccraut=5e-5,
+    def default(cls, ccraut=15.0, ccraut_kk_threshold=1.0e-5,
+                smooth_ccraut=5e-5,
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
@@ -128,6 +137,7 @@ class MicrophysicsParameters:
 
         return cls(
             ccraut=jnp.array(ccraut),
+            ccraut_kk_threshold=jnp.array(ccraut_kk_threshold),
             smooth_ccraut=jnp.array(smooth_ccraut),
             ccracl=jnp.array(ccracl),
             cauloc=jnp.array(cauloc),
@@ -274,7 +284,8 @@ def autoconversion_kk2000(
 
         P_aut = 1350 * qc^2.47 * Nc_cm3^(-1.79)   [kg/kg/s, qc in kg/kg]
 
-    Activates above the ``ccraut`` threshold. KK2000 was the original
+    Activates above the ``ccraut_kk_threshold`` in-cloud qc threshold.
+    KK2000 was the original
     1M default and remains a good fit for 2M microphysics where the
     droplet number ``Nc`` is a prognostic variable. In the 1M context
     with prescribed ``Nc`` and large dt, the explicit form can produce
@@ -290,7 +301,8 @@ def autoconversion_kk2000(
         droplet_number: Cloud droplet number concentration (1/m³)
         dt: Time step (s) — unused (explicit rate); kept in signature
             for parity with ``autoconversion_beheng``.
-        config: Microphysics configuration (uses ccraut, epsilon)
+        config: Microphysics configuration (uses ccraut_kk_threshold,
+            smooth_ccraut, epsilon)
 
     Returns:
         Grid-mean autoconversion rate (kg/kg/s)
@@ -309,17 +321,20 @@ def autoconversion_kk2000(
     # previous code fed qc in g/m³ (×ρ×1000 ≈ ×1200) into the 2.47 power
     # and then applied a spurious g/m³→kg/kg back-conversion — a net
     # ~2.6e4× overestimate (review finding 1.5; non-default branch).
-    # Smooth threshold (maintainability review B.2.5): with the hard
-    # ``where(qc > ccraut, rate, 0)`` the threshold appears only in the
-    # inequality, so d(rate)/d(ccraut) is identically zero — ccraut was
-    # calibratable only in Beheng mode. The sigmoid ramp puts it in the
+    # Smooth threshold (maintainability review B.2.5): with a hard
+    # ``where(qc > threshold, rate, 0)`` the threshold appears only in the
+    # inequality, so d(rate)/d(threshold) is identically zero — the
+    # threshold was not calibratable. The sigmoid ramp puts it in the
     # value; width -> 0 recovers the hard gate. The qc power base is
     # double-where-guarded so the ramp's sub-threshold tail cannot
     # differentiate a negative/zero base (0**x cotangent class).
+    # ``ccraut_kk_threshold`` (~1e-5 kg/kg) is the KK2000-specific qc
+    # threshold — NOT the Beheng ``ccraut`` prefactor, which would push
+    # the sigmoid to 0 for any physical qc (#674).
     has_qc = qc_in_cloud > 0.0
     qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
     ramp = jax.nn.sigmoid(
-        (qc_in_cloud - config.ccraut) / config.smooth_ccraut
+        (qc_in_cloud - config.ccraut_kk_threshold) / config.smooth_ccraut
     )
     autoconv_rate = jnp.where(
         has_qc,
