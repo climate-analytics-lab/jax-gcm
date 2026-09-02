@@ -120,6 +120,21 @@ class JamOpticsTermTest(unittest.TestCase):
         self.assertNotEqual(term._cache.ang_band_idx, term._cache.aod_band_idx)
         self.assertTrue(bool(np.all(np.isfinite(np.asarray(a.angstrom)))))
 
+    def test_single_broadband_sw_uses_default_angstrom(self):
+        """With a single broadband SW band (grey's own config) there is no
+        550/865 ratio, so Angstrom falls back to the fine-mode 1.5 default
+        while the profile still comes from the sole SW band (#640).
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup(n_sw=1)
+        term = self._term(band)
+        self.assertEqual(term._cache.ang_band_idx, term._cache.aod_band_idx)
+        _, out = term(state, diagnostics, None, None)
+        a = out["aerosol"]
+        np.testing.assert_array_equal(
+            np.asarray(a.angstrom), np.full_like(np.asarray(a.angstrom), 1.5))
+        np.testing.assert_allclose(
+            np.asarray(a.aod_profile), np.asarray(a.aod_sw_per_band[0]))
+
     def test_radiation_gate_replays_cache_between_compute_steps(self):
         """With the gate configured, non-radiation steps must reuse the
         cached per-band fields (the radiation term can't see fresh optics
