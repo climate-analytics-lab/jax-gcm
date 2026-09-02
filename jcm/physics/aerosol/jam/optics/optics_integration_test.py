@@ -61,7 +61,7 @@ class OpticsIntegrationTest(unittest.TestCase):
         # the old ``aod >= 0`` bound could not distinguish from healthy).
         # A stronger on/off flux-difference test needs a seeded aerosol
         # burden (cold-start AOD is radiatively invisible) — deferred.
-        aod = predictions.physics["aerosol_optical_depth"]
+        aod = predictions.physics["_jam_optics"]["aod_550"]
         aod = np.asarray(aod)
         self.assertTrue(np.all(np.isfinite(aod)))
         self.assertTrue(np.all(aod >= 0.0))

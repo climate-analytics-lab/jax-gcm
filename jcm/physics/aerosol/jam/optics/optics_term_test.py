@@ -138,17 +138,17 @@ class JamOpticsTermTest(unittest.TestCase):
 
         base = {**diagnostics, "_dt_seconds": jnp.asarray(900.0)}
         # Step 0 (compute): no cache in the carry yet -> unconditional
-        # compute that seeds the ``_jam_band_optics`` slot.
+        # compute that seeds the ``_jam_optics`` slot.
         _, d0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))},
                      None, None)
-        self.assertIn("_jam_band_optics", d0)
+        self.assertIn("_jam_optics", d0)
 
         # Step 1 (cached): perturb the aerosol state; output must equal the
         # step-0 fields, not fresh ones.
         aer2 = d0["_jam_state"].copy(number=d0["_jam_state"].number * 3.0)
         d1_in = {**base, "radiation": _Rad(jnp.int32(1)),
                  "_jam_state": aer2,
-                 "_jam_band_optics": d0["_jam_band_optics"]}
+                 "_jam_optics": d0["_jam_optics"]}
         _, d1 = term(state, d1_in, None, None)
         np.testing.assert_array_equal(
             np.asarray(d1["aerosol"].aod_sw_per_band),
@@ -214,7 +214,7 @@ class JamOpticsTermTest(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
             # Asymmetry is physically [-1, 1] (negative g = back-scattering).
             self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
-        self.assertTrue(np.all(np.isfinite(np.asarray(diag["aerosol_optical_depth"]))))
+        self.assertTrue(np.all(np.isfinite(np.asarray(diag["_jam_optics"]["aod_550"]))))
 
     def test_empty_levels_carry_exactly_zero_tau(self):
         """POSITIVE-side ringing: tiny +ve number with a garbage wet radius
@@ -292,7 +292,7 @@ class JamOpticsTermTest(unittest.TestCase):
         }
         _, diag = term(state, diagnostics, None, None)
 
-        aod = diag["aerosol_optical_depth"]
+        aod = diag["_jam_optics"]["aod_550"]
         # Column field, one value per column; finite and physical.
         self.assertEqual(aod.shape, (ncols,))
         self.assertTrue(np.all(np.isfinite(np.asarray(aod))))
@@ -317,7 +317,7 @@ class JamOpticsTermTest(unittest.TestCase):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
         _, diag = term(state, diagnostics, None, None)
-        aod_lognormal = float(jnp.max(diag["aerosol_optical_depth"]))
+        aod_lognormal = float(jnp.max(diag["_jam_optics"]["aod_550"]))
 
         # Monodisperse expectation: same LUT, same geometry, single radius.
         lut = default_mie_lut()
@@ -513,7 +513,7 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         _, out0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))}, None, None)
         # A replay step must go through lax.cond with the diagnostics present.
         _, out1 = term(state, {**base, "radiation": _Rad(jnp.int32(3)),
-                               "_jam_band_optics": out0["_jam_band_optics"]},
+                               "_jam_optics": out0["_jam_optics"]},
                        None, None)
         for k in term.optics_diagnostic_keys():
             np.testing.assert_allclose(np.asarray(out1[k]), np.asarray(out0[k]),

@@ -41,6 +41,25 @@ class AerosolCarrySeeder(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
     carry_slots: ClassVar[dict[str, type]] = {"aerosol": AerosolData}
 
+    # The shared ``aerosol`` struct is internal plumbing in the JAM path: it
+    # feeds radiation and the microphysics by attribute, but its fields are
+    # either duplicated in JAM's own ``jam_optics.*`` namespace (the profile /
+    # Angstrom fields ``JamOpticsTerm`` writes) or a meaningless zero default
+    # JAM never fills (``aod_total``/``Nccn``/``cdnc_factor``/anthropogenic /
+    # background — the MACv2-SP-specific outputs). Withhold the whole struct
+    # from output so none of those zero defaults can be read as data (#640;
+    # the per-band optics are already dropped by ``_EXCLUDED_OUTPUT_KEYS``).
+    _WITHHELD: ClassVar[tuple[str, ...]] = (
+        "aerosol.aod_profile", "aerosol.ssa_profile", "aerosol.asy_profile",
+        "aerosol.aod_total", "aerosol.aod_anthropogenic",
+        "aerosol.aod_background", "aerosol.cdnc_factor", "aerosol.Nccn",
+        "aerosol.angstrom",
+    )
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """Keep the internal ``aerosol`` plumbing struct out of the output."""
+        return self._WITHHELD
+
     def __init__(self):
         """Start at the standard RRTMGP band counts (see ``cache_band_config``)."""
         # SW/LW band counts — overridden by ``cache_band_config`` once

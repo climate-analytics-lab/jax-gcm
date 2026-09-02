@@ -97,7 +97,40 @@ class JamOpticsTerm(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "_jam_state", "aerosol", "air_density", "layer_thickness",
     )
-    provides: ClassVar[tuple[str, ...]] = ("aerosol", "aerosol_optical_depth")
+    provides: ClassVar[tuple[str, ...]] = ("aerosol", "_jam_optics")
+    # JAM's column optics diagnostics publish under the explicit ``jam_optics.*``
+    # namespace (#640): the ``_jam_optics`` carry dict flattens to
+    # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that
+    # survive (the per-band arrays are dropped by ``_EXCLUDED_OUTPUT_KEYS``).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "jam_optics.aod_550": {
+            "units": "1",
+            "standard_name": (
+                "atmosphere_optical_thickness_due_to_ambient_aerosol_particles"
+            ),
+            "long_name": (
+                "JAM total-column aerosol optical depth at the SW band nearest "
+                "550 nm (band-centre approximation; the Mie-based od550aer is "
+                "the aerocom_optics diagnostic)"
+            ),
+        },
+        "jam_optics.aod_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm aerosol optical depth per layer",
+        },
+        "jam_optics.ssa_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm single-scattering albedo per layer",
+        },
+        "jam_optics.asy_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm asymmetry parameter per layer",
+        },
+        "jam_optics.angstrom": {
+            "units": "1",
+            "long_name": "JAM column Angstrom exponent (550/865 nm band ratio)",
+        },
+    }
 
     def __init__(self, *, spec: ModalAerosolSpec | None = None,
                  optics_diagnostics: bool = False):
@@ -144,7 +177,7 @@ class JamOpticsTerm(PhysicsTerm):
         30-band × 4-mode Mie evaluation on the intermediate steps is
         discarded work (~8× of the second-largest JAM cost). With the gate
         configured, those steps replay the previous compute's per-band
-        fields from the ``_jam_band_optics`` carry slot instead, using the
+        fields from the ``_jam_optics`` carry slot instead, using the
         *same* ``radiation.step`` counter the radiation gate reads (this
         term runs earlier in the chain, so both see the identical
         pre-increment value and agree within a step). ``interval_s <= 0``
@@ -570,7 +603,7 @@ class JamOpticsTerm(PhysicsTerm):
         return fields
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        cached = diagnostics.get("_jam_band_optics")
+        cached = diagnostics.get("_jam_optics")
         if (self._radiation_interval_s is None or cached is None
                 or "radiation" not in diagnostics):
             # Ungated (every step): gate unconfigured, or no cached fields in
@@ -600,10 +633,15 @@ class JamOpticsTerm(PhysicsTerm):
                if k not in ("aod_550", "_optics_diag")}
         )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
+        # The column AOD-550 no longer publishes a top-level
+        # ``aerosol_optical_depth`` key (#640): that name collided with the
+        # unrelated per-band ``RadiationInput`` field, and the value now lives
+        # under the JAM namespace as ``jam_optics.aod_550`` (from the
+        # ``_jam_optics`` carry dict, which also carries the per-band optics
+        # plumbing and the grey profile fields).
         return tendency, {
             **diagnostics,
             **fields.get("_optics_diag", {}),
             "aerosol": new_aerosol,
-            "aerosol_optical_depth": fields["aod_550"],
-            "_jam_band_optics": fields,
+            "_jam_optics": fields,
         }
