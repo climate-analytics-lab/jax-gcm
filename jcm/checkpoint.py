@@ -72,7 +72,7 @@ def load_checkpoint(model, path) -> float:
 
     The model must already have been bootstrapped (e.g. by an earlier
     ``Model.run``, ``Model.bootstrap_state``, or one of the
-    ``inject_*_profile`` helpers in :mod:`jcm.runners`) so that its
+    ``inject_*`` helpers in :mod:`jcm.initial_states`) so that its
     state pytrees provide a treedef + per-leaf shape/dtype templates
     that match the checkpoint.
 

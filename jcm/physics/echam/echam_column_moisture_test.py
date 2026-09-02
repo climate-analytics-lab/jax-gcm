@@ -41,7 +41,7 @@ from jcm.forcing import ForcingData
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
-from jcm.runners import inject_balanced_isothermal_profile
+from jcm.initial_states import inject_balanced_isothermal_profile
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
 
