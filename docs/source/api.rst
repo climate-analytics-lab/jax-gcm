@@ -17,3 +17,20 @@ API
    jcm.physics_interface.Physics
    jcm.checkpoint
    jcm.profiling
+
+Initial conditions, forcing and post-processing
+-----------------------------------------------
+
+Library homes for the science the Hydra runner only adapts (see :mod:`jcm.runners`).
+
+.. autosummary::
+   :toctree: generated
+   :recursive:
+
+   jcm.initial_states
+   jcm.analysis
+   jcm.forcing
+   jcm.nudging
+   jcm.diagnostics
+   jcm.single_column_model
+   jcm.diffusion.DiffusionFilter
