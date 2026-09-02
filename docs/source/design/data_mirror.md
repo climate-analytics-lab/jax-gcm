@@ -72,7 +72,30 @@ GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 ## Fetching at runtime
 
 Any boundary-file path in the Hydra config accepts an `hf://` prefix,
-resolved through the local HF cache by `jcm.runners._resolve_data_path`:
+resolved through the local HF cache by `jcm.runners._resolve_data_path`.
+
+**The online-aerosol emission inputs resolve themselves.** The four
+prescribed-emission keys (`emissions_file`, `dms_file`, `dust_file`,
+`oxidants_file`) default to `auto` (issue #640): when a prognostic-aerosol
+(JAM) physics package is active, `auto` composes the per-grid present-day
+bundle for the model grid at build time. So the documented-canonical run is
+just the physics preset and the grid —
+
+```bash
+python -m jcm.main physics=echam-jam-aerocom grid=echam_t63_l47_hybrid
+```
+
+— which auto-resolves `bundles/t63/{emissions_pd,dms,dust}.nc`,
+`bundles/t63_l47/oxidants_pd.nc` and (via `ozone_file: auto`)
+`bundles/t63_l47/ozone_pd.nc`, exactly as the explicit nine-line form below
+did. Prefetch the bundles on a node with internet first; a cold cache fails
+loudly at build time, naming the missing `hf://` path and the fixes (prefetch,
+a local path, or `forcing.<key>=null` to opt out). A path may carry `{grid}` /
+`{nlev}` placeholders, resolved from the composed grid.
+
+The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
+real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its
+land-sea mask):
 
 ```bash
 python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \

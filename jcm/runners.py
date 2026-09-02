@@ -879,6 +879,92 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 # Forcing
 # ---------------------------------------------------------------------------
 
+#: Prescribed-emission forcing keys that honour the ``auto`` convention and the
+#: ``{grid}``/``{nlev}`` placeholders. ``auto`` resolves to the per-grid HF
+#: bundle when a prognostic-aerosol (JAM) package is active. Value is
+#: ``(subdir_suffix, filename)``: ``""`` is the horizontal bundle
+#: (``bundles/<grid>/``), ``"_l{nlev}"`` the level-resolved one
+#: (``bundles/<grid>_l<nlev>/``) — matching the mirror layout in
+#: docs/source/design/data_mirror.md. ``emissions_pd``/``oxidants_pd`` are the
+#: present-day climatology members.
+_EMISSION_AUTO_BUNDLES = {
+    "emissions_file": ("", "emissions_pd.nc"),
+    "dms_file": ("", "dms.nc"),
+    "dust_file": ("", "dust.nc"),
+    "oxidants_file": ("_l{nlev}", "oxidants_pd.nc"),
+}
+
+
+def _resolve_grid_placeholders(path, coords):
+    """Substitute ``{grid}``/``{nlev}`` in a forcing path from the model grid.
+
+    ``{grid}`` becomes the mirror grid token (``t63``) and ``{nlev}`` the model
+    level count, so one config path serves every resolution (e.g.
+    ``hf://bundles/{grid}_l{nlev}/oxidants_pd.nc``). Non-string or
+    placeholder-free paths pass through unchanged.
+    """
+    if not (isinstance(path, str) and "{" in path):
+        return path
+    return path.format(grid=_grid_token(coords),
+                       nlev=int(coords.nodal_shape[0]))
+
+
+def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
+    """Resolve one prescribed-emission forcing value (``auto`` / placeholders).
+
+    * ``auto`` → the per-grid HF bundle path, fetched *now* (so a cold cache
+      fails loudly at build time, not mid-run) — but only on the spectral path
+      with a JAM package active; pySES native grids are not the spectral-token
+      bundles, and a non-JAM package consumes no emissions, so both give
+      ``None``.
+    * explicit null (``None``/``""``/``"null"``) → ``None`` (opt-out).
+    * a ``{grid}``/``{nlev}`` placeholder path → substituted, then left for the
+      attach helper's own ``_resolve_data_path`` to fetch.
+    """
+    if value == "auto":
+        if is_pyses or not jam:
+            return None
+        subdir, name = _EMISSION_AUTO_BUNDLES[key]
+        token = _grid_token(coords)
+        nlev = int(coords.nodal_shape[0])
+        hf = f"hf://bundles/{token}{subdir.format(nlev=nlev)}/{name}"
+        try:
+            return _resolve_data_path(hf)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"forcing.{key}=auto resolved to {hf} — the online-aerosol "
+                "default supplies the per-grid emission bundles — but it is "
+                "not in the local Hugging Face cache and could not be "
+                "downloaded. Prefetch on a node with internet (python -c "
+                f"\"from jcm.data.remote import fetch; fetch('{hf[5:]}')\"), "
+                f"point forcing.{key} at a local file, or set forcing.{key}"
+                "=null to run without it (the runner then warns it is "
+                "emission-free)."
+            ) from e
+    if value in (None, "", "null", "none"):
+        return None
+    return _resolve_grid_placeholders(value, coords)
+
+
+def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
+    """Concretise the ``auto``/placeholder emission keys on ``forcing_cfg``.
+
+    Returns ``forcing_cfg`` with the four prescribed-emission keys resolved (see
+    :func:`_resolve_one_emission_input`). ``auto`` is keyed off whether the
+    composed physics is the prognostic-aerosol (JAM) module — the only package
+    that consumes prescribed emissions.
+    """
+    from omegaconf import OmegaConf
+
+    jam = str((cfg.get("physics", {}) or {}).get("aerosol_module", "")) == "jam"
+    updates = {
+        key: _resolve_one_emission_input(
+            forcing_cfg.get(key, None), key, coords, jam, is_pyses)
+        for key in _EMISSION_AUTO_BUNDLES
+    }
+    return OmegaConf.merge(forcing_cfg, updates)
+
+
 def build_forcing(cfg: DictConfig, coords, dycore=None):
     """Build a ``ForcingData`` from ``cfg.forcing``.
 
@@ -893,8 +979,21 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
     (``cfg.forcing.oxidants_file``); all files must already be on the model
     horizontal grid (the HAMMOZ-style natural-emission files may have
     descending latitude — they are validated and flipped to model order).
+
+    The four prescribed-emission keys default to ``auto`` (see
+    ``forcing/default.yaml``): a JAM (online-aerosol) package then composes the
+    per-grid HF emission bundles by itself, so
+    ``physics=echam-jam grid=echam_t63_l47_hybrid`` is the documented-canonical
+    run without nine lines of ``hf://`` overrides. Non-JAM packages and the
+    pySES backend leave them empty; ``forcing.<key>=null`` opts out explicitly.
     """
-    if dycore is not None and hasattr(dycore, "colmap"):
+    is_pyses = dycore is not None and hasattr(dycore, "colmap")
+    _forcing_cfg = cfg.get("forcing", None)
+    if _forcing_cfg is not None:
+        _forcing_cfg = _resolve_emission_inputs(
+            _forcing_cfg, cfg, coords, is_pyses)
+
+    if is_pyses:
         # pySES backend: monthly lon/lat climatology + JAM aerosol inputs,
         # each bilinearly interpolated onto the physics columns at build
         # time by ``jcm.dycore.pyses.forcing`` (files may live on any
@@ -903,7 +1002,7 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         # the T63 file serves any pySES resolution.
         from jcm.dycore.pyses.forcing import build_forcing as pyses_build_forcing
 
-        ozone_file = cfg.forcing.get("ozone_file", None)
+        ozone_file = _forcing_cfg.get("ozone_file", None)
         if ozone_file == "auto":
             from importlib import resources
 
@@ -925,20 +1024,20 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
             f"prescribed:{ozone_file}" if ozone_file
             else "analytic (no ozone file)")
 
-        file = (_resolve_data_path(cfg.forcing.get("file", None))
+        file = (_resolve_data_path(_forcing_cfg.get("file", None))
                 or _pyses_default_bc("forcing.nc"))
         return pyses_build_forcing(
             str(file), dycore,
             emissions_file=_resolve_data_path(
-                cfg.forcing.get("emissions_file", None)),
-            dms_file=_resolve_data_path(cfg.forcing.get("dms_file", None)),
-            dust_file=_resolve_data_path(cfg.forcing.get("dust_file", None)),
+                _forcing_cfg.get("emissions_file", None)),
+            dms_file=_resolve_data_path(_forcing_cfg.get("dms_file", None)),
+            dust_file=_resolve_data_path(_forcing_cfg.get("dust_file", None)),
             oxidants_file=_resolve_data_path(
-                cfg.forcing.get("oxidants_file", None)),
+                _forcing_cfg.get("oxidants_file", None)),
             ozone_file=_resolve_data_path(ozone_file),
         )
 
-    forcing_cfg = cfg.get("forcing", None)
+    forcing_cfg = _forcing_cfg
     if forcing_cfg is None or forcing_cfg.kind == "default":
         forcing = None
     elif forcing_cfg.kind == "from_file":

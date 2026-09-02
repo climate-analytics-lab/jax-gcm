@@ -43,29 +43,28 @@ align: auto
 # forces the analytical profile silently.
 ozone_file: auto
 
-# Optional prescribed aerosol emissions netCDF, already on the model grid
-# (regrid with ``jcm.data.emissions.prepare`` first). Auto-routes by content:
-# ``emis_<sector>_<species>`` → bulk/differentiable path; ``aero_emis_<tracer>``
-# → CAM6-faithful pre-speciated path. Needs a JAM physics package with the
-# emission term(s) (e.g. ``physics=echam-jam``). Null → no prescribed emissions.
-emissions_file: null
+# --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
+# ``auto`` (default; same convention as ``forcing/default.yaml``): a JAM package
+# resolves the per-grid present-day HF bundle for the model grid at build time,
+# so ``physics=echam-jam forcing=from_file grid=echam_t63_l47_hybrid`` composes
+# the emission inputs by itself. Non-JAM packages supply nothing. Each key also
+# takes an explicit/``hf://`` path (``{grid}``/``{nlev}`` placeholders allowed)
+# or ``null`` to opt out (the runner then warns it is emission-free).
 
-# Optional seawater-DMS monthly climatology netCDF (HAMMOZ layout:
-# ``DMS_sea (time, lat, lon)`` in nmol/L, e.g.
-# ``emiss_fields_dms_sea_monthly_T63.nc``), already on the model horizontal
-# grid. Drives ``DmsEmissions`` (``physics=echam-jam``). Null → zero DMS
-# emission.
-dms_file: null
+# Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``); auto-routes
+# by content (``emis_<sector>_<species>`` bulk / ``aero_emis_<tracer>``
+# pre-speciated). Regrid a custom product with ``jcm.data.emissions.prepare``.
+emissions_file: auto
 
-# Optional dust-source/erodibility monthly climatology netCDF (HAMMOZ layout:
-# ``pot_source (time, lat, lon)`` in [0, 1], e.g.
-# ``dust_potential_sources_T63.nc``), already on the model horizontal grid.
-# Drives ``DustEmissions`` (``physics=echam-jam``). Null → zero dust emission.
-dust_file: null
+# Seawater-DMS monthly climatology (``bundles/<grid>/dms.nc``); drives
+# ``DmsEmissions``.
+dms_file: auto
 
-# Optional oxidant monthly climatology netCDF (HAMMOZ/MACC layout:
-# ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole on the model's
-# hybrid levels, e.g. ``ham_oxidants_monthly_T63L47_macc.nc`` with
-# ``grid=echam_t63_l47_hybrid``). Feeds ``PrescribedOxidants``
-# (``physics=echam-jam``); null → the analytic interim oxidant proxies.
-oxidants_file: null
+# Dust-source/erodibility monthly climatology (``bundles/<grid>/dust.nc``);
+# drives ``DustEmissions``.
+dust_file: auto
+
+# Oxidant monthly climatology on the model's hybrid levels
+# (``bundles/<grid>_l<nlev>/oxidants_pd.nc``); feeds ``PrescribedOxidants``.
+# ``null`` → the analytic interim oxidant proxies.
+oxidants_file: auto

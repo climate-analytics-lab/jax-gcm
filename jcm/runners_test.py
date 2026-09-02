@@ -37,6 +37,17 @@ def _compose(overrides=None):
         return compose(config_name="config", overrides=overrides)
 
 
+# The four prescribed-emission keys default to ``auto`` (the per-grid HF bundle
+# when a JAM package is active — issue #640). Emission-path unit tests run
+# offline on grids the mirror does not carry, so they null the keys they don't
+# provide to stay hermetic; a specific ``forcing.<key>=<path>`` listed *after*
+# these wins. Prepend with ``[*_NULL_EMISSIONS, ...]``.
+_NULL_EMISSIONS = (
+    "forcing.emissions_file=null", "forcing.dms_file=null",
+    "forcing.dust_file=null", "forcing.oxidants_file=null",
+)
+
+
 class TestTracerPositivityResolution(unittest.TestCase):
     """``diffusion.tracer_positivity`` resolution in build_tracer_filter.
 
@@ -321,7 +332,7 @@ class TestEmissionsConfig(unittest.TestCase):
         # base CI image doesn't carry; the wiring under test is independent of
         # both.
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "physics.jam_microphysics=placeholder",
                         "physics.radiation_scheme=grey"])
         names = [t.name for t in build_physics(cfg).terms]
@@ -333,7 +344,7 @@ class TestEmissionsConfig(unittest.TestCase):
         # to the default it was trying to override (Codex on #624).
         from omegaconf import open_dict
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         with open_dict(cfg):
             cfg.physics.cloud_sheme = "2m"      # sic
         with self.assertRaisesRegex(ValueError, "cloud_sheme"):
@@ -341,7 +352,7 @@ class TestEmissionsConfig(unittest.TestCase):
 
     def test_unknown_builder_raises(self):
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         cfg.physics.builder = "not_a_factory"
         with self.assertRaisesRegex(ValueError, "Unknown physics.builder"):
             build_physics(cfg)
@@ -355,7 +366,7 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"emis_surface_combustion_bc":
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
@@ -370,7 +381,7 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"aero_emis_m_so4_acc":
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             f = build_forcing(cfg, coords)
         self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
@@ -397,7 +408,7 @@ class TestEmissionsConfig(unittest.TestCase):
                         (("lon", "lat", "time"),
                          np.full((nlon, nlat, 12), 2e-11))},
                        coords=base).to_netcdf(p2)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file=[{p1},{p2}]"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
@@ -414,7 +425,7 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon + 2, nlat, 12), 1e-11))},
                             nlon + 2, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             with self.assertRaisesRegex(ValueError, "model grid"):
                 build_forcing(cfg, coords)
@@ -427,7 +438,7 @@ class TestEmissionsConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._write(tmp, {"sst": (("lon", "lat", "time"),
                                           np.zeros((nlon, nlat, 12)))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             with self.assertRaisesRegex(ValueError, "no emissions variables"):
                 build_forcing(cfg, coords)
@@ -503,6 +514,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dms, dust, ox = self._write_files(tmp, coords)
             cfg = _compose([
+                *_NULL_EMISSIONS,
                 "physics=echam-jam", "grid=echam_t42_l8_sigma",
                 f"forcing.dms_file={dms}",
                 f"forcing.dust_file={dust}",
@@ -537,7 +549,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
     def test_null_paths_are_noops(self):
         from jcm.runners import build_forcing
         coords = self._coords()
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         f = build_forcing(cfg, coords)
         # No files → no forcing at all (kind: default returns None).
         self.assertIsNone(f)
@@ -548,7 +560,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
             dms, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.dms_file={dms}"])
             with self.assertRaisesRegex(ValueError, "latitudes"):
                 build_forcing(cfg, coords)
@@ -560,7 +572,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, ox = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.oxidants_file={ox}"])
             with self.assertRaisesRegex(ValueError, "levels"):
                 build_forcing(cfg, coords)
@@ -1922,3 +1934,99 @@ class TestAttachMacv2Weights(unittest.TestCase):
         from jcm.runners import _attach_macv2_weights
         cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
         self.assertIsNone(_attach_macv2_weights(None, cfg, None))
+
+
+class TestEmissionAutoResolution(unittest.TestCase):
+    """The ``auto`` / ``{grid}`` prescribed-emission resolution (issue #640)."""
+
+    def _coords(self):
+        from jcm.runners import build_coords
+        return build_coords(
+            _compose(["physics=echam", "grid=echam_t63_l47_hybrid"]))
+
+    def test_placeholder_substitution(self):
+        from jcm.runners import _resolve_grid_placeholders
+        coords = self._coords()
+        self.assertEqual(
+            _resolve_grid_placeholders(
+                "hf://bundles/{grid}_l{nlev}/oxidants_pd.nc", coords),
+            "hf://bundles/t63_l47/oxidants_pd.nc")
+        # Non-placeholder / non-string paths pass through untouched.
+        self.assertEqual(_resolve_grid_placeholders("/a/b.nc", coords),
+                         "/a/b.nc")
+        self.assertIsNone(_resolve_grid_placeholders(None, coords))
+
+    def test_auto_builds_per_grid_bundle_for_jam(self):
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+        # Echo the hf:// path instead of fetching, so we can assert what the
+        # auto default resolved to.
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            emis = runners._resolve_one_emission_input(
+                "auto", "emissions_file", coords, jam=True, is_pyses=False)
+            ox = runners._resolve_one_emission_input(
+                "auto", "oxidants_file", coords, jam=True, is_pyses=False)
+        self.assertEqual(emis, "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(ox, "hf://bundles/t63_l47/oxidants_pd.nc")
+
+    def test_auto_is_none_for_non_jam_and_pyses(self):
+        from jcm.runners import _resolve_one_emission_input
+        coords = self._coords()
+        self.assertIsNone(_resolve_one_emission_input(
+            "auto", "dms_file", coords, jam=False, is_pyses=False))
+        self.assertIsNone(_resolve_one_emission_input(
+            "auto", "dms_file", coords, jam=True, is_pyses=True))
+
+    def test_explicit_null_opts_out(self):
+        from jcm.runners import _resolve_one_emission_input
+        coords = self._coords()
+        for val in (None, "null", ""):
+            self.assertIsNone(_resolve_one_emission_input(
+                val, "dust_file", coords, jam=True, is_pyses=False))
+
+    def test_auto_fetch_failure_is_loud_and_names_the_fix(self):
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+
+        def _raise(_p):
+            raise FileNotFoundError("cold cache")
+
+        with mock.patch.object(runners, "_resolve_data_path", side_effect=_raise):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                runners._resolve_one_emission_input(
+                    "auto", "emissions_file", coords, jam=True, is_pyses=False)
+        msg = str(ctx.exception)
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", msg)
+        self.assertIn("forcing.emissions_file=null", msg)
+        self.assertIn("prefetch", msg.lower())
+
+
+class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
+    """End-to-end: a JAM ``auto`` default reaches the bundle fetch.
+
+    And fails loudly when the bundle cannot be resolved.
+    """
+
+    def test_jam_default_forcing_fetches_bundles_and_fails_loud(self):
+        from unittest import mock
+
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        def _raise(_path, **_kw):
+            raise FileNotFoundError("no network in test")
+
+        # The auto default resolves the first emission bundle, whose fetch we
+        # force to fail — build_forcing must surface it, not silently continue.
+        with mock.patch("jcm.data.remote.fetch", side_effect=_raise):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                build_forcing(cfg, coords)
+        self.assertIn("hf://bundles/t42/", str(ctx.exception))
