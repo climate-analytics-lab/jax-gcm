@@ -4,6 +4,13 @@
 # up against realistic ozone without a runaway at the model top.
 # Replaces the old ``utils/run_echam_longrun.py`` script. See
 # ``feat: ECHAM lmidatm stability stack`` PR for the calibration.
+#
+# Inherits the complete base schema from ``run/default.yaml``; only the keys
+# that differ from the default are set below.
+defaults:
+  - default
+  - _self_
+
 time_step: 12
 save_interval: 5
 total_time: 365
@@ -31,10 +38,3 @@ sponge:
 
 chunk_days: 30
 output_prefix: longrun
-
-mode: full
-state_file: null
-tracer_vars: null
-column:
-  lat_deg: 0.0
-  lon_deg: 0.0

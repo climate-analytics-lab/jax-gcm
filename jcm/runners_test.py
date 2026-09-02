@@ -112,6 +112,27 @@ class TestConfigComposition(unittest.TestCase):
         self.assertEqual(cfg.run.total_time, 1)
         self.assertEqual(cfg.run.save_interval, 1)
 
+    def test_run_groups_share_one_schema(self):
+        # ``run/default.yaml`` is the complete base schema and the other run
+        # groups inherit it (``defaults: [default, _self_]``), so every run
+        # group must expose exactly the same set of keys (#640 smell 3).
+        keysets = {name: set(_compose([f"run={name}"]).run.keys())
+                   for name in ("default", "longrun", "smoke", "pyses_year")}
+        base = keysets["default"]
+        for name, keys in keysets.items():
+            self.assertEqual(keys, base, f"run={name} key set diverged")
+
+    def test_run_key_override_needs_no_plus(self):
+        # Because the schema is complete, formerly-per-group keys can be set on
+        # any run group without a ``+`` (previously ``run=longrun`` had no
+        # ``checkpoint_path`` and required ``+run.checkpoint_path=...``).
+        cfg = _compose(["run=longrun", "run.checkpoint_path=/tmp/x.ckpt"])
+        self.assertEqual(cfg.run.checkpoint_path, "/tmp/x.ckpt")
+        # ``bail_on_unhealthy`` is now universal and defaults to the runner's
+        # historical implicit default (True) on every group.
+        self.assertTrue(cfg.run.bail_on_unhealthy)
+        self.assertTrue(_compose(["run=default"]).run.bail_on_unhealthy)
+
     def test_init_jw_compose(self):
         cfg = _compose(["init=jw"])
         self.assertEqual(cfg.init.kind, "jw")

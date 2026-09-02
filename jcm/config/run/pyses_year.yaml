@@ -6,25 +6,26 @@
 #
 #   python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
 #
-# ``time_step`` is absent deliberately — the Model adopts the dycore's
-# dt_seconds. The dinosaur-style ``sponge`` group is likewise not used here;
-# the finite-lid sponge lives in ``dycore.lid_sponge``.
+# ``time_step`` is set null deliberately — the Model adopts the dycore's
+# dt_seconds. The dinosaur-style ``sponge`` group is not used here (it stays
+# at the inherited ``levels: 0``, i.e. disabled); the finite-lid sponge lives
+# in ``dycore.lid_sponge`` instead.
+#
+# Inherits the complete base schema from ``run/default.yaml``; only the keys
+# that differ from the default are set below.
+defaults:
+  - default
+  - _self_
+
+time_step: null
 save_interval: 5
 total_time: 365
 output_averages: true
 output: pyses_year.nc
 log_level: INFO
-time_step: null
 
 chunk_days: 10
 output_prefix: pyses_year
 checkpoint_path: pyses_year.ckpt
 archive_ckpt_every: 60
 bail_on_unhealthy: true
-
-mode: full
-state_file: null
-tracer_vars: null
-column:
-  lat_deg: 0.0
-  lon_deg: 0.0
