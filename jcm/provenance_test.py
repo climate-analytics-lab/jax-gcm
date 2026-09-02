@@ -452,10 +452,11 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
     def test_traced_record_wins_over_the_live_module(self):
         # `self` is a static argument to
         # Model._run_from_state, so the parameters are constants inside
-        # the compiled executable and an in-place change afterwards does
-        # not reach the computation. Reading the live module at the
-        # handoff therefore stamped a trajectory with values that never
-        # ran — a confident, wrong record, which is worse than no record.
+        # the compiled executable and an in-place change afterwards is
+        # not reliably seen by a later run. Reading the live module at
+        # the handoff therefore stamped a trajectory with values that may
+        # never have run — a confident, wrong record, which is worse than
+        # no record.
         import jax.numpy as jnp
 
         from jcm.predictions import ModelPredictions
@@ -472,11 +473,10 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
             preds.params["speedy_convection.params.entmax"],
             traced["speedy_convection.params.entmax"])
         # ...and the divergence is surfaced rather than papered over: the
-        # user's parameter change did nothing to the run, which is a
-        # scientific error they need told about.
+        # user's parameter change may not have reached the run at all,
+        # which is a scientific error they need told about.
         self.assertIn("live_parameters_differ_from_compiled", preds.params)
-        self.assertIn("does NOT affect the computation",
-                      "".join(logged.output))
+        self.assertIn("Rebuild the Model", "".join(logged.output))
 
     def test_no_false_alarm_when_live_matches_compiled(self):
         from jcm.predictions import ModelPredictions
@@ -488,77 +488,71 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         self.assertNotIn("live_parameters_differ_from_compiled", preds.params)
 
     @pytest.mark.slow
-    def test_each_executable_keeps_its_own_traced_record(self):
-        """One static signature can own several compiled executables.
+    def test_record_is_the_first_compiled_values_and_a_later_edit_is_flagged(self):
+        """The record names the values the model actually computes with.
 
-        Keying the store on the static arguments let a later trace
-        overwrite an earlier executable's record, so re-running the first
-        one reported the second's parameters. The record is
-        keyed by a trace id the executable itself carries back, so a cache
-        hit returns the id of the executable that actually ran.
+        Parameters bind at the model's FIRST physics trace. A later outer
+        retrace (a different ``total_time``) re-enters ``_run_from_state``
+        but the per-term ``jax.checkpoint`` wrapper returns its cached
+        jaxpr, so the term's ``__call__`` is never re-entered and the
+        edited value never reaches the computation. The record is
+        therefore captured once and never refreshed, and the divergence
+        is reported rather than the new values being presented as the
+        ones that ran.
         """
-        import dataclasses
-
         import jax.numpy as jnp
+        import numpy as np
 
-        from jcm.forcing import default_forcing, make_time_series
         from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
 
         key = "speedy_vertical_diffusion.params.trvdi"
         coords = get_speedy_coords(layers=8, spectral_truncation=21)
         model = Model(coords=coords, physics=self._physics(), time_step=30.0)
 
-        # The static arguments are held IDENTICAL throughout. The second
-        # run differs only in a dynamic aval: co2_vmr as a scalar
-        # (fixed-CO2) versus as a TimeSeries (historical forcing), which
-        # is a documented pair of real configurations. Varying a static
-        # argument instead would not test anything, since keying the store
-        # on the static arguments — the implementation this regresses —
-        # would separate those two on its own.
-        fixed_co2 = default_forcing(coords.horizontal)
-        co2 = float(fixed_co2.co2_vmr)
-        historical_co2 = dataclasses.replace(
-            fixed_co2,
-            co2_vmr=make_time_series(jnp.array([co2, co2]),
-                                     jnp.array([0.0, 1e12])))
-
-        first = model.run(forcing=fixed_co2, save_interval=0.5,
-                          total_time=0.5)
-        original = first.params[key]
+        first = model.run(save_interval=0.25, total_time=0.25)
+        as_compiled = first.params[key]
+        self.assertAlmostEqual(as_compiled, 24.0, places=6)  # the default
+        self.assertNotIn("live_parameters_differ_from_compiled", first.params)
 
         term = next(t for t in model.physics.terms
                     if t.name == "speedy_vertical_diffusion")
         term.params.set_value(
             term.params.get_value().replace(trvdi=jnp.array(2.0)))
-        second = model.run(forcing=historical_co2, save_interval=0.5,
-                           total_time=0.5)
-        self.assertEqual(second.params[key], 2.0)
+        self.assertNotEqual(as_compiled, 2.0)
 
-        # Re-running the first forcing reuses the FIRST executable, which
-        # still holds the original value.
-        again = model.run(forcing=fixed_co2, save_interval=0.5,
-                          total_time=0.5)
-        self.assertEqual(again.params[key], original)
+        # A longer window retraces ``_run_from_state``; the record still
+        # reports the first trace's values, and says the live module has
+        # since diverged from them.
+        with self.assertLogs("jcm.predictions", level="WARNING"):
+            second = model.run(save_interval=0.25, total_time=0.5)
+        self.assertEqual(second.params[key], as_compiled)
+        self.assertIn("live_parameters_differ_from_compiled", second.params)
 
-    def test_traced_parameter_records_are_bounded(self):
-        # A model that keeps meeting new input shapes retraces
-        # indefinitely, and jax.clear_caches() cannot reach this dict, so
-        # an unbounded store would grow for the model's lifetime.
-        from jcm import model as model_module
-        from jcm.model import Model
+        # ...and the fields say the record is right: identical to a fresh
+        # model built with the default value, different from one built
+        # with the edited value. The edit did not reach this run.
+        default_model = Model(coords=coords, physics=self._physics(),
+                              time_step=30.0)
+        as_default = default_model.run(save_interval=0.25, total_time=0.5)
+        np.testing.assert_array_equal(
+            np.asarray(second.dynamics.temperature),
+            np.asarray(as_default.dynamics.temperature))
 
-        cap = model_module._MAX_TRACED_PARAM_RECORDS
-        model = Model.__new__(Model)
-        model._traced_params = {}
-        for trace_id in range(cap + 5):
-            model._remember_traced_params(trace_id, {"a.b.c": trace_id})
-
-        self.assertEqual(len(model._traced_params), cap)
-        # The oldest go, the newest stay: a record is never replaced by a
-        # different executable's values, only by nothing.
-        self.assertNotIn(0, model._traced_params)
-        self.assertEqual(model._traced_params[cap + 4], {"a.b.c": cap + 4})
+        params = Parameters.default()
+        params = params.replace(
+            vertical_diffusion=params.vertical_diffusion.replace(
+                trvdi=jnp.array(2.0)))
+        edited_model = Model(coords=coords,
+                             physics=speedy_physics(parameters=params),
+                             time_step=30.0)
+        as_edited = edited_model.run(save_interval=0.25, total_time=0.5)
+        self.assertGreater(
+            float(jnp.max(jnp.abs(second.dynamics.temperature
+                                  - as_edited.dynamics.temperature))),
+            1e-3)
 
     def test_capture_failure_never_breaks_a_completed_run(self):
         class _Exploding:
