@@ -1743,6 +1743,20 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
 
+    def test_list_spec_expands_per_element_and_flattens(self):
+        # emissions_file may be a list (e.g. biomass-burning + anthropogenic).
+        # A {year} element expands to its yearly run; static elements pass
+        # through; the result is flattened for the by-coords merge downstream.
+        from jcm import runners
+        self.assertEqual(
+            runners._expand_years(
+                ["/bb_{year}.nc", "/anthro.nc"], [2000, 2001]),
+            ["/bb_2000.nc", "/bb_2001.nc", "/anthro.nc"])
+        # A list of static paths passes through untouched even with a range.
+        self.assertEqual(
+            runners._expand_years(["/a.nc", "/b.nc"], [2000, 2001]),
+            ["/a.nc", "/b.nc"])
+
     def test_start_date_resolves_to_datetime(self):
         from omegaconf import OmegaConf
 
@@ -1771,6 +1785,48 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         import jax_datetime as jdt
         self.assertEqual(
             int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+
+
+class TestEmulatorWeightsBuilderPath(unittest.TestCase):
+    """``emulator_weights_file`` via the echam_physics builder (Codex P2).
+
+    ``_build_physics_from_factory`` drops ``null`` kwargs, so
+    ``physics.emulator_weights_file=null`` cannot mean "random init" — it
+    resolves to the ``auto`` default. Train-from-scratch is the explicit
+    ``"random"`` sentinel instead.
+    """
+
+    def _rad_term(self, physics):
+        return next(t for t in physics.terms
+                    if getattr(t, "name", "") == "nn_emulator_radiation")
+
+    def _build(self, **extra):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _build_physics_from_factory
+        cfg = OmegaConf.create({
+            "builder": "echam_physics",
+            "radiation_scheme": "emulated",
+            **extra,
+        })
+        return _build_physics_from_factory(cfg)
+
+    def test_random_reaches_random_init(self):
+        term = self._rad_term(self._build(emulator_weights_file="random"))
+        self.assertIsNone(term._weights_file)
+
+    def test_null_falls_back_to_auto(self):
+        # null is dropped by the builder → the "auto" default (packaged).
+        term = self._rad_term(self._build(emulator_weights_file=None))
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(str(term._weights_file).endswith(
+            "emulator_weights_per_band_u64.nc"))
+
+    def test_absent_defaults_to_auto(self):
+        term = self._rad_term(self._build())
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(str(term._weights_file).endswith(
+            "emulator_weights_per_band_u64.nc"))
 
 
 class TestEmulatorGhgGuard(unittest.TestCase):
@@ -2096,6 +2152,15 @@ class TestEmissionAutoResolution(unittest.TestCase):
             _resolve_grid_placeholders(
                 "hf://bundles/{grid}/emissions/{year}.nc", coords),
             "hf://bundles/t63/emissions/{year}.nc")
+        # A list (emissions_file may be several files) is mapped element-wise:
+        # {grid}/{nlev} resolved, {year} preserved for the later expansion, so
+        # a list must not slip through with literal braces to the fetcher.
+        self.assertEqual(
+            _resolve_grid_placeholders(
+                ["hf://bundles/{grid}/bb_{year}.nc",
+                 "hf://bundles/{grid}_l{nlev}/anthro.nc"], coords),
+            ["hf://bundles/t63/bb_{year}.nc",
+             "hf://bundles/t63_l47/anthro.nc"])
 
     def test_auto_builds_per_grid_bundle_for_jam(self):
         from unittest import mock
@@ -2157,7 +2222,9 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from unittest import mock
 
         from jcm.runners import build_coords, build_forcing
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        # A published grid (t63): the auto default resolves the per-grid bundle
+        # and eagerly fetches it, so a cold cache must fail loudly here.
+        cfg = _compose(["physics=echam-jam", "grid=echam_t63_l47_hybrid",
                         "physics.jam_microphysics=placeholder",
                         "physics.radiation_scheme=grey"])
         coords = build_coords(cfg)
@@ -2170,7 +2237,44 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         with mock.patch("jcm.data.remote.fetch", side_effect=_raise):
             with self.assertRaises(FileNotFoundError) as ctx:
                 build_forcing(cfg, coords)
-        self.assertIn("hf://bundles/t42/", str(ctx.exception))
+        self.assertIn("hf://bundles/t63/", str(ctx.exception))
+
+    def test_jam_auto_nulls_on_non_mirrored_grid_without_fetch(self):
+        """A non-mirrored grid (t42) auto-nulls emissions, no fetch (Codex P1).
+
+        The mirror publishes bundles only for ``PUBLISHED_GRIDS``; a JAM run on
+        any other grid (e.g. echam_t42_l8_sigma) must restore the null,
+        emission-free baseline automatically — resolving ``auto`` to None with
+        NO fetch (so the documented ``physics=echam-jam grid=echam_t42_l8_sigma
+        forcing.emissions_file=<explicit>`` workflow no longer aborts) — and
+        emit ONE info log naming the keys and the reason.
+        """
+        import logging
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        def _no_fetch(path):
+            raise AssertionError(f"no fetch expected, got {path!r}")
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=_no_fetch):
+            with self.assertLogs(level=logging.INFO) as logs:
+                out = runners._resolve_emission_inputs(
+                    cfg.forcing, cfg, coords, is_pyses=False)
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            self.assertIsNone(out.get(key))
+        # Exactly one aggregated info line, naming the grid and the keys.
+        info = [r for r in logs.records
+                if r.levelno == logging.INFO and "resolved to None" in r.message]
+        self.assertEqual(len(info), 1)
+        self.assertIn("t42", info[0].getMessage())
 
     def test_t119_jam_experiment_resolves_emission_free(self):
         """The ma-t119 experiments run emission-free (Codex P1).
@@ -2178,8 +2282,11 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         T119 has no mirror bundle, so the JAM ``auto`` default cannot resolve
         the four emission keys (bundles/t119/*.nc do not exist and the fetch
         would abort build_forcing). The experiment yamls null the keys
-        explicitly; assert the resolver then requests NO fetch and yields None,
-        so ``python -m jcm.main +experiment=ma-t119-l47`` is one command.
+        explicitly (round-1 documentation — no longer load-bearing now that the
+        published-grid whitelist auto-nulls any non-mirrored grid, see
+        ``test_jam_auto_nulls_on_non_mirrored_grid_without_fetch``); assert the
+        resolver requests NO fetch and yields None either way, so
+        ``python -m jcm.main +experiment=ma-t119-l47`` is one command.
         """
         from unittest import mock
 
@@ -2254,3 +2361,53 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(
             seen["paths"],
             ["hf://bundles/t42/emis/2000.nc", "hf://bundles/t42/emis/2001.nc"])
+
+    def test_oxidants_year_matched_pattern_expands_and_concatenates(self):
+        """A year-matched oxidants pattern expands + concatenates (Codex P1).
+
+        Warning 5 recommends ``oxidants_file=.../{year}.nc`` for a transient
+        run; ``_attach_oxidants`` must therefore honour the same yearly
+        expansion + by-coords merge the emissions path does, or that remedy
+        fails at startup. Assert the per-year files reach ``open_mfdataset``.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey",
+            *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = \
+            "hf://bundles/{grid}_l{nlev}/oxidants_{year}.nc"
+        cfg.forcing.years = [2000, 2001]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object()}) as read_mock, \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+
+        # {grid}/{nlev} resolved, {year} expanded, files concatenated by coords.
+        self.assertEqual(
+            seen["paths"],
+            ["hf://bundles/t42_l8/oxidants_2000.nc",
+             "hf://bundles/t42_l8/oxidants_2001.nc"])
+        # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")

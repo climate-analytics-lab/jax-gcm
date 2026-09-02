@@ -21,6 +21,18 @@ prefetch enumerator cannot drift apart.
 
 from __future__ import annotations
 
+#: Grid tokens (``"t63"``) for which the data mirror actually publishes bundles.
+#: Single source of truth for the mirror's published-grid whitelist:
+#: ``jcm/data/mirror/build_mirror.py`` imports this to drive its build loop (it
+#: adds the per-grid Gaussian latitude count), and :func:`jcm.runners.
+#: _resolve_one_emission_input` consults it so ``auto`` resolves to ``None``
+#: (rather than eagerly fetching a non-existent ``bundles/<grid>/*.nc`` and
+#: aborting) on any grid the mirror does not carry. That restores the null,
+#: emission-free behaviour automatically for every non-mirrored grid — a
+#: ``physics=echam-jam grid=echam_t42_l8_sigma`` run then composes with online
+#: sources only, without hand-nulling the four emission keys.
+PUBLISHED_GRIDS = frozenset({"t63", "t106"})
+
 #: Prescribed-emission forcing keys that honour the ``auto`` convention and the
 #: ``{grid}``/``{nlev}`` placeholders. Value is ``(subdir_suffix, filename)``:
 #: ``""`` is the horizontal bundle (``bundles/<grid>/``), ``"_l{nlev}"`` the

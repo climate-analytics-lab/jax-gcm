@@ -183,7 +183,9 @@ def _auto_emission_files(cfg) -> list[str]:
     Mirrors ``jcm.runners._resolve_one_emission_input``: ``auto`` supplies a
     bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
     non-JAM package consumes no emissions, and the pySES backend's native grids
-    are not the spectral-token bundles — both resolve ``auto`` to nothing. A key
+    are not the spectral-token bundles — both resolve ``auto`` to nothing. A
+    grid outside the mirror's published-grid whitelist (``PUBLISHED_GRIDS``)
+    likewise has no bundle to fetch, so ``auto`` nulls there too. A key
     explicitly set to a path/``null`` in the preset is honoured (the literal
     path is already picked up by ``_preset_data_files``; ``null`` opts out).
     """
@@ -199,6 +201,10 @@ def _auto_emission_files(cfg) -> list[str]:
     names = _load_bundle_names()
     forcing = cfg.get("forcing") or {}
     token = names.grid_token(trunc)
+    # Mirror the runner's published-grid whitelist: a non-mirrored grid has no
+    # bundles to prefetch (``auto`` resolves to None there), so enumerate none.
+    if token not in names.PUBLISHED_GRIDS:
+        return []
     return [path
             for key, path in names.auto_emission_bundle_paths(
                 token, nlev).items()

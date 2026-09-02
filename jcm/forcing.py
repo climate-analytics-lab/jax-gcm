@@ -1232,7 +1232,25 @@ def expand_yearly_files(file_spec, years, available=None):
     run ending Dec 31 the next January's) for ``by_date_interp`` to
     bracket the boundary instead of clamping to the nearest mid-month
     value for ~half a month.
+
+    A **list** spec (e.g. ``emissions_file`` carrying a biomass-burning file
+    plus an anthropogenic one) is expanded per element and flattened: a static
+    element passes through, while a ``{year}`` element expands to its yearly
+    run, so ``[bb_{year}.nc, anthro.nc]`` with ``years=[2000, 2001]`` becomes
+    ``[bb_2000.nc, bb_2001.nc, anthro.nc]`` for the by-coords merge downstream.
     """
+    from collections.abc import Iterable, Mapping
+    if (not isinstance(file_spec, (str, bytes, Mapping))
+            and isinstance(file_spec, Iterable)):
+        out: list = []
+        for element in file_spec:
+            expanded = expand_yearly_files(element, years, available)
+            if (not isinstance(expanded, (str, bytes, Mapping))
+                    and isinstance(expanded, Iterable)):
+                out.extend(expanded)
+            else:
+                out.append(expanded)
+        return out
     has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
     if not has_pattern:
         return file_spec

@@ -902,7 +902,17 @@ def _resolve_grid_placeholders(path, coords):
     ``hf://bundles/{grid}/forcing_amip/{year}.nc`` must keep its ``{year}`` for
     the later yearly-file expansion — a blanket ``str.format`` would raise
     ``KeyError: 'year'`` here and break the year-matched-emissions workflow.
+
+    ``emissions_file`` also legitimately takes a **list** of paths (e.g. a
+    biomass-burning file plus an anthropogenic one). The substitution maps over
+    the elements (strings only; non-string elements pass through) so each
+    ``{grid}``/``{nlev}`` is resolved while any per-element ``{year}`` survives
+    for the later expansion — a list must not slip through with literal braces
+    to the fetcher.
     """
+    from omegaconf import ListConfig
+    if isinstance(path, (list, tuple, ListConfig)):
+        return [_resolve_grid_placeholders(p, coords) for p in path]
     if not (isinstance(path, str) and "{" in path):
         return path
     return (path.replace("{grid}", _grid_token(coords))
@@ -923,6 +933,15 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     """
     if value == "auto":
         if is_pyses or not jam:
+            return None
+        if _grid_token(coords) not in bundle_names.PUBLISHED_GRIDS:
+            # The mirror publishes emission bundles only for the grids in
+            # ``PUBLISHED_GRIDS``; any other grid (e.g. echam_t42_l8_sigma,
+            # ma-t119) has no ``bundles/<grid>/*.nc`` to fetch. Resolve ``auto``
+            # to None so the run falls back to the null, emission-free baseline
+            # automatically instead of aborting on a 404 — restoring the prior
+            # behaviour for every non-mirrored grid. ``_resolve_emission_inputs``
+            # emits one aggregated info log naming the keys and the reason.
             return None
         hf = bundle_names.emission_bundle_path(
             key, _grid_token(coords), int(coords.nodal_shape[0]))
@@ -955,11 +974,30 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     from omegaconf import OmegaConf
 
     jam = str((cfg.get("physics", {}) or {}).get("aerosol_module", "")) == "jam"
+    auto_keys = [key for key in _EMISSION_AUTO_BUNDLES
+                 if str(forcing_cfg.get(key, None)) == "auto"]
     updates = {
         key: _resolve_one_emission_input(
             forcing_cfg.get(key, None), key, coords, jam, is_pyses)
         for key in _EMISSION_AUTO_BUNDLES
     }
+    # One info log when a JAM spectral run on a non-mirrored grid nulls its
+    # ``auto`` emission keys (see _resolve_one_emission_input): naming the keys
+    # and the reason once, rather than silently supplying nothing or aborting
+    # per key. Guarded so ``_grid_token`` (spectral-only) is never touched on
+    # the pySES path or the non-JAM path (where ``auto`` already nulled and
+    # ``coords`` may be absent/native-grid).
+    if jam and not is_pyses and auto_keys:
+        token = _grid_token(coords)
+        if token not in bundle_names.PUBLISHED_GRIDS:
+            logging.info(
+                "forcing.%s=auto resolved to None: grid %r is not one of the "
+                "mirror's published grids (%s), so no per-grid emission bundle "
+                "exists to fetch. The JAM run therefore uses only online "
+                "sources (Gong sea salt) for these inputs; point each key at "
+                "an on-grid file to supply prescribed emissions.",
+                ", ".join(auto_keys), token,
+                ", ".join(sorted(bundle_names.PUBLISHED_GRIDS)))
     return OmegaConf.merge(forcing_cfg, updates)
 
 
@@ -1361,21 +1399,42 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     cross-checked against the model's coefficients here, so a file on
     different 47 levels can't be wired in silently. Horizontal grid handling
     as in :func:`_attach_dms`.
+
+    Supports the same yearly-expansion the anthropogenic emissions path does, so
+    the year-matched transient oxidant product recommended for a transient run
+    (``oxidants_file=.../{year}.nc`` with ``forcing.years``) actually loads: a
+    ``{year}`` pattern expands to one file per year, which are concatenated
+    along the time axis (``open_mfdataset``, by-coords) and read with ``auto``
+    alignment — a single 12-month climatology stays ``WRAP_YEAR`` while a
+    multi-year axis becomes ``BY_DATE``. The level-for-level vertical mapping
+    is unchanged (the yearly files share the model's hybrid grid).
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("oxidants_file", None))
+    path = _resolve_data_path(_expand_years(
+        forcing_cfg.get("oxidants_file", None),
+        forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr
+    from omegaconf import ListConfig
 
     from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
-    with xr.open_dataset(str(path)) as ds:
-        mapping = read_oxidant_vmr(ds, nlev=nlev,
-                                   lat_deg=lat_deg, lon_deg=lon_deg)
+    if isinstance(path, (list, tuple, ListConfig)):
+        paths = [str(p) for p in path]
+        ds = (xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1
+              else xr.open_dataset(paths[0]))
+    else:
+        ds = xr.open_dataset(str(path))
+    try:
+        mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
+                                   lon_deg=lon_deg, align_mode="auto")
         validate_oxidant_levels(ds, coords, path)
+    finally:
+        ds.close()
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
 
@@ -1641,11 +1700,12 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
                 "(amip/era5: per-year files, by_date_interp) but %s are still "
                 "'auto', which resolved to the present-day *_pd emission "
                 "bundles. A historical/AMIP run is therefore using present-day "
-                "aerosol emissions. Override each with a year-matched product "
-                "(e.g. forcing.emissions_file=hf://bundles/<grid>/"
-                "emissions_<year>.nc, forcing.oxidants_file=hf://bundles/"
-                "<grid>_l<nlev>/oxidants_<year>.nc) for a consistent transient "
-                "run.",
+                "aerosol emissions. Override each with a year-matched {year} "
+                "pattern (the same yearly-file expansion the SST forcing uses; "
+                "both keys support it) — e.g. forcing.emissions_file=hf://"
+                "bundles/<grid>/emissions_{year}.nc, forcing.oxidants_file="
+                "hf://bundles/<grid>_l<nlev>/oxidants_{year}.nc, with the run's "
+                "forcing.years range — for a consistent transient run.",
                 ", ".join(pd_auto_keys),
             )
 

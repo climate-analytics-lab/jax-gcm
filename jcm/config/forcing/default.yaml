@@ -41,5 +41,8 @@ dust_file: auto
 # Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC
 # ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole;
 # ``bundles/<grid>_l<nlev>/oxidants_pd.nc``). Feeds ``PrescribedOxidants``;
-# ``null`` → the analytic interim oxidant proxies.
+# ``null`` → the analytic interim oxidant proxies. For a transient run set a
+# ``{year}`` pattern plus ``forcing.years`` (e.g.
+# ``hf://bundles/<grid>_l<nlev>/oxidants_{year}.nc``): the yearly files are
+# concatenated along time and aligned by date, exactly like ``emissions_file``.
 oxidants_file: auto
