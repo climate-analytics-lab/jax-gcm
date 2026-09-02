@@ -57,9 +57,14 @@ aerocom_groups: [cloud, column, plev, aerosol, nearsurface]
 # Should match the radiation scheme's overlap assumption.
 aerocom_overlap: maximum-random
 
-# Per-species / per-mode / spectral aerosol optics (jax-gcm#584). Off here;
-# see echam-jam-aerocom-optics.yaml.
-aerocom_optics: false
+# Per-species / per-mode / spectral aerosol optics (jax-gcm#584). ON by
+# default: measured cost is 241.1 vs 240.7 s/sim-day at T63L47/A100 — below the
+# single-run noise floor — because the extra Mie sweep rides the radiation gate
+# (5 diagnostic wavelengths against the shortwave's 14 already-gated bands). It
+# supplies the AeroCom-standard AOD names (od550aer, etc.) that the burden/AOD
+# analyses need, so this preset should carry them. The now-equivalent
+# ``echam-jam-aerocom-optics`` alias remains for callers naming it explicitly.
+aerocom_optics: true
 # Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
 #
 #   null   no *noa fluxes, no ERFari, no extra cost
