@@ -88,7 +88,11 @@ python -m jcm.main
 # ECHAM T63L47 with the production RRTMGP radiation
 python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
 
-# Chunked, resumable long run
+# One validated configuration, one command (the experiment group)
+python -m jcm.main +experiment=t63-echam-jam
+
+# Chunked, resumable long run. Every run group shares one complete key
+# schema now, so run.checkpoint_path sets cleanly without a +/++ prefix.
 python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun \
     run.checkpoint_path=/scratch/$JOB_ID.ckpt
 
@@ -98,7 +102,9 @@ python -m jcm.main --cfg job grid=echam_t63_l47_hybrid
 ```
 
 Config groups live under [`jcm/config/`](jcm/config/) (`physics`, `grid`,
-`run`, `init`, `terrain`, `forcing`, and `diffusion`).
+`run`, `init`, `terrain`, `forcing`, `diffusion`, and `experiment` — the
+last promotes each validated physics×grid×init×forcing combination to a
+single `+experiment=<name>` composition).
 
 Boundary-condition and emissions files can be pulled straight from the
 project data mirror on Hugging Face by prefixing any file path with

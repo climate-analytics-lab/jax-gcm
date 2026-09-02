@@ -66,7 +66,56 @@ Inspect the available config groups and the fully-composed config::
    python -m jcm.main --cfg job grid=echam_t63_l47_hybrid       # with overrides
 
 Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
-``init``, ``terrain``, ``forcing``, ``diffusion``.
+``init``, ``terrain``, ``forcing``, ``diffusion``, ``experiment``.
+
+Validated configurations — the ``experiment`` group
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Composing a run by hand (``physics=… grid=… init=… run=… terrain=… forcing=…``)
+is powerful but easy to get subtly wrong — an isothermal cold start with no
+sponge, for instance, goes NaN within days at L47. The ``experiment`` group
+promotes each *known-good* combination to a single named composition, so one
+command is one validated configuration::
+
+   python -m jcm.main +experiment=t63-echam-jam        # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +experiment=speedy-t31           # SPEEDY T31L8 reference
+   python -m jcm.main +experiment=ma-t63-l95           # middle-atmosphere JAM sweep
+
+Note the leading ``+``: an experiment is *added* to the default composition and
+then overrides the physics/grid/init/run/terrain/forcing groups it selects. Each
+``jcm/config/experiment/*.yaml`` carries comments explaining WHY every setting is
+what it is (the dry-JW init, the production sponge, the semi-Lagrangian
+off-centering, the level-matched ozone, …), and is the single source of truth
+for that configuration — ``tools/benchmark.py`` and the release-validation
+matrix compose the very same yaml rather than a private override list. Override
+individual keys on top as usual, e.g.
+``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``.
+
+One run schema — no ``+``/``++`` guesswork for run keys
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every ``run`` group (``default``, ``longrun``, ``smoke``, ``pyses_year``) now
+exposes the **same** complete set of keys. ``run/default.yaml`` is the base
+schema and the others inherit it (``defaults: [default, _self_]``), overriding
+only what they change. So any run key can be set with a plain override on any
+group — ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though
+the old ``longrun`` had no ``checkpoint_path`` key. The rule is simply:
+**``run.<key>=<value>`` always works**; reserve the ``+`` (add-new-key) and
+``++`` (add-or-override) prefixes for keys *outside* the run schema.
+
+Online-aerosol (JAM) inputs default to ``auto``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a prognostic-aerosol package is active (``physics=echam-jam`` and its
+AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
+default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
+project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
+at build time, so ``python -m jcm.main +experiment=t63-echam-jam`` composes a
+fully-specified online-aerosol run with no hand-managed emission paths. For any
+non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
+bundle to override one, or ``null`` to opt out (the runner then warns the run is
+emission-free).
 
 Quick Start Examples
 --------------------
