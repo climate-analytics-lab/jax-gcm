@@ -17,7 +17,7 @@ sim-time / date bookkeeping, and produces an xarray trajectory.
 
 import jax
 import jax.numpy as jnp
-from jax.tree_util import tree_map
+from jax.tree_util import tree_leaves, tree_map
 import jax_datetime as jdt
 from typing import Callable, Any
 from dinosaur.scales import units
@@ -87,6 +87,11 @@ def _reshard_columns(tree, ncols: int, axis: str):
     from jax.sharding import reshard
 
     return reshard(tree, _column_partition_specs(tree, ncols, axis))
+
+
+def _contains_tracers(tree) -> bool:
+    """Whether any leaf of *tree* is a JAX tracer rather than a real array."""
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in tree_leaves(tree))
 
 
 def _neutralize_mesh_typing(physics) -> None:
@@ -597,6 +602,10 @@ class Model:
 
         # Dycore-native state at end of last run/resume.
         self._final_dycore_state = None
+
+        # Set when a run's final state was a tracer, so the carry on this
+        # model is gone rather than merely absent (see ``resume``).
+        self._carry_was_traced = False
 
         # Cross-step physics carry threaded through op-split run/resume.
         # ``None`` means "build a fresh carry on the next call"; set by
@@ -1312,6 +1321,16 @@ class Model:
         for the same total duration therefore matches a single ``run()`` of
         the combined duration (to numerical roundoff).
         """
+        if self._carry_was_traced:
+            raise ValueError(
+                "The previous run was traced — called inside jax.jit, grad "
+                "or vmap — so its final state never existed as a value on "
+                "the host and this model has no carry to resume from. "
+                "Inside a transformation, thread the carry yourself with "
+                "run_from_state_with_carry, which returns the final dycore "
+                "and physics states alongside the predictions; outside one, "
+                "start again from an explicit state with run(initial_state)."
+            )
         jax.debug.callback(
             lambda: logger.info(
                 "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
@@ -1330,8 +1349,20 @@ class Model:
             observer_xs=observer_xs,
         )
         jax.debug.callback(lambda: logger.info("Run completed."))
-        self._final_dycore_state = final_dycore_state
-        self._final_physics_state = final_physics_state
+        # Under an enclosing transformation these are tracers, and storing
+        # them poisons the model: the next ``resume`` would thread a value
+        # that escaped its trace back into a new one and raise
+        # ``UnexpectedTracerError`` far from the cause. The run itself is
+        # fine — its results are returned, not read back off the model — so
+        # record that there is no carry rather than keeping a broken one.
+        if _contains_tracers((final_dycore_state, final_physics_state)):
+            self._final_dycore_state = None
+            self._final_physics_state = None
+            self._carry_was_traced = True
+        else:
+            self._final_dycore_state = final_dycore_state
+            self._final_physics_state = final_physics_state
+            self._carry_was_traced = False
         return predictions
 
     def run(self,
@@ -1392,3 +1423,6 @@ class Model:
         # available as a checkpoint-restore template and to any caller that
         # wants to inspect / mutate the seed state before stepping.
         self._final_physics_state = self._build_initial_physics_carry()
+        # An explicit state is a fresh, concrete carry: whatever a previous
+        # traced run left behind no longer applies.
+        self._carry_was_traced = False

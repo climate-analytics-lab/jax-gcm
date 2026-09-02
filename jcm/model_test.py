@@ -1002,6 +1002,55 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
         preds = model.run(save_interval=1 / 48.0, total_time=1 / 24.0)
         self.assertAlmostEqual(preds.params[key], 2.0, places=6)
 
+    def test_a_traced_run_leaves_no_carry_on_the_model(self):
+        """Running an existing model under a jit must not poison it.
+
+        ``run``/``resume`` store the final dycore and physics states so a
+        later ``resume`` can continue from them. Under an enclosing
+        transformation those are tracers, and keeping them would let a
+        value escape its trace: the next ``resume`` threads it into a new
+        one and raises ``UnexpectedTracerError`` somewhere far from the
+        cause. The run itself is fine, since its results are returned
+        rather than read back off the model, so the carry is dropped and
+        the next ``resume`` says why.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        model.bootstrap_state(None)
+        state = model._final_dycore_state
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+
+        value = float(jax.jit(lambda s: jnp.mean(
+            model.run(s, **kw).dynamics.temperature))(state))
+        self.assertTrue(np.isfinite(value))
+        self.assertIsNone(model._final_dycore_state)
+
+        with self.assertRaises(ValueError) as caught:
+            model.resume(**kw)
+        self.assertIn("run_from_state_with_carry", str(caught.exception))
+
+        # ...and the model is not permanently broken: an explicit state
+        # gives it a concrete carry again.
+        model.run(state, **kw)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
+    def test_an_ordinary_run_still_carries_into_resume(self):
+        """The guard must not disturb the untransformed path."""
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        model.run(**kw)
+        self.assertIsNotNone(model._final_dycore_state)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
     @pytest.mark.slow
     def test_gradient_flows_through_a_model_built_inside_the_jit(self):
         """The calibration loop's actual shape: ``jit(grad(loss))``.
