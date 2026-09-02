@@ -253,17 +253,17 @@ The simplest path is to hand :meth:`~jcm.model.Model.run` a
        total_time=10.0
    )
 
-For the common starting states there are ready-made *injectors* in
+For the common starting states there are ready-made *state builders* in
 :mod:`jcm.initial_states` — the same ones the CLI's ``init`` config group
-exposes. Each one mutates the model's stored initial dycore state in place, so
-the call pattern is **build the model → inject → resume** (see below).
+exposes. Each one **returns** a starting state; hand it to
+:meth:`~jcm.model.Model.run` via ``initial_state=``.
 
 .. code-block:: python
 
    from jcm.model import Model
    from jcm.terrain import TerrainData
    from jcm.physics.echam.echam_terms import echam_physics
-   from jcm.initial_states import inject_jw_profile
+   from jcm.initial_states import jw_state
 
    coords = ...                       # your CoordinateSystem
    terrain = TerrainData.from_coords(coords)
@@ -271,37 +271,35 @@ the call pattern is **build the model → inject → resume** (see below).
 
    # Jablonowski–Williamson-style lapse-rate atmosphere at 60 % RH,
    # with surface pressure rebalanced over the orography.
-   inject_jw_profile(model, rh=0.6)
+   predictions = model.run(
+       initial_state=jw_state(model, rh=0.6),
+       total_time=10.0, save_interval=1.0,
+   )
 
-   predictions = model.resume(total_time=10.0, save_interval=1.0)
+The other builders follow the identical pattern:
 
-.. important::
-
-   Follow an injector with :meth:`~jcm.model.Model.resume`, **not**
-   :meth:`~jcm.model.Model.run`. ``run`` rebuilds the default isothermal
-   rest state on entry and would discard whatever you just injected;
-   ``resume`` continues from the current stored state.
-
-The other injectors follow the identical pattern:
-
-* :func:`~jcm.initial_states.inject_balanced_isothermal_profile` — a uniform
+* :func:`~jcm.initial_states.balanced_isothermal_state` — a uniform
   288 K rest state with the same orography-balanced surface pressure; a robust
   spin-up state for moist physics over real terrain.
-* :func:`~jcm.initial_states.inject_era5_state` ``(model, date)`` — seed from an
-  ERA5 (WeatherBench2) slice at an ISO date, regridded via :mod:`jcm.data.era5`.
-* :func:`~jcm.initial_states.inject_checkpoint_state` ``(model, path)`` — a
+* :func:`~jcm.initial_states.era5_state` ``(coords, date)`` — a ``PhysicsState``
+  seeded from an ERA5 (WeatherBench2) slice at an ISO date, regridded via
+  :mod:`jcm.data.era5` (re-exported here for discoverability).
+* :func:`~jcm.initial_states.checkpoint_state` ``(model, path)`` — a
   **warm start** from a saved state (e.g. a hosted equilibrated state under
-  ``bundles/<grid>_<levels>/init_states/``). Unlike a checkpoint *resume* the
-  donor's elapsed-day count is discarded, so the clock starts at the model's
-  ``start_date`` — this skips the ~9-month from-cold spin-up without inheriting
-  the donor run's calendar:
+  ``bundles/<grid>_<levels>/init_states/``). It returns ``(state, donor_days)``;
+  unlike a checkpoint *resume* the donor's elapsed-day count is discarded, so
+  the clock starts at the model's ``start_date`` — this skips the ~9-month
+  from-cold spin-up without inheriting the donor run's calendar:
 
   .. code-block:: python
 
-     from jcm.initial_states import inject_checkpoint_state
+     from jcm.initial_states import checkpoint_state
 
-     inject_checkpoint_state(model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
-     predictions = model.resume(forcing=forcing, total_time='1 year', save_interval='1 day')
+     state, _ = checkpoint_state(
+         model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
+     predictions = model.run(
+         initial_state=state, forcing=forcing,
+         total_time='1 year', save_interval='1 day')
 
   (Restoring a *checkpoint* to continue a preempted run of your own — keeping
   the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`
