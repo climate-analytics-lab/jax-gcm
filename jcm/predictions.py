@@ -100,27 +100,32 @@ class ModelPredictions:
     def _check_live_matches_traced(traced, physics):
         """Return *traced*, flagging a live/compiled parameter divergence.
 
-        A mismatch means the caller changed a parameter in place and jcm
-        silently ignored it: the model rebinds parameters only when the
-        jit retraces, so the run used the compiled values (#735). That is
-        a scientific error the user needs told about, not something for
-        provenance to paper over by quietly recording the compiled values
-        and moving on.
+        A mismatch means the caller edited a parameter in place after the
+        model was first compiled with a different value. jcm binds physics
+        parameters when the physics is first traced (``Model`` is a static
+        jit argument), and whether a later edit reaches a later run depends
+        on which of JAX's compilation caches that run hits (#735), so the
+        results are unreliable either way. That is a scientific error the
+        user needs told about, not something for provenance to paper over
+        by quietly recording the compiled values and moving on.
         """
         live = provenance.describe_params(physics)
         if live == traced:
             return traced
         logger.warning(
-            "provenance: the live parameters differ from those compiled "
-            "into this run. jcm binds physics parameters at trace time "
-            "(Model._run_from_state takes `self` as a static argument), so "
-            "an in-place parameter change after the first run does NOT "
-            "affect the computation. The record reports the values that "
-            "actually ran. Rebuild the Model to change parameters.")
+            "provenance: the live parameters differ from those this model "
+            "was first compiled with. jcm binds physics parameters when the "
+            "physics is first traced (Model._run_from_state takes `self` as "
+            "a static argument), and an in-place parameter change afterwards "
+            "may or may not reach a later run, depending on JAX's "
+            "compilation caches. Results after such a change are therefore "
+            "unreliable, whatever this record says. Rebuild the Model to "
+            "change parameters.")
         flagged = dict(traced)
         flagged["live_parameters_differ_from_compiled"] = (
-            "in-place parameter changes did not reach this run; the record "
-            "holds the compiled values")
+            "parameters were edited in place after this model was first "
+            "compiled; the record holds the first-compiled values and the "
+            "run's results are unreliable")
         return flagged
 
     @property

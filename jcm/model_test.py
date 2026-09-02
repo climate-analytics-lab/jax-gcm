@@ -911,3 +911,117 @@ class TestLegacyPathRemoved(unittest.TestCase):
             f"Legacy identifiers must be fully removed; found: {lines}",
         )
 
+
+
+class TestParameterBindingAndCompilation(unittest.TestCase):
+    """Physics parameters are bound into the executable at trace time.
+
+    ``Model._run_from_state`` takes ``self`` as a static jit argument, so
+    every physics term and its parameters are constants inside the
+    compiled executable, bound when the physics is first traced. Editing
+    a live model's parameters afterwards is not reliably picked up by a
+    later run (#735, and the warning ``ModelPredictions`` raises when it
+    sees it). The supported way to vary a parameter is therefore to build
+    a Model per parameter set — inside one jitted function, so the
+    rebuild is a trace-time cost paid once instead of a recompile per
+    iteration. These tests pin that pattern, which is what a sensitivity
+    sweep or a gradient-based calibration loop is made of.
+    """
+
+    def setUp(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+
+    def _mean_temperature(self, albsea, traces=None):
+        """Mean T of a 2-hour SPEEDY forecast at a given sea albedo.
+
+        Built the way a calibration loop must build it: the parameter is
+        an argument, the Model is constructed from it here rather than
+        mutated afterwards.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        if traces is not None:
+            traces.append(albsea)  # Python side effect: once per trace.
+        params = Parameters.default()
+        params = params.replace(
+            mod_radcon=params.mod_radcon.replace(albsea=albsea))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 12.0)
+        return jnp.mean(preds.dynamics.temperature)
+
+    def test_run_works_inside_an_outer_jit(self):
+        """``jax.jit`` around ``model.run`` compiles once and stays exact.
+
+        A regression test for #735: provenance briefly returned a trace
+        id from the jitted run and read it with ``int()``, which is a
+        concrete value only when ``run`` is called outside any enclosing
+        transformation. Wrapping a run in ``jax.jit`` — the whole point
+        of a calibration loop, since it turns a per-iteration recompile
+        into a per-iteration executable reuse — raised
+        ``ConcretizationTypeError``. Nothing on the ``run`` path may
+        require a concrete value from the jitted computation.
+        """
+        traces = []
+        jitted = jax.jit(
+            lambda albsea: self._mean_temperature(albsea, traces))
+
+        cold = float(jitted(jnp.float32(0.02)))
+        bright = float(jitted(jnp.float32(0.9)))
+
+        # One trace for both parameter values: the second call reuses the
+        # executable rather than rebuilding and recompiling the model.
+        self.assertEqual(len(traces), 1)
+        # ...and the parameter still reaches the computation, so the
+        # reuse is not the silent no-op an in-place edit would be. A
+        # brighter ocean reflects more shortwave; over two hours that is
+        # a small but unambiguous change in the global mean.
+        self.assertGreater(abs(cold - bright), 1e-4)
+
+    def test_predictions_record_the_parameters_that_ran(self):
+        """Provenance survives the loss of the trace id (#732 via #735)."""
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        key = "speedy_vertical_diffusion.params.trvdi"
+        params = Parameters.default()
+        params = params.replace(
+            vertical_diffusion=params.vertical_diffusion.replace(
+                trvdi=jnp.array(2.0)))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 24.0)
+        self.assertAlmostEqual(preds.params[key], 2.0, places=6)
+
+    @pytest.mark.slow
+    def test_gradient_flows_through_a_model_built_inside_the_jit(self):
+        """The calibration loop's actual shape: ``jit(grad(loss))``.
+
+        Rebuilding the Model inside the traced function is what makes the
+        parameter a traced value rather than a baked-in constant, so the
+        gradient with respect to it is the gradient of the forecast, and
+        one compilation serves every optimizer iteration.
+        """
+        traces = []
+        target = float(self._mean_temperature(jnp.float32(0.5)))
+
+        def loss(albsea):
+            return (self._mean_temperature(albsea, traces) - target) ** 2
+
+        grad_loss = jax.jit(jax.grad(loss))
+        g1 = float(grad_loss(jnp.float32(0.2)))
+        g2 = float(grad_loss(jnp.float32(0.8)))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(jnp.isfinite(g1) and jnp.isfinite(g2))
+        # Either side of the target the pull is in opposite directions,
+        # so a flat response (the signature of a parameter that never
+        # reached the computation) fails here.
+        self.assertLess(g1 * g2, 0.0)
