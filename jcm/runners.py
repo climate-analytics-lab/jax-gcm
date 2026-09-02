@@ -609,7 +609,10 @@ def _state_from_file(model: Model, cfg: DictConfig):
     collides with ``run.checkpoint_path`` (the first-chunk checkpoint would
     overwrite the donor init state), then delegates to
     :func:`jcm.initial_states.checkpoint_state` for the load and clock-reset
-    semantics. Returns the loaded dycore state for the caller to run.
+    semantics. Returns ``(state, physics_carry)`` for the caller to hand to
+    ``model.run(initial_state=..., initial_physics_state=...)`` — the donor's
+    physics carry is threaded through so the warm start keeps its radiation
+    sub-cycle cache / prior-step TKE rather than resetting them.
     """
     from jcm.initial_states import checkpoint_state
 
@@ -621,12 +624,12 @@ def _state_from_file(model: Model, cfg: DictConfig):
             "first chunk checkpoint would overwrite the donor init state. "
             "Give the run its own checkpoint_path."
         )
-    state, days = checkpoint_state(model, path)
+    state, physics_carry, days = checkpoint_state(model, path)
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,
     )
-    return state
+    return state, physics_carry
 
 
 def _state_from_era5(model: Model, cfg: DictConfig):
@@ -1407,18 +1410,23 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
         )
+    # A warm start (from_state) carries the donor's physics carry through to
+    # ``run``; every other init builds a fresh carry (initial_physics_state
+    # stays None).
+    initial_physics_state = None
     if cfg.init.kind == "jw":
         initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
     elif cfg.init.kind == "balanced_isothermal":
         initial_state = balanced_isothermal_state(model)
     elif cfg.init.kind == "from_state":
-        initial_state = _state_from_file(model, cfg)
+        initial_state, initial_physics_state = _state_from_file(model, cfg)
     elif cfg.init.kind == "era5":
         initial_state = _state_from_era5(model, cfg)
     else:
         raise ValueError(f"Unknown init.kind={cfg.init.kind!r}")
     return model.run(
         initial_state=initial_state,
+        initial_physics_state=initial_physics_state,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
         total_time=cfg.run.total_time,
@@ -1614,6 +1622,9 @@ def run_chunked(
             # (isothermal) path's ``model.run`` does. ``init=era5`` must be
             # handled here too: the chunked dispatch returns before
             # ``_run_full``'s init ladder runs.
+            # from_state warm starts thread the donor's physics carry into
+            # the first chunk's ``run``; all other inits build a fresh carry.
+            initial_physics_state = None
             if cfg.init.kind == "jw":
                 initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
             elif cfg.init.kind == "balanced_isothermal":
@@ -1621,11 +1632,12 @@ def run_chunked(
             elif cfg.init.kind == "era5":
                 initial_state = _state_from_era5(model, cfg)
             elif cfg.init.kind == "from_state":
-                initial_state = _state_from_file(model, cfg)
+                initial_state, initial_physics_state = _state_from_file(model, cfg)
             else:
                 initial_state = None
             preds = model.run(
                 initial_state=initial_state,
+                initial_physics_state=initial_physics_state,
                 forcing=forcing,
                 save_interval=save_interval,
                 total_time=cur_chunk,

@@ -286,20 +286,24 @@ The other builders follow the identical pattern:
   :mod:`jcm.data.era5` (re-exported here for discoverability).
 * :func:`~jcm.initial_states.checkpoint_state` ``(model, path)`` — a
   **warm start** from a saved state (e.g. a hosted equilibrated state under
-  ``bundles/<grid>_<levels>/init_states/``). It returns ``(state, donor_days)``;
-  unlike a checkpoint *resume* the donor's elapsed-day count is discarded, so
-  the clock starts at the model's ``start_date`` — this skips the ~9-month
-  from-cold spin-up without inheriting the donor run's calendar:
+  ``bundles/<grid>_<levels>/init_states/``). It returns
+  ``(state, physics_carry, donor_days)``; unlike a checkpoint *resume* the
+  donor's elapsed-day count is discarded, so the clock starts at the model's
+  ``start_date`` — this skips the ~9-month from-cold spin-up without
+  inheriting the donor run's calendar. Pass ``physics_carry`` to
+  ``initial_physics_state`` so the warm start keeps the donor's cross-step
+  physics carry (radiation sub-cycle cache, prior-step TKE) rather than
+  resetting it at the run seam:
 
   .. code-block:: python
 
      from jcm.initial_states import checkpoint_state
 
-     state, _ = checkpoint_state(
+     state, physics_carry, _ = checkpoint_state(
          model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
      predictions = model.run(
-         initial_state=state, forcing=forcing,
-         total_time='1 year', save_interval='1 day')
+         initial_state=state, initial_physics_state=physics_carry,
+         forcing=forcing, total_time='1 year', save_interval='1 day')
 
   (Restoring a *checkpoint* to continue a preempted run of your own — keeping
   the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`

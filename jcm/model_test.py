@@ -841,6 +841,67 @@ class TestOperatorSplitPhysics(unittest.TestCase):
             "integration consumed",
         )
 
+    def test_run_threads_supplied_initial_physics_state(self):
+        """``run(initial_physics_state=...)`` seeds the integration with the
+        given carry instead of rebuilding a fresh one.
+
+        A warm start off a donor checkpoint wants the donor's radiation
+        sub-cycle cache / prior-step TKE preserved across the run seam rather
+        than reset. ``run`` replaces the freshly-built carry with the supplied
+        one after ``bootstrap_state`` and before the first ``resume``. We spy
+        on ``run_from_state_with_carry`` — the seam ``resume`` delegates to —
+        to capture the carry the integration actually receives, and check that
+        supplying a stamped carry threads it through while the default rebuilds
+        a fresh (unstamped) one.
+        """
+        import numpy as np
+
+        model = self._speedy_model()
+
+        captured = {}
+        original = model.run_from_state_with_carry
+
+        def spy(initial_state, forcing, **kwargs):
+            captured["carry"] = kwargs.get("initial_physics_state")
+            return original(initial_state, forcing, **kwargs)
+
+        model.run_from_state_with_carry = spy
+
+        # A carry structurally matching what the model builds, with a
+        # recognizable stamp added to every floating-point leaf (integer
+        # leaves are left alone so the pytree stays valid).
+        fresh = model._build_initial_physics_carry()
+        stamped = jax.tree_util.tree_map(
+            lambda x: x + 0.0123
+            if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x,
+            fresh,
+        )
+        model.run(
+            initial_physics_state=stamped,
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+        )
+        threaded = captured["carry"]
+        self.assertIsNotNone(threaded, "run did not thread a carry to the seam")
+        # The integration receives exactly the carry we supplied.
+        for got, want in zip(jax.tree_util.tree_leaves(threaded),
+                             jax.tree_util.tree_leaves(stamped)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+        # ... and it is genuinely the stamped carry, not the fresh rebuild.
+        differs = any(
+            not np.allclose(np.asarray(a), np.asarray(b))
+            for a, b in zip(jax.tree_util.tree_leaves(stamped),
+                            jax.tree_util.tree_leaves(fresh))
+        )
+        self.assertTrue(differs, "stamp was a no-op — test would be vacuous")
+
+        # Default: no initial_physics_state -> the freshly-built carry.
+        captured.clear()
+        model.run(save_interval=1 / 48.0, total_time=1 / 48.0)
+        default_carry = captured["carry"]
+        for got, want in zip(jax.tree_util.tree_leaves(default_carry),
+                             jax.tree_util.tree_leaves(fresh)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+
 
 class TestLegacyPathRemoved(unittest.TestCase):
     """Phase 4 of #471: legacy inside-RK physics path is gone.

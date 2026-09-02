@@ -81,13 +81,15 @@ def test_era5_state_reexport_is_accepted_by_run(monkeypatch):
 
 
 def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
-    """``checkpoint_state`` returns ``(state, donor_days)`` with a zeroed clock.
+    """``checkpoint_state`` returns ``(state, physics_carry, donor_days)``.
 
     A donor checkpoint written with a nonzero elapsed sim-time must load its
     fields yet reset the *returned* dycore clock to zero (dates, forcing
     interpolation and output timestamps all derive from sim_time). The donor's
-    elapsed-day count is returned for logging.
+    elapsed-day count is returned for logging, and its cross-step physics carry
+    is returned so a warm start can keep it rather than reset it.
     """
+    import jax
     import jax.numpy as jnp
 
     from jcm.checkpoint import save_checkpoint
@@ -101,13 +103,43 @@ def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
         donor._final_dycore_state,
         jnp.full_like(donor_sim_time, 5.0 * 86400.0),
     )
+    # Stamp the donor's physics carry with a recognizable value so we can prove
+    # the restored carry — not a fresh rebuild — is what threads into the run.
+    donor._final_physics_state = jax.tree_util.tree_map(
+        lambda x: jnp.full_like(x, 0.0456), donor._final_physics_state
+    )
     ckpt = tmp_path / "donor.ckpt"
     save_checkpoint(donor, ckpt, elapsed_days=5.0)
 
     warm = _held_suarez_model()
-    state, days = checkpoint_state(warm, str(ckpt))
+    state, physics_carry, days = checkpoint_state(warm, str(ckpt))
 
     assert days == pytest.approx(5.0)
     # The RETURNED state carries the zeroed clock.
     reset_sim_time = np.asarray(warm.dycore.sim_time(state))
     np.testing.assert_allclose(reset_sim_time, 0.0)
+
+    # The RETURNED physics carry is the donor's restored carry (stamped value),
+    # structurally matching what this model builds.
+    carry_leaves = jax.tree_util.tree_leaves(physics_carry)
+    assert carry_leaves
+    for leaf in carry_leaves:
+        np.testing.assert_allclose(np.asarray(leaf), 0.0456)
+
+    # And it survives into the run seam: ``run(initial_physics_state=...)``
+    # threads the donor carry through instead of rebuilding a fresh one.
+    captured = {}
+    original = warm.run_from_state_with_carry
+
+    def spy(initial_state, forcing, **kwargs):
+        captured["carry"] = kwargs.get("initial_physics_state")
+        return original(initial_state, forcing, **kwargs)
+
+    warm.run_from_state_with_carry = spy
+    dt_days = 180.0 / 86400.0
+    warm.run(
+        initial_state=state, initial_physics_state=physics_carry,
+        save_interval=dt_days, total_time=dt_days,
+    )
+    for leaf in jax.tree_util.tree_leaves(captured["carry"]):
+        np.testing.assert_allclose(np.asarray(leaf), 0.0456)
