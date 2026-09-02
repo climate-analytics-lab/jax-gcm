@@ -608,10 +608,12 @@ def radiation_scheme_rrtmgp(
     # the high end of realistic in-cloud water, so genuine clouds are untouched
     # and only the pathological inflation is clipped.
     cloud_water_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_water, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE
+        in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
+        _MAX_IN_CLOUD_CONDENSATE,
     )
     cloud_ice_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_ice, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE
+        in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
+        _MAX_IN_CLOUD_CONDENSATE,
     )
 
     icon_state = prepare_radiation_state(

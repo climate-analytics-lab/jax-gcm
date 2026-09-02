@@ -8,6 +8,7 @@ Date: 2025-01-10
 
 import math
 import jax.numpy as jnp
+import numpy as np
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
@@ -816,3 +817,62 @@ def test_radiation_scheme_reproducibility():
             assert tendencies_1.temperature_tendency.shape == tendencies.temperature_tendency.shape
             assert tendencies_1.longwave_heating.shape == tendencies.longwave_heating.shape
             assert tendencies_1.shortwave_heating.shape == tendencies.shortwave_heating.shape
+
+
+def test_cld_frac_min_override_changes_in_cloud_masking():
+    """``RadiationParameters.cld_frac_min`` is wired into ``in_cloud_path``.
+
+    A thin-but-resolved cloud (cf between the default and an overridden
+    ``2*eps``) is KEPT at the default cld_frac_min but ZEROED once the
+    threshold is raised above its cover, so the in-cloud path (and hence the
+    cloud optics and the fluxes) must change. This is what proves the
+    parameter reaches ``mcica.in_cloud_path`` rather than sitting dead.
+    """
+    nlev = 8
+    atm = create_test_atmosphere(nlev=nlev)
+    # Replace the default 0.5-cover cloud with a thin cloud at cf = 5e-3.
+    # Default eps = 1e-3 -> 2*eps = 2e-3, so cf = 5e-3 is a real cloud;
+    # eps = 1e-2 -> 2*eps = 2e-2, so cf = 5e-3 now reads as clear and its
+    # in-cloud path is zeroed.
+    cf = jnp.zeros(nlev).at[nlev // 2].set(5e-3)
+    cw = jnp.zeros(nlev).at[nlev // 2].set(1e-4)
+    ci = jnp.zeros(nlev).at[nlev // 2].set(5e-5)
+
+    air_density = calculate_air_density(atm['pressure_levels'], atm['temperature'])
+    layer_thickness = calculate_layer_thickness(
+        atm['pressure_levels'], atm['temperature'])
+    date = jdt.Datetime.from_pydatetime(datetime(2025, 6, 21, 12, 0, 0))
+
+    def run(cld_frac_min):
+        parameters = RadiationParameters.default(cld_frac_min=cld_frac_min)
+        aerosol_data = create_default_aerosol_data(
+            nlev=nlev, parameters=parameters, ncols=1)
+        _, diag = radiation_scheme(
+            temperature=atm['temperature'],
+            specific_humidity=atm['specific_humidity'],
+            pressure_levels=atm['pressure_levels'],
+            pressure_interfaces=atm['pressure_interfaces'],
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=cw,
+            cloud_ice=ci,
+            cloud_fraction=cf,
+            solar=_solar_from_dt(date),
+            latitude=0.0,
+            longitude=0.0,
+            parameters=parameters,
+            aerosol_data=aerosol_data,
+            surface_albedo_nir=jnp.array([0.2]),
+            surface_albedo_vis=jnp.array([0.2]),
+            surface_emissivity=jnp.array([0.95]),
+            surface_temperature=jnp.array([288.0]),
+        )
+        return diag
+
+    diag_default = run(1e-3)   # cloud kept
+    diag_raised = run(1e-2)    # cloud zeroed as clear
+
+    # The masking change must move the shortwave TOA reflection: with the
+    # cloud zeroed, less is reflected, so the two runs cannot be identical.
+    assert not np.allclose(
+        np.array(diag_default.toa_sw_up), np.array(diag_raised.toa_sw_up))

@@ -385,9 +385,11 @@ def radiation_scheme(
     # gpoint count makes per-gpoint sub-columns effectively free.
     in_cloud_lwp = in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
     in_cloud_ipath = in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
 
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(

@@ -52,7 +52,10 @@ class RadiationParameters:
 
     # Cloud optics parameters
     cld_tau_min: float       # Minimum cloud optical depth
-    cld_frac_min: float      # Minimum cloud fraction
+    # Minimum cloud fraction: the ``eps`` floor in ``mcica.in_cloud_path``
+    # (grid-mean / max(cf, eps), with the in-cloud path zeroed where
+    # cf <= 2*eps). Read by the RRTMGP and grey two-stream schemes.
+    cld_frac_min: float
 
     # Cloud overlap selector for partial-cloud radiation. 0 = random,
     # 1 = maximum_random (Geleyn-Hollingsworth), 2 = exponential
