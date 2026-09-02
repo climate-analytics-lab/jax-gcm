@@ -150,12 +150,69 @@ def _compose_preset(overrides: list[str]):
         return compose(config_name="config", overrides=overrides)
 
 
+def _load_bundle_names():
+    """Load ``jcm.data.bundle_names`` WITHOUT importing the ``jcm`` package.
+
+    Same rationale (and mechanism) as :func:`_hf_fetch`: reaching the module as
+    ``from jcm.data.bundle_names import ...`` executes ``jcm/__init__.py``,
+    which initialises a JAX backend and preallocates ~75 % of the device the
+    instant it is touched — before the free-GPU gate. ``bundle_names.py`` has
+    no intra-package imports (that is a maintained invariant), so loading it by
+    file path is safe and keeps the auto-bundle naming convention a single
+    source of truth shared with ``jcm.runners``.
+    """
+    import importlib.util
+    src = REPO / "jcm" / "data" / "bundle_names.py"
+    spec = importlib.util.spec_from_file_location("_jcm_bundle_names", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _auto_emission_files(cfg) -> list[str]:
+    """``hf://`` bundles the JAM ``auto`` emission default resolves to.
+
+    :func:`_preset_data_files` collects only the LITERAL paths in the composed
+    config, but the four prescribed-emission keys default to ``auto`` and are
+    resolved lazily by ``jcm.runners`` during model construction — i.e. AFTER
+    the GPU is claimed and the telemetry sampler is running. Enumerate them here
+    (from the same ``jcm.data.bundle_names`` convention the runner uses) so they
+    join the pre-GPU prefetch: an unreachable or non-existent bundle then
+    refuses the run up front instead of stalling on a held card.
+
+    Mirrors ``jcm.runners._resolve_one_emission_input``: ``auto`` supplies a
+    bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
+    non-JAM package consumes no emissions, and the pySES backend's native grids
+    are not the spectral-token bundles — both resolve ``auto`` to nothing. A key
+    explicitly set to a path/``null`` in the preset is honoured (the literal
+    path is already picked up by ``_preset_data_files``; ``null`` opts out).
+    """
+    phys = cfg.get("physics") or {}
+    if str(phys.get("aerosol_module", "")) != "jam":
+        return []
+    if str((cfg.get("dycore") or {}).get("name", "")) == "pyses":
+        return []
+    grid = cfg.get("grid") or {}
+    trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
+    if trunc is None or nlev is None:
+        return []
+    names = _load_bundle_names()
+    forcing = cfg.get("forcing") or {}
+    token = names.grid_token(trunc)
+    return [path
+            for key, path in names.auto_emission_bundle_paths(
+                token, nlev).items()
+            if str(forcing.get(key, "auto")) == "auto"]
+
+
 def _preset_data_files(overrides: list[str]) -> list[str]:
-    """Explicit prescribed-input paths (hf:// or local) a preset resolves to.
+    """Prescribed-input paths (hf:// or local) a preset resolves to.
 
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
     ``file`` and returns the concrete paths, skipping ``auto``/``null``/``none``
-    (resolved lazily at build time) and unset ``???`` values.
+    (resolved lazily at build time) and unset ``???`` values — then ADDS the
+    ``auto`` emission bundles a JAM preset resolves lazily (see
+    :func:`_auto_emission_files`), which the ``file``-key walk cannot see.
     """
     from omegaconf import OmegaConf
     cfg = _compose_preset(overrides)
@@ -179,6 +236,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
         for k, v in cont.items():
             if str(k).endswith("file"):
                 _add(v)
+    out += _auto_emission_files(cfg)
     return out
 
 

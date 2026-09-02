@@ -29,6 +29,7 @@ import jax
 from omegaconf import DictConfig
 
 from jcm import provenance
+from jcm.data import bundle_names
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
@@ -879,20 +880,12 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 # Forcing
 # ---------------------------------------------------------------------------
 
-#: Prescribed-emission forcing keys that honour the ``auto`` convention and the
-#: ``{grid}``/``{nlev}`` placeholders. ``auto`` resolves to the per-grid HF
-#: bundle when a prognostic-aerosol (JAM) package is active. Value is
-#: ``(subdir_suffix, filename)``: ``""`` is the horizontal bundle
-#: (``bundles/<grid>/``), ``"_l{nlev}"`` the level-resolved one
-#: (``bundles/<grid>_l<nlev>/``) — matching the mirror layout in
-#: docs/source/design/data_mirror.md. ``emissions_pd``/``oxidants_pd`` are the
-#: present-day climatology members.
-_EMISSION_AUTO_BUNDLES = {
-    "emissions_file": ("", "emissions_pd.nc"),
-    "dms_file": ("", "dms.nc"),
-    "dust_file": ("", "dust.nc"),
-    "oxidants_file": ("_l{nlev}", "oxidants_pd.nc"),
-}
+#: The ``auto`` emission-bundle naming convention lives in
+#: :mod:`jcm.data.bundle_names` (a jcm-import-free module) so the build-time
+#: resolver here and the benchmark's pre-GPU prefetch enumerator share one
+#: source of truth. ``auto`` resolves to the per-grid HF bundle when a
+#: prognostic-aerosol (JAM) package is active.
+_EMISSION_AUTO_BUNDLES = bundle_names.EMISSION_AUTO_BUNDLES
 
 
 def _resolve_grid_placeholders(path, coords):
@@ -931,10 +924,8 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     if value == "auto":
         if is_pyses or not jam:
             return None
-        subdir, name = _EMISSION_AUTO_BUNDLES[key]
-        token = _grid_token(coords)
-        nlev = int(coords.nodal_shape[0])
-        hf = f"hf://bundles/{token}{subdir.format(nlev=nlev)}/{name}"
+        hf = bundle_names.emission_bundle_path(
+            key, _grid_token(coords), int(coords.nodal_shape[0]))
         try:
             return _resolve_data_path(hf)
         except FileNotFoundError as e:
@@ -1094,7 +1085,8 @@ def _grid_token(coords) -> str:
     uses), so no hand-maintained table can go stale; whether the mirror
     actually carries the grid is decided by the fetch itself.
     """
-    return f"t{int(coords.horizontal.total_wavenumbers) - 2}"
+    return bundle_names.grid_token(
+        int(coords.horizontal.total_wavenumbers) - 2)
 
 
 def _resolve_auto_ozone(coords):
