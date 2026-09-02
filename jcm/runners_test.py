@@ -2172,6 +2172,38 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 build_forcing(cfg, coords)
         self.assertIn("hf://bundles/t42/", str(ctx.exception))
 
+    def test_t119_jam_experiment_resolves_emission_free(self):
+        """The ma-t119 experiments run emission-free (Codex P1).
+
+        T119 has no mirror bundle, so the JAM ``auto`` default cannot resolve
+        the four emission keys (bundles/t119/*.nc do not exist and the fetch
+        would abort build_forcing). The experiment yamls null the keys
+        explicitly; assert the resolver then requests NO fetch and yields None,
+        so ``python -m jcm.main +experiment=ma-t119-l47`` is one command.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        for name in ("ma-t119-l47", "ma-t119-l95"):
+            with self.subTest(name):
+                cfg = _compose([f"+experiment={name}"])
+                coords = build_coords(cfg)
+                calls = []
+
+                def _record(path):
+                    calls.append(path)
+                    raise AssertionError("no emission fetch expected")
+
+                with mock.patch.object(runners, "_resolve_data_path",
+                                       side_effect=_record):
+                    out = runners._resolve_emission_inputs(
+                        cfg.forcing, cfg, coords, is_pyses=False)
+                self.assertEqual(calls, [])
+                for key in ("emissions_file", "dms_file", "dust_file",
+                            "oxidants_file"):
+                    self.assertIsNone(out.get(key))
+
     def test_grid_and_year_placeholders_resolve_end_to_end(self):
         """``{grid}`` + ``{year}`` in an emissions path survive to the loader.
 
