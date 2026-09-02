@@ -911,31 +911,21 @@ def _pyses_default_bc(filename: str) -> str:
 
 
 def _pyses_lid_sponge_term(dycore, sponge_cfg):
-    """Finite-lid sponge: USSA T relaxation + implicit Rayleigh wind drag.
+    """Config adapter for the pySES finite-lid sponge term.
 
-    The USSA-1976 reference temperature is evaluated at the level reference
-    mid-pressures of the dycore's own hybrid grid — the same profile the
-    backend's resting initial state uses, so the relaxation target is
-    consistent with the initialization.
+    Reads the sponge config keys and builds the term via
+    :meth:`jcm.physics.dissipation.upper_temperature_relaxation.UpperTemperatureRelaxation.from_ussa`,
+    which evaluates the USSA-1976 reference temperature on the dycore's own
+    hybrid grid.
     """
-    import numpy as np
-
-    from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
     from jcm.physics.dissipation.upper_temperature_relaxation import (
         UpperTemperatureRelaxation,
     )
 
-    a = np.asarray(dycore.coords.vertical.a_boundaries, dtype=float)
-    b = np.asarray(dycore.coords.vertical.b_boundaries, dtype=float)
-    p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * 101325.0
-    zs = np.linspace(0.0, 84000.0, 4000)
-    ps = np.asarray(ussa_pressure(zs))
-    z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
-    t_ref = np.asarray(ussa_temperature(z_of_p))
-
     uv_hours = float(sponge_cfg.get("uv_hours", 0.0) or 0.0)
-    return UpperTemperatureRelaxation(
-        t_ref,
+    return UpperTemperatureRelaxation.from_ussa(
+        dycore.coords.vertical.a_boundaries,
+        dycore.coords.vertical.b_boundaries,
         n_levels=int(sponge_cfg.get("levels", 8)),
         timescale_s=float(sponge_cfg.get("t_hours", 6.0)) * 3600.0,
         wind_timescale_s=(uv_hours * 3600.0 if uv_hours > 0 else None),

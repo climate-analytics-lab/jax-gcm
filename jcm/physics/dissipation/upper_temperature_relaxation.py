@@ -112,6 +112,36 @@ class UpperTemperatureRelaxation(PhysicsTerm):
         self.damps_wind = wind_timescale_s is not None
         self.n_levels = int(n_levels)
 
+    @classmethod
+    def from_ussa(cls, a_boundaries, b_boundaries, *, n_levels: int,
+                  timescale_s: float, wind_timescale_s: float | None = None,
+                  p0: float = 101325.0) -> "UpperTemperatureRelaxation":
+        """Build the term with a U.S. Standard Atmosphere reference profile.
+
+        The USSA-1976 reference temperature is evaluated at the level
+        reference mid-pressures of the hybrid grid described by
+        ``a_boundaries`` / ``b_boundaries`` — the same profile the backend's
+        resting initial state uses, so the relaxation target is consistent
+        with the initialization. The mid-pressures are mapped to heights by
+        interpolating the USSA pressure profile in log-p over
+        ``z ∈ [0, 84000] m``, and the USSA temperature is read off there.
+        """
+        from jcm.initial_states.ussa1976 import ussa_pressure, ussa_temperature
+
+        a = np.asarray(a_boundaries, dtype=float)
+        b = np.asarray(b_boundaries, dtype=float)
+        p_mid = 0.5 * (a[:-1] + a[1:]) + 0.5 * (b[:-1] + b[1:]) * p0
+        zs = np.linspace(0.0, 84000.0, 4000)
+        ps = np.asarray(ussa_pressure(zs))
+        z_of_p = np.interp(np.log(p_mid), np.log(ps[::-1]), zs[::-1])
+        t_ref = np.asarray(ussa_temperature(z_of_p))
+        return cls(
+            t_ref,
+            n_levels=int(n_levels),
+            timescale_s=float(timescale_s),
+            wind_timescale_s=wind_timescale_s,
+        )
+
     def __call__(
         self,
         state: PhysicsState,
