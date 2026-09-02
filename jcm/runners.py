@@ -136,16 +136,16 @@ def build_coords(cfg: DictConfig):
             spmd_mesh=spmd_mesh,
         )
     if vertical == "hybrid":
-        # ICON ships pre-tuned hybrid tables for 40 / 47 levels; for any
-        # other count the user has to drop the table in by hand. Keep the
-        # error chatty so the failure mode is obvious.
+        # ECHAM/ICON ship pre-tuned full-depth hybrid tables for 47 / 95
+        # levels; for any other count the user has to drop the table in by
+        # hand. Keep the error chatty so the failure mode is obvious.
         from jcm.physics.echam.echam_levels import get_echam_levels
         try:
             vert = get_echam_levels(layers)
         except ValueError as exc:
             raise ValueError(
                 f"hybrid coords with {layers} levels are not pre-configured. "
-                "Use one of the supported counts (40, 47, 95) or extend "
+                "Use one of the supported counts (47, 95) or extend "
                 "jcm.physics.echam.echam_levels.get_echam_levels."
             ) from exc
         return get_coords(
