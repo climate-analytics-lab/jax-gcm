@@ -378,10 +378,10 @@ def calculate_downdraft(
 
         # Initial downdraft mass flux: ECHAM cudlfs uses
         #   zmftop = -cmfdeps * pmfub
-        # where pmfub = mfu(kcbot) is the cloud-base mass flux. The
-        # previous code used ``cmfctop`` (a different parameter that
-        # controls cloud-top mass flux fraction in the updraft) which is
-        # numerically similar (~0.2-0.3) but conceptually wrong.
+        # where pmfub = mfu(kcbot) is the cloud-base mass flux. Do NOT use
+        # an updraft cloud-top mass-flux fraction (~0.2) here: it is
+        # numerically similar to ``cmfdeps`` but conceptually a different,
+        # updraft-side quantity.
         mfd_new = mfd_init.at[lfs].set(
             -config.cmfdeps * updraft_state.mfu[kbase]
         )

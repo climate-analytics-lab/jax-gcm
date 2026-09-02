@@ -53,28 +53,7 @@ class MicrophysicsParameters:
     ccsacl: float        # Riming efficiency of snow collecting cloud
                          # water (ECHAM: 0.10)
     cvtfall: float       # Terminal velocity factor for ice
-    cthomi: float        # Homogeneous ice nucleation temperature (K)
-    csecfrl: float       # Critical ice fraction for Bergeron-Findeisen
-    
-    # Collection efficiencies
-    ccollec: float       # Collection efficiency rain/cloud
-    ccollei: float       # Collection efficiency snow/ice
-    
-    # Time scale parameters
-    tau_melt: float      # Melting time scale (s)
-    tau_freeze: float    # Freezing time scale (s)
-    
-    # Evaporation/sublimation parameters
-    cevaprain: float     # Rain evaporation coefficient
-    cevapsnow: float     # Snow sublimation coefficient
-    
-    # Sedimentation parameters
-    vt_ice: float        # Ice crystal fall speed (m/s)
-    vt_snow_a: float     # Snow fall speed coefficient a
-    vt_snow_b: float     # Snow fall speed exponent b
-    vt_rain_a: float     # Rain fall speed coefficient a
-    vt_rain_b: float     # Rain fall speed exponent b
-    
+
     # Cloud droplet number concentration
     base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
 
@@ -102,7 +81,6 @@ class MicrophysicsParameters:
     #    ice fall speed and opened the water budget ~22%).
     epsilon: float       # Small number for numerical stability
     d_epsilon: float     # Absolute floor for differentiability guards only
-    dt_sedi: float       # Sub-timestep for sedimentation (s)
     cqtmin: float        # ECHAM ``cqtmin`` (mo_echam_cloud_params): the
                          # cloud-fraction floor below which a cell counts as
                          # cloud-free and its condensate force-evaporates
@@ -130,12 +108,9 @@ class MicrophysicsParameters:
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
-                 cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
-                 ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
-                 cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
-                 vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
+                 cvtfall=3.29, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
-                 epsilon=1.0e-12, d_epsilon=1.0e-30, dt_sedi=10.0,
+                 epsilon=1.0e-12, d_epsilon=1.0e-30,
                  cqtmin=1.0e-12, ccwmin=1.0e-7,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
@@ -165,19 +140,6 @@ class MicrophysicsParameters:
             ccsaut=jnp.array(ccsaut),
             ccsacl=jnp.array(ccsacl),
             cvtfall=jnp.array(cvtfall),
-            cthomi=jnp.array(cthomi),
-            csecfrl=jnp.array(csecfrl),
-            ccollec=jnp.array(ccollec),
-            ccollei=jnp.array(ccollei),
-            tau_melt=jnp.array(tau_melt),
-            tau_freeze=jnp.array(tau_freeze),
-            cevaprain=jnp.array(cevaprain),
-            cevapsnow=jnp.array(cevapsnow),
-            vt_ice=jnp.array(vt_ice),
-            vt_snow_a=jnp.array(vt_snow_a),
-            vt_snow_b=jnp.array(vt_snow_b),
-            vt_rain_a=jnp.array(vt_rain_a),
-            vt_rain_b=jnp.array(vt_rain_b),
             base_cdnc=jnp.array(base_cdnc),
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
@@ -185,7 +147,6 @@ class MicrophysicsParameters:
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
             ccwmin=jnp.array(ccwmin),
-            dt_sedi=jnp.array(dt_sedi),
             autoconversion_scheme=int(autoconversion_scheme),
         )
 

@@ -231,9 +231,6 @@ closure work deliberately excluded).
    * - ``cprcon``
      - Precipitation conversion coefficient (1/m)
      - 1.4e-3
-   * - ``dt_conv``
-     - Convection time step (s)
-     - 3600.0
    * - ``cu_dqcv_width``
      - Width of the deep/shallow moisture-convergence sigmoid (kg/m²/s);
        ECHAM's hard switch in a differentiable form
@@ -439,15 +436,6 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``ccracl``
      - Accretion coefficient (cloud → rain)
      - 6.0
-   * - ``cthomi``
-     - Homogeneous ice nucleation temperature (K)
-     - 233.15
-   * - ``ccollec``
-     - Collection efficiency rain/cloud
-     - 0.7
-   * - ``ccollei``
-     - Collection efficiency snow/ice
-     - 0.3
    * - ``cn0s``
      - Snow particle number density (1/m³)
      - 3.0e6
@@ -457,12 +445,6 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice content-dependent terminal velocity factor
      - 3.29
-   * - ``vt_rain_a`` / ``vt_rain_b``
-     - Rain terminal velocity coefficient and exponent
-     - 386.0 / 0.67
-   * - ``vt_snow_a`` / ``vt_snow_b``
-     - Snow terminal velocity coefficient and exponent
-     - 8.8 / 0.15
    * - ``base_cdnc``
      - Baseline CDNC in clean air (1/m³)
      - 100e6
@@ -777,9 +759,6 @@ Aerosol Scheme (MACv2-SP)
    * - Parameter
      - Description
      - Default
-   * - ``nplumes``
-     - Number of anthropogenic plumes
-     - 9
    * - ``aod_spmx``
      - Maximum AOD at 550 nm per plume
      - [0.30, 0.15, ...]

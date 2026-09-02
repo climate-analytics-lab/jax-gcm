@@ -21,10 +21,11 @@ class AerosolParameters:
     background aerosol.
     """
     
-    # Number of plumes and features
-    nplumes: int
-    nfeatures: int
-    
+    # Plume count and feature count are not stored as fields: they are the
+    # leading axis lengths of the arrays below (``plume_lat.shape[0]`` and
+    # ``ftr_weight.shape[0]``), so a stored copy could only ever drift out
+    # of sync with the real array shapes (#674).
+
     # Plume center locations [degrees]
     plume_lat: jnp.ndarray        # (nplumes,) latitude of plume centers
     plume_lon: jnp.ndarray        # (nplumes,) longitude of plume centers
@@ -87,9 +88,6 @@ class AerosolParameters:
         Longitudes use the file's 0-360 convention, matching the
         dinosaur-derived column longitudes cached by the term.
         """
-        nplumes = 9
-        nfeatures = 2
-
         # Plume centers [degrees N / degrees E, 0-360].
         plume_lat = jnp.array(
             [49.4, 40.1, 30.0, 23.3, 3.5, -10.3, -1.0, -3.5, -20.0])
@@ -154,8 +152,6 @@ class AerosolParameters:
         ]).T
 
         return cls(
-            nplumes=nplumes,
-            nfeatures=nfeatures,
             plume_lat=plume_lat,
             plume_lon=plume_lon,
             beta_a=beta_a,
@@ -193,8 +189,6 @@ class AerosolParameters:
         as_arr = lambda name: jnp.asarray(ds[name].values)
         as_arr_T = lambda name: jnp.asarray(ds[name].values.T)
         return cls(
-            nplumes=int(ds.sizes["plume_number"]),
-            nfeatures=int(ds.sizes["plume_feature"]),
             plume_lat=as_arr("plume_lat"),
             plume_lon=as_arr("plume_lon"),
             beta_a=as_arr("beta_a"),

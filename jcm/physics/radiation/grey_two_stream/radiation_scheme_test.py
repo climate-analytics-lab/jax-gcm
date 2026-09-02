@@ -427,8 +427,6 @@ def test_radiation_scheme_custom_parameters():
     # Custom parameters with appropriate band limits
     custom_params = RadiationParameters.default(
         solar_constant=1400.0,  # Higher than default
-        n_sw_bands=3,          # More bands
-        n_lw_bands=4,
         lw_band_limits=((10, 250), (250, 350), (350, 500), (500, 2500)),  # 4 LW bands
         sw_band_limits=((4000, 10000), (10000, 14500), (14500, 50000)),   # 3 SW bands
     )
