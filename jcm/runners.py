@@ -5,6 +5,15 @@ construction of ``Model``, ``TerrainData``, ``DiffusionFilter`` and the various
 physics packages. Keeps ``main.py`` minimal so other harnesses (notebooks,
 integration tests) can import the same builders directly without going through
 Hydra's CLI machinery.
+
+By design (#640) this module contains **no science**: it parses config and
+calls the library — the injectors in :mod:`jcm.initial_states`, the weights and
+burdens in :mod:`jcm.analysis`, the forcing helpers in :mod:`jcm.forcing`, the
+relaxation profiles in :mod:`jcm.nudging`, and the various scheme constructors.
+Every scientific choice lives in one of those homes with its own tests, so a
+diff of this file should never need a scientific reviewer — only a config one.
+New behaviour is added by promoting the science into a library home and calling
+it from here, not by growing logic in the runner.
 """
 
 from __future__ import annotations
