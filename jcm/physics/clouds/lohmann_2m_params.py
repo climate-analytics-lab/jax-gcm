@@ -154,6 +154,14 @@ class CloudParams2M:
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
+        # Recorded tuning target (#674, #641): these defaults are the generic
+        # ECHAM ``mo_echam_cloud_params`` values, but ECHAM-HAM retunes them
+        # for the prognostic-CDNC/ICNC scheme (``mo_activ.f90``, activ_initialize:
+        # ``lcdnc_progn`` with T63 L31/L47, AR&G activation ``ncd_activ=2``,
+        # ``cdnc_min_fixed=40`` cm^-3 — the case matching our 2M setup) to
+        # ccsaut = 900.0, ccraut = 10.6. Deliberately NOT changed here:
+        # adopting the HAM pair is a climate-tuning decision that needs its
+        # own validation run.
         ccsaut: float = 95.0,
         ccraut: float = 15.0,
         ceffmax: float = 150.0,
