@@ -458,7 +458,14 @@ def run(args) -> dict:
     # The validated file references now live inside the ``+experiment`` yaml,
     # not in the override strings, so enumerate them from the COMPOSED config
     # (``auto``/``null`` inputs resolve lazily at build time and are skipped).
-    files = _preset_data_files(preset)
+    #
+    # ``args.extra`` is folded in FIRST so the preflight enumerates the SAME
+    # inputs the real command (``[*preset, ..., *args.extra]`` below) will build
+    # from: an ``--extra`` that nulls an auto input, or repoints a ``file`` key
+    # at a local path, changes which bundles the run actually needs. Composing
+    # the preset alone would prefetch (or fail offline on) bundles the effective
+    # config never uses.
+    files = _preset_data_files([*preset, *args.extra])
     missing = []
     for f in files:
         if f.startswith("hf://"):

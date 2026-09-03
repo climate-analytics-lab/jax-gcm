@@ -240,6 +240,29 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)
         self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", prefetched)
 
+    def test_extra_nulling_emissions_drops_them_from_prefetch(self):
+        """``--extra`` that nulls the auto emissions removes them from the
+        prefetch list, while the preset alone still enumerates them (Codex F2).
+
+        ``run`` prefetches from the config composed with ``args.extra`` folded
+        in — the same override list the real command builds from — so an
+        ``--extra`` that nulls an auto input must not leave the harness
+        downloading (or failing offline on) a bundle the run never uses.
+        """
+        preset = PRESETS["t63-echam-jam"]
+        # Preset alone: the four auto bundles are enumerated for prefetch.
+        base = _preset_data_files(preset)
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", base)
+        self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", base)
+        # Same mechanism the real run uses: preset + extra nulling the inputs.
+        extra = ["forcing.emissions_file=null", "forcing.dms_file=null",
+                 "forcing.dust_file=null", "forcing.oxidants_file=null"]
+        with_extra = _preset_data_files([*preset, *extra])
+        for bundle in ("hf://bundles/t63/emissions_pd.nc",
+                       "hf://bundles/t63/dms.nc", "hf://bundles/t63/dust.nc",
+                       "hf://bundles/t63_l47/oxidants_pd.nc"):
+            self.assertNotIn(bundle, with_extra)
+
     def test_t119_jam_preset_is_emission_free(self):
         """T119 has no mirror bundle; the preset nulls the four keys so nothing
         is prefetched (and build_forcing does not abort on a t119 fetch).
