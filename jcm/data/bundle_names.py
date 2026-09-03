@@ -33,6 +33,16 @@ from __future__ import annotations
 #: sources only, without hand-nulling the four emission keys.
 PUBLISHED_GRIDS = frozenset({"t63", "t106"})
 
+#: Vertical layer counts for which the mirror publishes the level-resolved
+#: (``bundles/<grid>_l<nlev>/``) products. ``build_mirror.stage_bundles`` builds
+#: the oxidant (and ozone) files only at these layer counts — ``t63``/``t106`` ×
+#: ``l47``/``l95`` — so a *level-dependent* ``auto`` key on a published
+#: horizontal grid but an unpublished layer count (e.g. ``t63_l8``) has no
+#: bundle and must resolve to None rather than compose a nonexistent
+#: ``hf://bundles/t63_l8/oxidants_pd.nc`` (F2). Level-FREE products
+#: (emissions/dms/dust, published one-per-grid) ignore the layer count.
+PUBLISHED_LEVELS = frozenset({47, 95})
+
 #: Prescribed-emission forcing keys that honour the ``auto`` convention. Value
 #: is ``(subdir_suffix, filename)``: ``""`` is the horizontal bundle
 #: (``bundles/<grid>/``), ``"_l{nlev}"`` the level-resolved one
@@ -40,7 +50,10 @@ PUBLISHED_GRIDS = frozenset({"t63", "t106"})
 #: ``docs/source/design/data_mirror.md``. The ``{nlev}`` here is an *internal*
 #: format token that :func:`emission_bundle_path` fills from the model grid; it
 #: is not a user-facing path template (``auto`` is the only grid-portable
-#: mechanism — see :func:`jcm.runners._resolve_one_emission_input`).
+#: mechanism — see :func:`jcm.runners._resolve_one_emission_input`). The
+#: presence of ``{nlev}`` in the suffix is also the single source of truth for
+#: which keys are LEVEL-dependent — :func:`bundle_is_published` reads it so the
+#: published-set knowledge lives in one place.
 #: ``emissions_pd``/``oxidants_pd`` are the present-day climatology members.
 EMISSION_AUTO_BUNDLES = {
     "emissions_file": ("", "emissions_pd.nc"),
@@ -48,6 +61,28 @@ EMISSION_AUTO_BUNDLES = {
     "dust_file": ("", "dust.nc"),
     "oxidants_file": ("_l{nlev}", "oxidants_pd.nc"),
 }
+
+
+def bundle_is_published(key: str, token: str, nlev) -> bool:
+    """Whether the mirror publishes the ``auto`` bundle for ``key`` on this grid.
+
+    The horizontal ``token`` must be a :data:`PUBLISHED_GRIDS` member for every
+    product. A LEVEL-dependent product (its subdir carries ``{nlev}`` — only
+    ``oxidants_file`` today) additionally requires ``nlev`` to be a
+    :data:`PUBLISHED_LEVELS` member; level-FREE products (empty subdir:
+    emissions/dms/dust) ignore ``nlev``. Level-dependence is inferred from the
+    subdir template in :data:`EMISSION_AUTO_BUNDLES`, so the published set and
+    the path layout cannot drift. Shared by :func:`jcm.runners.
+    _emission_auto_resolves_to_none` (the build-time resolver + its warning
+    predicate) and ``tools/benchmark.py``'s prefetch enumerator so all three
+    agree on which ``auto`` keys have a real bundle (F2).
+    """
+    if token not in PUBLISHED_GRIDS:
+        return False
+    subdir, _ = EMISSION_AUTO_BUNDLES[key]
+    if "{nlev}" in subdir:
+        return int(nlev) in PUBLISHED_LEVELS
+    return True
 
 
 def grid_token(spectral_truncation) -> str:

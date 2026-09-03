@@ -203,11 +203,15 @@ def _auto_emission_files(cfg) -> list[str]:
     Mirrors ``jcm.runners._resolve_one_emission_input``: ``auto`` supplies a
     bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
     non-JAM package consumes no emissions, and the pySES backend's native grids
-    are not the spectral-token bundles — both resolve ``auto`` to nothing. A
-    grid outside the mirror's published-grid whitelist (``PUBLISHED_GRIDS``)
-    likewise has no bundle to fetch, so ``auto`` nulls there too. A key
-    explicitly set to a path/``null`` in the preset is honoured (the literal
-    path is already picked up by ``_preset_data_files``; ``null`` opts out).
+    are not the spectral-token bundles — both resolve ``auto`` to nothing. The
+    mirror's published-bundle set is consulted per key
+    (``bundle_is_published``): a grid outside the published-grid whitelist has
+    no bundle at all, and a published-horizontal / unpublished-level combo
+    (e.g. ``t63_l8``) has no level-resolved oxidant bundle while its level-free
+    emissions/dms/dust bundles still exist — so ``auto`` nulls exactly those
+    keys here too. A key explicitly set to a path/``null`` in the preset is
+    honoured (the literal path is already picked up by ``_preset_data_files``;
+    ``null`` opts out).
     """
     phys = cfg.get("physics") or {}
     if str(phys.get("aerosol_module", "")) != "jam":
@@ -221,14 +225,17 @@ def _auto_emission_files(cfg) -> list[str]:
     names = _load_bundle_names()
     forcing = cfg.get("forcing") or {}
     token = names.grid_token(trunc)
-    # Mirror the runner's published-grid whitelist: a non-mirrored grid has no
-    # bundles to prefetch (``auto`` resolves to None there), so enumerate none.
-    if token not in names.PUBLISHED_GRIDS:
-        return []
+    # Mirror the runner's key-specific published-bundle check (F2): a
+    # non-mirrored grid has NO bundles, and a published-horizontal /
+    # unpublished-level combo (e.g. t63_l8) has no level-resolved oxidant
+    # bundle while its level-free emissions/dms/dust bundles still exist. The
+    # shared ``bundle_is_published`` keeps this enumerator and the runner's
+    # ``auto`` resolver from disagreeing on which keys to fetch.
     return [path
             for key, path in names.auto_emission_bundle_paths(
                 token, nlev).items()
-            if str(forcing.get(key, "auto")) == "auto"]
+            if str(forcing.get(key, "auto")) == "auto"
+            and names.bundle_is_published(key, token, nlev)]
 
 
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,

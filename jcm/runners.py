@@ -933,22 +933,28 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 _EMISSION_AUTO_BUNDLES = bundle_names.EMISSION_AUTO_BUNDLES
 
 
-def _emission_auto_resolves_to_none(coords, jam, is_pyses) -> bool:
-    """Whether an ``auto`` emission key resolves to None — a pure classification.
+def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
+    """Whether ``auto`` for one emission ``key`` resolves to None — pure classify.
 
-    ``auto`` yields None (no per-grid bundle) on the pySES path, for a non-JAM
-    package (neither consumes prescribed emissions), or on a grid the mirror
-    does not publish (:data:`jcm.data.bundle_names.PUBLISHED_GRIDS`). No fetch,
-    no side effects. Shared by the build-time resolver
+    ``auto`` yields None (no bundle) on the pySES path, for a non-JAM package
+    (neither consumes prescribed emissions), or when the mirror does not publish
+    THIS key's bundle for the model grid — a check that is now key-specific
+    (:func:`jcm.data.bundle_names.bundle_is_published`): the horizontal token
+    must be a published grid, and the level-dependent ``oxidants_file`` bundle
+    additionally requires a published layer count, so a published-horizontal /
+    unpublished-level combo (e.g. ``t63_l8``) nulls ``oxidants_file`` while the
+    level-free emissions/dms/dust keys still resolve (F2). No fetch, no side
+    effects. Shared by the build-time resolver
     (:func:`_resolve_one_emission_input`) and the config-trap warner
     (:func:`warn_on_config_traps`) so the None-decision the warning reasons
-    about can never drift from the one the build actually applies (F2). The
-    pySES / non-JAM cases return before ``_grid_token`` so pySES native coords
-    are never asked for a spectral token.
+    about can never drift from the one the build actually applies. The pySES /
+    non-JAM cases return before ``_grid_token`` so pySES native coords are never
+    asked for a spectral token.
     """
     if is_pyses or not jam:
         return True
-    return _grid_token(coords) not in bundle_names.PUBLISHED_GRIDS
+    return not bundle_names.bundle_is_published(
+        key, _grid_token(coords), int(coords.nodal_shape[0]))
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
@@ -968,7 +974,7 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
       substitution — use ``auto`` to let a config follow the grid).
     """
     if value == "auto":
-        if _emission_auto_resolves_to_none(coords, jam, is_pyses):
+        if _emission_auto_resolves_to_none(key, coords, jam, is_pyses):
             # No per-grid bundle exists on the pySES path, for a non-JAM
             # package, or on a grid the mirror does not publish (e.g.
             # echam_t42_l8_sigma, ma-t119). Resolve ``auto`` to None so the run
@@ -1642,8 +1648,8 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     available = _product_available_years(
         forcing_cfg, "emissions_available_years")
     # Keep each list element / ``{year}`` expansion as its own product for the
-    # uniform-time-axis guard (span is a per-product property — see
-    # :func:`_classify_product_time_axis`), then flatten to the single path list
+    # uniform-time-axis guard (the time axis is a per-product property — see
+    # :func:`_product_time_axis`), then flatten to the single path list
     # ``attach_jam_forcing`` opens by-coords.
     products: list[list[str]] = []
     for product in _forcing_products(raw, years, available):
@@ -1734,143 +1740,148 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     return forcing.copy(oxidant_vmr=mapping)
 
 
-def _time_axis_years(values) -> set:
-    """Distinct calendar years present in a decoded time coordinate.
-
-    Handles both ``datetime64`` (numpy) and ``object`` (decoded cftime /
-    ``datetime``) arrays; a ``.year`` attribute covers the latter. Used only to
-    decide climatology (one calendar year) vs transient (several) span — the
-    exact years never matter, only how many distinct ones there are.
-    """
-    import numpy as np
-    arr = np.asarray(values).ravel()
-    if arr.size == 0:
-        return set()
-    if np.issubdtype(arr.dtype, np.datetime64):
-        # datetime64[Y] counts years from 1970; the absolute value is
-        # irrelevant here, only the *number* of distinct years.
-        return set(arr.astype("datetime64[Y]").astype(int).tolist())
-    return {getattr(v, "year", None) for v in arr}
-
-
-def _classify_product_time_axis(product):
-    """Classify one product's combined time axis as ``(dtype, span)``.
+def _product_time_axis(product):
+    """One product's combined time axis, or ``None`` for a static field.
 
     A *product* is the file set that resolves from one list element / one
-    ``{year}`` expansion; all of a product's files are concatenated onto a
-    single time axis, so the classification is over the product's files
-    together, not each file alone. Two orthogonal properties decide whether two
-    products can share one ``open_mfdataset`` (by-coords) axis without a silent
-    NaN-union:
+    ``{year}`` expansion; all its files are concatenated onto a single time
+    axis (``open_mfdataset``, by-coords), so the axis is read over the product's
+    files TOGETHER, not each alone. Returns ``(dtype, key, label)``:
 
-    * ``dtype`` — ``integer-month`` (numeric ``time``: a bare month index) vs
-      ``datetime`` (a real calendar axis: ``datetime64`` or decoded cftime).
-    * ``span`` — ``climatology`` (every sample falls in ONE calendar year: a
-      12-month cycle) vs ``transient`` (samples span several calendar years).
-
-    The ``span`` axis is the crucial discriminator a dtype-only test misses: a
-    12-month climatology stored with real CF *datetime* stamps is dtype-
-    identical to a transient product's yearly files, yet by-coords would outer-
-    union their disjoint dates and NaN-fill every off-year step. Span is a
-    *per-product* property — a single transient yearly file covers one calendar
-    year and is indistinguishable from a climatology in isolation; only the
-    product's FULL file set reveals a multi-year reach. So N yearly files of one
-    transient product classify ``(datetime, transient)`` together and
-    concatenate cleanly, while a climatology dropped into the same list
-    classifies ``(datetime, climatology)`` and is caught.
+    * ``dtype`` — ``"datetime"`` (a real calendar axis: ``datetime64`` or
+      decoded cftime) or ``"integer-month"`` (a numeric month index).
+    * ``key`` — the frozenset of the axis's DISTINCT time values, normalised to
+      a hashable/comparable form (nanoseconds for ``datetime64``; ``str`` for
+      object cftime/``datetime`` so two files decoded to *distinct* objects at
+      the same instant still compare equal; the ints for an integer-month
+      axis). This is the MERGE key (see :func:`_assert_uniform_time_axis`): two
+      products union cleanly under by-coords iff they carry the same
+      ``(dtype, key)`` — every step then has every product's variables, so
+      nothing is NaN-filled.
+    * ``label`` — a human ``min..max (n steps)`` range string for error
+      messages, so a rejection names each product's time range.
 
     Returns ``None`` when no file in the product carries a ``time`` axis (a
-    static field — nothing to reconcile). Raises when a single product itself
-    straddles both an integer-month and a datetime axis: that set is malformed
+    static field — nothing to reconcile). Raises when the product's own files
+    straddle both an integer-month and a datetime axis: that set is malformed
     regardless of what else it is merged with.
     """
     import numpy as np
     import xarray as xr
+    chunks: list = []
     dtypes: set[str] = set()
-    years: set = set()
-    saw_time = False
     for p in product:
         with xr.open_dataset(p) as ds:
             if "time" not in ds.variables and "time" not in ds.dims:
                 continue
-            saw_time = True
-            vals = np.asarray(ds["time"].values)
+            vals = np.asarray(ds["time"].values).ravel()
             # datetime64 or object (decoded cftime) => a real calendar axis;
             # anything numeric is an integer/float month-index climatology.
             is_datetime = (np.issubdtype(vals.dtype, np.datetime64)
                            or vals.dtype == np.object_)
             dtypes.add("datetime" if is_datetime else "integer-month")
-            if is_datetime:
-                years |= _time_axis_years(vals)
-    if not saw_time:
+            chunks.append(vals)
+    if not chunks:
         return None
     if len(dtypes) > 1:
         raise ValueError(
             "a single product mixes incompatible time axes — its files "
-            f"straddle both an integer-month and a datetime axis ({sorted(product)}), "
-            "which cannot share one open_mfdataset (by-coords) axis."
+            f"straddle both an integer-month and a datetime axis "
+            f"({sorted(product)}), which cannot share one open_mfdataset "
+            "(by-coords) axis."
         )
     dtype = next(iter(dtypes))
-    # An integer-month axis is inherently a single-cycle climatology; a datetime
-    # axis is a climatology only when every sample lands in one calendar year.
-    span = ("climatology" if dtype == "integer-month" or len(years) <= 1
-            else "transient")
-    return (dtype, span)
+    values = np.concatenate(chunks)
+    if dtype == "datetime" and np.issubdtype(values.dtype, np.datetime64):
+        ns = values.astype("datetime64[ns]")
+        order = np.sort(ns)
+        key = frozenset(order.astype("int64").tolist())
+        label = f"datetime {order[0]}..{order[-1]} ({len(key)} steps)"
+    elif dtype == "datetime":
+        # object dtype: decoded cftime / datetime — normalise by ``str`` so
+        # files decoded to distinct objects at the same instant compare equal.
+        strs = sorted(str(v) for v in values)
+        key = frozenset(strs)
+        label = f"datetime {strs[0]}..{strs[-1]} ({len(key)} steps)"
+    else:
+        months = sorted({int(v) for v in values})
+        key = frozenset(months)
+        label = f"integer-month {months[0]}..{months[-1]} ({len(key)} steps)"
+    return (dtype, key, label)
 
 
 def _assert_uniform_time_axis(products, *, config_key) -> None:
-    """Reject a product set whose members carry incompatible time axes.
+    """Reject a product set that cannot share one by-coords time axis.
 
     Shared by the oxidant path (:func:`_resolve_oxidant_paths`) and the pySES
     emissions path (:func:`_resolve_pyses_emission_paths`): both open ALL their
     files as ONE combined dataset (``open_mfdataset``, by-coords) along a single
-    time axis, so every product must resolve to the SAME ``(dtype, span)`` kind
-    (see :func:`_classify_product_time_axis`). Mixing kinds — an integer-month
-    climatology with a datetime transient, OR a CF-*datetime* 12-month
-    climatology with datetime transient yearly files (dtype-identical, which a
-    dtype-only guard waves through) — makes by-coords either NaN-fill the
-    non-overlapping steps or clash cryptically on dtype. That silent-ignore
-    class is what this hardening abolishes.
+    time axis. Rather than enumerate per-product ``(dtype, span)`` heuristics,
+    this guards the MERGE PROPERTY directly. Under by-coords a combined open is
+    well-posed in exactly two shapes:
+
+    * **(a) identical axis** — all time-bearing products share ONE identical
+      time axis (a stacked climatology, or a same-year set). by-coords then
+      unions their variables with every step carrying every product's fields —
+      no NaN-fill. Products may carry disjoint variables (different
+      sectors/species); it is the *time* axis that must coincide.
+    * **(b) one concatenated series** — a SINGLE product, whose own yearly files
+      tile disjoint years into one monotonic transient axis (or which is a lone
+      climatology). There is nothing to reconcile it against, so it is always
+      well-posed. Keyed to single-product expansions: the one-product-yearly-
+      files case arrives as ONE list element.
+
+    Anything else is rejected, naming each product's time range. The degenerate
+    case a ``(dtype, span)`` classifier missed falls straight out of this: a
+    one-year ``{year}`` transient and a CF-datetime climatology dated in a
+    DIFFERENT year both look like "one-year datetime" to a span test, yet their
+    axes are not identical (shape a fails) and they are two products (shape b
+    fails) — so the honest structural property rejects them where the heuristic
+    NaN-unioned their disjoint years.
 
     ``products`` is a list of products, each a list of file paths (one list
-    element / one ``{year}`` expansion). Legitimate: N yearly files of ONE
-    transient product (they classify ``(datetime, transient)`` together and
-    concatenate); or several products that all share one kind. A single-file
-    set (a lone climatology, the common case) is trivially uniform.
-
-    ``config_key`` names the knob in the message (``forcing.oxidants_file`` /
-    ``forcing.emissions_file``). NOTE the asymmetry with the SPECTRAL emissions
-    path (:func:`_attach_emissions`), which does NOT use this: it opens each
-    list element as an independent PRODUCT with its own time axis (per-product
-    ``TimeSeries`` alignment), so a mixed climatology+transient list is valid
-    there. pySES has no per-product alignment machinery — one combined open —
-    so a loud rejection is the honest semantics on that path.
+    element / one ``{year}`` expansion). ``config_key`` names the knob in the
+    message. NOTE the asymmetry with the SPECTRAL emissions path
+    (:func:`_attach_emissions`), which does NOT use this: it opens each list
+    element as an independent PRODUCT with its own ``TimeSeries`` alignment, so
+    a mixed climatology+transient list is valid there. pySES has no per-product
+    alignment machinery — one combined open — so a loud rejection is the honest
+    semantics on that path.
     """
     # A single file across all products (a lone climatology, the common case)
-    # is trivially uniform — skip the opens entirely.
+    # is trivially well-posed — skip the opens entirely.
     if sum(len(product) for product in products) <= 1:
         return
-    kinds: dict[tuple[str, str], list[str]] = {}
+    axes: list[tuple[str, tuple]] = []
     for product in products:
-        kind = _classify_product_time_axis(product)
-        if kind is None:
+        axis = _product_time_axis(product)  # raises on an internal straddle
+        if axis is None:
             continue
         label = (product[0] if len(product) == 1
                  else f"{product[0]} … (+{len(product) - 1} more)")
-        kinds.setdefault(kind, []).append(label)
-    if len(kinds) > 1:
-        detail = "; ".join(
-            f"{dt}/{sp}: {v}" for (dt, sp), v in sorted(kinds.items()))
-        raise ValueError(
-            f"{config_key} mixes incompatible time axes across its products "
-            f"({detail}). These products are opened together along ONE time "
-            "axis (open_mfdataset, by-coords) and must all share the same kind "
-            "— an (integer-month|datetime, climatology|transient) pair. "
-            "Supported forms: a single 12-month climatology, or one transient "
-            "product's yearly files (all datetime, spanning several years). Do "
-            "not mix a climatology (integer-month OR datetime, one calendar "
-            "year) with datetime transient files."
-        )
+        axes.append((label, axis))
+    # Shape (b): a single time-bearing product is one concatenated series —
+    # nothing to reconcile against.
+    if len(axes) <= 1:
+        return
+    # Shape (a): several products must share ONE identical time axis.
+    _, (ref_dtype, ref_key, _) = axes[0]
+    if all(dtype == ref_dtype and key == ref_key
+           for _, (dtype, key, _) in axes[1:]):
+        return
+    detail = "; ".join(f"{label}: {rng}" for label, (_, _, rng) in axes)
+    raise ValueError(
+        f"{config_key} mixes incompatible time axes across its products "
+        f"({detail}). These products are opened TOGETHER along ONE time axis "
+        "(open_mfdataset, by-coords), so they must either all share an "
+        "IDENTICAL time axis (a stacked climatology / same-year set, whose "
+        "variables union cleanly) or be a single product's yearly files (one "
+        "concatenated transient series). A one-year transient beside a "
+        "climatology dated in another year, or an integer-month climatology "
+        "beside datetime transients, cannot share one axis — by-coords would "
+        "NaN-fill every non-overlapping step. Put them on one time axis, or "
+        "drop one."
+    )
 
 
 def _attach_macv2_weights(forcing, forcing_cfg, coords):
@@ -2015,22 +2026,24 @@ def _has_macv2sp(physics) -> bool:
                for t in physics.terms)
 
 
-def _resolved_emission_value(literal, coords, jam, is_pyses):
-    """Resolution OUTCOME of one emission key, for warning purposes (no fetch).
+def _resolved_emission_value(literal, key, coords, jam, is_pyses):
+    """Resolution OUTCOME of one emission ``key``, for warnings (no fetch).
 
     Returns None when the key resolves to no prescribed source (an explicit
-    null, or ``auto`` on a path that has no bundle — see
-    :func:`_emission_auto_resolves_to_none`); otherwise the literal path (or the
+    null, or ``auto`` on a grid that has no bundle for THIS key — see
+    :func:`_emission_auto_resolves_to_none`, now key-specific so the level-
+    dependent ``oxidants_file`` nulls on an unpublished layer count while the
+    level-free keys still resolve, F2); otherwise the literal path (or the
     ``"auto"`` sentinel when ``auto`` resolves to a real per-grid bundle).
     Mirrors :func:`_resolve_one_emission_input`'s None-decision WITHOUT fetching
     so :func:`warn_on_config_traps` reasons about the same values the build
-    applies rather than the raw ``"auto"`` cfg (F2).
+    applies rather than the raw ``"auto"`` cfg.
     """
     if literal in (None, "", "null", "none"):
         return None
     if literal == "auto":
         return None if _emission_auto_resolves_to_none(
-            coords, jam, is_pyses) else "auto"
+            key, coords, jam, is_pyses) else "auto"
     return literal
 
 
@@ -2173,7 +2186,7 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
         emission_keys = ("emissions_file", "dms_file", "dust_file",
                          "oxidants_file")
         resolved = {k: _resolved_emission_value(
-                        forcing_cfg.get(k, None), coords, has_jam, is_pyses)
+                        forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
                     for k in emission_keys}
         unset = [k for k in emission_keys if resolved[k] is None]
         # Keys the user left at ``auto`` that nonetheless resolved to None —
@@ -2210,6 +2223,25 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                     "emissions_pd.nc).",
                     ", ".join(unset),
                 )
+        elif auto_nulled:
+            # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
+            # resolved — in practice the LEVEL-dependent oxidants_file on a
+            # published horizontal grid but an unpublished layer count (e.g.
+            # t63_l8), whose L47/L95-only bundle does not exist. The level-free
+            # keys still supply their emissions, so this is not the all-zero
+            # baseline above; the nulled species alone stay at zero, which a
+            # config reading 'auto' hides — flag exactly those keys.
+            logger.warning(
+                "config trap: partial zero-emission JAM baseline — the 'auto' "
+                "emission key(s) %s resolved to None because the mirror "
+                "publishes no bundle for this grid/level combination "
+                "(level-resolved products such as oxidants exist only at L%s), "
+                "while the remaining keys resolved. Those species stay at zero; "
+                "point each nulled key at an on-grid file, or run a published "
+                "layer count, to supply them.",
+                ", ".join(auto_nulled),
+                "/L".join(str(n) for n in sorted(bundle_names.PUBLISHED_LEVELS)),
+            )
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only
@@ -2281,7 +2313,8 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
             k for k in ("emissions_file", "oxidants_file")
             if str(forcing_cfg.get(k, None)) == "auto"
             and _resolved_emission_value(
-                forcing_cfg.get(k, None), coords, has_jam, is_pyses) is not None]
+                forcing_cfg.get(k, None), k, coords, has_jam,
+                is_pyses) is not None]
         if is_transient and pd_auto_keys:
             logger.warning(
                 "config trap: transient (by-date) forcing with present-day JAM "

@@ -2177,6 +2177,23 @@ class TestWarnOnConfigTraps:
     that it fires on its trap combo and that it stays silent on the sane one.
     """
 
+    @pytest.fixture(autouse=True)
+    def _audible_jcm_logger(self):
+        # ``caplog.at_level("WARNING")`` sets only the ROOT logger level, so a
+        # leaked ``jcm``-hierarchy level (another module's logging test can
+        # leave ``logging.getLogger("jcm")`` at CRITICAL under xdist) would
+        # filter these warnings before they reach caplog and make the
+        # assert-present cases spuriously fail. Force the ``jcm`` logger audible
+        # for the duration and restore it, so the capture is order-independent.
+        import logging
+        jcm_logger = logging.getLogger("jcm")
+        prev = jcm_logger.level
+        jcm_logger.setLevel(logging.WARNING)
+        try:
+            yield
+        finally:
+            jcm_logger.setLevel(prev)
+
     @staticmethod
     def _physics(*names):
         import types
@@ -2194,15 +2211,19 @@ class TestWarnOnConfigTraps:
         return OmegaConf.create(cfg)
 
     @staticmethod
-    def _coords(truncation=63):
+    def _coords(truncation=63, nlev=47):
         # ``_grid_token`` reads ``coords.horizontal.total_wavenumbers`` and maps
-        # ``total_wavenumbers - 2`` to ``t{trunc}``; a lightweight stub avoids
-        # building a real (expensive) coordinate system just to pick the grid
-        # token. t63 is published; t42 (truncation=42) is not.
+        # ``total_wavenumbers - 2`` to ``t{trunc}``; the level-aware oxidant
+        # predicate reads ``coords.nodal_shape[0]`` for the layer count. A
+        # lightweight stub avoids building a real (expensive) coordinate system.
+        # t63 is published; t42 (truncation=42) is not. nlev defaults to a
+        # PUBLISHED layer count (47) so the level-dependent oxidant bundle
+        # resolves unless a test overrides it (e.g. nlev=8 for the t63_l8 gap).
         import types
         return types.SimpleNamespace(
             horizontal=types.SimpleNamespace(
-                total_wavenumbers=int(truncation) + 2))
+                total_wavenumbers=int(truncation) + 2),
+            nodal_shape=(int(nlev),))
 
     @staticmethod
     def _pyses_dycore():
@@ -2497,6 +2518,26 @@ class TestWarnOnConfigTraps:
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
                                  None, coords=self._coords(63))
         assert "zero-emission JAM baseline" not in caplog.text
+
+    def test_jam_auto_unpublished_level_warns_partial(self, caplog):
+        # t63_l8: published horizontal grid, unpublished layer count (F2). The
+        # level-free emissions/dms/dust bundles resolve, but the level-resolved
+        # oxidants bundle (L47/L95 only) nulls — a PARTIAL silent-degrade the
+        # config (reading 'auto') hides. The dedicated warning names the nulled
+        # key without the all-zero-baseline message.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63, nlev=8))
+        assert "partial zero-emission JAM baseline" in caplog.text
+        assert "oxidants_file" in caplog.text
+        assert "L47/L95" in caplog.text
+        # Only oxidants nulled — the level-free keys did NOT, so the emissions/
+        # dms/dust keys are not named as unresolved.
+        assert "emissions_file" not in caplog.text
 
     # SCM (run.mode=scm) family sweep. The single-column model builds no gridded
     # surface: it runs on TerrainData.single_column() + ForcingData.zeros and
@@ -2802,6 +2843,64 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         for key in ("emissions_file", "dms_file", "dust_file",
                     "oxidants_file"):
             self.assertIsNone(out.get(key))
+
+    def test_jam_oxidants_auto_nulls_on_unpublished_level_count(self):
+        """Published horizontal grid + unpublished layer count nulls ONLY the
+        level-dependent oxidants; level-free keys still resolve (Codex P2).
+
+        ``grid=echam_t42_l8_sigma grid.spectral_truncation=63`` is a published
+        horizontal grid (t63) at an UNpublished layer count (l8). The mirror
+        publishes oxidants only at L47/L95, so ``oxidants_file=auto`` must null
+        (no nonexistent ``bundles/t63_l8/oxidants_pd.nc``) while the level-free
+        emissions/dms/dust bundles under ``bundles/t63/`` still resolve.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
+        # Level-free products resolve to their t63 (level-agnostic) bundles.
+        self.assertEqual(out.get("emissions_file"),
+                         "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
+        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        # The level-dependent oxidant bundle does not exist at l8 → auto→None.
+        self.assertIsNone(out.get("oxidants_file"))
+
+    def test_jam_oxidants_auto_resolves_on_published_level_count(self):
+        """A published grid AND layer count (t63_l47) resolves oxidants (P2).
+
+        The level gate must not over-reject: on ``echam_t63_l47_hybrid`` the
+        oxidant bundle exists (L47 is published), so ``auto`` composes the
+        level-resolved ``bundles/t63_l47/oxidants_pd.nc``.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        for grid, nlev in (("echam_t63_l47_hybrid", 47),
+                           ("echam_t63_l95_hybrid", 95)):
+            with self.subTest(grid):
+                cfg = _compose(["physics=echam-jam", f"grid={grid}",
+                                "physics.jam_microphysics=placeholder",
+                                "physics.radiation_scheme=grey"])
+                coords = build_coords(cfg)
+                with mock.patch.object(runners, "_resolve_data_path",
+                                       side_effect=lambda p: p):
+                    out = runners._resolve_emission_inputs(
+                        cfg.forcing, cfg, coords, is_pyses=False)
+                self.assertEqual(
+                    out.get("oxidants_file"),
+                    f"hf://bundles/t63_l{nlev}/oxidants_pd.nc")
 
     def test_t119_jam_experiment_resolves_emission_free(self):
         """The ma-t119 experiments run emission-free (Codex P1).
@@ -3360,29 +3459,37 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             build_forcing(cfg, coords)
         self.assertEqual(seen["paths"], ["/ox_2000.nc", "/ox_2001.nc"])
 
-    def test_classify_product_object_cftime_climatology(self):
-        """A decoded-cftime (object dtype) 12-month axis classifies as a
-        datetime climatology — the ``.year`` path in ``_time_axis_years``.
+    def test_product_time_axis_object_cftime(self):
+        """A decoded-cftime (object dtype) axis is recognised as ``datetime``.
+
+        The merge key normalises each object by ``str`` (real cftime objects
+        stringify to a date) so two files decoded to distinct objects at the
+        same instant compare equal.
         """
         import xarray as xr
 
         from jcm import runners
 
         class _CFTime:
-            def __init__(self, year):
-                self.year = year
+            def __init__(self, month):
+                self.month = month
+
+            def __str__(self):
+                return f"2000-{self.month:02d}-15"
 
         def _open(_path, **_kw):
-            times = np.array([_CFTime(2000) for _ in range(12)], dtype=object)
+            times = np.array([_CFTime(m) for m in range(1, 13)], dtype=object)
             return xr.Dataset(coords={"time": ("time", times)})
 
         with mock.patch("xarray.open_dataset", side_effect=_open):
-            kind = runners._classify_product_time_axis(["/clim_cf.nc"])
-        self.assertEqual(kind, ("datetime", "climatology"))
+            dtype, key, _label = runners._product_time_axis(["/clim_cf.nc"])
+        self.assertEqual(dtype, "datetime")
+        self.assertEqual(
+            key, frozenset(f"2000-{m:02d}-15" for m in range(1, 13)))
 
-    def test_classify_product_no_time_axis_is_none(self):
-        """A product whose file carries no ``time`` axis (a static field) is
-        unclassifiable — ``None``, nothing to reconcile.
+    def test_product_time_axis_no_time_is_none(self):
+        """A product whose file carries no ``time`` axis (a static field) has
+        no axis to reconcile — ``_product_time_axis`` returns ``None``.
         """
         import xarray as xr
 
@@ -3392,8 +3499,86 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={"lat": [0.0, 1.0]})
 
         with mock.patch("xarray.open_dataset", side_effect=_open):
-            self.assertIsNone(
-                runners._classify_product_time_axis(["/static.nc"]))
+            self.assertIsNone(runners._product_time_axis(["/static.nc"]))
+
+    def test_pyses_emissions_one_year_transient_plus_offyear_climatology(self):
+        """One-year ``{year}`` transient + climatology dated another year rejects.
+
+        The degenerate case a ``(dtype, span)`` classifier missed (F1): a
+        ``{year}`` product expanded over a SINGLE year and a CF-datetime
+        climatology dated in a DIFFERENT year both look like "one-year datetime"
+        to a span test, so it waved them through and by-coords NaN-unioned their
+        disjoint years. The merge-property guard rejects them structurally —
+        two products whose axes are not identical.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_{year}.nc",
+                            "hf://bundles/t42/anthro_clim.nc"],
+            years=[2000])
+
+        def _open_by_path(path, **_kw):
+            s = str(path)
+            if "anthro_clim" in s:
+                # 12 monthly CF-datetime samples in year 1850 (another year).
+                return xr.Dataset(coords={"time": np.array(
+                    [f"1850-{m:02d}-15" for m in range(1, 13)],
+                    dtype="datetime64[ns]")})
+            if "bb_2000" in s:
+                return xr.Dataset(coords={"time": np.array(
+                    ["2000-06-15"], dtype="datetime64[ns]")})
+            return xr.Dataset()
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_path):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_emissions_identical_axis_climatology_stack_merges(self):
+        """A stack of climatologies on the SAME axis merges (shape a) (F1).
+
+        Two distinct climatology products (disjoint sectors/species) sharing an
+        IDENTICAL 12-month datetime axis union their variables cleanly, so the
+        set flattens into one by-coords open and reaches the loader.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_clim.nc",
+                            "hf://bundles/t42/anthro_clim.nc"])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # Both products carry the identical 12-month year-2000 axis.
+        def _open_same_axis(path, **_kw):
+            if "clim" not in str(path):
+                return xr.Dataset()
+            return xr.Dataset(coords={"time": np.array(
+                [f"2000-{m:02d}-15" for m in range(1, 13)],
+                dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_same_axis), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/bb_clim.nc", "hf://bundles/t42/anthro_clim.nc"])
 
     def test_pyses_transient_ozone_rejected_clearly(self):
         """Transient ``{year}`` ozone is rejected with a clear message on pySES.
