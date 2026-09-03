@@ -206,9 +206,10 @@ def _auto_emission_files(cfg) -> list[str]:
     are not the spectral-token bundles — both resolve ``auto`` to nothing. The
     mirror's published-bundle set is consulted per key
     (``bundle_is_published``): a grid outside the published-grid whitelist has
-    no bundle at all, and a published-horizontal / unpublished-level combo
-    (e.g. ``t63_l8``) has no level-resolved oxidant bundle while its level-free
-    emissions/dms/dust bundles still exist — so ``auto`` nulls exactly those
+    no bundle at all; a published-horizontal / unpublished-level combo
+    (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
+    (token, nlev) — has no level-resolved oxidant bundle while its level-free
+    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those
     keys here too. A key explicitly set to a path/``null`` in the preset is
     honoured (the literal path is already picked up by ``_preset_data_files``;
     ``null`` opts out).
@@ -225,6 +226,11 @@ def _auto_emission_files(cfg) -> list[str]:
     names = _load_bundle_names()
     forcing = cfg.get("forcing") or {}
     token = names.grid_token(trunc)
+    # Level-resolved bundles (oxidants) are on hybrid-level pressures, so the
+    # runner's gate also rejects a sigma grid that merely shares a published
+    # (token, nlev); mirror that here so the prefetch never fetches an oxidant
+    # bundle the build will null.
+    vertical = str(grid.get("vertical", "hybrid"))
     # Mirror the runner's key-specific published-bundle check (F2): a
     # non-mirrored grid has NO bundles, and a published-horizontal /
     # unpublished-level combo (e.g. t63_l8) has no level-resolved oxidant
@@ -235,7 +241,7 @@ def _auto_emission_files(cfg) -> list[str]:
             for key, path in names.auto_emission_bundle_paths(
                 token, nlev).items()
             if str(forcing.get(key, "auto")) == "auto"
-            and names.bundle_is_published(key, token, nlev)]
+            and names.bundle_is_published(key, token, nlev, vertical)]
 
 
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,

@@ -43,6 +43,21 @@ PUBLISHED_GRIDS = frozenset({"t63", "t106"})
 #: (emissions/dms/dust, published one-per-grid) ignore the layer count.
 PUBLISHED_LEVELS = frozenset({47, 95})
 
+#: Vertical-coordinate families for which the mirror publishes the level-resolved
+#: products. ``build_mirror``/``interpolate_ozone`` interpolate the oxidant (and
+#: ozone) files onto the model's **hybrid**-level centre pressures at a reference
+#: surface pressure — the file's level k is a specific hybrid pressure, mapped
+#: one-to-one onto model level k with no re-interpolation. That mapping is only
+#: correct on a matching hybrid grid: a *sigma* grid whose (token, nlev) happen to
+#: coincide with a published hybrid bundle (e.g. ``grid=echam_t42_l8_sigma``
+#: ``grid.spectral_truncation=63 grid.layers=47`` → ``t63``/``l47``) would pull the
+#: hybrid bundle and silently wire its stratospheric pressures onto unrelated sigma
+#: levels — and :func:`jcm.forcing.validate_oxidant_levels` deliberately skips the
+#: hyam/hybm coefficient cross-check for ``SigmaCoordinates``, so nothing else
+#: catches it. So a LEVEL-dependent ``auto`` key additionally requires a hybrid
+#: vertical; level-FREE products (emissions/dms/dust, purely horizontal) ignore it.
+PUBLISHED_VERTICALS = frozenset({"hybrid"})
+
 #: Prescribed-emission forcing keys that honour the ``auto`` convention. Value
 #: is ``(subdir_suffix, filename)``: ``""`` is the horizontal bundle
 #: (``bundles/<grid>/``), ``"_l{nlev}"`` the level-resolved one
@@ -63,25 +78,31 @@ EMISSION_AUTO_BUNDLES = {
 }
 
 
-def bundle_is_published(key: str, token: str, nlev) -> bool:
+def bundle_is_published(key: str, token: str, nlev, vertical: str = "hybrid") -> bool:
     """Whether the mirror publishes the ``auto`` bundle for ``key`` on this grid.
 
     The horizontal ``token`` must be a :data:`PUBLISHED_GRIDS` member for every
     product. A LEVEL-dependent product (its subdir carries ``{nlev}`` — only
     ``oxidants_file`` today) additionally requires ``nlev`` to be a
-    :data:`PUBLISHED_LEVELS` member; level-FREE products (empty subdir:
-    emissions/dms/dust) ignore ``nlev``. Level-dependence is inferred from the
-    subdir template in :data:`EMISSION_AUTO_BUNDLES`, so the published set and
-    the path layout cannot drift. Shared by :func:`jcm.runners.
-    _emission_auto_resolves_to_none` (the build-time resolver + its warning
-    predicate) and ``tools/benchmark.py``'s prefetch enumerator so all three
-    agree on which ``auto`` keys have a real bundle (F2).
+    :data:`PUBLISHED_LEVELS` member *and* ``vertical`` (the coordinate family,
+    ``"hybrid"``/``"sigma"``) to be a :data:`PUBLISHED_VERTICALS` member: the
+    level-resolved bundles are interpolated onto hybrid-level pressures and are
+    silently wrong when mapped level-for-level onto a sigma grid that merely
+    shares the same (token, nlev). Level-FREE products (empty subdir:
+    emissions/dms/dust) are purely horizontal and ignore both ``nlev`` and
+    ``vertical``. Level-dependence is inferred from the subdir template in
+    :data:`EMISSION_AUTO_BUNDLES`, so the published set and the path layout
+    cannot drift. Shared by :func:`jcm.runners._emission_auto_resolves_to_none`
+    (the build-time resolver + its warning predicate) and
+    ``tools/benchmark.py``'s prefetch enumerator so all three agree on which
+    ``auto`` keys have a real bundle (F2). ``vertical`` defaults to ``"hybrid"``
+    so level-free callers (and hybrid grids) need not pass it.
     """
     if token not in PUBLISHED_GRIDS:
         return False
     subdir, _ = EMISSION_AUTO_BUNDLES[key]
     if "{nlev}" in subdir:
-        return int(nlev) in PUBLISHED_LEVELS
+        return int(nlev) in PUBLISHED_LEVELS and vertical in PUBLISHED_VERTICALS
     return True
 
 

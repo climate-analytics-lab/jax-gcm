@@ -1870,6 +1870,27 @@ class TestAutoInputResolution(unittest.TestCase):
             self.assertEqual(_resolve_auto_terrain(coords), "/cached/file.nc")
             self.assertEqual(f.call_args.args[0], "bundles/t21/terrain.nc")
 
+    def test_ozone_auto_nulls_on_sigma_without_fetch(self):
+        # Codex round 14 family check: auto-ozone has the SAME sigma hole as
+        # oxidants. ``jcm.data.bc.interpolate_ozone`` writes the packaged AND
+        # mirror ozone products on the model's HYBRID-level centre pressures and
+        # OzoneClimatology.from_file only cross-checks shape/lat-lon, so a sigma
+        # grid sharing a published (token, nlev) would wire hybrid-pressure
+        # ozone onto unrelated sigma levels. So a sigma grid resolves auto-ozone
+        # to None (analytic fallback + warning) with NO packaged scan or fetch.
+        import logging
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone, build_coords
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63", "grid.layers=47"])
+        coords = build_coords(cfg)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=AssertionError("fetch must not be hit")):
+            with self.assertLogs("jcm", level=logging.WARNING) as cm:
+                self.assertIsNone(_resolve_auto_ozone(coords))
+        assert any("sigma" in m for m in cm.output)
+
     def test_terrain_auto_raises_loudly_when_unresolvable(self):
         from unittest import mock
 
@@ -2211,19 +2232,33 @@ class TestWarnOnConfigTraps:
         return OmegaConf.create(cfg)
 
     @staticmethod
-    def _coords(truncation=63, nlev=47):
+    def _coords(truncation=63, nlev=47, vertical="hybrid"):
         # ``_grid_token`` reads ``coords.horizontal.total_wavenumbers`` and maps
         # ``total_wavenumbers - 2`` to ``t{trunc}``; the level-aware oxidant
-        # predicate reads ``coords.nodal_shape[0]`` for the layer count. A
-        # lightweight stub avoids building a real (expensive) coordinate system.
-        # t63 is published; t42 (truncation=42) is not. nlev defaults to a
-        # PUBLISHED layer count (47) so the level-dependent oxidant bundle
-        # resolves unless a test overrides it (e.g. nlev=8 for the t63_l8 gap).
+        # predicate reads ``coords.nodal_shape[0]`` for the layer count and
+        # ``_vertical_kind`` reads ``coords.vertical`` (isinstance
+        # HybridCoordinates) for the family. A lightweight stub avoids building a
+        # real (expensive) coordinate system, but ``vertical`` is a REAL dinosaur
+        # coordinate object so the isinstance classification is faithful. t63 is
+        # published; t42 (truncation=42) is not. nlev defaults to a PUBLISHED
+        # layer count (47) so the level-dependent oxidant bundle resolves unless
+        # a test overrides it (nlev=8 for the t63_l8 gap; vertical='sigma' for
+        # the sigma-on-published-(token,nlev) gap).
         import types
+
+        import numpy as np
+        n = int(nlev)
+        if vertical == "sigma":
+            from dinosaur.sigma_coordinates import SigmaCoordinates
+            vert = SigmaCoordinates.equidistant(n)
+        else:
+            from dinosaur.hybrid_coordinates import HybridCoordinates
+            vert = HybridCoordinates(a_boundaries=np.zeros(n + 1),
+                                     b_boundaries=np.linspace(0.0, 1.0, n + 1))
         return types.SimpleNamespace(
             horizontal=types.SimpleNamespace(
                 total_wavenumbers=int(truncation) + 2),
-            nodal_shape=(int(nlev),))
+            nodal_shape=(n,), vertical=vert)
 
     @staticmethod
     def _pyses_dycore():
@@ -2537,6 +2572,29 @@ class TestWarnOnConfigTraps:
         assert "L47/L95" in caplog.text
         # Only oxidants nulled — the level-free keys did NOT, so the emissions/
         # dms/dust keys are not named as unresolved.
+        assert "emissions_file" not in caplog.text
+
+    def test_jam_auto_sigma_vertical_warns_partial(self, caplog):
+        # Codex round 14: a SIGMA grid at a published (token, nlev) — e.g.
+        # echam_t42_l8_sigma at t63/l47 — passes the horizontal+level gate but
+        # the oxidant bundle is on hybrid-level pressures, so oxidants_file=auto
+        # nulls while the level-free keys resolve. Same PARTIAL branch as the
+        # t63_l8 gap, but the warning must name the SIGMA reason (not the layer
+        # count, which here IS published).
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                cfg, self._physics("jam_dust_emissions"), None,
+                coords=self._coords(63, nlev=47, vertical="sigma"))
+        assert "partial zero-emission JAM baseline" in caplog.text
+        assert "oxidants_file" in caplog.text
+        # The message names the sigma vertical as the reason (the layer count 47
+        # is published, so it cannot be blamed here).
+        assert "sigma" in caplog.text
+        # Level-free keys resolved on the published t63 grid → not named.
         assert "emissions_file" not in caplog.text
 
     # SCM (run.mode=scm) family sweep. The single-column model builds no gridded
@@ -2901,6 +2959,44 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 self.assertEqual(
                     out.get("oxidants_file"),
                     f"hf://bundles/t63_l{nlev}/oxidants_pd.nc")
+
+    def test_jam_oxidants_auto_nulls_on_sigma_grid(self):
+        """A sigma grid sharing a published (token, nlev) still nulls oxidants.
+
+        Codex round 14: ``grid=echam_t42_l8_sigma grid.spectral_truncation=63
+        grid.layers=47`` passes the (t63, l47) horizontal+level gate, but the
+        oxidant bundle is on HYBRID-level pressures — mapping it level-for-level
+        onto sigma levels is silently wrong and ``validate_oxidant_levels`` skips
+        the coefficient check on ``SigmaCoordinates``. So ``oxidants_file=auto``
+        must null on the sigma vertical while the level-free (purely horizontal)
+        emissions/dms/dust bundles under ``bundles/t63/`` still resolve.
+        """
+        from unittest import mock
+
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63", "grid.layers=47",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+        # Guard the premise: this really is a sigma grid at the published
+        # (t63, l47) — the exact silent-corruption combo the gate rejects.
+        self.assertIsInstance(coords.vertical, SigmaCoordinates)
+        self.assertEqual(coords.nodal_shape[0], 47)
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
+        # Level-free products resolve to their t63 (level-agnostic) bundles.
+        self.assertEqual(out.get("emissions_file"),
+                         "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
+        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
+        self.assertIsNone(out.get("oxidants_file"))
 
     def test_t119_jam_experiment_resolves_emission_free(self):
         """The ma-t119 experiments run emission-free (Codex P1).

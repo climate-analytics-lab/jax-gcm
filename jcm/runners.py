@@ -941,9 +941,13 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     THIS key's bundle for the model grid — a check that is now key-specific
     (:func:`jcm.data.bundle_names.bundle_is_published`): the horizontal token
     must be a published grid, and the level-dependent ``oxidants_file`` bundle
-    additionally requires a published layer count, so a published-horizontal /
-    unpublished-level combo (e.g. ``t63_l8``) nulls ``oxidants_file`` while the
-    level-free emissions/dms/dust keys still resolve (F2). No fetch, no side
+    additionally requires a published layer count AND a hybrid vertical (the
+    bundle is on hybrid-level pressures — mapping it level-for-level onto a
+    sigma grid is silently wrong), so a published-horizontal / unpublished-level
+    combo (e.g. ``t63_l8``) OR a sigma grid that merely shares a published
+    (token, nlev) (e.g. ``echam_t42_l8_sigma`` at ``t63``/``l47``) nulls
+    ``oxidants_file`` while the level-free emissions/dms/dust keys still resolve
+    (F2). No fetch, no side
     effects. Shared by the build-time resolver
     (:func:`_resolve_one_emission_input`) and the config-trap warner
     (:func:`warn_on_config_traps`) so the None-decision the warning reasons
@@ -954,7 +958,8 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     if is_pyses or not jam:
         return True
     return not bundle_names.bundle_is_published(
-        key, _grid_token(coords), int(coords.nodal_shape[0]))
+        key, _grid_token(coords), int(coords.nodal_shape[0]),
+        _vertical_kind(coords))
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
@@ -1222,6 +1227,20 @@ def _grid_token(coords) -> str:
         int(coords.horizontal.total_wavenumbers) - 2)
 
 
+def _vertical_kind(coords) -> str:
+    """Coordinate family (``"hybrid"``/``"sigma"``) of the model's vertical grid.
+
+    Gates the level-resolved ``auto`` products (oxidants, ozone), which the data
+    mirror interpolates onto hybrid-level pressures and maps level-for-level: a
+    sigma grid must NOT pull a hybrid bundle that merely shares its (token, nlev).
+    Uses the same ``HybridCoordinates`` test as
+    :func:`jcm.forcing.validate_oxidant_levels` so the availability gate and the
+    (sigma-skipping) coefficient validator classify a grid identically.
+    """
+    from dinosaur.hybrid_coordinates import HybridCoordinates
+    return "hybrid" if isinstance(coords.vertical, HybridCoordinates) else "sigma"
+
+
 def _resolve_auto_ozone(coords):
     """Find an ozone climatology matching the model grid.
 
@@ -1235,11 +1254,31 @@ def _resolve_auto_ozone(coords):
     finds a file — the caller warns and falls back to the analytic
     profile, whose ~7.6× tropospheric ozone column biases clear-sky OLR
     ~12 W/m² low.
+
+    Auto resolves to ``None`` on a **sigma** grid: every ozone product here
+    (packaged and mirror alike) is written by ``jcm.data.bc.interpolate_ozone``
+    onto the model's *hybrid*-level centre pressures and mapped level-for-level,
+    so a sigma grid that merely shares a published (token, nlev) would wire
+    stratospheric-pressure ozone onto unrelated sigma levels — the same silent
+    corruption the oxidant gate rejects (``bundle_names.PUBLISHED_VERTICALS``).
+    ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
+    vertical coordinate, so nothing downstream would catch it.
     """
     from importlib import resources
 
     import xarray as xr
 
+    if _vertical_kind(coords) != "hybrid":
+        logger.warning(
+            "forcing.ozone_file=auto on a %s-vertical grid — the packaged and "
+            "mirror ozone products are interpolated onto hybrid-level pressures "
+            "and would be mapped level-for-level onto unrelated sigma levels. "
+            "Falling back to the ANALYTIC ozone profile; supply an on-grid "
+            "forcing.ozone_file (built for this vertical grid) for production "
+            "radiation.",
+            _vertical_kind(coords),
+        )
+        return None
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     nlev = int(coords.nodal_shape[0])
     bc_root = Path(str(resources.files("jcm"))) / "data" / "bc"
@@ -2226,21 +2265,27 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
         elif auto_nulled:
             # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
             # resolved — in practice the LEVEL-dependent oxidants_file on a
-            # published horizontal grid but an unpublished layer count (e.g.
-            # t63_l8), whose L47/L95-only bundle does not exist. The level-free
+            # published horizontal grid that nonetheless lacks a level-resolved
+            # bundle, because either the layer count is unpublished (e.g.
+            # t63_l8) or the vertical is sigma (the bundle is on hybrid-level
+            # pressures — e.g. echam_t42_l8_sigma at t63/l47). The level-free
             # keys still supply their emissions, so this is not the all-zero
             # baseline above; the nulled species alone stay at zero, which a
-            # config reading 'auto' hides — flag exactly those keys.
+            # config reading 'auto' hides — flag exactly those keys and name
+            # both possible reasons.
             logger.warning(
                 "config trap: partial zero-emission JAM baseline — the 'auto' "
                 "emission key(s) %s resolved to None because the mirror "
-                "publishes no bundle for this grid/level combination "
-                "(level-resolved products such as oxidants exist only at L%s), "
-                "while the remaining keys resolved. Those species stay at zero; "
-                "point each nulled key at an on-grid file, or run a published "
-                "layer count, to supply them.",
+                "publishes no bundle for this grid: level-resolved products "
+                "such as oxidants exist only for hybrid verticals at L%s, and "
+                "this grid is %s at L%d. The remaining keys resolved, so those "
+                "species alone stay at zero; point each nulled key at an "
+                "on-grid file, or run a published hybrid layer count, to "
+                "supply them.",
                 ", ".join(auto_nulled),
                 "/L".join(str(n) for n in sorted(bundle_names.PUBLISHED_LEVELS)),
+                _vertical_kind(coords) if coords is not None else "unknown-vertical",
+                int(coords.nodal_shape[0]) if coords is not None else -1,
             )
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
