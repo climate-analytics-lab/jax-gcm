@@ -3241,10 +3241,14 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 return xr.Dataset(coords={"time": np.array(
                     [f"2000-{m:02d}-15" for m in range(1, 13)],
                     dtype="datetime64[ns]")})
-            # Transient yearly file: one sample stamped in its own year.
-            yr = re.search(r"(\d{4})", s).group(1)
+            # Transient yearly file: one sample stamped in its own year. Guard
+            # the incidental non-yearly opens (e.g. the auto-ozone glob) whose
+            # path need not carry a year on a clean CI install.
+            m = re.search(r"(\d{4})", s)
+            if m is None:
+                return xr.Dataset()
             return xr.Dataset(coords={"time": np.array(
-                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=lambda p: p), \
@@ -3280,11 +3284,15 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return base
 
         # Each yearly file is stamped in its OWN calendar year, so the product
-        # spans several years (transient) — exactly what must be allowed.
+        # spans several years (transient) — exactly what must be allowed. Guard
+        # the incidental non-yearly opens (e.g. the auto-ozone glob) whose path
+        # need not carry a year on a clean CI install.
         def _open_by_year(path, **_kw):
-            yr = re.search(r"(\d{4})", str(path)).group(1)
+            m = re.search(r"(\d{4})", str(path))
+            if m is None:
+                return xr.Dataset()
             return xr.Dataset(coords={"time": np.array(
-                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=lambda p: p), \
@@ -3328,9 +3336,18 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset()
 
         def _open_by_year(path, **_kw):
-            yr = re.search(r"(\d{4})", str(path)).group(1)
+            # This patches ``open_dataset`` GLOBALLY, so it also catches the
+            # incidental opens the build makes on non-yearly files — notably the
+            # ``ozone_file: auto`` glob over the packaged ``bc/*/ozone.nc``. That
+            # path need not contain a 4-digit run (it does on this box only
+            # because the worktree dir happens to; a clean CI install path does
+            # not), so guard the no-match case with a time-less dataset that the
+            # classifier / auto-ozone resolver simply ignore.
+            m = re.search(r"(\d{4})", str(path))
+            if m is None:
+                return xr.Dataset()
             return xr.Dataset(coords={"time": np.array(
-                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=lambda p: p), \
