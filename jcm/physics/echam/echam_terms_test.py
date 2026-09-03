@@ -133,6 +133,35 @@ class TestEchamComposablePhysics(unittest.TestCase):
             categories.index("clouds"),
         )
 
+    def test_cu_lmfmid_flag_toggles_the_omega_requirement(self):
+        """The scalar cu_lmfmid knob controls the dycore omega contract.
+
+        With the mid-level trigger on (the default) TiedtkeConvection
+        declares an ``omega`` dycore requirement, which fails Model
+        construction on a backend that cannot supply omega (pySES, #698).
+        Setting cu_lmfmid=False drops that requirement so the ne30
+        experiments compose (#715).
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        on = echam_physics(checkpoint_terms=False)
+        self.assertIn("omega", on.required_dycore_fields())
+
+        off = echam_physics(checkpoint_terms=False, cu_lmfmid=False)
+        self.assertNotIn("omega", off.required_dycore_fields())
+
+    def test_cu_lmfmid_rejects_a_simultaneous_convection_override(self):
+        """cu_lmfmid and an explicit convection Parameters are exclusive."""
+        from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            echam_physics(
+                checkpoint_terms=False,
+                cu_lmfmid=False,
+                convection=ConvectionParameters.default(),
+            )
+
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
         from jcm.physics.echam.echam_terms import echam_physics

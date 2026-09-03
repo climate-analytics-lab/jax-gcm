@@ -20,11 +20,20 @@
 #  - forcing=from_file + hf:// present-day T63 SST bundle; ozone from the
 #    level-matched mirror bundle (L47). run=pyses_year carries the
 #    finite-lid sponge (dycore.lid_sponge) + health-gated chunking.
+#  - physics.cu_lmfmid=false: disable ECHAM's mid-level convection trigger.
+#    It needs the dycore's omega, which pySES computes internally but does
+#    not expose (#698); with the trigger on, Model construction raises. Until
+#    a pySES omega provider lands, ne30 runs without mid-level convection —
+#    matching the validated 2026-07 campaign, which predates the omega gate
+#    (#715).
 defaults:
   - override /physics: echam-jam
   - override /dycore: pyses_ne30l47
   - override /forcing: from_file
   - override /run: pyses_year
+
+physics:
+  cu_lmfmid: false
 
 forcing:
   file: hf://bundles/t63/forcing_pd.nc

@@ -96,6 +96,7 @@ def echam_physics(
     aerocom_overlap: str = "maximum-random",
     aerocom_optics: bool = False,
     diagnose_omega: bool = False,
+    cu_lmfmid: bool | None = None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -207,6 +208,15 @@ def echam_physics(
             ``DinosaurDycore(compute_omega=True)``; the CLI enables the
             provider automatically). Model-agnostic, independent of the
             AeroCom wap/w500/w700 fields.
+        cu_lmfmid: Enable ECHAM's mid-level convection trigger
+            (``lmfmid``, default on). ``None`` leaves the trigger as the
+            ``convection`` Parameters set it (on by default); ``False``
+            disables it. The trigger needs the dycore's ``omega``; a
+            backend that cannot supply it (pySES, #698) must set this
+            ``False`` or Model construction raises — hence the ne30
+            experiments turn it off (#715). Mutually exclusive with an
+            explicit ``convection`` override (set the field on that object
+            instead).
         enable_aerocom: Attach the AeroCom phase-4 derived
             diagnostics term (cloud-top sampling, column
             integrals, pressure-level fields, aerosol number
@@ -293,7 +303,26 @@ def echam_physics(
             f"NN checkpoint, so radiation_scheme={radiation_scheme!r} would "
             "ignore it.")
 
-    convection_p = convection or ConvectionParameters.default()
+    # ``cu_lmfmid`` is the scalar escape hatch for the ECHAM mid-level
+    # convection trigger (ECHAM ``lmfmid``, default on). With it on,
+    # TiedtkeConvection declares an ``omega`` dycore requirement; a backend
+    # that cannot supply omega — today pySES (#698) — then fails at Model
+    # construction, so the ne30 experiments turn it off. It is deliberately a
+    # scalar flag (not buried in the ``convection`` Parameters block) so it
+    # forwards through the Hydra ``echam_physics`` builder, which only relays
+    # scalar kwargs. Passing both is a silently-ignored-argument bug — the
+    # class this factory abolishes — so it is rejected; set cu_lmfmid on the
+    # ConvectionParameters you pass instead.
+    if cu_lmfmid is not None:
+        if convection is not None:
+            raise ValueError(
+                "cu_lmfmid and an explicit convection override are mutually "
+                "exclusive — set cu_lmfmid on the ConvectionParameters you "
+                "pass as convection=."
+            )
+        convection_p = ConvectionParameters.default(cu_lmfmid=cu_lmfmid)
+    else:
+        convection_p = convection or ConvectionParameters.default()
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
     microphysics_2m_p = microphysics_2m or CloudParams2M.default()
