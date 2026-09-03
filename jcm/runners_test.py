@@ -3141,6 +3141,174 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
                 build_forcing(cfg, coords, dycore=dycore)
 
+    def test_pyses_emissions_datetime_climatology_plus_transient_raise(self):
+        """A CF-*datetime* climatology mixed with a datetime transient product
+        is rejected on pySES (F1, the dtype-only-guard blind spot).
+
+        The two products are dtype-identical (both real calendar axes), so a
+        dtype-only classification waved them through and let by-coords outer-
+        union their disjoint dates → NaN-fill. The per-product *span* classifier
+        distinguishes them: the climatology element's 12 monthly stamps all fall
+        in one calendar year (``climatology``), while the ``{year}`` element's
+        yearly files span several (``transient``) — two kinds, so the combined
+        open is refused.
+        """
+        import re
+
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/anthro_clim.nc",
+                            "hf://bundles/t42/bb_{year}.nc"],
+            years=[2000, 2001])
+
+        def _open_by_path(path, **_kw):
+            s = str(path)
+            if "clim" in s:
+                # 12 monthly CF-datetime samples, all within one calendar year.
+                return xr.Dataset(coords={"time": np.array(
+                    [f"2000-{m:02d}-15" for m in range(1, 13)],
+                    dtype="datetime64[ns]")})
+            # Transient yearly file: one sample stamped in its own year.
+            yr = re.search(r"(\d{4})", s).group(1)
+            return xr.Dataset(coords={"time": np.array(
+                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_path):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_emissions_transient_yearly_files_concatenate(self):
+        """One transient product's multi-year yearly files still concatenate (F1).
+
+        The improved per-product classifier must NOT falsely reject the
+        legitimate case the guard exists to allow: N yearly files of ONE product
+        with contiguous, non-overlapping (distinct calendar year) ranges. They
+        classify ``(datetime, transient)`` together and flatten into the single
+        by-coords open.
+        """
+        import re
+
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file="hf://bundles/t42/emis_{year}.nc",
+            years=[2000, 2001, 2002])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # Each yearly file is stamped in its OWN calendar year, so the product
+        # spans several years (transient) — exactly what must be allowed.
+        def _open_by_year(path, **_kw):
+            yr = re.search(r"(\d{4})", str(path)).group(1)
+            return xr.Dataset(coords={"time": np.array(
+                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_year), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/emis_2000.nc", "hf://bundles/t42/emis_2001.nc",
+             "hf://bundles/t42/emis_2002.nc"])
+
+    def test_oxidants_transient_yearly_files_concatenate(self):
+        """Spectral oxidants: a transient multi-year product still concatenates.
+
+        Family sweep of the improved classifier onto the SHARED
+        ``_resolve_oxidant_paths`` (spectral + pySES). Oxidants are ONE product,
+        so distinct-year yearly files span several years (``transient``) and must
+        reach a single ``open_mfdataset`` — the per-product span classifier must
+        not mistake the multi-year single product for a mix.
+        """
+        import re
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/ox_2000.nc", "/ox_2001.nc"]
+        coords = build_coords(cfg)
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        def _open_by_year(path, **_kw):
+            yr = re.search(r"(\d{4})", str(path)).group(1)
+            return xr.Dataset(coords={"time": np.array(
+                [f"{yr}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_year), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object()}), \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+        self.assertEqual(seen["paths"], ["/ox_2000.nc", "/ox_2001.nc"])
+
+    def test_classify_product_object_cftime_climatology(self):
+        """A decoded-cftime (object dtype) 12-month axis classifies as a
+        datetime climatology — the ``.year`` path in ``_time_axis_years``.
+        """
+        import xarray as xr
+
+        from jcm import runners
+
+        class _CFTime:
+            def __init__(self, year):
+                self.year = year
+
+        def _open(_path, **_kw):
+            times = np.array([_CFTime(2000) for _ in range(12)], dtype=object)
+            return xr.Dataset(coords={"time": ("time", times)})
+
+        with mock.patch("xarray.open_dataset", side_effect=_open):
+            kind = runners._classify_product_time_axis(["/clim_cf.nc"])
+        self.assertEqual(kind, ("datetime", "climatology"))
+
+    def test_classify_product_no_time_axis_is_none(self):
+        """A product whose file carries no ``time`` axis (a static field) is
+        unclassifiable — ``None``, nothing to reconcile.
+        """
+        import xarray as xr
+
+        from jcm import runners
+
+        def _open(_path, **_kw):
+            return xr.Dataset(coords={"lat": [0.0, 1.0]})
+
+        with mock.patch("xarray.open_dataset", side_effect=_open):
+            self.assertIsNone(
+                runners._classify_product_time_axis(["/static.nc"]))
+
     def test_pyses_transient_ozone_rejected_clearly(self):
         """Transient ``{year}`` ozone is rejected with a clear message on pySES.
 

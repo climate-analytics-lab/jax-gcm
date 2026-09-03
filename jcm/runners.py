@@ -1573,7 +1573,11 @@ def _resolve_oxidant_paths(forcing_cfg):
         paths = [str(files)]
     if not paths:
         return None
-    _assert_uniform_time_axis(paths, config_key="forcing.oxidants_file")
+    # Oxidants are ONE product (its ``{year}`` expansion or explicit file set),
+    # so the whole list is a single product for the guard: a lone climatology
+    # or one transient product's yearly files are uniform, while a file set
+    # straddling integer-month and datetime axes is rejected as malformed.
+    _assert_uniform_time_axis([paths], config_key="forcing.oxidants_file")
     return paths
 
 
@@ -1609,18 +1613,26 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     years = forcing_cfg.get("years", None)
     available = _product_available_years(
         forcing_cfg, "emissions_available_years")
-    paths: list[str] = []
+    # Keep each list element / ``{year}`` expansion as its own product for the
+    # uniform-time-axis guard (span is a per-product property — see
+    # :func:`_classify_product_time_axis`), then flatten to the single path list
+    # ``attach_jam_forcing`` opens by-coords.
+    products: list[list[str]] = []
     for product in _forcing_products(raw, years, available):
         resolved = _resolve_data_path(product)
         if isinstance(resolved, (list, tuple)):
-            paths.extend(str(p) for p in resolved
-                         if str(p) not in ("", "null", "none", "None"))
+            files = [str(p) for p in resolved
+                     if str(p) not in ("", "null", "none", "None")]
         elif resolved not in (None, "", "null"):
-            paths.append(str(resolved))
-    if not paths:
+            files = [str(resolved)]
+        else:
+            files = []
+        if files:
+            products.append(files)
+    if not products:
         return None
-    _assert_uniform_time_axis(paths, config_key="forcing.emissions_file")
-    return paths
+    _assert_uniform_time_axis(products, config_key="forcing.emissions_file")
+    return [p for product in products for p in product]
 
 
 def _attach_oxidants(forcing, forcing_cfg, coords):
@@ -1694,19 +1706,109 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     return forcing.copy(oxidant_vmr=mapping)
 
 
-def _assert_uniform_time_axis(paths, *, config_key) -> None:
-    """Reject a file set whose members carry incompatible time axes.
+def _time_axis_years(values) -> set:
+    """Distinct calendar years present in a decoded time coordinate.
+
+    Handles both ``datetime64`` (numpy) and ``object`` (decoded cftime /
+    ``datetime``) arrays; a ``.year`` attribute covers the latter. Used only to
+    decide climatology (one calendar year) vs transient (several) span — the
+    exact years never matter, only how many distinct ones there are.
+    """
+    import numpy as np
+    arr = np.asarray(values).ravel()
+    if arr.size == 0:
+        return set()
+    if np.issubdtype(arr.dtype, np.datetime64):
+        # datetime64[Y] counts years from 1970; the absolute value is
+        # irrelevant here, only the *number* of distinct years.
+        return set(arr.astype("datetime64[Y]").astype(int).tolist())
+    return {getattr(v, "year", None) for v in arr}
+
+
+def _classify_product_time_axis(product):
+    """Classify one product's combined time axis as ``(dtype, span)``.
+
+    A *product* is the file set that resolves from one list element / one
+    ``{year}`` expansion; all of a product's files are concatenated onto a
+    single time axis, so the classification is over the product's files
+    together, not each file alone. Two orthogonal properties decide whether two
+    products can share one ``open_mfdataset`` (by-coords) axis without a silent
+    NaN-union:
+
+    * ``dtype`` — ``integer-month`` (numeric ``time``: a bare month index) vs
+      ``datetime`` (a real calendar axis: ``datetime64`` or decoded cftime).
+    * ``span`` — ``climatology`` (every sample falls in ONE calendar year: a
+      12-month cycle) vs ``transient`` (samples span several calendar years).
+
+    The ``span`` axis is the crucial discriminator a dtype-only test misses: a
+    12-month climatology stored with real CF *datetime* stamps is dtype-
+    identical to a transient product's yearly files, yet by-coords would outer-
+    union their disjoint dates and NaN-fill every off-year step. Span is a
+    *per-product* property — a single transient yearly file covers one calendar
+    year and is indistinguishable from a climatology in isolation; only the
+    product's FULL file set reveals a multi-year reach. So N yearly files of one
+    transient product classify ``(datetime, transient)`` together and
+    concatenate cleanly, while a climatology dropped into the same list
+    classifies ``(datetime, climatology)`` and is caught.
+
+    Returns ``None`` when no file in the product carries a ``time`` axis (a
+    static field — nothing to reconcile). Raises when a single product itself
+    straddles both an integer-month and a datetime axis: that set is malformed
+    regardless of what else it is merged with.
+    """
+    import numpy as np
+    import xarray as xr
+    dtypes: set[str] = set()
+    years: set = set()
+    saw_time = False
+    for p in product:
+        with xr.open_dataset(p) as ds:
+            if "time" not in ds.variables and "time" not in ds.dims:
+                continue
+            saw_time = True
+            vals = np.asarray(ds["time"].values)
+            # datetime64 or object (decoded cftime) => a real calendar axis;
+            # anything numeric is an integer/float month-index climatology.
+            is_datetime = (np.issubdtype(vals.dtype, np.datetime64)
+                           or vals.dtype == np.object_)
+            dtypes.add("datetime" if is_datetime else "integer-month")
+            if is_datetime:
+                years |= _time_axis_years(vals)
+    if not saw_time:
+        return None
+    if len(dtypes) > 1:
+        raise ValueError(
+            "a single product mixes incompatible time axes — its files "
+            f"straddle both an integer-month and a datetime axis ({sorted(product)}), "
+            "which cannot share one open_mfdataset (by-coords) axis."
+        )
+    dtype = next(iter(dtypes))
+    # An integer-month axis is inherently a single-cycle climatology; a datetime
+    # axis is a climatology only when every sample lands in one calendar year.
+    span = ("climatology" if dtype == "integer-month" or len(years) <= 1
+            else "transient")
+    return (dtype, span)
+
+
+def _assert_uniform_time_axis(products, *, config_key) -> None:
+    """Reject a product set whose members carry incompatible time axes.
 
     Shared by the oxidant path (:func:`_resolve_oxidant_paths`) and the pySES
-    emissions path (:func:`_resolve_pyses_emission_paths`): both open their file
-    set as ONE combined dataset (``open_mfdataset``, by-coords) along a single
-    time axis. Mixing an integer-month climatology (numeric ``time``) with a
-    datetime transient in that set would either silently NaN-fill the
-    non-overlapping steps or clash cryptically on dtype — the silent-ignore
-    class this hardening abolishes. Classify each member's ``time`` axis and
-    raise a targeted error, naming both axes and the supported forms, when the
-    set is mixed. A single-file set (a lone climatology, the common case) is
-    trivially uniform.
+    emissions path (:func:`_resolve_pyses_emission_paths`): both open ALL their
+    files as ONE combined dataset (``open_mfdataset``, by-coords) along a single
+    time axis, so every product must resolve to the SAME ``(dtype, span)`` kind
+    (see :func:`_classify_product_time_axis`). Mixing kinds — an integer-month
+    climatology with a datetime transient, OR a CF-*datetime* 12-month
+    climatology with datetime transient yearly files (dtype-identical, which a
+    dtype-only guard waves through) — makes by-coords either NaN-fill the
+    non-overlapping steps or clash cryptically on dtype. That silent-ignore
+    class is what this hardening abolishes.
+
+    ``products`` is a list of products, each a list of file paths (one list
+    element / one ``{year}`` expansion). Legitimate: N yearly files of ONE
+    transient product (they classify ``(datetime, transient)`` together and
+    concatenate); or several products that all share one kind. A single-file
+    set (a lone climatology, the common case) is trivially uniform.
 
     ``config_key`` names the knob in the message (``forcing.oxidants_file`` /
     ``forcing.emissions_file``). NOTE the asymmetry with the SPECTRAL emissions
@@ -1716,30 +1818,30 @@ def _assert_uniform_time_axis(paths, *, config_key) -> None:
     there. pySES has no per-product alignment machinery — one combined open —
     so a loud rejection is the honest semantics on that path.
     """
-    if len(paths) <= 1:
+    # A single file across all products (a lone climatology, the common case)
+    # is trivially uniform — skip the opens entirely.
+    if sum(len(product) for product in products) <= 1:
         return
-    import numpy as np
-    import xarray as xr
-    kinds: dict[str, list[str]] = {}
-    for p in paths:
-        with xr.open_dataset(p) as ds:
-            if "time" not in ds.variables and "time" not in ds.dims:
-                continue
-            dt = np.asarray(ds["time"].values).dtype
-            # datetime64 or object (decoded cftime) => a real calendar axis;
-            # anything numeric is an integer/float month-index climatology.
-            is_datetime = np.issubdtype(dt, np.datetime64) or dt == np.object_
-            kind = "datetime" if is_datetime else "integer-month"
-            kinds.setdefault(kind, []).append(p)
+    kinds: dict[tuple[str, str], list[str]] = {}
+    for product in products:
+        kind = _classify_product_time_axis(product)
+        if kind is None:
+            continue
+        label = (product[0] if len(product) == 1
+                 else f"{product[0]} … (+{len(product) - 1} more)")
+        kinds.setdefault(kind, []).append(label)
     if len(kinds) > 1:
-        detail = "; ".join(f"{k}: {v}" for k, v in sorted(kinds.items()))
+        detail = "; ".join(
+            f"{dt}/{sp}: {v}" for (dt, sp), v in sorted(kinds.items()))
         raise ValueError(
-            f"{config_key} mixes incompatible time axes within one file set "
-            f"({detail}). These files are opened together along ONE time axis "
-            "(open_mfdataset, by-coords) and must all share it. Supported "
-            "forms: a single 12-month climatology file, or one transient "
-            "product's yearly files (all on a datetime axis). Do not mix an "
-            "integer-month climatology with datetime transient files."
+            f"{config_key} mixes incompatible time axes across its products "
+            f"({detail}). These products are opened together along ONE time "
+            "axis (open_mfdataset, by-coords) and must all share the same kind "
+            "— an (integer-month|datetime, climatology|transient) pair. "
+            "Supported forms: a single 12-month climatology, or one transient "
+            "product's yearly files (all datetime, spanning several years). Do "
+            "not mix a climatology (integer-month OR datetime, one calendar "
+            "year) with datetime transient files."
         )
 
 
