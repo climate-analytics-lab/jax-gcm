@@ -23,11 +23,17 @@ file: ???
 # ``by_date_interp``.
 years: null
 available_years: null
-# Per-product coverage override for the ozone pattern, when its yearly
-# product spans a different range than the main file (falls back to
-# ``available_years``). Run dates beyond the expanded files clamp to
-# the last sample.
+# Per-product coverage overrides for the ozone / emissions / oxidants
+# {year} patterns, when a product spans a different range than the main
+# file (each falls back to ``available_years`` when null). Run dates
+# beyond the expanded files clamp to the last sample. See ``forcing=era5``
+# for a preset that sets these: its surface files run to 2024 but the
+# amip ozone/emissions bundles end in 2022. The mirror ships no transient
+# oxidants product, so ``oxidants_available_years`` only matters for a
+# user-supplied transient oxidant series.
 ozone_available_years: null
+emissions_available_years: null
+oxidants_available_years: null
 
 # Time alignment for ``file``: auto (default; climatology span → wrap_year,
 # longer → by_date), or force wrap_year / by_date / by_date_interp.

@@ -34,3 +34,11 @@ ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc
 # non-pattern path (e.g. hf://bundles/t63_l47/ozone_pd.nc) to use a
 # climatology instead.
 ozone_available_years: [1850, 2022]
+# The transient emissions the JAM-transient warning recommends
+# (emissions_file=hf://bundles/<grid>/emissions_amip/{year}.nc) come from
+# the SAME --stage amip build as ozone_amip and likewise end in 2022 (CEDS
+# source 1850-2023, staged to 2022). Without this per-product clamp,
+# forcing.years=[2023,2024] would expand the emissions pattern to 2023/2024
+# files that were never built; for run dates past 2022 the time lookup
+# clamps to the last (Dec 2022) sample.
+emissions_available_years: [1850, 2022]

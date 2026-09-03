@@ -545,10 +545,13 @@ def _product_available_years(forcing_cfg, key: str):
     """Per-product source coverage, falling back to ``available_years``.
 
     A preset can mix yearly products with different coverages (e.g.
-    ``forcing_era5`` runs to 2024 while the FZJ ozone product ends in
-    2022); a per-product override keeps each pattern's expansion inside
-    the files that actually exist — for run dates beyond it, the time
-    lookup clamps to the last sample.
+    ``forcing_era5`` surface files run to 2024 while the FZJ ``ozone_amip``
+    and CEDS ``emissions_amip`` bundles both end in 2022); a per-product
+    override (``ozone_available_years`` / ``emissions_available_years`` /
+    ``oxidants_available_years``) keeps each pattern's expansion inside the
+    files that actually exist — for run dates beyond it, the time lookup
+    clamps to the last sample. ``key`` selects the override; any product
+    without one shares the top-level ``available_years``.
     """
     avail = forcing_cfg.get(key, None)
     return avail if avail is not None else forcing_cfg.get(
@@ -1093,7 +1096,25 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
             f"prescribed:{ozone_file}" if ozone_file
             else "analytic (no ozone file)")
 
-        file = (_resolve_data_path(_forcing_cfg.get("file", None))
+        raw_file = _forcing_cfg.get("file", None)
+        if isinstance(raw_file, str) and "{year}" in raw_file:
+            # Transient surface forcing is genuinely unsupported on pySES (as
+            # for ozone above): the column forcing reader opens a SINGLE
+            # 12-month climatology (``jcm.dycore.pyses.forcing.build_forcing``
+            # → one ``xr.open_dataset``), not a multi-year concatenation. Raise
+            # the clear limitation here rather than let the literal-brace path
+            # reach ``_resolve_data_path`` and surface as a confusing hf:// 404
+            # / file-not-found. Use forcing=amip/era5 on the spectral dinosaur
+            # backend for transient surface forcing.
+            raise ValueError(
+                f"forcing.file={raw_file!r} has a {{year}} pattern, but "
+                "transient surface forcing is not supported on the pySES "
+                "backend (the column forcing reader opens a single 12-month "
+                "climatology). Provide a single climatology file, or use the "
+                "spectral dinosaur backend (forcing=amip/era5) for transient "
+                "surface forcing."
+            )
+        file = (_resolve_data_path(raw_file)
                 or _pyses_default_bc("forcing.nc"))
         # Year expansion must happen on the pySES path too, so the documented
         # transient forms (``oxidants_file``/``emissions_file=.../{year}.nc``
@@ -1117,7 +1138,8 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
             emissions_file=_resolve_data_path(_expand_years(
                 _forcing_cfg.get("emissions_file", None),
                 _forcing_cfg.get("years", None),
-                _forcing_cfg.get("available_years", None))),
+                _product_available_years(
+                    _forcing_cfg, "emissions_available_years"))),
             dms_file=_resolve_data_path(_forcing_cfg.get("dms_file", None)),
             dust_file=_resolve_data_path(_forcing_cfg.get("dust_file", None)),
             oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
@@ -1397,7 +1419,15 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     if raw in (None, "", "null"):
         return forcing
     years = forcing_cfg.get("years", None)
-    available = forcing_cfg.get("available_years", None)
+    # Per-product coverage: a preset may run its SURFACE forcing past the
+    # emissions series' end (``forcing=era5`` runs to 2024 but the mirror's
+    # ``emissions_amip`` bundle ends 2022), so honour an
+    # ``emissions_available_years`` override — the same mechanism ozone uses —
+    # and only fall back to the shared ``available_years`` when it is unset.
+    # Without this, ``emissions_file=.../{year}.nc`` would over-expand into
+    # never-built 2023/2024 files following the transient-warning's advice.
+    available = _product_available_years(
+        forcing_cfg, "emissions_available_years")
 
     from jcm.forcing import (
         default_forcing,
@@ -1528,9 +1558,15 @@ def _resolve_oxidant_paths(forcing_cfg):
     if raw in (None, "", "null"):
         return None
     from omegaconf import ListConfig
+    # Per-product coverage, resolved HERE so both the spectral and pySES paths
+    # (which share this helper) clamp a transient oxidant ``{year}`` pattern to
+    # the same range and cannot drift. The mirror publishes no transient
+    # oxidants product, but a user bringing their own series whose coverage
+    # differs from the surface forcing's sets ``oxidants_available_years``; it
+    # falls back to the shared ``available_years`` when unset.
     files = _resolve_data_path(_expand_years(
         raw, forcing_cfg.get("years", None),
-        forcing_cfg.get("available_years", None)))
+        _product_available_years(forcing_cfg, "oxidants_available_years")))
     if isinstance(files, (list, tuple, ListConfig)):
         paths = [str(p) for p in files
                  if str(p) not in ("", "null", "none", "None")]
@@ -1986,11 +2022,17 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                 "transient product using a year-matched {year} pattern (the "
                 "same yearly-file expansion the SST forcing uses) — e.g. "
                 "forcing.emissions_file=hf://bundles/<grid>/emissions_amip/"
-                "{year}.nc, with the run's forcing.years range. The mirror "
-                "publishes NO transient oxidants product (only oxidants_pi/"
-                "oxidants_pd climatologies), so transient oxidants must come "
-                "from a separately prepared dataset; forcing.oxidants_file "
-                "accepts a {year} pattern once you have one.",
+                "{year}.nc, with the run's forcing.years range. The "
+                "emissions_amip bundle ends in 2022 (before era5's 2024 "
+                "surface coverage), so also set "
+                "forcing.emissions_available_years=[1850,2022] to clamp the "
+                "expansion to the built files (era5 already ships this). The "
+                "mirror publishes NO transient oxidants product (only "
+                "oxidants_pi/oxidants_pd climatologies), so transient oxidants "
+                "must come from a separately prepared dataset; "
+                "forcing.oxidants_file accepts a {year} pattern (and "
+                "forcing.oxidants_available_years its coverage) once you have "
+                "one.",
                 ", ".join(pd_auto_keys),
             )
 

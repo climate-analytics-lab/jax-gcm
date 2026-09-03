@@ -1912,12 +1912,68 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
                 fallback, "ozone_available_years"),
             fallback.available_years)
 
+    def test_emissions_coverage_clamps_while_surface_keeps_range(self):
+        # Codex P2 (round 8): an era5-style cfg runs its SURFACE forcing to
+        # 2024 but the mirror's emissions_amip bundle ends 2022. The
+        # emissions_available_years override must clamp the emissions
+        # expansion to 2022 while the shared available_years keeps the full
+        # surface range — following the transient warning's advice otherwise
+        # fetches never-built 2023/2024 emission files.
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({
+            "years": [2023, 2024],
+            "available_years": [1979, 2024],
+            "emissions_available_years": [1850, 2022],
+        })
+        # Emissions clamp to the last built (2022) file...
+        self.assertEqual(
+            runners._forcing_products(
+                "/emis/{year}.nc", cfg.years,
+                runners._product_available_years(
+                    cfg, "emissions_available_years")),
+            [["/emis/2022.nc"]])
+        # ...while the surface product (shared available_years, coverage to
+        # 2024) still reaches the requested 2023-2024 (plus the one-year
+        # by_date_interp bracket on the low side).
+        self.assertEqual(
+            runners._expand_years(
+                "/sst/{year}.nc", cfg.years,
+                runners._product_available_years(cfg, "available_years")),
+            ["/sst/2022.nc", "/sst/2023.nc", "/sst/2024.nc"])
+
+    def test_emissions_oxidants_coverage_fall_back_to_shared(self):
+        # Per-product override beats the shared fallback; absent it, each
+        # transient-capable input inherits available_years (so it can never
+        # silently drift from the surface coverage).
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({
+            "available_years": [1979, 2024],
+            "emissions_available_years": [1850, 2022],
+        })
+        self.assertEqual(
+            list(runners._product_available_years(
+                cfg, "emissions_available_years")),
+            [1850, 2022])
+        # oxidants has no override here → shared available_years.
+        self.assertEqual(
+            runners._product_available_years(
+                cfg, "oxidants_available_years"),
+            cfg.available_years)
+
     def test_era5_preset_composes(self):
         cfg = _compose(["forcing=era5", "forcing.years=[2023,2024]",
                         "run.start_date=2023-01-01"])
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
+        # Surface files run to 2024 but the emissions_amip bundle ends 2022,
+        # so the preset ships a per-product emissions clamp (Codex round 8).
+        self.assertEqual(list(cfg.forcing.available_years)[-1], 2024)
+        self.assertEqual(list(cfg.forcing.emissions_available_years)[-1], 2022)
 
     def test_list_spec_splits_into_per_element_products(self):
         # emissions_file may be a list (e.g. biomass-burning + anthropogenic).
@@ -2915,4 +2971,22 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             ozone_file="hf://bundles/t42_l8/ozone_{year}.nc", years=[2000])
         with self.assertRaisesRegex(
                 ValueError, "transient ozone is not supported"):
+            build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_transient_surface_file_rejected_clearly(self):
+        """A ``{year}`` surface ``forcing.file`` is rejected clearly on pySES.
+
+        Matrix audit (round 8): the SPECTRAL path year-expands the surface
+        ``file`` (that IS the transient input for forcing=amip/era5), so a user
+        reasonably expects ``forcing=era5`` to work. On pySES the column reader
+        opens a single 12-month climatology, so a ``{year}`` pattern must raise
+        the documented limitation up front — mirroring the ozone guard — rather
+        than reach ``_resolve_data_path`` as a confusing hf:// 404.
+        """
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            file="hf://bundles/t63/forcing_era5/{year}.nc", years=[2000, 2001])
+        with self.assertRaisesRegex(
+                ValueError, "transient surface forcing is not supported"):
             build_forcing(cfg, coords, dycore=dycore)
