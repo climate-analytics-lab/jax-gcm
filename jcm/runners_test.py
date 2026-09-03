@@ -836,6 +836,25 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "latitudes"):
                 build_forcing(cfg, coords)
 
+    def test_year_pattern_in_dms_dust_rejected_loudly(self):
+        # F3 (round 12): dms/dust are climatology-only single files — no
+        # transient product is mirrored and their WRAP_YEAR readers do not
+        # expand {year}. A {year} pattern must fail loudly at build time,
+        # naming the contract, not reach xr.open_dataset as a literal-brace
+        # file-not-found. (A bare `{` is Hydra override syntax, so the value
+        # is double-quoted for Hydra to keep the literal braces.)
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        for key in ("dms_file", "dust_file"):
+            with self.subTest(key):
+                cfg = _compose([
+                    *_NULL_EMISSIONS, "physics=echam-jam",
+                    "grid=echam_t42_l8_sigma",
+                    f'forcing.{key}="/x/{{year}}.nc"'])
+                with self.assertRaisesRegex(
+                        ValueError, rf"{key}.*climatology-only"):
+                    build_forcing(cfg, coords)
+
     def test_oxidant_level_mismatch_raises(self):
         import tempfile
         from jcm.runners import build_forcing

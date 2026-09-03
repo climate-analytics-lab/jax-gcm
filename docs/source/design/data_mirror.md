@@ -93,7 +93,10 @@ loudly at build time, naming the missing `hf://` path and the fixes (prefetch,
 a local path, or `forcing.<key>=null` to opt out). `auto` is the only
 grid-portable mechanism — it composes the concrete per-grid bundle path itself,
 so one config follows the grid without any user-facing path template. An
-explicit path is taken verbatim (a `{year}` pattern is still expanded per year).
+explicit path is taken verbatim; a `{year}` pattern is expanded per year for
+`emissions_file` / `oxidants_file` (and the surface `file` / `ozone_file`), but
+`dms_file` / `dust_file` are climatology-only single files — no transient
+product is mirrored — and reject a `{year}` at build time.
 
 The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
 real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its

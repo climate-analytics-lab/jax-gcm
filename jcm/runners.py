@@ -1132,13 +1132,16 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         # can carry both in one list). ``dms_file`` / ``dust_file`` take no year
         # expansion because they are climatology-only on BOTH backends (their
         # readers are WRAP_YEAR; ``_attach_dms`` / ``_attach_dust`` likewise
-        # never expand) — a literal ``{year}`` there fails identically on the
-        # spectral path, so there is no pySES-specific bypass to close.
+        # never expand); a ``{year}`` there is rejected loudly by
+        # ``_reject_year_pattern`` on both paths rather than reaching
+        # ``open_dataset`` as a literal-brace file-not-found.
         forcing = pyses_build_forcing(
             str(file), dycore,
             emissions_file=_resolve_pyses_emission_paths(_forcing_cfg),
-            dms_file=_resolve_data_path(_forcing_cfg.get("dms_file", None)),
-            dust_file=_resolve_data_path(_forcing_cfg.get("dust_file", None)),
+            dms_file=_resolve_data_path(_reject_year_pattern(
+                _forcing_cfg.get("dms_file", None), "dms_file")),
+            dust_file=_resolve_data_path(_reject_year_pattern(
+                _forcing_cfg.get("dust_file", None), "dust_file")),
             oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
             ozone_file=_resolve_data_path(ozone_file),
         )
@@ -1482,6 +1485,29 @@ def _attach_emissions(forcing, forcing_cfg, coords):
                         prescribed_aerosol_emissions=speciated or None)
 
 
+def _reject_year_pattern(value, key):
+    """Fail loudly on a ``{year}`` pattern for a climatology-only forcing key.
+
+    ``dms_file`` and ``dust_file`` are single-file WRAP_YEAR climatologies: the
+    data mirror publishes NO transient (yearly) DMS or dust product, and their
+    readers (:func:`jcm.forcing.read_dms_seawater` /
+    :func:`jcm.forcing.read_dust_source`) do not expand ``{year}``. A pattern
+    here would otherwise reach ``xr.open_dataset`` as a literal-brace path and
+    die with a cryptic file-not-found; reject it up front, naming the reason and
+    that only ``emissions_file`` / ``oxidants_file`` accept yearly patterns.
+    Returns ``value`` unchanged when it is not a pattern.
+    """
+    if isinstance(value, str) and "{year}" in value:
+        raise ValueError(
+            f"forcing.{key}={value!r} contains a {{year}} pattern, but {key} "
+            "is a climatology-only single file: the data mirror publishes no "
+            "transient (yearly) DMS/dust product and its reader does not expand "
+            "{year}. Only forcing.emissions_file and forcing.oxidants_file "
+            "accept yearly patterns; give dms_file/dust_file a single 12-month "
+            "climatology (or 'auto'/'null').")
+    return value
+
+
 def _attach_dms(forcing, forcing_cfg, coords):
     """Attach the seawater-DMS climatology from ``cfg.forcing.dms_file``.
 
@@ -1497,7 +1523,8 @@ def _attach_dms(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("dms_file", None))
+    path = _resolve_data_path(
+        _reject_year_pattern(forcing_cfg.get("dms_file", None), "dms_file"))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr
@@ -1521,7 +1548,8 @@ def _attach_dust(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("dust_file", None))
+    path = _resolve_data_path(
+        _reject_year_pattern(forcing_cfg.get("dust_file", None), "dust_file"))
     if path in (None, "", "null"):
         return forcing
     import xarray as xr

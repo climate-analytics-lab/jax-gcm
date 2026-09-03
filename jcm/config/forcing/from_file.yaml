@@ -13,10 +13,14 @@
 kind: from_file
 file: ???
 
-# Yearly transient bundles (issue #610): any *_file here may be a {year}
+# Yearly transient bundles (issue #610): the surface ``file`` and the
+# ``emissions_file`` / ``oxidants_file`` / ``ozone_file`` keys may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along
 # time — set it in a forcing yaml as
 # ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with ``years: [1979, 1983]``.
+# ``dms_file`` / ``dust_file`` are climatology-only single files (no transient
+# product is mirrored and their readers do not expand) — a {year} there is
+# rejected at build time.
 # A bare ``{`` is Hydra override syntax, so a CLI override must quote the value
 # (outer single quotes for the shell, inner double quotes for Hydra):
 # ``'forcing.file="hf://bundles/t63/forcing_amip/{year}.nc"'``. Plain paths
@@ -58,9 +62,11 @@ ozone_file: auto
 # resolves the per-grid present-day HF bundle for the model grid at build time,
 # so ``physics=echam-jam forcing=from_file grid=echam_t63_l47_hybrid`` composes
 # the emission inputs by itself. Non-JAM packages supply nothing. Each key also
-# takes an explicit/``hf://`` path (a ``{year}`` pattern is expanded per year;
-# use ``auto`` — not a path template — to let a config follow the grid) or
-# ``null`` to opt out (the runner then warns it is emission-free).
+# takes an explicit/``hf://`` path or ``null`` to opt out (the runner then warns
+# it is emission-free); use ``auto`` — not a path template — to let a config
+# follow the grid. Only ``emissions_file`` and ``oxidants_file`` accept a
+# ``{year}`` pattern (expanded per year); ``dms_file`` / ``dust_file`` are
+# climatology-only single files and reject a ``{year}`` at build time.
 
 # Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``); auto-routes
 # by content (``emis_<sector>_<species>`` bulk / ``aero_emis_<tracer>``

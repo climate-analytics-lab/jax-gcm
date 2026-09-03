@@ -17,9 +17,11 @@ ozone_file: auto
 # emission inputs by itself instead of the silent zero-emission baseline (#640).
 # For any non-JAM package (and the pySES backend) ``auto`` supplies nothing.
 # Each key also accepts:
-#   * an explicit path or ``hf://`` path (a ``{year}`` pattern is expanded per
-#     year; use ``auto`` — not a path template — to let a config follow the
-#     grid);
+#   * an explicit path or ``hf://`` path (use ``auto`` — not a path template —
+#     to let a config follow the grid). Only ``emissions_file`` and
+#     ``oxidants_file`` accept a ``{year}`` pattern (expanded per year);
+#     ``dms_file`` / ``dust_file`` are climatology-only single files and reject
+#     a ``{year}`` at build time;
 #   * ``null`` to opt out explicitly (the runner then warns it is emission-free).
 # Files must already be on the model horizontal grid; download once on a node
 # with internet (a cold cache fails loudly at build time, naming the fix).
