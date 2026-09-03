@@ -1341,6 +1341,13 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # Read each product independently and merge the per-variable TimeSeries
     # leaves. Each product keeps its own time axis / align_mode, so mixing a
     # transient product with a climatology does not force one shared axis.
+    #
+    # This per-product merge is meaningful HERE but not for oxidants (contrast
+    # _attach_oxidants, which handles a list as ONE product): emission products
+    # carry DISJOINT variables (different ``emis_<sector>_<species>`` /
+    # ``aero_emis_<tracer>`` sets), so ``dict.update`` across products unions
+    # genuinely distinct keys. Oxidant files must each carry the IDENTICAL four
+    # gases, so an analogous update would be pure last-one-wins.
     anthro: dict = {}
     speciated: dict = {}
     for product in _forcing_products(raw, years, available):
@@ -1449,12 +1456,20 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     multi-year axis becomes ``BY_DATE``. The level-for-level vertical mapping
     is unchanged (the yearly files share the model's hybrid grid).
 
-    A **list** ``oxidants_file`` is handled per-product exactly as the emissions
-    path (see :func:`_forcing_products`): each element is opened, level-checked
-    and time-aligned on its own, so mixing a transient oxidant product with a
-    climatology one does not force a single shared (and possibly incompatible)
-    time axis. Products merge by oxidant key into one ``oxidant_vmr`` mapping,
-    each leaf keeping its own alignment.
+    Oxidants are handled as **one product**, unlike the per-product emissions
+    path. A user-supplied **list** ``oxidants_file`` means the yearly files of a
+    *single* oxidant product (exactly what ``{year}`` expansion produces): the
+    whole file set is opened together (``open_mfdataset``, by-coords) along one
+    time axis and read once. This differs deliberately from
+    :func:`_attach_emissions`, whose per-product merge is meaningful because
+    emission products carry **disjoint** variables (different sectors/species).
+    :func:`jcm.forcing.read_oxidant_vmr` instead requires *every* oxidant file
+    to carry **all four** gases (oh/no3/o3/h2o2), so distinct products fully
+    overlap — a per-product ``dict.update`` would be pure last-one-wins and
+    silently keep only the final file. Genuinely incompatible members in one
+    file set (e.g. an integer-month climatology mixed with datetime transients)
+    are rejected up front by :func:`_assert_uniform_oxidant_time_axis` rather
+    than left to ``open_mfdataset`` to NaN-fill or clash cryptically.
     """
     if forcing_cfg is None:
         return forcing
@@ -1464,26 +1479,80 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     years = forcing_cfg.get("years", None)
     available = forcing_cfg.get("available_years", None)
 
+    import xarray as xr
+    from omegaconf import ListConfig
+
     from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
-    mapping: dict = {}
-    for product in _forcing_products(raw, years, available):
-        path = _resolve_data_path(product)
-        if path in (None, "", "null"):
-            continue
-        ds = _open_forcing_dataset(path)
-        try:
-            product_map = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
-                                           lon_deg=lon_deg, align_mode="auto")
-            validate_oxidant_levels(ds, coords, path)
-        finally:
-            ds.close()
-        mapping.update(product_map)
+
+    # A `{year}` pattern expands to the product's yearly file list; an explicit
+    # list is taken verbatim as that one product's file set. Either way the set
+    # shares a single time axis and is read once (see docstring).
+    files = _resolve_data_path(_expand_years(raw, years, available))
+    if isinstance(files, (list, tuple, ListConfig)):
+        paths = [str(p) for p in files
+                 if str(p) not in ("", "null", "none", "None")]
+    elif files in (None, "", "null"):
+        return forcing
+    else:
+        paths = [str(files)]
+    if not paths:
+        return forcing
+    _assert_uniform_oxidant_time_axis(paths)
+    ds = (xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1
+          else xr.open_dataset(paths[0]))
+    ref = paths if len(paths) > 1 else paths[0]
+    try:
+        mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
+                                   lon_deg=lon_deg, align_mode="auto")
+        validate_oxidant_levels(ds, coords, ref)
+    finally:
+        ds.close()
     if not mapping:
         return forcing
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
+
+
+def _assert_uniform_oxidant_time_axis(paths) -> None:
+    """Reject an oxidant file set whose members carry incompatible time axes.
+
+    A list ``oxidants_file`` (or a ``{year}`` expansion) is the yearly files of
+    ONE product, opened together along a single time axis (see
+    :func:`_attach_oxidants`). Mixing an integer-month climatology (numeric
+    ``time``) with a datetime transient in that set would either silently
+    NaN-fill the non-overlapping steps under ``open_mfdataset(by_coords)`` or
+    clash cryptically on dtype — the silent-ignore class this hardening
+    abolishes. Classify each member's ``time`` axis and raise a targeted error,
+    naming both axes and the supported forms, when the set is mixed. A
+    single-file set (a lone climatology, the common case) is trivially uniform.
+    """
+    if len(paths) <= 1:
+        return
+    import numpy as np
+    import xarray as xr
+    kinds: dict[str, list[str]] = {}
+    for p in paths:
+        with xr.open_dataset(p) as ds:
+            if "time" not in ds.variables and "time" not in ds.dims:
+                continue
+            dt = np.asarray(ds["time"].values).dtype
+            # datetime64 or object (decoded cftime) => a real calendar axis;
+            # anything numeric is an integer/float month-index climatology.
+            is_datetime = np.issubdtype(dt, np.datetime64) or dt == np.object_
+            kind = "datetime" if is_datetime else "integer-month"
+            kinds.setdefault(kind, []).append(p)
+    if len(kinds) > 1:
+        detail = "; ".join(f"{k}: {v}" for k, v in sorted(kinds.items()))
+        raise ValueError(
+            "forcing.oxidants_file mixes incompatible time axes within one "
+            f"file set ({detail}). A list (or a {{year}} expansion) is the "
+            "yearly files of a SINGLE oxidant product and must share one time "
+            "axis. Supported forms: a single 12-month climatology file, or one "
+            "transient product's yearly files (all on a datetime axis). Do not "
+            "mix an integer-month climatology with datetime transient files."
+        )
 
 
 def _attach_macv2_weights(forcing, forcing_cfg, coords):

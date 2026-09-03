@@ -2564,10 +2564,19 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["paths"] = list(paths)
             return xr.Dataset()
 
+        # The set carries >1 file, so _attach_oxidants opens each to classify
+        # its time axis (the incompatible-mixture guard). Both yearly files are
+        # transient (datetime), so the set is uniform and the read proceeds.
+        def _open_datetime_stub(path, **_kw):
+            return xr.Dataset(
+                coords={"time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_mfdataset",
                            side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset",
+                           side_effect=_open_datetime_stub), \
                 mock.patch("jcm.forcing.read_oxidant_vmr",
                            return_value={"oh": object()}) as read_mock, \
                 mock.patch("jcm.forcing.validate_oxidant_levels"):
@@ -2580,3 +2589,90 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
              "hf://bundles/t42_l8/oxidants_2001.nc"])
         # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
         self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")
+
+    def test_oxidants_explicit_list_is_one_product(self):
+        """An explicit-list oxidants_file is ONE product, opened together (F2).
+
+        Unlike emissions (per-product merge over disjoint variables), every
+        oxidant file must carry all four gases, so a list is the yearly files of
+        a single product: the whole set goes to one ``open_mfdataset`` along one
+        time axis and is read once. (A per-product ``dict.update`` would have
+        been pure last-one-wins for the fully-overlapping oxidant maps.)
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/ox_a.nc", "/ox_b.nc"]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        # Both members transient (datetime) → uniform, read proceeds.
+        def _open_datetime_stub(path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset",
+                           side_effect=_open_datetime_stub), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object(), "no3": object()}), \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+
+        # The whole list reached a single open_mfdataset (one product, one axis).
+        self.assertEqual(seen["paths"], ["/ox_a.nc", "/ox_b.nc"])
+
+    def test_oxidants_mixed_time_axes_raise(self):
+        """A mixed integer-month + datetime oxidant set is rejected loudly (F2).
+
+        The genuinely-incompatible case ``_assert_uniform_oxidant_time_axis``
+        exists to catch: one member on an integer-month climatology axis, one on
+        a datetime transient axis, in a single product's file set — silent
+        NaN-fill / cryptic dtype clash under ``open_mfdataset`` is exactly the
+        silent-ignore class this hardening abolishes.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/clim.nc", "/transient.nc"]
+        coords = build_coords(cfg)
+
+        def _open_mixed(path, **_kw):
+            if "clim" in str(path):
+                return xr.Dataset(coords={"time": np.arange(12)})  # integer month
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_mixed):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords)
