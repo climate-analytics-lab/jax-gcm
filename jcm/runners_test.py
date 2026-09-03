@@ -2254,40 +2254,40 @@ class TestAttachMacv2Weights(unittest.TestCase):
 
 
 class TestEmissionAutoResolution(unittest.TestCase):
-    """The ``auto`` / ``{grid}`` prescribed-emission resolution (issue #640)."""
+    """The ``auto`` prescribed-emission resolution (issue #640).
+
+    ``auto`` is the only grid-portable mechanism: it composes the concrete
+    per-grid bundle path from :mod:`jcm.data.bundle_names` + the grid token, so
+    one config follows the grid. There is no user-facing ``{grid}``/``{nlev}``
+    path template (removed as a redundant simplification, #640) — an explicit
+    path is taken verbatim; only ``{year}`` is expanded downstream.
+    """
 
     def _coords(self):
         from jcm.runners import build_coords
         return build_coords(
             _compose(["physics=echam", "grid=echam_t63_l47_hybrid"]))
 
-    def test_placeholder_substitution(self):
-        from jcm.runners import _resolve_grid_placeholders
+    def test_explicit_path_taken_verbatim(self):
+        # No {grid}/{nlev} substitution: an explicit forcing path passes through
+        # _resolve_one_emission_input unchanged (auto is the grid-portable path).
+        from jcm.runners import _resolve_one_emission_input
         coords = self._coords()
         self.assertEqual(
-            _resolve_grid_placeholders(
-                "hf://bundles/{grid}_l{nlev}/oxidants_pd.nc", coords),
+            _resolve_one_emission_input(
+                "hf://bundles/t63_l47/oxidants_pd.nc", "oxidants_file",
+                coords, jam=True, is_pyses=False),
             "hf://bundles/t63_l47/oxidants_pd.nc")
-        # Non-placeholder / non-string paths pass through untouched.
-        self.assertEqual(_resolve_grid_placeholders("/a/b.nc", coords),
-                         "/a/b.nc")
-        self.assertIsNone(_resolve_grid_placeholders(None, coords))
-        # A {year} pattern must survive grid resolution intact: grid runs
-        # before _expand_years, so a blanket str.format would raise
-        # KeyError: 'year' and break the year-matched-emissions workflow.
+        # A {year} pattern is left intact for the later yearly expansion.
         self.assertEqual(
-            _resolve_grid_placeholders(
-                "hf://bundles/{grid}/emissions/{year}.nc", coords),
+            _resolve_one_emission_input(
+                "hf://bundles/t63/emissions/{year}.nc", "emissions_file",
+                coords, jam=True, is_pyses=False),
             "hf://bundles/t63/emissions/{year}.nc")
-        # A list (emissions_file may be several files) is mapped element-wise:
-        # {grid}/{nlev} resolved, {year} preserved for the later expansion, so
-        # a list must not slip through with literal braces to the fetcher.
-        self.assertEqual(
-            _resolve_grid_placeholders(
-                ["hf://bundles/{grid}/bb_{year}.nc",
-                 "hf://bundles/{grid}_l{nlev}/anthro.nc"], coords),
-            ["hf://bundles/t63/bb_{year}.nc",
-             "hf://bundles/t63_l47/anthro.nc"])
+        # Explicit null opts out.
+        self.assertIsNone(
+            _resolve_one_emission_input(
+                "null", "emissions_file", coords, jam=True, is_pyses=False))
 
     def test_auto_builds_per_grid_bundle_for_jam(self):
         from unittest import mock
@@ -2438,12 +2438,11 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                             "oxidants_file"):
                     self.assertIsNone(out.get(key))
 
-    def test_grid_and_year_placeholders_resolve_end_to_end(self):
-        """``{grid}`` + ``{year}`` in an emissions path survive to the loader.
+    def test_year_pattern_resolves_end_to_end(self):
+        """A ``{year}`` emissions pattern expands to one file per year.
 
-        Grid resolution runs before ``_expand_years``; a year-varying emissions
-        input must keep its ``{year}`` through grid substitution so the yearly
-        expansion (issue #610) then produces one grid-resolved file per year.
+        ``{year}`` is the only remaining path template; the yearly expansion
+        (issue #610) produces one file per year, opened together as one product.
         """
         from unittest import mock
 
@@ -2458,12 +2457,12 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             "physics.radiation_scheme=grey",
             *_NULL_EMISSIONS,
         ])
-        # Set the placeholder path and year range directly: the Hydra override
-        # grammar treats the ``{`` in ``{grid}``/``{year}`` as syntax, so it
-        # cannot be passed on the command line — but a preset yaml carries it
-        # verbatim. ``years`` is likewise not in the base forcing struct.
+        # Set the pattern path and year range directly: the Hydra override
+        # grammar treats the ``{`` in ``{year}`` as syntax, so it cannot be
+        # passed on the command line — but a preset yaml carries it verbatim.
+        # ``years`` is likewise not in the base forcing struct.
         OmegaConf.set_struct(cfg, False)
-        cfg.forcing.emissions_file = "hf://bundles/{grid}/emis/{year}.nc"
+        cfg.forcing.emissions_file = "hf://bundles/t42/emis/{year}.nc"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -2484,7 +2483,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 mock.patch("jcm.forcing.validate_emissions_grid"):
             build_forcing(cfg, coords)
 
-        # {grid} resolved to t42, {year} expanded to the inclusive range.
+        # {year} expanded to the inclusive range; opened as one product.
         self.assertEqual(
             seen["paths"],
             ["hf://bundles/t42/emis/2000.nc", "hf://bundles/t42/emis/2001.nc"])
@@ -2512,7 +2511,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = \
-            "hf://bundles/{grid}_l{nlev}/oxidants_{year}.nc"
+            "hf://bundles/t42_l8/oxidants_{year}.nc"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -2531,7 +2530,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 mock.patch("jcm.forcing.validate_oxidant_levels"):
             build_forcing(cfg, coords)
 
-        # {grid}/{nlev} resolved, {year} expanded, files concatenated by coords.
+        # {year} expanded, files concatenated by coords as one product.
         self.assertEqual(
             seen["paths"],
             ["hf://bundles/t42_l8/oxidants_2000.nc",

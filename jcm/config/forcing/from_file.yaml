@@ -48,8 +48,9 @@ ozone_file: auto
 # resolves the per-grid present-day HF bundle for the model grid at build time,
 # so ``physics=echam-jam forcing=from_file grid=echam_t63_l47_hybrid`` composes
 # the emission inputs by itself. Non-JAM packages supply nothing. Each key also
-# takes an explicit/``hf://`` path (``{grid}``/``{nlev}`` placeholders allowed)
-# or ``null`` to opt out (the runner then warns it is emission-free).
+# takes an explicit/``hf://`` path (a ``{year}`` pattern is expanded per year;
+# use ``auto`` — not a path template — to let a config follow the grid) or
+# ``null`` to opt out (the runner then warns it is emission-free).
 
 # Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``); auto-routes
 # by content (``emis_<sector>_<species>`` bulk / ``aero_emis_<tracer>``

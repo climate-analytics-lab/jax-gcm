@@ -90,8 +90,10 @@ python -m jcm.main physics=echam-jam-aerocom grid=echam_t63_l47_hybrid
 `bundles/t63_l47/ozone_pd.nc`, exactly as the explicit nine-line form below
 did. Prefetch the bundles on a node with internet first; a cold cache fails
 loudly at build time, naming the missing `hf://` path and the fixes (prefetch,
-a local path, or `forcing.<key>=null` to opt out). A path may carry `{grid}` /
-`{nlev}` placeholders, resolved from the composed grid.
+a local path, or `forcing.<key>=null` to opt out). `auto` is the only
+grid-portable mechanism — it composes the concrete per-grid bundle path itself,
+so one config follows the grid without any user-facing path template. An
+explicit path is taken verbatim (a `{year}` pattern is still expanded per year).
 
 The equivalent explicit form (any `*_file` still accepts an `hf://` path, and a
 real-world SST/land file needs `terrain=from_file`/`terrain=auto` to match its

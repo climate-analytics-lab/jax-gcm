@@ -33,12 +33,15 @@ from __future__ import annotations
 #: sources only, without hand-nulling the four emission keys.
 PUBLISHED_GRIDS = frozenset({"t63", "t106"})
 
-#: Prescribed-emission forcing keys that honour the ``auto`` convention and the
-#: ``{grid}``/``{nlev}`` placeholders. Value is ``(subdir_suffix, filename)``:
-#: ``""`` is the horizontal bundle (``bundles/<grid>/``), ``"_l{nlev}"`` the
-#: level-resolved one (``bundles/<grid>_l<nlev>/``) — matching the mirror layout
-#: in ``docs/source/design/data_mirror.md``. ``emissions_pd``/``oxidants_pd``
-#: are the present-day climatology members.
+#: Prescribed-emission forcing keys that honour the ``auto`` convention. Value
+#: is ``(subdir_suffix, filename)``: ``""`` is the horizontal bundle
+#: (``bundles/<grid>/``), ``"_l{nlev}"`` the level-resolved one
+#: (``bundles/<grid>_l<nlev>/``) — matching the mirror layout in
+#: ``docs/source/design/data_mirror.md``. The ``{nlev}`` here is an *internal*
+#: format token that :func:`emission_bundle_path` fills from the model grid; it
+#: is not a user-facing path template (``auto`` is the only grid-portable
+#: mechanism — see :func:`jcm.runners._resolve_one_emission_input`).
+#: ``emissions_pd``/``oxidants_pd`` are the present-day climatology members.
 EMISSION_AUTO_BUNDLES = {
     "emissions_file": ("", "emissions_pd.nc"),
     "dms_file": ("", "dms.nc"),

@@ -930,48 +930,21 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 _EMISSION_AUTO_BUNDLES = bundle_names.EMISSION_AUTO_BUNDLES
 
 
-def _resolve_grid_placeholders(path, coords):
-    """Substitute ``{grid}``/``{nlev}`` in a forcing path from the model grid.
-
-    ``{grid}`` becomes the mirror grid token (``t63``) and ``{nlev}`` the model
-    level count, so one config path serves every resolution (e.g.
-    ``hf://bundles/{grid}_l{nlev}/oxidants_pd.nc``). Non-string or
-    placeholder-free paths pass through unchanged.
-
-    Only these two recognised placeholders are substituted; any *other* brace
-    token is left verbatim. This matters because grid resolution runs *before*
-    ``_expand_years`` sees the path, so a year-varying transient input like
-    ``hf://bundles/{grid}/forcing_amip/{year}.nc`` must keep its ``{year}`` for
-    the later yearly-file expansion — a blanket ``str.format`` would raise
-    ``KeyError: 'year'`` here and break the year-matched-emissions workflow.
-
-    ``emissions_file`` also legitimately takes a **list** of paths (e.g. a
-    biomass-burning file plus an anthropogenic one). The substitution maps over
-    the elements (strings only; non-string elements pass through) so each
-    ``{grid}``/``{nlev}`` is resolved while any per-element ``{year}`` survives
-    for the later expansion — a list must not slip through with literal braces
-    to the fetcher.
-    """
-    from omegaconf import ListConfig
-    if isinstance(path, (list, tuple, ListConfig)):
-        return [_resolve_grid_placeholders(p, coords) for p in path]
-    if not (isinstance(path, str) and "{" in path):
-        return path
-    return (path.replace("{grid}", _grid_token(coords))
-                .replace("{nlev}", str(int(coords.nodal_shape[0]))))
-
-
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
-    """Resolve one prescribed-emission forcing value (``auto`` / placeholders).
+    """Resolve one prescribed-emission forcing value (``auto`` / explicit).
 
     * ``auto`` → the per-grid HF bundle path, fetched *now* (so a cold cache
       fails loudly at build time, not mid-run) — but only on the spectral path
       with a JAM package active; pySES native grids are not the spectral-token
       bundles, and a non-JAM package consumes no emissions, so both give
-      ``None``.
+      ``None``. ``auto`` is the only grid-portable mechanism: it composes the
+      concrete bundle path from :mod:`jcm.data.bundle_names` + the grid token,
+      so one config follows the grid without any user-facing path template.
     * explicit null (``None``/``""``/``"null"``) → ``None`` (opt-out).
-    * a ``{grid}``/``{nlev}`` placeholder path → substituted, then left for the
-      attach helper's own ``_resolve_data_path`` to fetch.
+    * an explicit path / ``hf://`` URL → returned unchanged for the attach
+      helper's own ``_resolve_data_path`` to fetch. A ``{year}`` pattern is
+      left intact for :func:`_expand_years` (there is no ``{grid}``/``{nlev}``
+      substitution — use ``auto`` to let a config follow the grid).
     """
     if value == "auto":
         if is_pyses or not jam:
@@ -1002,11 +975,11 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
             ) from e
     if value in (None, "", "null", "none"):
         return None
-    return _resolve_grid_placeholders(value, coords)
+    return value
 
 
 def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
-    """Concretise the ``auto``/placeholder emission keys on ``forcing_cfg``.
+    """Concretise the ``auto`` emission keys on ``forcing_cfg``.
 
     Returns ``forcing_cfg`` with the four prescribed-emission keys resolved (see
     :func:`_resolve_one_emission_input`). ``auto`` is keyed off whether the
