@@ -1077,7 +1077,7 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
 
         file = (_resolve_data_path(_forcing_cfg.get("file", None))
                 or _pyses_default_bc("forcing.nc"))
-        return pyses_build_forcing(
+        forcing = pyses_build_forcing(
             str(file), dycore,
             emissions_file=_resolve_data_path(
                 _forcing_cfg.get("emissions_file", None)),
@@ -1087,6 +1087,22 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
                 _forcing_cfg.get("oxidants_file", None)),
             ozone_file=_resolve_data_path(ozone_file),
         )
+        # MACv2-SP plume weights are the one dycore-agnostic attachment the
+        # spectral tail below also performs that ``pyses_build_forcing`` does
+        # NOT: ``aerosol_year_weight``/``aerosol_ann_cycle`` are plume-indexed
+        # scalar time series with NO horizontal field, so they need none of the
+        # column bilinear sampling ``attach_jam_forcing`` does for the gridded
+        # inputs (ozone/emissions/dms/dust/oxidants, which it therefore
+        # reimplements). Reuse the SAME ``_attach_macv2_weights`` helper here so
+        # ``forcing=macv2_sp`` on pySES actually loads its mandatory
+        # ``macv2_file`` instead of silently dropping it — the very silent-ignore
+        # trap warning 4 recommends this config to escape. (The exact-grid
+        # ``validate_emissions_grid``/``validate_oxidant_levels`` checks stay
+        # dinosaur-only: pySES interpolates every field onto columns, so it has
+        # no exact-grid requirement and asserts dim order in ``attach_jam_forcing``
+        # instead. Nudging is likewise dinosaur-only — attached later in ``run``,
+        # not here, and gated off on pySES.)
+        return _attach_macv2_weights(forcing, _forcing_cfg, coords)
 
     forcing_cfg = _forcing_cfg
     if forcing_cfg is None or forcing_cfg.kind == "default":

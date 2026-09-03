@@ -2252,6 +2252,49 @@ class TestAttachMacv2Weights(unittest.TestCase):
         cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
         self.assertIsNone(_attach_macv2_weights(None, cfg, None))
 
+    def test_pyses_path_attaches_macv2_weights(self):
+        """``forcing=macv2_sp`` on pySES must still load ``macv2_file`` (F1).
+
+        ``build_forcing``'s pySES branch returns before the spectral tail, so
+        the ONE dycore-agnostic attachment the tail performs that
+        ``pyses_build_forcing`` does not — the plume-indexed MACv2-SP weights
+        (no horizontal field, so no column sampling needed) — must be applied on
+        the pySES path via the shared ``_attach_macv2_weights``. Otherwise
+        ``forcing=macv2_sp`` loads the surface file but silently drops its
+        mandatory ``macv2_file``, the exact silent-ignore trap warning 4
+        recommends this very config to escape.
+        """
+        import tempfile
+        import types
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm.forcing import ForcingData, TimeSeries
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import build_forcing
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``; a stub with
+        # that attribute takes the pySES branch without a real CAM-SE build.
+        fake_dycore = types.SimpleNamespace(colmap=object())
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "MACv2.0-SP_v1.nc"
+            self._write_macv2(p)
+            cfg = OmegaConf.create({"forcing": {
+                "kind": "from_file", "file": "dummy.nc", "ozone_file": "null",
+                "emissions_file": "null", "dms_file": "null",
+                "dust_file": "null", "oxidants_file": "null",
+                "macv2_file": str(p)}})
+            with mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                            return_value=base) as pfb:
+                forcing = build_forcing(cfg, coords, dycore=fake_dycore)
+        pfb.assert_called_once()
+        # The weights rode through the pySES early return.
+        self.assertIsInstance(forcing.aerosol_year_weight, TimeSeries)
+        self.assertIsInstance(forcing.aerosol_ann_cycle, TimeSeries)
+
 
 class TestEmissionAutoResolution(unittest.TestCase):
     """The ``auto`` prescribed-emission resolution (issue #640).
