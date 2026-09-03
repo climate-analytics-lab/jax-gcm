@@ -509,6 +509,66 @@ class TestEmissionsConfig(unittest.TestCase):
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
 
+    def test_duplicate_variable_across_products_raises(self):
+        # F1: two products claiming the SAME emission variable is ambiguous —
+        # `dict.update` would silently keep the last (double-counting the
+        # moment someone lists overlapping bundles). Reject with a build-time
+        # error naming the colliding variable and BOTH products.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "prod_a.nc"
+            p2 = Path(tmp) / "prod_b.nc"
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 1e-11))},
+                       coords=base).to_netcdf(p1)
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 2e-11))},
+                       coords=base).to_netcdf(p2)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            with self.assertRaises(ValueError) as ctx:
+                build_forcing(cfg, coords)
+        msg = str(ctx.exception)
+        self.assertIn("emis_surface_combustion_bc", msg)
+        self.assertIn(str(p1), msg)
+        self.assertIn(str(p2), msg)
+
+    def test_duplicate_speciated_variable_across_products_raises(self):
+        # Same disjoint-merge guard on the pre-speciated (aero_emis_*) channel.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "spec_a.nc"
+            p2 = Path(tmp) / "spec_b.nc"
+            for p in (p1, p2):
+                xr.Dataset({"aero_emis_m_so4_acc":
+                            (("lon", "lat", "time"),
+                             np.full((nlon, nlat, 12), 1e-11))},
+                           coords=base).to_netcdf(p)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            with self.assertRaises(ValueError) as ctx:
+                build_forcing(cfg, coords)
+        msg = str(ctx.exception)
+        self.assertIn("m_so4_acc", msg)
+        self.assertIn(str(p1), msg)
+        self.assertIn(str(p2), msg)
+
     def test_mixed_transient_and_climatology_products_align_independently(self):
         # Codex P1 (round 3): a list mixing a {year} transient product with a
         # non-pattern time-bearing climatology must NOT feed one by-coords

@@ -1298,6 +1298,38 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     return forcing.copy(ozone_climatology=climatology)
 
 
+def _merge_disjoint_emissions(acc, acc_src, new, path):
+    """Merge one emission product's variables into ``acc``, rejecting overlaps.
+
+    Emission products are contractually **disjoint**: each ``emissions_file``
+    list entry contributes distinct ``emis_<sector>_<species>`` /
+    ``aero_emis_<tracer>`` variables (see :func:`_attach_emissions`). Two
+    products claiming the SAME variable is ambiguous user intent, so raise a
+    build-time ``ValueError`` naming the colliding variable(s) and both
+    products — the runner will neither silently keep the last (``dict.update``
+    is last-one-wins, the F1 defect) nor invent an additive merge (summing two
+    products for one sector/species would silently double-count). ``acc_src``
+    maps each already-merged variable to the product that supplied it, purely
+    to name both sides of a collision.
+    """
+    collisions = [v for v in new if v in acc]
+    if collisions:
+        detail = "; ".join(
+            f"{v!r} (from {acc_src[v]!r} and {str(path)!r})"
+            for v in collisions)
+        raise ValueError(
+            "forcing.emissions_file: duplicate emission variable(s) across "
+            f"products — {detail}. Each list entry must contribute DISTINCT "
+            "emission variables (different sectors/species); two products "
+            "claiming the same variable is ambiguous, so the runner neither "
+            "silently keeps one nor sums them (which would double-count). "
+            "Remove the overlap, or merge the overlapping products offline "
+            "into a single file."
+        )
+    acc.update(new)
+    acc_src.update({v: str(path) for v in new})
+
+
 def _attach_emissions(forcing, forcing_cfg, coords):
     """Attach prescribed aerosol emissions from ``cfg.forcing.emissions_file``.
 
@@ -1345,11 +1377,18 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # This per-product merge is meaningful HERE but not for oxidants (contrast
     # _attach_oxidants, which handles a list as ONE product): emission products
     # carry DISJOINT variables (different ``emis_<sector>_<species>`` /
-    # ``aero_emis_<tracer>`` sets), so ``dict.update`` across products unions
-    # genuinely distinct keys. Oxidant files must each carry the IDENTICAL four
-    # gases, so an analogous update would be pure last-one-wins.
+    # ``aero_emis_<tracer>`` sets), so merging across products unions genuinely
+    # distinct keys. That disjointness is a contract, not a hope:
+    # ``_merge_disjoint_emissions`` REJECTS a variable supplied by two products
+    # (F1) rather than let a plain ``dict.update`` silently keep the last.
+    # Oxidant files must each carry the IDENTICAL four gases, so an analogous
+    # update would be pure last-one-wins.
     anthro: dict = {}
     speciated: dict = {}
+    # Provenance for the disjoint-merge check: which product supplied each
+    # already-merged variable, for a precise collision message (F1).
+    anthro_src: dict = {}
+    speciated_src: dict = {}
     for product in _forcing_products(raw, years, available):
         path = _resolve_data_path(product)
         if path in (None, "", "null"):
@@ -1368,9 +1407,9 @@ def _attach_emissions(forcing, forcing_cfg, coords):
                 "contract in docs/design/jam.md."
             )
         if a:
-            anthro.update(a)
+            _merge_disjoint_emissions(anthro, anthro_src, a, path)
         if s:
-            speciated.update(s)
+            _merge_disjoint_emissions(speciated, speciated_src, s, path)
     if not anthro and not speciated:
         return forcing
     validate_emissions_grid({**anthro, **speciated}, coords, raw)
