@@ -1816,12 +1816,15 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
                 "(amip/era5: per-year files, by_date_interp) but %s are still "
                 "'auto', which resolved to the present-day *_pd emission "
                 "bundles. A historical/AMIP run is therefore using present-day "
-                "aerosol emissions. Override each with a year-matched {year} "
-                "pattern (the same yearly-file expansion the SST forcing uses; "
-                "both keys support it) — e.g. forcing.emissions_file=hf://"
-                "bundles/<grid>/emissions_{year}.nc, forcing.oxidants_file="
-                "hf://bundles/<grid>_l<nlev>/oxidants_{year}.nc, with the run's "
-                "forcing.years range — for a consistent transient run.",
+                "aerosol emissions. For emissions, override with the mirror's "
+                "transient product using a year-matched {year} pattern (the "
+                "same yearly-file expansion the SST forcing uses) — e.g. "
+                "forcing.emissions_file=hf://bundles/<grid>/emissions_amip/"
+                "{year}.nc, with the run's forcing.years range. The mirror "
+                "publishes NO transient oxidants product (only oxidants_pi/"
+                "oxidants_pd climatologies), so transient oxidants must come "
+                "from a separately prepared dataset; forcing.oxidants_file "
+                "accepts a {year} pattern once you have one.",
                 ", ".join(pd_auto_keys),
             )
 

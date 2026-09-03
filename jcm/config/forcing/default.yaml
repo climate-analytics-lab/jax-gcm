@@ -42,8 +42,10 @@ dust_file: auto
 # Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC
 # ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole;
 # ``bundles/<grid>_l<nlev>/oxidants_pd.nc``). Feeds ``PrescribedOxidants``;
-# ``null`` → the analytic interim oxidant proxies. For a transient run set a
-# ``{year}`` pattern plus ``forcing.years`` (e.g.
-# ``hf://bundles/<grid>_l<nlev>/oxidants_{year}.nc``): the yearly files are
-# concatenated along time and aligned by date, exactly like ``emissions_file``.
+# ``null`` → the analytic interim oxidant proxies. The loader accepts a
+# ``{year}`` pattern plus ``forcing.years`` (yearly files concatenated along
+# time and aligned by date, exactly like ``emissions_file``), but the data
+# mirror publishes NO transient oxidants product — only the ``oxidants_pi`` /
+# ``oxidants_pd`` climatologies — so a transient oxidants run needs a
+# separately prepared dataset pointed at by such a pattern.
 oxidants_file: auto
