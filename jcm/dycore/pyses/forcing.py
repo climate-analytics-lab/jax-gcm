@@ -62,7 +62,9 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             (``DMS_sea (time, lat, lon)``; :func:`jcm.forcing.read_dms_seawater`).
         dust_file: Optional dust-source/erodibility map (``pot_source``;
             :func:`jcm.forcing.read_dust_source`, static or monthly).
-        oxidants_file: Optional oxidant climatology
+        oxidants_file: Optional oxidant climatology — a single path or the
+            yearly file list of ONE transient product (a ``{year}`` expansion,
+            opened together along a shared time axis)
             (``*_VMR_avrg (time, mlev, lat, lon)`` on the model's ``nlev``
             hybrid levels; :func:`jcm.forcing.read_oxidant_vmr`). Levels map
             one-to-one; only the horizontal is interpolated.
@@ -265,9 +267,30 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                 dust_source=to_cols(read_dust_source(ds), lon, lat))
 
     if oxidants_file is not None:
-        with xr.open_dataset(str(oxidants_file)) as ds:
+        # ``oxidants_file`` may be a single climatology path or the yearly file
+        # list of ONE transient product (a ``{year}`` expansion). The runner
+        # (:func:`jcm.runners._resolve_oxidant_paths`) has already expanded,
+        # resolved and uniform-time-axis-checked the set, so here it is simply
+        # opened together along the shared time axis (``open_mfdataset``,
+        # by-coords) — mirroring the emissions handling above and the spectral
+        # ``_attach_oxidants``. A scalar path opens directly.
+        paths = ([str(p) for p in oxidants_file]
+                 if isinstance(oxidants_file, (list, tuple))
+                 else [str(oxidants_file)])
+        # ``data_vars="minimal"`` so only the time-dependent VMR fields are
+        # concatenated: the static ``hyam``/``hybm`` hybrid coefficients carry
+        # no time axis and must stay 1-D (the default ``data_vars="all"`` would
+        # stack them to a spurious ``(nfiles, mlev)`` that breaks
+        # ``read_oxidant_vmr``'s level checks).
+        ds = (xr.open_mfdataset(paths, combine="by_coords", data_vars="minimal")
+              if len(paths) > 1 else xr.open_dataset(paths[0]))
+        with ds:
             lon, lat = _reader_grid(ds)
-            vmr = read_oxidant_vmr(ds, nlev=nlev)
+            # ``auto`` (matching the spectral ``_attach_oxidants``) keeps a lone
+            # 12-month file WRAP_YEAR but reads a concatenated multi-year
+            # transient set BY_DATE — without it the yearly ``{year}`` product
+            # would be mis-indexed as a 24-month wrap-year climatology.
+            vmr = read_oxidant_vmr(ds, nlev=nlev, align_mode="auto")
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 

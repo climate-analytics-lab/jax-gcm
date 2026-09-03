@@ -2807,3 +2807,112 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 mock.patch("xarray.open_dataset", side_effect=_open_mixed):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
                 build_forcing(cfg, coords)
+
+    def _pyses_cfg(self, **forcing):
+        """Build a minimal pySES-path forcing cfg (nulls unless overridden)."""
+        from omegaconf import OmegaConf
+        base = {"kind": "from_file", "file": "dummy.nc", "ozone_file": "null",
+                "emissions_file": "null", "dms_file": "null",
+                "dust_file": "null", "oxidants_file": "null"}
+        base.update(forcing)
+        return OmegaConf.create({"forcing": base})
+
+    def _pyses_dycore_and_coords(self):
+        import types
+
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``; the stub
+        # takes the pySES branch without a real CAM-SE build (the pySES forcing
+        # loader is mocked, so its column internals are never read).
+        return types.SimpleNamespace(colmap=object()), get_speedy_coords(
+            layers=8, spectral_truncation=31)
+
+    def test_pyses_oxidants_year_pattern_expands_before_loader(self):
+        """Expand + open pySES oxidants ``{year}`` together before the loader (F1).
+
+        The pySES branch previously handed ``oxidants_file`` straight through
+        ``_resolve_data_path``, bypassing ``_expand_years`` and the uniform
+        time-axis check — a documented transient run
+        (``oxidants_file=.../{year}.nc`` + ``forcing.years``) would fetch a
+        literal-brace path. Assert the expanded yearly list (via the SAME shared
+        ``_resolve_oxidant_paths`` the spectral path uses) reaches the pySES
+        forcing loader.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            oxidants_file="hf://bundles/t42_l8/oxidants_{year}.nc",
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # The >1-file set is opened per-member to classify its time axis
+        # (uniform-mixture guard); both yearly files are transient (datetime).
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["oxidants_file"],
+            ["hf://bundles/t42_l8/oxidants_2000.nc",
+             "hf://bundles/t42_l8/oxidants_2001.nc"])
+
+    def test_pyses_emissions_year_pattern_expands_before_loader(self):
+        """Expand pySES emissions ``{year}`` before the loader (same class as F1).
+
+        The emissions input had the same bypass; a scalar ``{year}`` pattern must
+        expand to that one product's yearly files (which ``attach_jam_forcing``
+        opens by coords) instead of a literal-brace path.
+        """
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file="hf://bundles/t42/emis_{year}.nc",
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/emis_2000.nc", "hf://bundles/t42/emis_2001.nc"])
+
+    def test_pyses_transient_ozone_rejected_clearly(self):
+        """Transient ``{year}`` ozone is rejected with a clear message on pySES.
+
+        Unlike oxidants/emissions, transient ozone is genuinely unsupported on
+        the pySES backend (the column ozone climatology is a 12-month WRAP_YEAR
+        field). A ``{year}`` pattern must raise the documented limitation up
+        front, not reach ``xr.open_dataset`` as a literal-brace file-not-found.
+        """
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            ozone_file="hf://bundles/t42_l8/ozone_{year}.nc", years=[2000])
+        with self.assertRaisesRegex(
+                ValueError, "transient ozone is not supported"):
+            build_forcing(cfg, coords, dycore=dycore)

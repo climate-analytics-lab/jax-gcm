@@ -1074,6 +1074,20 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
                 ozone_file = None
         elif ozone_file in ("", "null", "none"):
             ozone_file = None
+        if isinstance(ozone_file, str) and "{year}" in ozone_file:
+            # Transient ozone is genuinely unsupported on the pySES path (unlike
+            # oxidants/emissions below): the column ozone leaf is a 12-month
+            # WRAP_YEAR climatology and ``attach_jam_forcing`` rejects any
+            # non-12-month file. Raise the clear limitation here rather than let
+            # the literal-brace path reach ``xr.open_dataset`` as a file-not-
+            # found. Run the spectral dinosaur backend for transient ozone.
+            raise ValueError(
+                f"forcing.ozone_file={ozone_file!r} has a {{year}} pattern, but "
+                "transient ozone is not supported on the pySES backend (the "
+                "column ozone climatology is a 12-month WRAP_YEAR field). "
+                "Provide a single 12-month climatology file, or use the "
+                "spectral dinosaur backend for transient ozone."
+            )
         provenance.record_fact(
             "ozone_source",
             f"prescribed:{ozone_file}" if ozone_file
@@ -1081,14 +1095,32 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
 
         file = (_resolve_data_path(_forcing_cfg.get("file", None))
                 or _pyses_default_bc("forcing.nc"))
+        # Year expansion must happen on the pySES path too, so the documented
+        # transient forms (``oxidants_file``/``emissions_file=.../{year}.nc``
+        # with ``forcing.years``) resolve to real yearly files rather than a
+        # literal-brace path (or an unfetched ``hf://`` URL) reaching
+        # ``xr.open_dataset``. Oxidants go through the SAME helper the spectral
+        # ``_attach_oxidants`` uses — one product, list-as-one, uniform-time-axis
+        # checked — so the two paths cannot drift. Emissions expand via
+        # ``_expand_years`` (a scalar ``{year}`` pattern becomes that one
+        # product's yearly file list, which ``attach_jam_forcing`` opens by
+        # coords); a genuine multi-product emissions *list* is opened as one
+        # merged dataset there, the pre-existing pySES limitation, so per-element
+        # ``{year}`` expansion inside such a list is not offered here. ``dms_file``
+        # / ``dust_file`` take no year expansion because they are climatology-only
+        # on BOTH backends (their readers are WRAP_YEAR; ``_attach_dms`` /
+        # ``_attach_dust`` likewise never expand) — a literal ``{year}`` there
+        # fails identically on the spectral path, so there is no pySES-specific
+        # bypass to close.
         forcing = pyses_build_forcing(
             str(file), dycore,
-            emissions_file=_resolve_data_path(
-                _forcing_cfg.get("emissions_file", None)),
+            emissions_file=_resolve_data_path(_expand_years(
+                _forcing_cfg.get("emissions_file", None),
+                _forcing_cfg.get("years", None),
+                _forcing_cfg.get("available_years", None))),
             dms_file=_resolve_data_path(_forcing_cfg.get("dms_file", None)),
             dust_file=_resolve_data_path(_forcing_cfg.get("dust_file", None)),
-            oxidants_file=_resolve_data_path(
-                _forcing_cfg.get("oxidants_file", None)),
+            oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
             ozone_file=_resolve_data_path(ozone_file),
         )
         # MACv2-SP plume weights are the one dycore-agnostic attachment the
@@ -1475,6 +1507,43 @@ def _attach_dust(forcing, forcing_cfg, coords):
     return forcing.copy(dust_source=ts)
 
 
+def _resolve_oxidant_paths(forcing_cfg):
+    """Resolve ``forcing.oxidants_file`` into the single oxidant product's files.
+
+    Shared by the spectral (:func:`_attach_oxidants`) and pySES
+    (:func:`_build_forcing`) paths so ``{year}`` expansion, ``hf://`` resolution
+    and the uniform-time-axis validation cannot drift between the two — the
+    forked bypass that previously let the pySES branch hand a literal
+    ``{year}`` brace path (or an unfetched ``hf://`` URL) straight to
+    ``xr.open_dataset``. A ``{year}`` pattern expands to the product's yearly
+    files; an explicit list is taken verbatim as that one product's file set;
+    either way the set is opened together (``open_mfdataset``, by-coords)
+    downstream, so :func:`_assert_uniform_oxidant_time_axis` runs here to reject
+    a mixed set up front. Returns a non-empty list of string paths, or ``None``
+    when ``oxidants_file`` is unset/empty.
+    """
+    if forcing_cfg is None:
+        return None
+    raw = forcing_cfg.get("oxidants_file", None)
+    if raw in (None, "", "null"):
+        return None
+    from omegaconf import ListConfig
+    files = _resolve_data_path(_expand_years(
+        raw, forcing_cfg.get("years", None),
+        forcing_cfg.get("available_years", None)))
+    if isinstance(files, (list, tuple, ListConfig)):
+        paths = [str(p) for p in files
+                 if str(p) not in ("", "null", "none", "None")]
+    elif files in (None, "", "null"):
+        return None
+    else:
+        paths = [str(files)]
+    if not paths:
+        return None
+    _assert_uniform_oxidant_time_axis(paths)
+    return paths
+
+
 def _attach_oxidants(forcing, forcing_cfg, coords):
     """Attach the oxidant climatology from ``cfg.forcing.oxidants_file``.
 
@@ -1516,35 +1585,23 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    raw = forcing_cfg.get("oxidants_file", None)
-    if raw in (None, "", "null"):
+    paths = _resolve_oxidant_paths(forcing_cfg)
+    if not paths:
         return forcing
-    years = forcing_cfg.get("years", None)
-    available = forcing_cfg.get("available_years", None)
 
     import xarray as xr
-    from omegaconf import ListConfig
 
     from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
 
-    # A `{year}` pattern expands to the product's yearly file list; an explicit
-    # list is taken verbatim as that one product's file set. Either way the set
-    # shares a single time axis and is read once (see docstring).
-    files = _resolve_data_path(_expand_years(raw, years, available))
-    if isinstance(files, (list, tuple, ListConfig)):
-        paths = [str(p) for p in files
-                 if str(p) not in ("", "null", "none", "None")]
-    elif files in (None, "", "null"):
-        return forcing
-    else:
-        paths = [str(files)]
-    if not paths:
-        return forcing
-    _assert_uniform_oxidant_time_axis(paths)
-    ds = (xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1
-          else xr.open_dataset(paths[0]))
+    # ``data_vars="minimal"`` so only the time-dependent VMR fields are
+    # concatenated across a multi-year set: the static ``hyam``/``hybm`` hybrid
+    # coefficients carry no time axis and must stay 1-D (the default
+    # ``data_vars="all"`` would stack them to a spurious ``(nfiles, mlev)`` that
+    # breaks ``read_oxidant_vmr`` / ``validate_oxidant_levels``).
+    ds = (xr.open_mfdataset(paths, combine="by_coords", data_vars="minimal")
+          if len(paths) > 1 else xr.open_dataset(paths[0]))
     ref = paths if len(paths) > 1 else paths[0]
     try:
         mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
