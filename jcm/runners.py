@@ -1120,26 +1120,23 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
         # transient forms (``oxidants_file``/``emissions_file=.../{year}.nc``
         # with ``forcing.years``) resolve to real yearly files rather than a
         # literal-brace path (or an unfetched ``hf://`` URL) reaching
-        # ``xr.open_dataset``. Oxidants go through the SAME helper the spectral
-        # ``_attach_oxidants`` uses — one product, list-as-one, uniform-time-axis
-        # checked — so the two paths cannot drift. Emissions expand via
-        # ``_expand_years`` (a scalar ``{year}`` pattern becomes that one
-        # product's yearly file list, which ``attach_jam_forcing`` opens by
-        # coords); a genuine multi-product emissions *list* is opened as one
-        # merged dataset there, the pre-existing pySES limitation, so per-element
-        # ``{year}`` expansion inside such a list is not offered here. ``dms_file``
-        # / ``dust_file`` take no year expansion because they are climatology-only
-        # on BOTH backends (their readers are WRAP_YEAR; ``_attach_dms`` /
-        # ``_attach_dust`` likewise never expand) — a literal ``{year}`` there
-        # fails identically on the spectral path, so there is no pySES-specific
-        # bypass to close.
+        # ``xr.open_dataset``. Oxidants and emissions each go through a shared
+        # resolver that expands ``{year}`` patterns, resolves ``hf://`` and
+        # runs the uniform-time-axis check, so neither can drift from the
+        # spectral path. Both open their file set as ONE combined dataset in
+        # ``attach_jam_forcing`` (pySES has no per-product alignment machinery),
+        # so a genuine multi-product emissions *list* is flattened for that
+        # single open with every ``{year}`` element expanded — and a list that
+        # mixes a climatology with a transient product is rejected there rather
+        # than mis-aligned (the spectral per-product path is the only one that
+        # can carry both in one list). ``dms_file`` / ``dust_file`` take no year
+        # expansion because they are climatology-only on BOTH backends (their
+        # readers are WRAP_YEAR; ``_attach_dms`` / ``_attach_dust`` likewise
+        # never expand) — a literal ``{year}`` there fails identically on the
+        # spectral path, so there is no pySES-specific bypass to close.
         forcing = pyses_build_forcing(
             str(file), dycore,
-            emissions_file=_resolve_data_path(_expand_years(
-                _forcing_cfg.get("emissions_file", None),
-                _forcing_cfg.get("years", None),
-                _product_available_years(
-                    _forcing_cfg, "emissions_available_years"))),
+            emissions_file=_resolve_pyses_emission_paths(_forcing_cfg),
             dms_file=_resolve_data_path(_forcing_cfg.get("dms_file", None)),
             dust_file=_resolve_data_path(_forcing_cfg.get("dust_file", None)),
             oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
@@ -1548,7 +1545,7 @@ def _resolve_oxidant_paths(forcing_cfg):
     ``xr.open_dataset``. A ``{year}`` pattern expands to the product's yearly
     files; an explicit list is taken verbatim as that one product's file set;
     either way the set is opened together (``open_mfdataset``, by-coords)
-    downstream, so :func:`_assert_uniform_oxidant_time_axis` runs here to reject
+    downstream, so :func:`_assert_uniform_time_axis` runs here to reject
     a mixed set up front. Returns a non-empty list of string paths, or ``None``
     when ``oxidants_file`` is unset/empty.
     """
@@ -1576,7 +1573,53 @@ def _resolve_oxidant_paths(forcing_cfg):
         paths = [str(files)]
     if not paths:
         return None
-    _assert_uniform_oxidant_time_axis(paths)
+    _assert_uniform_time_axis(paths, config_key="forcing.oxidants_file")
+    return paths
+
+
+def _resolve_pyses_emission_paths(forcing_cfg):
+    """Resolve ``forcing.emissions_file`` into a flat file list for pySES.
+
+    The pySES column backend opens ALL emission files as ONE combined dataset
+    (``jcm.dycore.pyses.forcing.attach_jam_forcing`` → a single
+    ``open_mfdataset``, by-coords), so every element — a scalar path, an
+    ``hf://`` URL, or a ``{year}`` pattern — is expanded and the result
+    FLATTENED into one path list for that single open. A ``{year}`` element
+    becomes its product's yearly files (via :func:`_forcing_products`, the same
+    expansion the spectral path uses), so both a scalar ``{year}`` pattern and a
+    ``{year}`` element *inside a list* resolve to real yearly files rather than a
+    literal-brace path reaching ``xr.open_dataset``.
+
+    This deliberately differs from the spectral :func:`_attach_emissions`, which
+    opens each list element as an INDEPENDENT product with its own time axis
+    (per-product ``TimeSeries`` alignment) and can therefore mix a transient
+    ``{year}`` product with a 12-month climatology in one list. pySES has no
+    per-product alignment machinery — one combined open along a single time
+    axis — so a mixed climatology+transient list cannot be aligned and is
+    rejected up front by :func:`_assert_uniform_time_axis` (the honest
+    semantics here), exactly as the shared oxidant path does. Returns a
+    non-empty list of string paths, or ``None`` when ``emissions_file`` is
+    unset/empty.
+    """
+    if forcing_cfg is None:
+        return None
+    raw = forcing_cfg.get("emissions_file", None)
+    if raw in (None, "", "null"):
+        return None
+    years = forcing_cfg.get("years", None)
+    available = _product_available_years(
+        forcing_cfg, "emissions_available_years")
+    paths: list[str] = []
+    for product in _forcing_products(raw, years, available):
+        resolved = _resolve_data_path(product)
+        if isinstance(resolved, (list, tuple)):
+            paths.extend(str(p) for p in resolved
+                         if str(p) not in ("", "null", "none", "None"))
+        elif resolved not in (None, "", "null"):
+            paths.append(str(resolved))
+    if not paths:
+        return None
+    _assert_uniform_time_axis(paths, config_key="forcing.emissions_file")
     return paths
 
 
@@ -1616,7 +1659,7 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     overlap — a per-product ``dict.update`` would be pure last-one-wins and
     silently keep only the final file. Genuinely incompatible members in one
     file set (e.g. an integer-month climatology mixed with datetime transients)
-    are rejected up front by :func:`_assert_uniform_oxidant_time_axis` rather
+    are rejected up front by :func:`_assert_uniform_time_axis` rather
     than left to ``open_mfdataset`` to NaN-fill or clash cryptically.
     """
     if forcing_cfg is None:
@@ -1651,18 +1694,27 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     return forcing.copy(oxidant_vmr=mapping)
 
 
-def _assert_uniform_oxidant_time_axis(paths) -> None:
-    """Reject an oxidant file set whose members carry incompatible time axes.
+def _assert_uniform_time_axis(paths, *, config_key) -> None:
+    """Reject a file set whose members carry incompatible time axes.
 
-    A list ``oxidants_file`` (or a ``{year}`` expansion) is the yearly files of
-    ONE product, opened together along a single time axis (see
-    :func:`_attach_oxidants`). Mixing an integer-month climatology (numeric
-    ``time``) with a datetime transient in that set would either silently
-    NaN-fill the non-overlapping steps under ``open_mfdataset(by_coords)`` or
-    clash cryptically on dtype — the silent-ignore class this hardening
-    abolishes. Classify each member's ``time`` axis and raise a targeted error,
-    naming both axes and the supported forms, when the set is mixed. A
-    single-file set (a lone climatology, the common case) is trivially uniform.
+    Shared by the oxidant path (:func:`_resolve_oxidant_paths`) and the pySES
+    emissions path (:func:`_resolve_pyses_emission_paths`): both open their file
+    set as ONE combined dataset (``open_mfdataset``, by-coords) along a single
+    time axis. Mixing an integer-month climatology (numeric ``time``) with a
+    datetime transient in that set would either silently NaN-fill the
+    non-overlapping steps or clash cryptically on dtype — the silent-ignore
+    class this hardening abolishes. Classify each member's ``time`` axis and
+    raise a targeted error, naming both axes and the supported forms, when the
+    set is mixed. A single-file set (a lone climatology, the common case) is
+    trivially uniform.
+
+    ``config_key`` names the knob in the message (``forcing.oxidants_file`` /
+    ``forcing.emissions_file``). NOTE the asymmetry with the SPECTRAL emissions
+    path (:func:`_attach_emissions`), which does NOT use this: it opens each
+    list element as an independent PRODUCT with its own time axis (per-product
+    ``TimeSeries`` alignment), so a mixed climatology+transient list is valid
+    there. pySES has no per-product alignment machinery — one combined open —
+    so a loud rejection is the honest semantics on that path.
     """
     if len(paths) <= 1:
         return
@@ -1682,12 +1734,12 @@ def _assert_uniform_oxidant_time_axis(paths) -> None:
     if len(kinds) > 1:
         detail = "; ".join(f"{k}: {v}" for k, v in sorted(kinds.items()))
         raise ValueError(
-            "forcing.oxidants_file mixes incompatible time axes within one "
-            f"file set ({detail}). A list (or a {{year}} expansion) is the "
-            "yearly files of a SINGLE oxidant product and must share one time "
-            "axis. Supported forms: a single 12-month climatology file, or one "
-            "transient product's yearly files (all on a datetime axis). Do not "
-            "mix an integer-month climatology with datetime transient files."
+            f"{config_key} mixes incompatible time axes within one file set "
+            f"({detail}). These files are opened together along ONE time axis "
+            "(open_mfdataset, by-coords) and must all share it. Supported "
+            "forms: a single 12-month climatology file, or one transient "
+            "product's yearly files (all on a datetime axis). Do not mix an "
+            "integer-month climatology with datetime transient files."
         )
 
 

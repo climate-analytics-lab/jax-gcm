@@ -2830,7 +2830,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
     def test_oxidants_mixed_time_axes_raise(self):
         """A mixed integer-month + datetime oxidant set is rejected loudly (F2).
 
-        The genuinely-incompatible case ``_assert_uniform_oxidant_time_axis``
+        The genuinely-incompatible case ``_assert_uniform_time_axis``
         exists to catch: one member on an integer-month climatology axis, one on
         a datetime transient axis, in a single product's file set — silent
         NaN-fill / cryptic dtype clash under ``open_mfdataset`` is exactly the
@@ -2934,6 +2934,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         expand to that one product's yearly files (which ``attach_jam_forcing``
         opens by coords) instead of a literal-brace path.
         """
+        import xarray as xr
+
         from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
@@ -2948,14 +2950,95 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen.update(kw)
             return base
 
+        # The >1-file set is opened per-member to classify its time axis
+        # (uniform-mixture guard); both yearly files are transient (datetime).
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",
                            side_effect=_capture):
             build_forcing(cfg, coords, dycore=dycore)
         self.assertEqual(
             seen["emissions_file"],
             ["hf://bundles/t42/emis_2000.nc", "hf://bundles/t42/emis_2001.nc"])
+
+    def test_pyses_emissions_list_with_year_element_expands_and_flattens(self):
+        """A pySES emissions LIST with a ``{year}`` element expands + flattens (F1).
+
+        pySES opens all emission files as ONE combined dataset, so each list
+        element is expanded and the result flattened into a single path list —
+        a ``{year}`` element becomes its yearly files, a plain climatology stays
+        as-is. Previously the whole list reached ``_resolve_data_path`` with the
+        literal ``{year}`` braces intact (``_expand_years`` only expands a scalar
+        string), so the pattern element hit ``xr.open_dataset`` unexpanded.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_{year}.nc",
+                            "hf://bundles/t42/anthro.nc"],
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # All members share a datetime axis, so the flattened set is uniform.
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        # The {year} element expanded to its yearly files; the climatology
+        # passed through; all flattened into one list for the single open.
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/bb_2000.nc", "hf://bundles/t42/bb_2001.nc",
+             "hf://bundles/t42/anthro.nc"])
+
+    def test_pyses_emissions_mixed_time_axes_raise(self):
+        """A mixed climatology+transient emissions list is rejected on pySES (F1).
+
+        pySES has no per-product alignment machinery (unlike the spectral
+        ``_attach_emissions``, which opens each element as its own product), so a
+        list mixing an integer-month climatology with a datetime transient cannot
+        be aligned — the shared uniform-time-axis guard rejects it loudly rather
+        than let ``open_mfdataset`` NaN-fill or clash cryptically.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["/clim.nc", "/transient.nc"])
+
+        def _open_mixed(path, **_kw):
+            if "clim" in str(path):
+                return xr.Dataset(coords={"time": np.arange(12)})  # integer month
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_mixed):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
 
     def test_pyses_transient_ozone_rejected_clearly(self):
         """Transient ``{year}`` ozone is rejected with a clear message on pySES.
