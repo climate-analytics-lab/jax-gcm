@@ -1233,24 +1233,16 @@ def expand_yearly_files(file_spec, years, available=None):
     bracket the boundary instead of clamping to the nearest mid-month
     value for ~half a month.
 
-    A **list** spec (e.g. ``emissions_file`` carrying a biomass-burning file
-    plus an anthropogenic one) is expanded per element and flattened: a static
-    element passes through, while a ``{year}`` element expands to its yearly
-    run, so ``[bb_{year}.nc, anthro.nc]`` with ``years=[2000, 2001]`` becomes
-    ``[bb_2000.nc, bb_2001.nc, anthro.nc]`` for the by-coords merge downstream.
+    This expands a **single** product (one scalar spec). A ``{year}``
+    pattern becomes that product's list of yearly files — one product
+    concatenated along a single time axis downstream. A **list** spec
+    (e.g. ``emissions_file`` carrying a biomass-burning product plus an
+    anthropogenic one) names *several* products and is not flattened here:
+    :func:`jcm.runners._forcing_products` splits it and expands each element
+    through this function, so each product is opened and time-aligned on its
+    own (a transient ``{year}`` product and a 12-month climatology in the same
+    list must not share one time axis — see that function).
     """
-    from collections.abc import Iterable, Mapping
-    if (not isinstance(file_spec, (str, bytes, Mapping))
-            and isinstance(file_spec, Iterable)):
-        out: list = []
-        for element in file_spec:
-            expanded = expand_yearly_files(element, years, available)
-            if (not isinstance(expanded, (str, bytes, Mapping))
-                    and isinstance(expanded, Iterable)):
-                out.extend(expanded)
-            else:
-                out.append(expanded)
-        return out
     has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
     if not has_pattern:
         return file_spec

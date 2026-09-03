@@ -509,6 +509,122 @@ class TestEmissionsConfig(unittest.TestCase):
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
 
+    def test_mixed_transient_and_climatology_products_align_independently(self):
+        # Codex P1 (round 3): a list mixing a {year} transient product with a
+        # non-pattern time-bearing climatology must NOT feed one by-coords
+        # merge — disjoint/incompatible time axes would either NaN-fill the
+        # non-overlapping steps or clash (integer month vs datetime). Each
+        # element is now its own product, opened and time-aligned on its own,
+        # and their per-variable TimeSeries leaves merge into one ForcingData
+        # keeping distinct alignments.
+        import tempfile
+
+        import jax_datetime as jdt
+        import xarray as xr
+        from omegaconf import open_dict
+
+        from jcm.date import DateData
+        from jcm.forcing import BY_DATE, WRAP_YEAR, TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                "lat": np.linspace(-87, 87, nlat)}
+        with tempfile.TemporaryDirectory() as tmp:
+            # Transient biomass-burning product: one file per year, 12 monthly
+            # datetime steps each; value encodes year*100 + month so the
+            # sampled slice is identifiable.
+            for yr in (2000, 2001):
+                times = np.array([np.datetime64(f"{yr}-{m:02d}-15")
+                                  for m in range(1, 13)])
+                vals = np.stack([np.full((nlon, nlat), yr * 100 + m)
+                                 for m in range(12)])
+                xr.Dataset(
+                    {"emis_biomass_burning_bc": (("time", "lon", "lat"), vals)},
+                    coords={**base, "time": times},
+                ).to_netcdf(Path(tmp) / f"bb_{yr}.nc")
+            # Climatology product: 12-month, INTEGER month axis — the exact
+            # integer-month-vs-datetime mix a single by-coords merge clashes on.
+            cvals = np.stack([np.full((nlon, nlat), 10.0 + m)
+                              for m in range(12)])
+            anthro_path = Path(tmp) / "anthro.nc"
+            xr.Dataset(
+                {"emis_surface_combustion_bc": (("time", "lon", "lat"), cvals)},
+                coords={**base, "time": np.arange(12)},
+            ).to_netcdf(anthro_path)
+
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma"])
+            with open_dict(cfg):
+                cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
+                                              str(anthro_path)]
+                cfg.forcing.years = [2000, 2001]
+            f = build_forcing(cfg, coords)
+
+        em = f.anthropogenic_emissions
+        self.assertIn("emis_biomass_burning_bc", em)
+        self.assertIn("emis_surface_combustion_bc", em)
+        bb, an = em["emis_biomass_burning_bc"], em["emis_surface_combustion_bc"]
+        self.assertIsInstance(bb, TimeSeries)
+        self.assertIsInstance(an, TimeSeries)
+        # Independent alignment: transient BY_DATE over 24 months, climatology
+        # WRAP_YEAR over 12 — not one shared axis.
+        self.assertEqual(int(bb.align_mode), BY_DATE)
+        self.assertEqual(bb.values.shape[0], 24)
+        self.assertEqual(int(an.align_mode), WRAP_YEAR)
+        self.assertEqual(an.values.shape[0], 12)
+        # No NaN fill (the outer-join corruption mode).
+        self.assertFalse(bool(np.isnan(np.asarray(bb.values)).any()))
+        self.assertFalse(bool(np.isnan(np.asarray(an.values)).any()))
+        # Both sampled correctly at a mid-year date: 2001-07 → bb month index 6
+        # of 2001 (200106) and climatology month index 6 (16).
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime("2001-07-15")),
+            calendar="gregorian")
+        sel = f.select(date, calendar="gregorian").anthropogenic_emissions
+        self.assertAlmostEqual(
+            float(np.asarray(sel["emis_biomass_burning_bc"])[0, 0]), 200106.0)
+        self.assertAlmostEqual(
+            float(np.asarray(sel["emis_surface_combustion_bc"])[0, 0]), 16.0)
+
+    def test_all_transient_list_products_load_by_date(self):
+        # A list of *only* transient {year} products keeps working: each is its
+        # own multi-year BY_DATE product and all variables merge.
+        import tempfile
+
+        import xarray as xr
+        from omegaconf import open_dict
+
+        from jcm.forcing import BY_DATE, TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                "lat": np.linspace(-87, 87, nlat)}
+        with tempfile.TemporaryDirectory() as tmp:
+            for stem, var in (("bb", "emis_biomass_burning_bc"),
+                              ("an", "emis_surface_combustion_bc")):
+                for yr in (2000, 2001):
+                    times = np.array([np.datetime64(f"{yr}-{m:02d}-15")
+                                      for m in range(1, 13)])
+                    vals = np.full((12, nlon, nlat), 1e-11)
+                    xr.Dataset({var: (("time", "lon", "lat"), vals)},
+                               coords={**base, "time": times}).to_netcdf(
+                        Path(tmp) / f"{stem}_{yr}.nc")
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma"])
+            with open_dict(cfg):
+                cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
+                                              str(Path(tmp) / "an_{year}.nc")]
+                cfg.forcing.years = [2000, 2001]
+            f = build_forcing(cfg, coords)
+        em = f.anthropogenic_emissions
+        for var in ("emis_biomass_burning_bc", "emis_surface_combustion_bc"):
+            self.assertIsInstance(em[var], TimeSeries)
+            self.assertEqual(int(em[var].align_mode), BY_DATE)
+            self.assertEqual(em[var].values.shape[0], 24)
+
     def test_grid_mismatch_raises(self):
         import tempfile
         from jcm.runners import build_forcing
@@ -1743,19 +1859,30 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
 
-    def test_list_spec_expands_per_element_and_flattens(self):
+    def test_list_spec_splits_into_per_element_products(self):
         # emissions_file may be a list (e.g. biomass-burning + anthropogenic).
-        # A {year} element expands to its yearly run; static elements pass
-        # through; the result is flattened for the by-coords merge downstream.
+        # Each element is its OWN product: a {year} element expands to its
+        # yearly file list (one product concatenated along one time axis),
+        # while a static element stays scalar. The list is NOT flattened, so
+        # each product is opened and time-aligned on its own downstream (a
+        # transient product and a climatology must not share one time axis).
         from jcm import runners
         self.assertEqual(
-            runners._expand_years(
-                ["/bb_{year}.nc", "/anthro.nc"], [2000, 2001]),
-            ["/bb_2000.nc", "/bb_2001.nc", "/anthro.nc"])
-        # A list of static paths passes through untouched even with a range.
+            runners._forcing_products(
+                ["/bb_{year}.nc", "/anthro.nc"], [2000, 2001], None),
+            [["/bb_2000.nc", "/bb_2001.nc"], "/anthro.nc"])
+        # A list of static paths keeps one product per element, unchanged.
         self.assertEqual(
-            runners._expand_years(["/a.nc", "/b.nc"], [2000, 2001]),
+            runners._forcing_products(["/a.nc", "/b.nc"], [2000, 2001], None),
             ["/a.nc", "/b.nc"])
+        # A scalar spec is a single product; a {year} scalar becomes that
+        # product's yearly file list.
+        self.assertEqual(
+            runners._forcing_products("/anthro.nc", [2000, 2001], None),
+            ["/anthro.nc"])
+        self.assertEqual(
+            runners._forcing_products("/bb_{year}.nc", [2000, 2001], None),
+            [["/bb_2000.nc", "/bb_2001.nc"]])
 
     def test_start_date_resolves_to_datetime(self):
         from omegaconf import OmegaConf

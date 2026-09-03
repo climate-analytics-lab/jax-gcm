@@ -499,6 +499,48 @@ def _resolve_data_path(path):
 _expand_years = expand_yearly_files
 
 
+def _forcing_products(file_spec, years, available):
+    """Split a forcing file spec into independent products, each expanded.
+
+    Each element of a **list** spec (e.g.
+    ``emissions_file: [bb_{year}.nc, anthro.nc]``) names one product that is
+    opened and time-aligned on its own — so a transient ``{year}`` product and
+    a 12-month climatology in the same list keep their *distinct* time axes
+    instead of being outer-joined into one incompatible axis. That outer-join
+    is the bug this replaces: ``open_mfdataset(combine="by_coords")`` over
+    disjoint time axes either NaN-fills every non-overlapping step (silently
+    corrupting most timesteps) or raises on an integer-month-vs-datetime clash.
+    The per-variable ``TimeSeries`` machinery already carries a *per-leaf* time
+    axis and ``align_mode`` (see :func:`jcm.forcing._select_time_series`), so
+    products with different alignments merge cleanly into one ``ForcingData``.
+
+    Returns a list of *products*, each a scalar path or, for a ``{year}``
+    element, its list of yearly files (opened together and concatenated along
+    one time axis — the intended multi-year transient). A scalar spec is a
+    single product.
+    """
+    if (not isinstance(file_spec, (str, bytes, Mapping))
+            and isinstance(file_spec, Iterable)):
+        return [expand_yearly_files(element, years, available)
+                for element in file_spec]
+    return [expand_yearly_files(file_spec, years, available)]
+
+
+def _open_forcing_dataset(path):
+    """Open one product's file(s) as a single xarray dataset.
+
+    A product may be a list of yearly files (a ``{year}`` expansion) — those
+    share one time axis and are concatenated with
+    ``open_mfdataset(combine="by_coords")``. A scalar path opens directly.
+    """
+    import xarray as xr
+    if isinstance(path, (list, tuple)):
+        paths = [str(p) for p in path]
+        return (xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1
+                else xr.open_dataset(paths[0]))
+    return xr.open_dataset(str(path))
+
+
 def _product_available_years(forcing_cfg, key: str):
     """Per-product source coverage, falling back to ``available_years``.
 
@@ -1271,9 +1313,12 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     """Attach prescribed aerosol emissions from ``cfg.forcing.emissions_file``.
 
     No-op when unset. ``emissions_file`` may be a single path or a **list** of
-    paths (e.g. one file for biomass burning and one for the rest) — multiple
-    files are merged by coordinates via ``xr.open_mfdataset``, so each can carry
-    a disjoint set of channels on the same grid. The fields auto-route by
+    paths (e.g. one file for biomass burning and one for the rest). Each list
+    element is a **product** opened and time-aligned on its own (see
+    :func:`_forcing_products`), so a transient ``{year}`` product and a 12-month
+    climatology can be mixed without outer-joining their disjoint time axes; the
+    per-variable ``TimeSeries`` leaves from all products merge into one
+    ``ForcingData``, each keeping its own time axis. The fields auto-route by
     content: variables named ``emis_<sector>_<species>`` drive the bulk /
     in-model-speciated path (``anthropogenic_emissions``); ``aero_emis_<tracer>``
     variables drive the CAM6-faithful pre-speciated path
@@ -1291,15 +1336,11 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(_expand_years(
-        forcing_cfg.get("emissions_file", None),
-        forcing_cfg.get("years", None),
-        forcing_cfg.get("available_years", None)))
-    if path in (None, "", "null"):
+    raw = forcing_cfg.get("emissions_file", None)
+    if raw in (None, "", "null"):
         return forcing
-
-    import xarray as xr
-    from omegaconf import ListConfig
+    years = forcing_cfg.get("years", None)
+    available = forcing_cfg.get("available_years", None)
 
     from jcm.forcing import (
         default_forcing,
@@ -1308,29 +1349,39 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         validate_emissions_grid,
     )
 
-    # One path → open_dataset; several → merge by coords (disjoint channels on a
-    # shared grid, e.g. biomass-burning + anthropogenic files).
-    if isinstance(path, (list, tuple, ListConfig)):
-        paths = [str(p) for p in path]
-        ds = xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1 \
-            else xr.open_dataset(paths[0])
-    else:
-        ds = xr.open_dataset(path)
-    anthro = read_anthropogenic_emissions(ds)
-    speciated = read_prescribed_aerosol_emissions(ds)
-    if anthro is None and speciated is None:
-        raise ValueError(
-            f"forcing.emissions_file {path!r} has no emissions variables: "
-            "expected ``emis_<sector>_<species>`` (bulk) or "
-            "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
-            "contract in docs/design/jam.md."
-        )
-    validate_emissions_grid({**(anthro or {}), **(speciated or {})},
-                            coords, path)
+    # Read each product independently and merge the per-variable TimeSeries
+    # leaves. Each product keeps its own time axis / align_mode, so mixing a
+    # transient product with a climatology does not force one shared axis.
+    anthro: dict = {}
+    speciated: dict = {}
+    for product in _forcing_products(raw, years, available):
+        path = _resolve_data_path(product)
+        if path in (None, "", "null"):
+            continue
+        ds = _open_forcing_dataset(path)
+        try:
+            a = read_anthropogenic_emissions(ds)
+            s = read_prescribed_aerosol_emissions(ds)
+        finally:
+            ds.close()
+        if a is None and s is None:
+            raise ValueError(
+                f"forcing.emissions_file {path!r} has no emissions variables: "
+                "expected ``emis_<sector>_<species>`` (bulk) or "
+                "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
+                "contract in docs/design/jam.md."
+            )
+        if a:
+            anthro.update(a)
+        if s:
+            speciated.update(s)
+    if not anthro and not speciated:
+        return forcing
+    validate_emissions_grid({**anthro, **speciated}, coords, raw)
     if forcing is None:
         forcing = default_forcing(coords.horizontal)
-    return forcing.copy(anthropogenic_emissions=anthro,
-                        prescribed_aerosol_emissions=speciated)
+    return forcing.copy(anthropogenic_emissions=anthro or None,
+                        prescribed_aerosol_emissions=speciated or None)
 
 
 def _attach_dms(forcing, forcing_cfg, coords):
@@ -1408,33 +1459,40 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     alignment — a single 12-month climatology stays ``WRAP_YEAR`` while a
     multi-year axis becomes ``BY_DATE``. The level-for-level vertical mapping
     is unchanged (the yearly files share the model's hybrid grid).
+
+    A **list** ``oxidants_file`` is handled per-product exactly as the emissions
+    path (see :func:`_forcing_products`): each element is opened, level-checked
+    and time-aligned on its own, so mixing a transient oxidant product with a
+    climatology one does not force a single shared (and possibly incompatible)
+    time axis. Products merge by oxidant key into one ``oxidant_vmr`` mapping,
+    each leaf keeping its own alignment.
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(_expand_years(
-        forcing_cfg.get("oxidants_file", None),
-        forcing_cfg.get("years", None),
-        forcing_cfg.get("available_years", None)))
-    if path in (None, "", "null"):
+    raw = forcing_cfg.get("oxidants_file", None)
+    if raw in (None, "", "null"):
         return forcing
-    import xarray as xr
-    from omegaconf import ListConfig
+    years = forcing_cfg.get("years", None)
+    available = forcing_cfg.get("available_years", None)
 
     from jcm.forcing import read_oxidant_vmr, validate_oxidant_levels
     lat_deg, lon_deg = _model_latlon_deg(coords)
     nlev = int(coords.nodal_shape[0])
-    if isinstance(path, (list, tuple, ListConfig)):
-        paths = [str(p) for p in path]
-        ds = (xr.open_mfdataset(paths, combine="by_coords") if len(paths) > 1
-              else xr.open_dataset(paths[0]))
-    else:
-        ds = xr.open_dataset(str(path))
-    try:
-        mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
-                                   lon_deg=lon_deg, align_mode="auto")
-        validate_oxidant_levels(ds, coords, path)
-    finally:
-        ds.close()
+    mapping: dict = {}
+    for product in _forcing_products(raw, years, available):
+        path = _resolve_data_path(product)
+        if path in (None, "", "null"):
+            continue
+        ds = _open_forcing_dataset(path)
+        try:
+            product_map = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
+                                           lon_deg=lon_deg, align_mode="auto")
+            validate_oxidant_levels(ds, coords, path)
+        finally:
+            ds.close()
+        mapping.update(product_map)
+    if not mapping:
+        return forcing
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(oxidant_vmr=mapping)
 
