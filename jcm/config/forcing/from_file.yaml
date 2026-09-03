@@ -15,8 +15,12 @@ file: ???
 
 # Yearly transient bundles (issue #610): any *_file here may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along
-# time, e.g. ``file=hf://bundles/t63/forcing_amip/{year}.nc`` with
-# ``years=[1979,1983]``. Plain paths ignore ``years``. When
+# time — set it in a forcing yaml as
+# ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with ``years: [1979, 1983]``.
+# A bare ``{`` is Hydra override syntax, so a CLI override must quote the value
+# (outer single quotes for the shell, inner double quotes for Hydra):
+# ``'forcing.file="hf://bundles/t63/forcing_amip/{year}.nc"'``. Plain paths
+# ignore ``years``. When
 # ``available_years`` gives the product's source coverage, the expansion
 # pads the range by one year each side (clipped to coverage) so
 # mid-month samples bracket the run's first/last dates under

@@ -2321,6 +2321,34 @@ class TestWarnOnConfigTraps:
         assert "emissions_file" in caplog.text
         assert "oxidants_file" in caplog.text
 
+    def test_transient_warning_override_is_hydra_launchable(self, caplog):
+        # The remedy the transient warning prints must actually launch (F2): a
+        # bare ``{`` is Hydra override syntax (this repo's own year-pattern
+        # tests cannot pass it on the CLI), so the recommended form quotes the
+        # value. Pull the copy-pasteable override out of the warning and compose
+        # it through Hydra to prove it parses to the literal ``{year}`` path —
+        # tying the advertised string to one that is guaranteed launchable.
+        import re
+
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        # The whole single-quoted argument: 'forcing.emissions_file="...{year}..."'.
+        m = re.search(
+            r"'(forcing\.emissions_file=\"[^']*\{year\}[^']*\")'", caplog.text)
+        assert m, f"no quoted emissions override advertised in: {caplog.text}"
+        # The shell strips the OUTER single quotes; Hydra receives the inner
+        # double-quoted token. Substitute the <grid> placeholder and compose.
+        hydra_token = m.group(1).replace("<grid>", "t63")
+        composed = _compose([hydra_token])
+        assert (composed.forcing.emissions_file
+                == "hf://bundles/t63/emissions_amip/{year}.nc")
+
     def test_transient_forcing_explicit_emission_paths_silent(self, caplog):
         # Explicit year-matched paths (not `auto`) opt out of the warning.
         from jcm.runners import warn_on_config_traps
