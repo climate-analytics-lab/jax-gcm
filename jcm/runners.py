@@ -2006,6 +2006,35 @@ def _resolved_emission_value(literal, coords, jam, is_pyses):
     return literal
 
 
+def _forcing_tracks_calendar(forcing) -> bool:
+    """Report whether the RESOLVED surface forcing is date-aligned (transient).
+
+    The config keys ``forcing.years`` / ``forcing.align`` miss the common case
+    of a single multi-year netCDF under the default ``align: auto``:
+    ``ForcingData.from_file``'s span-based auto-detection resolves it to
+    ``BY_DATE`` at build time, yet the config still reads ``align: auto`` /
+    ``years: null``. So classify from what the resolution actually produced —
+    any surface ``TimeSeries`` leaf (SST / sea-ice / snow / soil / land T) whose
+    ``align_mode`` is ``BY_DATE`` / ``BY_DATE_INTERP`` means those fields track
+    real calendar dates. A 12-month climatology resolves to ``WRAP_YEAR`` and is
+    not transient. ``forcing`` may be ``None`` (default/prescribed path builds
+    none) — then there is no date-aligned surface forcing to flag.
+    """
+    if forcing is None:
+        return False
+    from jcm.forcing import BY_DATE, BY_DATE_INTERP, TimeSeries
+    # ``getattr`` defaults so a caller passing a partial forcing stand-in (with
+    # only the fields the check it targets needs) is treated as non-transient
+    # rather than raising — a real ForcingData always carries all five.
+    for name in ("sea_surface_temperature", "sice_am", "snowc_am",
+                 "soilw_am", "stl_am"):
+        field = getattr(forcing, name, None)
+        if isinstance(field, TimeSeries) and int(field.align_mode) in (
+                BY_DATE, BY_DATE_INTERP):
+            return True
+    return False
+
+
 def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                          coords=None, dycore=None) -> None:
     """Warn (never raise) about config combinations that run but mislead.
@@ -2187,7 +2216,12 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    emission bundles. amip/era5 (forcing/{amip,era5}.yaml) are transient
     #    from_file presets — one file per year, ``align: by_date_interp``, a
     #    required ``years`` range — so the run's SST/sea-ice track real calendar
-    #    dates. But ``emissions_file``/``oxidants_file: auto`` resolve the
+    #    dates; so too does a single multi-year netCDF under the default
+    #    ``align: auto`` (span-detected to BY_DATE at build time). Transience is
+    #    therefore read off the RESOLVED forcing's surface alignment
+    #    (:func:`_forcing_tracks_calendar`), not just the ``years``/``align``
+    #    config keys — which the ``align: auto`` case leaves untouched.
+    #    But ``emissions_file``/``oxidants_file: auto`` resolve the
     #    *present-day* ``*_pd`` bundle (``_resolve_one_emission_input`` — the
     #    ``dms``/``dust`` climatologies are natural and roughly time-invariant,
     #    so only these two anthropogenic products are the concern). The result
@@ -2202,7 +2236,15 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
         forcing_cfg = cfg.get("forcing", {})
         years = forcing_cfg.get("years", None)
         align = str(forcing_cfg.get("align", "") or "")
-        is_transient = bool(years) or align in ("by_date", "by_date_interp")
+        # Transience is classified from what the resolution actually produced,
+        # not the raw config: a single multi-year netCDF under the default
+        # ``align: auto`` resolves to BY_DATE at build time while the config
+        # still reads ``align: auto`` / ``years: null`` — so keying only on
+        # ``years``/``align`` would miss it and skip this warning. The config
+        # keys stay as OR fallbacks for a forcing-less caller.
+        is_transient = (_forcing_tracks_calendar(forcing)
+                        or bool(years)
+                        or align in ("by_date", "by_date_interp"))
         # Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
         # concern (F2): ``auto`` that nulled on a non-mirrored grid supplies no
         # emissions at all — warning 3 covers that, and firing here too would

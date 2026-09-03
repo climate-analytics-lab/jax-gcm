@@ -2207,6 +2207,23 @@ class TestWarnOnConfigTraps:
         return types.SimpleNamespace(
             aerosol_year_weight=yw, aerosol_ann_cycle=ac)
 
+    @staticmethod
+    def _surface_forcing(align_mode):
+        # A resolved ForcingData stand-in carrying a surface SST TimeSeries with
+        # the given alignment; `_forcing_tracks_calendar` reads its align_mode
+        # (the other surface fields are static). BY_DATE(_INTERP) => transient.
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import make_time_series
+        sst = make_time_series(jnp.zeros((2, 4, 4)), jnp.arange(2.0),
+                               align_mode=align_mode)
+        static = jnp.zeros((4, 4))
+        return types.SimpleNamespace(
+            sea_surface_temperature=sst, sice_am=static, snowc_am=static,
+            soilw_am=static, stl_am=static)
+
     # 1. JAM + aquaplanet terrain
     def test_jam_aquaplanet_terrain_warns(self, caplog):
         from jcm.runners import warn_on_config_traps
@@ -2362,6 +2379,39 @@ class TestWarnOnConfigTraps:
             oxidants_file="hf://bundles/t63_l47/oxidants_1980.nc")
         with caplog.at_level("WARNING"):
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_resolved_by_date_forcing_under_align_auto_warns(self, caplog):
+        # F1 (round 12): a single multi-year netCDF under the default
+        # `align: auto` resolves to BY_DATE at build time, but the config still
+        # reads `align: auto` / `years: null`. Keying only on those config keys
+        # would classify it non-transient and skip the warning. Transience is
+        # read off the RESOLVED forcing's surface alignment instead, so the
+        # present-day-emissions mismatch still fires.
+        from jcm.forcing import BY_DATE
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        align="auto", emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 self._surface_forcing(BY_DATE),
+                                 coords=self._coords(63))
+        assert "present-day JAM emissions" in caplog.text
+
+    def test_resolved_wrap_year_forcing_under_align_auto_silent(self, caplog):
+        # The other side of F1: a 12-month climatology under `align: auto`
+        # resolves to WRAP_YEAR — not transient — so a present-day-emissions run
+        # off it is the intended climatological baseline, not a mismatch.
+        from jcm.forcing import WRAP_YEAR
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        align="auto", emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 self._surface_forcing(WRAP_YEAR),
+                                 coords=self._coords(63))
         assert "present-day JAM emissions" not in caplog.text
 
     def test_default_forcing_auto_emissions_silent(self, caplog):
