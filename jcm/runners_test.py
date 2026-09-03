@@ -2116,6 +2116,23 @@ class TestWarnOnConfigTraps:
              "forcing": {"kind": forcing_kind, **forcing_keys}})
 
     @staticmethod
+    def _coords(truncation=63):
+        # ``_grid_token`` reads ``coords.horizontal.total_wavenumbers`` and maps
+        # ``total_wavenumbers - 2`` to ``t{trunc}``; a lightweight stub avoids
+        # building a real (expensive) coordinate system just to pick the grid
+        # token. t63 is published; t42 (truncation=42) is not.
+        import types
+        return types.SimpleNamespace(
+            horizontal=types.SimpleNamespace(
+                total_wavenumbers=int(truncation) + 2))
+
+    @staticmethod
+    def _pyses_dycore():
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``.
+        import types
+        return types.SimpleNamespace(colmap=object())
+
+    @staticmethod
     def _macv2_forcing(loaded=False):
         import types
 
@@ -2232,14 +2249,18 @@ class TestWarnOnConfigTraps:
     def test_transient_forcing_present_day_jam_emissions_warns(self, caplog):
         # amip/era5 encode transience as a `years` range + by_date_interp
         # align on top of `kind: from_file`; emissions_file/oxidants_file: auto
-        # then resolve the present-day *_pd bundles.
+        # then resolve the present-day *_pd bundles. Read on a PUBLISHED grid
+        # (t63) so `auto` resolves to a real bundle — the mismatch this warns
+        # about (F2). On an unpublished grid `auto` resolves to None instead,
+        # which warning 3 covers (see the pySES/t42 tests below).
         from jcm.runners import warn_on_config_traps
         cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
                         years=[1979, 1983], align="by_date_interp",
                         emissions_file="auto", dms_file="auto",
                         dust_file="auto", oxidants_file="auto")
         with caplog.at_level("WARNING"):
-            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
         assert "present-day JAM emissions" in caplog.text
         assert "emissions_file" in caplog.text
         assert "oxidants_file" in caplog.text
@@ -2257,15 +2278,69 @@ class TestWarnOnConfigTraps:
         assert "present-day JAM emissions" not in caplog.text
 
     def test_default_forcing_auto_emissions_silent(self, caplog):
-        # Non-transient forcing (no `years`, default align) + auto is the
-        # canonical present-day run — no mismatch, no warning.
+        # Non-transient forcing (no `years`, default align) + auto on a
+        # PUBLISHED grid is the canonical present-day run — auto resolves to
+        # real bundles, so neither the transient mismatch (5) nor the
+        # zero-emission baseline (3) fires.
         from jcm.runners import warn_on_config_traps
         cfg = self._cfg(terrain="from_file", forcing_kind="default",
                         emissions_file="auto", dms_file="auto",
                         dust_file="auto", oxidants_file="auto")
         with caplog.at_level("WARNING"):
-            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
         assert "present-day JAM emissions" not in caplog.text
+        assert "zero-emission JAM baseline" not in caplog.text
+
+    # 3 (F2). RESOLVED-value awareness: `auto` that nulls on the pySES path or
+    # an unpublished grid is the silently-degraded run the zero-emission
+    # warning must catch — the raw cfg still reads "auto" and would miss it.
+    def test_jam_auto_null_on_pyses_warns(self, caplog):
+        # ne30/pySES JAM: the four emission keys are `auto` (default) but the
+        # pySES backend publishes no per-grid bundles, so every one resolves to
+        # None — a sea-salt-only run that used to be silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "pySES" in caplog.text
+        # No spurious present-day-emissions warning: those keys resolved to
+        # None, not to a *_pd bundle.
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
+        # A JAM spectral run on an unpublished grid (t42): `auto` resolves to
+        # None (no bundle to fetch) and the ONE combined warning names the grid
+        # — replacing the invisible info-level log the resolver used to emit.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(42))
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "'t42'" in caplog.text
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            assert key in caplog.text
+
+    def test_jam_auto_on_published_grid_silent(self, caplog):
+        # t63 JAM with the `auto` bundles: every key resolves to a real
+        # present-day bundle, so the zero-emission warning stays silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "zero-emission JAM baseline" not in caplog.text
 
 
 class TestAttachMacv2Weights(unittest.TestCase):
@@ -2476,10 +2551,12 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         any other grid (e.g. echam_t42_l8_sigma) must restore the null,
         emission-free baseline automatically — resolving ``auto`` to None with
         NO fetch (so the documented ``physics=echam-jam grid=echam_t42_l8_sigma
-        forcing.emissions_file=<explicit>`` workflow no longer aborts) — and
-        emit ONE info log naming the keys and the reason.
+        forcing.emissions_file=<explicit>`` workflow no longer aborts). The
+        silent-degrade WARNING is emitted by ``warn_on_config_traps`` from the
+        resolved values (F2), not an info log in the resolver — so the resolver
+        stays a pure, side-effect-light resolution
+        (see ``TestConfigTraps.test_jam_auto_null_non_mirrored_grid_warns``).
         """
-        import logging
         from unittest import mock
 
         from jcm import runners
@@ -2494,17 +2571,11 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         with mock.patch.object(runners, "_resolve_data_path",
                                side_effect=_no_fetch):
-            with self.assertLogs(level=logging.INFO) as logs:
-                out = runners._resolve_emission_inputs(
-                    cfg.forcing, cfg, coords, is_pyses=False)
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
         for key in ("emissions_file", "dms_file", "dust_file",
                     "oxidants_file"):
             self.assertIsNone(out.get(key))
-        # Exactly one aggregated info line, naming the grid and the keys.
-        info = [r for r in logs.records
-                if r.levelno == logging.INFO and "resolved to None" in r.message]
-        self.assertEqual(len(info), 1)
-        self.assertIn("t42", info[0].getMessage())
 
     def test_t119_jam_experiment_resolves_emission_free(self):
         """The ma-t119 experiments run emission-free (Codex P1).

@@ -930,6 +930,24 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 _EMISSION_AUTO_BUNDLES = bundle_names.EMISSION_AUTO_BUNDLES
 
 
+def _emission_auto_resolves_to_none(coords, jam, is_pyses) -> bool:
+    """Whether an ``auto`` emission key resolves to None — a pure classification.
+
+    ``auto`` yields None (no per-grid bundle) on the pySES path, for a non-JAM
+    package (neither consumes prescribed emissions), or on a grid the mirror
+    does not publish (:data:`jcm.data.bundle_names.PUBLISHED_GRIDS`). No fetch,
+    no side effects. Shared by the build-time resolver
+    (:func:`_resolve_one_emission_input`) and the config-trap warner
+    (:func:`warn_on_config_traps`) so the None-decision the warning reasons
+    about can never drift from the one the build actually applies (F2). The
+    pySES / non-JAM cases return before ``_grid_token`` so pySES native coords
+    are never asked for a spectral token.
+    """
+    if is_pyses or not jam:
+        return True
+    return _grid_token(coords) not in bundle_names.PUBLISHED_GRIDS
+
+
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     """Resolve one prescribed-emission forcing value (``auto`` / explicit).
 
@@ -947,16 +965,16 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
       substitution — use ``auto`` to let a config follow the grid).
     """
     if value == "auto":
-        if is_pyses or not jam:
-            return None
-        if _grid_token(coords) not in bundle_names.PUBLISHED_GRIDS:
-            # The mirror publishes emission bundles only for the grids in
-            # ``PUBLISHED_GRIDS``; any other grid (e.g. echam_t42_l8_sigma,
-            # ma-t119) has no ``bundles/<grid>/*.nc`` to fetch. Resolve ``auto``
-            # to None so the run falls back to the null, emission-free baseline
-            # automatically instead of aborting on a 404 — restoring the prior
-            # behaviour for every non-mirrored grid. ``_resolve_emission_inputs``
-            # emits one aggregated info log naming the keys and the reason.
+        if _emission_auto_resolves_to_none(coords, jam, is_pyses):
+            # No per-grid bundle exists on the pySES path, for a non-JAM
+            # package, or on a grid the mirror does not publish (e.g.
+            # echam_t42_l8_sigma, ma-t119). Resolve ``auto`` to None so the run
+            # falls back to the null, emission-free baseline automatically
+            # instead of aborting on a 404 — restoring the prior behaviour for
+            # every non-mirrored grid. The silent degrade this creates is
+            # surfaced by ``warn_on_config_traps`` (which reasons about the SAME
+            # None-decision via the shared predicate), not an invisible info
+            # log here.
             return None
         hf = bundle_names.emission_bundle_path(
             key, _grid_token(coords), int(coords.nodal_shape[0]))
@@ -985,34 +1003,20 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     :func:`_resolve_one_emission_input`). ``auto`` is keyed off whether the
     composed physics is the prognostic-aerosol (JAM) module — the only package
     that consumes prescribed emissions.
+
+    Pure resolution only: the silent degrade when a JAM run's ``auto`` keys
+    null on a non-mirrored grid (or the pySES path) is surfaced by
+    :func:`warn_on_config_traps`, which folds it into ONE config-trap warning
+    with the zero-emission finding rather than an invisible info log here (F2).
     """
     from omegaconf import OmegaConf
 
     jam = str((cfg.get("physics", {}) or {}).get("aerosol_module", "")) == "jam"
-    auto_keys = [key for key in _EMISSION_AUTO_BUNDLES
-                 if str(forcing_cfg.get(key, None)) == "auto"]
     updates = {
         key: _resolve_one_emission_input(
             forcing_cfg.get(key, None), key, coords, jam, is_pyses)
         for key in _EMISSION_AUTO_BUNDLES
     }
-    # One info log when a JAM spectral run on a non-mirrored grid nulls its
-    # ``auto`` emission keys (see _resolve_one_emission_input): naming the keys
-    # and the reason once, rather than silently supplying nothing or aborting
-    # per key. Guarded so ``_grid_token`` (spectral-only) is never touched on
-    # the pySES path or the non-JAM path (where ``auto`` already nulled and
-    # ``coords`` may be absent/native-grid).
-    if jam and not is_pyses and auto_keys:
-        token = _grid_token(coords)
-        if token not in bundle_names.PUBLISHED_GRIDS:
-            logging.info(
-                "forcing.%s=auto resolved to None: grid %r is not one of the "
-                "mirror's published grids (%s), so no per-grid emission bundle "
-                "exists to fetch. The JAM run therefore uses only online "
-                "sources (Gong sea salt) for these inputs; point each key at "
-                "an on-grid file to supply prescribed emissions.",
-                ", ".join(auto_keys), token,
-                ", ".join(sorted(bundle_names.PUBLISHED_GRIDS)))
     return OmegaConf.merge(forcing_cfg, updates)
 
 
@@ -1736,7 +1740,27 @@ def _has_macv2sp(physics) -> bool:
                for t in physics.terms)
 
 
-def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
+def _resolved_emission_value(literal, coords, jam, is_pyses):
+    """Resolution OUTCOME of one emission key, for warning purposes (no fetch).
+
+    Returns None when the key resolves to no prescribed source (an explicit
+    null, or ``auto`` on a path that has no bundle — see
+    :func:`_emission_auto_resolves_to_none`); otherwise the literal path (or the
+    ``"auto"`` sentinel when ``auto`` resolves to a real per-grid bundle).
+    Mirrors :func:`_resolve_one_emission_input`'s None-decision WITHOUT fetching
+    so :func:`warn_on_config_traps` reasons about the same values the build
+    applies rather than the raw ``"auto"`` cfg (F2).
+    """
+    if literal in (None, "", "null", "none"):
+        return None
+    if literal == "auto":
+        return None if _emission_auto_resolves_to_none(
+            coords, jam, is_pyses) else "auto"
+    return literal
+
+
+def warn_on_config_traps(cfg: DictConfig, physics, forcing,
+                         coords=None, dycore=None) -> None:
     """Warn (never raise) about config combinations that run but mislead.
 
     Config-layer cross-validation belongs in the runner (#640): it reads the
@@ -1745,6 +1769,14 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
     not an error — the combinations all *run*, they just quietly produce
     something other than what the config name suggests, and the maintainer
     chose to keep them runnable (e.g. for controlled idealized experiments).
+
+    ``coords`` and ``dycore`` let the emission-key checks (3 and 5) read the
+    RESOLVED emission values rather than the raw ``"auto"`` cfg (F2): ``auto``
+    resolves to None on the pySES path or a non-mirrored grid, so a JAM run
+    there is silently emission-free — the exact case warning 3 must catch.
+    ``dycore`` decides the pySES path (``hasattr(dycore, "colmap")``); when
+    both are omitted (e.g. a caller that builds no forcing) the resolution
+    falls back to treating ``auto`` conservatively via the shared predicate.
 
     ``forcing`` may be ``None`` (``forcing.kind: default``, or the SCM/
     prescribed paths that build none): the aquaplanet ``default_forcing`` the
@@ -1758,6 +1790,7 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
     terrain_kind = cfg.get("terrain", {}).get("kind", None)
     forcing_kind = cfg.get("forcing", {}).get("kind", None)
     has_jam = _has_jam(physics)
+    is_pyses = dycore is not None and hasattr(dycore, "colmap")
 
     # 1. Prognostic aerosol over a flat all-ocean planet: Gong sea-salt emits
     #    everywhere (including where land should be), there is no orography to
@@ -1783,26 +1816,56 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
             "agree (issue #640)."
         )
 
-    # 3. Prognostic aerosol with every prescribed-emission input nulled: only
-    #    online Gong sea-salt has a source. After commit 3 the JAM presets
-    #    supply the bundles by default, so this fires only when a user has
-    #    explicitly nulled them.
+    # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
+    #    online Gong sea-salt then has one. This reads the RESOLVED values, not
+    #    the raw cfg (F2): ``auto`` on the pySES path or a grid the mirror does
+    #    not publish resolves to None, so a JAM run there is silently
+    #    emission-free — exactly the case the warning exists for (the ne30
+    #    experiments ran sea-salt-only silently). The grid/pySES fact (formerly
+    #    an invisible info-level log in the resolver) is folded into this ONE
+    #    warning so the two never double-fire.
     if has_jam:
         forcing_cfg = cfg.get("forcing", {})
         emission_keys = ("emissions_file", "dms_file", "dust_file",
                          "oxidants_file")
-        unset = [k for k in emission_keys
-                 if forcing_cfg.get(k, None) in (None, "", "null", "none")]
+        resolved = {k: _resolved_emission_value(
+                        forcing_cfg.get(k, None), coords, has_jam, is_pyses)
+                    for k in emission_keys}
+        unset = [k for k in emission_keys if resolved[k] is None]
+        # Keys the user left at ``auto`` that nonetheless resolved to None —
+        # i.e. the silent-degrade case (pySES / non-mirrored grid), distinct
+        # from an explicit opt-out null.
+        auto_nulled = [k for k in emission_keys
+                       if str(forcing_cfg.get(k, None)) == "auto"
+                       and resolved[k] is None]
         if len(unset) == len(emission_keys):
-            logger.warning(
-                "config trap: zero-emission JAM baseline — %s are all unset, so "
-                "the only online aerosol source is Gong sea salt; sulfur, dust "
-                "and carbonaceous species stay at zero. Leave them at their "
-                "'auto' default (the per-grid HF bundles) or set an explicit "
-                "path (e.g. forcing.emissions_file=hf://bundles/<grid>/"
-                "emissions_pd.nc).",
-                ", ".join(unset),
-            )
+            if auto_nulled:
+                reason = (
+                    "the pySES backend publishes no per-grid emission bundles"
+                    if is_pyses else
+                    f"grid {_grid_token(coords)!r} is not one of the mirror's "
+                    f"published grids "
+                    f"({', '.join(sorted(bundle_names.PUBLISHED_GRIDS))})")
+                logger.warning(
+                    "config trap: zero-emission JAM baseline — the 'auto' "
+                    "emission key(s) %s resolved to None because %s, so the "
+                    "only online aerosol source is Gong sea salt; sulfur, dust "
+                    "and carbonaceous species stay at zero. Point each key at "
+                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
+                    "supply prescribed emissions.",
+                    ", ".join(auto_nulled), reason,
+                )
+            else:
+                logger.warning(
+                    "config trap: zero-emission JAM baseline — %s are all "
+                    "unset, so the only online aerosol source is Gong sea "
+                    "salt; sulfur, dust and carbonaceous species stay at zero. "
+                    "Leave them at their 'auto' default (the per-grid HF "
+                    "bundles) or set an explicit path (e.g. "
+                    "forcing.emissions_file=hf://bundles/<grid>/"
+                    "emissions_pd.nc).",
+                    ", ".join(unset),
+                )
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only
@@ -1846,8 +1909,15 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing) -> None:
         years = forcing_cfg.get("years", None)
         align = str(forcing_cfg.get("align", "") or "")
         is_transient = bool(years) or align in ("by_date", "by_date_interp")
-        pd_auto_keys = [k for k in ("emissions_file", "oxidants_file")
-                        if forcing_cfg.get(k, None) == "auto"]
+        # Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
+        # concern (F2): ``auto`` that nulled on a non-mirrored grid supplies no
+        # emissions at all — warning 3 covers that, and firing here too would
+        # misdescribe it as a present-day bundle.
+        pd_auto_keys = [
+            k for k in ("emissions_file", "oxidants_file")
+            if str(forcing_cfg.get(k, None)) == "auto"
+            and _resolved_emission_value(
+                forcing_cfg.get(k, None), coords, has_jam, is_pyses) is not None]
         if is_transient and pd_auto_keys:
             logger.warning(
                 "config trap: transient (by-date) forcing with present-day JAM "
@@ -1875,7 +1945,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
-    warn_on_config_traps(cfg, model.physics, forcing)
+    warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
+                         dycore=getattr(model, "dycore", None))
     # After model + forcing construction: config-selected libraries are
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
@@ -1974,7 +2045,7 @@ def _run_prescribed(cfg: DictConfig):
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
-    warn_on_config_traps(cfg, physics, forcing)
+    warn_on_config_traps(cfg, physics, forcing, coords=coords)
     _, states = _load_states_from_cfg(cfg, physics)
 
     model = PrescribedStateModel(
@@ -2008,8 +2079,9 @@ def _run_scm(cfg: DictConfig):
     coords = build_coords(cfg)
     # The SCM builds no ForcingData; pass None so the config-trap check still
     # covers this mode (terrain/emission-key traps read cfg, and the None
-    # forcing is the all-ones MACv2-SP default for warning 4).
-    warn_on_config_traps(cfg, physics, None)
+    # forcing is the all-ones MACv2-SP default for warning 4). ``coords`` lets
+    # the emission-key checks resolve ``auto`` against the model grid (F2).
+    warn_on_config_traps(cfg, physics, None, coords=coords)
     ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
         states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
