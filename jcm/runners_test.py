@@ -2165,11 +2165,14 @@ class TestWarnOnConfigTraps:
             terms=[types.SimpleNamespace(name=n) for n in names])
 
     @staticmethod
-    def _cfg(terrain="aquaplanet", forcing_kind="default", **forcing_keys):
+    def _cfg(terrain="aquaplanet", forcing_kind="default", run_mode=None,
+             **forcing_keys):
         from omegaconf import OmegaConf
-        return OmegaConf.create(
-            {"terrain": {"kind": terrain},
-             "forcing": {"kind": forcing_kind, **forcing_keys}})
+        cfg = {"terrain": {"kind": terrain},
+               "forcing": {"kind": forcing_kind, **forcing_keys}}
+        if run_mode is not None:
+            cfg["run"] = {"mode": run_mode}
+        return OmegaConf.create(cfg)
 
     @staticmethod
     def _coords(truncation=63):
@@ -2425,6 +2428,76 @@ class TestWarnOnConfigTraps:
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
                                  None, coords=self._coords(63))
         assert "zero-emission JAM baseline" not in caplog.text
+
+    # SCM (run.mode=scm) family sweep. The single-column model builds no gridded
+    # surface: it runs on TerrainData.single_column() + ForcingData.zeros and
+    # consumes none of cfg.terrain/cfg.forcing or the prescribed emission
+    # inputs. So the gridded-surface / transient / MACv2-weight traps are gated
+    # off and JAM gets one honest, mode-specific zero-emission message — even on
+    # a PUBLISHED grid where the resolved-value logic would have stayed silent.
+    def test_jam_scm_fires_single_column_zero_emission_message(self, caplog):
+        # t63 is published, so warning 3's resolved-value logic would classify
+        # `auto` as a real bundle and say nothing; the SCM attaches no forcing,
+        # so the honest scm-specific message must fire instead.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        run_mode="scm",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "single-column mode" in caplog.text
+        assert "zero-emission apart from any online sources" in caplog.text
+        # The gridded resolved-value message and the transient message are NOT
+        # the ones used in SCM.
+        assert "zero-emission JAM baseline" not in caplog.text
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_jam_scm_aquaplanet_terrain_trap_gated_off(self, caplog):
+        # Warning 1 is meaningless under scm (the SCM ignores cfg.terrain and
+        # always runs on a single flat-ocean column). One honest message only.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="aquaplanet", run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_seasalt_emissions"),
+                                 None, coords=self._coords(63))
+        assert "terrain=aquaplanet" not in caplog.text
+        assert "single-column mode" in caplog.text
+
+    def test_scm_aquaplanet_from_file_forcing_trap_gated_off(self, caplog):
+        # Warning 2 is meaningless under scm (no forcing built, single-column
+        # terrain — no gridded masks can disagree). Non-JAM: fully silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="aquaplanet", forcing_kind="from_file",
+                        run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("macv2_sp_aerosol"), None)
+        assert "from_file over terrain=aquaplanet" not in caplog.text
+
+    def test_macv2_scm_default_weights_trap_gated_off(self, caplog):
+        # Warning 4's remedy (forcing=macv2_sp) cannot be applied in scm — the
+        # SCM never builds forcing from cfg — so it is gated off.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("macv2_sp_aerosol"), None)
+        assert "perpetual year-2005" not in caplog.text
+
+    def test_transient_jam_scm_present_day_trap_gated_off(self, caplog):
+        # Warning 5 is meaningless under scm (no transient surface forcing, no
+        # emissions consumed). Only the honest scm message fires.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        run_mode="scm",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "present-day JAM emissions" not in caplog.text
+        assert "single-column mode" in caplog.text
 
 
 class TestAttachMacv2Weights(unittest.TestCase):

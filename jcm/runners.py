@@ -1923,10 +1923,23 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     both are omitted (e.g. a caller that builds no forcing) the resolution
     falls back to treating ``auto`` conservatively via the shared predicate.
 
-    ``forcing`` may be ``None`` (``forcing.kind: default``, or the SCM/
-    prescribed paths that build none): the aquaplanet ``default_forcing`` the
-    model then falls back to carries the same all-ones MACv2-SP weights, so it
-    is treated as the all-ones case for warning 4.
+    ``forcing`` may be ``None`` (``forcing.kind: default``, or the prescribed
+    path that builds none): the aquaplanet ``default_forcing`` the model then
+    falls back to carries the same all-ones MACv2-SP weights, so it is treated
+    as the all-ones case for warning 4.
+
+    ``run.mode=scm`` is handled specially. The single-column model
+    (:func:`_run_scm`) builds NO gridded surface: it runs on
+    ``TerrainData.single_column()`` (flat ocean) and ``ForcingData.zeros`` and
+    consumes none of ``cfg.terrain``/``cfg.forcing`` — no gridded land-sea mask,
+    no transient surface forcing, and (critically) none of the prescribed JAM
+    emission inputs. The gridded-surface traps (1, 2), the transient-emission
+    trap (5), and the MACv2-SP-weight trap (4) therefore either fire on config
+    the SCM ignores or point at a remedy the SCM cannot apply, so they are gated
+    off under ``scm``. The zero-emission trap (3) would MIS-SUPPRESS there — on a
+    published grid ``auto`` resolves to a "real bundle" and stays silent, yet the
+    SCM attaches no forcing so the column genuinely has no prescribed emissions —
+    so ``scm`` replaces it with one honest, mode-specific warning.
     """
     import numpy as np
 
@@ -1936,11 +1949,18 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     forcing_kind = cfg.get("forcing", {}).get("kind", None)
     has_jam = _has_jam(physics)
     is_pyses = dycore is not None and hasattr(dycore, "colmap")
+    # See the docstring: the SCM builds no gridded terrain/forcing and attaches
+    # no prescribed emissions, so the gridded-surface / transient / MACv2-weight
+    # traps below are gated off under ``scm`` and the zero-emission trap is
+    # replaced by one honest SCM-specific message.
+    is_scm = str(cfg.get("run", {}).get("mode", "full") or "full") == "scm"
 
     # 1. Prognostic aerosol over a flat all-ocean planet: Gong sea-salt emits
     #    everywhere (including where land should be), there is no orography to
     #    source dust, and the idealized cos²-lat SSTs are not a real surface.
-    if has_jam and terrain_kind == "aquaplanet":
+    #    Gated off under scm: the SCM ignores cfg.terrain and always runs on a
+    #    single flat-ocean column, so the gridded land-sea-mask concern is moot.
+    if has_jam and terrain_kind == "aquaplanet" and not is_scm:
         logger.warning(
             "config trap: JAM prognostic aerosol with terrain=aquaplanet — a "
             "flat all-ocean planet has no land-sea mask, so Gong sea-salt "
@@ -1951,8 +1971,9 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
 
     # 2. The inverse mismatch (#640): a real-world boundary file's land-sea
     #    mask over aquaplanet terrain — SSTs land on cells the terrain calls
-    #    ocean and vice-versa.
-    if terrain_kind == "aquaplanet" and forcing_kind == "from_file":
+    #    ocean and vice-versa. Gated off under scm: the SCM builds no forcing
+    #    and uses a single-column terrain, so no gridded masks can disagree.
+    if terrain_kind == "aquaplanet" and forcing_kind == "from_file" and not is_scm:
         logger.warning(
             "config trap: forcing.kind=from_file over terrain=aquaplanet — the "
             "boundary file's real-world SST/land fields carry a land-sea mask "
@@ -1969,7 +1990,26 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    experiments ran sea-salt-only silently). The grid/pySES fact (formerly
     #    an invisible info-level log in the resolver) is folded into this ONE
     #    warning so the two never double-fire.
-    if has_jam:
+    #
+    #    Under scm this trap MIS-SUPPRESSES: on a published grid ``auto``
+    #    resolves to a real bundle and stays silent, but the SCM attaches no
+    #    forcing at all (it runs on ``ForcingData.zeros``) so the column
+    #    genuinely has no prescribed emissions regardless of grid. So scm gets
+    #    one honest, mode-specific message instead of the resolved-value logic.
+    if has_jam and is_scm:
+        logger.warning(
+            "config trap: JAM prognostic aerosol in single-column mode "
+            "(run.mode=scm) — the single-column model builds no boundary "
+            "ForcingData (it runs on ForcingData.zeros) and consumes NONE of "
+            "the prescribed emission inputs: emissions_file, dms_file, "
+            "dust_file and oxidants_file are all ignored in SCM regardless of "
+            "grid. The column is therefore zero-emission apart from any online "
+            "sources (e.g. wind-driven Gong sea salt); prescribed sulfur, dust "
+            "and carbonaceous emissions stay at zero. This is expected for an "
+            "SCM process study — prescribed emissions require the full "
+            "(gridded) model."
+        )
+    elif has_jam:
         forcing_cfg = cfg.get("forcing", {})
         emission_keys = ("emissions_file", "dms_file", "dust_file",
                          "oxidants_file")
@@ -2023,7 +2063,11 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
             return False
         return bool(np.allclose(np.asarray(x), 1.0))
 
-    if _has_macv2sp(physics) and not has_jam:
+    #    Gated off under scm: the SCM never builds forcing from cfg (it always
+    #    runs on ForcingData.zeros, i.e. all-ones weights), so the remedy this
+    #    warning offers — forcing=macv2_sp for time-varying weights — cannot be
+    #    applied in SCM. Firing it would advertise an inapplicable fix.
+    if _has_macv2sp(physics) and not has_jam and not is_scm:
         # forcing=None → the aquaplanet default_forcing, all-ones weights.
         all_ones = forcing is None or (
             _is_allones_static(forcing.aerosol_year_weight)
@@ -2048,8 +2092,11 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
     #    is a historical/AMIP circulation breathing present-day aerosol
     #    emissions. Fires only when ``auto`` is still in place (an explicit
     #    year-matched path silences it); on the spectral+JAM path ``auto`` is
-    #    exactly what resolved to the ``_pd`` bundle.
-    if has_jam:
+    #    exactly what resolved to the ``_pd`` bundle. Gated off under scm: the
+    #    SCM consumes no transient surface forcing and no emissions, so there is
+    #    no historical circulation breathing present-day aerosol to warn about —
+    #    the scm-specific warning 3 already states the column is emission-free.
+    if has_jam and not is_scm:
         forcing_cfg = cfg.get("forcing", {})
         years = forcing_cfg.get("years", None)
         align = str(forcing_cfg.get("align", "") or "")
@@ -2232,10 +2279,12 @@ def _run_scm(cfg: DictConfig):
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
     coords = build_coords(cfg)
-    # The SCM builds no ForcingData; pass None so the config-trap check still
-    # covers this mode (terrain/emission-key traps read cfg, and the None
-    # forcing is the all-ones MACv2-SP default for warning 4). ``coords`` lets
-    # the emission-key checks resolve ``auto`` against the model grid (F2).
+    # The SCM builds no ForcingData; pass None so the config-trap check runs in
+    # its scm-aware branch (it reads run.mode=scm from cfg). In scm mode the
+    # gridded-surface/transient/MACv2-weight traps are gated off and a JAM run
+    # gets one honest "column is emission-free" warning — see
+    # ``warn_on_config_traps``. ``coords`` is still passed for symmetry with the
+    # other run paths (the scm branch does not use it).
     warn_on_config_traps(cfg, physics, None, coords=coords)
     ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
