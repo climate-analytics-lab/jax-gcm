@@ -283,6 +283,45 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                 self.assertEqual(
                     _auto_emission_files(_compose_preset(PRESETS[name])), [])
 
+    def test_year_pattern_expands_to_concrete_prefetch_files(self):
+        """A ``{year}`` pattern + ``forcing.years`` reaches the prefetch list as
+        the concrete yearly files, never the literal ``{year}`` URL (Codex F2).
+
+        The runner expands the pattern at build time (after the GPU is claimed),
+        so a prefetch that fetched the literal ``{year}.nc`` would die on a
+        non-existent file before the run starts. Expansion here mirrors it.
+        """
+        overrides = [
+            "forcing=from_file",
+            'forcing.file="hf://bundles/t63/forcing_amip/{year}.nc"',
+            'forcing.emissions_file='
+            '"hf://bundles/t63/emissions_amip/{year}.nc"',
+            "forcing.years=[1979,1981]",
+        ]
+        files = _preset_data_files(overrides)
+        self.assertNotIn("hf://bundles/t63/forcing_amip/{year}.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/{year}.nc", files)
+        for y in (1979, 1980, 1981):
+            self.assertIn(f"hf://bundles/t63/forcing_amip/{y}.nc", files)
+            self.assertIn(f"hf://bundles/t63/emissions_amip/{y}.nc", files)
+
+    def test_year_pattern_honours_per_product_available_clamp(self):
+        """The per-product ``emissions_available_years`` clamps the emissions
+        expansion independently of the surface ``forcing.years`` — the era5
+        case where surface files run past the amip emissions' 2022 coverage.
+        """
+        overrides = [
+            "forcing=from_file",
+            'forcing.emissions_file='
+            '"hf://bundles/t63/emissions_amip/{year}.nc"',
+            "forcing.years=[2021,2024]",
+            "forcing.emissions_available_years=[1850,2022]",
+        ]
+        files = _preset_data_files(overrides)
+        self.assertIn("hf://bundles/t63/emissions_amip/2022.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/2023.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/2024.nc", files)
+
 
 class GpuTenantTest(unittest.TestCase):
     """The free-GPU gate must not mistake the harness for a rival tenant.

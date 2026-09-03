@@ -169,6 +169,26 @@ def _load_bundle_names():
     return mod
 
 
+def _load_expand_yearly_files():
+    """Load ``jcm.data.yearly_files.expand_yearly_files`` WITHOUT importing ``jcm``.
+
+    Same rationale (and mechanism) as :func:`_load_bundle_names`: reaching it as
+    ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
+    — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
+    backend, preallocating the GPU before the free-card gate. The expansion lives
+    in the import-free leaf ``jcm/data/yearly_files.py`` precisely so the runner
+    (via ``jcm.forcing``'s re-export) and this pre-GPU prefetch share ONE
+    implementation of the ``{year}`` → yearly-file mapping without either copy
+    drifting.
+    """
+    import importlib.util
+    src = REPO / "jcm" / "data" / "yearly_files.py"
+    spec = importlib.util.spec_from_file_location("_jcm_yearly_files", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.expand_yearly_files
+
+
 def _auto_emission_files(cfg) -> list[str]:
     """``hf://`` bundles the JAM ``auto`` emission default resolves to.
 
@@ -211,6 +231,19 @@ def _auto_emission_files(cfg) -> list[str]:
             if str(forcing.get(key, "auto")) == "auto"]
 
 
+# Per-product ``available_years`` override each ``{year}`` forcing key honours,
+# mirroring ``jcm.runners._product_available_years`` — a preset may mix yearly
+# products with different coverage (era5 surface files run to 2024 while the
+# amip ozone/emissions bundles end in 2022), and the expansion must clamp each
+# to the files that actually exist. Any key not listed shares the top-level
+# ``forcing.available_years``.
+_PER_PRODUCT_AVAILABLE = {
+    "ozone_file": "ozone_available_years",
+    "emissions_file": "emissions_available_years",
+    "oxidants_file": "oxidants_available_years",
+}
+
+
 def _preset_data_files(overrides: list[str]) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
 
@@ -219,17 +252,45 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     (resolved lazily at build time) and unset ``???`` values — then ADDS the
     ``auto`` emission bundles a JAM preset resolves lazily (see
     :func:`_auto_emission_files`), which the ``file``-key walk cannot see.
+
+    A ``{year}`` pattern (transient emissions/oxidants/ozone/surface bundles)
+    is EXPANDED to its concrete yearly files here — over ``forcing.years`` and
+    the per-product ``*_available_years`` clamps — using the same
+    ``jcm.data.yearly_files.expand_yearly_files`` the runner uses (loaded by
+    file path, jcm-free). Without this the prefetch would try to fetch a literal
+    ``{year}.nc`` and die before the run even starts.
     """
     from omegaconf import OmegaConf
     cfg = _compose_preset(overrides)
+    expand = _load_expand_yearly_files()
+    forcing = OmegaConf.to_container(cfg.get("forcing", {}) or {},
+                                     resolve=False, throw_on_missing=False)
+    if not isinstance(forcing, dict):
+        forcing = {}
+    years = forcing.get("years", None)
     out: list[str] = []
 
-    def _add(v):
+    def _available_for(key):
+        # Mirror runners._product_available_years: the per-product override
+        # wins ONLY when set (the yaml defaults it to null), else the shared
+        # forcing.available_years.
+        per = _PER_PRODUCT_AVAILABLE.get(str(key))
+        val = forcing.get(per) if per else None
+        return val if val is not None else forcing.get("available_years", None)
+
+    def _add(v, available):
+        # A ``{year}`` scalar expands to its yearly-file list; a plain path
+        # passes through. Lists name several independent products — expand each
+        # element with the same coverage clamp (mirrors _forcing_products).
         if isinstance(v, str) and v not in ("auto", "null", "none", "???"):
-            out.append(v)
+            expanded = expand(v, years, available)
+            if isinstance(expanded, (list, tuple)):
+                out.extend(str(x) for x in expanded)
+            else:
+                out.append(expanded)
         elif isinstance(v, (list, tuple)):
             for x in v:
-                _add(x)
+                _add(x, available)
 
     for group in ("forcing", "terrain", "dycore"):
         node = cfg.get(group, None)
@@ -240,8 +301,12 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
         if not isinstance(cont, dict):
             continue
         for k, v in cont.items():
-            if str(k).endswith("file"):
-                _add(v)
+            if not str(k).endswith("file"):
+                continue
+            # The ``{year}`` clamp only applies to forcing-group keys (terrain /
+            # dycore files are never yearly patterns; ``forcing.years`` and the
+            # ``*_available_years`` overrides live under ``forcing``).
+            _add(v, _available_for(k) if group == "forcing" else None)
     out += _auto_emission_files(cfg)
     return out
 
