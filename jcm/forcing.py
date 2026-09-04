@@ -386,6 +386,98 @@ class ForcingData:
                                 align_mode=align_mode, validate=validate)
 
     @classmethod
+    def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
+                     fetch=None):
+        """Build the canonical mirror-bundle forcing set for a composition.
+
+        The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
+        it composes the surface bundle (``surface`` ∈
+        ``"pd"``/``"pi"``/``"amip"``/``"era5"``/``None``), ozone, and — for
+        ``aerosol="jam"`` — the emission/dms/dust/oxidant set, then routes the
+        composed config through the SAME engine ``jcm.runners.build_forcing``
+        uses, so the CLI and Python doors provably agree (#751; see the
+        equivalence test in ``forcing_test``). The emission-family config-trap
+        warnings fire here from the shared home too. ``aerosol="macv2sp"`` raises
+        the precise not-yet-published error until the MACv2-SP weights are staged
+        on the mirror. Unpublished-grid / sigma degradations (``auto`` → nothing)
+        mirror the CLI. ``fetch`` (default: the HF cache) pre-resolves the
+        composed surface bundle via the engine; the ``auto`` products use the
+        cache.
+        """
+        from omegaconf import OmegaConf
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        from jcm import runners
+        from jcm.data import bundle_names
+        from jcm.data import input_resolution as ir
+        from jcm.data import mirror_manifest as mm
+
+        manifest = mm.load_manifest()
+        grid_token = bundle_names.grid_token(
+            int(coords.horizontal.total_wavenumbers) - 2)
+        nlev = int(coords.nodal_shape[0])
+        vertical = ("hybrid" if isinstance(coords.vertical, HybridCoordinates)
+                    else "sigma")
+
+        if aerosol not in (None, "jam", "macv2sp"):
+            raise ValueError(
+                f"aerosol={aerosol!r}; expected None, 'jam' or 'macv2sp'.")
+        if aerosol == "macv2sp":
+            # staged:false today → resolve_input raises the precise not-yet-
+            # staged error (naming the build_mirror staging step). When the
+            # weights are published this returns the fetched MACv2 file.
+            ir.resolve_input("macv2_file", "auto", grid_token=grid_token,
+                             nlev=nlev, vertical=vertical, manifest=manifest,
+                             fetch=fetch)
+
+        surface_products = {"pd": "forcing_pd", "pi": "forcing_pi",
+                            "amip": "forcing_amip", "era5": "forcing_era5"}
+        forcing_dict = {
+            "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
+            "dust_file": "auto", "oxidants_file": "auto", "align": "auto",
+            "years": years, "available_years": None,
+            "ozone_available_years": None, "emissions_available_years": None,
+            "oxidants_available_years": None,
+        }
+        if surface is None:
+            forcing_dict["kind"] = "default"
+        else:
+            if surface not in surface_products:
+                raise ValueError(
+                    f"surface={surface!r}; expected "
+                    "'pd'/'pi'/'amip'/'era5'/None.")
+            product = surface_products[surface]
+            forcing_dict["kind"] = "from_file"
+            if mm.product(manifest, product)["alignment"] == "transient":
+                if years is None:
+                    raise ValueError(
+                        f"surface={surface!r} is a transient (per-year) bundle "
+                        "— pass years=[first, last].")
+                forcing_dict["align"] = "by_date_interp"
+                forcing_dict["available_years"] = mm.coverage(manifest, product)
+            file_spec = "hf://" + mm.bundle_path(manifest, product,
+                                                 grid_token, nlev)
+            if fetch is not None:
+                sr = ir.resolve_input(
+                    "file", file_spec, grid_token=grid_token, nlev=nlev,
+                    vertical=vertical, years=years,
+                    available=forcing_dict["available_years"],
+                    manifest=manifest, fetch=fetch)
+                file_spec = (list(sr.paths) if len(sr.paths) > 1
+                             else sr.paths[0])
+            forcing_dict["file"] = file_spec
+
+        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        cfg = OmegaConf.create(
+            {"forcing": forcing_dict, "physics": physics_dict})
+        forcing = runners.build_forcing(cfg, coords)
+        # Same emission-family traps the CLI door fires (from the shared home).
+        runners.warn_emission_config_traps(
+            has_jam=(aerosol == "jam"), is_pyses=False, is_scm=False,
+            forcing_cfg=cfg.forcing, coords=coords, forcing=forcing)
+        return forcing
+
+    @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
                      align_mode: str = "auto", validate: bool = True):
         """Initialize forcing data from an in-memory xarray Dataset.
