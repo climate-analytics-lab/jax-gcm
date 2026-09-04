@@ -154,16 +154,20 @@ class CloudParams2M:
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
-        # Recorded tuning target (#674, #641): these defaults are the generic
-        # ECHAM ``mo_echam_cloud_params`` values, but ECHAM-HAM retunes them
-        # for the prognostic-CDNC/ICNC scheme (``mo_activ.f90``, activ_initialize:
-        # ``lcdnc_progn`` with T63 L31/L47, AR&G activation ``ncd_activ=2``,
-        # ``cdnc_min_fixed=40`` cm^-3 — the case matching our 2M setup) to
-        # ccsaut = 900.0, ccraut = 10.6. Deliberately NOT changed here:
-        # adopting the HAM pair is a climate-tuning decision that needs its
-        # own validation run.
-        ccsaut: float = 95.0,
-        ccraut: float = 15.0,
+        # ECHAM-HAM prognostic-CDNC autoconversion / snow-formation retune.
+        # ``mo_activ.f90`` activ_initialize overwrites the generic
+        # ``mo_echam_cloud_params`` ccsaut/ccraut whenever the coupled
+        # CDNC/ICNC scheme runs (``lcdnc_progn``); at T63 (``nn==63``) with
+        # AR&G activation (``ncd_activ==2``) and ``cdnc_min_fixed==40`` cm^-3
+        # the values are ccsaut = 900.0, ccraut = 10.6 — identical for L31 and
+        # L47. That is the configuration the 2M scheme runs in now that JAM+ARG
+        # is its primary activation source (#759), so it is the default here
+        # (maintainer decision, #760/#674). The generic base values
+        # (ccsaut = 95.0, ccraut = 15.0) are correct only for the
+        # non-prognostic / non-AR&G route — MACv2-SP SPA activation — which
+        # pins them back explicitly in its config preset.
+        ccsaut: float = 900.0,
+        ccraut: float = 10.6,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,

@@ -41,6 +41,15 @@ terms:
     _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
   lohmann_2m_microphysics:
     _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+    params:
+      # This preset activates CDNC through MACv2-SP simple plumes (SPA), not
+      # AR&G, so it keeps ECHAM's generic ``mo_echam_cloud_params`` ccsaut /
+      # ccraut. The scheme DEFAULT is the ECHAM-HAM prognostic-CDNC / AR&G
+      # retune (ccsaut=900, ccraut=10.6, mo_activ.f90 under ncd_activ==2 +
+      # cdnc_min_fixed==40) — that branch is the JAM+ARG route this preset
+      # does not run, so restore the base values here.
+      ccsaut: 95.0
+      ccraut: 15.0
   # COSP CloudSat radar simulator + Muelmenstaedt-2020 warm-rain flags.
   # PSD assumptions follow ECHAM-COSP practice (Nam & Quaas 2012): COSP's
   # single-moment hydrometeor tables, with the 2M scheme's own effective
