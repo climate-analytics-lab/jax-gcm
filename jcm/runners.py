@@ -30,6 +30,8 @@ from omegaconf import DictConfig
 
 from jcm import provenance
 from jcm.data import bundle_names
+from jcm.data import input_resolution as ir
+from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
@@ -511,30 +513,12 @@ _expand_years = expand_yearly_files
 
 
 def _forcing_products(file_spec, years, available):
-    """Split a forcing file spec into independent products, each expanded.
+    """Split a forcing spec into per-product, year-expanded file sets.
 
-    Each element of a **list** spec (e.g.
-    ``emissions_file: [bb_{year}.nc, anthro.nc]``) names one product that is
-    opened and time-aligned on its own — so a transient ``{year}`` product and
-    a 12-month climatology in the same list keep their *distinct* time axes
-    instead of being outer-joined into one incompatible axis. That outer-join
-    is the bug this replaces: ``open_mfdataset(combine="by_coords")`` over
-    disjoint time axes either NaN-fills every non-overlapping step (silently
-    corrupting most timesteps) or raises on an integer-month-vs-datetime clash.
-    The per-variable ``TimeSeries`` machinery already carries a *per-leaf* time
-    axis and ``align_mode`` (see :func:`jcm.forcing._select_time_series`), so
-    products with different alignments merge cleanly into one ``ForcingData``.
-
-    Returns a list of *products*, each a scalar path or, for a ``{year}``
-    element, its list of yearly files (opened together and concatenated along
-    one time axis — the intended multi-year transient). A scalar spec is a
-    single product.
+    Thin adapter over :func:`jcm.data.input_resolution.forcing_products` — the
+    single home for the list-into-products split + ``{year}`` coverage clamp.
     """
-    if (not isinstance(file_spec, (str, bytes, Mapping))
-            and isinstance(file_spec, Iterable)):
-        return [expand_yearly_files(element, years, available)
-                for element in file_spec]
-    return [expand_yearly_files(file_spec, years, available)]
+    return ir.forcing_products(file_spec, years, available)
 
 
 def _open_forcing_dataset(path):
@@ -968,21 +952,27 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     """
     if is_pyses or not jam:
         return True
-    return not bundle_names.bundle_is_published(
-        key, _grid_token(coords), int(coords.nodal_shape[0]),
-        _vertical_kind(coords))
+    # Publication gating is the manifest lookup ``mm.is_published`` (the whole
+    # product table), which mirror_manifest generalises from — and is
+    # cross-checked against — ``bundle_names.bundle_is_published`` (#751).
+    manifest = mm.load_manifest()
+    return not mm.is_published(
+        manifest, mm.product_for_key(manifest, key),
+        _grid_token(coords), int(coords.nodal_shape[0]), _vertical_kind(coords))
 
 
 def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     """Resolve one prescribed-emission forcing value (``auto`` / explicit).
 
-    * ``auto`` → the per-grid HF bundle path, fetched *now* (so a cold cache
-      fails loudly at build time, not mid-run) — but only on the spectral path
-      with a JAM package active; pySES native grids are not the spectral-token
-      bundles, and a non-JAM package consumes no emissions, so both give
-      ``None``. ``auto`` is the only grid-portable mechanism: it composes the
-      concrete bundle path from :mod:`jcm.data.bundle_names` + the grid token,
-      so one config follows the grid without any user-facing path template.
+    * ``auto`` → the per-grid HF bundle, resolved + eager-fetched *now* (cold
+      cache fails loudly at build time) by :func:`jcm.data.input_resolution.
+      resolve_input` — but only on the spectral path with a JAM package active;
+      pySES native grids are not the spectral-token bundles and a non-JAM
+      package consumes no emissions, so both give ``None`` (the early gate keeps
+      pySES native coords from being asked for a spectral token). Fetch is
+      routed through ``_resolve_data_path`` so the hf:// scheme + provenance are
+      honoured. ``auto`` is the only grid-portable mechanism; there is no
+      user-facing ``{grid}``/``{nlev}`` template.
     * explicit null (``None``/``""``/``"null"``) → ``None`` (opt-out).
     * an explicit path / ``hf://`` URL → returned unchanged for the attach
       helper's own ``_resolve_data_path`` to fetch. A ``{year}`` pattern is
@@ -991,31 +981,16 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
     """
     if value == "auto":
         if _emission_auto_resolves_to_none(key, coords, jam, is_pyses):
-            # No per-grid bundle exists on the pySES path, for a non-JAM
-            # package, or on a grid the mirror does not publish (e.g.
-            # echam_t42_l8_sigma, ma-t119). Resolve ``auto`` to None so the run
-            # falls back to the null, emission-free baseline automatically
-            # instead of aborting on a 404 — restoring the prior behaviour for
-            # every non-mirrored grid. The silent degrade this creates is
-            # surfaced by ``warn_on_config_traps`` (which reasons about the SAME
-            # None-decision via the shared predicate), not an invisible info
-            # log here.
+            # Non-mirrored grid / unpublished level / pySES / non-JAM: resolve
+            # ``auto`` to None so the run falls back to the emission-free
+            # baseline instead of aborting on a 404. ``warn_on_config_traps``
+            # surfaces the silent degrade (same None-decision), not a log here.
             return None
-        hf = bundle_names.emission_bundle_path(
-            key, _grid_token(coords), int(coords.nodal_shape[0]))
-        try:
-            return _resolve_data_path(hf)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(
-                f"forcing.{key}=auto resolved to {hf} — the online-aerosol "
-                "default supplies the per-grid emission bundles — but it is "
-                "not in the local Hugging Face cache and could not be "
-                "downloaded. Prefetch on a node with internet (python -c "
-                f"\"from jcm.data.remote import fetch; fetch('{hf[5:]}')\"), "
-                f"point forcing.{key} at a local file, or set forcing.{key}"
-                "=null to run without it (the runner then warns it is "
-                "emission-free)."
-            ) from e
+        r = ir.resolve_input(
+            key, "auto", grid_token=_grid_token(coords),
+            nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
+            fetch=lambda rel: _resolve_data_path("hf://" + rel))
+        return r.paths[0] if not r.is_none else None
     if value in (None, "", "null", "none"):
         return None
     return value
@@ -1791,147 +1766,21 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
 
 
 def _product_time_axis(product):
-    """One product's combined time axis, or ``None`` for a static field.
+    """One product's combined time axis (thin adapter over the engine).
 
-    A *product* is the file set that resolves from one list element / one
-    ``{year}`` expansion; all its files are concatenated onto a single time
-    axis (``open_mfdataset``, by-coords), so the axis is read over the product's
-    files TOGETHER, not each alone. Returns ``(dtype, key, label)``:
-
-    * ``dtype`` — ``"datetime"`` (a real calendar axis: ``datetime64`` or
-      decoded cftime) or ``"integer-month"`` (a numeric month index).
-    * ``key`` — the frozenset of the axis's DISTINCT time values, normalised to
-      a hashable/comparable form (nanoseconds for ``datetime64``; ``str`` for
-      object cftime/``datetime`` so two files decoded to *distinct* objects at
-      the same instant still compare equal; the ints for an integer-month
-      axis). This is the MERGE key (see :func:`_assert_uniform_time_axis`): two
-      products union cleanly under by-coords iff they carry the same
-      ``(dtype, key)`` — every step then has every product's variables, so
-      nothing is NaN-filled.
-    * ``label`` — a human ``min..max (n steps)`` range string for error
-      messages, so a rejection names each product's time range.
-
-    Returns ``None`` when no file in the product carries a ``time`` axis (a
-    static field — nothing to reconcile). Raises when the product's own files
-    straddle both an integer-month and a datetime axis: that set is malformed
-    regardless of what else it is merged with.
+    See :func:`jcm.data.input_resolution.product_time_axis` — the single home
+    for the merge-key computation shared with the Python door.
     """
-    import numpy as np
-    import xarray as xr
-    chunks: list = []
-    dtypes: set[str] = set()
-    for p in product:
-        with xr.open_dataset(p) as ds:
-            if "time" not in ds.variables and "time" not in ds.dims:
-                continue
-            vals = np.asarray(ds["time"].values).ravel()
-            # datetime64 or object (decoded cftime) => a real calendar axis;
-            # anything numeric is an integer/float month-index climatology.
-            is_datetime = (np.issubdtype(vals.dtype, np.datetime64)
-                           or vals.dtype == np.object_)
-            dtypes.add("datetime" if is_datetime else "integer-month")
-            chunks.append(vals)
-    if not chunks:
-        return None
-    if len(dtypes) > 1:
-        raise ValueError(
-            "a single product mixes incompatible time axes — its files "
-            f"straddle both an integer-month and a datetime axis "
-            f"({sorted(product)}), which cannot share one open_mfdataset "
-            "(by-coords) axis."
-        )
-    dtype = next(iter(dtypes))
-    values = np.concatenate(chunks)
-    if dtype == "datetime" and np.issubdtype(values.dtype, np.datetime64):
-        ns = values.astype("datetime64[ns]")
-        order = np.sort(ns)
-        key = frozenset(order.astype("int64").tolist())
-        label = f"datetime {order[0]}..{order[-1]} ({len(key)} steps)"
-    elif dtype == "datetime":
-        # object dtype: decoded cftime / datetime — normalise by ``str`` so
-        # files decoded to distinct objects at the same instant compare equal.
-        strs = sorted(str(v) for v in values)
-        key = frozenset(strs)
-        label = f"datetime {strs[0]}..{strs[-1]} ({len(key)} steps)"
-    else:
-        months = sorted({int(v) for v in values})
-        key = frozenset(months)
-        label = f"integer-month {months[0]}..{months[-1]} ({len(key)} steps)"
-    return (dtype, key, label)
+    return ir.product_time_axis(product)
 
 
 def _assert_uniform_time_axis(products, *, config_key) -> None:
     """Reject a product set that cannot share one by-coords time axis.
 
-    Shared by the oxidant path (:func:`_resolve_oxidant_paths`) and the pySES
-    emissions path (:func:`_resolve_pyses_emission_paths`): both open ALL their
-    files as ONE combined dataset (``open_mfdataset``, by-coords) along a single
-    time axis. Rather than enumerate per-product ``(dtype, span)`` heuristics,
-    this guards the MERGE PROPERTY directly. Under by-coords a combined open is
-    well-posed in exactly two shapes:
-
-    * **(a) identical axis** — all time-bearing products share ONE identical
-      time axis (a stacked climatology, or a same-year set). by-coords then
-      unions their variables with every step carrying every product's fields —
-      no NaN-fill. Products may carry disjoint variables (different
-      sectors/species); it is the *time* axis that must coincide.
-    * **(b) one concatenated series** — a SINGLE product, whose own yearly files
-      tile disjoint years into one monotonic transient axis (or which is a lone
-      climatology). There is nothing to reconcile it against, so it is always
-      well-posed. Keyed to single-product expansions: the one-product-yearly-
-      files case arrives as ONE list element.
-
-    Anything else is rejected, naming each product's time range. The degenerate
-    case a ``(dtype, span)`` classifier missed falls straight out of this: a
-    one-year ``{year}`` transient and a CF-datetime climatology dated in a
-    DIFFERENT year both look like "one-year datetime" to a span test, yet their
-    axes are not identical (shape a fails) and they are two products (shape b
-    fails) — so the honest structural property rejects them where the heuristic
-    NaN-unioned their disjoint years.
-
-    ``products`` is a list of products, each a list of file paths (one list
-    element / one ``{year}`` expansion). ``config_key`` names the knob in the
-    message. NOTE the asymmetry with the SPECTRAL emissions path
-    (:func:`_attach_emissions`), which does NOT use this: it opens each list
-    element as an independent PRODUCT with its own ``TimeSeries`` alignment, so
-    a mixed climatology+transient list is valid there. pySES has no per-product
-    alignment machinery — one combined open — so a loud rejection is the honest
-    semantics on that path.
+    Thin adapter over :func:`jcm.data.input_resolution.assert_uniform_time_axis`
+    — the merge-compatibility rule lives once in the engine (#750/#751).
     """
-    # A single file across all products (a lone climatology, the common case)
-    # is trivially well-posed — skip the opens entirely.
-    if sum(len(product) for product in products) <= 1:
-        return
-    axes: list[tuple[str, tuple]] = []
-    for product in products:
-        axis = _product_time_axis(product)  # raises on an internal straddle
-        if axis is None:
-            continue
-        label = (product[0] if len(product) == 1
-                 else f"{product[0]} … (+{len(product) - 1} more)")
-        axes.append((label, axis))
-    # Shape (b): a single time-bearing product is one concatenated series —
-    # nothing to reconcile against.
-    if len(axes) <= 1:
-        return
-    # Shape (a): several products must share ONE identical time axis.
-    _, (ref_dtype, ref_key, _) = axes[0]
-    if all(dtype == ref_dtype and key == ref_key
-           for _, (dtype, key, _) in axes[1:]):
-        return
-    detail = "; ".join(f"{label}: {rng}" for label, (_, _, rng) in axes)
-    raise ValueError(
-        f"{config_key} mixes incompatible time axes across its products "
-        f"({detail}). These products are opened TOGETHER along ONE time axis "
-        "(open_mfdataset, by-coords), so they must either all share an "
-        "IDENTICAL time axis (a stacked climatology / same-year set, whose "
-        "variables union cleanly) or be a single product's yearly files (one "
-        "concatenated transient series). A one-year transient beside a "
-        "climatology dated in another year, or an integer-month climatology "
-        "beside datetime transients, cannot share one axis — by-coords would "
-        "NaN-fill every non-overlapping step. Put them on one time axis, or "
-        "drop one."
-    )
+    ir.assert_uniform_time_axis(products, config_key=config_key)
 
 
 def _attach_macv2_weights(forcing, forcing_cfg, coords):
@@ -2126,6 +1975,148 @@ def _forcing_tracks_calendar(forcing) -> bool:
     return False
 
 
+def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
+                               coords, forcing) -> None:
+    """Emission-family config-trap warnings (traps 3 & 5) from RESOLVED values.
+
+    Shared home so the CLI runner (:func:`warn_on_config_traps`) and the Python
+    door (:func:`jcm.forcing.ForcingData.from_bundles`) fire IDENTICAL messages
+    once (#751). The terrain / forcing-kind / MACv2-weight traps read cfg only
+    and stay in :func:`warn_on_config_traps`. ``forcing_cfg`` is the ``forcing``
+    config mapping; ``coords`` the built grid; ``forcing`` the built struct
+    (``None`` on the default/prescribed path).
+    """
+    # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
+    #    online Gong sea-salt then has one. Reads the RESOLVED values, not the
+    #    raw cfg (F2): ``auto`` on pySES / a non-published grid resolves to None,
+    #    so a JAM run there is silently emission-free. Under scm the trap
+    #    MIS-SUPPRESSES (auto reads "real bundle" but the SCM attaches no
+    #    forcing), so scm gets one honest mode-specific message instead.
+    if has_jam and is_scm:
+        logger.warning(
+            "config trap: JAM prognostic aerosol in single-column mode "
+            "(run.mode=scm) — the single-column model builds no boundary "
+            "ForcingData (it runs on ForcingData.zeros) and consumes NONE of "
+            "the prescribed emission inputs: emissions_file, dms_file, "
+            "dust_file and oxidants_file are all ignored in SCM regardless of "
+            "grid. The column is therefore zero-emission apart from any online "
+            "sources (e.g. wind-driven Gong sea salt); prescribed sulfur, dust "
+            "and carbonaceous emissions stay at zero. This is expected for an "
+            "SCM process study — prescribed emissions require the full "
+            "(gridded) model."
+        )
+    elif has_jam:
+        emission_keys = ("emissions_file", "dms_file", "dust_file",
+                         "oxidants_file")
+        resolved = {k: _resolved_emission_value(
+                        forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
+                    for k in emission_keys}
+        unset = [k for k in emission_keys if resolved[k] is None]
+        # Keys the user left at ``auto`` that nonetheless resolved to None —
+        # i.e. the silent-degrade case (pySES / non-mirrored grid), distinct
+        # from an explicit opt-out null.
+        auto_nulled = [k for k in emission_keys
+                       if str(forcing_cfg.get(k, None)) == "auto"
+                       and resolved[k] is None]
+        if len(unset) == len(emission_keys):
+            if auto_nulled:
+                reason = (
+                    "the pySES backend publishes no per-grid emission bundles"
+                    if is_pyses else
+                    f"grid {_grid_token(coords)!r} is not one of the mirror's "
+                    f"published grids "
+                    f"({', '.join(sorted(bundle_names.PUBLISHED_GRIDS))})")
+                logger.warning(
+                    "config trap: zero-emission JAM baseline — the 'auto' "
+                    "emission key(s) %s resolved to None because %s, so the "
+                    "only online aerosol source is Gong sea salt; sulfur, dust "
+                    "and carbonaceous species stay at zero. Point each key at "
+                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
+                    "supply prescribed emissions.",
+                    ", ".join(auto_nulled), reason,
+                )
+            else:
+                logger.warning(
+                    "config trap: zero-emission JAM baseline — %s are all "
+                    "unset, so the only online aerosol source is Gong sea "
+                    "salt; sulfur, dust and carbonaceous species stay at zero. "
+                    "Leave them at their 'auto' default (the per-grid HF "
+                    "bundles) or set an explicit path (e.g. "
+                    "forcing.emissions_file=hf://bundles/<grid>/"
+                    "emissions_pd.nc).",
+                    ", ".join(unset),
+                )
+        elif auto_nulled:
+            # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
+            # resolved — the LEVEL-dependent oxidants_file on a published
+            # horizontal grid lacking a level-resolved bundle (unpublished layer
+            # count e.g. t63_l8, or a sigma vertical). The level-free keys still
+            # supply their emissions, so flag exactly the nulled keys.
+            logger.warning(
+                "config trap: partial zero-emission JAM baseline — the 'auto' "
+                "emission key(s) %s resolved to None because the mirror "
+                "publishes no bundle for this grid: level-resolved products "
+                "such as oxidants exist only for hybrid verticals at L%s, and "
+                "this grid is %s at L%d. The remaining keys resolved, so those "
+                "species alone stay at zero; point each nulled key at an "
+                "on-grid file, or run a published hybrid layer count, to "
+                "supply them.",
+                ", ".join(auto_nulled),
+                "/L".join(str(n) for n in sorted(bundle_names.PUBLISHED_LEVELS)),
+                _vertical_kind(coords) if coords is not None else "unknown-vertical",
+                int(coords.nodal_shape[0]) if coords is not None else -1,
+            )
+
+    # 5. Transient (by-date) surface forcing driving JAM off the present-day
+    #    emission bundles. Transience is read off the RESOLVED forcing's surface
+    #    alignment (:func:`_forcing_tracks_calendar`) — a single multi-year
+    #    netCDF under ``align: auto`` resolves to BY_DATE while the config still
+    #    reads ``auto``/``years: null``, which keying only on those keys misses —
+    #    with ``years``/``align`` as OR fallbacks for a forcing-less caller.
+    #    Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
+    #    concern (F2); an auto that nulled is warning 3's case, not this one.
+    if has_jam and not is_scm:
+        years = forcing_cfg.get("years", None)
+        align = str(forcing_cfg.get("align", "") or "")
+        is_transient = (_forcing_tracks_calendar(forcing)
+                        or bool(years)
+                        or align in ("by_date", "by_date_interp"))
+        pd_auto_keys = [
+            k for k in ("emissions_file", "oxidants_file")
+            if str(forcing_cfg.get(k, None)) == "auto"
+            and _resolved_emission_value(
+                forcing_cfg.get(k, None), k, coords, has_jam,
+                is_pyses) is not None]
+        if is_transient and pd_auto_keys:
+            logger.warning(
+                "config trap: transient (by-date) forcing with present-day JAM "
+                "emissions — the surface forcing tracks real calendar dates "
+                "(amip/era5: per-year files, by_date_interp) but %s are still "
+                "'auto', which resolved to the present-day *_pd emission "
+                "bundles. A historical/AMIP run is therefore using present-day "
+                "aerosol emissions. For emissions, override with the mirror's "
+                "transient product using a year-matched {year} pattern (the "
+                "same yearly-file expansion the SST forcing uses). A bare "
+                "'{' is Hydra override syntax, so the value must be quoted for "
+                "Hydra AND protected from the shell — wrap the whole argument "
+                "in single quotes with the value in double quotes (or set it "
+                "in a forcing yaml, where the brace needs no escaping) — e.g. "
+                "'forcing.emissions_file=\"hf://bundles/<grid>/emissions_amip/"
+                "{year}.nc\"', with the run's forcing.years range. The "
+                "emissions_amip bundle ends in 2022 (before era5's 2024 "
+                "surface coverage), so also set "
+                "forcing.emissions_available_years=[1850,2022] to clamp the "
+                "expansion to the built files (era5 already ships this). The "
+                "mirror publishes NO transient oxidants product (only "
+                "oxidants_pi/oxidants_pd climatologies), so transient oxidants "
+                "must come from a separately prepared dataset; "
+                "forcing.oxidants_file accepts a {year} pattern (and "
+                "forcing.oxidants_available_years its coverage) once you have "
+                "one.",
+                ", ".join(pd_auto_keys),
+            )
+
+
 def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                          coords=None, dycore=None) -> None:
     """Warn (never raise) about config combinations that run but mislead.
@@ -2204,100 +2195,12 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
             "agree (issue #640)."
         )
 
-    # 3. Prognostic aerosol with no RESOLVED prescribed-emission source: only
-    #    online Gong sea-salt then has one. This reads the RESOLVED values, not
-    #    the raw cfg (F2): ``auto`` on the pySES path or a grid the mirror does
-    #    not publish resolves to None, so a JAM run there is silently
-    #    emission-free — exactly the case the warning exists for (the ne30
-    #    experiments ran sea-salt-only silently). The grid/pySES fact (formerly
-    #    an invisible info-level log in the resolver) is folded into this ONE
-    #    warning so the two never double-fire.
-    #
-    #    Under scm this trap MIS-SUPPRESSES: on a published grid ``auto``
-    #    resolves to a real bundle and stays silent, but the SCM attaches no
-    #    forcing at all (it runs on ``ForcingData.zeros``) so the column
-    #    genuinely has no prescribed emissions regardless of grid. So scm gets
-    #    one honest, mode-specific message instead of the resolved-value logic.
-    if has_jam and is_scm:
-        logger.warning(
-            "config trap: JAM prognostic aerosol in single-column mode "
-            "(run.mode=scm) — the single-column model builds no boundary "
-            "ForcingData (it runs on ForcingData.zeros) and consumes NONE of "
-            "the prescribed emission inputs: emissions_file, dms_file, "
-            "dust_file and oxidants_file are all ignored in SCM regardless of "
-            "grid. The column is therefore zero-emission apart from any online "
-            "sources (e.g. wind-driven Gong sea salt); prescribed sulfur, dust "
-            "and carbonaceous emissions stay at zero. This is expected for an "
-            "SCM process study — prescribed emissions require the full "
-            "(gridded) model."
-        )
-    elif has_jam:
-        forcing_cfg = cfg.get("forcing", {})
-        emission_keys = ("emissions_file", "dms_file", "dust_file",
-                         "oxidants_file")
-        resolved = {k: _resolved_emission_value(
-                        forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
-                    for k in emission_keys}
-        unset = [k for k in emission_keys if resolved[k] is None]
-        # Keys the user left at ``auto`` that nonetheless resolved to None —
-        # i.e. the silent-degrade case (pySES / non-mirrored grid), distinct
-        # from an explicit opt-out null.
-        auto_nulled = [k for k in emission_keys
-                       if str(forcing_cfg.get(k, None)) == "auto"
-                       and resolved[k] is None]
-        if len(unset) == len(emission_keys):
-            if auto_nulled:
-                reason = (
-                    "the pySES backend publishes no per-grid emission bundles"
-                    if is_pyses else
-                    f"grid {_grid_token(coords)!r} is not one of the mirror's "
-                    f"published grids "
-                    f"({', '.join(sorted(bundle_names.PUBLISHED_GRIDS))})")
-                logger.warning(
-                    "config trap: zero-emission JAM baseline — the 'auto' "
-                    "emission key(s) %s resolved to None because %s, so the "
-                    "only online aerosol source is Gong sea salt; sulfur, dust "
-                    "and carbonaceous species stay at zero. Point each key at "
-                    "an on-grid file (e.g. forcing.emissions_file=<path>) to "
-                    "supply prescribed emissions.",
-                    ", ".join(auto_nulled), reason,
-                )
-            else:
-                logger.warning(
-                    "config trap: zero-emission JAM baseline — %s are all "
-                    "unset, so the only online aerosol source is Gong sea "
-                    "salt; sulfur, dust and carbonaceous species stay at zero. "
-                    "Leave them at their 'auto' default (the per-grid HF "
-                    "bundles) or set an explicit path (e.g. "
-                    "forcing.emissions_file=hf://bundles/<grid>/"
-                    "emissions_pd.nc).",
-                    ", ".join(unset),
-                )
-        elif auto_nulled:
-            # Partial silent-degrade (F2): SOME 'auto' keys nulled while others
-            # resolved — in practice the LEVEL-dependent oxidants_file on a
-            # published horizontal grid that nonetheless lacks a level-resolved
-            # bundle, because either the layer count is unpublished (e.g.
-            # t63_l8) or the vertical is sigma (the bundle is on hybrid-level
-            # pressures — e.g. echam_t42_l8_sigma at t63/l47). The level-free
-            # keys still supply their emissions, so this is not the all-zero
-            # baseline above; the nulled species alone stay at zero, which a
-            # config reading 'auto' hides — flag exactly those keys and name
-            # both possible reasons.
-            logger.warning(
-                "config trap: partial zero-emission JAM baseline — the 'auto' "
-                "emission key(s) %s resolved to None because the mirror "
-                "publishes no bundle for this grid: level-resolved products "
-                "such as oxidants exist only for hybrid verticals at L%s, and "
-                "this grid is %s at L%d. The remaining keys resolved, so those "
-                "species alone stay at zero; point each nulled key at an "
-                "on-grid file, or run a published hybrid layer count, to "
-                "supply them.",
-                ", ".join(auto_nulled),
-                "/L".join(str(n) for n in sorted(bundle_names.PUBLISHED_LEVELS)),
-                _vertical_kind(coords) if coords is not None else "unknown-vertical",
-                int(coords.nodal_shape[0]) if coords is not None else -1,
-            )
+    # 3 & 5. Emission-family traps (zero/partial-emission JAM baseline;
+    #    transient forcing with present-day emissions) — computed from the
+    #    RESOLVED values in the shared home both doors traverse (#751).
+    warn_emission_config_traps(
+        has_jam=has_jam, is_pyses=is_pyses, is_scm=is_scm,
+        forcing_cfg=cfg.get("forcing", {}), coords=coords, forcing=forcing)
 
     # 4. MACv2-SP driven by the all-ones default weights: perpetual year-2005
     #    plume amplitude with no seasonal cycle — not historical forcing. Only
@@ -2326,78 +2229,6 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                 "year-2005 plume amplitude with no seasonal cycle, not "
                 "historical aerosol forcing. Use forcing=macv2_sp (with "
                 "macv2_file set) for real time-varying MACv2-SP weights."
-            )
-
-    # 5. Transient (by-date) surface forcing driving JAM off the present-day
-    #    emission bundles. amip/era5 (forcing/{amip,era5}.yaml) are transient
-    #    from_file presets — one file per year, ``align: by_date_interp``, a
-    #    required ``years`` range — so the run's SST/sea-ice track real calendar
-    #    dates; so too does a single multi-year netCDF under the default
-    #    ``align: auto`` (span-detected to BY_DATE at build time). Transience is
-    #    therefore read off the RESOLVED forcing's surface alignment
-    #    (:func:`_forcing_tracks_calendar`), not just the ``years``/``align``
-    #    config keys — which the ``align: auto`` case leaves untouched.
-    #    But ``emissions_file``/``oxidants_file: auto`` resolve the
-    #    *present-day* ``*_pd`` bundle (``_resolve_one_emission_input`` — the
-    #    ``dms``/``dust`` climatologies are natural and roughly time-invariant,
-    #    so only these two anthropogenic products are the concern). The result
-    #    is a historical/AMIP circulation breathing present-day aerosol
-    #    emissions. Fires only when ``auto`` is still in place (an explicit
-    #    year-matched path silences it); on the spectral+JAM path ``auto`` is
-    #    exactly what resolved to the ``_pd`` bundle. Gated off under scm: the
-    #    SCM consumes no transient surface forcing and no emissions, so there is
-    #    no historical circulation breathing present-day aerosol to warn about —
-    #    the scm-specific warning 3 already states the column is emission-free.
-    if has_jam and not is_scm:
-        forcing_cfg = cfg.get("forcing", {})
-        years = forcing_cfg.get("years", None)
-        align = str(forcing_cfg.get("align", "") or "")
-        # Transience is classified from what the resolution actually produced,
-        # not the raw config: a single multi-year netCDF under the default
-        # ``align: auto`` resolves to BY_DATE at build time while the config
-        # still reads ``align: auto`` / ``years: null`` — so keying only on
-        # ``years``/``align`` would miss it and skip this warning. The config
-        # keys stay as OR fallbacks for a forcing-less caller.
-        is_transient = (_forcing_tracks_calendar(forcing)
-                        or bool(years)
-                        or align in ("by_date", "by_date_interp"))
-        # Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
-        # concern (F2): ``auto`` that nulled on a non-mirrored grid supplies no
-        # emissions at all — warning 3 covers that, and firing here too would
-        # misdescribe it as a present-day bundle.
-        pd_auto_keys = [
-            k for k in ("emissions_file", "oxidants_file")
-            if str(forcing_cfg.get(k, None)) == "auto"
-            and _resolved_emission_value(
-                forcing_cfg.get(k, None), k, coords, has_jam,
-                is_pyses) is not None]
-        if is_transient and pd_auto_keys:
-            logger.warning(
-                "config trap: transient (by-date) forcing with present-day JAM "
-                "emissions — the surface forcing tracks real calendar dates "
-                "(amip/era5: per-year files, by_date_interp) but %s are still "
-                "'auto', which resolved to the present-day *_pd emission "
-                "bundles. A historical/AMIP run is therefore using present-day "
-                "aerosol emissions. For emissions, override with the mirror's "
-                "transient product using a year-matched {year} pattern (the "
-                "same yearly-file expansion the SST forcing uses). A bare "
-                "'{' is Hydra override syntax, so the value must be quoted for "
-                "Hydra AND protected from the shell — wrap the whole argument "
-                "in single quotes with the value in double quotes (or set it "
-                "in a forcing yaml, where the brace needs no escaping) — e.g. "
-                "'forcing.emissions_file=\"hf://bundles/<grid>/emissions_amip/"
-                "{year}.nc\"', with the run's forcing.years range. The "
-                "emissions_amip bundle ends in 2022 (before era5's 2024 "
-                "surface coverage), so also set "
-                "forcing.emissions_available_years=[1850,2022] to clamp the "
-                "expansion to the built files (era5 already ships this). The "
-                "mirror publishes NO transient oxidants product (only "
-                "oxidants_pi/oxidants_pd climatologies), so transient oxidants "
-                "must come from a separately prepared dataset; "
-                "forcing.oxidants_file accepts a {year} pattern (and "
-                "forcing.oxidants_available_years its coverage) once you have "
-                "one.",
-                ", ".join(pd_auto_keys),
             )
 
 
