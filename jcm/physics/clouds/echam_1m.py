@@ -17,6 +17,8 @@ Based on the ECHAM6/ICON ``mo_cloud.f90`` single-moment branch
 (Lohmann and Roeckner, 1996).
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
@@ -25,16 +27,33 @@ import tree_math
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
 
+# Defaults shared by the ``default`` factory's signature AND its legacy-config
+# guard (F2, #674): the Beheng rate prefactor and the KK2000 in-cloud qc
+# threshold. Kept as module constants so the guard tests the SAME literals the
+# signature ships, and they can never drift apart.
+_BEHENG_CCRAUT_DEFAULT = 15.0
+_KK2000_QC_THRESHOLD_DEFAULT = 1.0e-5
+
 
 @tree_math.struct
 class MicrophysicsParameters:
     """Configuration parameters for cloud microphysics"""
     
-    # Autoconversion parameters
-    ccraut: float        # Critical cloud water for autoconversion (kg/kg)
+    # Autoconversion parameters. ``ccraut`` and ``ccraut_kk_threshold`` are
+    # separate fields because they are physically different quantities: one
+    # field serving as "rate prefactor (Beheng) OR qc threshold (KK2000)"
+    # meant selecting KK2000 without overriding it fed the Beheng 15.0 into
+    # the threshold sigmoid — sigmoid((qc - 15)/5e-5) ≡ 0 for any physical
+    # qc, silently disabling autoconversion (#674).
+    ccraut: float        # Beheng (1994) autoconversion rate prefactor (-);
+                         # ECHAM mo_echam_cloud_params ``ccraut`` (15.0).
+                         # Read only in Beheng mode.
+    ccraut_kk_threshold: float  # KK2000 in-cloud qc threshold (kg/kg) above
+                         # which autoconversion fires. Read only in KK2000
+                         # mode.
     smooth_ccraut: float # Sigmoid width of the KK2000 qc threshold (kg/kg);
-                         # only read in KK2000 mode — Beheng uses ccraut as
-                         # a rate coefficient (already smooth)
+                         # only read in KK2000 mode — Beheng's rate form is
+                         # already smooth
     ccracl: float        # Accretion coefficient (cloud to rain)
     cauloc: float        # ECHAM ``zrac2`` local-rain accretion enhancement.
                          # 0.0 is the ECHAM6.3 default (zrac2 disabled); raise to
@@ -53,28 +72,7 @@ class MicrophysicsParameters:
     ccsacl: float        # Riming efficiency of snow collecting cloud
                          # water (ECHAM: 0.10)
     cvtfall: float       # Terminal velocity factor for ice
-    cthomi: float        # Homogeneous ice nucleation temperature (K)
-    csecfrl: float       # Critical ice fraction for Bergeron-Findeisen
-    
-    # Collection efficiencies
-    ccollec: float       # Collection efficiency rain/cloud
-    ccollei: float       # Collection efficiency snow/ice
-    
-    # Time scale parameters
-    tau_melt: float      # Melting time scale (s)
-    tau_freeze: float    # Freezing time scale (s)
-    
-    # Evaporation/sublimation parameters
-    cevaprain: float     # Rain evaporation coefficient
-    cevapsnow: float     # Snow sublimation coefficient
-    
-    # Sedimentation parameters
-    vt_ice: float        # Ice crystal fall speed (m/s)
-    vt_snow_a: float     # Snow fall speed coefficient a
-    vt_snow_b: float     # Snow fall speed exponent b
-    vt_rain_a: float     # Rain fall speed coefficient a
-    vt_rain_b: float     # Rain fall speed exponent b
-    
+
     # Cloud droplet number concentration
     base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
 
@@ -102,7 +100,6 @@ class MicrophysicsParameters:
     #    ice fall speed and opened the water budget ~22%).
     epsilon: float       # Small number for numerical stability
     d_epsilon: float     # Absolute floor for differentiability guards only
-    dt_sedi: float       # Sub-timestep for sedimentation (s)
     cqtmin: float        # ECHAM ``cqtmin`` (mo_echam_cloud_params): the
                          # cloud-fraction floor below which a cell counts as
                          # cloud-free and its condensate force-evaporates
@@ -113,46 +110,76 @@ class MicrophysicsParameters:
                          # write-back (mo_cloud.f90:1280, #687)
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
-    # 0 = Beheng (1994) implicit form (default; robust at large dt).
+    # 0 = Beheng (1994) implicit form (default; robust at large dt),
+    #     controlled by ``ccraut``.
     # 1 = Khairoutdinov & Kogan (2000) explicit form (good fit for 2M
-    #     microphysics with prognostic Nc).
-    # ``ccraut`` is interpreted differently by each scheme: in Beheng
-    # it's the rate prefactor (default 15.0); in KK2000 it's the qc
-    # threshold above which autoconversion fires (a small g/kg-scale
-    # value is appropriate, e.g. 1e-5).
+    #     microphysics with prognostic Nc), controlled by
+    #     ``ccraut_kk_threshold`` / ``smooth_ccraut``.
     autoconversion_scheme: int
 
     SCHEME_BEHENG = 0
     SCHEME_KK2000 = 1
+    # Documented string aliases → canonical int flag. Kept as a class
+    # attribute (no annotation, so not a dataclass field) so both the
+    # ``default()`` door and the Hydra-override door (``runners._build_term``,
+    # which reconstructs the class directly) map through the SAME table.
+    _SCHEME_ALIASES = {"beheng": SCHEME_BEHENG, "kk2000": SCHEME_KK2000}
 
     @classmethod
-    def default(cls, ccraut=15.0, smooth_ccraut=5e-5,
+    def _normalize_scheme(cls, scheme):
+        """Map a string alias to the canonical int flag; pass ints through.
+
+        A traced leaf (under a jit trace, when the struct is unflattened) is
+        not a ``str`` and passes through unchanged.
+        """
+        if isinstance(scheme, str):
+            try:
+                return cls._SCHEME_ALIASES[scheme]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown autoconversion_scheme {scheme!r}; expected one of "
+                    f"{sorted(cls._SCHEME_ALIASES)} or the int constants "
+                    f"{cls.SCHEME_BEHENG} (Beheng) / {cls.SCHEME_KK2000} (KK2000)."
+                )
+        return scheme
+
+    def __post_init__(self):
+        """Normalize the scheme selector to its canonical int at construction.
+
+        The STORED field is canonical regardless of which door built the
+        instance — ``default()`` OR ``_build_term``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra override. Downstream
+        (the ``validate`` guard and the ``lax.cond`` dispatch) then only ever
+        sees the int, so the documented ``"beheng"`` / ``"kk2000"`` string
+        aliases are equivalent to the int constants everywhere (#674).
+        """
+        object.__setattr__(
+            self, "autoconversion_scheme",
+            self._normalize_scheme(self.autoconversion_scheme),
+        )
+
+    @classmethod
+    def default(cls, ccraut=_BEHENG_CCRAUT_DEFAULT,
+                ccraut_kk_threshold=_KK2000_QC_THRESHOLD_DEFAULT,
+                smooth_ccraut=5e-5,
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
-                 cvtfall=3.29, cthomi=233.15, csecfrl=0.1, ccollec=0.7,
-                 ccollei=0.3, tau_melt=100.0, tau_freeze=100.0, cevaprain=1.0e-3,
-                 cevapsnow=5.0e-4, vt_ice=0.1, vt_snow_a=8.8, vt_snow_b=0.15,
-                 vt_rain_a=386.0, vt_rain_b=0.67, base_cdnc=100.0e6,
+                 cvtfall=3.29, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
-                 epsilon=1.0e-12, d_epsilon=1.0e-30, dt_sedi=10.0,
+                 epsilon=1.0e-12, d_epsilon=1.0e-30,
                  cqtmin=1.0e-12, ccwmin=1.0e-7,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
         ``autoconversion_scheme`` accepts either the int constant
         (``SCHEME_BEHENG`` / ``SCHEME_KK2000``) or the string aliases
-        ``"beheng"`` / ``"kk2000"``.
+        ``"beheng"`` / ``"kk2000"`` — ``__post_init__`` normalizes either
+        form to the canonical int on the constructed instance.
         """
-        if isinstance(autoconversion_scheme, str):
-            scheme_map = {
-                "beheng": cls.SCHEME_BEHENG,
-                "kk2000": cls.SCHEME_KK2000,
-            }
-            autoconversion_scheme = scheme_map[autoconversion_scheme]
-
-        return cls(
+        params = cls(
             ccraut=jnp.array(ccraut),
+            ccraut_kk_threshold=jnp.array(ccraut_kk_threshold),
             smooth_ccraut=jnp.array(smooth_ccraut),
             ccracl=jnp.array(ccracl),
             cauloc=jnp.array(cauloc),
@@ -165,19 +192,6 @@ class MicrophysicsParameters:
             ccsaut=jnp.array(ccsaut),
             ccsacl=jnp.array(ccsacl),
             cvtfall=jnp.array(cvtfall),
-            cthomi=jnp.array(cthomi),
-            csecfrl=jnp.array(csecfrl),
-            ccollec=jnp.array(ccollec),
-            ccollei=jnp.array(ccollei),
-            tau_melt=jnp.array(tau_melt),
-            tau_freeze=jnp.array(tau_freeze),
-            cevaprain=jnp.array(cevaprain),
-            cevapsnow=jnp.array(cevapsnow),
-            vt_ice=jnp.array(vt_ice),
-            vt_snow_a=jnp.array(vt_snow_a),
-            vt_snow_b=jnp.array(vt_snow_b),
-            vt_rain_a=jnp.array(vt_rain_a),
-            vt_rain_b=jnp.array(vt_rain_b),
             base_cdnc=jnp.array(base_cdnc),
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
@@ -185,9 +199,58 @@ class MicrophysicsParameters:
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
             ccwmin=jnp.array(ccwmin),
-            dt_sedi=jnp.array(dt_sedi),
-            autoconversion_scheme=int(autoconversion_scheme),
+            autoconversion_scheme=autoconversion_scheme,
         )
+        # Run the field-level cross-validation on this door too (the runner
+        # runs it on the YAML-override door — see ``validate``).
+        params.validate()
+        return params
+
+    def validate(self) -> None:
+        """Raise on an illegal field COMBINATION (config-time only).
+
+        This is the cross-field guard that both construction doors share:
+        ``default()`` calls it after building the instance, and the Hydra
+        runner (``runners._build_term``) calls it on the post-override
+        object it builds directly via ``__class__(**...)``. Without the
+        latter, a YAML config that flips ``autoconversion_scheme`` and sets
+        a legacy ``ccraut`` would bypass ``default()``'s guard entirely and
+        silently run with the wrong threshold.
+
+        Concrete-values-only: it reads fields as Python floats/ints, so it
+        MUST run at config/compose time only, never inside a jit trace — a
+        traced leaf would raise a ConcretizationError. Every caller is
+        config-time (parameter construction), so that holds.
+        """
+        # Legacy-config guard (F2, #674). Before the split, ``ccraut`` was the
+        # single overloaded field and legacy KK2000 configs documented it AS
+        # the qc threshold. Such a config (e.g. ``ccraut=1e-3``) still composes
+        # because ``ccraut`` remains a live Beheng field, but the KK2000 branch
+        # now reads ``ccraut_kk_threshold`` — so the override would be silently
+        # ignored and the threshold would stay at its 1e-5 default. Raising is
+        # safe: ``ccraut`` (the Beheng prefactor) is UNUSED in the KK2000
+        # branch, so a deliberate Beheng-prefactor override alongside kk2000
+        # is meaningless. A Beheng-mode ``ccraut`` override is untouched.
+        # ``rel_tol`` accommodates the f32 round-trip: the fields are stored as
+        # ``jnp.array`` (float32), so a Python 1e-5 default reads back as
+        # 9.9999997e-6 — well outside ``math.isclose``'s 1e-9 default. 1e-6 is
+        # far tighter than any physically meaningful override yet forgiving of
+        # f32 precision, so "left at the default" is recognised.
+        if (int(self.autoconversion_scheme) == self.SCHEME_KK2000
+                and not math.isclose(float(self.ccraut),
+                                     _BEHENG_CCRAUT_DEFAULT, rel_tol=1e-6)
+                and math.isclose(float(self.ccraut_kk_threshold),
+                                 _KK2000_QC_THRESHOLD_DEFAULT, rel_tol=1e-6)):
+            raise ValueError(
+                "autoconversion_scheme='kk2000' with a non-default "
+                f"ccraut={float(self.ccraut)} but ccraut_kk_threshold left at "
+                f"its default ({_KK2000_QC_THRESHOLD_DEFAULT}). Legacy configs "
+                "documented ccraut AS the KK2000 threshold, but the KK2000 "
+                "branch now reads the dedicated 'ccraut_kk_threshold' field "
+                "(in-cloud qc, kg/kg); 'ccraut' is the Beheng (1994) rate "
+                "prefactor and is UNUSED under kk2000. Migrate this config: "
+                "rename ccraut -> ccraut_kk_threshold."
+            )
 
 
 class MicrophysicsState(NamedTuple):
@@ -313,7 +376,8 @@ def autoconversion_kk2000(
 
         P_aut = 1350 * qc^2.47 * Nc_cm3^(-1.79)   [kg/kg/s, qc in kg/kg]
 
-    Activates above the ``ccraut`` threshold. KK2000 was the original
+    Activates above the ``ccraut_kk_threshold`` in-cloud qc threshold.
+    KK2000 was the original
     1M default and remains a good fit for 2M microphysics where the
     droplet number ``Nc`` is a prognostic variable. In the 1M context
     with prescribed ``Nc`` and large dt, the explicit form can produce
@@ -329,7 +393,8 @@ def autoconversion_kk2000(
         droplet_number: Cloud droplet number concentration (1/m³)
         dt: Time step (s) — unused (explicit rate); kept in signature
             for parity with ``autoconversion_beheng``.
-        config: Microphysics configuration (uses ccraut, epsilon)
+        config: Microphysics configuration (uses ccraut_kk_threshold,
+            smooth_ccraut, epsilon)
 
     Returns:
         Grid-mean autoconversion rate (kg/kg/s)
@@ -348,17 +413,20 @@ def autoconversion_kk2000(
     # previous code fed qc in g/m³ (×ρ×1000 ≈ ×1200) into the 2.47 power
     # and then applied a spurious g/m³→kg/kg back-conversion — a net
     # ~2.6e4× overestimate (review finding 1.5; non-default branch).
-    # Smooth threshold (maintainability review B.2.5): with the hard
-    # ``where(qc > ccraut, rate, 0)`` the threshold appears only in the
-    # inequality, so d(rate)/d(ccraut) is identically zero — ccraut was
-    # calibratable only in Beheng mode. The sigmoid ramp puts it in the
+    # Smooth threshold (maintainability review B.2.5): with a hard
+    # ``where(qc > threshold, rate, 0)`` the threshold appears only in the
+    # inequality, so d(rate)/d(threshold) is identically zero — the
+    # threshold was not calibratable. The sigmoid ramp puts it in the
     # value; width -> 0 recovers the hard gate. The qc power base is
     # double-where-guarded so the ramp's sub-threshold tail cannot
     # differentiate a negative/zero base (0**x cotangent class).
+    # ``ccraut_kk_threshold`` (~1e-5 kg/kg) is the KK2000-specific qc
+    # threshold — NOT the Beheng ``ccraut`` prefactor, which would push
+    # the sigmoid to 0 for any physical qc (#674).
     has_qc = qc_in_cloud > 0.0
     qc_safe = jnp.where(has_qc, qc_in_cloud, 1.0)
     ramp = jax.nn.sigmoid(
-        (qc_in_cloud - config.ccraut) / config.smooth_ccraut
+        (qc_in_cloud - config.ccraut_kk_threshold) / config.smooth_ccraut
     )
     autoconv_rate = jnp.where(
         has_qc,

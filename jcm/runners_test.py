@@ -249,6 +249,88 @@ class TestBuilders(unittest.TestCase):
             float(convection_term.params.get_value().entrpen), 4e-4,
         )
 
+    def test_build_term_runs_param_validate_on_overrides(self):
+        # The Hydra override door (``_build_term``) builds Parameters via
+        # ``default()`` then re-constructs with the YAML overrides applied,
+        # bypassing ``default()``'s guard. It must re-run the ``validate``
+        # hook so a legacy ccraut-as-KK2000-threshold config (#674) still
+        # fails loudly rather than silently ignoring the override.
+        from jcm.runners import _build_term
+
+        entry = {
+            "_target_": "jcm.physics.clouds.echam_1m.Echam1MMicrophysics",
+            "params": {"autoconversion_scheme": 1, "ccraut": 1e-3},
+        }
+        with pytest.raises(ValueError, match="ccraut_kk_threshold"):
+            _build_term("echam_1m_microphysics", entry)
+
+    def test_build_term_accepts_legit_kk2000_override(self):
+        # The migrated KK2000 config (dedicated threshold field) passes the
+        # same door.
+        from jcm.runners import _build_term
+
+        entry = {
+            "_target_": "jcm.physics.clouds.echam_1m.Echam1MMicrophysics",
+            "params": {"autoconversion_scheme": 1, "ccraut_kk_threshold": 1e-3},
+        }
+        term = _build_term("echam_1m_microphysics", entry)
+        params = term.params.get_value()
+        self.assertEqual(
+            int(params.autoconversion_scheme),
+            params.SCHEME_KK2000,
+        )
+        self.assertAlmostEqual(float(params.ccraut_kk_threshold), 1e-3)
+
+    def test_build_term_accepts_scheme_string_aliases(self):
+        # The documented ``"beheng"`` / ``"kk2000"`` string aliases must
+        # survive the Hydra override door: ``_build_term`` reconstructs the
+        # Parameters class directly (not via ``default()``), so the class
+        # normalizes the alias to its canonical int in ``__post_init__`` —
+        # otherwise ``validate``'s ``int("beheng")`` would crash and the
+        # dispatch would compare a string to an int (#674).
+        from jcm.runners import _build_term
+
+        for alias, expected in (("beheng", 0), ("kk2000", 1)):
+            entry = {
+                "_target_": "jcm.physics.clouds.echam_1m.Echam1MMicrophysics",
+                "params": {"autoconversion_scheme": alias},
+            }
+            params = _build_term(
+                "echam_1m_microphysics", entry).params.get_value()
+            self.assertEqual(int(params.autoconversion_scheme), expected)
+
+    def test_build_term_migration_guard_fires_for_kk2000_string_alias(self):
+        # The legacy-ccraut guard must fire under the STRING form of kk2000
+        # exactly as it does under the int form (#674).
+        from jcm.runners import _build_term
+
+        entry = {
+            "_target_": "jcm.physics.clouds.echam_1m.Echam1MMicrophysics",
+            "params": {"autoconversion_scheme": "kk2000", "ccraut": 1e-3},
+        }
+        with pytest.raises(ValueError, match="ccraut_kk_threshold"):
+            _build_term("echam_1m_microphysics", entry)
+
+    def test_build_term_accepts_vdiff_scheme_string_aliases(self):
+        # Companion to autoconversion_scheme: VDiffParameters'
+        # ``surface_layer_scheme`` carries the same documented string aliases
+        # and must likewise normalize to the canonical int through the Hydra
+        # override door, or its ``lax.cond`` dispatch silently mis-selects
+        # (#674).
+        from jcm.runners import _build_term
+
+        for alias, expected in (("businger_dyer", 0), ("echam_louis", 1)):
+            entry = {
+                "_target_": (
+                    "jcm.physics.vertical_diffusion.tte_tke."
+                    "vertical_diffusion.TteTkeVerticalDiffusion"
+                ),
+                "params": {"surface_layer_scheme": alias},
+            }
+            params = _build_term(
+                "vertical_diffusion", entry).params.get_value()
+            self.assertEqual(int(params.surface_layer_scheme), expected)
+
     def test_build_physics_curated_preset(self):
         # The echam-strong-conv preset bumps entrpen via the same
         # term-list pipeline.

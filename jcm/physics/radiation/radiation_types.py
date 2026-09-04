@@ -11,7 +11,7 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    N_SW_BANDS, N_LW_BANDS, SW_BAND_LIMITS, LW_BAND_LIMITS,
+    SW_BAND_LIMITS, LW_BAND_LIMITS,
 )
 
 
@@ -33,11 +33,11 @@ class RadiationParameters:
     # Solar parameters
     solar_constant: float    # Solar constant (W/m²)
 
-    # Spectral bands
-    n_sw_bands: int          # Number of shortwave bands
-    n_lw_bands: int          # Number of longwave bands
-
-    # Band limits (wavenumber in cm⁻¹)
+    # Band limits (wavenumber in cm⁻¹). The band COUNTS are not stored: a
+    # scheme's spectral resolution is a static shape set by its module
+    # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
+    # a runtime tunable, so a stored count could only drift from the truth
+    # (#674).
     lw_band_limits: tuple    # LW bands
     sw_band_limits: tuple    # SW bands
 
@@ -48,11 +48,12 @@ class RadiationParameters:
 
     # Numerical parameters
     min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
-    flux_epsilon: float      # Small value for flux calculations
 
     # Cloud optics parameters
-    cld_tau_min: float       # Minimum cloud optical depth
-    cld_frac_min: float      # Minimum cloud fraction
+    # Minimum cloud fraction: the ``eps`` floor in ``mcica.in_cloud_path``
+    # (grid-mean / max(cf, eps), with the in-cloud path zeroed where
+    # cf <= 2*eps). Read by the RRTMGP and grey two-stream schemes.
+    cld_frac_min: float
 
     # Cloud overlap selector for partial-cloud radiation. 0 = random,
     # 1 = maximum_random (Geleyn-Hollingsworth), 2 = exponential
@@ -77,11 +78,9 @@ class RadiationParameters:
     @classmethod
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
-                 n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
                  lw_band_limits=LW_BAND_LIMITS,
                  sw_band_limits=SW_BAND_LIMITS,
-                 min_cos_zenith=0.035, flux_epsilon=1e-6,
-                 cld_tau_min=1e-6, cld_frac_min=1e-3,
+                 min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
                  emulator_weights=None, sw_scaling=None,
@@ -90,13 +89,9 @@ class RadiationParameters:
         return cls(
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
-            n_sw_bands=jnp.asarray(n_sw_bands),
-            n_lw_bands=jnp.asarray(n_lw_bands),
             lw_band_limits=jnp.asarray(lw_band_limits),
             sw_band_limits=jnp.asarray(sw_band_limits),
             min_cos_zenith=jnp.array(min_cos_zenith),
-            flux_epsilon=jnp.array(flux_epsilon),
-            cld_tau_min=jnp.array(cld_tau_min),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),

@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     combine_optical_properties
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters, OpticalProperties
+from jcm.physics.radiation.radiation_types import OpticalProperties
 from jcm.physics.radiation.cloud_optics import effective_radius_liquid
 from jcm.physics.aerosol.macv2_sp import (
     _per_feature_plume_gaussians,
@@ -89,28 +89,26 @@ def test_optical_property_combination():
 
 
 def test_radiation_scheme_with_without_aerosols():
-    """Test that radiation scheme runs with and without aerosols"""
-    print("\\nTesting radiation scheme with/without aerosols...")
-    
-    # Create test data
+    """Mock per-band aerosol arrays match the grey scheme's band layout.
+
+    The band counts come from the radiation module constants (the static
+    spectral resolution each scheme owns) — RadiationParameters no longer
+    stores them (#674). The previous version read the deleted struct fields
+    inside a try/except that swallowed the AttributeError, silently
+    reducing the test to a no-op.
+    """
+    from jcm.physics.radiation.constants import N_SW_BANDS, N_LW_BANDS
+
     nlev = 10
-    parameters = RadiationParameters.default(n_sw_bands=2, n_lw_bands=3)
-    
-    # Test with mock aerosol data to ensure array shapes are correct
-    try:
-        # Create mock aerosol data
-        total_bands = int(parameters.n_sw_bands) + int(parameters.n_lw_bands)
-        aerosol_tau = jnp.ones((nlev, total_bands)) * 0.1
-        aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9
-        # Set LW bands to pure absorption
-        aerosol_ssa = aerosol_ssa.at[:, int(parameters.n_sw_bands):].set(0.0)
-        
-        print(f"✓ Created test aerosol data: τ shape {aerosol_tau.shape}")
-        print(f"✓ SW bands: {int(parameters.n_sw_bands)}, LW bands: {int(parameters.n_lw_bands)}")
-        
-    except Exception as e:
-        print(f"✗ Error creating test data: {e}")
-        return
+    total_bands = N_SW_BANDS + N_LW_BANDS
+    aerosol_tau = jnp.ones((nlev, total_bands)) * 0.1
+    aerosol_ssa = jnp.ones((nlev, total_bands)) * 0.9
+    # LW bands are pure absorption.
+    aerosol_ssa = aerosol_ssa.at[:, N_SW_BANDS:].set(0.0)
+
+    assert aerosol_tau.shape == (nlev, total_bands)
+    assert bool(jnp.all(aerosol_ssa[:, N_SW_BANDS:] == 0.0))
+    assert bool(jnp.all(aerosol_ssa[:, :N_SW_BANDS] > 0.0))
 
 
 def test_angstrom_spectral_scaling():
@@ -177,14 +175,14 @@ def test_temporal_weights_scale_aod():
     lons = jnp.linspace(0, 360, ncols)
 
     gauss = _per_feature_plume_gaussians(lats, lons, params)
-    ones_cycle = jnp.ones((params.nfeatures, params.nplumes))
+    ones_cycle = jnp.ones((params.ftr_weight.shape[0], params.plume_lat.shape[0]))
 
     cw_pd, _ = get_plume_column_weights(
-        params, jnp.ones(params.nplumes), ones_cycle, gauss)
+        params, jnp.ones(params.plume_lat.shape[0]), ones_cycle, gauss)
     cw_pi, _ = get_plume_column_weights(
-        params, jnp.zeros(params.nplumes), ones_cycle, gauss)
+        params, jnp.zeros(params.plume_lat.shape[0]), ones_cycle, gauss)
     cw_half, _ = get_plume_column_weights(
-        params, jnp.full(params.nplumes, 0.5), ones_cycle, gauss)
+        params, jnp.full(params.plume_lat.shape[0], 0.5), ones_cycle, gauss)
 
     assert jnp.all(cw_pi == 0), "Pre-industrial AOD should be zero"
     assert jnp.allclose(cw_half, cw_pd * 0.5, rtol=1e-6)
@@ -192,7 +190,7 @@ def test_temporal_weights_scale_aod():
     # Seasonal cycle: reducing one plume's features lowers the total.
     cyc = ones_cycle.at[:, 0].set(0.5)
     cw_seasonal, _ = get_plume_column_weights(
-        params, jnp.ones(params.nplumes), cyc, gauss)
+        params, jnp.ones(params.plume_lat.shape[0]), cyc, gauss)
     assert jnp.sum(cw_seasonal) < jnp.sum(cw_pd)
 
 

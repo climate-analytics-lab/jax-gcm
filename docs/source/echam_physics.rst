@@ -231,9 +231,6 @@ closure work deliberately excluded).
    * - ``cprcon``
      - Precipitation conversion coefficient (1/m)
      - 1.4e-3
-   * - ``dt_conv``
-     - Convection time step (s)
-     - 3600.0
    * - ``cu_dqcv_width``
      - Width of the deep/shallow moisture-convergence sigmoid (kg/m²/s);
        ECHAM's hard switch in a differentiable form
@@ -399,8 +396,8 @@ Key processes:
 
 1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
 
-   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is the rate prefactor (default 15.0).
-   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut`` is the qc threshold above which autoconversion fires (small g/kg-scale value, e.g. 1e-5).
+   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is its rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut_kk_threshold`` is the in-cloud qc threshold above which autoconversion fires (default 1e-5 kg/kg).
 
 2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
 3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
@@ -434,20 +431,14 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
      - 0 (Beheng) or 1 (KK2000); accepts ``"beheng"`` / ``"kk2000"``
      - 0 (Beheng)
    * - ``ccraut``
-     - Autoconversion rate prefactor (Beheng) or qc threshold (KK2000)
+     - Beheng autoconversion rate prefactor
      - 15.0
+   * - ``ccraut_kk_threshold``
+     - KK2000 in-cloud qc threshold for autoconversion onset (kg/kg)
+     - 1.0e-5
    * - ``ccracl``
      - Accretion coefficient (cloud → rain)
      - 6.0
-   * - ``cthomi``
-     - Homogeneous ice nucleation temperature (K)
-     - 233.15
-   * - ``ccollec``
-     - Collection efficiency rain/cloud
-     - 0.7
-   * - ``ccollei``
-     - Collection efficiency snow/ice
-     - 0.3
    * - ``cn0s``
      - Snow particle number density (1/m³)
      - 3.0e6
@@ -457,12 +448,6 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice content-dependent terminal velocity factor
      - 3.29
-   * - ``vt_rain_a`` / ``vt_rain_b``
-     - Rain terminal velocity coefficient and exponent
-     - 386.0 / 0.67
-   * - ``vt_snow_a`` / ``vt_snow_b``
-     - Snow terminal velocity coefficient and exponent
-     - 8.8 / 0.15
    * - ``base_cdnc``
      - Baseline CDNC in clean air (1/m³)
      - 100e6
@@ -777,9 +762,6 @@ Aerosol Scheme (MACv2-SP)
    * - Parameter
      - Description
      - Default
-   * - ``nplumes``
-     - Number of anthropogenic plumes
-     - 9
    * - ``aod_spmx``
      - Maximum AOD at 550 nm per plume
      - [0.30, 0.15, ...]

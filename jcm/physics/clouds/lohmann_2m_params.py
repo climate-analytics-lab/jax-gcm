@@ -154,8 +154,10 @@ class CloudParams2M:
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
-        ccsaut: float = 95.0,
-        ccraut: float = 15.0,
+        # mo_activ.f90's prognostic-CDNC retune (T63, AR&G, cdnc_min=40);
+        # the SPA route pins the base 95.0/15.0 in its presets.
+        ccsaut: float = 900.0,
+        ccraut: float = 10.6,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,

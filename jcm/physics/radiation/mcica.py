@@ -74,6 +74,32 @@ def in_cloud_path(
     return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
 
 
+def effective_cloud_fraction(
+    cloud_fraction: jnp.ndarray,
+    eps: float = 1.0e-3,
+) -> jnp.ndarray:
+    """Zero the cloud fraction in the cells :func:`in_cloud_path` zeros.
+
+    ``in_cloud_path`` zeros the in-cloud condensate wherever
+    ``cloud_fraction <= 2*eps``, so those cells are radiatively **empty**. The
+    fraction that drives the McICA sub-column sampler and the total-cover
+    diagnostic must agree with that: an optically-empty cell must not be
+    reported as cloud cover, nor act as a cloudy layer that bridges
+    maximum-random overlap across an otherwise-clear gap. Returning
+    ``where(cloud_fraction > 2*eps, cloud_fraction, 0)`` ties the two together
+    on the **same** criterion.
+
+    This mirrors ECHAM ``mo_psrad_interface.f90:232`` — the WHERE that zeros
+    the in-cloud water (``ziwgkg_vr``/``zlwgkg_vr``) ALSO clears the
+    layer-cloudy flag ``icldlyr`` on the identical ``cld_frc_vr > 2*EPSILON``
+    test, so the sampler and the optics see a consistent "this cell is clear".
+    In ECHAM ``EPSILON`` is machine epsilon, so this only ever bites exactly
+    empty cells; here ``eps`` is a *physical* threshold (``cld_frac_min``,
+    default 1e-3), so the tie must be made explicit.
+    """
+    return jnp.where(cloud_fraction > 2.0 * eps, cloud_fraction, 0.0)
+
+
 def _alpha_from_overlap(
     cloud_fraction: jnp.ndarray,
     layer_thickness: jnp.ndarray,
