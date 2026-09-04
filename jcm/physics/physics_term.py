@@ -108,6 +108,15 @@ class PhysicsTerm(nnx.Module):
     # unit is worse than an absent one.
     output_attrs: ClassVar[Mapping[str, Mapping[str, str]]] = {}
 
+    # Output-key renames applied by ``ComposablePhysics.data_struct_to_dict``:
+    # ``{internal_dotted_key: output_key}``. Lets a scheme publish its
+    # diagnostics under an explicit namespace (e.g. MACv2-SP's ``aerosol.*``
+    # struct fields → ``macsp.*`` with CF-style names, #640) WITHOUT renaming
+    # the internal ``aerosol`` struct that radiation/microphysics read by
+    # attribute — those stay scheme-agnostic. The FIRST term to claim a key
+    # wins, matching the ``output_attrs`` / units-table precedence rule.
+    output_key_map: ClassVar[Mapping[str, str]] = {}
+
     def withheld_output_keys(self) -> tuple[str, ...]:
         """``<struct>.<field>`` keys this configuration never populates.
 

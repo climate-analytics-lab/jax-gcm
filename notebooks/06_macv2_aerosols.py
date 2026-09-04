@@ -157,7 +157,7 @@ def main(macv2_path: Path) -> None:
 
         # Extract anthropogenic AOD from the diagnostic output.
         diag_ds = preds.to_xarray()
-        aod_anth = diag_ds["aerosol.aod_anthropogenic"].mean(dim="time")
+        aod_anth = diag_ds["macsp.aod_anthropogenic"].mean(dim="time")
         print(f"{label}: mean column AOD_anth = "
               f"{float(aod_anth.mean()):.4f}")
 

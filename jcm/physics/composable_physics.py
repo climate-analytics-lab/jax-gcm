@@ -20,6 +20,7 @@ See docs/design/composable_physics.md for the full design.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 import jax
@@ -94,6 +95,16 @@ class ComposablePhysics(nnx.Module, Physics):
         # as data (see _term_withheld_keys).
         self._term_withheld_keys = frozenset(
             key for t in terms for key in t.withheld_output_keys())
+        # Per-term output-key renames (e.g. the MACv2-SP ``aerosol.*`` struct
+        # fields → the ``macsp.*`` namespace, #640). Keyed by the INTERNAL
+        # dotted diagnostics name and applied in ``data_struct_to_dict`` after
+        # flattening; the FIRST term to claim a key wins (composition order),
+        # matching the units-table / output_attrs precedence rule.
+        output_key_map: dict[str, str] = {}
+        for t in terms:
+            for src, dst in getattr(t, "output_key_map", {}).items():
+                output_key_map.setdefault(src, dst)
+        self._output_key_map = output_key_map
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
@@ -567,6 +578,13 @@ class ComposablePhysics(nnx.Module, Physics):
     #: all-sky flux, ~240 W/m2 instead of ~-1 (jax-gcm#647).
     _term_withheld_keys: frozenset[str] = frozenset()
 
+    #: Internal-dotted-key → output-key renames aggregated from the terms'
+    #: :attr:`PhysicsTerm.output_key_map` (see ``__init__``). Applied to every
+    #: flattened output key so a scheme can publish its diagnostics under an
+    #: explicit namespace (e.g. MACv2-SP's ``aerosol.*`` → ``macsp.*``, #640)
+    #: without renaming the internal struct radiation/microphysics read.
+    _output_key_map: Mapping[str, str] = {}
+
     def units_table_paths(self) -> tuple:
         """Units/description CSVs of every term in this package, deduplicated.
 
@@ -625,6 +643,7 @@ class ComposablePhysics(nnx.Module, Physics):
             return super().data_struct_to_dict(struct, nodal_shape, sep)
 
         items: dict[str, Any] = {}
+        rename = self._output_key_map
         for k, v in struct.items():
             # The exclusion set holds dotted leaf names for sub-structs and
             # bare names for whole top-level entries (e.g. the ``_prev_step``
@@ -636,16 +655,18 @@ class ComposablePhysics(nnx.Module, Physics):
             if not out_key:
                 continue
             if isinstance(v, jax.Array):
-                items[out_key] = v
+                items[rename.get(out_key, out_key)] = v
             elif isinstance(v, dict) and k not in self._UNFLATTENED_DICTS:
                 # Plain dict-of-arrays diagnostic (e.g. the carry-stored
-                # cloud-borne fields ``_jam_cloud_borne``, #602 item 3):
-                # flatten one level with the same separator convention as
-                # typed sub-structs. Zero-size entries (empty band tables
-                # and the like) have no xarray shape and are skipped.
+                # cloud-borne fields ``_jam_cloud_borne``, #602 item 3, or the
+                # JAM optics ``_jam_optics`` carry, #640): flatten one level
+                # with the same separator convention as typed sub-structs.
+                # Zero-size entries (empty band tables and the like) have no
+                # xarray shape and are skipped.
                 for sk, sv in v.items():
                     if isinstance(sv, jax.Array) and sv.size:
-                        items[f"{out_key}{sep}{sk}"] = sv
+                        full_key = f"{out_key}{sep}{sk}"
+                        items[rename.get(full_key, full_key)] = sv
             elif hasattr(v, "__dict__") and v.__dict__:
                 # Typed sub-struct (e.g. PhysicsData.radiation). Flatten via
                 # the parent recursive helper; skip if it raises (sub-structs
@@ -659,7 +680,7 @@ class ComposablePhysics(nnx.Module, Physics):
                     if (full_key in self._EXCLUDED_OUTPUT_KEYS
                             or full_key in self._term_withheld_keys):
                         continue
-                    items[full_key] = sv
+                    items[rename.get(full_key, full_key)] = sv
 
         # Reshape column-vectorized diagnostics (a flattened ncols axis,
         # produced when ``vectorize_columns=True``) back to ``(lon, lat)``

@@ -591,12 +591,51 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
                                   radiation_scheme="rrtmgp"),
         )
         ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
-        sw = "jam_band_optics.aod_sw_per_band"
-        lw = "jam_band_optics.aod_lw_per_band"
+        sw = "jam_optics.aod_sw_per_band"
+        lw = "jam_optics.aod_lw_per_band"
         self.assertIn(sw, ds.data_vars)
         self.assertEqual(ds[sw].dims[1], "sw_band")
         self.assertIn(lw, ds.data_vars)
         self.assertEqual(ds[lw].dims[1], "lw_band")
+        # JAM optics publish under the explicit ``jam_optics.*`` namespace
+        # (#640); the column AOD is ``jam_optics.aod_550``.
+        self.assertIn("jam_optics.aod_550", ds.data_vars)
+        # The old top-level ``aerosol_optical_depth`` key is gone (it collided
+        # with the per-band RadiationInput field), and no MACv2-SP ``aerosol.*``
+        # /``macsp.*`` output appears in a JAM run (MACv2-SP is not composed).
+        self.assertNotIn("aerosol_optical_depth", ds.data_vars)
+        self.assertNotIn("aerosol.aod_total", ds.data_vars)
+        self.assertNotIn("aerosol.Nccn", ds.data_vars)
+        self.assertNotIn("macsp.od550aer", ds.data_vars)
+
+
+class Macv2NamespaceOutputTest(unittest.TestCase):
+    """MACv2-SP output moves to the explicit ``macsp.*`` namespace (#640)."""
+
+    @pytest.mark.slow
+    def test_macv2sp_publishes_macsp_namespace(self):
+        from jcm.model import Model
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=900.0,
+            physics=echam_physics(aerosol_module="macv2sp",
+                                  radiation_scheme="rrtmgp"),
+        )
+        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        # Namespaced, CF-named MACv2-SP output present...
+        self.assertIn("macsp.od550aer", ds.data_vars)
+        self.assertIn("macsp.aod_anthropogenic", ds.data_vars)
+        # ...and the old ``aerosol.*`` struct keys and the top-level
+        # ``aerosol_optical_depth`` are gone.
+        self.assertNotIn("aerosol.aod_total", ds.data_vars)
+        self.assertNotIn("aerosol.angstrom", ds.data_vars)
+        self.assertNotIn("aerosol_optical_depth", ds.data_vars)
 
 
 class AerocomOpticsConfigTest(unittest.TestCase):

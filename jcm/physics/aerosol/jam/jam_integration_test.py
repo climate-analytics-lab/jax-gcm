@@ -62,20 +62,24 @@ class JamIntegrationTest(unittest.TestCase):
 
         # The docstring's actual claim — activation feeds the 2M scheme —
         # must hold: the activated-CDNC diagnostic the 2M term consumes is
-        # present and positive somewhere (ARG or its SPA floor), and the
-        # 2M droplet-number tracer has been populated in response. A run
-        # where the coupling silently no-ops passes every finiteness check
-        # above but fails here (measured on a healthy cold-start run:
-        # activated_cdnc max ~66, qnc max ~3e-5 after 3 steps).
+        # present and positive somewhere (ARG, or the ECHAM-HAM cdnc_min floor
+        # the JAM path falls back to where ARG is empty, #640), and the 2M
+        # droplet-number tracer has been populated in response. A run where the
+        # coupling silently no-ops passes every finiteness check above but
+        # fails here (measured on a healthy cold-start run: activated_cdnc max
+        # ~66, qnc max ~3e-5 after 3 steps).
         physics = predictions.physics
         self.assertIn("activated_cdnc", physics)
         self.assertGreater(
             float(np.max(np.asarray(physics["activated_cdnc"]))), 0.0,
-            "activation never produced droplets (ARG + SPA floor both zero)",
+            "activation never produced droplets (ARG + cdnc_min floor zero)",
         )
-        self.assertGreater(
-            float(np.max(np.asarray(physics["aerosol"].Nccn))), 0.0,
-            "aerosol term produced no CCN",
+        # The shared aerosol slot is present and finite. MACv2-SP was removed
+        # from the JAM path (#640), so JAM carries no prescribed-plume Nccn —
+        # it stays zero (the cdnc_min fallback, not Nccn, drives activation).
+        self.assertIn("aerosol", physics)
+        self.assertTrue(
+            bool(np.all(np.isfinite(np.asarray(physics["aerosol"].Nccn))))
         )
         self.assertGreater(
             float(np.max(np.asarray(tracers["qnc"]))), 0.0,

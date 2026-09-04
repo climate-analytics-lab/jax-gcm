@@ -53,8 +53,8 @@ RANGES = {
     "precip_mm_day": (2.0, 4.0),
     "cloud_cover": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
-    # Global-mean 550 nm AOD: JAM's jam_band_optics.aod_550 or MACv2-SP's
-    # aerosol.aod_total. Wide gate — a from-zero JAM spin-up year sits low,
+    # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
+    # macsp.od550aer. Wide gate — a from-zero JAM spin-up year sits low,
     # so use --last-n to score the settled months.
     "aod_550": (0.02, 0.35),
 }
@@ -144,17 +144,18 @@ def main():
     t_low = ds["temperature"].isel(level=0)
     check("near_surface_T", wmean(t_low, weights), *RANGES["near_surface_T"])
 
-    # 550 nm AOD — JAM publishes jam_band_optics.aod_550, MACv2-SP runs
-    # publish aerosol.aod_total; whichever is present is the scheme's AOD.
+    # 550 nm AOD — JAM publishes jam_optics.aod_550, MACv2-SP runs
+    # publish macsp.od550aer; whichever is present is the scheme's AOD.
     aod = None
-    for key in ("jam_band_optics.aod_550", "aerosol.aod_total"):
+    for key in ("jam_optics.aod_550", "macsp.od550aer"):
         if key in ds:
             aod = ds[key]
             break
     if aod is not None:
         check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
     else:
-        print("NOTE  no AOD field found (aod_550/aod_total); skipping")
+        print("NOTE  no AOD field found "
+              "(jam_optics.aod_550/macsp.od550aer); skipping")
 
     # Per-species global burdens (JAM runs): the shared ``burden`` sums
     # interstitial + cloud-borne mass over the species' modes and

@@ -43,6 +43,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import warnings
 
 import numpy as np
 
@@ -914,6 +915,58 @@ def _first_var(ds, names, default=None, shape=None):
     return np.full(shape, default, dtype=np.float64), f"<default {default}>"
 
 
+# Broadband 550 nm aerosol optics the per-band scaling (:func:`_per_band_optics`)
+# rebuilds from. Each run publishes these under exactly ONE scheme namespace
+# (#640): MACv2-SP under ``macsp.*``, the online JAM direct-effect optics under
+# ``jam_optics.*`` (a JAM run's optics term writes the 550 nm band-centre
+# profiles + a band-ratio Angstrom into those keys). The pre-#640 un-namespaced
+# ``aerosol.*`` names are kept LAST as a compatibility alias for old
+# trajectories. A single file only ever carries one namespace, so the order is a
+# documented preference, not a merge; ``macsp`` leads only because it is the
+# older/plainer diagnostic. Reading the removed ``aerosol.*`` names alone (the
+# pre-fix behaviour) silently substituted zeros on a post-rename file and trained
+# the emulator with the aerosol effect dropped -- hence the loud warning below
+# when NONE of the names are present.
+_AOD_PROFILE_NAMES = (
+    "macsp.aod_profile", "jam_optics.aod_profile", "aerosol.aod_profile")
+_SSA_PROFILE_NAMES = (
+    "macsp.ssa_profile", "jam_optics.ssa_profile", "aerosol.ssa_profile")
+_ASY_PROFILE_NAMES = (
+    "macsp.asy_profile", "jam_optics.asy_profile", "aerosol.asy_profile")
+_ANGSTROM_NAMES = (
+    "macsp.angstrom", "jam_optics.angstrom", "aerosol.angstrom")
+
+
+def _aerosol_optics_fields(ds, shape_3d, shape_2d):
+    """Resolve the broadband aerosol optics, warning loudly if none are present.
+
+    Returns the ``aod_profile``/``ssa_profile``/``asy_profile``/``angstrom``
+    arrays, taking each from the first present name in its preference list
+    (``macsp.*`` → ``jam_optics.*`` → legacy ``aerosol.*``). If the AOD profile
+    is absent under every name the whole quartet falls back to its documented
+    no-aerosol default and a warning fires: that is legitimate for a genuinely
+    aerosol-free run, but a silent zero on a run that DID carry aerosol would
+    train the emulator with the aerosol effect dropped, so it must be said.
+    """
+    aod, aod_src = _first_var(ds, list(_AOD_PROFILE_NAMES), 0.0, shape_3d)
+    fields = {
+        "aod_profile": aod,
+        "ssa_profile": _first_var(ds, list(_SSA_PROFILE_NAMES), 0.9, shape_3d)[0],
+        "asy_profile": _first_var(ds, list(_ASY_PROFILE_NAMES), 0.7, shape_3d)[0],
+        "angstrom": _first_var(ds, list(_ANGSTROM_NAMES), 1.5, shape_2d)[0],
+    }
+    if aod_src.startswith("<default"):
+        warnings.warn(
+            "no aerosol optics found: none of the aod_profile names "
+            f"{_AOD_PROFILE_NAMES!r} are present in the state file; training "
+            "columns will carry ZERO aerosol. This is correct only for a "
+            "genuinely aerosol-free run -- if the run had a MACv2-SP or JAM "
+            "aerosol scheme, its diagnostics were not written to output.",
+            stacklevel=2,
+        )
+    return fields
+
+
 @functools.lru_cache(maxsize=1)
 def _load_trajectory_fields(state_file):
     """Read every field the trajectory source needs from one JCM output file.
@@ -964,14 +1017,7 @@ def _load_trajectory_fields(state_file):
         ds, ["radiation.surface_albedo_nir"], 0.07, shape_2d)[0]
     out["surface_emissivity"] = _first_var(
         ds, ["radiation.surface_emissivity"], 0.98, shape_2d)[0]
-    out["aod_profile"] = _first_var(
-        ds, ["aerosol.aod_profile"], 0.0, shape_3d)[0]
-    out["ssa_profile"] = _first_var(
-        ds, ["aerosol.ssa_profile"], 0.9, shape_3d)[0]
-    out["asy_profile"] = _first_var(
-        ds, ["aerosol.asy_profile"], 0.7, shape_3d)[0]
-    out["angstrom"] = _first_var(
-        ds, ["aerosol.angstrom"], 1.5, shape_2d)[0]
+    out.update(_aerosol_optics_fields(ds, shape_3d, shape_2d))
     out["lat"] = np.asarray(ds["lat"].values)
     out["lon"] = np.asarray(ds["lon"].values)
     out["time"] = np.asarray(ds["time"].values)
@@ -986,8 +1032,9 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
 
     Randomly subsamples over (time, lon, lat). Fields the run did not
     write fall back to documented constants; the per-band aerosol optics
-    are rebuilt from the broadband ``aerosol.*_profile`` diagnostics with
-    the MACv2-SP wavelength scaling, because JCM output never carries the
+    are rebuilt from the broadband 550 nm profile diagnostics (``macsp.*`` /
+    ``jam_optics.*`` / legacy ``aerosol.*``; see :func:`_aerosol_optics_fields`)
+    with the MACv2-SP wavelength scaling, because JCM output never carries the
     (n_bnd, nlev, ncols) per-band arrays.
 
     Point the source at SNAPSHOT output. Solar geometry is reconstructed

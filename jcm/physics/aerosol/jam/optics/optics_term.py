@@ -9,10 +9,13 @@ the Mie efficiencies, and accumulate the extinction across modes;
 single-scattering albedo and asymmetry are extinction-/scattering-weighted.
 
 The expensive Mie evaluation is paid once at construction (``mie_lut``); the
-per-step path is a differentiable table interpolation. SW band optics overwrite
-MACv2-SP's fields (so the SW direct effect flows immediately); LW band optics
-populate the new ``aerosol`` LW fields consumed by RRTMGP. MACv2-SP is kept
-only for its indirect (Twomey/SPA) fields for now.
+per-step path is a differentiable table interpolation. The per-band SW/LW
+optics are written into the shared ``aerosol`` struct (seeded all-zero each
+step by ``AerosolCarrySeeder``) and consumed directly by RRTMGP. For the grey
+two-stream scheme, which reads a single broadband 550 nm profile rather than
+per-band optics, this term also writes ``aod_profile``/``ssa_profile``/
+``asy_profile`` (the SW band nearest 550 nm) and a band-ratio ``angstrom`` so
+grey+JAM keeps a direct effect (#640).
 """
 
 from __future__ import annotations
@@ -81,6 +84,8 @@ class _OpticsCache:
     ri_lw: dict
     aod_band_idx: int    # SW band index whose centre is closest to 550 nm
     aod_band_nm: float   # that band's actual centre wavelength [nm]
+    ang_band_idx: int    # SW band for the 550/865 Angstrom pair (grey #640)
+    ang_band_nm: float   # that band's actual centre wavelength [nm]
     ri_diag: dict | None = None   # RI at _DIAG_WAVELENGTHS_NM (#584), or None
 
 
@@ -92,7 +97,40 @@ class JamOpticsTerm(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "_jam_state", "aerosol", "air_density", "layer_thickness",
     )
-    provides: ClassVar[tuple[str, ...]] = ("aerosol", "aerosol_optical_depth")
+    provides: ClassVar[tuple[str, ...]] = ("aerosol", "_jam_optics")
+    # JAM's column optics diagnostics publish under the explicit ``jam_optics.*``
+    # namespace (#640): the ``_jam_optics`` carry dict flattens to
+    # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that
+    # survive (the per-band arrays are dropped by ``_EXCLUDED_OUTPUT_KEYS``).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "jam_optics.aod_550": {
+            "units": "1",
+            "standard_name": (
+                "atmosphere_optical_thickness_due_to_ambient_aerosol_particles"
+            ),
+            "long_name": (
+                "JAM total-column aerosol optical depth at the SW band nearest "
+                "550 nm (band-centre approximation; the Mie-based od550aer is "
+                "the aerocom_optics diagnostic)"
+            ),
+        },
+        "jam_optics.aod_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm aerosol optical depth per layer",
+        },
+        "jam_optics.ssa_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm single-scattering albedo per layer",
+        },
+        "jam_optics.asy_profile": {
+            "units": "1",
+            "long_name": "JAM 550 nm asymmetry parameter per layer",
+        },
+        "jam_optics.angstrom": {
+            "units": "1",
+            "long_name": "JAM column Angstrom exponent (550/865 nm band ratio)",
+        },
+    }
 
     def __init__(self, *, spec: ModalAerosolSpec | None = None,
                  optics_diagnostics: bool = False):
@@ -139,7 +177,7 @@ class JamOpticsTerm(PhysicsTerm):
         30-band × 4-mode Mie evaluation on the intermediate steps is
         discarded work (~8× of the second-largest JAM cost). With the gate
         configured, those steps replay the previous compute's per-band
-        fields from the ``_jam_band_optics`` carry slot instead, using the
+        fields from the ``_jam_optics`` carry slot instead, using the
         *same* ``radiation.step`` counter the radiation gate reads (this
         term runs earlier in the chain, so both see the identical
         pre-increment value and agree within a step). ``interval_s <= 0``
@@ -169,6 +207,18 @@ class JamOpticsTerm(PhysicsTerm):
             aod_nm = float(sw_nm[aod_idx])
         else:
             aod_idx, aod_nm = 0, float("nan")
+        # Second SW band for the column Angstrom exponent fed to the grey
+        # two-stream scheme (#640): the band nearest 865 nm, giving the
+        # ECHAM-HAM 550/865 pair. With a single broadband SW band (grey's own
+        # default RadiationBandConfig) there is no ratio to form, so fall back
+        # to the 550 band index and flag it degenerate for the default below.
+        if sw_nm.size >= 2:
+            ang_idx = int(np.argmin(np.abs(sw_nm - 865.0)))
+            if ang_idx == aod_idx:
+                ang_idx = int(np.argmax(np.abs(sw_nm - aod_nm)))
+            ang_nm = float(sw_nm[ang_idx])
+        else:
+            ang_idx, ang_nm = aod_idx, aod_nm
         ri_diag = None
         if self._optics_diagnostics:
             diag_nm = jnp.asarray(_DIAG_WAVELENGTHS_NM)
@@ -177,7 +227,7 @@ class JamOpticsTerm(PhysicsTerm):
                 n_d, k_d = refractive_index_at(sp, diag_nm)
                 ri_diag[sp] = (np.asarray(n_d), np.asarray(k_d))
         self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm,
-                                   ri_diag)
+                                   ang_idx, ang_nm, ri_diag)
 
     def _band_optics(self, state, aer, num_per_area, centers_nm, ri,
                      want_decomposition: bool = False):
@@ -497,11 +547,51 @@ class JamOpticsTerm(PhysicsTerm):
         else:
             aod_550 = jnp.zeros_like(state.temperature[0])
 
+        # Broadband 550 nm profile fields for hosts that read a single aerosol
+        # profile rather than per-band optics — specifically the grey
+        # two-stream scheme (grey_two_stream/radiation_scheme.py reads
+        # ``aerosol.aod_profile``/``ssa_profile``/``asy_profile``/``angstrom``
+        # and band-scales them itself). With MACv2-SP removed from the JAM path
+        # (#640) nothing else writes these, so grey+JAM would otherwise have a
+        # silent zero direct effect. Taken from the SW band whose centre is
+        # nearest 550 nm — a band-CENTRE approximation to the exact 550 nm
+        # optics (the per-species Mie pass at exactly 550 nm is the separate
+        # aerocom_optics diagnostic); it reuses the radiation bands already
+        # computed here and costs no extra Mie work. ``aod_profile`` inherits
+        # the same ``_AER_RAD_PMIN`` mask and ``_MAX_LAYER_TAU`` cap as the
+        # per-band SW AOD, so grey and RRTMGP see a consistent burden.
+        if aod_sw.shape[0]:
+            aod_profile = aod_sw[c.aod_band_idx]
+            ssa_profile = ssa_sw[c.aod_band_idx]
+            asy_profile = asy_sw[c.aod_band_idx]
+        else:
+            zeros3 = jnp.zeros_like(state.temperature)
+            aod_profile = ssa_profile = asy_profile = zeros3
+
+        # Column Angstrom exponent from the 550/865 nm band pair, which grey
+        # uses to scale ``aod_profile`` to its own SW/LW band wavelengths. This
+        # is the cheap band-RATIO Angstrom (two radiation-band column AODs) —
+        # NOT the Mie-based ``ang550865aer`` of the aerocom_optics pass — and
+        # is only well-defined with >=2 SW bands. Defaults to the fine-mode 1.5
+        # (the ``AerosolData`` zero default) with a single broadband SW band
+        # (grey's own config) or where a column has no aerosol at both bands.
+        if aod_sw.shape[0] and c.ang_band_idx != c.aod_band_idx:
+            od_a = jnp.maximum(jnp.sum(aod_sw[c.aod_band_idx], axis=0), 0.0)
+            od_b = jnp.maximum(jnp.sum(aod_sw[c.ang_band_idx], axis=0), 0.0)
+            both = (od_a > _TINY) & (od_b > _TINY)
+            ratio = jnp.maximum(od_a, _TINY) / jnp.maximum(od_b, _TINY)
+            lam_ratio = math.log(c.aod_band_nm / c.ang_band_nm)
+            angstrom = jnp.where(both, -jnp.log(ratio) / lam_ratio, 1.5)
+        else:
+            angstrom = jnp.full_like(state.temperature[0], 1.5)
+
         fields = {
             "aod_sw_per_band": aod_sw, "ssa_sw_per_band": ssa_sw,
             "asy_sw_per_band": asy_sw,
             "aod_lw_per_band": aod_lw, "ssa_lw_per_band": ssa_lw,
             "asy_lw_per_band": asy_lw,
+            "aod_profile": aod_profile, "ssa_profile": ssa_profile,
+            "asy_profile": asy_profile, "angstrom": angstrom,
             "aod_550": aod_550,
         }
         if self._optics_diagnostics:
@@ -513,7 +603,7 @@ class JamOpticsTerm(PhysicsTerm):
         return fields
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        cached = diagnostics.get("_jam_band_optics")
+        cached = diagnostics.get("_jam_optics")
         if (self._radiation_interval_s is None or cached is None
                 or "radiation" not in diagnostics):
             # Ungated (every step): gate unconfigured, or no cached fields in
@@ -543,10 +633,15 @@ class JamOpticsTerm(PhysicsTerm):
                if k not in ("aod_550", "_optics_diag")}
         )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
+        # The column AOD-550 no longer publishes a top-level
+        # ``aerosol_optical_depth`` key (#640): that name collided with the
+        # unrelated per-band ``RadiationInput`` field, and the value now lives
+        # under the JAM namespace as ``jam_optics.aod_550`` (from the
+        # ``_jam_optics`` carry dict, which also carries the per-band optics
+        # plumbing and the grey profile fields).
         return tendency, {
             **diagnostics,
             **fields.get("_optics_diag", {}),
             "aerosol": new_aerosol,
-            "aerosol_optical_depth": fields["aod_550"],
-            "_jam_band_optics": fields,
+            "_jam_optics": fields,
         }

@@ -1,6 +1,35 @@
 Release Notes
 =============
 
+Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
+-----------------------------------------------------------------
+
+- **MACv2-SP and JAM are now mutually exclusive aerosol sources** (#640).
+  ``echam_physics(aerosol_module="jam")`` no longer also composes MACv2-SP
+  (which was a stopgap for the shared ``aerosol`` optics/Twomey diagnostic
+  before JAM had its own coupling). JAM now owns the ``aerosol`` slot through a
+  minimal ``AerosolCarrySeeder`` and supplies the direct effect via
+  ``JamOpticsTerm`` — including the grey two-stream scheme's broadband 550 nm
+  profile fields, so grey+JAM keeps a direct effect. With ``jam_optics=False``
+  the aerosol is radiatively passive (all-zero optics), a clean A/B control.
+  MACv2-SP is unchanged for ``aerosol_module="macv2sp"``.
+- **Activation fallback.** In the JAM path the 2M scheme falls back, where
+  ARG's ``activated_cdnc`` is empty, to its own ECHAM-HAM minimum-CDNC floor
+  (``cdnc_min_fixed`` = 40 cm⁻³, or the dynamic max-radius floor; #674) rather
+  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp``+2M path's
+  Twomey link.
+- **Breaking: aerosol output variables are renamed into explicit namespaces.**
+  MACv2-SP's ``aerosol.*`` output moves to ``macsp.*`` with CF/AeroCom names
+  where they exist (``aerosol.aod_total`` → ``macsp.od550aer``); JAM's column
+  optics publish under ``jam_optics.*`` (``jam_optics.aod_550`` is the
+  band-centre-approx column AOD, distinct from the Mie-based ``od550aer`` of the
+  ``aerocom_optics`` pass). The top-level ``aerosol_optical_depth`` key — which
+  collided with the unrelated per-band ``RadiationInput`` field — is **removed**;
+  its value lives on as ``jam_optics.aod_550``. The internal ``aerosol`` struct
+  that radiation and the microphysics read by attribute is unchanged; only the
+  output keys move. ``tools/aerocom_cmor.py`` and
+  ``tools/release_validation/health.py`` are updated for the new names.
+
 Unreleased — one vertical direction in the output, and CF metadata
 ------------------------------------------------------------------
 
