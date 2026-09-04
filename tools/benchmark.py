@@ -150,30 +150,36 @@ def _compose_preset(overrides: list[str]):
         return compose(config_name="config", overrides=overrides)
 
 
-def _load_bundle_names():
-    """Load ``jcm.data.bundle_names`` WITHOUT importing the ``jcm`` package.
+def _load_mirror_manifest():
+    """Load ``jcm.data.mirror_manifest`` WITHOUT importing the ``jcm`` package.
 
-    Same rationale (and mechanism) as :func:`_hf_fetch`: reaching the module as
-    ``from jcm.data.bundle_names import ...`` executes ``jcm/__init__.py``,
-    which initialises a JAX backend and preallocates ~75 % of the device the
-    instant it is touched — before the free-GPU gate. ``bundle_names.py`` has
-    no intra-package imports (that is a maintained invariant), so loading it by
-    file path is safe and keeps the auto-bundle naming convention a single
-    source of truth shared with ``jcm.runners``.
+    Same rationale (and mechanism) as :func:`_hf_fetch`: reaching it through
+    ``jcm`` executes ``jcm/__init__.py``, which initialises a JAX backend and
+    preallocates ~75 % of the device before the free-GPU gate. The manifest
+    read-side is import-free (json + pathlib), so a file-path load is safe and
+    shares the availability source of truth with the runner (#751). Its
+    ``load_manifest`` reads the sibling JSON via ``__file__``, so the file-path
+    load resolves it the same way a package import would.
     """
     import importlib.util
-    src = REPO / "jcm" / "data" / "bundle_names.py"
-    spec = importlib.util.spec_from_file_location("_jcm_bundle_names", src)
+    src = REPO / "jcm" / "data" / "mirror_manifest.py"
+    spec = importlib.util.spec_from_file_location("_jcm_mirror_manifest", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
+#: The four prescribed-emission keys honouring ``auto`` (their auto product is
+#: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
+_EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
+                       "oxidants_file")
+
+
 def _load_expand_yearly_files():
     """Load ``jcm.data.yearly_files.expand_yearly_files`` WITHOUT importing ``jcm``.
 
-    Same rationale (and mechanism) as :func:`_load_bundle_names`: reaching it as
-    ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
+    Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
+    as ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
     — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
     backend, preallocating the GPU before the free-card gate. The expansion lives
     in the import-free leaf ``jcm/data/yearly_files.py`` precisely so the runner
@@ -196,7 +202,7 @@ def _auto_emission_files(cfg) -> list[str]:
     config, but the four prescribed-emission keys default to ``auto`` and are
     resolved lazily by ``jcm.runners`` during model construction — i.e. AFTER
     the GPU is claimed and the telemetry sampler is running. Enumerate them here
-    (from the same ``jcm.data.bundle_names`` convention the runner uses) so they
+    (from the same mirror manifest the runner's resolver consults) so they
     join the pre-GPU prefetch: an unreachable or non-existent bundle then
     refuses the run up front instead of stalling on a held card.
 
@@ -204,15 +210,13 @@ def _auto_emission_files(cfg) -> list[str]:
     bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
     non-JAM package consumes no emissions, and the pySES backend's native grids
     are not the spectral-token bundles — both resolve ``auto`` to nothing. The
-    mirror's published-bundle set is consulted per key
-    (``bundle_is_published``): a grid outside the published-grid whitelist has
-    no bundle at all; a published-horizontal / unpublished-level combo
-    (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
+    mirror manifest's ``is_published`` is consulted per key: a grid outside the
+    published-grid set has no bundle; a published-horizontal / unpublished-level
+    combo (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
     (token, nlev) — has no level-resolved oxidant bundle while its level-free
-    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those
-    keys here too. A key explicitly set to a path/``null`` in the preset is
-    honoured (the literal path is already picked up by ``_preset_data_files``;
-    ``null`` opts out).
+    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those keys
+    here too. A key explicitly set to a path/``null`` is honoured (the literal
+    path is already picked up by ``_preset_data_files``; ``null`` opts out).
     """
     phys = cfg.get("physics") or {}
     if str(phys.get("aerosol_module", "")) != "jam":
@@ -223,25 +227,25 @@ def _auto_emission_files(cfg) -> list[str]:
     trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
     if trunc is None or nlev is None:
         return []
-    names = _load_bundle_names()
+    mm = _load_mirror_manifest()
+    manifest = mm.load_manifest()
     forcing = cfg.get("forcing") or {}
-    token = names.grid_token(trunc)
-    # Level-resolved bundles (oxidants) are on hybrid-level pressures, so the
-    # runner's gate also rejects a sigma grid that merely shares a published
-    # (token, nlev); mirror that here so the prefetch never fetches an oxidant
-    # bundle the build will null.
+    # grid_token: ``t{truncation}`` — the same relation utils.get_coords uses.
+    token = f"t{int(trunc)}"
+    # Level-resolved bundles (oxidants) are on hybrid-level pressures, so
+    # is_published also rejects a sigma grid that merely shares a published
+    # (token, nlev); the shared manifest keeps this enumerator and the runner's
+    # ``auto`` resolver from disagreeing on which keys to fetch (F2).
     vertical = str(grid.get("vertical", "hybrid"))
-    # Mirror the runner's key-specific published-bundle check (F2): a
-    # non-mirrored grid has NO bundles, and a published-horizontal /
-    # unpublished-level combo (e.g. t63_l8) has no level-resolved oxidant
-    # bundle while its level-free emissions/dms/dust bundles still exist. The
-    # shared ``bundle_is_published`` keeps this enumerator and the runner's
-    # ``auto`` resolver from disagreeing on which keys to fetch.
-    return [path
-            for key, path in names.auto_emission_bundle_paths(
-                token, nlev).items()
-            if str(forcing.get(key, "auto")) == "auto"
-            and names.bundle_is_published(key, token, nlev, vertical)]
+    out = []
+    for key in _EMISSION_AUTO_KEYS:
+        if str(forcing.get(key, "auto")) != "auto":
+            continue
+        product = mm.product_for_key(manifest, key)
+        if mm.is_published(manifest, product, token, int(nlev), vertical):
+            out.append(
+                "hf://" + mm.bundle_path(manifest, product, token, int(nlev)))
+    return out
 
 
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,
