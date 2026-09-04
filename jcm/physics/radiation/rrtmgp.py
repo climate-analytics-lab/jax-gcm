@@ -39,6 +39,7 @@ from jcm.physics.radiation.radiation_types import (
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import prepare_radiation_state
 from jcm.physics.radiation.mcica import (
     column_key,
+    effective_cloud_fraction,
     generate_subcolumns,
     in_cloud_path,
 )
@@ -616,6 +617,17 @@ def radiation_scheme_rrtmgp(
         _MAX_IN_CLOUD_CONDENSATE,
     )
 
+    # The clear-cell threshold ``in_cloud_path`` uses to zero the condensate
+    # (cf <= 2*cld_frac_min) must also gate the McICA sampler and the cover
+    # diagnostic below: a cell whose in-cloud condensate was zeroed is
+    # optically empty, so it must not be reported as cover nor bridge
+    # maximum-random overlap through an empty layer (ECHAM ties condensate and
+    # the icldlyr cloud flag together on the same test; see
+    # ``effective_cloud_fraction``).
+    cloud_fraction_rad = effective_cloud_fraction(
+        cloud_fraction, eps=parameters.cld_frac_min,
+    )
+
     icon_state = prepare_radiation_state(
         temperature=temperature,
         specific_humidity=specific_humidity,
@@ -625,7 +637,7 @@ def radiation_scheme_rrtmgp(
         air_density=air_density,
         cloud_water=cloud_water_in_cloud,
         cloud_ice=cloud_ice_in_cloud,
-        cloud_fraction=cloud_fraction,
+        cloud_fraction=cloud_fraction_rad,
         cos_zenith=cos_zenith,
         ozone_vmr=ozone_vmr,
     )
@@ -653,12 +665,12 @@ def radiation_scheme_rrtmgp(
     decorrelation_km = float(parameters.cloud_decorrelation_km)
 
     masks_lw = generate_subcolumns(
-        cloud_fraction, layer_thickness,
+        cloud_fraction_rad, layer_thickness,
         n_subcols=n_gpt_lw, overlap=overlap_str,
         decorrelation_km=decorrelation_km, key=key_lw,
     )    # [n_gpt_lw, nlev], TOA-first
     masks_sw = generate_subcolumns(
-        cloud_fraction, layer_thickness,
+        cloud_fraction_rad, layer_thickness,
         n_subcols=n_gpt_sw, overlap=overlap_str,
         decorrelation_km=decorrelation_km, key=key_sw,
     )    # [n_gpt_sw, nlev], TOA-first

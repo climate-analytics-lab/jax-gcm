@@ -8,6 +8,8 @@ import numpy as np
 
 from jcm.physics.radiation.mcica import (
     column_key,
+    column_total_cover,
+    effective_cloud_fraction,
     generate_subcolumns,
     in_cloud_path,
 )
@@ -186,3 +188,43 @@ def test_in_cloud_path_no_inflation_for_decorrelated_condensate():
     f = jnp.array([1e-6])        # essentially clear
     out = in_cloud_path(grid, f, eps=eps)
     assert float(out[0]) == 0.0
+
+
+def test_effective_cloud_fraction_matches_in_cloud_path_zeroing():
+    """The sampler/cover fraction is zeroed on the SAME cells in_cloud_path is.
+
+    A cell whose in-cloud condensate is zeroed (cf <= 2*eps) is optically
+    empty, so its effective cloud fraction must be 0 too — otherwise the
+    McICA sampler and the cover diagnostic disagree with the optics.
+    """
+    eps = 1e-3
+    grid = jnp.ones(4)
+    f = jnp.array([0.0, eps, 2.0 * eps, 5.0 * eps])
+    eff = effective_cloud_fraction(f, eps=eps)
+    zeroed_condensate = in_cloud_path(grid, f, eps=eps) == 0.0
+    # Wherever the condensate is zeroed the effective fraction is 0, and only
+    # there — the thin-but-real cloud (5*eps) keeps its fraction.
+    np.testing.assert_array_equal(np.array(eff == 0.0), np.array(zeroed_condensate))
+    np.testing.assert_allclose(float(eff[3]), 5.0 * eps, rtol=1e-6)
+
+
+def test_effective_fraction_removes_spurious_cover_from_optically_empty_layer():
+    """A sub-threshold layer must not report cover or bridge overlap.
+
+    Quantifies the marginal-layer behaviour change at the 1e-3 default: a
+    column whose only nonzero fraction is a sub-threshold layer (cf = 1.5e-3)
+    reports nonzero max-random cover from the RAW fraction but ZERO from the
+    effective fraction, matching the zeroed in-cloud condensate there.
+    """
+    eps = 1e-3
+    f = jnp.array([0.0, 1.5e-3, 0.0])   # cf in (eps, 2*eps]: condensate zeroed
+    # Raw fraction still reports cover (max-random overlap code 1).
+    np.testing.assert_allclose(float(column_total_cover(f, 1)), 1.5e-3, rtol=1e-5)
+    # Effective fraction reports none — consistent with the empty optics.
+    eff = effective_cloud_fraction(f, eps=eps)
+    assert float(column_total_cover(eff, 1)) == 0.0
+    # A genuine (supra-threshold) cloud in the same column is untouched.
+    f2 = f.at[0].set(0.6)
+    np.testing.assert_allclose(
+        float(column_total_cover(effective_cloud_fraction(f2, eps=eps), 1)),
+        0.6, rtol=1e-5)
