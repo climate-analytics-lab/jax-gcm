@@ -203,6 +203,9 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
         terrain = TerrainData.aquaplanet(coords)
         forcing = ForcingData.zeros((64, 32))
 
+        # No time_step: ECHAM reports no stability limit, so the Model resolves
+        # the 12-min no-limit default (matching run/default.yaml); the reference
+        # was regenerated at that step (#751).
         model = Model(
             coords=coords,
             terrain=terrain,
