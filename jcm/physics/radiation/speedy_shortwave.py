@@ -43,11 +43,27 @@ def get_shortwave_rad_fluxes(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
 
-    # if compute_shortwave is true, then compute shortwave radiation
-    # otherwise return the same physics_data and empty tendencies
-    zero_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
-    state, physics_data, parameters, forcing, terrain, tendencies = shortwave_rad_fluxes((state, physics_data, parameters, forcing, terrain, zero_tendencies))
-    return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, lambda: tendencies, lambda: zero_tendencies), physics_data
+    # SPEEDY computes shortwave radiation only every `nstrad` steps (physics.f90) but keeps
+    # the resulting heating rate (tt_rsw) and applies it on every step. Do the same here:
+    # on a radiation step compute the fluxes and cache the temperature tendency in the
+    # shortwave carry; on the other steps skip the (expensive) computation and re-apply the
+    # cached tendency. The cached radiative diagnostics (ftop, rsds, rsns, dfabs) are carried
+    # unchanged between radiation steps, consistent with the heating actually applied.
+    shape = state.temperature.shape
+
+    def _compute(_):
+        zero_tendencies = PhysicsTendency.zeros(shape=shape)
+        _, new_physics_data, _, _, _, tendencies = shortwave_rad_fluxes(
+            (state, physics_data, parameters, forcing, terrain, zero_tendencies))
+        shortwave_rad = new_physics_data.shortwave_rad.copy(heating_rate=tendencies.temperature)
+        return tendencies, new_physics_data.copy(shortwave_rad=shortwave_rad)
+
+    def _replay(_):
+        tendencies = PhysicsTendency.zeros(shape=shape, temperature=physics_data.shortwave_rad.heating_rate)
+        return tendencies, physics_data
+
+    return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, _compute, _replay, None)
+
 
 @jit
 def shortwave_rad_fluxes(operand):
@@ -376,11 +392,16 @@ def get_clouds(
     terrain: TerrainData
 ) -> tuple[PhysicsTendency, PhysicsData]:
 
-    # if compute_shortwave is true, then clouds
-    # otherwise return the same physics_data and empty tendencies
+    # Clouds are only needed on shortwave radiation steps; skip the computation otherwise
+    # and carry the previous cloud fields (they produce no tendency of their own).
     zero_tendencies = PhysicsTendency.zeros(shape=state.temperature.shape)
-    state, physics_data, parameters, forcing, terrain, tendencies = clouds((state, physics_data, parameters, forcing, terrain, zero_tendencies))
-    return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, lambda: tendencies, lambda: zero_tendencies), physics_data
+
+    def _compute(_):
+        _, new_physics_data, _, _, _, _ = clouds((state, physics_data, parameters, forcing, terrain, zero_tendencies))
+        return new_physics_data
+
+    return zero_tendencies, jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, _compute, lambda _: physics_data, None)
+
 
 @jit
 def clouds(operand):

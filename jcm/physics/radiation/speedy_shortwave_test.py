@@ -447,6 +447,121 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dforcing.isnan().any_true())
 
+    def _build_realistic_state_and_data(self, compute_shortwave=True):
+        """Column setup matching test_shortwave_radiation, before clouds/shortwave
+        are computed (i.e. shortwave_rad still carries its default cloud fields)."""
+        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
+        qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        rh = qa/qsat
+        geopotential = 20000. * jnp.arange(7, -1, -1, dtype = float)
+        se = .1*geopotential
+
+        xy = (ix, il)
+        zxy = (kx, ix, il)
+        broadcast = lambda a: jnp.tile(a[:, jnp.newaxis, jnp.newaxis], (1,) + xy)
+        qa, qsat, rh, geopotential, se = broadcast(qa), broadcast(qsat), broadcast(rh), broadcast(geopotential), broadcast(se)
+
+        psa = jnp.ones(xy)
+        precnv = 1.0 * np.ones(xy)
+        precls = 4.0 * np.ones(xy)
+        iptop = np.ones(xy, dtype=int) * jnp.linspace(0,kx,il).astype(int)[jnp.newaxis,:] + 1
+        fmask = .7 * np.ones(xy)
+
+        terrain_new = terrain.copy(fmask=fmask)
+        terrain_new, speedy_c = convert_to_speedy_latitudes(terrain_new, speedy_coords)
+
+        surface_flux = SurfaceFluxData.zeros(xy)
+        humidity = HumidityData.zeros(xy, kx, rh=rh, qsat=qsat)
+        convection = ConvectionData.zeros(xy, kx, iptop=iptop, precnv=precnv, se=se)
+        condensation = CondensationData.zeros(xy, kx, precls=precls)
+        sw_data = SWRadiationData.zeros(xy, kx, compute_shortwave=compute_shortwave)
+
+        date_data = DateData.set_date(
+            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
+        )
+
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_c)
+        state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
+        forcing_now = ForcingData.zeros(xy).select(date_data, calendar='gregorian')
+        physics_data = get_zonal_average_fields(state, physics_data, forcing_now, terrain_new)
+        return state, physics_data, forcing_now, terrain_new
+
+    def _build_shortwave_inputs(self, compute_shortwave=True):
+        """As above, plus clouds computed, i.e. ready for get_shortwave_rad_fluxes."""
+        state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave)
+        _, physics_data = get_clouds(state, physics_data, parameters, forcing_now, terrain_new)
+        return state, physics_data, forcing_now, terrain_new
+
+    def test_shortwave_replay_returns_cached_heating(self):
+        """On a replay step (compute_shortwave=False) get_shortwave_rad_fluxes must
+        return exactly the tendency cached from the last compute step, and must leave
+        the carried radiative diagnostics unchanged (issue #752)."""
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+        self.assertFalse(np.allclose(tend_compute.temperature, 0.0))
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        tend_replay, physics_data_out = get_shortwave_rad_fluxes(state, physics_data_replay, parameters, forcing_now, terrain_new)
+
+        np.testing.assert_allclose(tend_replay.temperature, tend_compute.temperature)
+        np.testing.assert_allclose(tend_replay.temperature, physics_data_compute.shortwave_rad.heating_rate)
+
+        for field in ('ftop', 'rsds', 'rsns', 'dfabs'):
+            np.testing.assert_allclose(getattr(physics_data_out.shortwave_rad, field),
+                                        getattr(physics_data_compute.shortwave_rad, field))
+
+    def test_shortwave_replay_does_not_recompute(self):
+        """A replay step must not touch `state` at all -- it should return the cached
+        heating rate exactly, even if the state passed in has since changed."""
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        perturbed_state = state.copy(temperature=state.temperature + 10.0,
+                                      specific_humidity=state.specific_humidity * 2.0)
+        tend_replay, _ = get_shortwave_rad_fluxes(perturbed_state, physics_data_replay, parameters, forcing_now, terrain_new)
+
+        np.testing.assert_allclose(tend_replay.temperature, physics_data_compute.shortwave_rad.heating_rate)
+
+    def test_shortwave_heating_applied_every_step(self):
+        """The exact failure mode of issue #752: one compute step followed by two
+        replay steps must apply the same heating rate all three times, so the sum
+        of the three tendencies is 3x the compute-step tendency (before the fix it
+        was 1x, since replay steps returned zero)."""
+        state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
+        tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
+
+        sw_replay = physics_data_compute.shortwave_rad.copy(compute_shortwave=False)
+        physics_data_replay = physics_data_compute.copy(shortwave_rad=sw_replay)
+
+        tend_replay1, physics_data_replay1 = get_shortwave_rad_fluxes(state, physics_data_replay, parameters, forcing_now, terrain_new)
+        tend_replay2, _ = get_shortwave_rad_fluxes(state, physics_data_replay1, parameters, forcing_now, terrain_new)
+
+        total = tend_compute.temperature + tend_replay1.temperature + tend_replay2.temperature
+        np.testing.assert_allclose(total, 3.0 * tend_compute.temperature)
+
+    def test_clouds_skipped_on_replay_step(self):
+        """get_clouds must carry the previous cloud fields unchanged on a replay
+        step, and must actually (re)compute them on a compute step."""
+        state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave=False)
+        initial_sw = physics_data.shortwave_rad
+
+        _, physics_data_replay = get_clouds(state, physics_data, parameters, forcing_now, terrain_new)
+        for field in ('qcloud', 'icltop', 'cloudc', 'cloudstr', 'gse'):
+            np.testing.assert_allclose(getattr(physics_data_replay.shortwave_rad, field),
+                                        getattr(initial_sw, field))
+
+        sw_compute = physics_data.shortwave_rad.copy(compute_shortwave=True)
+        physics_data_compute_input = physics_data.copy(shortwave_rad=sw_compute)
+        _, physics_data_computed = get_clouds(state, physics_data_compute_input, parameters, forcing_now, terrain_new)
+
+        self.assertFalse(np.allclose(physics_data_computed.shortwave_rad.cloudc, initial_sw.cloudc))
+
     @pytest.mark.skip(reason="JAX gradients are producing nans")
     def test_get_zonal_average_fields_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
