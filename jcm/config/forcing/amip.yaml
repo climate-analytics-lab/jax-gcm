@@ -20,6 +20,10 @@ years: ???
 # Source coverage of the yearly products: the expansion pads the
 # requested range by one year each side (clipped to this coverage) so
 # by_date_interp has bracketing mid-month samples across the Jan-1 /
-# Dec-31 run boundaries instead of clamping for ~half a month.
+# Dec-31 run boundaries instead of clamping for ~half a month. All of
+# amip's yearly products (forcing_amip, ozone_amip, emissions_amip) come
+# from the same --stage amip build and share this 2022 endpoint, so —
+# unlike forcing=era5, whose surface files run to 2024 — no per-product
+# ozone/emissions coverage override is needed here.
 available_years: [1870, 2022]
 ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc

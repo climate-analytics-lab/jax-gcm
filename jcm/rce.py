@@ -368,7 +368,7 @@ def rce_column(
             and would now deliver ~549 W/m² — enough to shut Betts-Miller
             deep convection off entirely in the default column.
         lat_deg: Column latitude [deg] (fixes the zenith angle with ``solar``).
-        nlev: Number of levels for ``get_echam_levels`` (47 or 40) when
+        nlev: Number of levels for ``get_echam_levels`` (47 or 95) when
             ``vertical`` is not given.
         vertical: Optional explicit vertical coordinate (e.g. a
             ``SigmaCoordinates`` for a cheap test grid); overrides ``nlev``.

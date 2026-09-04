@@ -32,7 +32,16 @@ from pathlib import Path
 
 import numpy as np
 
-GRIDS = {"t63": 96, "t106": 160}
+from jcm.data.bundle_names import PUBLISHED_GRIDS
+
+# Per-grid Gaussian latitude count. The *set* of published grids is owned by
+# ``jcm.data.bundle_names.PUBLISHED_GRIDS`` (the whitelist the runner's ``auto``
+# resolver and the benchmark prefetch both consult) so the build loop here and
+# that resolver cannot drift; this dict only adds each grid's ``nlat``. Missing
+# an entry for a published grid raises loudly below rather than silently
+# skipping it.
+_NLAT = {"t63": 96, "t106": 160}
+GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
 NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
              "noleak_greenlndantarcsgh30fac2.50_20250825.nc")

@@ -37,6 +37,17 @@ def _compose(overrides=None):
         return compose(config_name="config", overrides=overrides)
 
 
+# The four prescribed-emission keys default to ``auto`` (the per-grid HF bundle
+# when a JAM package is active — issue #640). Emission-path unit tests run
+# offline on grids the mirror does not carry, so they null the keys they don't
+# provide to stay hermetic; a specific ``forcing.<key>=<path>`` listed *after*
+# these wins. Prepend with ``[*_NULL_EMISSIONS, ...]``.
+_NULL_EMISSIONS = (
+    "forcing.emissions_file=null", "forcing.dms_file=null",
+    "forcing.dust_file=null", "forcing.oxidants_file=null",
+)
+
+
 class TestTracerPositivityResolution(unittest.TestCase):
     """``diffusion.tracer_positivity`` resolution in build_tracer_filter.
 
@@ -101,9 +112,104 @@ class TestConfigComposition(unittest.TestCase):
         self.assertEqual(cfg.run.total_time, 1)
         self.assertEqual(cfg.run.save_interval, 1)
 
+    def test_run_groups_share_one_schema(self):
+        # ``run/default.yaml`` is the complete base schema and the other run
+        # groups inherit it (``defaults: [default, _self_]``), so every run
+        # group must expose exactly the same set of keys (#640 smell 3).
+        keysets = {name: set(_compose([f"run={name}"]).run.keys())
+                   for name in ("default", "longrun", "smoke", "pyses_year")}
+        base = keysets["default"]
+        for name, keys in keysets.items():
+            self.assertEqual(keys, base, f"run={name} key set diverged")
+
+    def test_run_key_override_needs_no_plus(self):
+        # Because the schema is complete, formerly-per-group keys can be set on
+        # any run group without a ``+`` (previously ``run=longrun`` had no
+        # ``checkpoint_path`` and required ``+run.checkpoint_path=...``).
+        cfg = _compose(["run=longrun", "run.checkpoint_path=/tmp/x.ckpt"])
+        self.assertEqual(cfg.run.checkpoint_path, "/tmp/x.ckpt")
+        # ``bail_on_unhealthy`` is now universal and defaults to the runner's
+        # historical implicit default (True) on every group.
+        self.assertTrue(cfg.run.bail_on_unhealthy)
+        self.assertTrue(_compose(["run=default"]).run.bail_on_unhealthy)
+
     def test_init_jw_compose(self):
         cfg = _compose(["init=jw"])
         self.assertEqual(cfg.init.kind, "jw")
+
+
+class TestExperimentGroup(unittest.TestCase):
+    """The ``experiment`` group promotes each validated benchmark preset to a
+    first-class ``python -m jcm.main +experiment=<name>`` composition (#640
+    smell 2), so users get a validated configuration instead of a cold start.
+    """
+
+    EXPERIMENT_DIR = Path(__file__).parent / "config" / "experiment"
+
+    def _compose_hydra(self, name):
+        # ``return_hydra_config`` exposes ``cfg.hydra.runtime.choices`` so we
+        # can assert which group option each experiment selected.
+        with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
+            return compose(config_name="config",
+                           overrides=[f"+experiment={name}"],
+                           return_hydra_config=True)
+
+    def test_every_experiment_composes(self):
+        names = sorted(p.stem for p in self.EXPERIMENT_DIR.glob("*.yaml"))
+        self.assertTrue(names, "experiment group is empty")
+        for name in names:
+            with self.subTest(experiment=name):
+                cfg = self._compose_hydra(name)
+                self.assertIn("physics", cfg.hydra.runtime.choices)
+                # The run schema is complete, so ``time_step`` always exists.
+                self.assertIn("time_step", cfg.run)
+
+    def test_load_bearing_values(self):
+        cases = {
+            "speedy-t31": dict(physics="speedy", grid="speedy_t31_l8",
+                               init="isothermal", run="default", time_step=15),
+            "t63-echam-jam": dict(physics="echam-jam",
+                                  grid="echam_t63_l47_hybrid", init="jw",
+                                  run="longrun", time_step=12),
+            "ma-t63-l95": dict(physics="echam-jam",
+                               grid="echam_t63_l95_hybrid", init="jw",
+                               run="longrun", time_step=12),
+        }
+        for name, want in cases.items():
+            with self.subTest(experiment=name):
+                cfg = self._compose_hydra(name)
+                ch = cfg.hydra.runtime.choices
+                self.assertEqual(ch["physics"], want["physics"])
+                self.assertEqual(ch["grid"], want["grid"])
+                self.assertEqual(cfg.init.kind, want["init"])
+                self.assertEqual(ch["run"], want["run"])
+                self.assertEqual(cfg.run.time_step, want["time_step"])
+
+    def test_echam_experiments_use_dry_jw_and_sl_offcentering(self):
+        # The L47 stability recipe: fully-dry JW init + SL off-centering.
+        cfg = self._compose_hydra("t63-echam-rrtmgp")
+        self.assertEqual(cfg.init.kind, "jw")
+        self.assertEqual(cfg.init.rh, 0.0)
+        self.assertEqual(cfg.sl_off_centering, 0.2)
+
+    def test_pyses_experiment_keeps_isothermal_and_no_timestep(self):
+        # pySES rejects the dinosaur JW init and adopts the dycore dt_seconds,
+        # so its experiments override neither init nor run.time_step.
+        cfg = self._compose_hydra("ma-ne30-l47")
+        self.assertEqual(cfg.hydra.runtime.choices["dycore"], "pyses_ne30l47")
+        self.assertEqual(cfg.init.kind, "isothermal")
+        self.assertIsNone(cfg.run.time_step)
+
+    def test_speedy_experiment_builds_model(self):
+        # Cheap model-construction smoke on the smallest experiment. The big
+        # JAM/pySES experiments are deliberately NOT built here (too expensive
+        # and network-dependent); terrain/forcing are overridden to aquaplanet
+        # so the build needs no boundary-file fetch.
+        cfg = _compose(["+experiment=speedy-t31",
+                        "terrain=aquaplanet", "forcing=default"])
+        model = build_model(cfg)
+        self.assertIsNotNone(model)
+
 
 
 class TestBuilders(unittest.TestCase):
@@ -321,7 +427,7 @@ class TestEmissionsConfig(unittest.TestCase):
         # base CI image doesn't carry; the wiring under test is independent of
         # both.
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "physics.jam_microphysics=placeholder",
                         "physics.radiation_scheme=grey"])
         names = [t.name for t in build_physics(cfg).terms]
@@ -333,7 +439,7 @@ class TestEmissionsConfig(unittest.TestCase):
         # to the default it was trying to override (Codex on #624).
         from omegaconf import open_dict
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         with open_dict(cfg):
             cfg.physics.cloud_sheme = "2m"      # sic
         with self.assertRaisesRegex(ValueError, "cloud_sheme"):
@@ -341,7 +447,7 @@ class TestEmissionsConfig(unittest.TestCase):
 
     def test_unknown_builder_raises(self):
         from jcm.runners import build_physics
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         cfg.physics.builder = "not_a_factory"
         with self.assertRaisesRegex(ValueError, "Unknown physics.builder"):
             build_physics(cfg)
@@ -355,7 +461,7 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"emis_surface_combustion_bc":
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
@@ -370,7 +476,7 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"aero_emis_m_so4_acc":
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             f = build_forcing(cfg, coords)
         self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
@@ -397,11 +503,187 @@ class TestEmissionsConfig(unittest.TestCase):
                         (("lon", "lat", "time"),
                          np.full((nlon, nlat, 12), 2e-11))},
                        coords=base).to_netcdf(p2)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file=[{p1},{p2}]"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
+
+    def test_duplicate_variable_across_products_raises(self):
+        # F1: two products claiming the SAME emission variable is ambiguous —
+        # `dict.update` would silently keep the last (double-counting the
+        # moment someone lists overlapping bundles). Reject with a build-time
+        # error naming the colliding variable and BOTH products.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "prod_a.nc"
+            p2 = Path(tmp) / "prod_b.nc"
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 1e-11))},
+                       coords=base).to_netcdf(p1)
+            xr.Dataset({"emis_surface_combustion_bc":
+                        (("lon", "lat", "time"),
+                         np.full((nlon, nlat, 12), 2e-11))},
+                       coords=base).to_netcdf(p2)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            with self.assertRaises(ValueError) as ctx:
+                build_forcing(cfg, coords)
+        msg = str(ctx.exception)
+        self.assertIn("emis_surface_combustion_bc", msg)
+        self.assertIn(str(p1), msg)
+        self.assertIn(str(p2), msg)
+
+    def test_duplicate_speciated_variable_across_products_raises(self):
+        # Same disjoint-merge guard on the pre-speciated (aero_emis_*) channel.
+        import tempfile
+        import xarray as xr
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                    "lat": np.linspace(-87, 87, nlat), "time": np.arange(12)}
+            p1 = Path(tmp) / "spec_a.nc"
+            p2 = Path(tmp) / "spec_b.nc"
+            for p in (p1, p2):
+                xr.Dataset({"aero_emis_m_so4_acc":
+                            (("lon", "lat", "time"),
+                             np.full((nlon, nlat, 12), 1e-11))},
+                           coords=base).to_netcdf(p)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file=[{p1},{p2}]"])
+            with self.assertRaises(ValueError) as ctx:
+                build_forcing(cfg, coords)
+        msg = str(ctx.exception)
+        self.assertIn("m_so4_acc", msg)
+        self.assertIn(str(p1), msg)
+        self.assertIn(str(p2), msg)
+
+    def test_mixed_transient_and_climatology_products_align_independently(self):
+        # Codex P1 (round 3): a list mixing a {year} transient product with a
+        # non-pattern time-bearing climatology must NOT feed one by-coords
+        # merge — disjoint/incompatible time axes would either NaN-fill the
+        # non-overlapping steps or clash (integer month vs datetime). Each
+        # element is now its own product, opened and time-aligned on its own,
+        # and their per-variable TimeSeries leaves merge into one ForcingData
+        # keeping distinct alignments.
+        import tempfile
+
+        import jax_datetime as jdt
+        import xarray as xr
+        from omegaconf import open_dict
+
+        from jcm.date import DateData
+        from jcm.forcing import BY_DATE, WRAP_YEAR, TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                "lat": np.linspace(-87, 87, nlat)}
+        with tempfile.TemporaryDirectory() as tmp:
+            # Transient biomass-burning product: one file per year, 12 monthly
+            # datetime steps each; value encodes year*100 + month so the
+            # sampled slice is identifiable.
+            for yr in (2000, 2001):
+                times = np.array([np.datetime64(f"{yr}-{m:02d}-15")
+                                  for m in range(1, 13)])
+                vals = np.stack([np.full((nlon, nlat), yr * 100 + m)
+                                 for m in range(12)])
+                xr.Dataset(
+                    {"emis_biomass_burning_bc": (("time", "lon", "lat"), vals)},
+                    coords={**base, "time": times},
+                ).to_netcdf(Path(tmp) / f"bb_{yr}.nc")
+            # Climatology product: 12-month, INTEGER month axis — the exact
+            # integer-month-vs-datetime mix a single by-coords merge clashes on.
+            cvals = np.stack([np.full((nlon, nlat), 10.0 + m)
+                              for m in range(12)])
+            anthro_path = Path(tmp) / "anthro.nc"
+            xr.Dataset(
+                {"emis_surface_combustion_bc": (("time", "lon", "lat"), cvals)},
+                coords={**base, "time": np.arange(12)},
+            ).to_netcdf(anthro_path)
+
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma"])
+            with open_dict(cfg):
+                cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
+                                              str(anthro_path)]
+                cfg.forcing.years = [2000, 2001]
+            f = build_forcing(cfg, coords)
+
+        em = f.anthropogenic_emissions
+        self.assertIn("emis_biomass_burning_bc", em)
+        self.assertIn("emis_surface_combustion_bc", em)
+        bb, an = em["emis_biomass_burning_bc"], em["emis_surface_combustion_bc"]
+        self.assertIsInstance(bb, TimeSeries)
+        self.assertIsInstance(an, TimeSeries)
+        # Independent alignment: transient BY_DATE over 24 months, climatology
+        # WRAP_YEAR over 12 — not one shared axis.
+        self.assertEqual(int(bb.align_mode), BY_DATE)
+        self.assertEqual(bb.values.shape[0], 24)
+        self.assertEqual(int(an.align_mode), WRAP_YEAR)
+        self.assertEqual(an.values.shape[0], 12)
+        # No NaN fill (the outer-join corruption mode).
+        self.assertFalse(bool(np.isnan(np.asarray(bb.values)).any()))
+        self.assertFalse(bool(np.isnan(np.asarray(an.values)).any()))
+        # Both sampled correctly at a mid-year date: 2001-07 → bb month index 6
+        # of 2001 (200106) and climatology month index 6 (16).
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime("2001-07-15")),
+            calendar="gregorian")
+        sel = f.select(date, calendar="gregorian").anthropogenic_emissions
+        self.assertAlmostEqual(
+            float(np.asarray(sel["emis_biomass_burning_bc"])[0, 0]), 200106.0)
+        self.assertAlmostEqual(
+            float(np.asarray(sel["emis_surface_combustion_bc"])[0, 0]), 16.0)
+
+    def test_all_transient_list_products_load_by_date(self):
+        # A list of *only* transient {year} products keeps working: each is its
+        # own multi-year BY_DATE product and all variables merge.
+        import tempfile
+
+        import xarray as xr
+        from omegaconf import open_dict
+
+        from jcm.forcing import BY_DATE, TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        base = {"lon": np.linspace(0, 360, nlon, endpoint=False),
+                "lat": np.linspace(-87, 87, nlat)}
+        with tempfile.TemporaryDirectory() as tmp:
+            for stem, var in (("bb", "emis_biomass_burning_bc"),
+                              ("an", "emis_surface_combustion_bc")):
+                for yr in (2000, 2001):
+                    times = np.array([np.datetime64(f"{yr}-{m:02d}-15")
+                                      for m in range(1, 13)])
+                    vals = np.full((12, nlon, nlat), 1e-11)
+                    xr.Dataset({var: (("time", "lon", "lat"), vals)},
+                               coords={**base, "time": times}).to_netcdf(
+                        Path(tmp) / f"{stem}_{yr}.nc")
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma"])
+            with open_dict(cfg):
+                cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
+                                              str(Path(tmp) / "an_{year}.nc")]
+                cfg.forcing.years = [2000, 2001]
+            f = build_forcing(cfg, coords)
+        em = f.anthropogenic_emissions
+        for var in ("emis_biomass_burning_bc", "emis_surface_combustion_bc"):
+            self.assertIsInstance(em[var], TimeSeries)
+            self.assertEqual(int(em[var].align_mode), BY_DATE)
+            self.assertEqual(em[var].values.shape[0], 24)
 
     def test_grid_mismatch_raises(self):
         import tempfile
@@ -414,7 +696,7 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon + 2, nlat, 12), 1e-11))},
                             nlon + 2, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             with self.assertRaisesRegex(ValueError, "model grid"):
                 build_forcing(cfg, coords)
@@ -427,7 +709,7 @@ class TestEmissionsConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = self._write(tmp, {"sst": (("lon", "lat", "time"),
                                           np.zeros((nlon, nlat, 12)))}, nlon, nlat)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.emissions_file={p}"])
             with self.assertRaisesRegex(ValueError, "no emissions variables"):
                 build_forcing(cfg, coords)
@@ -503,6 +785,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dms, dust, ox = self._write_files(tmp, coords)
             cfg = _compose([
+                *_NULL_EMISSIONS,
                 "physics=echam-jam", "grid=echam_t42_l8_sigma",
                 f"forcing.dms_file={dms}",
                 f"forcing.dust_file={dust}",
@@ -537,7 +820,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
     def test_null_paths_are_noops(self):
         from jcm.runners import build_forcing
         coords = self._coords()
-        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma"])
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma"])
         f = build_forcing(cfg, coords)
         # No files → no forcing at all (kind: default returns None).
         self.assertIsNone(f)
@@ -548,10 +831,29 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
             dms, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.dms_file={dms}"])
             with self.assertRaisesRegex(ValueError, "latitudes"):
                 build_forcing(cfg, coords)
+
+    def test_year_pattern_in_dms_dust_rejected_loudly(self):
+        # F3 (round 12): dms/dust are climatology-only single files — no
+        # transient product is mirrored and their WRAP_YEAR readers do not
+        # expand {year}. A {year} pattern must fail loudly at build time,
+        # naming the contract, not reach xr.open_dataset as a literal-brace
+        # file-not-found. (A bare `{` is Hydra override syntax, so the value
+        # is double-quoted for Hydra to keep the literal braces.)
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        for key in ("dms_file", "dust_file"):
+            with self.subTest(key):
+                cfg = _compose([
+                    *_NULL_EMISSIONS, "physics=echam-jam",
+                    "grid=echam_t42_l8_sigma",
+                    f'forcing.{key}="/x/{{year}}.nc"'])
+                with self.assertRaisesRegex(
+                        ValueError, rf"{key}.*climatology-only"):
+                    build_forcing(cfg, coords)
 
     def test_oxidant_level_mismatch_raises(self):
         import tempfile
@@ -560,7 +862,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, ox = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
-            cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.oxidants_file={ox}"])
             with self.assertRaisesRegex(ValueError, "levels"):
                 build_forcing(cfg, coords)
@@ -1099,9 +1401,11 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         cfg.init.kind = "from_mars"
         # A stub model shortcuts build_model: before the init dispatch
         # _run_full only touches ``model.coords`` (for the forcing) and
-        # ``model.physics`` (for the emulator GHG guard, which returns
-        # immediately when there is no emulator term).
-        stub = _types.SimpleNamespace(coords=build_coords(cfg), physics=None)
+        # ``model.physics`` (for the emulator GHG guard and the config-trap
+        # check, both of which no-op on an empty term list).
+        stub = _types.SimpleNamespace(
+            coords=build_coords(cfg),
+            physics=_types.SimpleNamespace(terms=[]))
         with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
             _run_full(cfg, model=stub)
 
@@ -1566,6 +1870,27 @@ class TestAutoInputResolution(unittest.TestCase):
             self.assertEqual(_resolve_auto_terrain(coords), "/cached/file.nc")
             self.assertEqual(f.call_args.args[0], "bundles/t21/terrain.nc")
 
+    def test_ozone_auto_nulls_on_sigma_without_fetch(self):
+        # Codex round 14 family check: auto-ozone has the SAME sigma hole as
+        # oxidants. ``jcm.data.bc.interpolate_ozone`` writes the packaged AND
+        # mirror ozone products on the model's HYBRID-level centre pressures and
+        # OzoneClimatology.from_file only cross-checks shape/lat-lon, so a sigma
+        # grid sharing a published (token, nlev) would wire hybrid-pressure
+        # ozone onto unrelated sigma levels. So a sigma grid resolves auto-ozone
+        # to None (analytic fallback + warning) with NO packaged scan or fetch.
+        import logging
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone, build_coords
+        cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63", "grid.layers=47"])
+        coords = build_coords(cfg)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=AssertionError("fetch must not be hit")):
+            with self.assertLogs("jcm", level=logging.WARNING) as cm:
+                self.assertIsNone(_resolve_auto_ozone(coords))
+        assert any("sigma" in m for m in cm.output)
+
     def test_terrain_auto_raises_loudly_when_unresolvable(self):
         from unittest import mock
 
@@ -1627,12 +1952,93 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
                 fallback, "ozone_available_years"),
             fallback.available_years)
 
+    def test_emissions_coverage_clamps_while_surface_keeps_range(self):
+        # Codex P2 (round 8): an era5-style cfg runs its SURFACE forcing to
+        # 2024 but the mirror's emissions_amip bundle ends 2022. The
+        # emissions_available_years override must clamp the emissions
+        # expansion to 2022 while the shared available_years keeps the full
+        # surface range — following the transient warning's advice otherwise
+        # fetches never-built 2023/2024 emission files.
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({
+            "years": [2023, 2024],
+            "available_years": [1979, 2024],
+            "emissions_available_years": [1850, 2022],
+        })
+        # Emissions clamp to the last built (2022) file...
+        self.assertEqual(
+            runners._forcing_products(
+                "/emis/{year}.nc", cfg.years,
+                runners._product_available_years(
+                    cfg, "emissions_available_years")),
+            [["/emis/2022.nc"]])
+        # ...while the surface product (shared available_years, coverage to
+        # 2024) still reaches the requested 2023-2024 (plus the one-year
+        # by_date_interp bracket on the low side).
+        self.assertEqual(
+            runners._expand_years(
+                "/sst/{year}.nc", cfg.years,
+                runners._product_available_years(cfg, "available_years")),
+            ["/sst/2022.nc", "/sst/2023.nc", "/sst/2024.nc"])
+
+    def test_emissions_oxidants_coverage_fall_back_to_shared(self):
+        # Per-product override beats the shared fallback; absent it, each
+        # transient-capable input inherits available_years (so it can never
+        # silently drift from the surface coverage).
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        cfg = OmegaConf.create({
+            "available_years": [1979, 2024],
+            "emissions_available_years": [1850, 2022],
+        })
+        self.assertEqual(
+            list(runners._product_available_years(
+                cfg, "emissions_available_years")),
+            [1850, 2022])
+        # oxidants has no override here → shared available_years.
+        self.assertEqual(
+            runners._product_available_years(
+                cfg, "oxidants_available_years"),
+            cfg.available_years)
+
     def test_era5_preset_composes(self):
         cfg = _compose(["forcing=era5", "forcing.years=[2023,2024]",
                         "run.start_date=2023-01-01"])
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
+        # Surface files run to 2024 but the emissions_amip bundle ends 2022,
+        # so the preset ships a per-product emissions clamp (Codex round 8).
+        self.assertEqual(list(cfg.forcing.available_years)[-1], 2024)
+        self.assertEqual(list(cfg.forcing.emissions_available_years)[-1], 2022)
+
+    def test_list_spec_splits_into_per_element_products(self):
+        # emissions_file may be a list (e.g. biomass-burning + anthropogenic).
+        # Each element is its OWN product: a {year} element expands to its
+        # yearly file list (one product concatenated along one time axis),
+        # while a static element stays scalar. The list is NOT flattened, so
+        # each product is opened and time-aligned on its own downstream (a
+        # transient product and a climatology must not share one time axis).
+        from jcm import runners
+        self.assertEqual(
+            runners._forcing_products(
+                ["/bb_{year}.nc", "/anthro.nc"], [2000, 2001], None),
+            [["/bb_2000.nc", "/bb_2001.nc"], "/anthro.nc"])
+        # A list of static paths keeps one product per element, unchanged.
+        self.assertEqual(
+            runners._forcing_products(["/a.nc", "/b.nc"], [2000, 2001], None),
+            ["/a.nc", "/b.nc"])
+        # A scalar spec is a single product; a {year} scalar becomes that
+        # product's yearly file list.
+        self.assertEqual(
+            runners._forcing_products("/anthro.nc", [2000, 2001], None),
+            ["/anthro.nc"])
+        self.assertEqual(
+            runners._forcing_products("/bb_{year}.nc", [2000, 2001], None),
+            [["/bb_2000.nc", "/bb_2001.nc"]])
 
     def test_start_date_resolves_to_datetime(self):
         from omegaconf import OmegaConf
@@ -1662,6 +2068,48 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         import jax_datetime as jdt
         self.assertEqual(
             int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+
+
+class TestEmulatorWeightsBuilderPath(unittest.TestCase):
+    """``emulator_weights_file`` via the echam_physics builder (Codex P2).
+
+    ``_build_physics_from_factory`` drops ``null`` kwargs, so
+    ``physics.emulator_weights_file=null`` cannot mean "random init" — it
+    resolves to the ``auto`` default. Train-from-scratch is the explicit
+    ``"random"`` sentinel instead.
+    """
+
+    def _rad_term(self, physics):
+        return next(t for t in physics.terms
+                    if getattr(t, "name", "") == "nn_emulator_radiation")
+
+    def _build(self, **extra):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _build_physics_from_factory
+        cfg = OmegaConf.create({
+            "builder": "echam_physics",
+            "radiation_scheme": "emulated",
+            **extra,
+        })
+        return _build_physics_from_factory(cfg)
+
+    def test_random_reaches_random_init(self):
+        term = self._rad_term(self._build(emulator_weights_file="random"))
+        self.assertIsNone(term._weights_file)
+
+    def test_null_falls_back_to_auto(self):
+        # null is dropped by the builder → the "auto" default (packaged).
+        term = self._rad_term(self._build(emulator_weights_file=None))
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(str(term._weights_file).endswith(
+            "emulator_weights_per_band_u64.nc"))
+
+    def test_absent_defaults_to_auto(self):
+        term = self._rad_term(self._build())
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(str(term._weights_file).endswith(
+            "emulator_weights_per_band_u64.nc"))
 
 
 class TestEmulatorGhgGuard(unittest.TestCase):
@@ -1738,3 +2186,1526 @@ class TestEmulatorGhgGuard(unittest.TestCase):
         forcing = types.SimpleNamespace(
             ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
         guard_emulator_ghg_forcing(self._physics(True), forcing)
+
+
+class TestWarnOnConfigTraps:
+    """The config cross-validation warnings (invalid-but-runnable combos).
+
+    Uses lightweight stand-ins — a physics object is just something with a
+    ``.terms`` list of named terms, and a forcing is a namespace carrying the
+    two MACv2-SP weight fields — so the checks are exercised without building a
+    real (expensive) model. Every finding is a WARNING; the tests assert both
+    that it fires on its trap combo and that it stays silent on the sane one.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _audible_jcm_logger(self):
+        # ``caplog.at_level("WARNING")`` sets only the ROOT logger level, so a
+        # leaked ``jcm``-hierarchy level (another module's logging test can
+        # leave ``logging.getLogger("jcm")`` at CRITICAL under xdist) would
+        # filter these warnings before they reach caplog and make the
+        # assert-present cases spuriously fail. Force the ``jcm`` logger audible
+        # for the duration and restore it, so the capture is order-independent.
+        import logging
+        jcm_logger = logging.getLogger("jcm")
+        prev = jcm_logger.level
+        jcm_logger.setLevel(logging.WARNING)
+        try:
+            yield
+        finally:
+            jcm_logger.setLevel(prev)
+
+    @staticmethod
+    def _physics(*names):
+        import types
+        return types.SimpleNamespace(
+            terms=[types.SimpleNamespace(name=n) for n in names])
+
+    @staticmethod
+    def _cfg(terrain="aquaplanet", forcing_kind="default", run_mode=None,
+             **forcing_keys):
+        from omegaconf import OmegaConf
+        cfg = {"terrain": {"kind": terrain},
+               "forcing": {"kind": forcing_kind, **forcing_keys}}
+        if run_mode is not None:
+            cfg["run"] = {"mode": run_mode}
+        return OmegaConf.create(cfg)
+
+    @staticmethod
+    def _coords(truncation=63, nlev=47, vertical="hybrid"):
+        # ``_grid_token`` reads ``coords.horizontal.total_wavenumbers`` and maps
+        # ``total_wavenumbers - 2`` to ``t{trunc}``; the level-aware oxidant
+        # predicate reads ``coords.nodal_shape[0]`` for the layer count and
+        # ``_vertical_kind`` reads ``coords.vertical`` (isinstance
+        # HybridCoordinates) for the family. A lightweight stub avoids building a
+        # real (expensive) coordinate system, but ``vertical`` is a REAL dinosaur
+        # coordinate object so the isinstance classification is faithful. t63 is
+        # published; t42 (truncation=42) is not. nlev defaults to a PUBLISHED
+        # layer count (47) so the level-dependent oxidant bundle resolves unless
+        # a test overrides it (nlev=8 for the t63_l8 gap; vertical='sigma' for
+        # the sigma-on-published-(token,nlev) gap).
+        import types
+
+        import numpy as np
+        n = int(nlev)
+        if vertical == "sigma":
+            from dinosaur.sigma_coordinates import SigmaCoordinates
+            vert = SigmaCoordinates.equidistant(n)
+        else:
+            from dinosaur.hybrid_coordinates import HybridCoordinates
+            vert = HybridCoordinates(a_boundaries=np.zeros(n + 1),
+                                     b_boundaries=np.linspace(0.0, 1.0, n + 1))
+        return types.SimpleNamespace(
+            horizontal=types.SimpleNamespace(
+                total_wavenumbers=int(truncation) + 2),
+            nodal_shape=(n,), vertical=vert)
+
+    @staticmethod
+    def _pyses_dycore():
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``.
+        import types
+        return types.SimpleNamespace(colmap=object())
+
+    @staticmethod
+    def _macv2_forcing(loaded=False):
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import make_time_series
+        if loaded:
+            yw = make_time_series(jnp.full((2, 9), 0.3), jnp.arange(2.0))
+            ac = make_time_series(jnp.full((2, 2, 9), 0.7), jnp.arange(2.0))
+        else:
+            yw = jnp.ones(9)
+            ac = jnp.ones((2, 9))
+        return types.SimpleNamespace(
+            aerosol_year_weight=yw, aerosol_ann_cycle=ac)
+
+    @staticmethod
+    def _surface_forcing(align_mode):
+        # A resolved ForcingData stand-in carrying a surface SST TimeSeries with
+        # the given alignment; `_forcing_tracks_calendar` reads its align_mode
+        # (the other surface fields are static). BY_DATE(_INTERP) => transient.
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import make_time_series
+        sst = make_time_series(jnp.zeros((2, 4, 4)), jnp.arange(2.0),
+                               align_mode=align_mode)
+        static = jnp.zeros((4, 4))
+        return types.SimpleNamespace(
+            sea_surface_temperature=sst, sice_am=static, snowc_am=static,
+            soilw_am=static, stl_am=static)
+
+    # 1. JAM + aquaplanet terrain
+    def test_jam_aquaplanet_terrain_warns(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="aquaplanet"),
+                self._physics("jam_seasalt_emissions"), None)
+        assert "terrain=aquaplanet" in caplog.text
+        assert "Gong sea-salt" in caplog.text
+
+    def test_jam_realistic_terrain_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("jam_seasalt_emissions"), None)
+        assert "terrain=aquaplanet" not in caplog.text
+
+    # 2. aquaplanet terrain + from_file forcing
+    def test_aquaplanet_from_file_forcing_warns(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="aquaplanet", forcing_kind="from_file"),
+                self._physics("macv2_sp_aerosol"), None)
+        assert "from_file over terrain=aquaplanet" in caplog.text
+
+    def test_from_file_forcing_with_real_terrain_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file", forcing_kind="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=True))
+        assert "from_file over terrain=aquaplanet" not in caplog.text
+
+    # 3. Prognostic aerosol with every emission input nulled
+    def test_jam_zero_emissions_warns_and_names_keys(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", emissions_file=None,
+                        dms_file=None, dust_file=None, oxidants_file=None)
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" in caplog.text
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            assert key in caplog.text
+
+    def test_jam_with_emissions_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file",
+                        emissions_file="hf://bundles/t63/emissions_pd.nc",
+                        dms_file="hf://bundles/t63/dms.nc",
+                        dust_file="hf://bundles/t63/dust.nc",
+                        oxidants_file="hf://bundles/t63_l47/oxidants_pd.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" not in caplog.text
+
+    # 4. MACv2-SP all-ones default weights
+    def test_macv2_default_weights_warn(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=False))
+        assert "perpetual year-2005" in caplog.text
+
+    def test_macv2_default_weights_warn_when_forcing_none(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"), None)
+        assert "perpetual year-2005" in caplog.text
+
+    def test_macv2_loaded_weights_silent(self, caplog):
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol"),
+                self._macv2_forcing(loaded=True))
+        assert "perpetual year-2005" not in caplog.text
+
+    def test_macv2_on_jam_path_silent(self, caplog):
+        # JAM keeps MACv2-SP as a passive optics fudge; warning 4 must not
+        # fire there (the all-ones weights are not the concern on that path).
+        from jcm.runners import warn_on_config_traps
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                self._cfg(terrain="from_file"),
+                self._physics("macv2_sp_aerosol", "jam_seasalt_emissions"),
+                self._macv2_forcing(loaded=False))
+        assert "perpetual year-2005" not in caplog.text
+
+    # 5. Transient (amip/era5) forcing + present-day JAM emissions
+    def test_transient_forcing_present_day_jam_emissions_warns(self, caplog):
+        # amip/era5 encode transience as a `years` range + by_date_interp
+        # align on top of `kind: from_file`; emissions_file/oxidants_file: auto
+        # then resolve the present-day *_pd bundles. Read on a PUBLISHED grid
+        # (t63) so `auto` resolves to a real bundle — the mismatch this warns
+        # about (F2). On an unpublished grid `auto` resolves to None instead,
+        # which warning 3 covers (see the pySES/t42 tests below).
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "present-day JAM emissions" in caplog.text
+        assert "emissions_file" in caplog.text
+        assert "oxidants_file" in caplog.text
+
+    def test_transient_warning_override_is_hydra_launchable(self, caplog):
+        # The remedy the transient warning prints must actually launch (F2): a
+        # bare ``{`` is Hydra override syntax (this repo's own year-pattern
+        # tests cannot pass it on the CLI), so the recommended form quotes the
+        # value. Pull the copy-pasteable override out of the warning and compose
+        # it through Hydra to prove it parses to the literal ``{year}`` path —
+        # tying the advertised string to one that is guaranteed launchable.
+        import re
+
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        # The whole single-quoted argument: 'forcing.emissions_file="...{year}..."'.
+        m = re.search(
+            r"'(forcing\.emissions_file=\"[^']*\{year\}[^']*\")'", caplog.text)
+        assert m, f"no quoted emissions override advertised in: {caplog.text}"
+        # The shell strips the OUTER single quotes; Hydra receives the inner
+        # double-quoted token. Substitute the <grid> placeholder and compose.
+        hydra_token = m.group(1).replace("<grid>", "t63")
+        composed = _compose([hydra_token])
+        assert (composed.forcing.emissions_file
+                == "hf://bundles/t63/emissions_amip/{year}.nc")
+
+    def test_transient_forcing_explicit_emission_paths_silent(self, caplog):
+        # Explicit year-matched paths (not `auto`) opt out of the warning.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(
+            terrain="from_file", forcing_kind="from_file",
+            years=[1979, 1983], align="by_date_interp",
+            emissions_file="hf://bundles/t63/emissions_1980.nc",
+            oxidants_file="hf://bundles/t63_l47/oxidants_1980.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_resolved_by_date_forcing_under_align_auto_warns(self, caplog):
+        # F1 (round 12): a single multi-year netCDF under the default
+        # `align: auto` resolves to BY_DATE at build time, but the config still
+        # reads `align: auto` / `years: null`. Keying only on those config keys
+        # would classify it non-transient and skip the warning. Transience is
+        # read off the RESOLVED forcing's surface alignment instead, so the
+        # present-day-emissions mismatch still fires.
+        from jcm.forcing import BY_DATE
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        align="auto", emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 self._surface_forcing(BY_DATE),
+                                 coords=self._coords(63))
+        assert "present-day JAM emissions" in caplog.text
+
+    def test_resolved_wrap_year_forcing_under_align_auto_silent(self, caplog):
+        # The other side of F1: a 12-month climatology under `align: auto`
+        # resolves to WRAP_YEAR — not transient — so a present-day-emissions run
+        # off it is the intended climatological baseline, not a mismatch.
+        from jcm.forcing import WRAP_YEAR
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        align="auto", emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 self._surface_forcing(WRAP_YEAR),
+                                 coords=self._coords(63))
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_default_forcing_auto_emissions_silent(self, caplog):
+        # Non-transient forcing (no `years`, default align) + auto on a
+        # PUBLISHED grid is the canonical present-day run — auto resolves to
+        # real bundles, so neither the transient mismatch (5) nor the
+        # zero-emission baseline (3) fires.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="default",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "present-day JAM emissions" not in caplog.text
+        assert "zero-emission JAM baseline" not in caplog.text
+
+    # 3 (F2). RESOLVED-value awareness: `auto` that nulls on the pySES path or
+    # an unpublished grid is the silently-degraded run the zero-emission
+    # warning must catch — the raw cfg still reads "auto" and would miss it.
+    def test_jam_auto_null_on_pyses_warns(self, caplog):
+        # ne30/pySES JAM: the four emission keys are `auto` (default) but the
+        # pySES backend publishes no per-grid bundles, so every one resolves to
+        # None — a sea-salt-only run that used to be silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63),
+                                 dycore=self._pyses_dycore())
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "pySES" in caplog.text
+        # No spurious present-day-emissions warning: those keys resolved to
+        # None, not to a *_pd bundle.
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_jam_auto_null_non_mirrored_grid_warns(self, caplog):
+        # A JAM spectral run on an unpublished grid (t42): `auto` resolves to
+        # None (no bundle to fetch) and the ONE combined warning names the grid
+        # — replacing the invisible info-level log the resolver used to emit.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(42))
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "'t42'" in caplog.text
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            assert key in caplog.text
+
+    def test_jam_auto_on_published_grid_silent(self, caplog):
+        # t63 JAM with the `auto` bundles: every key resolves to a real
+        # present-day bundle, so the zero-emission warning stays silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "zero-emission JAM baseline" not in caplog.text
+
+    def test_jam_auto_unpublished_level_warns_partial(self, caplog):
+        # t63_l8: published horizontal grid, unpublished layer count (F2). The
+        # level-free emissions/dms/dust bundles resolve, but the level-resolved
+        # oxidants bundle (L47/L95 only) nulls — a PARTIAL silent-degrade the
+        # config (reading 'auto') hides. The dedicated warning names the nulled
+        # key without the all-zero-baseline message.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63, nlev=8))
+        assert "partial zero-emission JAM baseline" in caplog.text
+        assert "oxidants_file" in caplog.text
+        assert "L47/L95" in caplog.text
+        # Only oxidants nulled — the level-free keys did NOT, so the emissions/
+        # dms/dust keys are not named as unresolved.
+        assert "emissions_file" not in caplog.text
+
+    def test_jam_auto_sigma_vertical_warns_partial(self, caplog):
+        # Codex round 14: a SIGMA grid at a published (token, nlev) — e.g.
+        # echam_t42_l8_sigma at t63/l47 — passes the horizontal+level gate but
+        # the oxidant bundle is on hybrid-level pressures, so oxidants_file=auto
+        # nulls while the level-free keys resolve. Same PARTIAL branch as the
+        # t63_l8 gap, but the warning must name the SIGMA reason (not the layer
+        # count, which here IS published).
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(
+                cfg, self._physics("jam_dust_emissions"), None,
+                coords=self._coords(63, nlev=47, vertical="sigma"))
+        assert "partial zero-emission JAM baseline" in caplog.text
+        assert "oxidants_file" in caplog.text
+        # The message names the sigma vertical as the reason (the layer count 47
+        # is published, so it cannot be blamed here).
+        assert "sigma" in caplog.text
+        # Level-free keys resolved on the published t63 grid → not named.
+        assert "emissions_file" not in caplog.text
+
+    # SCM (run.mode=scm) family sweep. The single-column model builds no gridded
+    # surface: it runs on TerrainData.single_column() + ForcingData.zeros and
+    # consumes none of cfg.terrain/cfg.forcing or the prescribed emission
+    # inputs. So the gridded-surface / transient / MACv2-weight traps are gated
+    # off and JAM gets one honest, mode-specific zero-emission message — even on
+    # a PUBLISHED grid where the resolved-value logic would have stayed silent.
+    def test_jam_scm_fires_single_column_zero_emission_message(self, caplog):
+        # t63 is published, so warning 3's resolved-value logic would classify
+        # `auto` as a real bundle and say nothing; the SCM attaches no forcing,
+        # so the honest scm-specific message must fire instead.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        run_mode="scm",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "single-column mode" in caplog.text
+        assert "zero-emission apart from any online sources" in caplog.text
+        # The gridded resolved-value message and the transient message are NOT
+        # the ones used in SCM.
+        assert "zero-emission JAM baseline" not in caplog.text
+        assert "present-day JAM emissions" not in caplog.text
+
+    def test_jam_scm_aquaplanet_terrain_trap_gated_off(self, caplog):
+        # Warning 1 is meaningless under scm (the SCM ignores cfg.terrain and
+        # always runs on a single flat-ocean column). One honest message only.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="aquaplanet", run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_seasalt_emissions"),
+                                 None, coords=self._coords(63))
+        assert "terrain=aquaplanet" not in caplog.text
+        assert "single-column mode" in caplog.text
+
+    def test_scm_aquaplanet_from_file_forcing_trap_gated_off(self, caplog):
+        # Warning 2 is meaningless under scm (no forcing built, single-column
+        # terrain — no gridded masks can disagree). Non-JAM: fully silent.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="aquaplanet", forcing_kind="from_file",
+                        run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("macv2_sp_aerosol"), None)
+        assert "from_file over terrain=aquaplanet" not in caplog.text
+
+    def test_macv2_scm_default_weights_trap_gated_off(self, caplog):
+        # Warning 4's remedy (forcing=macv2_sp) cannot be applied in scm — the
+        # SCM never builds forcing from cfg — so it is gated off.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", run_mode="scm")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("macv2_sp_aerosol"), None)
+        assert "perpetual year-2005" not in caplog.text
+
+    def test_transient_jam_scm_present_day_trap_gated_off(self, caplog):
+        # Warning 5 is meaningless under scm (no transient surface forcing, no
+        # emissions consumed). Only the honest scm message fires.
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file", forcing_kind="from_file",
+                        run_mode="scm",
+                        years=[1979, 1983], align="by_date_interp",
+                        emissions_file="auto", dms_file="auto",
+                        dust_file="auto", oxidants_file="auto")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"),
+                                 None, coords=self._coords(63))
+        assert "present-day JAM emissions" not in caplog.text
+        assert "single-column mode" in caplog.text
+
+
+class TestAttachMacv2Weights(unittest.TestCase):
+    """``forcing.macv2_file`` loads real MACv2-SP weights onto ForcingData."""
+
+    @staticmethod
+    def _write_macv2(path):
+        import numpy as np
+        import xarray as xr
+        nplume, years, nweek, nfeat = 9, np.array([2004, 2005, 2006]), 52, 2
+        yw = np.arange(nplume * years.size,
+                       dtype=float).reshape(nplume, years.size)
+        ac = np.arange(nplume * nweek * nfeat,
+                       dtype=float).reshape(nplume, nweek, nfeat)
+        xr.Dataset(
+            {"year_weight": (("plume", "years"), yw),
+             "ann_cycle": (("plume", "week", "feature"), ac)},
+            coords={"years": years},
+        ).to_netcdf(path)
+
+    def test_macv2_file_attaches_timeseries(self):
+        import tempfile
+
+        from omegaconf import OmegaConf
+
+        from jcm.forcing import TimeSeries
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import _attach_macv2_weights
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "MACv2.0-SP_v1.nc"
+            self._write_macv2(p)
+            cfg = OmegaConf.create({"kind": "default", "macv2_file": str(p)})
+            forcing = _attach_macv2_weights(None, cfg, coords)
+        self.assertIsInstance(forcing.aerosol_year_weight, TimeSeries)
+        self.assertIsInstance(forcing.aerosol_ann_cycle, TimeSeries)
+        self.assertEqual(forcing.aerosol_year_weight.values.shape, (3, 9))
+
+    def test_macv2_file_unset_is_noop(self):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _attach_macv2_weights
+        cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
+        self.assertIsNone(_attach_macv2_weights(None, cfg, None))
+
+    def test_pyses_path_attaches_macv2_weights(self):
+        """``forcing=macv2_sp`` on pySES must still load ``macv2_file`` (F1).
+
+        ``build_forcing``'s pySES branch returns before the spectral tail, so
+        the ONE dycore-agnostic attachment the tail performs that
+        ``pyses_build_forcing`` does not — the plume-indexed MACv2-SP weights
+        (no horizontal field, so no column sampling needed) — must be applied on
+        the pySES path via the shared ``_attach_macv2_weights``. Otherwise
+        ``forcing=macv2_sp`` loads the surface file but silently drops its
+        mandatory ``macv2_file``, the exact silent-ignore trap warning 4
+        recommends this very config to escape.
+        """
+        import tempfile
+        import types
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm.forcing import ForcingData, TimeSeries
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import build_forcing
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``; a stub with
+        # that attribute takes the pySES branch without a real CAM-SE build.
+        fake_dycore = types.SimpleNamespace(colmap=object())
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "MACv2.0-SP_v1.nc"
+            self._write_macv2(p)
+            cfg = OmegaConf.create({"forcing": {
+                "kind": "from_file", "file": "dummy.nc", "ozone_file": "null",
+                "emissions_file": "null", "dms_file": "null",
+                "dust_file": "null", "oxidants_file": "null",
+                "macv2_file": str(p)}})
+            with mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                            return_value=base) as pfb:
+                forcing = build_forcing(cfg, coords, dycore=fake_dycore)
+        pfb.assert_called_once()
+        # The weights rode through the pySES early return.
+        self.assertIsInstance(forcing.aerosol_year_weight, TimeSeries)
+        self.assertIsInstance(forcing.aerosol_ann_cycle, TimeSeries)
+
+
+class TestEmissionAutoResolution(unittest.TestCase):
+    """The ``auto`` prescribed-emission resolution (issue #640).
+
+    ``auto`` is the only grid-portable mechanism: it composes the concrete
+    per-grid bundle path from :mod:`jcm.data.bundle_names` + the grid token, so
+    one config follows the grid. There is no user-facing ``{grid}``/``{nlev}``
+    path template (removed as a redundant simplification, #640) — an explicit
+    path is taken verbatim; only ``{year}`` is expanded downstream.
+    """
+
+    def _coords(self):
+        from jcm.runners import build_coords
+        return build_coords(
+            _compose(["physics=echam", "grid=echam_t63_l47_hybrid"]))
+
+    def test_explicit_path_taken_verbatim(self):
+        # No {grid}/{nlev} substitution: an explicit forcing path passes through
+        # _resolve_one_emission_input unchanged (auto is the grid-portable path).
+        from jcm.runners import _resolve_one_emission_input
+        coords = self._coords()
+        self.assertEqual(
+            _resolve_one_emission_input(
+                "hf://bundles/t63_l47/oxidants_pd.nc", "oxidants_file",
+                coords, jam=True, is_pyses=False),
+            "hf://bundles/t63_l47/oxidants_pd.nc")
+        # A {year} pattern is left intact for the later yearly expansion.
+        self.assertEqual(
+            _resolve_one_emission_input(
+                "hf://bundles/t63/emissions/{year}.nc", "emissions_file",
+                coords, jam=True, is_pyses=False),
+            "hf://bundles/t63/emissions/{year}.nc")
+        # Explicit null opts out.
+        self.assertIsNone(
+            _resolve_one_emission_input(
+                "null", "emissions_file", coords, jam=True, is_pyses=False))
+
+    def test_auto_builds_per_grid_bundle_for_jam(self):
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+        # Echo the hf:// path instead of fetching, so we can assert what the
+        # auto default resolved to.
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            emis = runners._resolve_one_emission_input(
+                "auto", "emissions_file", coords, jam=True, is_pyses=False)
+            ox = runners._resolve_one_emission_input(
+                "auto", "oxidants_file", coords, jam=True, is_pyses=False)
+        self.assertEqual(emis, "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(ox, "hf://bundles/t63_l47/oxidants_pd.nc")
+
+    def test_auto_is_none_for_non_jam_and_pyses(self):
+        from jcm.runners import _resolve_one_emission_input
+        coords = self._coords()
+        self.assertIsNone(_resolve_one_emission_input(
+            "auto", "dms_file", coords, jam=False, is_pyses=False))
+        self.assertIsNone(_resolve_one_emission_input(
+            "auto", "dms_file", coords, jam=True, is_pyses=True))
+
+    def test_explicit_null_opts_out(self):
+        from jcm.runners import _resolve_one_emission_input
+        coords = self._coords()
+        for val in (None, "null", ""):
+            self.assertIsNone(_resolve_one_emission_input(
+                val, "dust_file", coords, jam=True, is_pyses=False))
+
+    def test_auto_fetch_failure_is_loud_and_names_the_fix(self):
+        from unittest import mock
+
+        from jcm import runners
+        coords = self._coords()
+
+        def _raise(_p):
+            raise FileNotFoundError("cold cache")
+
+        with mock.patch.object(runners, "_resolve_data_path", side_effect=_raise):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                runners._resolve_one_emission_input(
+                    "auto", "emissions_file", coords, jam=True, is_pyses=False)
+        msg = str(ctx.exception)
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", msg)
+        self.assertIn("forcing.emissions_file=null", msg)
+        self.assertIn("prefetch", msg.lower())
+
+
+class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
+    """End-to-end: a JAM ``auto`` default reaches the bundle fetch.
+
+    And fails loudly when the bundle cannot be resolved.
+    """
+
+    def test_jam_default_forcing_fetches_bundles_and_fails_loud(self):
+        from unittest import mock
+
+        from jcm.runners import build_coords, build_forcing
+        # A published grid (t63): the auto default resolves the per-grid bundle
+        # and eagerly fetches it, so a cold cache must fail loudly here.
+        cfg = _compose(["physics=echam-jam", "grid=echam_t63_l47_hybrid",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        def _raise(_path, **_kw):
+            raise FileNotFoundError("no network in test")
+
+        # The auto default resolves the first emission bundle, whose fetch we
+        # force to fail — build_forcing must surface it, not silently continue.
+        with mock.patch("jcm.data.remote.fetch", side_effect=_raise):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                build_forcing(cfg, coords)
+        self.assertIn("hf://bundles/t63/", str(ctx.exception))
+
+    def test_jam_auto_nulls_on_non_mirrored_grid_without_fetch(self):
+        """A non-mirrored grid (t42) auto-nulls emissions, no fetch (Codex P1).
+
+        The mirror publishes bundles only for ``PUBLISHED_GRIDS``; a JAM run on
+        any other grid (e.g. echam_t42_l8_sigma) must restore the null,
+        emission-free baseline automatically — resolving ``auto`` to None with
+        NO fetch (so the documented ``physics=echam-jam grid=echam_t42_l8_sigma
+        forcing.emissions_file=<explicit>`` workflow no longer aborts). The
+        silent-degrade WARNING is emitted by ``warn_on_config_traps`` from the
+        resolved values (F2), not an info log in the resolver — so the resolver
+        stays a pure, side-effect-light resolution
+        (see ``TestConfigTraps.test_jam_auto_null_non_mirrored_grid_warns``).
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        def _no_fetch(path):
+            raise AssertionError(f"no fetch expected, got {path!r}")
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=_no_fetch):
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
+        for key in ("emissions_file", "dms_file", "dust_file",
+                    "oxidants_file"):
+            self.assertIsNone(out.get(key))
+
+    def test_jam_oxidants_auto_nulls_on_unpublished_level_count(self):
+        """Published horizontal grid + unpublished layer count nulls ONLY the
+        level-dependent oxidants; level-free keys still resolve (Codex P2).
+
+        ``grid=echam_t42_l8_sigma grid.spectral_truncation=63`` is a published
+        horizontal grid (t63) at an UNpublished layer count (l8). The mirror
+        publishes oxidants only at L47/L95, so ``oxidants_file=auto`` must null
+        (no nonexistent ``bundles/t63_l8/oxidants_pd.nc``) while the level-free
+        emissions/dms/dust bundles under ``bundles/t63/`` still resolve.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
+        # Level-free products resolve to their t63 (level-agnostic) bundles.
+        self.assertEqual(out.get("emissions_file"),
+                         "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
+        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        # The level-dependent oxidant bundle does not exist at l8 → auto→None.
+        self.assertIsNone(out.get("oxidants_file"))
+
+    def test_jam_oxidants_auto_resolves_on_published_level_count(self):
+        """A published grid AND layer count (t63_l47) resolves oxidants (P2).
+
+        The level gate must not over-reject: on ``echam_t63_l47_hybrid`` the
+        oxidant bundle exists (L47 is published), so ``auto`` composes the
+        level-resolved ``bundles/t63_l47/oxidants_pd.nc``.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        for grid, nlev in (("echam_t63_l47_hybrid", 47),
+                           ("echam_t63_l95_hybrid", 95)):
+            with self.subTest(grid):
+                cfg = _compose(["physics=echam-jam", f"grid={grid}",
+                                "physics.jam_microphysics=placeholder",
+                                "physics.radiation_scheme=grey"])
+                coords = build_coords(cfg)
+                with mock.patch.object(runners, "_resolve_data_path",
+                                       side_effect=lambda p: p):
+                    out = runners._resolve_emission_inputs(
+                        cfg.forcing, cfg, coords, is_pyses=False)
+                self.assertEqual(
+                    out.get("oxidants_file"),
+                    f"hf://bundles/t63_l{nlev}/oxidants_pd.nc")
+
+    def test_jam_oxidants_auto_nulls_on_sigma_grid(self):
+        """A sigma grid sharing a published (token, nlev) still nulls oxidants.
+
+        Codex round 14: ``grid=echam_t42_l8_sigma grid.spectral_truncation=63
+        grid.layers=47`` passes the (t63, l47) horizontal+level gate, but the
+        oxidant bundle is on HYBRID-level pressures — mapping it level-for-level
+        onto sigma levels is silently wrong and ``validate_oxidant_levels`` skips
+        the coefficient check on ``SigmaCoordinates``. So ``oxidants_file=auto``
+        must null on the sigma vertical while the level-free (purely horizontal)
+        emissions/dms/dust bundles under ``bundles/t63/`` still resolve.
+        """
+        from unittest import mock
+
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+        from jcm import runners
+        from jcm.runners import build_coords
+        cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
+                        "grid.spectral_truncation=63", "grid.layers=47",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        coords = build_coords(cfg)
+        # Guard the premise: this really is a sigma grid at the published
+        # (t63, l47) — the exact silent-corruption combo the gate rejects.
+        self.assertIsInstance(coords.vertical, SigmaCoordinates)
+        self.assertEqual(coords.nodal_shape[0], 47)
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p):
+            out = runners._resolve_emission_inputs(
+                cfg.forcing, cfg, coords, is_pyses=False)
+        # Level-free products resolve to their t63 (level-agnostic) bundles.
+        self.assertEqual(out.get("emissions_file"),
+                         "hf://bundles/t63/emissions_pd.nc")
+        self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
+        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
+        self.assertIsNone(out.get("oxidants_file"))
+
+    def test_t119_jam_experiment_resolves_emission_free(self):
+        """The ma-t119 experiments run emission-free (Codex P1).
+
+        T119 has no mirror bundle, so the JAM ``auto`` default cannot resolve
+        the four emission keys (bundles/t119/*.nc do not exist and the fetch
+        would abort build_forcing). The experiment yamls null the keys
+        explicitly (round-1 documentation — no longer load-bearing now that the
+        published-grid whitelist auto-nulls any non-mirrored grid, see
+        ``test_jam_auto_nulls_on_non_mirrored_grid_without_fetch``); assert the
+        resolver requests NO fetch and yields None either way, so
+        ``python -m jcm.main +experiment=ma-t119-l47`` is one command.
+        """
+        from unittest import mock
+
+        from jcm import runners
+        from jcm.runners import build_coords
+        for name in ("ma-t119-l47", "ma-t119-l95"):
+            with self.subTest(name):
+                cfg = _compose([f"+experiment={name}"])
+                coords = build_coords(cfg)
+                calls = []
+
+                def _record(path):
+                    calls.append(path)
+                    raise AssertionError("no emission fetch expected")
+
+                with mock.patch.object(runners, "_resolve_data_path",
+                                       side_effect=_record):
+                    out = runners._resolve_emission_inputs(
+                        cfg.forcing, cfg, coords, is_pyses=False)
+                self.assertEqual(calls, [])
+                for key in ("emissions_file", "dms_file", "dust_file",
+                            "oxidants_file"):
+                    self.assertIsNone(out.get(key))
+
+    def test_year_pattern_resolves_end_to_end(self):
+        """A ``{year}`` emissions pattern expands to one file per year.
+
+        ``{year}`` is the only remaining path template; the yearly expansion
+        (issue #610) produces one file per year, opened together as one product.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey",
+            *_NULL_EMISSIONS,
+        ])
+        # Set the pattern path and year range directly: the Hydra override
+        # grammar treats the ``{`` in ``{year}`` as syntax, so it cannot be
+        # passed on the command line — but a preset yaml carries it verbatim.
+        # ``years`` is likewise not in the base forcing struct.
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.emissions_file = "hf://bundles/t42/emis/{year}.nc"
+        cfg.forcing.years = [2000, 2001]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                           return_value={"sector": object()}), \
+                mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                           return_value=None), \
+                mock.patch("jcm.forcing.validate_emissions_grid"):
+            build_forcing(cfg, coords)
+
+        # {year} expanded to the inclusive range; opened as one product.
+        self.assertEqual(
+            seen["paths"],
+            ["hf://bundles/t42/emis/2000.nc", "hf://bundles/t42/emis/2001.nc"])
+
+    def test_oxidants_year_matched_pattern_expands_and_concatenates(self):
+        """A year-matched oxidants pattern expands + concatenates (Codex P1).
+
+        Warning 5 recommends ``oxidants_file=.../{year}.nc`` for a transient
+        run; ``_attach_oxidants`` must therefore honour the same yearly
+        expansion + by-coords merge the emissions path does, or that remedy
+        fails at startup. Assert the per-year files reach ``open_mfdataset``.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey",
+            *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = \
+            "hf://bundles/t42_l8/oxidants_{year}.nc"
+        cfg.forcing.years = [2000, 2001]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        # The set carries >1 file, so _attach_oxidants opens each to classify
+        # its time axis (the incompatible-mixture guard). Both yearly files are
+        # transient (datetime), so the set is uniform and the read proceeds.
+        def _open_datetime_stub(path, **_kw):
+            return xr.Dataset(
+                coords={"time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset",
+                           side_effect=_open_datetime_stub), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object()}) as read_mock, \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+
+        # {year} expanded, files concatenated by coords as one product.
+        self.assertEqual(
+            seen["paths"],
+            ["hf://bundles/t42_l8/oxidants_2000.nc",
+             "hf://bundles/t42_l8/oxidants_2001.nc"])
+        # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")
+
+    def test_oxidants_explicit_list_is_one_product(self):
+        """An explicit-list oxidants_file is ONE product, opened together (F2).
+
+        Unlike emissions (per-product merge over disjoint variables), every
+        oxidant file must carry all four gases, so a list is the yearly files of
+        a single product: the whole set goes to one ``open_mfdataset`` along one
+        time axis and is read once. (A per-product ``dict.update`` would have
+        been pure last-one-wins for the fully-overlapping oxidant maps.)
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/ox_a.nc", "/ox_b.nc"]
+        coords = build_coords(cfg)
+
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        # Both members transient (datetime) → uniform, read proceeds.
+        def _open_datetime_stub(path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset",
+                           side_effect=_open_datetime_stub), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object(), "no3": object()}), \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+
+        # The whole list reached a single open_mfdataset (one product, one axis).
+        self.assertEqual(seen["paths"], ["/ox_a.nc", "/ox_b.nc"])
+
+    def test_oxidants_mixed_time_axes_raise(self):
+        """A mixed integer-month + datetime oxidant set is rejected loudly (F2).
+
+        The genuinely-incompatible case ``_assert_uniform_time_axis``
+        exists to catch: one member on an integer-month climatology axis, one on
+        a datetime transient axis, in a single product's file set — silent
+        NaN-fill / cryptic dtype clash under ``open_mfdataset`` is exactly the
+        silent-ignore class this hardening abolishes.
+        """
+        from unittest import mock
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/clim.nc", "/transient.nc"]
+        coords = build_coords(cfg)
+
+        def _open_mixed(path, **_kw):
+            if "clim" in str(path):
+                return xr.Dataset(coords={"time": np.arange(12)})  # integer month
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_mixed):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords)
+
+    def _pyses_cfg(self, **forcing):
+        """Build a minimal pySES-path forcing cfg (nulls unless overridden)."""
+        from omegaconf import OmegaConf
+        base = {"kind": "from_file", "file": "dummy.nc", "ozone_file": "null",
+                "emissions_file": "null", "dms_file": "null",
+                "dust_file": "null", "oxidants_file": "null"}
+        base.update(forcing)
+        return OmegaConf.create({"forcing": base})
+
+    def _pyses_dycore_and_coords(self):
+        import types
+
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        # ``is_pyses`` is decided by ``hasattr(dycore, "colmap")``; the stub
+        # takes the pySES branch without a real CAM-SE build (the pySES forcing
+        # loader is mocked, so its column internals are never read).
+        return types.SimpleNamespace(colmap=object()), get_speedy_coords(
+            layers=8, spectral_truncation=31)
+
+    def test_pyses_oxidants_year_pattern_expands_before_loader(self):
+        """Expand + open pySES oxidants ``{year}`` together before the loader (F1).
+
+        The pySES branch previously handed ``oxidants_file`` straight through
+        ``_resolve_data_path``, bypassing ``_expand_years`` and the uniform
+        time-axis check — a documented transient run
+        (``oxidants_file=.../{year}.nc`` + ``forcing.years``) would fetch a
+        literal-brace path. Assert the expanded yearly list (via the SAME shared
+        ``_resolve_oxidant_paths`` the spectral path uses) reaches the pySES
+        forcing loader.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            oxidants_file="hf://bundles/t42_l8/oxidants_{year}.nc",
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # The >1-file set is opened per-member to classify its time axis
+        # (uniform-mixture guard); both yearly files are transient (datetime).
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["oxidants_file"],
+            ["hf://bundles/t42_l8/oxidants_2000.nc",
+             "hf://bundles/t42_l8/oxidants_2001.nc"])
+
+    def test_pyses_emissions_year_pattern_expands_before_loader(self):
+        """Expand pySES emissions ``{year}`` before the loader (same class as F1).
+
+        The emissions input had the same bypass; a scalar ``{year}`` pattern must
+        expand to that one product's yearly files (which ``attach_jam_forcing``
+        opens by coords) instead of a literal-brace path.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file="hf://bundles/t42/emis_{year}.nc",
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # The >1-file set is opened per-member to classify its time axis
+        # (uniform-mixture guard); both yearly files are transient (datetime).
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/emis_2000.nc", "hf://bundles/t42/emis_2001.nc"])
+
+    def test_pyses_emissions_list_with_year_element_expands_and_flattens(self):
+        """A pySES emissions LIST with a ``{year}`` element expands + flattens (F1).
+
+        pySES opens all emission files as ONE combined dataset, so each list
+        element is expanded and the result flattened into a single path list —
+        a ``{year}`` element becomes its yearly files, a plain climatology stays
+        as-is. Previously the whole list reached ``_resolve_data_path`` with the
+        literal ``{year}`` braces intact (``_expand_years`` only expands a scalar
+        string), so the pattern element hit ``xr.open_dataset`` unexpanded.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_{year}.nc",
+                            "hf://bundles/t42/anthro.nc"],
+            years=[2000, 2001])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # All members share a datetime axis, so the flattened set is uniform.
+        def _open_dt(_path, **_kw):
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_dt), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        # The {year} element expanded to its yearly files; the climatology
+        # passed through; all flattened into one list for the single open.
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/bb_2000.nc", "hf://bundles/t42/bb_2001.nc",
+             "hf://bundles/t42/anthro.nc"])
+
+    def test_pyses_emissions_mixed_time_axes_raise(self):
+        """A mixed climatology+transient emissions list is rejected on pySES (F1).
+
+        pySES has no per-product alignment machinery (unlike the spectral
+        ``_attach_emissions``, which opens each element as its own product), so a
+        list mixing an integer-month climatology with a datetime transient cannot
+        be aligned — the shared uniform-time-axis guard rejects it loudly rather
+        than let ``open_mfdataset`` NaN-fill or clash cryptically.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["/clim.nc", "/transient.nc"])
+
+        def _open_mixed(path, **_kw):
+            if "clim" in str(path):
+                return xr.Dataset(coords={"time": np.arange(12)})  # integer month
+            return xr.Dataset(coords={
+                "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_mixed):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_emissions_datetime_climatology_plus_transient_raise(self):
+        """A CF-*datetime* climatology mixed with a datetime transient product
+        is rejected on pySES (F1, the dtype-only-guard blind spot).
+
+        The two products are dtype-identical (both real calendar axes), so a
+        dtype-only classification waved them through and let by-coords outer-
+        union their disjoint dates → NaN-fill. The per-product *span* classifier
+        distinguishes them: the climatology element's 12 monthly stamps all fall
+        in one calendar year (``climatology``), while the ``{year}`` element's
+        yearly files span several (``transient``) — two kinds, so the combined
+        open is refused.
+        """
+        import re
+
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/anthro_clim.nc",
+                            "hf://bundles/t42/bb_{year}.nc"],
+            years=[2000, 2001])
+
+        def _open_by_path(path, **_kw):
+            s = str(path)
+            if "clim" in s:
+                # 12 monthly CF-datetime samples, all within one calendar year.
+                return xr.Dataset(coords={"time": np.array(
+                    [f"2000-{m:02d}-15" for m in range(1, 13)],
+                    dtype="datetime64[ns]")})
+            # Transient yearly file: one sample stamped in its own year. Guard
+            # the incidental non-yearly opens (e.g. the auto-ozone glob) whose
+            # path need not carry a year on a clean CI install.
+            m = re.search(r"(\d{4})", s)
+            if m is None:
+                return xr.Dataset()
+            return xr.Dataset(coords={"time": np.array(
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_path):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_emissions_transient_yearly_files_concatenate(self):
+        """One transient product's multi-year yearly files still concatenate (F1).
+
+        The improved per-product classifier must NOT falsely reject the
+        legitimate case the guard exists to allow: N yearly files of ONE product
+        with contiguous, non-overlapping (distinct calendar year) ranges. They
+        classify ``(datetime, transient)`` together and flatten into the single
+        by-coords open.
+        """
+        import re
+
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file="hf://bundles/t42/emis_{year}.nc",
+            years=[2000, 2001, 2002])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # Each yearly file is stamped in its OWN calendar year, so the product
+        # spans several years (transient) — exactly what must be allowed. Guard
+        # the incidental non-yearly opens (e.g. the auto-ozone glob) whose path
+        # need not carry a year on a clean CI install.
+        def _open_by_year(path, **_kw):
+            m = re.search(r"(\d{4})", str(path))
+            if m is None:
+                return xr.Dataset()
+            return xr.Dataset(coords={"time": np.array(
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_year), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/emis_2000.nc", "hf://bundles/t42/emis_2001.nc",
+             "hf://bundles/t42/emis_2002.nc"])
+
+    def test_oxidants_transient_yearly_files_concatenate(self):
+        """Spectral oxidants: a transient multi-year product still concatenates.
+
+        Family sweep of the improved classifier onto the SHARED
+        ``_resolve_oxidant_paths`` (spectral + pySES). Oxidants are ONE product,
+        so distinct-year yearly files span several years (``transient``) and must
+        reach a single ``open_mfdataset`` — the per-product span classifier must
+        not mistake the multi-year single product for a mix.
+        """
+        import re
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.runners import build_coords, build_forcing
+        cfg = _compose([
+            "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder",
+            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+        ])
+        OmegaConf.set_struct(cfg, False)
+        cfg.forcing.oxidants_file = ["/ox_2000.nc", "/ox_2001.nc"]
+        coords = build_coords(cfg)
+        seen = {}
+
+        def _capture_mfdataset(paths, **_kw):
+            seen["paths"] = list(paths)
+            return xr.Dataset()
+
+        def _open_by_year(path, **_kw):
+            # This patches ``open_dataset`` GLOBALLY, so it also catches the
+            # incidental opens the build makes on non-yearly files — notably the
+            # ``ozone_file: auto`` glob over the packaged ``bc/*/ozone.nc``. That
+            # path need not contain a 4-digit run (it does on this box only
+            # because the worktree dir happens to; a clean CI install path does
+            # not), so guard the no-match case with a time-less dataset that the
+            # classifier / auto-ozone resolver simply ignore.
+            m = re.search(r"(\d{4})", str(path))
+            if m is None:
+                return xr.Dataset()
+            return xr.Dataset(coords={"time": np.array(
+                [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_mfdataset",
+                           side_effect=_capture_mfdataset), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_year), \
+                mock.patch("jcm.forcing.read_oxidant_vmr",
+                           return_value={"oh": object()}), \
+                mock.patch("jcm.forcing.validate_oxidant_levels"):
+            build_forcing(cfg, coords)
+        self.assertEqual(seen["paths"], ["/ox_2000.nc", "/ox_2001.nc"])
+
+    def test_product_time_axis_object_cftime(self):
+        """A decoded-cftime (object dtype) axis is recognised as ``datetime``.
+
+        The merge key normalises each object by ``str`` (real cftime objects
+        stringify to a date) so two files decoded to distinct objects at the
+        same instant compare equal.
+        """
+        import xarray as xr
+
+        from jcm import runners
+
+        class _CFTime:
+            def __init__(self, month):
+                self.month = month
+
+            def __str__(self):
+                return f"2000-{self.month:02d}-15"
+
+        def _open(_path, **_kw):
+            times = np.array([_CFTime(m) for m in range(1, 13)], dtype=object)
+            return xr.Dataset(coords={"time": ("time", times)})
+
+        with mock.patch("xarray.open_dataset", side_effect=_open):
+            dtype, key, _label = runners._product_time_axis(["/clim_cf.nc"])
+        self.assertEqual(dtype, "datetime")
+        self.assertEqual(
+            key, frozenset(f"2000-{m:02d}-15" for m in range(1, 13)))
+
+    def test_product_time_axis_no_time_is_none(self):
+        """A product whose file carries no ``time`` axis (a static field) has
+        no axis to reconcile — ``_product_time_axis`` returns ``None``.
+        """
+        import xarray as xr
+
+        from jcm import runners
+
+        def _open(_path, **_kw):
+            return xr.Dataset(coords={"lat": [0.0, 1.0]})
+
+        with mock.patch("xarray.open_dataset", side_effect=_open):
+            self.assertIsNone(runners._product_time_axis(["/static.nc"]))
+
+    def test_pyses_emissions_one_year_transient_plus_offyear_climatology(self):
+        """One-year ``{year}`` transient + climatology dated another year rejects.
+
+        The degenerate case a ``(dtype, span)`` classifier missed (F1): a
+        ``{year}`` product expanded over a SINGLE year and a CF-datetime
+        climatology dated in a DIFFERENT year both look like "one-year datetime"
+        to a span test, so it waved them through and by-coords NaN-unioned their
+        disjoint years. The merge-property guard rejects them structurally —
+        two products whose axes are not identical.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_{year}.nc",
+                            "hf://bundles/t42/anthro_clim.nc"],
+            years=[2000])
+
+        def _open_by_path(path, **_kw):
+            s = str(path)
+            if "anthro_clim" in s:
+                # 12 monthly CF-datetime samples in year 1850 (another year).
+                return xr.Dataset(coords={"time": np.array(
+                    [f"1850-{m:02d}-15" for m in range(1, 13)],
+                    dtype="datetime64[ns]")})
+            if "bb_2000" in s:
+                return xr.Dataset(coords={"time": np.array(
+                    ["2000-06-15"], dtype="datetime64[ns]")})
+            return xr.Dataset()
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_by_path):
+            with self.assertRaisesRegex(ValueError, "incompatible time axes"):
+                build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_emissions_identical_axis_climatology_stack_merges(self):
+        """A stack of climatologies on the SAME axis merges (shape a) (F1).
+
+        Two distinct climatology products (disjoint sectors/species) sharing an
+        IDENTICAL 12-month datetime axis union their variables cleanly, so the
+        set flattens into one by-coords open and reaches the loader.
+        """
+        import xarray as xr
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            emissions_file=["hf://bundles/t42/bb_clim.nc",
+                            "hf://bundles/t42/anthro_clim.nc"])
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        # Both products carry the identical 12-month year-2000 axis.
+        def _open_same_axis(path, **_kw):
+            if "clim" not in str(path):
+                return xr.Dataset()
+            return xr.Dataset(coords={"time": np.array(
+                [f"2000-{m:02d}-15" for m in range(1, 13)],
+                dtype="datetime64[ns]")})
+
+        with mock.patch.object(runners, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("xarray.open_dataset", side_effect=_open_same_axis), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(
+            seen["emissions_file"],
+            ["hf://bundles/t42/bb_clim.nc", "hf://bundles/t42/anthro_clim.nc"])
+
+    def test_pyses_transient_ozone_rejected_clearly(self):
+        """Transient ``{year}`` ozone is rejected with a clear message on pySES.
+
+        Unlike oxidants/emissions, transient ozone is genuinely unsupported on
+        the pySES backend (the column ozone climatology is a 12-month WRAP_YEAR
+        field). A ``{year}`` pattern must raise the documented limitation up
+        front, not reach ``xr.open_dataset`` as a literal-brace file-not-found.
+        """
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            ozone_file="hf://bundles/t42_l8/ozone_{year}.nc", years=[2000])
+        with self.assertRaisesRegex(
+                ValueError, "transient ozone is not supported"):
+            build_forcing(cfg, coords, dycore=dycore)
+
+    def test_pyses_transient_surface_file_rejected_clearly(self):
+        """A ``{year}`` surface ``forcing.file`` is rejected clearly on pySES.
+
+        Matrix audit (round 8): the SPECTRAL path year-expands the surface
+        ``file`` (that IS the transient input for forcing=amip/era5), so a user
+        reasonably expects ``forcing=era5`` to work. On pySES the column reader
+        opens a single 12-month climatology, so a ``{year}`` pattern must raise
+        the documented limitation up front — mirroring the ozone guard — rather
+        than reach ``_resolve_data_path`` as a confusing hf:// 404.
+        """
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(
+            file="hf://bundles/t63/forcing_era5/{year}.nc", years=[2000, 2001])
+        with self.assertRaisesRegex(
+                ValueError, "transient surface forcing is not supported"):
+            build_forcing(cfg, coords, dycore=dycore)

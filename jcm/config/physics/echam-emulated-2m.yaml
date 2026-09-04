@@ -12,6 +12,12 @@
 # drive the model to NaN inside a step — pair it with
 # ``zero_tendency: true`` on the term to measure cost only.
 #
+# This is the direct term (``_target_``) path, where Hydra passes ``null``
+# straight through to random init. Via the ``echam_physics(...)`` builder
+# instead (``physics.builder``), ``emulator_weights_file: null`` is DROPPED
+# and falls back to ``auto`` — there the train-from-scratch value is the
+# explicit string ``"random"`` (``emulator_weights_file: random``).
+#
 # Use it as::
 #
 #     python -m jcm.main physics=echam-emulated-2m

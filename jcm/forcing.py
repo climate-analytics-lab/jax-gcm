@@ -8,6 +8,13 @@ from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes, CoordinateSystem
 from jcm.utils import VALID_TRUNCATIONS, VALID_NODAL_SHAPES, validate_ds
 from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
+# ``{year}`` pattern expansion lives in the import-free leaf
+# :mod:`jcm.data.yearly_files` so ``tools/benchmark.py`` can load it by file
+# path (jcm-free, before its GPU gate) and share this single source of truth;
+# forcing.py imports JAX/dinosaur/``jcm`` at module top and so cannot itself be
+# that shared leaf. Re-exported here — its historical home — for the runner and
+# tests (``from jcm.forcing import expand_yearly_files``).
+from jcm.data.yearly_files import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
     DEFAULT_CALENDAR,
@@ -1150,45 +1157,72 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-def expand_yearly_files(file_spec, years, available=None):
-    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
+def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+    """Read MACv2.0-SP time-varying plume weights into two ``TimeSeries`` leaves.
 
-    The transient AMIP bundles are one file per year (issue #610:
-    download only what you run, append new years without rewriting
-    history), so config points at a pattern plus an inclusive range:
-    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
-    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
-    than silently running with a literal ``{year}`` path. Non-pattern
-    specs (plain paths, lists, ``None``) pass through untouched even when
-    ``years`` is set — a run may mix yearly SST files with a static dust
-    climatology, all sharing one ``forcing.years`` range.
+    The Stevens et al. (2017) "Simple Plumes" file ``MACv2.0-SP_v1.nc`` carries
+    the static plume geometry (consumed separately by
+    :meth:`AerosolParameters.from_dataset`) alongside two time-varying scaling
+    arrays:
 
-    ``available`` (``forcing.available_years``, the product's inclusive
-    source coverage) widens the expansion by one year on each side,
-    clipped to that coverage: the yearly files hold *mid-month* samples,
-    so a run starting Jan 1 needs the previous December's sample (and a
-    run ending Dec 31 the next January's) for ``by_date_interp`` to
-    bracket the boundary instead of clamping to the nearest mid-month
-    value for ~half a month.
+    * ``year_weight(plume, year)`` over 1850..2100 — the per-year anthropogenic
+      amplitude. Returned as ``forcing.aerosol_year_weight``: a ``BY_DATE``
+      ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
+      calendar year. The v1 file only has valid data for 1850-2016; 2017-2100
+      are ``_FillValue`` (delivered as NaN), which would inject NaN AOD into a
+      post-2016 run, so the last valid year is forward-filled (a documented jcm
+      convention — the reference STOPs out of range).
+    * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
+      ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
+      ``(week, feature, plume)`` so a ``select(date)`` slice yields the
+      ``(feature, plume)`` the term consumes at the current week.
+
+    ``select(date)`` collapses each leaf to its current-step slice, so nothing
+    extra is needed at run time. Attach both to a :class:`ForcingData` via
+    ``base.copy(aerosol_year_weight=..., aerosol_ann_cycle=...)``.
     """
-    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
-    if not has_pattern:
-        return file_spec
-    if years is None:
-        raise ValueError(
-            f"forcing file pattern {file_spec!r} contains {{year}} but "
-            "no year range is set — add e.g. forcing.years=[1979,1983]")
-    first, last = int(years[0]), int(years[-1])
-    if last < first:
-        raise ValueError(f"forcing.years range is reversed: {years!r}")
-    if available is not None:
-        lo, hi = int(available[0]), int(available[-1])
-        first, last = max(first - 1, lo), min(last + 1, hi)
-        # A requested range entirely outside coverage would invert here
-        # and expand to nothing; clamp to the nearest edge file instead
-        # (the time lookup then clamps to its first/last sample).
-        first, last = min(first, hi), max(last, lo)
-    return [file_spec.format(year=y) for y in range(first, last + 1)]
+    import jax_datetime as jdt
+    import xarray as xr
+
+    ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
+    try:
+        # year_weight: (plume, year) -> (year, plume). Forward-fill past the
+        # last all-valid year so out-of-range years reuse the last real
+        # amplitude instead of the file's NaN fill.
+        yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
+        valid = ~np.isnan(yw_np).any(axis=1)
+        last_valid = np.where(valid)[0].max()
+        yw_np[last_valid + 1:] = yw_np[last_valid]
+        yw = jnp.asarray(yw_np)
+
+        # Time axis in seconds-since-MODEL_EPOCH (1970-01-01), one sample per
+        # year-start. The file labels year Y with the integer Y; treat it as
+        # Y-01-01 00:00 UTC.
+        years = ds["years"].values.astype(int)
+        epoch_seconds = [
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))))
+            for y in years
+        ]
+        year_weight = make_time_series(
+            yw, jnp.asarray(epoch_seconds), align_mode=BY_DATE)
+
+        # ann_cycle: (plume, week, feature) -> (week, feature, plume). WRAP_YEAR
+        # repeats every year; time_seconds is unused by that indexing but must
+        # be a 1-D coord of matching length, so pass the week index.
+        ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
+        ann_cycle = make_time_series(
+            ac, jnp.arange(ac.shape[0]), align_mode=WRAP_YEAR)
+    finally:
+        if not isinstance(path, xr.Dataset):
+            ds.close()
+    return year_weight, ann_cycle
+
+
+# ``expand_yearly_files`` is re-exported from the top-of-module import of the
+# import-free leaf :mod:`jcm.data.yearly_files` (see the imports block); its
+# historical home is this module, so the runner and tests still reach it as
+# ``jcm.forcing.expand_yearly_files``.
 
 
 def default_forcing(

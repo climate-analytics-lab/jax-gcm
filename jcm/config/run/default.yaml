@@ -1,4 +1,10 @@
 # Default run configuration: short integration with daily snapshots.
+#
+# This file is also the COMPLETE base schema for the ``run`` group: every run
+# key lives here with a default and a comment. The other run groups
+# (``longrun``, ``smoke``, ``pyses_year``) inherit it via ``defaults: [default,
+# _self_]`` and only override the keys they change, so every run group exposes
+# the same key set and any run key can be set on the CLI without a ``+`` prefix.
 time_step: 10              # minutes
 save_interval: 10          # days
 total_time: 10             # days
@@ -18,10 +24,19 @@ log_level: WARNING
 
 # Optional upper-sponge layer applied to (u, v) in the topmost ``levels``.
 # Off by default — set ``run.sponge.levels`` to a positive integer to enable.
+# ``damp_temperature`` (default true on ``UpperSponge``) and ``target_T_K``
+# (null = zonal-mean-only relaxation, no absolute target) only take effect
+# once ``levels`` is positive; they are listed here so every run group shares
+# one schema and the keys can be overridden without a ``+``. This base sponge
+# is the dinosaur-style upper sponge; the pySES finite-lid sponge is separate
+# and lives in ``dycore.lid_sponge`` (``run=pyses_year`` inherits ``levels: 0``
+# here, i.e. no dinosaur sponge, and relies on that lid sponge instead).
 sponge:
   levels: 0
   timescale_h: 3.0
   enspodi: 2.0
+  damp_temperature: true
+  target_T_K: null
 
 # Chunked-mode options. When ``chunk_days > 0`` the integration is broken
 # into chunks and run through ``jcm.diagnostics.check_health`` between each
@@ -45,6 +60,18 @@ snapshot_variables: []
 # resumes from it, skipping completed chunks. Single file per run, flax
 # msgpack format. Leave ``null`` to disable.
 checkpoint_path: null
+
+# Permanent checkpoint archives: every ``archive_ckpt_every`` sim-days (0 =
+# off) the rotating ``checkpoint_path`` is also copied to a dated, never-
+# overwritten archive, so a later experiment can restart from before a
+# slowly-developing failure. No effect unless ``checkpoint_path`` is set.
+archive_ckpt_every: 0
+
+# Chunked-mode health gate: with ``chunk_days > 0`` the state is checked
+# between chunks and, when ``true`` (the runner default), the run aborts on
+# the first unhealthy chunk instead of continuing. Set ``false`` to log the
+# failure and keep integrating.
+bail_on_unhealthy: true
 
 # Runtime mode:
 #   full        — standard dynamical-core integration (Model.run)

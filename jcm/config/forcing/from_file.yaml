@@ -13,21 +13,35 @@
 kind: from_file
 file: ???
 
-# Yearly transient bundles (issue #610): any *_file here may be a {year}
+# Yearly transient bundles (issue #610): the surface ``file`` and the
+# ``emissions_file`` / ``oxidants_file`` / ``ozone_file`` keys may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along
-# time, e.g. ``file=hf://bundles/t63/forcing_amip/{year}.nc`` with
-# ``years=[1979,1983]``. Plain paths ignore ``years``. When
+# time — set it in a forcing yaml as
+# ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with ``years: [1979, 1983]``.
+# ``dms_file`` / ``dust_file`` are climatology-only single files (no transient
+# product is mirrored and their readers do not expand) — a {year} there is
+# rejected at build time.
+# A bare ``{`` is Hydra override syntax, so a CLI override must quote the value
+# (outer single quotes for the shell, inner double quotes for Hydra):
+# ``'forcing.file="hf://bundles/t63/forcing_amip/{year}.nc"'``. Plain paths
+# ignore ``years``. When
 # ``available_years`` gives the product's source coverage, the expansion
 # pads the range by one year each side (clipped to coverage) so
 # mid-month samples bracket the run's first/last dates under
 # ``by_date_interp``.
 years: null
 available_years: null
-# Per-product coverage override for the ozone pattern, when its yearly
-# product spans a different range than the main file (falls back to
-# ``available_years``). Run dates beyond the expanded files clamp to
-# the last sample.
+# Per-product coverage overrides for the ozone / emissions / oxidants
+# {year} patterns, when a product spans a different range than the main
+# file (each falls back to ``available_years`` when null). Run dates
+# beyond the expanded files clamp to the last sample. See ``forcing=era5``
+# for a preset that sets these: its surface files run to 2024 but the
+# amip ozone/emissions bundles end in 2022. The mirror ships no transient
+# oxidants product, so ``oxidants_available_years`` only matters for a
+# user-supplied transient oxidant series.
 ozone_available_years: null
+emissions_available_years: null
+oxidants_available_years: null
 
 # Time alignment for ``file``: auto (default; climatology span → wrap_year,
 # longer → by_date), or force wrap_year / by_date / by_date_interp.
@@ -43,29 +57,31 @@ align: auto
 # forces the analytical profile silently.
 ozone_file: auto
 
-# Optional prescribed aerosol emissions netCDF, already on the model grid
-# (regrid with ``jcm.data.emissions.prepare`` first). Auto-routes by content:
-# ``emis_<sector>_<species>`` → bulk/differentiable path; ``aero_emis_<tracer>``
-# → CAM6-faithful pre-speciated path. Needs a JAM physics package with the
-# emission term(s) (e.g. ``physics=echam-jam``). Null → no prescribed emissions.
-emissions_file: null
+# --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
+# ``auto`` (default; same convention as ``forcing/default.yaml``): a JAM package
+# resolves the per-grid present-day HF bundle for the model grid at build time,
+# so ``physics=echam-jam forcing=from_file grid=echam_t63_l47_hybrid`` composes
+# the emission inputs by itself. Non-JAM packages supply nothing. Each key also
+# takes an explicit/``hf://`` path or ``null`` to opt out (the runner then warns
+# it is emission-free); use ``auto`` — not a path template — to let a config
+# follow the grid. Only ``emissions_file`` and ``oxidants_file`` accept a
+# ``{year}`` pattern (expanded per year); ``dms_file`` / ``dust_file`` are
+# climatology-only single files and reject a ``{year}`` at build time.
 
-# Optional seawater-DMS monthly climatology netCDF (HAMMOZ layout:
-# ``DMS_sea (time, lat, lon)`` in nmol/L, e.g.
-# ``emiss_fields_dms_sea_monthly_T63.nc``), already on the model horizontal
-# grid. Drives ``DmsEmissions`` (``physics=echam-jam``). Null → zero DMS
-# emission.
-dms_file: null
+# Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``); auto-routes
+# by content (``emis_<sector>_<species>`` bulk / ``aero_emis_<tracer>``
+# pre-speciated). Regrid a custom product with ``jcm.data.emissions.prepare``.
+emissions_file: auto
 
-# Optional dust-source/erodibility monthly climatology netCDF (HAMMOZ layout:
-# ``pot_source (time, lat, lon)`` in [0, 1], e.g.
-# ``dust_potential_sources_T63.nc``), already on the model horizontal grid.
-# Drives ``DustEmissions`` (``physics=echam-jam``). Null → zero dust emission.
-dust_file: null
+# Seawater-DMS monthly climatology (``bundles/<grid>/dms.nc``); drives
+# ``DmsEmissions``.
+dms_file: auto
 
-# Optional oxidant monthly climatology netCDF (HAMMOZ/MACC layout:
-# ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole on the model's
-# hybrid levels, e.g. ``ham_oxidants_monthly_T63L47_macc.nc`` with
-# ``grid=echam_t63_l47_hybrid``). Feeds ``PrescribedOxidants``
-# (``physics=echam-jam``); null → the analytic interim oxidant proxies.
-oxidants_file: null
+# Dust-source/erodibility monthly climatology (``bundles/<grid>/dust.nc``);
+# drives ``DustEmissions``.
+dust_file: auto
+
+# Oxidant monthly climatology on the model's hybrid levels
+# (``bundles/<grid>_l<nlev>/oxidants_pd.nc``); feeds ``PrescribedOxidants``.
+# ``null`` → the analytic interim oxidant proxies.
+oxidants_file: auto

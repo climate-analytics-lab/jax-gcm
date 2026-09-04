@@ -1316,5 +1316,58 @@ class TestValidateOxidantLevels(unittest.TestCase):
             validate_oxidant_levels(ds, coords, "ox.nc")
 
 
+class TestReadMacv2Weights(unittest.TestCase):
+    """The reusable MACv2.0-SP time-weight loader (issue #680 item 2)."""
+
+    @staticmethod
+    def _synthetic_macv2(nplume=9, years=(2013, 2014, 2015, 2016, 2017),
+                         nweek=52, nfeat=2, fill_last=True):
+        import xarray as xr
+
+        nyear = len(years)
+        yw = np.arange(nplume * nyear, dtype=float).reshape(nplume, nyear)
+        if fill_last:
+            # Mirror the v1 file: the final year(s) are NaN _FillValue.
+            yw[:, -1] = np.nan
+        ac = np.arange(nplume * nweek * nfeat,
+                       dtype=float).reshape(nplume, nweek, nfeat)
+        return xr.Dataset(
+            {"year_weight": (("plume", "years"), yw),
+             "ann_cycle": (("plume", "week", "feature"), ac)},
+            coords={"years": np.asarray(years)},
+        ), yw, ac
+
+    def test_shapes_orientation_and_align_modes(self):
+        from jcm.forcing import BY_DATE, WRAP_YEAR, read_macv2_weights
+        ds, _, ac = self._synthetic_macv2()
+        yw_ts, ac_ts = read_macv2_weights(ds)
+        # year_weight -> (year, plume), BY_DATE so the model tracks the year.
+        self.assertEqual(yw_ts.values.shape, (5, 9))
+        self.assertEqual(int(yw_ts.align_mode), BY_DATE)
+        # ann_cycle -> (week, feature, plume), WRAP_YEAR (repeats yearly).
+        self.assertEqual(ac_ts.values.shape, (52, 2, 9))
+        self.assertEqual(int(ac_ts.align_mode), WRAP_YEAR)
+        # The (plume, week, feature) -> (week, feature, plume) transpose holds.
+        np.testing.assert_allclose(np.asarray(ac_ts.values)[0, 0, :],
+                                   ac[:, 0, 0])
+
+    def test_forward_fills_nan_fill_years(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2()
+        yw_ts, _ = read_macv2_weights(ds)
+        vals = np.asarray(yw_ts.values)
+        self.assertFalse(np.isnan(vals).any())
+        # The 2017 fill row reuses the last valid year (2016).
+        np.testing.assert_allclose(vals[-1], vals[-2])
+
+    def test_time_axis_is_year_starts_since_epoch(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2(years=(1970, 1971))
+        yw_ts, _ = read_macv2_weights(ds)
+        # 1970-01-01 is MODEL_EPOCH -> 0 s; 1971-01-01 is 365 days later.
+        np.testing.assert_allclose(np.asarray(yw_ts.time_seconds),
+                                   [0.0, 365 * 86400.0])
+
+
 if __name__ == '__main__':
     unittest.main()

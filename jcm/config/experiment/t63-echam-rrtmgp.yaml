@@ -1,0 +1,42 @@
+# @package _global_
+#
+# ECHAM 1-moment microphysics + RRTMGP at T63L47 — validated benchmark configuration.
+#
+# Compose it with a single command:
+#
+#   python -m jcm.main +experiment=t63-echam-rrtmgp
+#
+# WHY each setting (mined from tools/benchmark.py's validated PRESETS):
+#  - physics=echam: ECHAM 1-moment microphysics + RRTMGP.
+#  - grid=echam_t63_l47_hybrid: ECHAM standard production grid.
+#  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
+#    fully DRY start. An isothermal cold start goes NaN within days at L47;
+#    the dry-JW init lets radiation + surface fluxes moisten the column and
+#    avoids the moist-init day-12 blow-up.
+#  - terrain=auto: native-grid orography (packaged jcm/data/bc/<grid> or the
+#    mirror bundle). Terrain must be native — interpolation corrupts the SSO
+#    sub-grid-orography fields.
+#  - forcing=from_file + hf:// present-day bundle: prescribed SST/sea-ice from
+#    the project data mirror (fetched once into the local HF cache). Ozone
+#    stays forcing.ozone_file: auto unless a level-matched bundle is set.
+#  - run=longrun: 30-day health-gated chunks with the settled production
+#    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
+#    stratosphere; run.time_step=12 min is the conservative L47/L95 step.
+#  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
+#    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
+#    stated explicitly so the recorded config documents the value used.
+defaults:
+  - override /physics: echam
+  - override /grid: echam_t63_l47_hybrid
+  - override /init: jw
+  - override /terrain: auto
+  - override /forcing: from_file
+  - override /run: longrun
+
+init:
+  rh: 0.0
+forcing:
+  file: hf://bundles/t63/forcing_pd.nc
+run:
+  time_step: 12
+sl_off_centering: 0.2

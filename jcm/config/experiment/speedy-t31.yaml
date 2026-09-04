@@ -1,0 +1,33 @@
+# @package _global_
+#
+# SPEEDY physics at T31L8 — the fast reference / smoke configuration.
+#
+# Compose it with a single command:
+#
+#   python -m jcm.main +experiment=speedy-t31
+#
+# WHY each setting (mined from tools/benchmark.py's validated PRESETS):
+#  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics
+#    on its native low resolution; cheap enough for reference runs.
+#  - init defaults to isothermal (NOT overridden): SPEEDY spins up from
+#    isothermal rest. The ECHAM dry-JW init and longrun's deep sponge both
+#    NaN SPEEDY within a chunk, so this preset keeps the config defaults.
+#  - terrain=from_file + interpolate: no native T31 orography exists, so the
+#    packaged T63 field is bilinearly interpolated. Safe here because SPEEDY
+#    composes no SSO scheme (interpolation would otherwise corrupt the
+#    sub-grid-orography statistics).
+#  - forcing from the mirror's present-day T63 bundle (interpolated to T31).
+#  - run.time_step=15 min on the default (short) run group.
+defaults:
+  - override /physics: speedy
+  - override /grid: speedy_t31_l8
+  - override /terrain: from_file
+  - override /forcing: from_file
+
+terrain:
+  file: hf://bundles/t63/terrain.nc
+  interpolate: true
+forcing:
+  file: hf://bundles/t63/forcing_pd.nc
+run:
+  time_step: 15

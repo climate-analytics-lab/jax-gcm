@@ -1,22 +1,16 @@
 # 1-day smoke test — useful as a quick CI/CLI integration check.
+#
+# Inherits the complete base schema from ``run/default.yaml``; only the keys
+# that differ from the default (a shorter, coarser-timestep single day and a
+# more verbose log) are set below. The sponge stays disabled (``levels: 0``,
+# inherited).
+defaults:
+  - default
+  - _self_
+
 time_step: 30
 save_interval: 1
 total_time: 1
-output_averages: false
-output: smoke_run.nc
 log_level: INFO
-
-sponge:
-  levels: 0
-  timescale_h: 3.0
-  enspodi: 2.0
-
-chunk_days: 0
+output: smoke_run.nc
 output_prefix: smoke_chunked
-
-mode: full
-state_file: null
-tracer_vars: null
-column:
-  lat_deg: 0.0
-  lon_deg: 0.0

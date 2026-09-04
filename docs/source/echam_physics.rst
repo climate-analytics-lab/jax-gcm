@@ -13,7 +13,7 @@ Key Characteristics
 
 - **Comprehensive Physics**: Full representation of radiation, convection, clouds, microphysics, turbulence, surface processes, gravity waves, aerosols, and chemistry
 - **Prognostic Cloud Scheme**: Separate prognostic equations for cloud water and cloud ice with single-moment microphysics
-- **Flexible Vertical Resolution**: Designed for 40+ vertical levels on hybrid sigma-pressure coordinates
+- **Flexible Vertical Resolution**: Designed for 47 or 95 vertical levels on hybrid sigma-pressure coordinates
 - **Aerosol-Cloud Coupling**: MACv2-SP aerosol scheme with Twomey effect on cloud droplet number and Angstrom spectral scaling
 - **Differentiability**: Fully compatible with JAX automatic differentiation (``jit``, ``grad``, ``vmap``)
 - **Column-Based Vectorization**: Physics operates on ``(nlev, ncols)`` format with ``jax.vmap`` for efficient GPU/TPU execution
@@ -1019,7 +1019,7 @@ Assumptions and Limitations
 
 **Vertical Resolution**:
 
-- Designed for 40 vertical levels with hybrid sigma-pressure coordinates
+- Designed for 47 or 95 vertical levels with hybrid sigma-pressure coordinates
 - Parameters are tuned for this configuration; performance may vary at other resolutions
 - Sub-grid processes (e.g., turbulence, convection) scale with level count
 
@@ -1073,7 +1073,7 @@ Comparison with SPEEDY Physics
      - Slow
    * - Vertical Levels
      - 8 (typical)
-     - 40 (typical)
+     - 47 (typical)
      - 47--95
    * - Radiation Bands
      - 2 SW, 3 LW

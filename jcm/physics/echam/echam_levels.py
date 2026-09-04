@@ -30,6 +30,28 @@ import jax.numpy as jnp
 from dinosaur.hybrid_coordinates import HybridCoordinates
 
 
+def _checked_hybrid(a_boundaries, b_boundaries) -> 'HybridCoordinates':
+    """Build ``HybridCoordinates``, rejecting a truncated vct table.
+
+    The tables here are TOA-first, so the *top* interface is index 0: its
+    pressure at a 1013.25 hPa surface is ``a_boundaries[0] + b_boundaries[0] *
+    101325`` Pa, which for a full-depth grid is essentially zero (a[0]=b[0]=0).
+    A table sliced to the bottom N entries of a longer vct (the removed L40
+    "grid" was the bottom 40 rows of L47 — a 274 hPa model top, not a real grid)
+    keeps a large ``a[0]`` and so a high top pressure. Catch that here rather
+    than integrate a decapitated atmosphere.
+    """
+    p_top_pa = float(a_boundaries[0] + b_boundaries[0] * 101325.0)
+    if not p_top_pa < 1000.0:
+        raise ValueError(
+            f"ECHAM hybrid level table has a top-interface pressure of "
+            f"{p_top_pa:.1f} Pa (>= 1000 Pa / 10 hPa) — that is a truncated "
+            "vct table, not a full-depth grid whose model top sits at "
+            "near-zero pressure. Supply the complete vct_a/vct_b table.")
+    return HybridCoordinates(a_boundaries=a_boundaries,
+                             b_boundaries=b_boundaries)
+
+
 def get_echam_levels(nlevels: int) -> 'HybridCoordinates':
     """Get ICON hybrid levels for specified number of levels.
 
@@ -74,45 +96,7 @@ def get_echam_levels(nlevels: int) -> 'HybridCoordinates':
             0.94420000000, 0.97300000000, 0.99230000000, 1.00000000000
         ])
         
-        return HybridCoordinates(
-            a_boundaries=a_boundaries,
-            b_boundaries=b_boundaries,
-        )
-
-    elif nlevels == 40:
-        # ICON 40-level configuration (a values in Pa)
-        a_boundaries = jnp.array([
-            27381.9054049070, 26991.9442204250, 26590.5390359760, 26177.4403857780,
-            25752.3948782790, 25315.1451483130, 24865.4298087160, 24402.9834013950,
-            23927.5363478650, 23438.8148992220, 22936.5410855720, 22420.4326648850,
-            21890.2030712940, 21345.5613628160, 20786.2121684930, 20211.8556349540,
-            19622.1873723850, 19016.8983998990, 18395.6750903180, 17758.1991143310,
-            17104.1473840520, 16433.1919959550, 15745.0001731790, 15039.2342072100,
-            14315.5513989190, 13573.6039989610, 12813.0391475160, 12033.4988133860,
-            11234.6197324160, 10416.0333452530, 9577.3657344247, 8718.2375607417,
-            7838.2639990006, 6937.0546729974, 6014.2135898353, 5069.3390735220,
-            4102.0236978492, 3111.8542185484, 2098.4115047143, 1061.2704694889,
-            0.0000000000
-        ])
-        
-        b_boundaries = jnp.array([
-            0.0000000000, 0.0142415650, 0.0289010701, 0.0439876262,
-            0.0595104870, 0.0754790518, 0.0919028665, 0.1087916257,
-            0.1261551746, 0.1440035106, 0.1623467854, 0.1811953064,
-            0.2005595393, 0.2204501094, 0.2408778037, 0.2618535732,
-            0.2833885341, 0.3054939706, 0.3281813366, 0.3514622576,
-            0.3753485329, 0.3998521376, 0.4249852251, 0.4507601285,
-            0.4771893633, 0.5042856296, 0.5320618139, 0.5605309917,
-            0.5897064296, 0.6196015876, 0.6502301212, 0.6816058842,
-            0.7137429305, 0.7466555168, 0.7803581051, 0.8148653646,
-            0.8501921748, 0.8863536276, 0.9233650298, 0.9612419058,
-            1.0000000000
-        ])
-        
-        return HybridCoordinates(
-            a_boundaries=a_boundaries,
-            b_boundaries=b_boundaries,
-        )
+        return _checked_hybrid(a_boundaries, b_boundaries)
 
     elif nlevels == 95:
         # ECHAM6 middle-atmosphere ``L95`` table (lid at ~0.01 hPa),
@@ -175,11 +159,8 @@ def get_echam_levels(nlevels: int) -> 'HybridCoordinates':
             0.94419997931, 0.97299998999, 0.99229997396, 1.00000000000
         ])
 
-        return HybridCoordinates(
-            a_boundaries=a_boundaries,
-            b_boundaries=b_boundaries,
-        )
+        return _checked_hybrid(a_boundaries, b_boundaries)
 
     else:
         raise ValueError(f"No built-in level definition for {nlevels} levels. "
-                        f"Available: 40, 47, 95")
+                        f"Available: 47, 95")

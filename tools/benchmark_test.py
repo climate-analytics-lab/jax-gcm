@@ -11,7 +11,14 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from benchmark import _summarize_gpu, should_keep_output  # noqa: E402
+from benchmark import (  # noqa: E402
+    PRESETS,
+    _auto_emission_files,
+    _compose_preset,
+    _preset_data_files,
+    _summarize_gpu,
+    should_keep_output,
+)
 from chunk_timing import analyse as _analyse_chunks  # noqa: E402
 import gpu_util  # noqa: E402
 
@@ -178,6 +185,142 @@ class KeepOutputTest(unittest.TestCase):
         absence must not be read as failure.
         """
         self.assertFalse(should_keep_output({"exit_code": 0}))
+
+
+#: Prescribed-emission bundles that actually exist on the data mirror. The
+#: mirror builds per-grid bundles only for the Gaussian grids in
+#: jcm/data/mirror/build_mirror.py's ``GRIDS`` (t63, t106) at L47/L95; T119 and
+#: the ne30 native columns carry no emission bundles. A JAM preset that resolves
+#: ``auto`` to anything outside this set would abort build_forcing on a fetch of
+#: a non-existent file — the failure Codex flagged for the T119 presets.
+_MIRROR_EMISSION_BUNDLES = frozenset(
+    [f"hf://bundles/{g}/{p}"
+     for g in ("t63", "t106")
+     for p in ("emissions_pd.nc", "dms.nc", "dust.nc")]
+    + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
+       for g in ("t63", "t106") for lv in (47, 95)]
+)
+
+
+class AutoEmissionPrefetchTest(unittest.TestCase):
+    """The JAM ``auto`` emission inputs must join the pre-GPU prefetch.
+
+    ``_preset_data_files`` sees only literal paths; the four emission keys
+    default to ``auto`` and are resolved lazily by ``jcm.runners`` during model
+    construction — after the GPU is claimed. ``_auto_emission_files`` enumerates
+    them up front (Codex P2), and no shipped preset may enumerate a bundle the
+    mirror does not carry (Codex P1, the T119 abort).
+    """
+
+    def test_every_shipped_preset_prefetches_only_real_bundles(self):
+        """Class sweep: over every preset, the auto-emission bundles that would
+        be prefetched are all real mirror products (or none).
+        """
+        for name in sorted(PRESETS):
+            with self.subTest(name):
+                auto = _auto_emission_files(_compose_preset(PRESETS[name]))
+                unknown = [p for p in auto
+                           if p not in _MIRROR_EMISSION_BUNDLES]
+                self.assertEqual(
+                    unknown, [],
+                    f"{name} would prefetch non-mirror bundle(s): {unknown}")
+
+    def test_jam_spectral_preset_enumerates_its_four_bundles(self):
+        """A t63 JAM preset resolves all four keys to the t63 bundles, and they
+        reach the prefetch list ``run`` iterates.
+        """
+        cfg = _compose_preset(PRESETS["t63-echam-jam"])
+        self.assertEqual(sorted(_auto_emission_files(cfg)), sorted([
+            "hf://bundles/t63/emissions_pd.nc",
+            "hf://bundles/t63/dms.nc",
+            "hf://bundles/t63/dust.nc",
+            "hf://bundles/t63_l47/oxidants_pd.nc",
+        ]))
+        prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", prefetched)
+        self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", prefetched)
+
+    def test_extra_nulling_emissions_drops_them_from_prefetch(self):
+        """``--extra`` that nulls the auto emissions removes them from the
+        prefetch list, while the preset alone still enumerates them (Codex F2).
+
+        ``run`` prefetches from the config composed with ``args.extra`` folded
+        in — the same override list the real command builds from — so an
+        ``--extra`` that nulls an auto input must not leave the harness
+        downloading (or failing offline on) a bundle the run never uses.
+        """
+        preset = PRESETS["t63-echam-jam"]
+        # Preset alone: the four auto bundles are enumerated for prefetch.
+        base = _preset_data_files(preset)
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", base)
+        self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", base)
+        # Same mechanism the real run uses: preset + extra nulling the inputs.
+        extra = ["forcing.emissions_file=null", "forcing.dms_file=null",
+                 "forcing.dust_file=null", "forcing.oxidants_file=null"]
+        with_extra = _preset_data_files([*preset, *extra])
+        for bundle in ("hf://bundles/t63/emissions_pd.nc",
+                       "hf://bundles/t63/dms.nc", "hf://bundles/t63/dust.nc",
+                       "hf://bundles/t63_l47/oxidants_pd.nc"):
+            self.assertNotIn(bundle, with_extra)
+
+    def test_t119_jam_preset_is_emission_free(self):
+        """T119 has no mirror bundle; the preset nulls the four keys so nothing
+        is prefetched (and build_forcing does not abort on a t119 fetch).
+        """
+        for name in ("ma-t119-l47", "ma-t119-l95"):
+            with self.subTest(name):
+                self.assertEqual(
+                    _auto_emission_files(_compose_preset(PRESETS[name])), [])
+
+    def test_non_jam_and_pyses_prefetch_no_emissions(self):
+        """A non-JAM package consumes no emissions; the pySES backend's native
+        grids are not the spectral-token bundles — both resolve ``auto`` to
+        nothing, matching jcm.runners.
+        """
+        for name in ("t63-echam-rrtmgp", "t63-echam-2m", "speedy-t31",
+                     "ma-ne30-l47", "ma-ne30-l95"):
+            with self.subTest(name):
+                self.assertEqual(
+                    _auto_emission_files(_compose_preset(PRESETS[name])), [])
+
+    def test_year_pattern_expands_to_concrete_prefetch_files(self):
+        """A ``{year}`` pattern + ``forcing.years`` reaches the prefetch list as
+        the concrete yearly files, never the literal ``{year}`` URL (Codex F2).
+
+        The runner expands the pattern at build time (after the GPU is claimed),
+        so a prefetch that fetched the literal ``{year}.nc`` would die on a
+        non-existent file before the run starts. Expansion here mirrors it.
+        """
+        overrides = [
+            "forcing=from_file",
+            'forcing.file="hf://bundles/t63/forcing_amip/{year}.nc"',
+            'forcing.emissions_file='
+            '"hf://bundles/t63/emissions_amip/{year}.nc"',
+            "forcing.years=[1979,1981]",
+        ]
+        files = _preset_data_files(overrides)
+        self.assertNotIn("hf://bundles/t63/forcing_amip/{year}.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/{year}.nc", files)
+        for y in (1979, 1980, 1981):
+            self.assertIn(f"hf://bundles/t63/forcing_amip/{y}.nc", files)
+            self.assertIn(f"hf://bundles/t63/emissions_amip/{y}.nc", files)
+
+    def test_year_pattern_honours_per_product_available_clamp(self):
+        """The per-product ``emissions_available_years`` clamps the emissions
+        expansion independently of the surface ``forcing.years`` — the era5
+        case where surface files run past the amip emissions' 2022 coverage.
+        """
+        overrides = [
+            "forcing=from_file",
+            'forcing.emissions_file='
+            '"hf://bundles/t63/emissions_amip/{year}.nc"',
+            "forcing.years=[2021,2024]",
+            "forcing.emissions_available_years=[1850,2022]",
+        ]
+        files = _preset_data_files(overrides)
+        self.assertIn("hf://bundles/t63/emissions_amip/2022.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/2023.nc", files)
+        self.assertNotIn("hf://bundles/t63/emissions_amip/2024.nc", files)
 
 
 class GpuTenantTest(unittest.TestCase):

@@ -132,6 +132,39 @@ class AttachJamForcingTest(unittest.TestCase):
             np.asarray(oh.values[0, :, 0, 0]),
             np.arange(1, nlev + 1) * 1.0e-9, rtol=1e-6)
 
+    def test_oxidants_year_list_concatenated_on_columns(self):
+        # A ``{year}`` expansion hands attach_jam_forcing the yearly files of ONE
+        # transient product as a list; they must open together (open_mfdataset,
+        # by-coords) into a single concatenated time axis and read BY_DATE
+        # (align_mode="auto"), mirroring the spectral _attach_oxidants — not a
+        # 24-month wrap-year climatology. Two 12-month yearly files -> 24 steps.
+        from jcm.forcing import BY_DATE
+        nlev = 4
+        base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
+
+        def _year_ds(year):
+            time = np.array([np.datetime64(f"{year}-{m:02d}-15")
+                             for m in range(1, 13)])
+            data = np.broadcast_to(base * 1.0e-9,
+                                   (12, nlev, _LAT.size, _LON.size)).copy()
+            ds = xr.Dataset(
+                {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                                   {"units": "mole/mole"})
+                 for n in ("OH", "NO3", "O3", "H2O2")},
+                coords={"time": time, "mlev": np.arange(1, nlev + 1),
+                        "lat": _LAT, "lon": _LON},
+            )
+            ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+            return ds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [_write(tmp, f"oxid_{y}.nc", _year_ds(y))
+                     for y in (2000, 2001)]
+            forcing = _attach(oxidants_file=paths)
+        oh = forcing.oxidant_vmr["oh"]
+        self.assertEqual(oh.values.shape, (24, nlev, 1, _NCOL))
+        self.assertEqual(int(oh.align_mode), BY_DATE)
+
     def test_ozone_climatology_on_columns(self):
         # jcm/data/bc ozone contract: O3 (time, level, lat, lon) mole/mole
         # on the model's levels. Distinct per-level values verify levels
