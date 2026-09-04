@@ -145,31 +145,7 @@ class MicrophysicsParameters:
             }
             autoconversion_scheme = scheme_map[autoconversion_scheme]
 
-        # Legacy-config guard (F2, #674). Before the split, ``ccraut`` was the
-        # single overloaded field and legacy KK2000 configs documented it AS
-        # the qc threshold. Such a config (e.g. ``ccraut=1e-3``) still composes
-        # because ``ccraut`` remains a live Beheng field, but the KK2000 branch
-        # now reads ``ccraut_kk_threshold`` — so the override would be silently
-        # ignored and the threshold would stay at its 1e-5 default. Raising is
-        # safe: ``ccraut`` (the Beheng prefactor) is UNUSED in the KK2000
-        # branch, so a deliberate Beheng-prefactor override alongside kk2000
-        # is meaningless. A Beheng-mode ``ccraut`` override is untouched.
-        if (autoconversion_scheme == cls.SCHEME_KK2000
-                and not math.isclose(ccraut, _BEHENG_CCRAUT_DEFAULT)
-                and math.isclose(ccraut_kk_threshold,
-                                 _KK2000_QC_THRESHOLD_DEFAULT)):
-            raise ValueError(
-                "autoconversion_scheme='kk2000' with a non-default "
-                f"ccraut={ccraut} but ccraut_kk_threshold left at its default "
-                f"({_KK2000_QC_THRESHOLD_DEFAULT}). Legacy configs documented "
-                "ccraut AS the KK2000 threshold, but the KK2000 branch now "
-                "reads the dedicated 'ccraut_kk_threshold' field (in-cloud qc, "
-                "kg/kg); 'ccraut' is the Beheng (1994) rate prefactor and is "
-                "UNUSED under kk2000. Migrate this config: rename ccraut -> "
-                "ccraut_kk_threshold."
-            )
-
-        return cls(
+        params = cls(
             ccraut=jnp.array(ccraut),
             ccraut_kk_threshold=jnp.array(ccraut_kk_threshold),
             smooth_ccraut=jnp.array(smooth_ccraut),
@@ -193,6 +169,56 @@ class MicrophysicsParameters:
             ccwmin=jnp.array(ccwmin),
             autoconversion_scheme=int(autoconversion_scheme),
         )
+        # Run the field-level cross-validation on this door too (the runner
+        # runs it on the YAML-override door — see ``validate``).
+        params.validate()
+        return params
+
+    def validate(self) -> None:
+        """Raise on an illegal field COMBINATION (config-time only).
+
+        This is the cross-field guard that both construction doors share:
+        ``default()`` calls it after building the instance, and the Hydra
+        runner (``runners._build_term``) calls it on the post-override
+        object it builds directly via ``__class__(**...)``. Without the
+        latter, a YAML config that flips ``autoconversion_scheme`` and sets
+        a legacy ``ccraut`` would bypass ``default()``'s guard entirely and
+        silently run with the wrong threshold.
+
+        Concrete-values-only: it reads fields as Python floats/ints, so it
+        MUST run at config/compose time only, never inside a jit trace — a
+        traced leaf would raise a ConcretizationError. Every caller is
+        config-time (parameter construction), so that holds.
+        """
+        # Legacy-config guard (F2, #674). Before the split, ``ccraut`` was the
+        # single overloaded field and legacy KK2000 configs documented it AS
+        # the qc threshold. Such a config (e.g. ``ccraut=1e-3``) still composes
+        # because ``ccraut`` remains a live Beheng field, but the KK2000 branch
+        # now reads ``ccraut_kk_threshold`` — so the override would be silently
+        # ignored and the threshold would stay at its 1e-5 default. Raising is
+        # safe: ``ccraut`` (the Beheng prefactor) is UNUSED in the KK2000
+        # branch, so a deliberate Beheng-prefactor override alongside kk2000
+        # is meaningless. A Beheng-mode ``ccraut`` override is untouched.
+        # ``rel_tol`` accommodates the f32 round-trip: the fields are stored as
+        # ``jnp.array`` (float32), so a Python 1e-5 default reads back as
+        # 9.9999997e-6 — well outside ``math.isclose``'s 1e-9 default. 1e-6 is
+        # far tighter than any physically meaningful override yet forgiving of
+        # f32 precision, so "left at the default" is recognised.
+        if (int(self.autoconversion_scheme) == self.SCHEME_KK2000
+                and not math.isclose(float(self.ccraut),
+                                     _BEHENG_CCRAUT_DEFAULT, rel_tol=1e-6)
+                and math.isclose(float(self.ccraut_kk_threshold),
+                                 _KK2000_QC_THRESHOLD_DEFAULT, rel_tol=1e-6)):
+            raise ValueError(
+                "autoconversion_scheme='kk2000' with a non-default "
+                f"ccraut={float(self.ccraut)} but ccraut_kk_threshold left at "
+                f"its default ({_KK2000_QC_THRESHOLD_DEFAULT}). Legacy configs "
+                "documented ccraut AS the KK2000 threshold, but the KK2000 "
+                "branch now reads the dedicated 'ccraut_kk_threshold' field "
+                "(in-cloud qc, kg/kg); 'ccraut' is the Beheng (1994) rate "
+                "prefactor and is UNUSED under kk2000. Migrate this config: "
+                "rename ccraut -> ccraut_kk_threshold."
+            )
 
 
 class MicrophysicsState(NamedTuple):
