@@ -21,11 +21,6 @@ class AerosolParameters:
     background aerosol.
     """
     
-    # Plume count and feature count are not stored as fields: they are the
-    # leading axis lengths of the arrays below (``plume_lat.shape[0]`` and
-    # ``ftr_weight.shape[0]``), so a stored copy could only ever drift out
-    # of sync with the real array shapes (#674).
-
     # Plume center locations [degrees]
     plume_lat: jnp.ndarray        # (nplumes,) latitude of plume centers
     plume_lon: jnp.ndarray        # (nplumes,) longitude of plume centers
