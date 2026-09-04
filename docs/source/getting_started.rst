@@ -310,10 +310,13 @@ resolved from a single source of truth:
   itself), the active physics is consulted via
   :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`.
   Physics without a grid-dependent stability limit (ECHAM, Held–Suarez,
-  ...) keep the historical 30-minute default; SPEEDY shortens the step
-  only for high-vertical-level / high-truncation grids where its explicit
-  surface drag would otherwise be unstable (standard 7/8-level SPEEDY
-  runs stay at exactly 30 minutes). See
+  ...) adopt the 12-minute default — the validated ECHAM L47/L95
+  production step, the same value ``run/default.yaml`` uses on the CLI, so
+  both doors resolve one rule. SPEEDY reports its own limit instead: it is
+  capped at the historical 30-min plateau and shortened only for
+  high-vertical-level / high-truncation grids where its explicit surface
+  drag would otherwise be unstable (standard 7/8-level SPEEDY runs stay at
+  exactly 30 minutes). See
   :doc:`design/speedy_variable_levels` for the stability analysis.
 
 **Physics**: Use different physics packages or configurations
