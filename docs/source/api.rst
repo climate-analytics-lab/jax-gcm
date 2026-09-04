@@ -27,6 +27,7 @@ Library homes for the science the Hydra runner only adapts (see :mod:`jcm.runner
    :toctree: generated
    :recursive:
 
+   jcm.experiments
    jcm.initial_states
    jcm.analysis
    jcm.forcing

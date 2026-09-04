@@ -89,7 +89,9 @@ off-centering, the level-matched ozone, …), and is the single source of truth
 for that configuration — ``tools/benchmark.py`` and the release-validation
 matrix compose the very same yaml rather than a private override list. Override
 individual keys on top as usual, e.g.
-``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``.
+``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``. The very same
+recipes are loadable from Python without touching Hydra — see
+:ref:`experiments-from-python` below.
 
 One run schema — no ``+``/``++`` guesswork for run keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -241,6 +243,34 @@ Unpublished grids / verticals degrade exactly as the CLI does (``auto`` inputs
 that the mirror does not carry resolve to nothing, with a warning), and
 ``aerosol="macv2sp"`` raises a precise error until the MACv2-SP weights are
 staged on the mirror.
+
+.. _experiments-from-python:
+
+The same recipes from Python (``jcm.experiments``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:func:`jcm.experiments.load` is the recipe door: it composes the same
+``jcm/config/experiment/*.yaml`` the CLI's ``+experiment=`` uses — internally,
+with Hydra invisible — and returns built objects. ``model.run(**exp.run_kwargs)``
+reproduces ``python -m jcm.main +experiment=<name>``'s integration (the recipe's
+initial state is already applied — e.g. the dry-JW start for the ECHAM family):
+
+.. code-block:: python
+
+   import jcm.experiments as experiments
+
+   experiments.available()          # {name: one-line summary} for every recipe
+
+   exp = experiments.load("t63-echam-jam")
+   predictions = exp.model.run(**exp.run_kwargs)   # same run as the CLI
+
+   # exp.forcing is the built ForcingData; exp.config is a plain resolved dict
+   # (no DictConfig leaks out). Override any key with Hydra dotted syntax:
+   exp = experiments.load("t63-echam-jam", **{"run.total_time": 30})
+
+pySES recipes load only when the optional ``pyses`` backend is installed
+(a clear error otherwise). For forcing alone, reach for
+:meth:`~jcm.forcing.ForcingData.from_bundles` above.
 
 Customizing the Model
 ^^^^^^^^^^^^^^^^^^^^^
