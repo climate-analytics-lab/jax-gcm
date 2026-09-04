@@ -119,6 +119,44 @@ class MicrophysicsParameters:
 
     SCHEME_BEHENG = 0
     SCHEME_KK2000 = 1
+    # Documented string aliases → canonical int flag. Kept as a class
+    # attribute (no annotation, so not a dataclass field) so both the
+    # ``default()`` door and the Hydra-override door (``runners._build_term``,
+    # which reconstructs the class directly) map through the SAME table.
+    _SCHEME_ALIASES = {"beheng": SCHEME_BEHENG, "kk2000": SCHEME_KK2000}
+
+    @classmethod
+    def _normalize_scheme(cls, scheme):
+        """Map a string alias to the canonical int flag; pass ints through.
+
+        A traced leaf (under a jit trace, when the struct is unflattened) is
+        not a ``str`` and passes through unchanged.
+        """
+        if isinstance(scheme, str):
+            try:
+                return cls._SCHEME_ALIASES[scheme]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown autoconversion_scheme {scheme!r}; expected one of "
+                    f"{sorted(cls._SCHEME_ALIASES)} or the int constants "
+                    f"{cls.SCHEME_BEHENG} (Beheng) / {cls.SCHEME_KK2000} (KK2000)."
+                )
+        return scheme
+
+    def __post_init__(self):
+        """Normalize the scheme selector to its canonical int at construction.
+
+        The STORED field is canonical regardless of which door built the
+        instance — ``default()`` OR ``_build_term``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra override. Downstream
+        (the ``validate`` guard and the ``lax.cond`` dispatch) then only ever
+        sees the int, so the documented ``"beheng"`` / ``"kk2000"`` string
+        aliases are equivalent to the int constants everywhere (#674).
+        """
+        object.__setattr__(
+            self, "autoconversion_scheme",
+            self._normalize_scheme(self.autoconversion_scheme),
+        )
 
     @classmethod
     def default(cls, ccraut=_BEHENG_CCRAUT_DEFAULT,
@@ -136,15 +174,9 @@ class MicrophysicsParameters:
 
         ``autoconversion_scheme`` accepts either the int constant
         (``SCHEME_BEHENG`` / ``SCHEME_KK2000``) or the string aliases
-        ``"beheng"`` / ``"kk2000"``.
+        ``"beheng"`` / ``"kk2000"`` — ``__post_init__`` normalizes either
+        form to the canonical int on the constructed instance.
         """
-        if isinstance(autoconversion_scheme, str):
-            scheme_map = {
-                "beheng": cls.SCHEME_BEHENG,
-                "kk2000": cls.SCHEME_KK2000,
-            }
-            autoconversion_scheme = scheme_map[autoconversion_scheme]
-
         params = cls(
             ccraut=jnp.array(ccraut),
             ccraut_kk_threshold=jnp.array(ccraut_kk_threshold),
@@ -167,7 +199,7 @@ class MicrophysicsParameters:
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
             ccwmin=jnp.array(ccwmin),
-            autoconversion_scheme=int(autoconversion_scheme),
+            autoconversion_scheme=autoconversion_scheme,
         )
         # Run the field-level cross-validation on this door too (the runner
         # runs it on the YAML-override door — see ``validate``).
