@@ -15,6 +15,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -27,6 +28,7 @@ import generate_training_data  # noqa: E402
 from generate_training_data import (  # noqa: E402
     LABEL_FIELDS,
     PROFILE_FIELDS,
+    _aerosol_optics_fields,
     _clip_to_bounds,
     _finalize_batch,
     _latin_hypercube,
@@ -262,6 +264,84 @@ class EffectiveRadiusTest(unittest.TestCase):
         toa_large = np.asarray(labeller(large, 0)["sw_flux_up"])[:, 0]
         self.assertTrue(np.all(toa_small > toa_large + 1.0),
                         f"4 um {toa_small} vs 20 um {toa_large}")
+
+
+class AerosolNamespaceTest(unittest.TestCase):
+    """The trajectory loader must follow the #640 aerosol output rename.
+
+    Each run publishes the broadband 550 nm optics under exactly one scheme
+    namespace (``macsp.*`` or ``jam_optics.*``); pre-#640 files used the
+    un-namespaced ``aerosol.*``. Reading only the removed ``aerosol.*`` names
+    silently substituted zeros on a post-rename file, dropping the aerosol
+    effect from the training set. The loader must prefer the new names, fall
+    back to the legacy ones, and warn loudly when none are present.
+    """
+
+    SHAPE_3D = (2, 3)
+    SHAPE_2D = (3,)
+
+    def _ds(self, **vars_):
+        import xarray as xr
+
+        data = {}
+        for name, arr in vars_.items():
+            arr = np.asarray(arr, dtype=np.float64)
+            dims = ("level", "col") if arr.ndim == 2 else ("col",)
+            data[name] = xr.DataArray(arr, dims=dims)
+        return xr.Dataset(data)
+
+    def test_prefers_the_macsp_namespace(self):
+        aod = np.full(self.SHAPE_3D, 0.11)
+        ang = np.full(self.SHAPE_2D, 1.3)
+        ds = self._ds(**{
+            "macsp.aod_profile": aod,
+            "macsp.ssa_profile": np.full(self.SHAPE_3D, 0.95),
+            "macsp.asy_profile": np.full(self.SHAPE_3D, 0.65),
+            "macsp.angstrom": ang,
+        })
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = _aerosol_optics_fields(ds, self.SHAPE_3D, self.SHAPE_2D)
+        np.testing.assert_array_equal(out["aod_profile"], aod)
+        np.testing.assert_array_equal(out["angstrom"], ang)
+
+    def test_prefers_jam_optics_namespace(self):
+        aod = np.full(self.SHAPE_3D, 0.07)
+        ds = self._ds(**{
+            "jam_optics.aod_profile": aod,
+            "jam_optics.ssa_profile": np.full(self.SHAPE_3D, 0.9),
+            "jam_optics.asy_profile": np.full(self.SHAPE_3D, 0.7),
+            "jam_optics.angstrom": np.full(self.SHAPE_2D, 1.1),
+        })
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = _aerosol_optics_fields(ds, self.SHAPE_3D, self.SHAPE_2D)
+        np.testing.assert_array_equal(out["aod_profile"], aod)
+
+    def test_falls_back_to_legacy_aerosol_names(self):
+        aod = np.full(self.SHAPE_3D, 0.05)
+        ds = self._ds(**{
+            "aerosol.aod_profile": aod,
+            "aerosol.ssa_profile": np.full(self.SHAPE_3D, 0.9),
+            "aerosol.asy_profile": np.full(self.SHAPE_3D, 0.7),
+            "aerosol.angstrom": np.full(self.SHAPE_2D, 1.5),
+        })
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = _aerosol_optics_fields(ds, self.SHAPE_3D, self.SHAPE_2D)
+        np.testing.assert_array_equal(out["aod_profile"], aod)
+
+    def test_warns_and_defaults_when_no_aerosol_names_present(self):
+        ds = self._ds()  # a genuinely aerosol-free (or misconfigured) file
+        with self.assertWarnsRegex(UserWarning, "no aerosol optics"):
+            out = _aerosol_optics_fields(ds, self.SHAPE_3D, self.SHAPE_2D)
+        # The quartet falls back to the documented no-aerosol defaults.
+        np.testing.assert_array_equal(
+            out["aod_profile"], np.zeros(self.SHAPE_3D))
+        np.testing.assert_array_equal(
+            out["ssa_profile"], np.full(self.SHAPE_3D, 0.9))
+        np.testing.assert_array_equal(
+            out["angstrom"], np.full(self.SHAPE_2D, 1.5))
 
 
 class SweepCoverageTest(unittest.TestCase):

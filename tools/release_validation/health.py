@@ -154,7 +154,8 @@ def main():
     if aod is not None:
         check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
     else:
-        print("NOTE  no AOD field found (aod_550/aod_total); skipping")
+        print("NOTE  no AOD field found "
+              "(jam_optics.aod_550/macsp.od550aer); skipping")
 
     # Per-species global burdens (JAM runs): the shared ``burden`` sums
     # interstitial + cloud-borne mass over the species' modes and
