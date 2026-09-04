@@ -3,6 +3,7 @@
 import jax.numpy as jnp
 import jax
 import numpy as np
+import pytest
 from .echam_1m import (
     MicrophysicsParameters,
     autoconversion, autoconversion_beheng, autoconversion_kk2000,
@@ -226,7 +227,35 @@ class TestKK2000Autoconversion:
         )
         assert int(cfg_str.autoconversion_scheme) == MicrophysicsParameters.SCHEME_KK2000
         assert int(cfg_int.autoconversion_scheme) == int(cfg_str.autoconversion_scheme)
-    
+
+    def test_legacy_kk2000_ccraut_override_raises(self):
+        """A legacy ``ccraut``-as-threshold KK2000 config must fail loudly.
+
+        Before the #674 split, KK2000 configs documented ``ccraut`` AS the qc
+        threshold. Such a config now silently ignores the override (the KK2000
+        branch reads ``ccraut_kk_threshold``), so construction must raise a
+        migration error naming the new field rather than run at the 1e-5
+        default.
+        """
+        with pytest.raises(ValueError, match="ccraut_kk_threshold"):
+            MicrophysicsParameters.default(
+                autoconversion_scheme="kk2000", ccraut=1e-3,
+            )
+
+    def test_kk2000_new_field_override_is_accepted(self):
+        """Overriding the dedicated KK2000 field constructs cleanly."""
+        cfg = MicrophysicsParameters.default(
+            autoconversion_scheme="kk2000", ccraut_kk_threshold=1e-3,
+        )
+        assert float(cfg.ccraut_kk_threshold) == pytest.approx(1e-3)
+
+    def test_beheng_ccraut_override_is_untouched_by_the_guard(self):
+        """A ccraut override under Beheng (the field's real owner) is fine."""
+        cfg = MicrophysicsParameters.default(
+            autoconversion_scheme="beheng", ccraut=1e-3,
+        )
+        assert float(cfg.ccraut) == pytest.approx(1e-3)
+
     def test_ice_autoconversion(self):
         """Levkov aggregation properties (ECHAM mo_cloud.f90:996-1052).
 

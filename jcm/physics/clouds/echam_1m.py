@@ -17,6 +17,8 @@ Based on the ECHAM6/ICON ``mo_cloud.f90`` single-moment branch
 (Lohmann and Roeckner, 1996).
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 from typing import NamedTuple, Tuple, Optional
@@ -24,6 +26,13 @@ import tree_math
 
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
+
+# Defaults shared by the ``default`` factory's signature AND its legacy-config
+# guard (F2, #674): the Beheng rate prefactor and the KK2000 in-cloud qc
+# threshold. Kept as module constants so the guard tests the SAME literals the
+# signature ships, and they can never drift apart.
+_BEHENG_CCRAUT_DEFAULT = 15.0
+_KK2000_QC_THRESHOLD_DEFAULT = 1.0e-5
 
 
 @tree_math.struct
@@ -112,7 +121,8 @@ class MicrophysicsParameters:
     SCHEME_KK2000 = 1
 
     @classmethod
-    def default(cls, ccraut=15.0, ccraut_kk_threshold=1.0e-5,
+    def default(cls, ccraut=_BEHENG_CCRAUT_DEFAULT,
+                ccraut_kk_threshold=_KK2000_QC_THRESHOLD_DEFAULT,
                 smooth_ccraut=5e-5,
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
@@ -134,6 +144,30 @@ class MicrophysicsParameters:
                 "kk2000": cls.SCHEME_KK2000,
             }
             autoconversion_scheme = scheme_map[autoconversion_scheme]
+
+        # Legacy-config guard (F2, #674). Before the split, ``ccraut`` was the
+        # single overloaded field and legacy KK2000 configs documented it AS
+        # the qc threshold. Such a config (e.g. ``ccraut=1e-3``) still composes
+        # because ``ccraut`` remains a live Beheng field, but the KK2000 branch
+        # now reads ``ccraut_kk_threshold`` — so the override would be silently
+        # ignored and the threshold would stay at its 1e-5 default. Raising is
+        # safe: ``ccraut`` (the Beheng prefactor) is UNUSED in the KK2000
+        # branch, so a deliberate Beheng-prefactor override alongside kk2000
+        # is meaningless. A Beheng-mode ``ccraut`` override is untouched.
+        if (autoconversion_scheme == cls.SCHEME_KK2000
+                and not math.isclose(ccraut, _BEHENG_CCRAUT_DEFAULT)
+                and math.isclose(ccraut_kk_threshold,
+                                 _KK2000_QC_THRESHOLD_DEFAULT)):
+            raise ValueError(
+                "autoconversion_scheme='kk2000' with a non-default "
+                f"ccraut={ccraut} but ccraut_kk_threshold left at its default "
+                f"({_KK2000_QC_THRESHOLD_DEFAULT}). Legacy configs documented "
+                "ccraut AS the KK2000 threshold, but the KK2000 branch now "
+                "reads the dedicated 'ccraut_kk_threshold' field (in-cloud qc, "
+                "kg/kg); 'ccraut' is the Beheng (1994) rate prefactor and is "
+                "UNUSED under kk2000. Migrate this config: rename ccraut -> "
+                "ccraut_kk_threshold."
+            )
 
         return cls(
             ccraut=jnp.array(ccraut),
