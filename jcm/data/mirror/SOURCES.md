@@ -19,6 +19,7 @@ Regridding always starts from the highest-resolution product available.
 | CESM ne30 topography | `.../inputdata/atm/cam/topo/se/ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_noleak_greenlndantarcsgh30fac2.50_20250825.nc` | native ne30np4 |
 | CEDS ne30 (MAM4-processed, native) | `/glade/campaign/cesm/cesmdata/cseg/inputdata/atm/cam/chem/emis/cmip7/ne30/CEDS-CMIP-2025-04-18_20251030` | native ne30 |
 | ECHAM T127 boundary files | `/glade/derecho/scratch/duncanwp/ECHAM_T127` (`T127GR15_jan_surf.nc` has the full SSO + soil/veg set; `T127L95_jan_spec.nc` A/B table; CMIP5 ozone decades) | T127 (384×192) — SSO cross-check only; GMTED remains the primary source |
+| MACv2.0-SP simple plumes (Stevens et al. 2017) | WDCC `MACv2_SP_v1` (https://doi.org/10.1594/WDCC/MACv2_SP_v1); download `MACv2.0-SP_v1.nc` once to `$JCM_MIRROR_ROOT/sources/macv2` | grid/level-free single file (plume geometry + `year_weight`/`ann_cycle`) — staged by `--stage macv2` |
 Surveyed and ruled out first: `/glade/campaign/acom/acom-climate/cesm2/inputdata/atm/waccm/`
 — the SC-WACCM forcing files carry O3/O/O2/H/NO/CO2 + heating but no
 OH/NO3/H2O2, and `sulf/` is stratospheric sulfate SAD. The WACCM CCMI
