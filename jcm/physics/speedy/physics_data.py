@@ -136,7 +136,7 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.ones((num_levels,)+nodal_shape),
             compute_shortwave = compute_shortwave if compute_shortwave is not None else True,
             step = step if step is not None else jnp.int32(1),
-            heating_rate = heating_rate if heating_rate is not None else jnp.zeros((num_levels,)+nodal_shape),
+            heating_rate = heating_rate if heating_rate is not None else jnp.ones((num_levels,)+nodal_shape),
         )
 
     def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None, heating_rate=None):
