@@ -24,6 +24,7 @@ worktree as cwd): an editable-installed jcm elsewhere shadows
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -32,7 +33,8 @@ from pathlib import Path
 
 import numpy as np
 
-from jcm.data.bundle_names import PUBLISHED_GRIDS
+from jcm.data.bundle_names import (PUBLISHED_GRIDS, PUBLISHED_LEVELS,
+                                   PUBLISHED_VERTICALS)
 
 # Per-grid Gaussian latitude count. The *set* of published grids is owned by
 # ``jcm.data.bundle_names.PUBLISHED_GRIDS`` (the whitelist the runner's ``auto``
@@ -42,10 +44,96 @@ from jcm.data.bundle_names import PUBLISHED_GRIDS
 # skipping it.
 _NLAT = {"t63": 96, "t106": 160}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
+
+# Column (non-Gaussian) grids that carry a terrain bundle only.
+_COLUMN_GRIDS = {"ne30pg3": None}
+
+#: Declarative product table the manifest is generated from (``build_manifest``
+#: expands ``{grid}``/``{nlev}`` over the ``PUBLISHED_*`` sets). Fields: ``path``
+#: template; ``grids`` (``gaussian``/``gaussian+column``/``None``=grid-free);
+#: ``levels`` (bool = level-resolved on a published vertical); ``coverage``
+#: ([first,last] transient series, else ``None``); ``alignment``
+#: (transient/climatology/static); ``key`` (forcing knob); ``auto`` (the product
+#: ``forcing.<key>=auto`` picks); ``staged`` (on the mirror today).
+_MANIFEST_PRODUCTS: tuple[dict, ...] = (
+    {"name": "terrain", "path": "bundles/{grid}/terrain.nc",
+     "grids": "gaussian+column", "levels": False, "coverage": None,
+     "alignment": "static", "key": "terrain_file", "auto": True,
+     "staged": True},
+    {"name": "forcing_pd", "path": "bundles/{grid}/forcing_pd.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "file", "auto": False,
+     "staged": True},
+    {"name": "forcing_pi", "path": "bundles/{grid}/forcing_pi.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "file", "auto": False,
+     "staged": True},
+    {"name": "emissions_pd", "path": "bundles/{grid}/emissions_pd.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "emissions_file", "auto": True,
+     "staged": True},
+    {"name": "emissions_pi", "path": "bundles/{grid}/emissions_pi.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "emissions_file", "auto": False,
+     "staged": True},
+    {"name": "dms", "path": "bundles/{grid}/dms.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "dms_file", "auto": True,
+     "staged": True},
+    {"name": "dust", "path": "bundles/{grid}/dust.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "dust_file", "auto": True,
+     "staged": True},
+    {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
+     "grids": "gaussian", "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "ozone_file", "auto": True,
+     "staged": True},
+    {"name": "ozone_pi", "path": "bundles/{grid}_l{nlev}/ozone_pi.nc",
+     "grids": "gaussian", "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "ozone_file", "auto": False,
+     "staged": True},
+    {"name": "oxidants_pd", "path": "bundles/{grid}_l{nlev}/oxidants_pd.nc",
+     "grids": "gaussian", "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "oxidants_file", "auto": True,
+     "staged": True},
+    {"name": "oxidants_pi", "path": "bundles/{grid}_l{nlev}/oxidants_pi.nc",
+     "grids": "gaussian", "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "oxidants_file", "auto": False,
+     "staged": True},
+    # Yearly transient series; coverage transcribed from the forcing yamls
+    # (amip.yaml / era5.yaml available_years) + SOURCES.md.
+    {"name": "forcing_amip", "path": "bundles/{grid}/forcing_amip/{year}.nc",
+     "grids": "gaussian", "levels": False, "coverage": [1870, 2022],
+     "alignment": "transient", "key": "file", "auto": False, "staged": True},
+    {"name": "emissions_amip",
+     "path": "bundles/{grid}/emissions_amip/{year}.nc", "grids": "gaussian",
+     "levels": False, "coverage": [1850, 2022], "alignment": "transient",
+     "key": "emissions_file", "auto": False, "staged": True},
+    {"name": "ozone_amip",
+     "path": "bundles/{grid}_l{nlev}/ozone_amip/{year}.nc",
+     "grids": "gaussian", "levels": True, "coverage": [1850, 2022],
+     "alignment": "transient", "key": "ozone_file", "auto": False,
+     "staged": True},
+    {"name": "forcing_era5", "path": "bundles/{grid}/forcing_era5/{year}.nc",
+     "grids": "gaussian", "levels": False, "coverage": [1979, 2024],
+     "alignment": "transient", "key": "file", "auto": False, "staged": True},
+    # MACv2-SP simple-plume file (Stevens et al. 2017; WDCC MACv2_SP_v1),
+    # grid/level-free; staged=false until stage_macv2 uploads it.
+    {"name": "macv2_sp", "path": "macv2_sp/MACv2.0-SP_v1.nc", "grids": None,
+     "levels": False, "coverage": None, "alignment": "static",
+     "key": "macv2_file", "auto": True, "staged": False},
+)
 NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
              "noleak_greenlndantarcsgh30fac2.50_20250825.nc")
 GRAV = 9.80665
+
+#: Local MACv2.0-SP parameter file for ``stage_macv2`` — download once from
+#: WDCC (https://doi.org/10.1594/WDCC/MACv2_SP_v1) into ``sources/macv2``.
+MACV2_SRC = Path(os.environ.get(
+    "JCM_MIRROR_ROOT",
+    f"/glade/derecho/scratch/{os.environ.get('USER', '')}/hf_mirror")
+) / "sources" / "macv2" / "MACv2.0-SP_v1.nc"
 
 ROOT = Path(os.environ.get(
     "JCM_MIRROR_ROOT",
@@ -312,6 +400,78 @@ def stage_era5_transient() -> None:
                     BUILD / "era5_land_transient" / f"{year}.nc"))
 
 
+def stage_macv2() -> None:
+    """Stage the MACv2.0-SP simple-plume parameter file (grid/level-free).
+
+    Copies ``MACv2.0-SP_v1.nc`` (Stevens et al. 2017; WDCC ``MACv2_SP_v1``,
+    https://doi.org/10.1594/WDCC/MACv2_SP_v1) — a single small file, one plume
+    geometry + ``year_weight``/``ann_cycle`` scalings, no per-grid variant — from
+    ``MACV2_SRC`` to the manifest's ``macv2_sp/`` product path. Flip that
+    product's ``staged`` flag to ``True`` and regenerate the manifest once the
+    upload lands.
+    """
+    dst = UPLOAD / "macv2_sp" / "MACv2.0-SP_v1.nc"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(MACV2_SRC, dst)
+    print("macv2:", dst, flush=True)
+
+
+def build_manifest() -> dict:
+    """Assemble the mirror-manifest dict from :data:`_MANIFEST_PRODUCTS`.
+
+    Expands each row's ``{grid}``/``{nlev}`` template against the published grid
+    (:data:`GRIDS` + column grids), level (:data:`PUBLISHED_LEVELS`) and vertical
+    (:data:`PUBLISHED_VERTICALS`) sets so the availability knowledge the resolver
+    consults is generated, never hand-listed. The published sets stay owned by
+    ``jcm.data.bundle_names`` so this and the runner's ``auto`` gate cannot drift.
+    """
+    from jcm.data.remote import DEFAULT_REPO
+
+    gaussian = sorted(GRIDS)
+    products = {}
+    for row in _MANIFEST_PRODUCTS:
+        if row["grids"] == "gaussian":
+            grids = gaussian
+        elif row["grids"] == "gaussian+column":
+            grids = gaussian + sorted(_COLUMN_GRIDS)
+        else:  # None -> grid-free single file
+            grids = None
+        products[row["name"]] = {
+            "path": row["path"],
+            "grids": grids,
+            "levels": sorted(PUBLISHED_LEVELS) if row["levels"] else None,
+            "vertical": (sorted(PUBLISHED_VERTICALS)[0]
+                         if row["levels"] else None),
+            "coverage": row["coverage"],
+            "alignment": row["alignment"],
+            "key": row["key"],
+            "auto": row["auto"],
+            "staged": row["staged"],
+        }
+    return {
+        "schema_version": 1,
+        "repo": DEFAULT_REPO,
+        "grids": {**GRIDS, **_COLUMN_GRIDS},
+        "levels": sorted(PUBLISHED_LEVELS),
+        "verticals": sorted(PUBLISHED_VERTICALS),
+        "products": products,
+    }
+
+
+#: Packaged manifest path (``jcm/data/mirror_manifest.json``), refreshed in-repo
+#: by ``stage_manifest`` so a mirror change regenerates it mechanically.
+_MANIFEST_PATH = Path(__file__).resolve().parents[1] / "mirror_manifest.json"
+
+
+def stage_manifest() -> None:
+    """(Re)generate the packaged ``jcm/data/mirror_manifest.json``.
+
+    Pure metadata — no Glade source — so it runs anywhere (see ``check_sources``).
+    """
+    _MANIFEST_PATH.write_text(json.dumps(build_manifest(), indent=2) + "\n")
+    print("manifest:", _MANIFEST_PATH, flush=True)
+
+
 def stage_registry() -> None:
     from jcm.data.mirror.registry import write_registry
 
@@ -346,6 +506,7 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
     "aux": ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst",
             "/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone"),
     "bundles": (str(BUILD),),
+    "macv2": (str(MACV2_SRC),),
     "amip": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
              "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10",
              "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
@@ -365,7 +526,13 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
 
 
 def check_sources(stage_names) -> None:
-    """Fail fast when the Glade sources for the requested stages are absent."""
+    """Fail fast when the Glade sources for the requested stages are absent.
+
+    Source-free stages (``manifest`` — pure metadata) skip the Glade guard so
+    the packaged manifest can be regenerated on any machine.
+    """
+    if not any(_STAGE_SOURCES.get(name) for name in stage_names):
+        return
     if not Path("/glade").is_dir():
         sys.exit("This builder streams NCAR Glade source data — /glade is "
                  "not mounted here. Run it on Derecho/Casper (see "
@@ -414,11 +581,14 @@ def stage_upload() -> None:
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
           "bundles": stage_bundles, "amip": stage_amip,
-          "era5-transient": stage_era5_transient,
+          "era5-transient": stage_era5_transient, "macv2": stage_macv2,
+          "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
 
-#: Heavy opt-in stages excluded from ``--stage all``.
-_NOT_IN_ALL = ("amip", "era5-transient", "upload")
+#: Heavy / source-gated opt-in stages excluded from ``--stage all``. ``macv2``
+#: needs the one-off WDCC download (``MACV2_SRC``); the others are multi-GB or
+#: push to the remote.
+_NOT_IN_ALL = ("amip", "era5-transient", "macv2", "upload")
 
 
 def main() -> None:

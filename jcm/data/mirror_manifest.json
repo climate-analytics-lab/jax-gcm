@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "repo": "climate-analytics-lab/jax-gcm-data",
+  "grids": {
+    "t106": 160,
+    "t63": 96,
+    "ne30pg3": null
+  },
+  "levels": [
+    47,
+    95
+  ],
+  "verticals": [
+    "hybrid"
+  ],
+  "products": {
+    "terrain": {
+      "path": "bundles/{grid}/terrain.nc",
+      "grids": [
+        "t106",
+        "t63",
+        "ne30pg3"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "terrain_file",
+      "auto": true,
+      "staged": true
+    },
+    "forcing_pd": {
+      "path": "bundles/{grid}/forcing_pd.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "forcing_pi": {
+      "path": "bundles/{grid}/forcing_pi.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "emissions_pd": {
+      "path": "bundles/{grid}/emissions_pd.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "emissions_file",
+      "auto": true,
+      "staged": true
+    },
+    "emissions_pi": {
+      "path": "bundles/{grid}/emissions_pi.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "emissions_file",
+      "auto": false,
+      "staged": true
+    },
+    "dms": {
+      "path": "bundles/{grid}/dms.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "dms_file",
+      "auto": true,
+      "staged": true
+    },
+    "dust": {
+      "path": "bundles/{grid}/dust.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "dust_file",
+      "auto": true,
+      "staged": true
+    },
+    "ozone_pd": {
+      "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "ozone_file",
+      "auto": true,
+      "staged": true
+    },
+    "ozone_pi": {
+      "path": "bundles/{grid}_l{nlev}/ozone_pi.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "ozone_file",
+      "auto": false,
+      "staged": true
+    },
+    "oxidants_pd": {
+      "path": "bundles/{grid}_l{nlev}/oxidants_pd.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "oxidants_file",
+      "auto": true,
+      "staged": true
+    },
+    "oxidants_pi": {
+      "path": "bundles/{grid}_l{nlev}/oxidants_pi.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "oxidants_file",
+      "auto": false,
+      "staged": true
+    },
+    "forcing_amip": {
+      "path": "bundles/{grid}/forcing_amip/{year}.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": [
+        1870,
+        2022
+      ],
+      "alignment": "transient",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "emissions_amip": {
+      "path": "bundles/{grid}/emissions_amip/{year}.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": [
+        1850,
+        2022
+      ],
+      "alignment": "transient",
+      "key": "emissions_file",
+      "auto": false,
+      "staged": true
+    },
+    "ozone_amip": {
+      "path": "bundles/{grid}_l{nlev}/ozone_amip/{year}.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": [
+        1850,
+        2022
+      ],
+      "alignment": "transient",
+      "key": "ozone_file",
+      "auto": false,
+      "staged": true
+    },
+    "forcing_era5": {
+      "path": "bundles/{grid}/forcing_era5/{year}.nc",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": [
+        1979,
+        2024
+      ],
+      "alignment": "transient",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "macv2_sp": {
+      "path": "macv2_sp/MACv2.0-SP_v1.nc",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "macv2_file",
+      "auto": true,
+      "staged": false
+    }
+  }
+}

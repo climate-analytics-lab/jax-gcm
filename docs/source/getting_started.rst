@@ -89,7 +89,9 @@ off-centering, the level-matched ozone, …), and is the single source of truth
 for that configuration — ``tools/benchmark.py`` and the release-validation
 matrix compose the very same yaml rather than a private override list. Override
 individual keys on top as usual, e.g.
-``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``.
+``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``. The very same
+recipes are loadable from Python without touching Hydra — see
+:ref:`experiments-from-python` below.
 
 One run schema — no ``+``/``++`` guesswork for run keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -199,6 +201,77 @@ For a more realistic simulation with orography and time-varying boundary conditi
    ds = predictions.to_xarray()
    ds.to_netcdf("output.nc")
 
+Canonical mirror-bundle forcing (``from_bundles``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:meth:`~jcm.forcing.ForcingData.from_bundles` is the Python door onto the same
+data-mirror bundles the CLI's ``auto`` defaults resolve — it composes the whole
+canonical input set for a composition in one call, fetching each per-grid bundle
+into the local Hugging Face cache. For a JAM (prognostic-aerosol) package it
+supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant set;
+a non-JAM package gets surface + ozone only. It routes the composed config
+through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
+``+experiment=t63-echam-jam`` run expressed in Python:
+
+.. code-block:: python
+
+   from jcm.model import Model
+   from jcm.terrain import TerrainData
+   from jcm.forcing import ForcingData
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.physics.echam.echam_levels import get_echam_levels
+   from jcm.initial_states import jw_state
+   from jcm.utils import get_coords
+
+   coords = get_coords(vertical_coords=get_echam_levels(47),
+                       spectral_truncation=63)      # ECHAM T63L47 hybrid
+   physics = echam_physics(aerosol_module="jam")     # JAM prognostic aerosol
+   terrain = TerrainData.from_coords(coords)
+   model = Model(coords=coords, terrain=terrain, physics=physics)
+
+   # Surface (present-day), ozone and the JAM emission/dms/dust/oxidant bundles,
+   # all for the model grid. surface="amip"/"era5" take a transient years=[...]
+   # range; aerosol=None supplies surface + ozone only.
+   forcing = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+
+   predictions = model.run(
+       initial_state=jw_state(model, rh=0.0),
+       forcing=forcing, total_time="1 year", save_interval="1 day",
+   )
+
+Unpublished grids / verticals degrade exactly as the CLI does (``auto`` inputs
+that the mirror does not carry resolve to nothing, with a warning), and
+``aerosol="macv2sp"`` raises a precise error until the MACv2-SP weights are
+staged on the mirror.
+
+.. _experiments-from-python:
+
+The same recipes from Python (``jcm.experiments``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:func:`jcm.experiments.load` is the recipe door: it composes the same
+``jcm/config/experiment/*.yaml`` the CLI's ``+experiment=`` uses — internally,
+with Hydra invisible — and returns built objects. ``model.run(**exp.run_kwargs)``
+reproduces ``python -m jcm.main +experiment=<name>``'s integration (the recipe's
+initial state is already applied — e.g. the dry-JW start for the ECHAM family):
+
+.. code-block:: python
+
+   import jcm.experiments as experiments
+
+   experiments.available()          # {name: one-line summary} for every recipe
+
+   exp = experiments.load("t63-echam-jam")
+   predictions = exp.model.run(**exp.run_kwargs)   # same run as the CLI
+
+   # exp.forcing is the built ForcingData; exp.config is a plain resolved dict
+   # (no DictConfig leaks out). Override any key with Hydra dotted syntax:
+   exp = experiments.load("t63-echam-jam", **{"run.total_time": 30})
+
+pySES recipes load only when the optional ``pyses`` backend is installed
+(a clear error otherwise). For forcing alone, reach for
+:meth:`~jcm.forcing.ForcingData.from_bundles` above.
+
 Customizing the Model
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -237,10 +310,13 @@ resolved from a single source of truth:
   itself), the active physics is consulted via
   :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`.
   Physics without a grid-dependent stability limit (ECHAM, Held–Suarez,
-  ...) keep the historical 30-minute default; SPEEDY shortens the step
-  only for high-vertical-level / high-truncation grids where its explicit
-  surface drag would otherwise be unstable (standard 7/8-level SPEEDY
-  runs stay at exactly 30 minutes). See
+  ...) adopt the 12-minute default — the validated ECHAM L47/L95
+  production step, the same value ``run/default.yaml`` uses on the CLI, so
+  both doors resolve one rule. SPEEDY reports its own limit instead: it is
+  capped at the historical 30-min plateau and shortened only for
+  high-vertical-level / high-truncation grids where its explicit surface
+  drag would otherwise be unstable (standard 7/8-level SPEEDY runs stay at
+  exactly 30 minutes). See
   :doc:`design/speedy_variable_levels` for the stability analysis.
 
 **Physics**: Use different physics packages or configurations

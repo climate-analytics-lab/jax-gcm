@@ -29,7 +29,7 @@
 #    prepare native-T119 emission files and point these keys at them.
 #  - run=longrun: 30-day health-gated chunks with the settled production
 #    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
-#    stratosphere; run.time_step=12 min is the conservative L47/L95 step.
+#    stratosphere; the 12-min L47/L95 step now comes from the shared default (run/default.yaml).
 #  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
 #    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
 #    stated explicitly so the recorded config documents the value used.
@@ -52,6 +52,4 @@ forcing:
   dms_file: null
   dust_file: null
   oxidants_file: null
-run:
-  time_step: 12
 sl_off_centering: 0.2

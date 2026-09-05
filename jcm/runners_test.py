@@ -82,7 +82,7 @@ class TestConfigComposition(unittest.TestCase):
         self.assertIn("speedy_convection", cfg.physics.terms)
         self.assertEqual(cfg.grid.vertical, "sigma")
         self.assertEqual(cfg.grid.layers, 8)
-        self.assertEqual(cfg.run.time_step, 10)
+        self.assertEqual(cfg.run.time_step, 12)
         self.assertEqual(cfg.init.kind, "isothermal")
         self.assertEqual(cfg.terrain.kind, "aquaplanet")
         self.assertEqual(cfg.forcing.kind, "default")

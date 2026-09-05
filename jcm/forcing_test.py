@@ -6,6 +6,7 @@ Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jcm.forcing import (
     ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
 )
@@ -1367,6 +1368,138 @@ class TestReadMacv2Weights(unittest.TestCase):
         # 1970-01-01 is MODEL_EPOCH -> 0 s; 1971-01-01 is 365 days later.
         np.testing.assert_allclose(np.asarray(yw_ts.time_seconds),
                                    [0.0, 365 * 86400.0])
+
+
+def _t63l47_coords():
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=get_echam_levels(47),
+                      spectral_truncation=63)
+
+
+def _t42l8_sigma_coords():
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=SigmaCoordinates.equidistant(8),
+                      spectral_truncation=42)
+
+
+class TestForcingFromBundles(unittest.TestCase):
+    """The Python door ``ForcingData.from_bundles`` (#751 Part 4).
+
+    It composes the canonical mirror-bundle config and routes it through the
+    SAME ``jcm.runners.build_forcing`` engine the CLI uses, so the flagship
+    proves the two doors agree pytree-for-pytree on a JAM T63L47 configuration.
+    """
+
+    @staticmethod
+    def _patch_readers(shape):
+        # Deterministic, network-free stand-ins so BOTH doors traverse the same
+        # patched engine and any difference is a config-composition defect. The
+        # readers return FIXED objects (identity-stable across both builds).
+        from unittest import mock
+
+        import xarray as xr
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        base = ForcingData.zeros(shape)
+        anthro = {"emis_so2_ant": jnp.ones(shape)}
+        dms = jnp.ones(shape)
+        dust = jnp.ones(shape)
+        oxi = {"oh": jnp.ones((1, *shape))}
+        return [
+            mock.patch.object(runners, "_resolve_data_path",
+                              side_effect=lambda p: p),
+            mock.patch.object(runners, "_resolve_auto_ozone",
+                              return_value=None),
+            mock.patch.object(ForcingData, "from_file", return_value=base),
+            mock.patch("xarray.open_dataset", return_value=xr.Dataset()),
+            mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                       return_value=anthro),
+            mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                       return_value=None),
+            mock.patch("jcm.forcing.validate_emissions_grid"),
+            mock.patch("jcm.forcing.read_dms_seawater", return_value=dms),
+            mock.patch("jcm.forcing.read_dust_source", return_value=dust),
+            mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
+            mock.patch("jcm.forcing.validate_oxidant_levels"),
+        ]
+
+    def test_jam_pd_equivalent_to_build_forcing(self):
+        import contextlib
+
+        import jax
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        # The equivalent composed cfg: forcing=from_file + the present-day
+        # surface bundle + the auto defaults, JAM active.
+        ref_cfg = OmegaConf.create({
+            "forcing": {"kind": "from_file",
+                        "file": "hf://bundles/t63/forcing_pd.nc",
+                        "ozone_file": "auto", "emissions_file": "auto",
+                        "dms_file": "auto", "dust_file": "auto",
+                        "oxidants_file": "auto"},
+            "physics": {"aerosol_module": "jam"}})
+
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_readers(shape):
+                stack.enter_context(p)
+            door = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+            ref = runners.build_forcing(ref_cfg, coords)
+
+        la = jax.tree_util.tree_leaves(door)
+        lb = jax.tree_util.tree_leaves(ref)
+        self.assertEqual(len(la), len(lb))
+        for x, y in zip(la, lb):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    def test_macv2sp_not_yet_staged_raises(self):
+        coords = _t42l8_sigma_coords()
+        with self.assertRaisesRegex(FileNotFoundError, "yet published"):
+            ForcingData.from_bundles(coords, aerosol="macv2sp", surface=None)
+
+    def test_invalid_arguments_raise(self):
+        coords = _t42l8_sigma_coords()
+        with self.assertRaisesRegex(ValueError, "aerosol="):
+            ForcingData.from_bundles(coords, aerosol="bogus")
+        with self.assertRaisesRegex(ValueError, "surface="):
+            ForcingData.from_bundles(coords, surface="bogus")
+        with self.assertRaisesRegex(ValueError, "transient"):
+            ForcingData.from_bundles(coords, surface="amip")  # years missing
+
+
+class TestForcingFromBundlesWarnings:
+    """The emission-family config traps fire on the Python door too (#751)."""
+
+    @pytest.fixture(autouse=True)
+    def _audible_jcm_logger(self):
+        import logging
+        jcm_logger = logging.getLogger("jcm")
+        prev = jcm_logger.level
+        jcm_logger.setLevel(logging.WARNING)
+        try:
+            yield
+        finally:
+            jcm_logger.setLevel(prev)
+
+    def test_zero_emission_warns_on_unpublished_grid(self, caplog):
+        import logging
+
+        from jcm.forcing import ForcingData
+        coords = _t42l8_sigma_coords()
+        # An unpublished grid nulls every auto emission key with no fetch, so the
+        # JAM baseline is sea-salt-only — the same degradation + warning the CLI
+        # door fires (surface=None keeps the build offline).
+        with caplog.at_level(logging.WARNING, logger="jcm.runners"):
+            ForcingData.from_bundles(coords, aerosol="jam", surface=None)
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "t42" in caplog.text
 
 
 if __name__ == '__main__':
