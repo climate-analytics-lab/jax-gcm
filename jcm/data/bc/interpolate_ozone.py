@@ -36,10 +36,14 @@ from jcm.physics.echam.echam_levels import get_echam_levels
 REFERENCE_SURFACE_PRESSURE_PA = 101325.0
 
 
-def _vertical_interp_log_p(
+def vertical_interp_log_p(
     o3_source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
 ) -> np.ndarray:
     """Vertical-interp ``o3_source`` from ``plev_source`` to ``plev_target``.
+
+    Public because the ERA5 loader in ``jcm.physics.bias_correction`` needs the
+    same interpolation for temperature, humidity and winds. Nothing here is
+    ozone-specific beyond the argument names.
 
     Args:
         o3_source: ``(..., nplev_source, ..., ...)`` ozone field; the
@@ -113,7 +117,7 @@ def interpolate_ozone(
     b = np.asarray(vertical.b_centers)
     plev_target = a + b * reference_ps_pa
 
-    o3_out = _vertical_interp_log_p(o3_in, plev_source, plev_target)
+    o3_out = vertical_interp_log_p(o3_in, plev_source, plev_target)
 
     # Build output dataset preserving lat/lon/time, replacing plev with level.
     ds_out = xr.Dataset(
