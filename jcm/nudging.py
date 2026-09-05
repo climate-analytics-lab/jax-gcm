@@ -51,8 +51,12 @@ class NudgingTarget:
     """Gridpoint reference fields the relaxation drives the state toward.
 
     All fields are dimensional in the model's native conventions: ``u_wind``
-    and ``v_wind`` in m/s, ``temperature`` in K, on the
-    ``(nlev, *horizontal_shape)`` layout the dycore exposes via
+    and ``v_wind`` in m/s, ``temperature`` in K, ``specific_humidity`` in
+    g/kg, the :class:`PhysicsState` convention (the state bridge
+    dimensionalizes humidity as gram/kilogram). A kg/kg reference such as raw
+    ERA5 must be multiplied by 1000 before it lands here, otherwise the
+    relaxation silently drives the model toward ~1/1000 of the intended
+    humidity. Fields are on the ``(nlev, *horizontal_shape)`` layout via
     ``coords.horizontal.nodal_shape``. Each leaf can be a bare
     ``jnp.ndarray`` (static target) or a :class:`jcm.forcing.TimeSeries`
     leaf with a leading time axis that ``select(date, calendar)`` slices
@@ -65,21 +69,30 @@ class NudgingTarget:
     u_wind: jnp.ndarray
     v_wind: jnp.ndarray
     temperature: jnp.ndarray
+    # Optional, and last so a three-argument construction still works. None
+    # means "no humidity reference", which is the pre-existing behaviour: the
+    # relaxation leaves specific humidity alone. Bias-correction training is
+    # what needs it, and it pairs with a non-zero `inv_tau_humidity`.
+    specific_humidity: jnp.ndarray = None
 
     @classmethod
     def from_dataset(cls, ds, *,
                      u_var: str = "u", v_var: str = "v",
-                     T_var: str = "T",
+                     T_var: str = "T", q_var: str = "q",
                      time_var: Optional[str] = "time") -> "NudgingTarget":
         """Build a :class:`NudgingTarget` from an xarray Dataset.
 
         Args:
-            ds: ``xarray.Dataset`` carrying ``u``, ``v``, ``T`` (or names
-                overridden by the ``*_var`` kwargs). Each is expected with
-                axes ``(time, lev, lat, lon)`` — time is optional, see
-                ``time_var``. Loaded verbatim onto the model grid;
+            ds: ``xarray.Dataset`` carrying ``u``, ``v``, ``T`` and
+                optionally ``q`` (or names overridden by the ``*_var``
+                kwargs). Each is expected with axes
+                ``(time, lev, lat, lon)``; time is optional (see
+                ``time_var``). Loaded verbatim onto the model grid;
                 regridding is the user's responsibility before loading.
-            u_var, v_var, T_var: netCDF variable names.
+            u_var, v_var, T_var, q_var: netCDF variable names. ``q_var``
+                may be absent, in which case ``specific_humidity`` is
+                filled with zeros and only matters when paired with a
+                non-zero ``inv_tau_humidity``.
             time_var: Time coord name. ``None`` for static (climatology)
                 reference data.
 
@@ -99,15 +112,19 @@ class NudgingTarget:
         u = to_jax(u_var)
         v = to_jax(v_var)
         T = to_jax(T_var)
+        # Humidity is optional: a wind/temperature-only target (the original
+        # use case) carries no q field, so fall back to zeros.
+        q = to_jax(q_var) if q_var in ds else jnp.zeros_like(T)
 
         if is_time_varying:
             time_seconds = _time_axis_seconds_from_ds(ds.rename({time_var: "time"}))
-            return cls(
-                u_wind=make_time_series(u, time_seconds, align_mode=BY_DATE),
-                v_wind=make_time_series(v, time_seconds, align_mode=BY_DATE),
-                temperature=make_time_series(T, time_seconds, align_mode=BY_DATE),
-            )
-        return cls(u_wind=u, v_wind=v, temperature=T)
+
+            def ts(a):
+                return make_time_series(a, time_seconds, align_mode=BY_DATE)
+
+            return cls(u_wind=ts(u), v_wind=ts(v),
+                       temperature=ts(T), specific_humidity=ts(q))
+        return cls(u_wind=u, v_wind=v, temperature=T, specific_humidity=q)
 
 
 # ---------------------------------------------------------------------------
@@ -120,21 +137,26 @@ class NudgingConfig:
     """Per-variable, per-level inverse relaxation timescales (1 / s).
 
     All values are dimensional (per second). Zero entries mean "no nudging"
-    for that variable / level — that's how the common "winds above the PBL
+    for that variable / level, which is how the common "winds above the PBL
     only" pattern is expressed: ``inv_tau_wind`` non-zero from the free
-    troposphere upwards, zero below; ``inv_tau_temperature`` zero everywhere.
+    troposphere upwards, zero below, with ``inv_tau_temperature`` and
+    ``inv_tau_humidity`` zero everywhere.
 
     Wind nudging applies symmetrically to ``u_wind`` and ``v_wind`` (one
     inverse-timescale profile covers both). Surface-pressure nudging is
-    deliberately not supported through the physics path — the dycore
+    deliberately not supported through the physics path: the dycore
     advances surface pressure via the continuity equation, and a ps
     nudging tendency would require extending :class:`PhysicsTendency` with
     a ``normalized_surface_pressure`` field. Add it only when a concrete
     use case lands.
     """
 
-    inv_tau_wind: jnp.ndarray         # (nlev,) — applied to both u and v
+    inv_tau_wind: jnp.ndarray         # (nlev,) applied to both u and v
     inv_tau_temperature: jnp.ndarray  # (nlev,)
+    # Optional, and last, so a wind/temperature config still takes two
+    # arguments. None means humidity is not relaxed, which is what this module
+    # did before humidity became configurable.
+    inv_tau_humidity: jnp.ndarray = None  # (nlev,) applied to specific humidity
 
     @classmethod
     def winds_only(cls, nlev: int, *, tau_seconds: float = 21600.0,
@@ -155,6 +177,30 @@ class NudgingConfig:
         return cls(
             inv_tau_wind=inv_tau * mask,
             inv_tau_temperature=jnp.zeros(nlev),
+            inv_tau_humidity=jnp.zeros(nlev),
+        )
+
+    @classmethod
+    def temp_humidity(cls, nlev: int, *, tau_seconds: float = 21600.0) -> "NudgingConfig":
+        """Nudge temperature and specific humidity on every level, winds free.
+
+        This is the offline-warmup target for the NN bias correction: the
+        temperature and humidity nudge recorded from a nudged-to-ERA5 run is
+        the supervised target the network learns to reproduce (see
+        ``jcm/physics/bias_correction``).
+
+        Args:
+            nlev: Number of vertical levels.
+            tau_seconds: Relaxation timescale in seconds (default 6 h),
+                shared by temperature and humidity.
+
+        """
+        inv_tau = 1.0 / float(tau_seconds)
+        ones = jnp.ones(nlev)
+        return cls(
+            inv_tau_wind=jnp.zeros(nlev),
+            inv_tau_temperature=inv_tau * ones,
+            inv_tau_humidity=inv_tau * ones,
         )
 
 
@@ -200,10 +246,12 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
                      nodal_shape: tuple | None = None) -> PhysicsTendency:
     """Newtonian relaxation tendency in gridpoint space.
 
-    ``dX/dt = inv_tau · (X_ref − X)`` per relaxed variable. Variables with
-    zero ``inv_tau`` get zero tendency. Tracers and specific humidity are
-    not nudged — the tendency carries zeros for them so the
-    :class:`PhysicsTendency` pytree shape matches the state's tracer dict.
+    ``dX/dt = inv_tau * (X_ref - X)`` per relaxed variable. Variables with
+    zero ``inv_tau`` get zero tendency, so temperature, winds, and specific
+    humidity are each nudged only where their ``inv_tau`` profile is
+    non-zero. Tracers are never nudged; the tendency carries zeros for them
+    so the :class:`PhysicsTendency` pytree shape matches the state's tracer
+    dict.
 
     Args:
         state: Current gridpoint state.
@@ -227,6 +275,8 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
 
     inv_tau_wind = _profile(config.inv_tau_wind)
     inv_tau_temp = _profile(config.inv_tau_temperature)
+    inv_tau_q = (None if config.inv_tau_humidity is None
+                 else _profile(config.inv_tau_humidity))
 
     # The target is assembled on the dycore's nodal (nlev, nlon, nlat) grid,
     # but under column vectorisation the state arriving here has already been
@@ -276,12 +326,22 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
     v_t = inv_tau_wind * (_match(target.v_wind, state.v_wind) - state.v_wind)
     T_t = inv_tau_temp * (
         _match(target.temperature, state.temperature) - state.temperature)
-    q_zeros = jnp.zeros_like(state.specific_humidity)
+    # No humidity reference, or no humidity timescale, relaxes nothing. That
+    # matches the wind/temperature-only behaviour this module had before
+    # humidity became configurable. Both are checked on the Python object
+    # rather than traced: each is either present for the whole run or absent
+    # for the whole run.
+    if target.specific_humidity is None or config.inv_tau_humidity is None:
+        q_t = jnp.zeros_like(state.specific_humidity)
+    else:
+        q_t = inv_tau_q * (
+            _match(target.specific_humidity, state.specific_humidity)
+            - state.specific_humidity)
     tracer_zeros = {name: jnp.zeros_like(t) for name, t in state.tracers.items()}
 
     return PhysicsTendency(
         u_wind=u_t, v_wind=v_t, temperature=T_t,
-        specific_humidity=q_zeros, tracers=tracer_zeros,
+        specific_humidity=q_t, tracers=tracer_zeros,
     )
 
 
