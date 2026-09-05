@@ -610,6 +610,12 @@ through the standard physics-coupling path. The same setup works under
 SPEEDY, ECHAM, or any other physics package, on any
 :class:`DynamicalCore` backend.
 
+.. note::
+   ``NudgingTarget`` fields use the model-state units: winds in m/s,
+   temperature in K, and specific humidity in **g/kg**. ERA5 stores
+   humidity in kg/kg, so multiply by 1000 before building the target.
+
+
 Composing extra terms: the upper sponge
 ----------------------------------------
 
@@ -635,6 +641,32 @@ levels and everything above ``min_pressure_hpa``). See the
 :mod:`jcm.nudging` and :mod:`jcm.physics.dissipation.upper_sponge` module
 docstrings for the full set of knobs, and :doc:`design/composable_physics`
 for the composition API (``+``, ``replace``, ``remove``).
+
+Learned bias correction
+-----------------------
+
+Where nudging needs the reference data at every step, the NN bias
+correction (``jcm/physics/bias_correction``) learns the correction once
+and then runs from the model state alone: a small per-column MLP reads
+the (T, q, u, v) profiles and adds a correction tendency on top of the
+physics. At run time a trained term is one line:
+
+.. code-block:: python
+
+   from jcm.physics.bias_correction import load_bias_correction
+
+   term = load_bias_correction(
+       'jcm/data/bias_correction/online_term_t31_big_insol_vt.npz')
+   model = Model(coords=coords, terrain=terrain,
+                 physics=speedy_physics() + term)
+
+A freshly constructed term (``make_bias_correction(coords)``) is a
+zero-initialised no-op, so composing it changes nothing until it is
+trained. Like nudging, the term is dycore-agnostic and
+broadcasting-native.
+
+See :doc:`bias_correction` for the architecture, the four training
+stages, the held-out results and the limitations.
 
 Multi-Device Parallelization
 -----------------------------

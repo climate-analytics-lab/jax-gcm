@@ -31,6 +31,7 @@ Library homes for the science the Hydra runner only adapts (see :mod:`jcm.runner
    jcm.analysis
    jcm.forcing
    jcm.nudging
+   jcm.physics.bias_correction
    jcm.diagnostics
    jcm.single_column_model
    jcm.diffusion.DiffusionFilter
