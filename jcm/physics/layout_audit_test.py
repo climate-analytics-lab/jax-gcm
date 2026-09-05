@@ -89,6 +89,7 @@ def _all_terms():
 LAYOUT_AGNOSTIC = frozenset({
     "AerocomDiagnostics",
     "MoistAirColumnState",
+    "NNBiasCorrection",
     "NudgingTerm",
     "UpperSponge",
 })
@@ -164,8 +165,17 @@ def _nudging_term():
     ))
 
 
+def _bias_correction_term():
+    from jcm.physics.bias_correction import make_bias_correction
+    # A freshly built term is a zero-initialised no-op, which the vacuous-pass
+    # guard below would reject; a non-zero output layer puts the network on
+    # its active path. No context feature, so the zero forcing suffices.
+    return make_bias_correction(nlev=_NLEV, zero_last_layer=False)
+
+
 #: Constructors for terms whose ``__init__`` needs arguments.
-TERM_FACTORIES = {"NudgingTerm": _nudging_term}
+TERM_FACTORIES = {"NudgingTerm": _nudging_term,
+                  "NNBiasCorrection": _bias_correction_term}
 
 
 def _attach_nudging_target(state, diagnostics, forcing, horiz):

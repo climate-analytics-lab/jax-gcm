@@ -186,6 +186,13 @@ notebooks/model_state.nc
 !jcm/data/test/**/*.nc
 # Packaged NN-emulator weights (weights_file: auto default)
 !jcm/data/emulator_weights_per_band_u64.nc
+# Bias-correction data. Trained terms are experiment artifacts, so only the
+# shipped reference term is versioned; add another deliberately with -f. The
+# _stats.nc the offline stage writes beside a warm start is a small record of
+# the normalisation and may be committed with a term.
+jcm/data/bias_correction/*.npz
+!jcm/data/bias_correction/online_term_t31_big_insol_vt.npz
+!jcm/data/bias_correction/*.nc
 
 # Docker remote setup
 startup.sh
@@ -208,3 +215,9 @@ docs/source/speedy_translation.rst
 # Model checkpoints — runs write these into the cwd (run=pyses_year sets a
 # RELATIVE checkpoint_path), and they are gigabytes. Never committable.
 *.ckpt
+
+# Output of the bias-correction drivers (tools/bias_correction/): figures,
+# evaluation field files, training logs.
+figures/
+eval_out*/
+logs/
