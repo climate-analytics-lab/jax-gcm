@@ -109,15 +109,24 @@ def _patched_engine(shape):
 class TestExperimentsAcceptance(unittest.TestCase):
     """#751 acceptance: the Python door reproduces the CLI composition."""
 
-    def test_jam_load_equivalent_to_cli_composition(self):
+    def setUp(self):
+        # JAM's mam4 term flips jax_enable_x64 on at construction; snapshot the
+        # flag so tearDown restores jcm's default float32 for sibling tests.
+        self._x64 = jax.config.read("jax_enable_x64")
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._x64)
+
+    def _assert_door_matches_cli(self, name):
+        """Both doors build the same patched engine; assert they agree."""
         coords = _t63l47_coords()
         shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
         with contextlib.ExitStack() as stack:
             for p in _patched_engine(shape):
                 stack.enter_context(p)
-            exp = experiments.load("t63-echam-jam")
+            exp = experiments.load(name)
             # The CLI composition, built through the same runners the door uses.
-            cfg = experiments._compose("t63-echam-jam", [])
+            cfg = experiments._compose(name, [])
             ref_model = runners.build_model(cfg)
             ref_forcing = runners.build_forcing(
                 cfg, ref_model.coords,
@@ -135,6 +144,17 @@ class TestExperimentsAcceptance(unittest.TestCase):
             np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
         # The jw recipe's init is applied, ready for model.run(**run_kwargs).
         self.assertIn("initial_state", exp.run_kwargs)
+
+    def test_rrtmgp_load_equivalent_to_cli_composition(self):
+        # No-optional-deps sibling so door<->CLI equivalence keeps running in CI
+        # (the JAM variant below skips there without the mam4-jax extra).
+        self._assert_door_matches_cli("t63-echam-rrtmgp")
+
+    def test_jam_load_equivalent_to_cli_composition(self):
+        # JAM composes the optional mam4-jax microphysics; CI installs no extras
+        # so skip cleanly there, run here where the GPL dep is present.
+        pytest.importorskip("mam4_jax.coupling")
+        self._assert_door_matches_cli("t63-echam-jam")
 
 
 @pytest.mark.slow
