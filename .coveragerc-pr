@@ -76,3 +76,17 @@ omit =
     # ``runners.py`` / ``utils.py`` omit pattern for code the slow
     # suite touches only through entry-point shims.
     jcm/dycore/dinosaur/dycore.py
+    # Bias-correction training, data and evaluation modules: the same
+    # utility/orchestration pattern as runners.py and utils.py above. The
+    # fast suite drives them at 96-100% (synthetic ERA5 store, synthetic
+    # cache, the training loops on a toy model, the evaluation protocol);
+    # the one slow test composes the term onto SPEEDY and never enters the
+    # training or data path. The term itself, nn_bias_correction.py, stays
+    # in the denominator because that slow test does exercise it.
+    jcm/physics/bias_correction/era5_cache.py
+    jcm/physics/bias_correction/era5_data.py
+    jcm/physics/bias_correction/eval_protocol.py
+    jcm/physics/bias_correction/multiyear.py
+    jcm/physics/bias_correction/offline_training.py
+    jcm/physics/bias_correction/online_training.py
+    jcm/physics/bias_correction/optim.py
