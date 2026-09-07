@@ -100,20 +100,24 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "oxidants_file", "auto": False,
      "staged": True},
-    # Yearly transient series; ``coverage`` here is the SOURCE span (from the
-    # forcing yamls' available_years + SOURCES.md) used only as the fallback when
-    # the staging sidecar has not recorded the actually-staged range — see
-    # ``build_manifest`` and ``_record_staged_coverage``.
+    # Yearly transient series. ``coverage`` is the span ACTUALLY on the mirror,
+    # NOT the wider raw-source span: the resolver pads a requested range against
+    # it and must only name year files that exist. Verified 2026-09-07 against
+    # HfApi().list_repo_files — forcing/emissions/ozone AMIP all hold 1950-2022
+    # (contiguous), era5 1979-2024. A partial ``--stage amip --years`` build
+    # narrows this further via the staging sidecar (see ``build_manifest`` /
+    # ``_record_staged_coverage``); ``--stage manifest --verify-remote`` re-checks
+    # it against the live mirror.
     {"name": "forcing_amip", "path": "bundles/{grid}/forcing_amip/{year}.nc",
-     "grids": "gaussian", "levels": False, "coverage": [1870, 2022],
+     "grids": "gaussian", "levels": False, "coverage": [1950, 2022],
      "alignment": "transient", "key": "file", "auto": False, "staged": True},
     {"name": "emissions_amip",
      "path": "bundles/{grid}/emissions_amip/{year}.nc", "grids": "gaussian",
-     "levels": False, "coverage": [1850, 2022], "alignment": "transient",
+     "levels": False, "coverage": [1950, 2022], "alignment": "transient",
      "key": "emissions_file", "auto": False, "staged": True},
     {"name": "ozone_amip",
      "path": "bundles/{grid}_l{nlev}/ozone_amip/{year}.nc",
-     "grids": "gaussian", "levels": True, "coverage": [1850, 2022],
+     "grids": "gaussian", "levels": True, "coverage": [1950, 2022],
      "alignment": "transient", "key": "ozone_file", "auto": False,
      "staged": True},
     {"name": "forcing_era5", "path": "bundles/{grid}/forcing_era5/{year}.nc",
@@ -152,7 +156,8 @@ GMTED = ROOT / "sources" / "gmted" / "mn30_grd"
 #: It lives under ``build/`` (not ``upload/``), so it is never pushed to HF; it
 #: persists between a staging run and a later ``--stage manifest`` on the same
 #: machine. Absent (e.g. an in-repo ``--stage manifest``), coverage falls back to
-#: the declared source range in :data:`_MANIFEST_PRODUCTS`.
+#: the declared full-mirror span in :data:`_MANIFEST_PRODUCTS` (which equals the
+#: full staged range, so the committed no-sidecar manifest already matches HF).
 _STAGED_COVERAGE_PATH = BUILD / "staged_coverage.json"
 
 
@@ -474,14 +479,15 @@ def build_manifest(staged_coverage: dict = None) -> dict:
 
     ``coverage`` for a ``{year}``-series product is the ACTUAL staged span when
     the staging sidecar records it (``staged_coverage``, default
-    :data:`_STAGED_COVERAGE_PATH`), else the declared source range in
-    :data:`_MANIFEST_PRODUCTS`. The distinction matters because the resolver pads
-    a requested range by a year on each side clipped to ``coverage`` (for the
-    ``by_date_interp`` bracket): if that advertised the wider source series while
-    ``--stage amip --years 1950,2022`` staged only a subset, the pad would fetch a
-    year file that was never built. Regenerating the manifest right after staging
-    (same machine, sidecar present) keeps the two honest; an in-repo regeneration
-    with no sidecar reproduces the committed source-coverage manifest unchanged.
+    :data:`_STAGED_COVERAGE_PATH`), else the declared full-mirror span in
+    :data:`_MANIFEST_PRODUCTS` (which equals the committed mirror's range). The
+    distinction matters because the resolver pads a requested range by a year on
+    each side clipped to ``coverage`` (for the ``by_date_interp`` bracket): if
+    that over-advertised while ``--stage amip --years 1950,2000`` staged only a
+    subset, the pad would fetch a year file that was never built. Regenerating
+    the manifest right after a partial staging (same machine, sidecar present)
+    keeps the two honest; an in-repo regeneration with no sidecar reproduces the
+    committed full-mirror-coverage manifest unchanged.
     """
     from jcm.data.remote import DEFAULT_REPO
 
@@ -530,6 +536,65 @@ def stage_manifest() -> None:
     """
     _MANIFEST_PATH.write_text(json.dumps(build_manifest(), indent=2) + "\n")
     print("manifest:", _MANIFEST_PATH, flush=True)
+
+
+def remote_transient_coverage(files, manifest: dict) -> dict:
+    """Real ``[first, last]`` span per ``{year}``-series product from a file list.
+
+    Pure (no network): matches each mirror-relative path in ``files`` against the
+    manifest's ``{year}`` path templates (``{grid}``/``{nlev}`` become wildcards)
+    and returns ``{product: [first, last]}`` for products with any staged year,
+    ``None`` for those with none. Split out from :func:`verify_remote_coverage` so
+    the path-to-span logic is testable without hitting the Hub.
+    """
+    import re
+    from collections import defaultdict
+
+    years: dict[str, set] = defaultdict(set)
+    patterns = {
+        name: re.compile(
+            "^" + re.escape(rec["path"]).replace(r"\{grid\}", "[^/]+")
+            .replace(r"\{nlev\}", r"\d+").replace(r"\{year\}", r"(\d{4})") + "$")
+        for name, rec in manifest["products"].items() if "{year}" in rec["path"]}
+    for f in files:
+        for name, pat in patterns.items():
+            m = pat.match(f)
+            if m:
+                years[name].add(int(m.group(1)))
+                break
+    spans = {}
+    for name in patterns:
+        ys = sorted(years.get(name, ()))
+        spans[name] = [ys[0], ys[-1]] if ys else None
+    return spans
+
+
+def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
+    """Cross-check each transient product's manifest coverage against the mirror.
+
+    Lists the dataset repo (``HfApi().list_repo_files``), derives the real staged
+    span per ``{year}`` product (:func:`remote_transient_coverage`) and returns
+    ``{product: {"manifest": [...], "remote": [...] | None}}`` for every product
+    whose declared coverage disagrees with the mirror (empty == no drift). This is
+    what keeps the committed coverages honest against what the Hub actually holds
+    — the failure Codex flagged when the manifest advertised a source span the
+    mirror never staged. Network-only; driven by ``--stage manifest --verify-remote``.
+    """
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    if manifest is None:
+        manifest = build_manifest()
+    repo_id = repo_id or manifest.get("repo", DEFAULT_REPO)
+    files = HfApi().list_repo_files(repo_id, repo_type="dataset")
+    spans = remote_transient_coverage(files, manifest)
+    drift = {}
+    for name, remote in spans.items():
+        declared = manifest["products"][name]["coverage"]
+        if remote != declared:
+            drift[name] = {"manifest": declared, "remote": remote}
+    return drift
 
 
 def stage_registry() -> None:
@@ -660,6 +725,10 @@ def main() -> None:
     ap.add_argument("--years", default="1950,2022",
                     help="inclusive year range for --stage amip, "
                          "e.g. 1950,2022")
+    ap.add_argument("--verify-remote", action="store_true",
+                    help="after staging, cross-check every transient product's "
+                         "manifest coverage against the live mirror "
+                         "(list_repo_files) and exit non-zero on any drift")
     args = ap.parse_args()
     global _AMIP_YEARS
     first, last = (int(y) for y in args.years.split(","))
@@ -673,6 +742,15 @@ def main() -> None:
     for name in names:
         print(f"=== stage: {name} ===", flush=True)
         STAGES[name]()
+    if args.verify_remote:
+        print("=== verify-remote ===", flush=True)
+        drift = verify_remote_coverage()
+        for name, d in sorted(drift.items()):
+            print(f"DRIFT {name}: manifest={d['manifest']} "
+                  f"remote={d['remote']}", flush=True)
+        if drift:
+            sys.exit("manifest coverage disagrees with the live mirror")
+        print("verify-remote: manifest coverages match the mirror", flush=True)
 
 
 if __name__ == "__main__":

@@ -55,11 +55,12 @@ class TestManifestLoads(unittest.TestCase):
         self.assertIsNone(rec["coverage"])    # static
 
     def test_yearly_products_carry_coverage(self):
-        # Transcribed from the forcing yamls (SOURCES.md).
+        # The span actually staged on the mirror (verified via list_repo_files),
+        # not the wider raw-source series — see build_mirror._MANIFEST_PRODUCTS.
         self.assertEqual(
-            mm.coverage(self.manifest, "forcing_amip"), [1870, 2022])
+            mm.coverage(self.manifest, "forcing_amip"), [1950, 2022])
         self.assertEqual(
-            mm.coverage(self.manifest, "emissions_amip"), [1850, 2022])
+            mm.coverage(self.manifest, "emissions_amip"), [1950, 2022])
         self.assertEqual(
             mm.coverage(self.manifest, "forcing_era5"), [1979, 2024])
         # Climatologies carry no coverage.
@@ -101,11 +102,11 @@ class TestManifestRegen(unittest.TestCase):
 class TestStagedCoverage(unittest.TestCase):
     """The staging sidecar (build_mirror) that pins ACTUAL yearly coverage.
 
-    The transient ``{year}`` products advertise a source span, but a run stages
-    only its ``--years`` subset; the resolver pads the requested range by a year
-    each side clipped to ``coverage``, so an over-advertised span would fetch a
-    year file that was never built. The sidecar records what was staged and
-    ``build_manifest`` folds it in.
+    The transient ``{year}`` products declare the full-mirror span, but a partial
+    ``--years`` run stages only a subset; the resolver pads the requested range by
+    a year each side clipped to ``coverage``, so an over-advertised span would
+    fetch a year file that was never built. The sidecar records what was staged
+    and ``build_manifest`` folds it in.
     """
 
     def test_record_unions_and_build_manifest_folds(self):
@@ -129,11 +130,12 @@ class TestStagedCoverage(unittest.TestCase):
                          [1940, 2022])
         self.assertEqual(man["products"]["ozone_amip"]["coverage"],
                          [1950, 2022])
-        # An un-recorded transient product falls back to its source coverage.
+        # An un-recorded transient product falls back to its declared
+        # full-mirror span.
         self.assertEqual(man["products"]["emissions_amip"]["coverage"],
-                         [1850, 2022])
+                         [1950, 2022])
 
-    def test_no_sidecar_falls_back_to_source_coverage(self):
+    def test_no_sidecar_falls_back_to_full_mirror_coverage(self):
         import tempfile
         from pathlib import Path
 
@@ -143,7 +145,65 @@ class TestStagedCoverage(unittest.TestCase):
         self.assertEqual(bm._load_staged_coverage(missing), {})
         man = bm.build_manifest(staged_coverage={})
         self.assertEqual(man["products"]["forcing_amip"]["coverage"],
-                         [1870, 2022])
+                         [1950, 2022])
+
+
+class TestRemoteCoverageVerification(unittest.TestCase):
+    """The ``--verify-remote`` cross-check of manifest coverage vs. the mirror.
+
+    Pins the pure path->span logic (:func:`remote_transient_coverage`) against a
+    synthetic ``list_repo_files`` payload so a future drift between the committed
+    coverages and the actual mirror is caught by a repeatable check, not a manual
+    inspection — the class of bug that shipped a 1870 source span the mirror never
+    staged.
+    """
+
+    def _files(self, spans):
+        # Build a fake mirror file list holding ``spans[product] = (lo, hi)``.
+        from jcm.data.mirror.build_mirror import _MANIFEST_PRODUCTS
+        tmpl = {row["name"]: row["path"] for row in _MANIFEST_PRODUCTS}
+        files = []
+        for name, (lo, hi) in spans.items():
+            path = tmpl[name].replace("{grid}", "t63").replace("{nlev}", "47")
+            files += [path.replace("{year}", str(y)) for y in range(lo, hi + 1)]
+        return files
+
+    def test_span_derivation_matches_committed_manifest(self):
+        from jcm.data.mirror.build_mirror import (build_manifest,
+                                                  remote_transient_coverage)
+        man = build_manifest(staged_coverage={})
+        files = self._files({"forcing_amip": (1950, 2022),
+                             "emissions_amip": (1950, 2022),
+                             "ozone_amip": (1950, 2022),
+                             "forcing_era5": (1979, 2024)})
+        spans = remote_transient_coverage(files, man)
+        for name, rec in man["products"].items():
+            if "{year}" in rec["path"]:
+                self.assertEqual(spans[name], rec["coverage"], name)
+
+    def test_verify_remote_flags_drift(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # Mirror really holds only 1950-2000 for forcing_amip; the others match.
+        files = self._files({"forcing_amip": (1950, 2000),
+                             "emissions_amip": (1950, 2022),
+                             "ozone_amip": (1950, 2022),
+                             "forcing_era5": (1979, 2024)})
+
+        class _FakeApi:
+            def list_repo_files(self, *a, **k):
+                return files
+
+        import huggingface_hub
+        orig = huggingface_hub.HfApi
+        huggingface_hub.HfApi = _FakeApi
+        try:
+            drift = bm.verify_remote_coverage(manifest=man)
+        finally:
+            huggingface_hub.HfApi = orig
+        self.assertEqual(drift, {"forcing_amip": {"manifest": [1950, 2022],
+                                                  "remote": [1950, 2000]}})
 
 
 if __name__ == "__main__":
