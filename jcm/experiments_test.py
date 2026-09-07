@@ -83,6 +83,47 @@ class TestExperimentsDoor(unittest.TestCase):
             self.assertTrue(GlobalHydra.instance().is_initialized())
             self.assertIsNotNone(compose(config_name="config"))
 
+    def test_override_str_quotes_hydra_grammar_values(self):
+        # F2: a string value carrying Hydra grammar characters (comma, '=',
+        # braces — ordinary in paths/filenames) must compose back verbatim
+        # instead of being read as list/sweep/assignment syntax. Parse each
+        # emitted token with Hydra's own parser and assert it round-trips.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        for value in ("/tmp/a,b", "prefix=tag", "/out/{run}/x", "it's",
+                      "plain/path"):
+            tok = experiments._override_str("run.output_prefix", value)
+            self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
+        # None -> null; non-string scalars stay unquoted (keep their type).
+        self.assertEqual(experiments._override_str("run.output_averages", None),
+                         "run.output_averages=null")
+        self.assertEqual(experiments._override_str("run.total_time", 10),
+                         "run.total_time=10")
+
+    def test_override_grammar_value_composes(self):
+        # F2: the escape hatch survives a real compose, not just token parsing.
+        cfg = experiments._compose(
+            "speedy-t31",
+            [experiments._override_str("run.output_prefix", "/tmp/a,b={c}=z")])
+        self.assertEqual(cfg.run.output_prefix, "/tmp/a,b={c}=z")
+
+    def test_duration_string_overrides_pass_through(self):
+        # F3: Model.run parses duration strings ("1 day"/"12 hours") via
+        # parse_duration_days, so load() must pass them through, not float()-cast
+        # (which would ValueError and break door<->CLI equivalence).
+        from jcm.date import parse_duration_days
+
+        exp = experiments.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": "1 day", "run.save_interval": "12 hours"})
+        self.assertEqual(exp.run_kwargs["total_time"], "1 day")
+        self.assertEqual(exp.run_kwargs["save_interval"], "12 hours")
+        self.assertEqual(parse_duration_days(exp.run_kwargs["total_time"]), 1.0)
+        self.assertAlmostEqual(
+            parse_duration_days(exp.run_kwargs["save_interval"]), 0.5)
+
     def test_module_imports_no_hydra_or_omegaconf_at_top_level(self):
         # The door's whole point: a caller (this file) never imports hydra.
         tree = ast.parse(Path(__file__).read_text())

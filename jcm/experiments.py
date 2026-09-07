@@ -90,8 +90,23 @@ def _compose(name: str, overrides: list[str]):
 
 
 def _override_str(key: str, value) -> str:
-    """One Hydra override token from a ``**overrides`` item (``None`` → ``null``)."""
-    return f"{key}=null" if value is None else f"{key}={value}"
+    """One Hydra override token from a ``**overrides`` item.
+
+    ``None`` → ``null``. A ``str`` value is emitted as a Hydra *quoted string* so
+    grammar characters (commas, ``=``, braces — ordinary in paths/filenames) are
+    carried literally rather than parsed as list/sweep/assignment syntax;
+    :meth:`QuotedString.with_quotes` is Hydra's own serializer, so the token
+    parses back to the exact string (embedded quotes/backslashes handled).
+    Non-string scalars pass through unquoted so ``run.total_time=10`` stays the
+    number ``10`` (and a Python list/dict keeps its native override meaning).
+    """
+    from hydra.core.override_parser.types import Quote, QuotedString
+
+    if value is None:
+        return f"{key}=null"
+    if isinstance(value, str):
+        return f"{key}={QuotedString(text=value, quote=Quote.single).with_quotes()}"
+    return f"{key}={value}"
 
 
 def _run_kwargs(cfg, model) -> dict:
@@ -109,8 +124,12 @@ def _run_kwargs(cfg, model) -> dict:
     run = cfg.run
     kwargs: dict = {
         "forcing": None,  # filled by the caller after build_forcing
-        "save_interval": float(run.save_interval),
-        "total_time": float(run.total_time),
+        # Pass total_time/save_interval through as composed: ``Model.run`` parses
+        # them with ``parse_duration_days`` (accepts int/float days OR a duration
+        # string like ``"1 day"``/``"12 hours"``), so a float() cast here would
+        # reject the string form the CLI accepts and break door equivalence.
+        "save_interval": run.save_interval,
+        "total_time": run.total_time,
         "output_averages": bool(run.output_averages),
         "snapshot_interval": run.get("snapshot_interval"),
         "snapshot_variables": tuple(run.get("snapshot_variables") or ()),
