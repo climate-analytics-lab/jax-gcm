@@ -171,22 +171,37 @@ def _load_staged_coverage(path: Path = None) -> dict:
 
 def _record_staged_coverage(products, first: int, last: int,
                             path: Path = None) -> None:
-    """Union-merge ``[first, last]`` into the sidecar for each named product.
+    """Merge ``[first, last]`` into the sidecar for each named product.
 
-    Called once per transient staging run. Merging by ``min``/``max`` lets an
-    incremental append (issue #610 stages contiguous years without rewriting
-    history) widen the recorded span; a genuinely discontiguous append would
-    over-claim the gap, but the yearly series are always staged as contiguous
-    ranges, so the recorded ``[first, last]`` is exactly the span on the mirror.
+    Called once per transient staging run. An append that overlaps or is
+    adjacent to the recorded span (issue #610 stages contiguous years without
+    rewriting history) widens it by ``min``/``max``. A *disjoint* append — one
+    that would leave a gap of never-staged years between the two ranges — is
+    rejected loudly: ``coverage`` is a single ``[first, last]``, so unioning
+    across the gap would advertise year files the mirror never staged and send
+    the resolver after them. The operator must fill the gap or stage the
+    disjoint ranges into separate mirrors (split coverage the manifest cannot
+    represent). Consistent with the manifest's loud-not-silent rule.
     """
     path = path or _STAGED_COVERAGE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     staged = _load_staged_coverage(path)
     for name in products:
         prev = staged.get(name)
-        lo = first if prev is None else min(prev[0], first)
-        hi = last if prev is None else max(prev[1], last)
-        staged[name] = [int(lo), int(hi)]
+        if prev is None:
+            staged[name] = [int(first), int(last)]
+            continue
+        # Inclusive integer year ranges are contiguous when unioned iff they
+        # overlap or touch: max(starts) <= min(ends) + 1. Otherwise the years
+        # in (min(ends), max(starts)) were never staged.
+        if max(prev[0], first) > min(prev[1], last) + 1:
+            gap_lo, gap_hi = min(prev[1], last) + 1, max(prev[0], first) - 1
+            raise ValueError(
+                f"{name}: staged range [{first}, {last}] is disjoint from the "
+                f"recorded [{prev[0]}, {prev[1]}] — years {gap_lo}-{gap_hi} "
+                f"would be missing. Fill the gap, or stage the disjoint ranges "
+                f"into separate mirrors.")
+        staged[name] = [int(min(prev[0], first)), int(max(prev[1], last))]
     path.write_text(json.dumps(staged, indent=2, sort_keys=True) + "\n")
 
 

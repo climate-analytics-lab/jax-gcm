@@ -135,6 +135,36 @@ class TestStagedCoverage(unittest.TestCase):
         self.assertEqual(man["products"]["emissions_amip"]["coverage"],
                          [1950, 2022])
 
+    def test_adjacent_and_overlapping_appends_merge(self):
+        import tempfile
+        from pathlib import Path
+
+        from jcm.data.mirror import build_mirror as bm
+
+        sidecar = Path(tempfile.mkdtemp()) / "staged_coverage.json"
+        bm._record_staged_coverage(("forcing_amip",), 1950, 1960, path=sidecar)
+        # Adjacent (1961 touches 1960) and overlapping (1955-1975) both widen.
+        bm._record_staged_coverage(("forcing_amip",), 1961, 1970, path=sidecar)
+        bm._record_staged_coverage(("forcing_amip",), 1955, 1975, path=sidecar)
+        self.assertEqual(
+            bm._load_staged_coverage(sidecar)["forcing_amip"], [1950, 1975])
+
+    def test_disjoint_append_raises_naming_the_gap(self):
+        import tempfile
+        from pathlib import Path
+
+        from jcm.data.mirror import build_mirror as bm
+
+        sidecar = Path(tempfile.mkdtemp()) / "staged_coverage.json"
+        bm._record_staged_coverage(("forcing_amip",), 1950, 1960, path=sidecar)
+        with self.assertRaises(ValueError) as cm:
+            bm._record_staged_coverage(("forcing_amip",), 2000, 2010,
+                                       path=sidecar)
+        self.assertIn("1961-1999", str(cm.exception))
+        # The rejected append leaves the sidecar untouched.
+        self.assertEqual(
+            bm._load_staged_coverage(sidecar)["forcing_amip"], [1950, 1960])
+
     def test_no_sidecar_falls_back_to_full_mirror_coverage(self):
         import tempfile
         from pathlib import Path
