@@ -68,6 +68,8 @@ class SWRadiationData:
     ftop: Net downward flux of short-wave radiation at the top of the atmosphere
     dfabs: Flux of short-wave radiation absorbed in each atmospheric layer
     compute_shortwave: Flag to compute shortwave radiation
+    heating_rate: Cached shortwave temperature tendency [K/s] from the last radiation step,
+        re-applied on the steps in between (SPEEDY's tt_rsw)
     """
 
     qcloud: jnp.ndarray
@@ -85,6 +87,7 @@ class SWRadiationData:
     ftop: jnp.ndarray
     dfabs: jnp.ndarray
     compute_shortwave: jnp.bool
+    heating_rate: jnp.ndarray
     # SPEEDY's shortwave sub-stepping counter (every `nstrad` calls).
     # `set_physics_flags` reads it, computes ``compute_shortwave``, then
     # writes ``step+1`` back so the next step sees the advanced value.
@@ -93,7 +96,7 @@ class SWRadiationData:
     step: jnp.int32
 
     @classmethod
-    def zeros(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None):
+    def zeros(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None, heating_rate=None):
         return cls(
             qcloud = qcloud if qcloud is not None else jnp.zeros(nodal_shape),
             fsol = fsol if fsol is not None else jnp.zeros(nodal_shape),
@@ -111,10 +114,11 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.zeros((num_levels,)+nodal_shape),
             compute_shortwave = compute_shortwave if compute_shortwave is not None else False,
             step = step if step is not None else jnp.int32(0),
+            heating_rate = heating_rate if heating_rate is not None else jnp.zeros((num_levels,)+nodal_shape),
         )
 
     @classmethod
-    def ones(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None):
+    def ones(cls, nodal_shape, num_levels, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None, heating_rate=None):
         return cls(
             qcloud = qcloud if qcloud is not None else jnp.ones(nodal_shape),
             fsol = fsol if fsol is not None else jnp.ones(nodal_shape),
@@ -132,9 +136,10 @@ class SWRadiationData:
             dfabs = dfabs if dfabs is not None else jnp.ones((num_levels,)+nodal_shape),
             compute_shortwave = compute_shortwave if compute_shortwave is not None else True,
             step = step if step is not None else jnp.int32(1),
+            heating_rate = heating_rate if heating_rate is not None else jnp.ones((num_levels,)+nodal_shape),
         )
 
-    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None):
+    def copy(self, qcloud=None, fsol=None, rsds=None, rsns=None, ozone=None, ozupp=None, zenit=None, stratz=None, gse=None, icltop=None, cloudc=None, cloudstr=None, ftop=None, dfabs=None, compute_shortwave=None, step=None, heating_rate=None):
         return SWRadiationData(
             qcloud=qcloud if qcloud is not None else self.qcloud,
             fsol=fsol if fsol is not None else self.fsol,
@@ -152,6 +157,7 @@ class SWRadiationData:
             dfabs=dfabs if dfabs is not None else self.dfabs,
             compute_shortwave=compute_shortwave if compute_shortwave is not None else self.compute_shortwave,
             step=step if step is not None else self.step,
+            heating_rate=heating_rate if heating_rate is not None else self.heating_rate,
         )
     
     def isnan(self):
