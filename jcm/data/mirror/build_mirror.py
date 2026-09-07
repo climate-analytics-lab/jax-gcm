@@ -574,16 +574,19 @@ def _variant_label(variant) -> str:
 
 
 def remote_transient_coverage(files, manifest: dict) -> dict:
-    """Real ``[first, last]`` span per ``{year}`` product **and grid/level variant**.
+    """Sorted list of staged years per ``{year}`` product **and grid/level variant**.
 
     Pure (no network): matches each mirror-relative path in ``files`` against the
     manifest's ``{year}`` path templates, capturing ``{grid}``/``{nlev}`` so the
-    span is resolved per concrete ``(grid, nlev)`` variant (``nlev`` is ``None``
-    for grid-only products). Returns ``{product: {(grid, nlev): [first, last]}}``;
-    a variant with no staged year is simply absent from its inner dict. Split out
-    from :func:`verify_remote_coverage` so the path-to-span logic is testable
-    without hitting the Hub — and kept per-variant because pooling all variants
-    under the product would let a complete grid hide a missing one.
+    years are resolved per concrete ``(grid, nlev)`` variant (``nlev`` is ``None``
+    for grid-only products). Returns ``{product: {(grid, nlev): [years...]}}`` with
+    the years sorted ascending; a variant with no staged year is simply absent
+    from its inner dict. The FULL year list (not a reduced ``[first, last]`` span)
+    is returned so :func:`verify_remote_coverage` can catch an interior hole — a
+    variant that keeps its endpoints but drops a middle year. Split out so the
+    path-to-years logic is testable without hitting the Hub, and kept per-variant
+    because pooling all variants under the product would let a complete grid hide
+    a missing one.
     """
     import re
     from collections import defaultdict
@@ -604,23 +607,39 @@ def remote_transient_coverage(files, manifest: dict) -> dict:
                            int(gd["nlev"]) if gd.get("nlev") else None)
                 years[name][variant].add(int(gd["year"]))
                 break
-    return {name: {variant: [min(ys), max(ys)]
+    return {name: {variant: sorted(ys)
                    for variant, ys in years.get(name, {}).items()}
             for name in patterns}
+
+
+def _bounded_years(years, cap: int = 12):
+    """Bounded rendering of a missing-year list for drift output.
+
+    All years when few; otherwise the first ``cap`` plus a ``"+N more"`` sentinel,
+    so a large contiguous hole stays readable in the reported drift.
+    """
+    years = list(years)
+    if len(years) <= cap:
+        return years
+    return [*years[:cap], f"+{len(years) - cap} more"]
 
 
 def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     """Cross-check every transient variant's manifest coverage against the mirror.
 
     Lists the dataset repo (``HfApi().list_repo_files``), derives the real staged
-    span per ``{year}`` product **and grid/level variant**
+    years per ``{year}`` product **and grid/level variant**
     (:func:`remote_transient_coverage`) and returns
     ``{"product[variant]": {"manifest": [...], "remote": [...] | None}}`` for every
     declared variant whose coverage disagrees with the mirror (empty == no drift).
-    A variant absent from the mirror reports ``"remote": None``. Checking each
-    variant — not one pooled span per product — is what keeps a complete grid from
-    masking a missing sibling (e.g. a full t63 series hiding an absent t106).
-    Network-only; driven by ``--stage manifest --verify-remote``.
+    A variant absent from the mirror reports ``"remote": None``. Coverage is
+    checked for CONTIGUITY, not just endpoints: a variant whose ``[first, last]``
+    match but which drops an interior year is flagged with an extra ``"missing"``
+    list (bounded for large holes) — otherwise clients trust the contiguous span
+    and later request a file that is not there. Checking each variant — not one
+    pooled span per product — is what keeps a complete grid from masking a missing
+    sibling (e.g. a full t63 series hiding an absent t106). Network-only; driven by
+    ``--stage manifest --verify-remote``.
     """
     from huggingface_hub import HfApi
 
@@ -630,18 +649,29 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
         manifest = build_manifest()
     repo_id = repo_id or manifest.get("repo", DEFAULT_REPO)
     files = HfApi().list_repo_files(repo_id, repo_type="dataset")
-    spans = remote_transient_coverage(files, manifest)
+    coverage = remote_transient_coverage(files, manifest)
     drift = {}
     for name, rec in manifest["products"].items():
         if "{year}" not in rec["path"]:
             continue
         declared = rec["coverage"]
-        remote_variants = spans.get(name, {})
+        remote_variants = coverage.get(name, {})
         for variant in _product_variants(rec):
-            remote = remote_variants.get(variant)
-            if remote != declared:
-                drift[f"{name}[{_variant_label(variant)}]"] = {
-                    "manifest": declared, "remote": remote}
+            years = remote_variants.get(variant)
+            key = f"{name}[{_variant_label(variant)}]"
+            if years is None:
+                drift[key] = {"manifest": declared, "remote": None}
+                continue
+            span = [years[0], years[-1]]
+            # Interior holes: years absent WITHIN the actual span (endpoint
+            # truncation is already conveyed by span != declared).
+            missing = sorted(set(range(span[0], span[1] + 1)) - set(years))
+            if span == declared and not missing:
+                continue
+            entry = {"manifest": declared, "remote": span}
+            if missing:
+                entry["missing"] = _bounded_years(missing)
+            drift[key] = entry
     return drift
 
 

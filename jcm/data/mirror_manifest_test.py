@@ -191,8 +191,9 @@ class TestRemoteCoverageVerification(unittest.TestCase):
     def _files(self, man, overrides=None):
         # Full mirror listing: every declared variant of every transient product
         # staged over its declared coverage. ``overrides`` maps a
-        # ``(product, grid, nlev)`` variant to a truncated ``(lo, hi)`` span, or
-        # to ``None`` to omit that variant entirely (never staged).
+        # ``(product, grid, nlev)`` variant to a truncated ``(lo, hi)`` span, to
+        # an explicit ``set`` of years (to punch an interior hole), or to ``None``
+        # to omit that variant entirely (never staged).
         from jcm.data.mirror.build_mirror import _product_variants
         overrides = overrides or {}
         files = []
@@ -203,11 +204,12 @@ class TestRemoteCoverageVerification(unittest.TestCase):
                 span = overrides.get((name, grid, nlev), tuple(rec["coverage"]))
                 if span is None:
                     continue
+                yrs = (sorted(span) if isinstance(span, (set, frozenset))
+                       else range(span[0], span[1] + 1))
                 path = rec["path"].replace("{grid}", grid)
                 if nlev is not None:
                     path = path.replace("{nlev}", str(nlev))
-                files += [path.replace("{year}", str(y))
-                          for y in range(span[0], span[1] + 1)]
+                files += [path.replace("{year}", str(y)) for y in yrs]
         return files
 
     def test_span_derivation_matches_committed_manifest(self):
@@ -215,13 +217,15 @@ class TestRemoteCoverageVerification(unittest.TestCase):
                                                   build_manifest,
                                                   remote_transient_coverage)
         man = build_manifest(staged_coverage={})
-        spans = remote_transient_coverage(self._files(man), man)
-        # Every declared variant carries its declared coverage.
+        coverage = remote_transient_coverage(self._files(man), man)
+        # Every declared variant carries the full contiguous year list spanning
+        # its declared coverage.
         for name, rec in man["products"].items():
             if "{year}" in rec["path"]:
+                lo, hi = rec["coverage"]
                 for variant in _product_variants(rec):
-                    self.assertEqual(spans[name][variant], rec["coverage"],
-                                     (name, variant))
+                    self.assertEqual(coverage[name][variant],
+                                     list(range(lo, hi + 1)), (name, variant))
 
     def _drift(self, man, overrides):
         from jcm.data.mirror import build_mirror as bm
@@ -250,6 +254,19 @@ class TestRemoteCoverageVerification(unittest.TestCase):
         self.assertEqual(drift, {"forcing_amip[t63]":
                                  {"manifest": [1950, 2022],
                                   "remote": [1950, 2000]}})
+
+    def test_verify_remote_flags_interior_hole_with_intact_endpoints(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # t63 forcing_amip keeps both endpoints (1950 & 2022) but 2000 is absent:
+        # an endpoint-only span check passes; contiguity names the missing year.
+        present = set(range(1950, 2023)) - {2000}
+        drift = self._drift(man, {("forcing_amip", "t63", None): present})
+        self.assertEqual(drift, {"forcing_amip[t63]":
+                                 {"manifest": [1950, 2022],
+                                  "remote": [1950, 2022],
+                                  "missing": [2000]}})
 
     def test_verify_remote_flags_missing_variant_a_full_sibling_would_mask(self):
         from jcm.data.mirror import build_mirror as bm
