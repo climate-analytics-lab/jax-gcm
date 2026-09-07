@@ -63,6 +63,26 @@ class TestExperimentsDoor(unittest.TestCase):
         self.assertNotIn("DictConfig", type(exp.config).__name__)
         self.assertIs(exp.run_kwargs["forcing"], exp.forcing)
 
+    def test_load_restores_host_hydra_context(self):
+        # F3: load() composes through an internal Hydra context that clears the
+        # global singleton on exit. A host application that has its OWN Hydra
+        # initialised must still find it composable afterwards — hydra imported
+        # lazily here to keep this file's top level hydra-free (meta-test below).
+        from hydra import compose, initialize_config_dir
+        from hydra.core.global_hydra import GlobalHydra
+
+        with initialize_config_dir(version_base=None,
+                                   config_dir=str(experiments.CONFIG_DIR)):
+            self.assertTrue(GlobalHydra.instance().is_initialized())
+            experiments.load(
+                "speedy-t31",
+                **{"terrain": "aquaplanet", "forcing": "default",
+                   "run.total_time": 1.0, "run.save_interval": 1.0})
+            # The host's context survived load(): still initialised and it
+            # composes without raising.
+            self.assertTrue(GlobalHydra.instance().is_initialized())
+            self.assertIsNotNone(compose(config_name="config"))
+
     def test_module_imports_no_hydra_or_omegaconf_at_top_level(self):
         # The door's whole point: a caller (this file) never imports hydra.
         tree = ast.parse(Path(__file__).read_text())

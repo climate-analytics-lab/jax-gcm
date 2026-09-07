@@ -67,18 +67,26 @@ def available() -> dict[str, str]:
 def _compose(name: str, overrides: list[str]):
     """Compose ``+experiment=<name>`` (+ dotted overrides) against the config root.
 
-    ``initialize_config_dir`` clears the global Hydra on exit; we also clear a
-    pre-existing one up front so ``load`` is safe to call repeatedly and from a
-    context where a prior compose left Hydra initialised.
+    ``initialize_config_dir`` clears the global Hydra on exit, and we also clear
+    a pre-existing one up front, so ``load`` is safe to call repeatedly. To not
+    leave a *host* application's own initialised Hydra cleared, we snapshot all
+    Hydra singletons first and restore them in a ``finally`` — the host's
+    context still composes after ``load`` returns (F3).
     """
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
+    from hydra.core.singleton import Singleton
 
-    if GlobalHydra.instance().is_initialized():
-        GlobalHydra.instance().clear()
-    with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
-        return compose(config_name="config",
-                       overrides=[f"+experiment={name}", *overrides])
+    saved = Singleton.get_state()
+    try:
+        if GlobalHydra.instance().is_initialized():
+            GlobalHydra.instance().clear()
+        with initialize_config_dir(version_base=None,
+                                   config_dir=str(CONFIG_DIR)):
+            return compose(config_name="config",
+                           overrides=[f"+experiment={name}", *overrides])
+    finally:
+        Singleton.set_state(saved)
 
 
 def _override_str(key: str, value) -> str:
