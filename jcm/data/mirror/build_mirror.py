@@ -553,47 +553,74 @@ def stage_manifest() -> None:
     print("manifest:", _MANIFEST_PATH, flush=True)
 
 
+def _product_variants(rec: dict):
+    """Concrete ``(grid, nlev)`` variants a ``{year}``-series product declares.
+
+    ``grid`` ranges over ``rec['grids']`` (every transient product is Gaussian);
+    ``nlev`` over ``rec['levels']`` when the product is level-resolved, else the
+    single ``None`` variant. Each is a distinct series the mirror is expected to
+    hold in full — verification checks every one rather than pooling them, so a
+    complete grid cannot mask a missing sibling variant.
+    """
+    for grid in rec["grids"]:
+        for nlev in rec["levels"] or (None,):
+            yield (grid, nlev)
+
+
+def _variant_label(variant) -> str:
+    """``(grid, nlev)`` -> the label used in drift keys, e.g. ``t63`` / ``t63_l47``."""
+    grid, nlev = variant
+    return grid if nlev is None else f"{grid}_l{nlev}"
+
+
 def remote_transient_coverage(files, manifest: dict) -> dict:
-    """Real ``[first, last]`` span per ``{year}``-series product from a file list.
+    """Real ``[first, last]`` span per ``{year}`` product **and grid/level variant**.
 
     Pure (no network): matches each mirror-relative path in ``files`` against the
-    manifest's ``{year}`` path templates (``{grid}``/``{nlev}`` become wildcards)
-    and returns ``{product: [first, last]}`` for products with any staged year,
-    ``None`` for those with none. Split out from :func:`verify_remote_coverage` so
-    the path-to-span logic is testable without hitting the Hub.
+    manifest's ``{year}`` path templates, capturing ``{grid}``/``{nlev}`` so the
+    span is resolved per concrete ``(grid, nlev)`` variant (``nlev`` is ``None``
+    for grid-only products). Returns ``{product: {(grid, nlev): [first, last]}}``;
+    a variant with no staged year is simply absent from its inner dict. Split out
+    from :func:`verify_remote_coverage` so the path-to-span logic is testable
+    without hitting the Hub — and kept per-variant because pooling all variants
+    under the product would let a complete grid hide a missing one.
     """
     import re
     from collections import defaultdict
 
-    years: dict[str, set] = defaultdict(set)
+    years: dict[str, dict] = defaultdict(lambda: defaultdict(set))
     patterns = {
         name: re.compile(
-            "^" + re.escape(rec["path"]).replace(r"\{grid\}", "[^/]+")
-            .replace(r"\{nlev\}", r"\d+").replace(r"\{year\}", r"(\d{4})") + "$")
+            "^" + re.escape(rec["path"]).replace(r"\{grid\}", r"(?P<grid>[^/]+)")
+            .replace(r"\{nlev\}", r"(?P<nlev>\d+)")
+            .replace(r"\{year\}", r"(?P<year>\d{4})") + "$")
         for name, rec in manifest["products"].items() if "{year}" in rec["path"]}
     for f in files:
         for name, pat in patterns.items():
             m = pat.match(f)
             if m:
-                years[name].add(int(m.group(1)))
+                gd = m.groupdict()
+                variant = (gd["grid"],
+                           int(gd["nlev"]) if gd.get("nlev") else None)
+                years[name][variant].add(int(gd["year"]))
                 break
-    spans = {}
-    for name in patterns:
-        ys = sorted(years.get(name, ()))
-        spans[name] = [ys[0], ys[-1]] if ys else None
-    return spans
+    return {name: {variant: [min(ys), max(ys)]
+                   for variant, ys in years.get(name, {}).items()}
+            for name in patterns}
 
 
 def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
-    """Cross-check each transient product's manifest coverage against the mirror.
+    """Cross-check every transient variant's manifest coverage against the mirror.
 
     Lists the dataset repo (``HfApi().list_repo_files``), derives the real staged
-    span per ``{year}`` product (:func:`remote_transient_coverage`) and returns
-    ``{product: {"manifest": [...], "remote": [...] | None}}`` for every product
-    whose declared coverage disagrees with the mirror (empty == no drift). This is
-    what keeps the committed coverages honest against what the Hub actually holds
-    — the failure Codex flagged when the manifest advertised a source span the
-    mirror never staged. Network-only; driven by ``--stage manifest --verify-remote``.
+    span per ``{year}`` product **and grid/level variant**
+    (:func:`remote_transient_coverage`) and returns
+    ``{"product[variant]": {"manifest": [...], "remote": [...] | None}}`` for every
+    declared variant whose coverage disagrees with the mirror (empty == no drift).
+    A variant absent from the mirror reports ``"remote": None``. Checking each
+    variant — not one pooled span per product — is what keeps a complete grid from
+    masking a missing sibling (e.g. a full t63 series hiding an absent t106).
+    Network-only; driven by ``--stage manifest --verify-remote``.
     """
     from huggingface_hub import HfApi
 
@@ -605,10 +632,16 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     files = HfApi().list_repo_files(repo_id, repo_type="dataset")
     spans = remote_transient_coverage(files, manifest)
     drift = {}
-    for name, remote in spans.items():
-        declared = manifest["products"][name]["coverage"]
-        if remote != declared:
-            drift[name] = {"manifest": declared, "remote": remote}
+    for name, rec in manifest["products"].items():
+        if "{year}" not in rec["path"]:
+            continue
+        declared = rec["coverage"]
+        remote_variants = spans.get(name, {})
+        for variant in _product_variants(rec):
+            remote = remote_variants.get(variant)
+            if remote != declared:
+                drift[f"{name}[{_variant_label(variant)}]"] = {
+                    "manifest": declared, "remote": remote}
     return drift
 
 

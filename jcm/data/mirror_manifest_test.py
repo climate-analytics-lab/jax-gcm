@@ -188,38 +188,45 @@ class TestRemoteCoverageVerification(unittest.TestCase):
     staged.
     """
 
-    def _files(self, spans):
-        # Build a fake mirror file list holding ``spans[product] = (lo, hi)``.
-        from jcm.data.mirror.build_mirror import _MANIFEST_PRODUCTS
-        tmpl = {row["name"]: row["path"] for row in _MANIFEST_PRODUCTS}
+    def _files(self, man, overrides=None):
+        # Full mirror listing: every declared variant of every transient product
+        # staged over its declared coverage. ``overrides`` maps a
+        # ``(product, grid, nlev)`` variant to a truncated ``(lo, hi)`` span, or
+        # to ``None`` to omit that variant entirely (never staged).
+        from jcm.data.mirror.build_mirror import _product_variants
+        overrides = overrides or {}
         files = []
-        for name, (lo, hi) in spans.items():
-            path = tmpl[name].replace("{grid}", "t63").replace("{nlev}", "47")
-            files += [path.replace("{year}", str(y)) for y in range(lo, hi + 1)]
+        for name, rec in man["products"].items():
+            if "{year}" not in rec["path"]:
+                continue
+            for grid, nlev in _product_variants(rec):
+                span = overrides.get((name, grid, nlev), tuple(rec["coverage"]))
+                if span is None:
+                    continue
+                path = rec["path"].replace("{grid}", grid)
+                if nlev is not None:
+                    path = path.replace("{nlev}", str(nlev))
+                files += [path.replace("{year}", str(y))
+                          for y in range(span[0], span[1] + 1)]
         return files
 
     def test_span_derivation_matches_committed_manifest(self):
-        from jcm.data.mirror.build_mirror import (build_manifest,
+        from jcm.data.mirror.build_mirror import (_product_variants,
+                                                  build_manifest,
                                                   remote_transient_coverage)
         man = build_manifest(staged_coverage={})
-        files = self._files({"forcing_amip": (1950, 2022),
-                             "emissions_amip": (1950, 2022),
-                             "ozone_amip": (1950, 2022),
-                             "forcing_era5": (1979, 2024)})
-        spans = remote_transient_coverage(files, man)
+        spans = remote_transient_coverage(self._files(man), man)
+        # Every declared variant carries its declared coverage.
         for name, rec in man["products"].items():
             if "{year}" in rec["path"]:
-                self.assertEqual(spans[name], rec["coverage"], name)
+                for variant in _product_variants(rec):
+                    self.assertEqual(spans[name][variant], rec["coverage"],
+                                     (name, variant))
 
-    def test_verify_remote_flags_drift(self):
+    def _drift(self, man, overrides):
         from jcm.data.mirror import build_mirror as bm
 
-        man = bm.build_manifest(staged_coverage={})
-        # Mirror really holds only 1950-2000 for forcing_amip; the others match.
-        files = self._files({"forcing_amip": (1950, 2000),
-                             "emissions_amip": (1950, 2022),
-                             "ozone_amip": (1950, 2022),
-                             "forcing_era5": (1979, 2024)})
+        files = self._files(man, overrides)
 
         class _FakeApi:
             def list_repo_files(self, *a, **k):
@@ -229,11 +236,30 @@ class TestRemoteCoverageVerification(unittest.TestCase):
         orig = huggingface_hub.HfApi
         huggingface_hub.HfApi = _FakeApi
         try:
-            drift = bm.verify_remote_coverage(manifest=man)
+            return bm.verify_remote_coverage(manifest=man)
         finally:
             huggingface_hub.HfApi = orig
-        self.assertEqual(drift, {"forcing_amip": {"manifest": [1950, 2022],
-                                                  "remote": [1950, 2000]}})
+
+    def test_verify_remote_flags_truncated_variant(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # t63 forcing_amip really holds only 1950-2000; every other variant is
+        # complete. Drift must name the specific variant, not the whole product.
+        drift = self._drift(man, {("forcing_amip", "t63", None): (1950, 2000)})
+        self.assertEqual(drift, {"forcing_amip[t63]":
+                                 {"manifest": [1950, 2022],
+                                  "remote": [1950, 2000]}})
+
+    def test_verify_remote_flags_missing_variant_a_full_sibling_would_mask(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # t106 forcing_amip is entirely absent while t63 is complete: pooling
+        # would report no drift; per-variant names the missing grid.
+        drift = self._drift(man, {("forcing_amip", "t106", None): None})
+        self.assertEqual(drift, {"forcing_amip[t106]":
+                                 {"manifest": [1950, 2022], "remote": None}})
 
 
 if __name__ == "__main__":
