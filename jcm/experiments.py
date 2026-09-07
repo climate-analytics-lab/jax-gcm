@@ -188,6 +188,20 @@ def load(name: str, **overrides) -> LoadedExperiment:
                 f"experiment {name!r} uses the pySES CAM-SE backend, which is "
                 "not installed. Install pyses (>=0.1.3.1) to load it.")
 
+    # Apply any ``+constants.*`` overrides to the process-global jcm.constants
+    # singleton BEFORE build, exactly as the CLI (runners.run) does — the dycore
+    # reads the live singleton at construction, so skipping this would build with
+    # default physics while ``.config`` claimed otherwise. Of runners.run()'s
+    # other pre-build steps only this one bears on the built model, so it is the
+    # sole one the door mirrors: configure_host_device_count (SPMD device count)
+    # and maybe_enable_compilation_cache (JAX compile cache) are process-global,
+    # perf-only side effects — XLA_FLAGS is the reliable device-count lever and a
+    # notebook can enable the cache itself; provenance.start_run and the
+    # from_state fail-fast path check are run-loop concerns (provenance is
+    # attached by _run_full/run_chunked, which the door does not use, and a bad
+    # init.file still raises via _state_from_file in _run_kwargs).
+    runners.apply_constants_overrides(cfg)
+
     model = runners.build_model(cfg)
     dycore = getattr(model, "dycore", None)
     forcing = runners.build_forcing(cfg, model.coords, dycore=dycore)

@@ -63,6 +63,26 @@ class TestExperimentsDoor(unittest.TestCase):
         self.assertNotIn("DictConfig", type(exp.config).__name__)
         self.assertIs(exp.run_kwargs["forcing"], exp.forcing)
 
+    def test_load_applies_constants_override_before_build(self):
+        # F1: a `+constants.*` override must reach the process-global singleton
+        # the dycore reads at construction — not just sit in `.config`. Restore
+        # the singleton in finally since set_constants is process-global.
+        import jcm.constants as c
+        saved = c.physical_constants
+        try:
+            exp = experiments.load(
+                "speedy-t31",
+                **{"terrain": "aquaplanet", "forcing": "default",
+                   "run.total_time": 1.0, "run.save_interval": 1.0,
+                   "+constants.grav": 1.62})
+            # The build saw the override: the live singleton (and its derived
+            # rgrav) carry it, and the recorded config agrees.
+            self.assertAlmostEqual(c.grav, 1.62)
+            self.assertAlmostEqual(c.rgrav, 1.0 / 1.62)
+            self.assertAlmostEqual(exp.config["constants"]["grav"], 1.62)
+        finally:
+            c.set_constants(saved)
+
     def test_load_restores_host_hydra_context(self):
         # F3: load() composes through an internal Hydra context that clears the
         # global singleton on exit. A host application that has its OWN Hydra

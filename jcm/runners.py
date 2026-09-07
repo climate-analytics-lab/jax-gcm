@@ -1839,6 +1839,25 @@ def maybe_enable_compilation_cache() -> None:
     logger.info("JAX persistent compilation cache: %s", cache_dir)
 
 
+def apply_constants_overrides(cfg: DictConfig) -> None:
+    """Apply any ``cfg.constants`` physical-constant overrides to the global singleton.
+
+    Shared by the CLI door (:func:`run`) and the Python door
+    (:func:`jcm.experiments.load`) so both build the model against the SAME
+    constants — the dynamical core reads the live :mod:`jcm.constants` singleton
+    at construction, so this MUST run before ``build_model``. Only base fields
+    may be set; derived constants (rd, cvd, rgrav, vtmpc*) recompute. Note
+    ``set_constants`` is process-global — the override persists for the whole
+    interpreter, not just this build.
+    """
+    constants_overrides = cfg.get("constants", None)
+    if constants_overrides:
+        import jcm.constants as _jcm_constants
+        _jcm_constants.set_constants(
+            **{k: float(v) for k, v in dict(constants_overrides).items()}
+        )
+
+
 def run(cfg: DictConfig, model: Model | None = None):
     """Dispatch to the appropriate runtime mode.
 
@@ -1887,12 +1906,7 @@ def run(cfg: DictConfig, model: Model | None = None):
                 "not exist."
             )
 
-    constants_overrides = cfg.get("constants", None)
-    if constants_overrides:
-        import jcm.constants as _jcm_constants
-        _jcm_constants.set_constants(
-            **{k: float(v) for k, v in dict(constants_overrides).items()}
-        )
+    apply_constants_overrides(cfg)
 
     mode = cfg.run.get("mode", "full")
     if mode == "full":
