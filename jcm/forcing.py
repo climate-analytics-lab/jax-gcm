@@ -200,6 +200,32 @@ class SolarGeometry:
 
 
 # ---------------------------------------------------------------------------
+# Canonical mirror-bundle composition (ForcingData.from_bundles)
+# ---------------------------------------------------------------------------
+
+# Surface epoch -> its mirror surface-bundle product.
+_SURFACE_PRODUCTS = {
+    "pd": "forcing_pd", "pi": "forcing_pi",
+    "amip": "forcing_amip", "era5": "forcing_era5",
+}
+
+# Era consistency (F1): the surface epoch selects the ancillary epoch, so a PI
+# surface is never paired with present-day ozone/emissions/oxidants (and vice
+# versa). Only ozone/emissions/oxidants carry a PI variant; dms/dust are
+# epoch-free (one product each, always "auto"). amip/era5 pair with the
+# present-day *climatology* ancillaries — a transient ozone_amip/emissions_amip
+# pairing is a documented deferral (the mirror stages those products, but wiring
+# them per-year is future work), recorded here so every surface's choice is
+# explicit rather than implicit in "auto".
+_SURFACE_ANCILLARY_EPOCH = {
+    None: "pd", "pd": "pd", "pi": "pi", "amip": "pd", "era5": "pd",
+}
+
+# The ancillary keys whose product carries an epoch (dms/dust do not).
+_EPOCH_ANCILLARY_KEYS = ("ozone_file", "emissions_file", "oxidants_file")
+
+
+# ---------------------------------------------------------------------------
 # ForcingData
 # ---------------------------------------------------------------------------
 
@@ -399,10 +425,25 @@ class ForcingData:
         equivalence test in ``forcing_test``). The emission-family config-trap
         warnings fire here from the shared home too. ``aerosol="macv2sp"`` raises
         the precise not-yet-published error until the MACv2-SP weights are staged
-        on the mirror. Unpublished-grid / sigma degradations (``auto`` → nothing)
-        mirror the CLI. ``fetch`` (default: the HF cache) pre-resolves the
-        composed surface bundle via the engine; the ``auto`` products use the
-        cache.
+        on the mirror (once staged, the resolved weights file is wired into
+        ``forcing.macv2_file`` so it is actually attached). Unpublished-grid /
+        sigma degradations (``auto`` → nothing) mirror the CLI. ``fetch``
+        (default: the HF cache) pre-resolves the composed surface bundle via the
+        engine; the ``auto`` products use the cache.
+
+        Era consistency (F1): the surface epoch selects the ancillary epoch, so
+        an 1870s PI surface is not silently paired with present-day ancillaries.
+        The pairing is explicit for every surface (dms/dust are epoch-free):
+
+        =========  ====================================================
+        surface    ozone / emissions / oxidants
+        =========  ====================================================
+        ``pd``     present-day (``*_pd``, via ``auto``)
+        ``pi``     pre-industrial (``ozone_pi``/``emissions_pi``/``oxidants_pi``)
+        ``amip``   present-day climatology (transient pairing deferred)
+        ``era5``   present-day climatology (transient pairing deferred)
+        ``None``   present-day (aquaplanet surface, ``*_pd`` ancillaries)
+        =========  ====================================================
         """
         from omegaconf import OmegaConf
         from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -422,31 +463,55 @@ class ForcingData:
         if aerosol not in (None, "jam", "macv2sp"):
             raise ValueError(
                 f"aerosol={aerosol!r}; expected None, 'jam' or 'macv2sp'.")
+        if surface is not None and surface not in _SURFACE_PRODUCTS:
+            raise ValueError(
+                f"surface={surface!r}; expected 'pd'/'pi'/'amip'/'era5'/None.")
+
+        macv2_file = None
         if aerosol == "macv2sp":
             # staged:false today → resolve_input raises the precise not-yet-
             # staged error (naming the build_mirror staging step). When the
-            # weights are published this returns the fetched MACv2 file.
-            ir.resolve_input("macv2_file", "auto", grid_token=grid_token,
-                             nlev=nlev, vertical=vertical, manifest=manifest,
-                             fetch=fetch)
+            # weights are published this returns the fetched MACv2 file, which we
+            # wire into forcing.macv2_file so build_forcing actually attaches the
+            # weights instead of the all-ones default (F2).
+            sr = ir.resolve_input("macv2_file", "auto", grid_token=grid_token,
+                                  nlev=nlev, vertical=vertical,
+                                  manifest=manifest, fetch=fetch)
+            macv2_file = None if sr.is_none else sr.paths[0]
 
-        surface_products = {"pd": "forcing_pd", "pi": "forcing_pi",
-                            "amip": "forcing_amip", "era5": "forcing_era5"}
         forcing_dict = {
             "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
             "dust_file": "auto", "oxidants_file": "auto", "align": "auto",
+            "macv2_file": macv2_file,
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
         }
+
+        # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
+        # auto=True product, so it stays "auto" (keeping the silent-degrade on an
+        # unpublished grid + the JAM-gating that "auto" gives). A non-pd epoch
+        # pins the explicit ``*_<epoch>`` bundle, except on a grid where that
+        # product is unpublished — there it falls back to "auto" so it degrades
+        # to None exactly as the pd product would, not a 404. Emissions/oxidants
+        # are JAM-only (a non-JAM package consumes neither), so their epoch is
+        # pinned only for aerosol="jam"; ozone feeds radiation on every config,
+        # so its epoch is always pinned.
+        epoch = _SURFACE_ANCILLARY_EPOCH[surface]
+        if epoch != "pd":
+            keys = (_EPOCH_ANCILLARY_KEYS if aerosol == "jam"
+                    else ("ozone_file",))
+            for key in keys:
+                product = f"{key[:-len('_file')]}_{epoch}"
+                if mm.is_published(manifest, product, grid_token, nlev,
+                                   vertical):
+                    forcing_dict[key] = "hf://" + mm.bundle_path(
+                        manifest, product, grid_token, nlev)
+
         if surface is None:
             forcing_dict["kind"] = "default"
         else:
-            if surface not in surface_products:
-                raise ValueError(
-                    f"surface={surface!r}; expected "
-                    "'pd'/'pi'/'amip'/'era5'/None.")
-            product = surface_products[surface]
+            product = _SURFACE_PRODUCTS[surface]
             forcing_dict["kind"] = "from_file"
             if mm.product(manifest, product)["alignment"] == "transient":
                 if years is None:

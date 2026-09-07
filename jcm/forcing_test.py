@@ -1459,10 +1459,100 @@ class TestForcingFromBundles(unittest.TestCase):
         for x, y in zip(la, lb):
             np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
 
+    @staticmethod
+    def _capture_forcing_cfg(shape):
+        # Intercept the composed cfg reaching the shared engine so a test can
+        # assert what ancillary epoch from_bundles pinned, without needing the
+        # bundle files. Returns (patches, captured) where captured["forcing"] is
+        # the resolved forcing dict once from_bundles has run.
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        captured: dict = {}
+
+        def _capture(cfg, coords, **kw):
+            captured["forcing"] = OmegaConf.to_container(
+                cfg.forcing, resolve=True)
+            return ForcingData.zeros(shape)
+
+        return [
+            mock.patch.object(runners, "build_forcing", side_effect=_capture),
+            mock.patch.object(runners, "warn_emission_config_traps"),
+        ], captured
+
+    def test_pi_surface_composes_pi_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pi")
+        fc = captured["forcing"]
+        # A PI surface pins the PI ozone/emissions/oxidants bundles...
+        self.assertIn("ozone_pi", fc["ozone_file"])
+        self.assertIn("emissions_pi", fc["emissions_file"])
+        self.assertIn("oxidants_pi", fc["oxidants_file"])
+        # ...while the epoch-free dms/dust stay on "auto".
+        self.assertEqual(fc["dms_file"], "auto")
+        self.assertEqual(fc["dust_file"], "auto")
+
+    def test_pd_surface_keeps_auto_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+        fc = captured["forcing"]
+        for key in ("ozone_file", "emissions_file", "oxidants_file",
+                    "dms_file", "dust_file"):
+            self.assertEqual(fc[key], "auto")
+
+    def test_ancillary_epoch_table_covers_every_surface(self):
+        # The pairing table must name a choice for every valid surface (the four
+        # named surfaces + None), so nothing is left implicit.
+        from jcm import forcing as F
+        self.assertEqual(set(F._SURFACE_ANCILLARY_EPOCH),
+                         {None, *F._SURFACE_PRODUCTS})
+
     def test_macv2sp_not_yet_staged_raises(self):
         coords = _t42l8_sigma_coords()
         with self.assertRaisesRegex(FileNotFoundError, "yet published"):
             ForcingData.from_bundles(coords, aerosol="macv2sp", surface=None)
+
+    def test_macv2sp_staged_attaches_weights(self):
+        # F2: once the mirror stages the MACv2 weights, from_bundles must wire
+        # the fetched file into forcing.macv2_file so build_forcing attaches
+        # non-all-ones weights instead of silently running the all-ones default.
+        import os
+        import tempfile
+        from unittest import mock
+
+        from jcm.data import mirror_manifest as mm
+
+        coords = _t42l8_sigma_coords()  # weights are grid-independent
+        ds, _, _ = TestReadMacv2Weights._synthetic_macv2()
+        staged = mm.load_manifest()
+        staged["products"]["macv2_sp"]["staged"] = True
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "MACv2.0-SP_v1.nc")
+            ds.to_netcdf(path)
+            with mock.patch.object(mm, "load_manifest", return_value=staged):
+                forcing = ForcingData.from_bundles(
+                    coords, aerosol="macv2sp", surface=None,
+                    fetch=lambda rel: path)
+        yw = np.asarray(forcing.aerosol_year_weight.values)
+        self.assertFalse(np.allclose(yw, 1.0))
 
     def test_invalid_arguments_raise(self):
         coords = _t42l8_sigma_coords()
