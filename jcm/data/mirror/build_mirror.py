@@ -100,8 +100,10 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "oxidants_file", "auto": False,
      "staged": True},
-    # Yearly transient series; coverage transcribed from the forcing yamls
-    # (amip.yaml / era5.yaml available_years) + SOURCES.md.
+    # Yearly transient series; ``coverage`` here is the SOURCE span (from the
+    # forcing yamls' available_years + SOURCES.md) used only as the fallback when
+    # the staging sidecar has not recorded the actually-staged range — see
+    # ``build_manifest`` and ``_record_staged_coverage``.
     {"name": "forcing_amip", "path": "bundles/{grid}/forcing_amip/{year}.nc",
      "grids": "gaussian", "levels": False, "coverage": [1870, 2022],
      "alignment": "transient", "key": "file", "auto": False, "staged": True},
@@ -141,6 +143,46 @@ ROOT = Path(os.environ.get(
 BUILD = ROOT / "build"
 UPLOAD = ROOT / "upload"
 GMTED = ROOT / "sources" / "gmted" / "mn30_grd"
+
+#: Sidecar the transient staging steps maintain in the build tree, recording the
+#: year range each ``{year}``-series product was ACTUALLY staged over (a per-run
+#: ``--years`` choice — the default ``--stage amip`` does not stage the whole
+#: source series). ``build_manifest`` folds this in so the coverage the resolver
+#: pads against names files that exist on the mirror, not the wider source span.
+#: It lives under ``build/`` (not ``upload/``), so it is never pushed to HF; it
+#: persists between a staging run and a later ``--stage manifest`` on the same
+#: machine. Absent (e.g. an in-repo ``--stage manifest``), coverage falls back to
+#: the declared source range in :data:`_MANIFEST_PRODUCTS`.
+_STAGED_COVERAGE_PATH = BUILD / "staged_coverage.json"
+
+
+def _load_staged_coverage(path: Path = None) -> dict:
+    """Return ``{product_name: [first, last]}`` from the sidecar, or ``{}``."""
+    path = path or _STAGED_COVERAGE_PATH
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def _record_staged_coverage(products, first: int, last: int,
+                            path: Path = None) -> None:
+    """Union-merge ``[first, last]`` into the sidecar for each named product.
+
+    Called once per transient staging run. Merging by ``min``/``max`` lets an
+    incremental append (issue #610 stages contiguous years without rewriting
+    history) widen the recorded span; a genuinely discontiguous append would
+    over-claim the gap, but the yearly series are always staged as contiguous
+    ranges, so the recorded ``[first, last]`` is exactly the span on the mirror.
+    """
+    path = path or _STAGED_COVERAGE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = _load_staged_coverage(path)
+    for name in products:
+        prev = staged.get(name)
+        lo = first if prev is None else min(prev[0], first)
+        hi = last if prev is None else max(prev[1], last)
+        staged[name] = [int(lo), int(hi)]
+    path.write_text(json.dumps(staged, indent=2, sort_keys=True) + "\n")
 
 
 def stage_sso() -> None:
@@ -349,6 +391,10 @@ def stage_amip() -> None:
                     UPLOAD / "bundles" / f"{grid}_l{nlev}" / "ozone_amip"
                     / f"{year}.nc", nlev)
             print("amip:", grid, year, flush=True)
+    # Record the span actually staged (all three amip series share it) so the
+    # manifest coverage names files that exist, not the wider source series.
+    _record_staged_coverage(("forcing_amip", "emissions_amip", "ozone_amip"),
+                            first, last)
 
 
 def stage_era5_transient() -> None:
@@ -398,6 +444,7 @@ def stage_era5_transient() -> None:
                 year, lats, lons, str(g / f"{year}.nc"),
                 land=xr.open_dataset(
                     BUILD / "era5_land_transient" / f"{year}.nc"))
+    _record_staged_coverage(("forcing_era5",), first, last)
 
 
 def stage_macv2() -> None:
@@ -416,7 +463,7 @@ def stage_macv2() -> None:
     print("macv2:", dst, flush=True)
 
 
-def build_manifest() -> dict:
+def build_manifest(staged_coverage: dict = None) -> dict:
     """Assemble the mirror-manifest dict from :data:`_MANIFEST_PRODUCTS`.
 
     Expands each row's ``{grid}``/``{nlev}`` template against the published grid
@@ -424,9 +471,22 @@ def build_manifest() -> dict:
     (:data:`PUBLISHED_VERTICALS`) sets so the availability knowledge the resolver
     consults is generated, never hand-listed. The published sets stay owned by
     ``jcm.data.bundle_names`` so this and the runner's ``auto`` gate cannot drift.
+
+    ``coverage`` for a ``{year}``-series product is the ACTUAL staged span when
+    the staging sidecar records it (``staged_coverage``, default
+    :data:`_STAGED_COVERAGE_PATH`), else the declared source range in
+    :data:`_MANIFEST_PRODUCTS`. The distinction matters because the resolver pads
+    a requested range by a year on each side clipped to ``coverage`` (for the
+    ``by_date_interp`` bracket): if that advertised the wider source series while
+    ``--stage amip --years 1950,2022`` staged only a subset, the pad would fetch a
+    year file that was never built. Regenerating the manifest right after staging
+    (same machine, sidecar present) keeps the two honest; an in-repo regeneration
+    with no sidecar reproduces the committed source-coverage manifest unchanged.
     """
     from jcm.data.remote import DEFAULT_REPO
 
+    if staged_coverage is None:
+        staged_coverage = _load_staged_coverage()
     gaussian = sorted(GRIDS)
     products = {}
     for row in _MANIFEST_PRODUCTS:
@@ -442,7 +502,7 @@ def build_manifest() -> dict:
             "levels": sorted(PUBLISHED_LEVELS) if row["levels"] else None,
             "vertical": (sorted(PUBLISHED_VERTICALS)[0]
                          if row["levels"] else None),
-            "coverage": row["coverage"],
+            "coverage": staged_coverage.get(row["name"], row["coverage"]),
             "alignment": row["alignment"],
             "key": row["key"],
             "auto": row["auto"],
