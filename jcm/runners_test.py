@@ -2858,7 +2858,7 @@ class TestEmissionAutoResolution(unittest.TestCase):
     """The ``auto`` prescribed-emission resolution (issue #640).
 
     ``auto`` is the only grid-portable mechanism: it composes the concrete
-    per-grid bundle path from :mod:`jcm.data.bundle_names` + the grid token, so
+    per-grid bundle path from the mirror manifest + the grid token, so
     one config follows the grid. There is no user-facing ``{grid}``/``{nlev}``
     path template (removed as a redundant simplification, #640) — an explicit
     path is taken verbatim; only ``{year}`` is expanded downstream.

@@ -33,15 +33,23 @@ from pathlib import Path
 
 import numpy as np
 
-from jcm.data.bundle_names import (PUBLISHED_GRIDS, PUBLISHED_LEVELS,
-                                   PUBLISHED_VERTICALS)
+#: The mirror's published sets — the source of truth the manifest is generated
+#: from (``build_manifest`` expands the product table over these, and the
+#: read-side ``mirror_manifest`` view carries them at top level for the resolver
+#: + the benchmark prefetch). Folded here from the former ``jcm.data
+#: .bundle_names`` so the declaration and the build loop cannot drift.
+#: ``PUBLISHED_GRIDS`` is the Gaussian-grid whitelist; ``PUBLISHED_LEVELS`` the
+#: layer counts carrying level-resolved (oxidant/ozone) bundles; and level-
+#: resolved products are only correct on a ``PUBLISHED_VERTICALS`` (hybrid) grid
+#: (they are on hybrid-level pressures — a sigma grid sharing a (token, nlev)
+#: must not pull one).
+PUBLISHED_GRIDS = frozenset({"t63", "t106"})
+PUBLISHED_LEVELS = frozenset({47, 95})
+PUBLISHED_VERTICALS = frozenset({"hybrid"})
 
-# Per-grid Gaussian latitude count. The *set* of published grids is owned by
-# ``jcm.data.bundle_names.PUBLISHED_GRIDS`` (the whitelist the runner's ``auto``
-# resolver and the benchmark prefetch both consult) so the build loop here and
-# that resolver cannot drift; this dict only adds each grid's ``nlat``. Missing
-# an entry for a published grid raises loudly below rather than silently
-# skipping it.
+# Per-grid Gaussian latitude count. The *set* of published grids is
+# :data:`PUBLISHED_GRIDS`; this dict only adds each grid's ``nlat``. Missing an
+# entry for a published grid raises loudly below rather than silently skipping.
 _NLAT = {"t63": 96, "t106": 160}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
 
@@ -464,8 +472,9 @@ def build_manifest(staged_coverage: dict = None) -> dict:
     Expands each row's ``{grid}``/``{nlev}`` template against the published grid
     (:data:`GRIDS` + column grids), level (:data:`PUBLISHED_LEVELS`) and vertical
     (:data:`PUBLISHED_VERTICALS`) sets so the availability knowledge the resolver
-    consults is generated, never hand-listed. The published sets stay owned by
-    ``jcm.data.bundle_names`` so this and the runner's ``auto`` gate cannot drift.
+    consults is generated, never hand-listed. The published sets (:data:`
+    PUBLISHED_GRIDS` etc.) are declared here so this and the read-side manifest
+    view cannot drift.
 
     ``coverage`` for a ``{year}``-series product is the ACTUAL staged span when
     the staging sidecar records it (``staged_coverage``, default

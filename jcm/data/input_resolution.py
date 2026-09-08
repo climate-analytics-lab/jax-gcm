@@ -1,7 +1,7 @@
 """Typed resolution of a forcing/boundary input value into concrete local paths.
 
 One layer replacing the stringly-typed mini-language that had accreted across
-``jcm.runners`` / ``jcm.forcing`` / ``jcm.data.bundle_names`` / ``tools/benchmark``
+``jcm.runners`` / ``jcm.forcing`` / ``jcm.data.mirror_manifest`` / ``tools/benchmark``
 (issue #751): ``auto`` sentinels, ``{year}`` patterns + coverage clamps, the
 ``hf://`` scheme, plain paths, lists of any of these, and ``null`` opt-outs. A
 user value is parsed once into an :class:`InputSpec`, and :func:`resolve_input`

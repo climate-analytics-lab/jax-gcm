@@ -451,13 +451,11 @@ class ForcingData:
 
         from jcm import forcing_assembly as fa
         from jcm import runners
-        from jcm.data import bundle_names
         from jcm.data import input_resolution as ir
         from jcm.data import mirror_manifest as mm
 
         manifest = mm.load_manifest()
-        grid_token = bundle_names.grid_token(
-            int(coords.horizontal.total_wavenumbers) - 2)
+        grid_token = fa._grid_token(coords)
         nlev = int(coords.nodal_shape[0])
         vertical = ("hybrid" if isinstance(coords.vertical, HybridCoordinates)
                     else "sigma")

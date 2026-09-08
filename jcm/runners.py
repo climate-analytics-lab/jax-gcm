@@ -29,7 +29,7 @@ import jax
 from omegaconf import DictConfig
 
 from jcm import provenance
-from jcm.data import bundle_names
+from jcm.data import mirror_manifest as mm
 from jcm.diffusion import DiffusionFilter
 from jcm.forcing import expand_yearly_files
 from jcm.initial_states import (
@@ -1058,7 +1058,7 @@ def _resolve_auto_ozone(coords):
     onto the model's *hybrid*-level centre pressures and mapped level-for-level,
     so a sigma grid that merely shares a published (token, nlev) would wire
     stratospheric-pressure ozone onto unrelated sigma levels — the same silent
-    corruption the oxidant gate rejects (``bundle_names.PUBLISHED_VERTICALS``).
+    corruption the oxidant gate rejects (the manifest's hybrid-only verticals).
     ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
     vertical coordinate, so nothing downstream would catch it.
     """
@@ -1350,6 +1350,12 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
     elif has_jam:
         emission_keys = ("emissions_file", "dms_file", "dust_file",
                          "oxidants_file")
+        # The mirror manifest is the read-side single source for what is
+        # published: Gaussian grids (top-level ``grids`` with a real nlat — the
+        # column ne30pg3 carries None) and the level-resolved layer counts.
+        _man = mm.load_manifest()
+        _pub_grids = sorted(g for g, n in _man["grids"].items() if n is not None)
+        _pub_levels = sorted(_man["levels"])
         resolved = {k: _resolved_emission_value(
                         forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
                     for k in emission_keys}
@@ -1366,8 +1372,7 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                     "the pySES backend publishes no per-grid emission bundles"
                     if is_pyses else
                     f"grid {_grid_token(coords)!r} is not one of the mirror's "
-                    f"published grids "
-                    f"({', '.join(sorted(bundle_names.PUBLISHED_GRIDS))})")
+                    f"published grids ({', '.join(_pub_grids)})")
                 logger.warning(
                     "config trap: zero-emission JAM baseline — the 'auto' "
                     "emission key(s) %s resolved to None because %s, so the "
@@ -1404,7 +1409,7 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                 "on-grid file, or run a published hybrid layer count, to "
                 "supply them.",
                 ", ".join(auto_nulled),
-                "/L".join(str(n) for n in sorted(bundle_names.PUBLISHED_LEVELS)),
+                "/L".join(str(n) for n in _pub_levels),
                 _vertical_kind(coords) if coords is not None else "unknown-vertical",
                 int(coords.nodal_shape[0]) if coords is not None else -1,
             )

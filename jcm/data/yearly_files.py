@@ -6,14 +6,14 @@ config points at a ``{year}`` pattern plus an inclusive ``forcing.years`` range
 and the loader expands it to the concrete yearly files.
 
 This module is deliberately free of any intra-package (``jcm``) import — the
-same invariant :mod:`jcm.data.bundle_names` maintains — so it can be loaded in
+same invariant :mod:`jcm.data.mirror_manifest` maintains — so it can be loaded in
 isolation:
 
 * :mod:`jcm.forcing` re-exports :func:`expand_yearly_files` (its historical
   home), and :mod:`jcm.runners` imports it from there, so the model build path
   is unchanged.
 * ``tools/benchmark.py`` loads it **by file path** (exactly as it loads
-  ``jcm/data/bundle_names.py`` and ``jcm/data/remote.py``) to expand the same
+  ``jcm/data/mirror_manifest.py`` and ``jcm/data/remote.py``) to expand the same
   patterns for its pre-GPU prefetch **without importing** ``jcm`` — importing
   the package initialises a JAX backend, which preallocates the GPU before the
   free-card gate. ``jcm.forcing`` itself imports JAX/dinosaur/``jcm`` at module

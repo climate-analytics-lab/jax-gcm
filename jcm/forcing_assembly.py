@@ -24,19 +24,19 @@ from __future__ import annotations
 import logging
 
 from jcm import provenance
-from jcm.data import bundle_names
 from jcm.data import input_resolution as ir
 from jcm.data import mirror_manifest as mm
 from jcm.forcing import expand_yearly_files as _expand_years
 
 logger = logging.getLogger(__name__)
 
-#: The ``auto`` emission-bundle naming convention lives in
-#: :mod:`jcm.data.bundle_names` (a jcm-import-free module) so the build-time
-#: resolver here and the benchmark's pre-GPU prefetch enumerator share one
-#: source of truth. ``auto`` resolves to the per-grid HF bundle when a
-#: prognostic-aerosol (JAM) package is active.
-_EMISSION_AUTO_BUNDLES = bundle_names.EMISSION_AUTO_BUNDLES
+#: The prescribed-emission forcing keys that honour the ``auto`` convention:
+#: ``auto`` resolves each to its per-grid HF bundle (via the mirror manifest)
+#: when a prognostic-aerosol (JAM) package is active. The manifest is the
+#: read-side single source of truth for whether a given key's bundle exists on a
+#: grid (:func:`mm.is_published`); this is only the set of keys to iterate.
+_EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
+                       "oxidants_file")
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +113,7 @@ def _grid_token(coords) -> str:
     uses), so no hand-maintained table can go stale; whether the mirror
     actually carries the grid is decided by the fetch itself.
     """
-    return bundle_names.grid_token(
-        int(coords.horizontal.total_wavenumbers) - 2)
+    return f"t{int(coords.horizontal.total_wavenumbers) - 2}"
 
 
 def _vertical_kind(coords) -> str:
@@ -140,8 +139,8 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
 
     ``auto`` yields None (no bundle) on the pySES path, for a non-JAM package
     (neither consumes prescribed emissions), or when the mirror does not publish
-    THIS key's bundle for the model grid — a check that is now key-specific
-    (:func:`jcm.data.bundle_names.bundle_is_published`): the horizontal token
+    THIS key's bundle for the model grid — a key-specific manifest lookup
+    (:func:`jcm.data.mirror_manifest.is_published`): the horizontal token
     must be a published grid, and the level-dependent ``oxidants_file`` bundle
     additionally requires a published layer count AND a hybrid vertical (the
     bundle is on hybrid-level pressures — mapping it level-for-level onto a
@@ -159,9 +158,8 @@ def _emission_auto_resolves_to_none(key, coords, jam, is_pyses) -> bool:
     """
     if is_pyses or not jam:
         return True
-    # Publication gating is the manifest lookup ``mm.is_published`` (the whole
-    # product table), which mirror_manifest generalises from — and is
-    # cross-checked against — ``bundle_names.bundle_is_published`` (#751).
+    # Publication gating is the manifest lookup ``mm.is_published`` over the
+    # whole product table — the read-side single source of truth (#751).
     manifest = mm.load_manifest()
     return not mm.is_published(
         manifest, mm.product_for_key(manifest, key),
@@ -224,7 +222,7 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     updates = {
         key: _resolve_one_emission_input(
             forcing_cfg.get(key, None), key, coords, jam, is_pyses)
-        for key in _EMISSION_AUTO_BUNDLES
+        for key in _EMISSION_AUTO_KEYS
     }
     return OmegaConf.merge(forcing_cfg, updates)
 
