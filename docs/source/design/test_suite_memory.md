@@ -1,9 +1,10 @@
-# Running the test suite: memory
+# Running the test suite: memory, and process-global state
 
-The jcm test suite is memory-bound, not CPU-bound, which changes how you have
+The jcm test suite is memory-bound, not CPU-bound, and it runs a lot of code
+that mutates process-global JAX configuration. Both facts change how you have
 to run it — especially on a Derecho login node. This page explains what the
-root `conftest.py` does about it and how to run the CI gates without fighting
-the machine.
+root `conftest.py` does about them and how to run the CI gates without
+fighting the machine.
 
 ## Why a pytest process grows without bound
 
@@ -97,3 +98,36 @@ Two related login-node observations that are *not* the problem:
 * Never run `pytest -n 12` on a login node: 12 workers × a few GB against a
   10 GiB cap is a guaranteed OOM, and the resulting red run carries no
   information.
+
+## Process-global JAX config: `jax_enable_x64`
+
+Two dependencies turn float64 on for the whole process:
+
+* `import mam4_jax` does it at import time, and `Mam4JaxMicrophysics.__init__`
+  does it again explicitly (default-on via `MAM4_JAX_ENABLE_X64`, so the
+  dycore state built afterwards inherits the precision the MAM4 core needs);
+* the pySES CAM-SE backend does it when its first grid/dycore is built.
+
+A test that leaves the flag on runs every later test in the same process (or
+xdist worker) in float64, which fails dtype assertions in unrelated packages
+and looks exactly like a numerical regression. The root `conftest.py` pins
+the flag: an autouse function-scoped fixture restores it to the session's
+starting value before *and* after every test, so neither a leak from an
+earlier test nor a leak from this one can propagate.
+
+Two deliberate exceptions:
+
+* Tests under `jcm/dycore/pyses/` are exempt. Their `setUpClass` fixtures
+  build float64 backends that later tests in the same class reuse, so the
+  flag must stay on for the life of the class; `jcm/dycore/pyses/conftest.py`
+  schedules the whole package last instead. That reordering is defeated by
+  `pytest-randomly`, so pass `-p no:randomly` if you have it installed.
+* `jcm/physics/aerosol/jam/microphysics/mam4_jax.py` restores the flag
+  around its own `import mam4_jax`, so importing the adapter — including at
+  collection time, via `pytest.importorskip` — cannot change anyone's dtype.
+  Constructing the adapter still sets the precision it needs; set
+  `MAM4_JAX_ENABLE_X64=0` to force a float32 core.
+
+CI never sees the mam4 side of this: it installs `pip install -e .` with no
+extras, so those tests skip there. The pin is what makes a local run with the
+`jcm[mam4]` extra installed agree with CI.

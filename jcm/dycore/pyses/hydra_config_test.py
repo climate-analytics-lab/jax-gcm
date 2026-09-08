@@ -84,7 +84,9 @@ class PysesHydraConfigTest(unittest.TestCase):
         canonical files document ne30.
         """
         pytest.importorskip("pyses")
-        pytest.importorskip("mam4_jax")  # echam-jam's default JAM core
+        # The submodule, not the package: a stale flat-layout mam4-jax wheel
+        # satisfies a bare "mam4_jax" import and then fails inside build_model.
+        pytest.importorskip("mam4_jax.core")  # echam-jam's default JAM core
         from jcm.runners import build_model
 
         for name in ("ma-ne30-l47", "ma-ne30-l95"):

@@ -95,7 +95,8 @@ The suite is memory-bound, and a process killed by a memory ceiling shows up
 as an arbitrary set of "failures" rather than an error. Before running it in
 parallel — in particular on a Derecho login node, where a 10 GiB per-user
 cgroup makes ``-n 12`` an OOM rather than a test result — see
-:doc:`design/test_suite_memory`.
+:doc:`design/test_suite_memory`, which also covers the ``jax_enable_x64``
+isolation the root ``conftest.py`` provides.
 
 Code Quality
 ^^^^^^^^^^^^

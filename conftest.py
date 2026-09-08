@@ -1,4 +1,4 @@
-"""Session-wide pytest hooks.
+"""Session-wide pytest hooks: memory ceiling and global-config isolation.
 
 Rationale, and how to run the gates on a memory-capped host such as a
 Derecho login node: ``docs/source/design/test_suite_memory.md``.
@@ -9,6 +9,49 @@ import os
 import sys
 
 import pytest
+
+# The pySES backend needs float64 for the whole life of the objects its
+# ``setUpClass`` fixtures build, so its tests are exempt from the x64 pinning
+# below; ``jcm/dycore/pyses/conftest.py`` schedules them last instead.
+_PYSES_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "jcm", "dycore", "pyses") + os.sep
+
+_X64_BASELINE = False
+
+
+def pytest_configure(config):
+    """Record the session's starting ``jax_enable_x64`` (issue #729).
+
+    Imported here rather than lazily at the first test because the baseline
+    has to predate every test-module import: a module that flips the flag at
+    collection time would otherwise define the baseline meant to detect it.
+    """
+    global _X64_BASELINE
+    import jax
+    _X64_BASELINE = bool(jax.config.read("jax_enable_x64"))
+
+
+@pytest.fixture(autouse=True)
+def _pin_jax_x64(request):
+    """Hold ``jax_enable_x64`` at the session default around each test (#729).
+
+    Constructing the MAM4-JAX adapter (and importing some optional
+    dependencies) flips the flag process-wide, which silently runs every later
+    test in that process/xdist worker in float64 and fails dtype assertions
+    that have nothing to do with aerosols.
+    """
+    import jax
+    if str(getattr(request.node, "path", "")).startswith(_PYSES_TESTS):
+        yield
+        return
+
+    def _restore():
+        if bool(jax.config.read("jax_enable_x64")) != _X64_BASELINE:
+            jax.config.update("jax_enable_x64", _X64_BASELINE)
+
+    _restore()
+    yield
+    _restore()
 
 
 def _memory_group(item):
