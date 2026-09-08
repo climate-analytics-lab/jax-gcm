@@ -158,6 +158,81 @@ class TestConfigurationsDoor(unittest.TestCase):
                          f"top-level imports leak hydra/omegaconf: {top_level}")
 
 
+# The coupler config a downstream Hydra app writes: it reaches jcm's groups
+# through ``pkg://jcm.config`` and mounts them under its own ``atmosphere`` node
+# (selecting each jcm group by name), so a re-rooted recipe has targets to
+# override. This is exactly how JAX-ESM composes the atmosphere component.
+_FOREIGN_COUPLER_CONFIG = """\
+defaults:
+  - _self_
+  - physics@atmosphere.physics: speedy
+  - grid@atmosphere.grid: speedy_t31_l8
+  - dycore@atmosphere.dycore: dinosaur
+  - run@atmosphere.run: default
+  - init@atmosphere.init: isothermal
+  - terrain@atmosphere.terrain: aquaplanet
+  - forcing@atmosphere.forcing: default
+  - nudging@atmosphere.nudging: none
+  - diffusion@atmosphere.diffusion: default
+
+hydra:
+  searchpath:
+    - pkg://jcm.config
+
+coupler:
+  name: demo
+"""
+
+
+class TestPackagedConfigSearchpath(unittest.TestCase):
+    """#757 contract: ``jcm/config`` is a public packaged Hydra tree a *foreign*
+    app composes via ``hydra.searchpath: [pkg://jcm.config]``, and the recipe
+    yamls' ``# @package _global_`` + absolute ``override /<group>`` style lets
+    ``+configuration@<node>=<name>`` re-root a whole validated configuration
+    under that node. A refactor breaking either property fails here, not in a
+    downstream release.
+    """
+
+    def test_foreign_app_reroots_configuration_via_pkg_searchpath(self):
+        # hydra/omegaconf stay lazy so this file's top level remains hydra-free
+        # (guarded by test_module_imports_no_hydra_or_omegaconf_at_top_level).
+        import importlib.resources as resources
+        import tempfile
+
+        from hydra import compose, initialize_config_dir
+
+        # pkg://jcm.config must resolve to the tree under test; a shadowing
+        # sibling editable install (a multi-checkout dev-box artifact) points it
+        # at a different tree, so skip rather than assert against the wrong one.
+        served = {p.name for p in resources.files("jcm.config").iterdir()}
+        if "configuration" not in served:
+            self.skipTest("pkg://jcm.config resolves to a shadowing install")
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.yaml").write_text(_FOREIGN_COUPLER_CONFIG)
+            with initialize_config_dir(version_base=None, config_dir=d):
+                cfg = compose(config_name="config",
+                              overrides=["+configuration@atmosphere=speedy-t31"],
+                              return_hydra_config=True)
+
+        # The coupler's own top-level schema survives the jcm composition.
+        self.assertEqual(cfg.coupler.name, "demo")
+        # Re-rooting landed the whole speedy-t31 recipe under `atmosphere`: its
+        # grid, 15-min step, and terrain/forcing file overrides all nest there.
+        atm = cfg.atmosphere
+        self.assertEqual(atm.grid.layers, 8)
+        self.assertEqual(atm.grid.vertical, "sigma")
+        self.assertEqual(atm.run.time_step, 15)
+        self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
+        self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
+        # The searchpath served the jcm groups by name and the recipe re-rooted:
+        # the physics preset, grid and the recipe choice all report under it.
+        choices = cfg.hydra.runtime.choices
+        self.assertEqual(choices["physics@atmosphere.physics"], "speedy")
+        self.assertEqual(choices["grid@atmosphere.grid"], "speedy_t31_l8")
+        self.assertEqual(choices["configuration@atmosphere"], "speedy-t31")
+
+
 def _patched_engine(shape):
     """Network-free stand-ins so both doors traverse the same patched engine.
 

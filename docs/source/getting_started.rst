@@ -93,6 +93,17 @@ individual keys on top as usual, e.g.
 same recipes are loadable from Python without touching Hydra — see
 :ref:`configurations-from-python` below.
 
+The whole ``jcm/config`` tree is also a **public, packaged** config tree: a
+downstream Hydra app (a coupled Earth-system CLI, say) reaches every jcm group
+through ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole
+validated configuration under one of its own nodes with
+``+configuration@<node>=<name>``. That contract — the public group names, the
+load-bearing ``# @package _global_`` header plus absolute-override recipe style,
+and the group-rename policy (this release renamed the ``experiment`` group to
+``configuration``, so a searchpath user must change ``+experiment@<node>=`` to
+``+configuration@<node>=``) — is documented in
+:doc:`design/packaged_config_tree`.
+
 One run schema — no ``+``/``++`` guesswork for run keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
