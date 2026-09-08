@@ -587,9 +587,15 @@ def solar(tyear, speedy_coords: SpeedyCoords, csol=4.*solc):
     # Compute daily-average insolation at the top of the atmosphere
     csolp = csol / pigr
 
-    # Calculate the solar radiation at the top of the atmosphere for each latitude
-    ch0 = jnp.clip(-tdecl * speedy_coords.sia / speedy_coords.coa, -1+epsilon, 1-epsilon) # Clip to prevent blowup of gradients
-    h0 = jnp.arccos(ch0)
+    # Half-day angle. A clip alone cannot hold arccos off its +/-1 singularity:
+    # float32 rounds 1-epsilon (1e-9) back to 1.0, so d(arccos)/dx = -1/sqrt(1-x^2)
+    # is -inf and the clip's zero tangent multiplies it to NaN. The where puts
+    # polar day/night on a branch AD never differentiates, and the 1e-6 margin
+    # keeps the interior arccos slope finite in float32.
+    ch0 = -tdecl * speedy_coords.sia / speedy_coords.coa
+    h0 = jnp.where(ch0 >= 1.0, 0.0,
+                   jnp.where(ch0 <= -1.0, pigr,
+                             jnp.arccos(jnp.clip(ch0, -1.0 + 1e-6, 1.0 - 1e-6))))
     sh0 = jnp.sin(h0)
 
     topsr = csolp * fdis * (h0 * speedy_coords.sia * sdecl + sh0 * speedy_coords.coa * cdecl)

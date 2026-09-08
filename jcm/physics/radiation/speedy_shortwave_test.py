@@ -5,7 +5,6 @@ import jax
 import jax_datetime as jdt
 import functools
 from jax.test_util import check_vjp, check_jvp
-import pytest
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
@@ -110,7 +109,30 @@ class TestSolar(unittest.TestCase):
         df_dtyear, df_dcoords, df_dcsol = f_vjp(input)
 
         self.assertFalse(jnp.any(jnp.isnan(df_dtyear)))
-        
+
+    def test_solar_gradients_finite_under_polar_day_and_night(self):
+        """Gradients must stay finite where the polar cap saturates the half-day
+        angle. ``arccos`` sits on its +/-1 singularity there and a float32 clip
+        cannot hold it off, so this guards the ``where`` in ``solar`` (#262).
+        tyear = 0.2 (the other gradient tests) has no polar cap and misses it.
+        """
+        from jcm.physics.speedy.physical_constants import solc
+        csol = 4. * solc
+        for tyear in (0.0, 0.4, 0.6, 0.8):
+            with self.subTest(tyear=tyear):
+                topsr = solar(tyear, speedy_coords, csol)
+                # Guard the guard: these dates must actually have a polar night.
+                self.assertTrue(bool(jnp.any(topsr == 0.0)))
+
+                _, tangent = jax.jvp(lambda t: solar(t, speedy_coords, csol),
+                                     (tyear,), (1.0,))
+                self.assertFalse(bool(jnp.any(jnp.isnan(tangent))))
+
+                _, f_vjp = jax.vjp(solar, tyear, speedy_coords, csol)
+                cotangents = f_vjp(jnp.ones_like(topsr))
+                for leaf in jax.tree.leaves(cotangents):
+                    self.assertFalse(bool(jnp.any(jnp.isnan(leaf))))
+
     def test_solar_gradient_check(self): 
         from jcm.physics.speedy.physical_constants import solc
         tyear = 0.2
@@ -449,13 +471,6 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dforcing.isnan().any_true())
 
-    # solar() clips the hour angle with epsilon = 1e-9, which is a no-op in
-    # float32 (1-1e-9 rounds to 1.0), so arccos meets |x| = 1 and its -inf
-    # derivative times the clip's zero tangent is NaN. Needs a double-where in
-    # solar() itself; the fixture below is otherwise repaired and ready.
-    @pytest.mark.skip(reason="solar() NaNs its own gradient at polar day/night: "
-                             "clip(ch0, -1+1e-9, 1-1e-9) is a no-op in float32, so "
-                             "arccos hits |x|=1 where d/dx = -inf (issue #262)")
     def test_get_zonal_average_fields_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
