@@ -1,6 +1,7 @@
 """Generate (and optionally submit) the release-validation matrix runs.
 
-    python tools/release_validation/launch.py --repo . [--members a,b] [--submit]
+    python tools/release_validation/launch.py --repo . [--members a,b] \
+        [--tag SHA] [--resume] [--submit]
 
 Each member of ``matrix.yaml`` references a validated preset in
 ``tools/benchmark.py``'s ``PRESETS`` (the single home of known-good
@@ -10,11 +11,16 @@ A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
 inputs staged per
 ``jcm/data/mirror/SOURCES.md`` (dms/dust/oxidants + emissions on the
 model grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment.
-Health-check finished runs with ``health.py``; run ``scm_check.py`` for
-the SCM member (CPU, no PBS needed).
+Each run directory is namespaced by ``--tag`` (default: the launched
+repo's HEAD short SHA), because a release-validation member is a *fresh*
+year: a fixed rundir let a second matrix run silently resume the first
+one's checkpoint. Health-check finished runs with ``health.py``; run
+``scm_check.py`` for the SCM member (CPU, no PBS needed).
 """
 import argparse
+import datetime
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -81,6 +87,44 @@ def _preset_grid(preset_name: str) -> str | None:
     return cfg.hydra.runtime.choices.get("grid")
 
 
+def repo_tag(repo: str | Path) -> str:
+    """Return the run tag for ``repo``: its HEAD short SHA where there is one.
+
+    Naming the rundir after the commit makes the provenance already recorded
+    in each output (``jcm=<sha>``) match the integration that produced it.
+    Outside a git checkout (a tarball, an exported tree) fall back to the UTC
+    date, which still separates one day's launch from the next.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        out = ""
+    tag = out or "nogit_" + datetime.datetime.now(
+        datetime.timezone.utc).strftime("%Y%m%d")
+    # The tag lands in a PBS job name and a path, so keep it to safe characters.
+    return re.sub(r"[^A-Za-z0-9_]", "_", tag)
+
+
+def check_fresh(rundir: str, resume: bool) -> None:
+    """Refuse to (re)launch into a rundir that already holds a checkpoint.
+
+    ``run_chunked`` resumes from ``checkpoint_path`` when it exists, so a
+    second launch into a populated directory continues someone else's
+    integration and reports a healthy year for a run that never happened
+    (#701). Crashing on a mismatched physics composition is the lucky case.
+    """
+    ckpt = Path(rundir) / "checkpoint.msgpack"
+    if ckpt.exists() and not resume:
+        raise SystemExit(
+            f"{ckpt} already exists — this member has been launched under "
+            "this tag before, and starting here would resume that run "
+            "instead of integrating a fresh year. Either pass --resume to "
+            "continue it deliberately, or launch under a new --tag (the "
+            "default is the repo HEAD short SHA).")
+
+
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     # Presets may carry their own output plumbing (the pyses ones set
     # run.checkpoint_path); ours must win, so strip conflicting keys
@@ -132,15 +176,21 @@ echo {marker}
 """
 
 
-def main():
+def main(argv=None):
+    """Write (and optionally submit) one PBS job per matrix member."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=".")
     ap.add_argument("--members", default=None,
                     help="comma-separated subset (default: all)")
+    ap.add_argument("--tag", default=None,
+                    help="rundir/job namespace (default: repo HEAD short SHA)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an existing run rather than refusing to "
+                         "start on top of its checkpoint")
     ap.add_argument("--submit", action="store_true")
     ap.add_argument("--account",
                     default=os.environ.get("PBS_ACCOUNT", "UCSD0085"))
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     cfg = yaml.safe_load(open(HERE / "matrix.yaml"))
     d = cfg["defaults"]
@@ -151,10 +201,20 @@ def main():
     outdir = Path(repo) / "runs"
     outdir.mkdir(exist_ok=True)
 
+    run_tag = a.tag or repo_tag(repo)
+    print(f"run tag: {run_tag}")
+
     wanted = a.members.split(",") if a.members else list(cfg["members"])
-    for name in wanted:
+    # The tag namespaces the rundir, the job name, the outputs and the log
+    # together, so one launch's artefacts never mix with another's. Vet every
+    # member before writing anything: a matrix launch that would resume a
+    # previous one should fail whole, not half-submitted.
+    plan = [(name, f"mx_{name.replace('-', '_')}_{run_tag}") for name in wanted]
+    for _, tag in plan:
+        check_fresh(f"{scratch}/jam_runs/{tag}", a.resume)
+
+    for name, tag in plan:
         m = cfg["members"][name]
-        tag = "mx_" + name.replace("-", "_")
         rundir = f"{scratch}/jam_runs/{tag}"
         ovs = " \\\n    ".join(
             overrides(tag, m, d, rundir) + [f"hydra.run.dir={rundir}"])
