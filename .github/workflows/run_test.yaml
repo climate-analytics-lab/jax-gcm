@@ -51,6 +51,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # ~2x the slowest recent green run (52 min). The default is 6 h, so a
+    # hung compile or a deadlocked test would otherwise burn a whole runner
+    # day before anyone noticed.
+    timeout-minutes: 110
     strategy:
       matrix:
         python-version: ["3.11"]

@@ -91,6 +91,12 @@ Run the test suite to ensure your changes don't break existing functionality:
 
 Write tests for your changes in the appropriate test file (e.g., ``jcm/module_name_test.py``). We aim for high unit test coverage to support the increasing complexity of physics going forward.
 
+The suite is memory-bound, and a process killed by a memory ceiling shows up
+as an arbitrary set of "failures" rather than an error. Before running it in
+parallel — in particular on a Derecho login node, where a 10 GiB per-user
+cgroup makes ``-n 12`` an OOM rather than a test result — see
+:doc:`design/test_suite_memory`.
+
 Code Quality
 ^^^^^^^^^^^^
 

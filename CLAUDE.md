@@ -245,6 +245,10 @@ coverage this way). Every Codex/bot inline comment gets an explicit
 threaded reply ("Confirmed and fixed in <sha>" / "Refuted: <evidence>")
 before handing back — see `jcm-local-ci` for the `gh api` one-liner.
 
+Run these on a compute node, not a Derecho login node: the suite is
+memory-bound and a 10 GiB cgroup turns `-n 12` into an OOM that reads as
+random failures (`docs/source/design/test_suite_memory.md`).
+
 Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
 checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
 module. CI: push runs fast tests at 90% coverage, PRs also run slow tests at
