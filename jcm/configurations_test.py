@@ -1,7 +1,7 @@
-"""Tests for the recipe door ``jcm.experiments`` (issue #751).
+"""Tests for the recipe door ``jcm.configurations`` (issue #751).
 
 Deliberately imports neither ``hydra`` nor ``omegaconf`` at module top level: the
-door hides them, so a caller (and this test) needs only ``jcm.experiments``. A
+door hides them, so a caller (and this test) needs only ``jcm.configurations``. A
 meta-test below enforces that on this file's own AST.
 """
 
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from jcm import experiments, runners
+from jcm import configurations, runners
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 
@@ -33,9 +33,9 @@ def _term_names(model):
     return [type(t).__name__ for t in model.physics.terms]
 
 
-class TestExperimentsDoor(unittest.TestCase):
+class TestConfigurationsDoor(unittest.TestCase):
     def test_available_lists_names_and_summaries(self):
-        av = experiments.available()
+        av = configurations.available()
         self.assertIn("speedy-t31", av)
         self.assertIn("t63-echam-jam", av)
         # The one-line summary is the yaml's first human comment.
@@ -43,14 +43,14 @@ class TestExperimentsDoor(unittest.TestCase):
         self.assertTrue(all(isinstance(v, str) for v in av.values()))
 
     def test_unknown_name_raises(self):
-        with self.assertRaisesRegex(ValueError, "Unknown experiment"):
-            experiments.load("does-not-exist")
+        with self.assertRaisesRegex(ValueError, "Unknown configuration"):
+            configurations.load("does-not-exist")
 
     def test_load_speedy_builds_and_hides_hydra(self):
         # Cheap real build (SPEEDY needs no network); aquaplanet/default keep it
         # offline. Exercises load()'s whole build path + the isothermal init
         # branch, and asserts no DictConfig leaks out.
-        exp = experiments.load(
+        exp = configurations.load(
             "speedy-t31", **{"terrain": "aquaplanet", "forcing": "default",
                              "run.total_time": 2.0, "run.save_interval": 1.0})
         from jcm.model import Model
@@ -70,7 +70,7 @@ class TestExperimentsDoor(unittest.TestCase):
         import jcm.constants as c
         saved = c.physical_constants
         try:
-            exp = experiments.load(
+            exp = configurations.load(
                 "speedy-t31",
                 **{"terrain": "aquaplanet", "forcing": "default",
                    "run.total_time": 1.0, "run.save_interval": 1.0,
@@ -92,9 +92,9 @@ class TestExperimentsDoor(unittest.TestCase):
         from hydra.core.global_hydra import GlobalHydra
 
         with initialize_config_dir(version_base=None,
-                                   config_dir=str(experiments.CONFIG_DIR)):
+                                   config_dir=str(configurations.CONFIG_DIR)):
             self.assertTrue(GlobalHydra.instance().is_initialized())
-            experiments.load(
+            configurations.load(
                 "speedy-t31",
                 **{"terrain": "aquaplanet", "forcing": "default",
                    "run.total_time": 1.0, "run.save_interval": 1.0})
@@ -113,19 +113,19 @@ class TestExperimentsDoor(unittest.TestCase):
         parser = OverridesParser.create()
         for value in ("/tmp/a,b", "prefix=tag", "/out/{run}/x", "it's",
                       "plain/path"):
-            tok = experiments._override_str("run.output_prefix", value)
+            tok = configurations._override_str("run.output_prefix", value)
             self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
         # None -> null; non-string scalars stay unquoted (keep their type).
-        self.assertEqual(experiments._override_str("run.output_averages", None),
+        self.assertEqual(configurations._override_str("run.output_averages", None),
                          "run.output_averages=null")
-        self.assertEqual(experiments._override_str("run.total_time", 10),
+        self.assertEqual(configurations._override_str("run.total_time", 10),
                          "run.total_time=10")
 
     def test_override_grammar_value_composes(self):
         # F2: the escape hatch survives a real compose, not just token parsing.
-        cfg = experiments._compose(
+        cfg = configurations._compose(
             "speedy-t31",
-            [experiments._override_str("run.output_prefix", "/tmp/a,b={c}=z")])
+            [configurations._override_str("run.output_prefix", "/tmp/a,b={c}=z")])
         self.assertEqual(cfg.run.output_prefix, "/tmp/a,b={c}=z")
 
     def test_duration_string_overrides_pass_through(self):
@@ -134,7 +134,7 @@ class TestExperimentsDoor(unittest.TestCase):
         # (which would ValueError and break door<->CLI equivalence).
         from jcm.date import parse_duration_days
 
-        exp = experiments.load(
+        exp = configurations.load(
             "speedy-t31",
             **{"terrain": "aquaplanet", "forcing": "default",
                "run.total_time": "1 day", "run.save_interval": "12 hours"})
@@ -187,7 +187,7 @@ def _patched_engine(shape):
 
 
 @pytest.mark.slow
-class TestExperimentsAcceptance(unittest.TestCase):
+class TestConfigurationsAcceptance(unittest.TestCase):
     """#751 acceptance: the Python door reproduces the CLI composition."""
 
     def setUp(self):
@@ -205,9 +205,9 @@ class TestExperimentsAcceptance(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for p in _patched_engine(shape):
                 stack.enter_context(p)
-            exp = experiments.load(name)
+            exp = configurations.load(name)
             # The CLI composition, built through the same runners the door uses.
-            cfg = experiments._compose(name, [])
+            cfg = configurations._compose(name, [])
             ref_model = runners.build_model(cfg)
             ref_forcing = runners.build_forcing(
                 cfg, ref_model.coords,
@@ -239,11 +239,11 @@ class TestExperimentsAcceptance(unittest.TestCase):
 
 
 @pytest.mark.slow
-class TestExperimentsSmoke(unittest.TestCase):
+class TestConfigurationsSmoke(unittest.TestCase):
     def test_speedy_run_kwargs_produce_finite_output(self):
         # No mocks: SPEEDY needs no network. Run one save interval and confirm
         # model.run accepts **run_kwargs and yields finite output.
-        exp = experiments.load(
+        exp = configurations.load(
             "speedy-t31", **{"terrain": "aquaplanet", "forcing": "default",
                              "run.total_time": 1.0, "run.save_interval": 1.0})
         preds = exp.model.run(**exp.run_kwargs)

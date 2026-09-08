@@ -4,7 +4,7 @@
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=speedy-t31
+#   python -m jcm.main +configuration=speedy-t31
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
 #  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics

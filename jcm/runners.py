@@ -1843,7 +1843,7 @@ def apply_constants_overrides(cfg: DictConfig) -> None:
     """Apply any ``cfg.constants`` physical-constant overrides to the global singleton.
 
     Shared by the CLI door (:func:`run`) and the Python door
-    (:func:`jcm.experiments.load`) so both build the model against the SAME
+    (:func:`jcm.configurations.load`) so both build the model against the SAME
     constants — the dynamical core reads the live :mod:`jcm.constants` singleton
     at construction, so this MUST run before ``build_model``. Only base fields
     may be set; derived constants (rd, cvd, rgrav, vtmpc*) recompute. Note

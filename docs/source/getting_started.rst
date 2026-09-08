@@ -66,32 +66,32 @@ Inspect the available config groups and the fully-composed config::
    python -m jcm.main --cfg job grid=echam_t63_l47_hybrid       # with overrides
 
 Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
-``init``, ``terrain``, ``forcing``, ``diffusion``, ``experiment``.
+``init``, ``terrain``, ``forcing``, ``diffusion``, ``configuration``.
 
-Validated configurations — the ``experiment`` group
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Validated configurations — the ``configuration`` group
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Composing a run by hand (``physics=… grid=… init=… run=… terrain=… forcing=…``)
 is powerful but easy to get subtly wrong — an isothermal cold start with no
-sponge, for instance, goes NaN within days at L47. The ``experiment`` group
+sponge, for instance, goes NaN within days at L47. The ``configuration`` group
 promotes each *known-good* combination to a single named composition, so one
 command is one validated configuration::
 
-   python -m jcm.main +experiment=t63-echam-jam        # T63L47 ECHAM + JAM aerosol
-   python -m jcm.main +experiment=speedy-t31           # SPEEDY T31L8 reference
-   python -m jcm.main +experiment=ma-t63-l95           # middle-atmosphere JAM sweep
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
+   python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
-Note the leading ``+``: an experiment is *added* to the default composition and
+Note the leading ``+``: a configuration is *added* to the default composition and
 then overrides the physics/grid/init/run/terrain/forcing groups it selects. Each
-``jcm/config/experiment/*.yaml`` carries comments explaining WHY every setting is
-what it is (the dry-JW init, the production sponge, the semi-Lagrangian
+``jcm/config/configuration/*.yaml`` carries comments explaining WHY every setting
+is what it is (the dry-JW init, the production sponge, the semi-Lagrangian
 off-centering, the level-matched ozone, …), and is the single source of truth
 for that configuration — ``tools/benchmark.py`` and the release-validation
 matrix compose the very same yaml rather than a private override list. Override
 individual keys on top as usual, e.g.
-``python -m jcm.main +experiment=t63-echam-jam run.total_time=30``. The very same
-recipes are loadable from Python without touching Hydra — see
-:ref:`experiments-from-python` below.
+``python -m jcm.main +configuration=t63-echam-jam run.total_time=30``. The very
+same recipes are loadable from Python without touching Hydra — see
+:ref:`configurations-from-python` below.
 
 One run schema — no ``+``/``++`` guesswork for run keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -113,7 +113,7 @@ AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``
 ``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
 default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
 project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
-at build time, so ``python -m jcm.main +experiment=t63-echam-jam`` composes a
+at build time, so ``python -m jcm.main +configuration=t63-echam-jam`` composes a
 fully-specified online-aerosol run with no hand-managed emission paths. For any
 non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
 bundle to override one, or ``null`` to opt out (the runner then warns the run is
@@ -211,7 +211,7 @@ into the local Hugging Face cache. For a JAM (prognostic-aerosol) package it
 supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant set;
 a non-JAM package gets surface + ozone only. It routes the composed config
 through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
-``+experiment=t63-echam-jam`` run expressed in Python:
+``+configuration=t63-echam-jam`` run expressed in Python:
 
 .. code-block:: python
 
@@ -244,29 +244,29 @@ that the mirror does not carry resolve to nothing, with a warning), and
 ``aerosol="macv2sp"`` raises a precise error until the MACv2-SP weights are
 staged on the mirror.
 
-.. _experiments-from-python:
+.. _configurations-from-python:
 
-The same recipes from Python (``jcm.experiments``)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The same recipes from Python (``jcm.configurations``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-:func:`jcm.experiments.load` is the recipe door: it composes the same
-``jcm/config/experiment/*.yaml`` the CLI's ``+experiment=`` uses — internally,
+:func:`jcm.configurations.load` is the recipe door: it composes the same
+``jcm/config/configuration/*.yaml`` the CLI's ``+configuration=`` uses — internally,
 with Hydra invisible — and returns built objects. ``model.run(**exp.run_kwargs)``
-reproduces ``python -m jcm.main +experiment=<name>``'s integration (the recipe's
+reproduces ``python -m jcm.main +configuration=<name>``'s integration (the recipe's
 initial state is already applied — e.g. the dry-JW start for the ECHAM family):
 
 .. code-block:: python
 
-   import jcm.experiments as experiments
+   import jcm.configurations as configurations
 
-   experiments.available()          # {name: one-line summary} for every recipe
+   configurations.available()          # {name: one-line summary} for every recipe
 
-   exp = experiments.load("t63-echam-jam")
+   exp = configurations.load("t63-echam-jam")
    predictions = exp.model.run(**exp.run_kwargs)   # same run as the CLI
 
    # exp.forcing is the built ForcingData; exp.config is a plain resolved dict
    # (no DictConfig leaks out). Override any key with Hydra dotted syntax:
-   exp = experiments.load("t63-echam-jam", **{"run.total_time": 30})
+   exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
 pySES recipes load only when the optional ``pyses`` backend is installed
 (a clear error otherwise). For forcing alone, reach for

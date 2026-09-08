@@ -85,15 +85,15 @@ _UNHEALTHY_RE = re.compile(r"atmosphere unhealthy|FAILED: T_min|FAILED: T_max"
                            r"|q_max=", re.I)
 _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 
-# The experiment-group Hydra compositions (jcm/config/experiment/*.yaml) are the
+# The configuration-group Hydra compositions (jcm/config/configuration/*.yaml) are the
 # single home of the validated override sets -- physics x grid x radiation
 # pairing x init x forcing -- each carrying a comment for WHY every setting is
 # what it is (an isothermal cold start with no sponge goes NaN within days at
 # L47, so these are not interchangeable with a bare ``grid=`` override). This
-# table is only a thin shim: it maps each benchmark id to ``+experiment=<name>``
+# table is only a thin shim: it maps each benchmark id to ``+configuration=<name>``
 # plus the benchmark-ONLY overrides the yaml deliberately leaves out. Keeping
 # the science in the yamls means a hand-composed ``python -m jcm.main
-# +experiment=<name>`` and a benchmark run share one validated definition rather
+# +configuration=<name>`` and a benchmark run share one validated definition rather
 # than drifting apart.
 #
 # The only benchmark-only overrides are machine-local data with no data-mirror
@@ -102,34 +102,34 @@ _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 _BC = pathlib.Path(os.environ.get("JCM_BC_DIR", "/scr/dwatsonparris/bc_l95"))
 
 
-def _exp(name: str, *extra: str) -> list[str]:
-    """``+experiment=<name>`` plus any benchmark-only overrides."""
-    return [f"+experiment={name}", *extra]
+def _cfg(name: str, *extra: str) -> list[str]:
+    """``+configuration=<name>`` plus any benchmark-only overrides."""
+    return [f"+configuration={name}", *extra]
 
 
 PRESETS: dict[str, list[str]] = {
-    "speedy-t31": _exp("speedy-t31"),
+    "speedy-t31": _cfg("speedy-t31"),
     # Release-matrix MACv2-SP members (#638): echam-1m/2m at t63/t106.
-    **{f"{t}-echam-{v}": _exp(f"{t}-echam-{v}")
+    **{f"{t}-echam-{v}": _cfg(f"{t}-echam-{v}")
        for t in ("t63", "t106") for v in ("1m", "2m")},
     # T63 RRTMGP / JAM family (historical benchmark ids).
-    "t63-echam-rrtmgp": _exp("t63-echam-rrtmgp"),
-    "t63-echam-rrtmgp-2m": _exp("t63-echam-rrtmgp-2m"),
-    "t63-echam-emulated-2m": _exp("t63-echam-emulated-2m"),
-    "t63-echam-jam": _exp("t63-echam-jam"),
-    "t63-echam-jam-aerocom": _exp("t63-echam-jam-aerocom"),
-    "t63-echam-jam-aerocom-optics": _exp("t63-echam-jam-aerocom-optics"),
+    "t63-echam-rrtmgp": _cfg("t63-echam-rrtmgp"),
+    "t63-echam-rrtmgp-2m": _cfg("t63-echam-rrtmgp-2m"),
+    "t63-echam-emulated-2m": _cfg("t63-echam-emulated-2m"),
+    "t63-echam-jam": _cfg("t63-echam-jam"),
+    "t63-echam-jam-aerocom": _cfg("t63-echam-jam-aerocom"),
+    "t63-echam-jam-aerocom-optics": _cfg("t63-echam-jam-aerocom-optics"),
     # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
     # no bundle, so its terrain + level-matched ozone stay machine-local.
-    **{f"ma-{t}-l{lv}": _exp(f"ma-{t}-l{lv}")
+    **{f"ma-{t}-l{lv}": _cfg(f"ma-{t}-l{lv}")
        for t in ("t63", "t106") for lv in (47, 95)},
-    **{f"ma-t119-l{lv}": _exp(
+    **{f"ma-t119-l{lv}": _cfg(
         f"ma-t119-l{lv}",
         f"terrain.file={_BC}/T119_terrain.nc",
         f"forcing.ozone_file={_BC}/t119_ozone_l{lv}.nc") for lv in (47, 95)},
     # pySES CAM-SE ne30 (dycore comparison); run=pyses_year drops a relative
     # checkpoint into cwd, so redirect it to the disposable scratch dir.
-    **{f"ma-ne30-l{lv}": _exp(
+    **{f"ma-ne30-l{lv}": _cfg(
         f"ma-ne30-l{lv}",
         f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt")
        for lv in (47, 95)},
@@ -142,7 +142,7 @@ def _compose_preset(overrides: list[str]):
     Cheap (pure Hydra composition -- no model build, no jcm import), so it is
     safe to call before a GPU is claimed. Used to enumerate the prescribed-input
     files a preset resolves to, which since the PRESETS shim now live inside the
-    ``+experiment`` yaml rather than in the override strings.
+    ``+configuration`` yaml rather than in the override strings.
     """
     from hydra import compose, initialize_config_dir
     cfgdir = str(REPO / "jcm" / "config")
@@ -537,7 +537,7 @@ def run(args) -> dict:
     # keeps the download out of the timed region and turns an unreachable
     # mirror into an immediate refusal instead of a stall on a held card.
     #
-    # The validated file references now live inside the ``+experiment`` yaml,
+    # The validated file references now live inside the ``+configuration`` yaml,
     # not in the override strings, so enumerate them from the COMPOSED config
     # (``auto``/``null`` inputs resolve lazily at build time and are skipped).
     #

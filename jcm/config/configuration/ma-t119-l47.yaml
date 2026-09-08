@@ -4,7 +4,7 @@
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=ma-t119-l47
+#   python -m jcm.main +configuration=ma-t119-l47
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
 #  - physics=echam-jam: ECHAM + JAM modal aerosol (auto emission inputs).

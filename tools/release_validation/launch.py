@@ -66,8 +66,8 @@ def jam_aux(grid: str, levels: str) -> list[str]:
 def _preset_grid(preset_name: str) -> str | None:
     """Return the grid config a preset composes to.
 
-    PRESETS entries are now a thin ``+experiment=<name>`` shim, so the grid is
-    inside the experiment yaml rather than a ``grid=`` override string. Compose
+    PRESETS entries are now a thin ``+configuration=<name>`` shim, so the grid is
+    inside the configuration yaml rather than a ``grid=`` override string. Compose
     the preset (pure Hydra, no model build) and read the chosen grid group.
     """
     from pathlib import Path

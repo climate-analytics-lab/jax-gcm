@@ -72,13 +72,13 @@ class PysesHydraConfigTest(unittest.TestCase):
         with self.assertRaises((FileNotFoundError, OSError, ValueError)):
             build_forcing(cfg, model.coords, dycore=model.dycore)
 
-    def test_ma_ne30_experiments_construct_on_pyses(self):
-        """The ma-ne30 experiment presets compose and build on pySES.
+    def test_ma_ne30_configurations_construct_on_pyses(self):
+        """The ma-ne30 configuration presets compose and build on pySES.
 
         echam-jam's TiedtkeConvection declares an ``omega`` requirement
         whenever the mid-level trigger is on (its default); pySES exposes
         no omega provider (#698), so with the trigger on Model construction
-        raises. Both experiment YAMLs set ``physics.cu_lmfmid=false`` — the
+        raises. Both configuration YAMLs set ``physics.cu_lmfmid=false`` — the
         launch blocker tracked in #715 — so the composed physics declares no
         omega requirement and the Model builds. Uses a test-size grid; the
         canonical files document ne30.
@@ -87,8 +87,8 @@ class PysesHydraConfigTest(unittest.TestCase):
         pytest.importorskip("mam4_jax")  # echam-jam's default JAM core
         from jcm.runners import build_model
 
-        for exp in ("ma-ne30-l47", "ma-ne30-l95"):
-            cfg = _cfg([f"+experiment={exp}", "dycore.nx=3",
+        for name in ("ma-ne30-l47", "ma-ne30-l95"):
+            cfg = _cfg([f"+configuration={name}", "dycore.nx=3",
                         "dycore.n_sponge=8"])
             model = build_model(cfg)
             self.assertNotIn("omega", model.physics.required_dycore_fields())

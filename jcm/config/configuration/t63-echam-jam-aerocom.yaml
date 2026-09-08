@@ -1,14 +1,15 @@
 # @package _global_
 #
-# ECHAM 1-moment microphysics + RRTMGP at T63L47 — release-validation matrix member (#638).
+# ECHAM + JAM with AeroCom diagnostics at T63L47 — validated benchmark configuration.
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=t63-echam-1m
+#   python -m jcm.main +configuration=t63-echam-jam-aerocom
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
-#  - physics=echam: ECHAM 1-moment microphysics + RRTMGP.
-#  - grid=echam_t63_l47_hybrid: ECHAM hybrid a+b*p_s levels.
+#  - physics=echam-jam-aerocom: ECHAM + JAM with AeroCom diagnostics.
+#  - JAM aerosol inputs auto-resolve; AeroCom diagnostic groups on.
+#  - grid=echam_t63_l47_hybrid: ECHAM standard production grid.
 #  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
 #    fully DRY start. An isothermal cold start goes NaN within days at L47;
 #    the dry-JW init lets radiation + surface fluxes moisten the column and
@@ -26,7 +27,7 @@
 #    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
 #    stated explicitly so the recorded config documents the value used.
 defaults:
-  - override /physics: echam
+  - override /physics: echam-jam-aerocom
   - override /grid: echam_t63_l47_hybrid
   - override /init: jw
   - override /terrain: auto
