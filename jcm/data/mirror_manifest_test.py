@@ -2,9 +2,8 @@
 
 The manifest is the data-driven source of truth the typed resolver consults, so
 these pin: that it stays in sync with the ``jcm.data.bundle_names`` availability
-predicate it generalises (they must never drift), that the packaged JSON matches
-what ``build_mirror.build_manifest`` regenerates (no stale hand edits), and the
-grid-free / not-yet-staged edge products (``macv2_sp``).
+predicate it generalises (they must never drift), and that the packaged JSON
+matches what ``build_mirror.build_manifest`` regenerates (no stale hand edits).
 """
 
 import unittest
@@ -27,14 +26,16 @@ class TestManifestLoads(unittest.TestCase):
                          set(bundle_names.PUBLISHED_VERTICALS))
 
     def test_auto_product_per_forcing_key(self):
+        # macv2_file is intentionally absent: the MACv2-SP file is repo-packaged
+        # (jcm.forcing.packaged_macv2_path), not a mirror product.
         for key, expected in (("emissions_file", "emissions_pd"),
                               ("dms_file", "dms"),
                               ("dust_file", "dust"),
                               ("oxidants_file", "oxidants_pd"),
-                              ("ozone_file", "ozone_pd"),
-                              ("macv2_file", "macv2_sp")):
+                              ("ozone_file", "ozone_pd")):
             self.assertEqual(
                 mm.product_for_key(self.manifest, key), expected, key)
+        self.assertIsNone(mm.product_for_key(self.manifest, "macv2_file"))
 
     def test_bundle_path_fills_grid_and_level(self):
         self.assertEqual(
@@ -43,16 +44,6 @@ class TestManifestLoads(unittest.TestCase):
         self.assertEqual(
             mm.bundle_path(self.manifest, "oxidants_pd", "t106", 47),
             "bundles/t106_l47/oxidants_pd.nc")
-        # A grid-free product ignores grid/nlev.
-        self.assertEqual(
-            mm.bundle_path(self.manifest, "macv2_sp"),
-            "macv2_sp/MACv2.0-SP_v1.nc")
-
-    def test_macv2_declared_but_not_staged(self):
-        rec = mm.product(self.manifest, "macv2_sp")
-        self.assertFalse(rec["staged"])
-        self.assertIsNone(rec["grids"])       # grid-free
-        self.assertIsNone(rec["coverage"])    # static
 
     def test_yearly_products_carry_coverage(self):
         # The span actually staged on the mirror (verified via list_repo_files),

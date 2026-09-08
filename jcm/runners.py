@@ -1791,14 +1791,19 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
     ``forcing.aerosol_year_weight`` / ``aerosol_ann_cycle`` — the fields the
     MACv2-SP aerosol term reads for per-year amplitude and the seasonal cycle.
     Without a file these default to all-ones (perpetual year-2005 amplitude, no
-    seasonal cycle); ``forcing=macv2_sp`` sets the key. The weights are plume-
-    indexed and grid-independent, so no horizontal regridding is needed here.
+    seasonal cycle); ``forcing=macv2_sp`` sets the key. ``macv2_file=auto`` (that
+    config's default) resolves to the repo-packaged SPv2.1 file
+    (:func:`jcm.forcing.packaged_macv2_path`); an explicit path overrides. The
+    weights are plume-indexed and grid-independent, so no regridding is needed.
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(forcing_cfg.get("macv2_file", None))
-    if path in (None, "", "null"):
+    raw = forcing_cfg.get("macv2_file", None)
+    if raw in (None, "", "null"):
         return forcing
+    from jcm.forcing import packaged_macv2_path
+    path = _resolve_data_path(
+        packaged_macv2_path() if raw == "auto" else raw)
     from jcm.forcing import read_macv2_weights
     year_weight, ann_cycle = read_macv2_weights(str(path))
     forcing = _ensure_parent_forcing(forcing, coords)
@@ -2241,8 +2246,9 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                 "config trap: MACv2-SP with the default all-ones "
                 "aerosol_year_weight/aerosol_ann_cycle — this is perpetual "
                 "year-2005 plume amplitude with no seasonal cycle, not "
-                "historical aerosol forcing. Use forcing=macv2_sp (with "
-                "macv2_file set) for real time-varying MACv2-SP weights."
+                "historical aerosol forcing. Use forcing=macv2_sp for real "
+                "time-varying MACv2-SP weights — it now loads the repo-packaged "
+                "SPv2.1 file out of the box (no macv2_file needed)."
             )
 
 

@@ -2794,6 +2794,22 @@ class TestAttachMacv2Weights(unittest.TestCase):
         cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
         self.assertIsNone(_attach_macv2_weights(None, cfg, None))
 
+    def test_macv2_file_auto_loads_packaged_spv2(self):
+        # macv2_file=auto (the forcing=macv2_sp default) resolves the repo-
+        # packaged SPv2.1 file and attaches its real (non-all-ones) weights.
+        import numpy as np
+        from omegaconf import OmegaConf
+
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import _attach_macv2_weights
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        cfg = OmegaConf.create({"kind": "default", "macv2_file": "auto"})
+        forcing = _attach_macv2_weights(None, cfg, coords)
+        yw = np.asarray(forcing.aerosol_year_weight.values)
+        self.assertEqual(yw.shape, (251, 9))
+        self.assertFalse(np.allclose(yw, 1.0))
+
     def test_pyses_path_attaches_macv2_weights(self):
         """``forcing=macv2_sp`` on pySES must still load ``macv2_file`` (F1).
 

@@ -251,17 +251,6 @@
       "key": "file",
       "auto": false,
       "staged": true
-    },
-    "macv2_sp": {
-      "path": "macv2_sp/MACv2.0-SP_v1.nc",
-      "grids": null,
-      "levels": null,
-      "vertical": null,
-      "coverage": null,
-      "alignment": "static",
-      "key": "macv2_file",
-      "auto": true,
-      "staged": false
     }
   }
 }

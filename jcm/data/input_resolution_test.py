@@ -169,8 +169,14 @@ class TestResolveInput(unittest.TestCase):
         fetch.assert_not_called()
 
     def test_auto_not_yet_staged_raises_precisely(self):
+        # A published-but-unstaged product must give the precise not-yet-staged
+        # error rather than fetch a 404. Synthesised by flipping a real product's
+        # staged flag (every committed product is staged today).
+        import copy
+        man = copy.deepcopy(self.manifest)
+        man["products"]["emissions_pd"]["staged"] = False
         with self.assertRaisesRegex(FileNotFoundError, "yet published"):
-            self._resolve("macv2_file", "auto",
+            self._resolve("emissions_file", "auto", manifest=man,
                           fetch=mock.Mock(return_value="/x"))
 
     def test_auto_offline_raises_actionable(self):

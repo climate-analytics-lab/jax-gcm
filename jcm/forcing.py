@@ -423,11 +423,12 @@ class ForcingData:
         composed config through the SAME engine ``jcm.runners.build_forcing``
         uses, so the CLI and Python doors provably agree (#751; see the
         equivalence test in ``forcing_test``). The emission-family config-trap
-        warnings fire here from the shared home too. ``aerosol="macv2sp"`` raises
-        the precise not-yet-published error until the MACv2-SP weights are staged
-        on the mirror (once staged, the resolved weights file is wired into
-        ``forcing.macv2_file`` so it is actually attached). Unpublished-grid /
-        sigma degradations (``auto`` → nothing) mirror the CLI. ``fetch``
+        warnings fire here from the shared home too. ``aerosol="macv2sp"`` wires
+        the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
+        ``forcing.macv2_file`` so the real plume weights are attached — the file
+        is resolution-invariant and shipped in the wheel, so it needs no mirror
+        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        the CLI for the other products. ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
         engine; the ``auto`` products use the cache.
 
@@ -469,15 +470,11 @@ class ForcingData:
 
         macv2_file = None
         if aerosol == "macv2sp":
-            # staged:false today → resolve_input raises the precise not-yet-
-            # staged error (naming the build_mirror staging step). When the
-            # weights are published this returns the fetched MACv2 file, which we
-            # wire into forcing.macv2_file so build_forcing actually attaches the
-            # weights instead of the all-ones default (F2).
-            sr = ir.resolve_input("macv2_file", "auto", grid_token=grid_token,
-                                  nlev=nlev, vertical=vertical,
-                                  manifest=manifest, fetch=fetch)
-            macv2_file = None if sr.is_none else sr.paths[0]
+            # The MACv2-SP file is repo-packaged (resolution-invariant single
+            # file), so wire its packaged path straight into forcing.macv2_file;
+            # build_forcing then attaches the real weights instead of the all-ones
+            # default (F2). No mirror fetch or staging gate.
+            macv2_file = packaged_macv2_path()
 
         forcing_dict = {
             "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
@@ -1314,10 +1311,27 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
-    """Read MACv2.0-SP time-varying plume weights into two ``TimeSeries`` leaves.
+#: Repo-packaged MACv2-SP simple-plume file: SPv2.1 (CMIP7; Fiedler & Azoulay,
+#: University Heidelberg, 2025), the CEDS-scaled successor to Stevens et al.
+#: (2017) v1. Resolution-invariant (~19 KB), so it ships in the wheel under
+#: ``jcm/data/bc`` rather than on the HF mirror (see SOURCES.md for provenance +
+#: sha256). ``forcing.macv2_file=auto`` and ``from_bundles(aerosol="macv2sp")``
+#: both resolve to it; an explicit path overrides.
+PACKAGED_MACV2_FILE = "SPv2.1_18502023_CMIP7.nc"
 
-    The Stevens et al. (2017) "Simple Plumes" file ``MACv2.0-SP_v1.nc`` carries
+
+def packaged_macv2_path() -> str:
+    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``)."""
+    from importlib import resources
+    from pathlib import Path
+    return str(Path(str(resources.files("jcm")))
+               / "data" / "bc" / PACKAGED_MACV2_FILE)
+
+
+def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+    """Read MACv2-SP time-varying plume weights into two ``TimeSeries`` leaves.
+
+    The MACv2-SP file (the packaged SPv2.1 CMIP7 build, or the older v1) carries
     the static plume geometry (consumed separately by
     :meth:`AerosolParameters.from_dataset`) alongside two time-varying scaling
     arrays:
@@ -1325,10 +1339,12 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
     * ``year_weight(plume, year)`` over 1850..2100 — the per-year anthropogenic
       amplitude. Returned as ``forcing.aerosol_year_weight``: a ``BY_DATE``
       ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
-      calendar year. The v1 file only has valid data for 1850-2016; 2017-2100
-      are ``_FillValue`` (delivered as NaN), which would inject NaN AOD into a
-      post-2016 run, so the last valid year is forward-filled (a documented jcm
-      convention — the reference STOPs out of range).
+      calendar year. Only part of the axis carries real data (SPv2.1: 1850-2023;
+      v1: 1850-2016); the trailing years are ``_FillValue`` (delivered as NaN),
+      which would inject NaN AOD, so the last valid year is forward-filled (a
+      documented jcm convention — the reference STOPs out of range). The
+      forward-fill finds the last all-valid year dynamically, so it adapts to
+      either file's real span with no version-specific constant.
     * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
       ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
       ``(week, feature, plume)`` so a ``select(date)`` slice yields the

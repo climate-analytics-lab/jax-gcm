@@ -123,23 +123,14 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "forcing_era5", "path": "bundles/{grid}/forcing_era5/{year}.nc",
      "grids": "gaussian", "levels": False, "coverage": [1979, 2024],
      "alignment": "transient", "key": "file", "auto": False, "staged": True},
-    # MACv2-SP simple-plume file (Stevens et al. 2017; WDCC MACv2_SP_v1),
-    # grid/level-free; staged=false until stage_macv2 uploads it.
-    {"name": "macv2_sp", "path": "macv2_sp/MACv2.0-SP_v1.nc", "grids": None,
-     "levels": False, "coverage": None, "alignment": "static",
-     "key": "macv2_file", "auto": True, "staged": False},
+    # The MACv2-SP simple-plume file is NOT mirrored: it is resolution-invariant
+    # (~19 KB) and ships in the wheel at jcm/data/bc (see jcm.forcing
+    # .packaged_macv2_path); forcing.macv2_file=auto resolves it directly.
 )
 NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
              "noleak_greenlndantarcsgh30fac2.50_20250825.nc")
 GRAV = 9.80665
-
-#: Local MACv2.0-SP parameter file for ``stage_macv2`` — download once from
-#: WDCC (https://doi.org/10.1594/WDCC/MACv2_SP_v1) into ``sources/macv2``.
-MACV2_SRC = Path(os.environ.get(
-    "JCM_MIRROR_ROOT",
-    f"/glade/derecho/scratch/{os.environ.get('USER', '')}/hf_mirror")
-) / "sources" / "macv2" / "MACv2.0-SP_v1.nc"
 
 ROOT = Path(os.environ.get(
     "JCM_MIRROR_ROOT",
@@ -467,22 +458,6 @@ def stage_era5_transient() -> None:
     _record_staged_coverage(("forcing_era5",), first, last)
 
 
-def stage_macv2() -> None:
-    """Stage the MACv2.0-SP simple-plume parameter file (grid/level-free).
-
-    Copies ``MACv2.0-SP_v1.nc`` (Stevens et al. 2017; WDCC ``MACv2_SP_v1``,
-    https://doi.org/10.1594/WDCC/MACv2_SP_v1) — a single small file, one plume
-    geometry + ``year_weight``/``ann_cycle`` scalings, no per-grid variant — from
-    ``MACV2_SRC`` to the manifest's ``macv2_sp/`` product path. Flip that
-    product's ``staged`` flag to ``True`` and regenerate the manifest once the
-    upload lands.
-    """
-    dst = UPLOAD / "macv2_sp" / "MACv2.0-SP_v1.nc"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(MACV2_SRC, dst)
-    print("macv2:", dst, flush=True)
-
-
 def build_manifest(staged_coverage: dict = None) -> dict:
     """Assemble the mirror-manifest dict from :data:`_MANIFEST_PRODUCTS`.
 
@@ -709,7 +684,6 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
     "aux": ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst",
             "/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone"),
     "bundles": (str(BUILD),),
-    "macv2": (str(MACV2_SRC),),
     "amip": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
              "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10",
              "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
@@ -784,14 +758,13 @@ def stage_upload() -> None:
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux,
           "bundles": stage_bundles, "amip": stage_amip,
-          "era5-transient": stage_era5_transient, "macv2": stage_macv2,
+          "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
 
-#: Heavy / source-gated opt-in stages excluded from ``--stage all``. ``macv2``
-#: needs the one-off WDCC download (``MACV2_SRC``); the others are multi-GB or
-#: push to the remote.
-_NOT_IN_ALL = ("amip", "era5-transient", "macv2", "upload")
+#: Heavy / source-gated opt-in stages excluded from ``--stage all``: multi-GB
+#: builds or the push to the remote.
+_NOT_IN_ALL = ("amip", "era5-transient", "upload")
 
 
 def main() -> None:

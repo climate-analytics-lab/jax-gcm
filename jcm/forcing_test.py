@@ -1525,34 +1525,18 @@ class TestForcingFromBundles(unittest.TestCase):
         self.assertEqual(set(F._SURFACE_ANCILLARY_EPOCH),
                          {None, *F._SURFACE_PRODUCTS})
 
-    def test_macv2sp_not_yet_staged_raises(self):
-        coords = _t42l8_sigma_coords()
-        with self.assertRaisesRegex(FileNotFoundError, "yet published"):
-            ForcingData.from_bundles(coords, aerosol="macv2sp", surface=None)
-
-    def test_macv2sp_staged_attaches_weights(self):
-        # F2: once the mirror stages the MACv2 weights, from_bundles must wire
-        # the fetched file into forcing.macv2_file so build_forcing attaches
-        # non-all-ones weights instead of silently running the all-ones default.
-        import os
-        import tempfile
-        from unittest import mock
-
-        from jcm.data import mirror_manifest as mm
-
+    def test_macv2sp_attaches_packaged_weights(self):
+        # F2: from_bundles(aerosol="macv2sp") wires the repo-packaged SPv2.1 file
+        # into forcing.macv2_file, so build_forcing attaches the real (non-all-
+        # ones) weights spanning the file's 1850-2023 valid range instead of the
+        # all-ones default. No mirror fetch, no staging gate.
         coords = _t42l8_sigma_coords()  # weights are grid-independent
-        ds, _, _ = TestReadMacv2Weights._synthetic_macv2()
-        staged = mm.load_manifest()
-        staged["products"]["macv2_sp"]["staged"] = True
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "MACv2.0-SP_v1.nc")
-            ds.to_netcdf(path)
-            with mock.patch.object(mm, "load_manifest", return_value=staged):
-                forcing = ForcingData.from_bundles(
-                    coords, aerosol="macv2sp", surface=None,
-                    fetch=lambda rel: path)
+        forcing = ForcingData.from_bundles(coords, aerosol="macv2sp",
+                                           surface=None)
         yw = np.asarray(forcing.aerosol_year_weight.values)
         self.assertFalse(np.allclose(yw, 1.0))
+        # The packaged file carries 251 annual samples (1850..2100).
+        self.assertEqual(yw.shape[0], 251)
 
     def test_invalid_arguments_raise(self):
         coords = _t42l8_sigma_coords()
