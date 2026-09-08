@@ -529,23 +529,36 @@ def stage_manifest() -> None:
 
 
 def _product_variants(rec: dict):
-    """Concrete ``(grid, nlev)`` variants a ``{year}``-series product declares.
+    """Concrete ``(grid, nlev)`` variants a product declares.
 
-    ``grid`` ranges over ``rec['grids']`` (every transient product is Gaussian);
-    ``nlev`` over ``rec['levels']`` when the product is level-resolved, else the
-    single ``None`` variant. Each is a distinct series the mirror is expected to
-    hold in full — verification checks every one rather than pooling them, so a
-    complete grid cannot mask a missing sibling variant.
+    ``grid`` ranges over ``rec['grids']`` (``None`` for a grid-free single file,
+    which yields the lone ``(None, None)`` variant); ``nlev`` over
+    ``rec['levels']`` when the product is level-resolved, else the single
+    ``None``. Each is a distinct artifact the mirror is expected to hold —
+    verification checks every one rather than pooling them, so a complete grid
+    cannot mask a missing sibling variant.
     """
-    for grid in rec["grids"]:
+    for grid in rec["grids"] or (None,):
         for nlev in rec["levels"] or (None,):
             yield (grid, nlev)
 
 
 def _variant_label(variant) -> str:
-    """``(grid, nlev)`` -> the label used in drift keys, e.g. ``t63`` / ``t63_l47``."""
+    """``(grid, nlev)`` -> the label used in drift keys, e.g. ``t63`` / ``t63_l47``.
+
+    A grid-free variant (``(None, None)``) has no per-variant suffix, so the
+    product name alone is the key (see ``_variant_key``).
+    """
     grid, nlev = variant
+    if grid is None:
+        return ""
     return grid if nlev is None else f"{grid}_l{nlev}"
+
+
+def _variant_key(name: str, variant) -> str:
+    """Drift-dict key for a product variant: ``name[label]``, or ``name`` grid-free."""
+    label = _variant_label(variant)
+    return f"{name}[{label}]" if label else name
 
 
 def remote_transient_coverage(files, manifest: dict) -> dict:
@@ -600,53 +613,69 @@ def _bounded_years(years, cap: int = 12):
 
 
 def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
-    """Cross-check every transient variant's manifest coverage against the mirror.
+    """Cross-check every declared mirror artifact against the live mirror.
 
-    Lists the dataset repo (``HfApi().list_repo_files``), derives the real staged
-    years per ``{year}`` product **and grid/level variant**
-    (:func:`remote_transient_coverage`) and returns
-    ``{"product[variant]": {"manifest": [...], "remote": [...] | None}}`` for every
-    declared variant whose coverage disagrees with the mirror (empty == no drift).
-    A variant absent from the mirror reports ``"remote": None``. Coverage is
-    checked for CONTIGUITY, not just endpoints: a variant whose ``[first, last]``
-    match but which drops an interior year is flagged with an extra ``"missing"``
-    list (bounded for large holes) — otherwise clients trust the contiguous span
-    and later request a file that is not there. Checking each variant — not one
-    pooled span per product — is what keeps a complete grid from masking a missing
-    sibling (e.g. a full t63 series hiding an absent t106). Network-only; driven by
-    ``--stage manifest --verify-remote``.
+    Lists the dataset repo (``HfApi().list_repo_files``) once and checks two
+    things, returning a drift dict (empty == no drift) whose entries the CLI
+    prints and exits non-zero on:
+
+    * **Transient ``{year}`` series** — the real staged years per product **and
+      grid/level variant** (:func:`remote_transient_coverage`) vs the manifest
+      ``coverage``. Checked for CONTIGUITY, not just endpoints: a variant whose
+      ``[first, last]`` match but which drops an interior year is flagged with an
+      extra ``"missing"`` list (bounded for large holes) — otherwise clients
+      trust the contiguous span and later request a file that is not there.
+    * **Static / climatology artifacts** — every ``staged: true`` product with no
+      ``{year}`` template must have each declared ``(grid, nlev)`` variant file
+      present on the mirror; a missing one reports ``"remote": None``. Without
+      this, a ``staged`` flag could advertise a file the resolver then 404s on.
+      Unstaged products are skipped — their absence is intentional and the
+      resolver already gives a precise not-yet-published error.
+
+    Checking each variant — not one pooled span per product — is what keeps a
+    complete grid from masking a missing sibling (e.g. a full t63 series hiding an
+    absent t106). Network-only; driven by ``--stage manifest --verify-remote``.
     """
     from huggingface_hub import HfApi
 
+    from jcm.data import mirror_manifest as mm
     from jcm.data.remote import DEFAULT_REPO
 
     if manifest is None:
         manifest = build_manifest()
     repo_id = repo_id or manifest.get("repo", DEFAULT_REPO)
     files = HfApi().list_repo_files(repo_id, repo_type="dataset")
+    file_set = set(files)
     coverage = remote_transient_coverage(files, manifest)
     drift = {}
     for name, rec in manifest["products"].items():
-        if "{year}" not in rec["path"]:
-            continue
-        declared = rec["coverage"]
-        remote_variants = coverage.get(name, {})
-        for variant in _product_variants(rec):
-            years = remote_variants.get(variant)
-            key = f"{name}[{_variant_label(variant)}]"
-            if years is None:
-                drift[key] = {"manifest": declared, "remote": None}
-                continue
-            span = [years[0], years[-1]]
-            # Interior holes: years absent WITHIN the actual span (endpoint
-            # truncation is already conveyed by span != declared).
-            missing = sorted(set(range(span[0], span[1] + 1)) - set(years))
-            if span == declared and not missing:
-                continue
-            entry = {"manifest": declared, "remote": span}
-            if missing:
-                entry["missing"] = _bounded_years(missing)
-            drift[key] = entry
+        if "{year}" in rec["path"]:
+            declared = rec["coverage"]
+            remote_variants = coverage.get(name, {})
+            for variant in _product_variants(rec):
+                years = remote_variants.get(variant)
+                key = _variant_key(name, variant)
+                if years is None:
+                    drift[key] = {"manifest": declared, "remote": None}
+                    continue
+                span = [years[0], years[-1]]
+                # Interior holes: years absent WITHIN the actual span (endpoint
+                # truncation is already conveyed by span != declared).
+                missing = sorted(set(range(span[0], span[1] + 1)) - set(years))
+                if span == declared and not missing:
+                    continue
+                entry = {"manifest": declared, "remote": span}
+                if missing:
+                    entry["missing"] = _bounded_years(missing)
+                drift[key] = entry
+        elif rec["staged"]:
+            # Static/climatology artifact: every declared variant file must exist.
+            for variant in _product_variants(rec):
+                grid, nlev = variant
+                rel = mm.bundle_path(manifest, name, grid, nlev)
+                if rel not in file_set:
+                    drift[_variant_key(name, variant)] = {
+                        "manifest": rel, "remote": None}
     return drift
 
 
@@ -777,9 +806,10 @@ def main() -> None:
                     help="inclusive year range for --stage amip, "
                          "e.g. 1950,2022")
     ap.add_argument("--verify-remote", action="store_true",
-                    help="after staging, cross-check every transient product's "
-                         "manifest coverage against the live mirror "
-                         "(list_repo_files) and exit non-zero on any drift")
+                    help="after staging, cross-check the manifest against the "
+                         "live mirror (list_repo_files): transient coverage "
+                         "per variant + existence of every staged static "
+                         "artifact; exit non-zero on any drift")
     args = ap.parse_args()
     global _AMIP_YEARS
     first, last = (int(y) for y in args.years.split(","))
@@ -800,8 +830,9 @@ def main() -> None:
             print(f"DRIFT {name}: manifest={d['manifest']} "
                   f"remote={d['remote']}", flush=True)
         if drift:
-            sys.exit("manifest coverage disagrees with the live mirror")
-        print("verify-remote: manifest coverages match the mirror", flush=True)
+            sys.exit("manifest disagrees with the live mirror")
+        print("verify-remote: manifest matches the mirror "
+              "(coverage + static existence)", flush=True)
 
 
 if __name__ == "__main__":

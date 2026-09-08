@@ -170,30 +170,37 @@ class TestStagedCoverage(unittest.TestCase):
 
 
 class TestRemoteCoverageVerification(unittest.TestCase):
-    """The ``--verify-remote`` cross-check of manifest coverage vs. the mirror.
+    """The ``--verify-remote`` cross-check of the manifest vs. the mirror.
 
-    Pins the pure path->span logic (:func:`remote_transient_coverage`) against a
-    synthetic ``list_repo_files`` payload so a future drift between the committed
-    coverages and the actual mirror is caught by a repeatable check, not a manual
-    inspection — the class of bug that shipped a 1870 source span the mirror never
-    staged.
+    Pins two things against a synthetic ``list_repo_files`` payload so drift
+    between the committed manifest and the actual mirror is caught by a
+    repeatable check, not manual inspection: the pure ``{year}`` path->span
+    logic (:func:`remote_transient_coverage`, the class of bug that shipped a
+    1870 source span the mirror never staged), and the static-artifact
+    existence check (that every ``staged: true`` climatology/static variant is
+    actually on the mirror, not merely advertised).
     """
 
     def _files(self, man, overrides=None):
-        # Full mirror listing: every declared variant of every transient product
-        # staged over its declared coverage. ``overrides`` maps a
-        # ``(product, grid, nlev)`` variant to a truncated ``(lo, hi)`` span, to
-        # an explicit ``set`` of years (to punch an interior hole), or to ``None``
-        # to omit that variant entirely (never staged).
+        # Full mirror listing: every declared variant of every product staged
+        # (transient over its declared coverage, static as a single file).
+        # ``overrides`` maps a ``(product, grid, nlev)`` variant to a truncated
+        # ``(lo, hi)`` span, an explicit ``set`` of years (to punch an interior
+        # hole), or ``None`` to omit that variant entirely (never staged).
         from jcm.data.mirror.build_mirror import _product_variants
         overrides = overrides or {}
         files = []
         for name, rec in man["products"].items():
-            if "{year}" not in rec["path"]:
+            transient = "{year}" in rec["path"]
+            if not transient and not rec["staged"]:
                 continue
             for grid, nlev in _product_variants(rec):
-                span = overrides.get((name, grid, nlev), tuple(rec["coverage"]))
+                default = tuple(rec["coverage"]) if transient else "present"
+                span = overrides.get((name, grid, nlev), default)
                 if span is None:
+                    continue
+                if not transient:
+                    files.append(mm.bundle_path(man, name, grid, nlev))
                     continue
                 yrs = (sorted(span) if isinstance(span, (set, frozenset))
                        else range(span[0], span[1] + 1))
@@ -268,6 +275,26 @@ class TestRemoteCoverageVerification(unittest.TestCase):
         drift = self._drift(man, {("forcing_amip", "t106", None): None})
         self.assertEqual(drift, {"forcing_amip[t106]":
                                  {"manifest": [1950, 2022], "remote": None}})
+
+    def test_verify_remote_clean_when_full_mirror(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # A complete mirror (every transient AND static variant present) drifts
+        # on nothing — the static existence check must not fire spuriously.
+        self.assertEqual(self._drift(man, {}), {})
+
+    def test_verify_remote_flags_missing_static_variant(self):
+        from jcm.data.mirror import build_mirror as bm
+
+        man = bm.build_manifest(staged_coverage={})
+        # The t63 dms climatology is staged in the manifest but absent from the
+        # mirror listing: the existence check names the exact variant instead of
+        # letting the staged flag advertise a file the resolver would 404 on.
+        drift = self._drift(man, {("dms", "t63", None): None})
+        self.assertEqual(drift, {"dms[t63]":
+                                 {"manifest": "bundles/t63/dms.nc",
+                                  "remote": None}})
 
 
 if __name__ == "__main__":
