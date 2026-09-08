@@ -1040,31 +1040,29 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
 
 
 def _resolve_auto_ozone(coords):
-    """Find an ozone climatology matching the model grid.
+    """Find an ozone climatology matching the model grid (coords→facts shim).
 
-    Two-stage discovery: (1) a packaged ``jcm/data/bc/*/ozone.nc`` whose
-    (nlev, nlat, nlon) match; (2) the data mirror's per-grid file
-    ``bundles/<grid>_l<nlev>/ozone_pd.nc`` (cache-first fetch — works
-    offline once cached; the loader rejects any grid mismatch, so only
-    an exact-grid file is worth returning). Grid identity is then fully
-    validated by
-    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage
-    finds a file — the caller warns and falls back to the analytic
-    profile, whose ~7.6× tropospheric ozone column biases clear-sky OLR
-    ~12 W/m² low.
+    Two-stage discovery: (1) the packaged ``ozone_packaged`` product
+    (``jcm/data/bc/*/ozone.nc``) shape-matched on (nlev, nlat, nlon) via the one
+    packaged-product mechanism (:func:`jcm.data.input_resolution.
+    resolve_packaged`); (2) the data mirror's per-grid ``bundles/<grid>_l<nlev>/
+    ozone_pd.nc`` (cache-first fetch — works offline once cached; the loader
+    rejects any grid mismatch). Grid identity is then fully validated by
+    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage finds a
+    file — the caller warns and falls back to the analytic profile, whose ~7.6×
+    tropospheric ozone column biases clear-sky OLR ~12 W/m² low.
 
-    Auto resolves to ``None`` on a **sigma** grid: every ozone product here
-    (packaged and mirror alike) is written by ``jcm.data.bc.interpolate_ozone``
-    onto the model's *hybrid*-level centre pressures and mapped level-for-level,
-    so a sigma grid that merely shares a published (token, nlev) would wire
+    Auto resolves to ``None`` on a **sigma** grid: every ozone product (packaged
+    and mirror alike) is written by ``jcm.data.bc.interpolate_ozone`` onto the
+    model's *hybrid*-level centre pressures and mapped level-for-level, so a
+    sigma grid that merely shares a published (token, nlev) would wire
     stratospheric-pressure ozone onto unrelated sigma levels — the same silent
     corruption the oxidant gate rejects (the manifest's hybrid-only verticals).
     ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
-    vertical coordinate, so nothing downstream would catch it.
+    vertical coordinate, so nothing downstream would catch it. This shim reads
+    the (coords-adjacent) nodal facts + sigma gate and drives the engine.
     """
-    from importlib import resources
-
-    import xarray as xr
+    from jcm.data import input_resolution as ir
 
     if _vertical_kind(coords) != "hybrid":
         logger.warning(
@@ -1079,13 +1077,10 @@ def _resolve_auto_ozone(coords):
         return None
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     nlev = int(coords.nodal_shape[0])
-    bc_root = Path(str(resources.files("jcm"))) / "data" / "bc"
-    for cand in sorted(bc_root.glob("*/ozone.nc")):
-        with xr.open_dataset(cand) as ds:
-            sizes = ds.sizes
-            if (sizes.get("level") == nlev and sizes.get("lat") == nlat
-                    and sizes.get("lon") == nlon):
-                return str(cand)
+    packaged = ir.resolve_packaged(mm.load_manifest(), "ozone_packaged",
+                                   nlev=nlev, nlat=nlat, nlon=nlon)
+    if packaged is not None:
+        return packaged
     token = _grid_token(coords)
     from jcm.data.remote import bundle_file
     try:
@@ -1103,25 +1098,23 @@ def _resolve_auto_ozone(coords):
 
 
 def _resolve_auto_terrain(coords):
-    """Native-grid terrain path for ``terrain.kind: auto``.
+    """Native-grid terrain path for ``terrain.kind: auto`` (coords→facts shim).
 
     Terrain must be NATIVE to the model grid: horizontally interpolating
     a coarser file breaks the Lott-Miller SSO sub-grid orography fields
-    (shape mismatch inside the column vmap). Stages: packaged
-    ``jcm/data/bc/*/terrain.nc`` shape-matched on (nlat, nlon), then the
-    mirror's ``bundles/<grid>/terrain.nc``. Raises when neither exists,
-    because a silently substituted terrain corrupts the run.
+    (shape mismatch inside the column vmap). Stages: the packaged
+    ``terrain_packaged`` product (``jcm/data/bc/*/terrain.nc``) shape-matched on
+    (nlat, nlon) via :func:`jcm.data.input_resolution.resolve_packaged`, then the
+    mirror's ``bundles/<grid>/terrain.nc``. Raises when neither exists, because a
+    silently substituted terrain corrupts the run.
     """
-    from importlib import resources
-
-    import xarray as xr
+    from jcm.data import input_resolution as ir
 
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
-    bc_root = Path(str(resources.files("jcm"))) / "data" / "bc"
-    for cand in sorted(bc_root.glob("*/terrain.nc")):
-        with xr.open_dataset(cand) as ds:
-            if (ds.sizes.get("lat") == nlat and ds.sizes.get("lon") == nlon):
-                return str(cand)
+    packaged = ir.resolve_packaged(mm.load_manifest(), "terrain_packaged",
+                                   nlat=nlat, nlon=nlon)
+    if packaged is not None:
+        return packaged
     token = _grid_token(coords)
     from jcm.data.remote import bundle_file
     try:

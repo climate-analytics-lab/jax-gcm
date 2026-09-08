@@ -131,9 +131,26 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "forcing_era5", "path": "bundles/{grid}/forcing_era5/{year}.nc",
      "grids": "gaussian", "levels": False, "coverage": [1979, 2024],
      "alignment": "transient", "key": "file", "auto": False, "staged": True},
-    # The MACv2-SP simple-plume file is NOT mirrored: it is resolution-invariant
-    # (~19 KB) and ships in the wheel at jcm/data/bc (see jcm.forcing
-    # .packaged_macv2_path); forcing.macv2_file=auto resolves it directly.
+    # Packaged products (``source: "packaged"``): boundary files shipped in the
+    # wheel under ``jcm/data/bc`` (path relative to the ``jcm`` package), NOT on
+    # the HF mirror. The engine resolves them via
+    # ``jcm.data.input_resolution.resolve_packaged``: a direct file for the
+    # grid-independent MACv2-SP plumes; a shape-keyed ``*`` glob for the ozone /
+    # terrain climatologies, which have BOTH a packaged variant (tried first, on
+    # the grid it was built for) and the mirrored ``ozone_pd`` / ``terrain``
+    # variant above (the fallback). ``grids``/``coverage`` are ``None`` (grid-
+    # free / no {grid} expansion — the glob spans the packaged dirs itself).
+    {"name": "macv2_sp", "path": "data/bc/SPv2.1_18502023_CMIP7.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "macv2_file", "auto": False, "staged": True},
+    {"name": "ozone_packaged", "path": "data/bc/*/ozone.nc",
+     "source": "packaged", "grids": None, "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "ozone_file", "auto": False,
+     "staged": True},
+    {"name": "terrain_packaged", "path": "data/bc/*/terrain.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "terrain_file", "auto": False,
+     "staged": True},
 )
 NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
@@ -503,6 +520,9 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = None
         products[row["name"]] = {
             "path": row["path"],
+            # ``source`` selects the resolver: "mirror" (default) fetches the HF
+            # bundle, "packaged" reads a wheel-shipped file (resolve_packaged).
+            "source": row.get("source", "mirror"),
             "grids": grids,
             "levels": sorted(PUBLISHED_LEVELS) if row["levels"] else None,
             "vertical": (sorted(PUBLISHED_VERTICALS)[0]
@@ -658,6 +678,10 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     coverage = remote_transient_coverage(files, manifest)
     drift = {}
     for name, rec in manifest["products"].items():
+        # Packaged products ship in the wheel, not on the mirror — nothing to
+        # cross-check against list_repo_files.
+        if rec.get("source") == "packaged":
+            continue
         if "{year}" in rec["path"]:
             declared = rec["coverage"]
             remote_variants = coverage.get(name, {})

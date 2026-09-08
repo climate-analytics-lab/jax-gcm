@@ -247,6 +247,52 @@ def assert_uniform_time_axis(products, *, config_key, open_dataset=None) -> None
 
 
 # ---------------------------------------------------------------------------
+# packaged products (shipped in the wheel under jcm/data/bc)
+# ---------------------------------------------------------------------------
+
+def resolve_packaged(manifest, name, *, nlev=None, nlat=None, nlon=None,
+                     root=None):
+    """Local path to a manifest ``source: "packaged"`` product, or ``None``.
+
+    The one mechanism for the boundary files shipped in the wheel (formerly the
+    bespoke ``packaged_macv2_path`` + the ``_resolve_auto_ozone`` /
+    ``_resolve_auto_terrain`` packaged-first scans). The product's ``path`` is
+    relative to the package ``root`` (``importlib.resources.files("jcm")`` by
+    default; a filesystem path is injectable for tests):
+
+    * a direct file (no ``*``) — e.g. the grid-independent MACv2-SP plumes —
+      resolves straight to that packaged path;
+    * a shape-keyed glob (``data/bc/*/<file>``) scans the packaged grid dirs and
+      returns the first file whose grid shape matches the model's — ``lat``/
+      ``lon`` always, and ``level`` too for a level-resolved product (``levels``
+      truthy) — so a packaged file is used only on the grid it was built for.
+
+    Returns ``None`` when a shape-keyed scan finds no match, so the caller can
+    fall back to the product's mirrored variant (ozone/terrain) or degrade.
+    """
+    from pathlib import Path
+    rec = manifest["products"][name]
+    if rec.get("source") != "packaged":
+        raise ValueError(f"product {name!r} is not a packaged product")
+    if root is None:
+        import importlib.resources
+        root = importlib.resources.files("jcm")
+    root = Path(str(root))
+    tmpl = rec["path"]
+    if "*" not in tmpl:
+        return str(root / tmpl)
+    import xarray as xr
+    level_keyed = bool(rec["levels"])
+    for cand in sorted(root.glob(tmpl)):
+        with xr.open_dataset(cand) as ds:
+            sizes = ds.sizes
+            if (sizes.get("lat") == nlat and sizes.get("lon") == nlon
+                    and (not level_keyed or sizes.get("level") == nlev)):
+                return str(cand)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # path fetching (hf:// resolution)
 # ---------------------------------------------------------------------------
 

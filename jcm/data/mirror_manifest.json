@@ -16,6 +16,7 @@
   "products": {
     "terrain": {
       "path": "bundles/{grid}/terrain.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63",
@@ -31,6 +32,7 @@
     },
     "forcing_pd": {
       "path": "bundles/{grid}/forcing_pd.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -45,6 +47,7 @@
     },
     "forcing_pi": {
       "path": "bundles/{grid}/forcing_pi.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -59,6 +62,7 @@
     },
     "emissions_pd": {
       "path": "bundles/{grid}/emissions_pd.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -73,6 +77,7 @@
     },
     "emissions_pi": {
       "path": "bundles/{grid}/emissions_pi.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -87,6 +92,7 @@
     },
     "dms": {
       "path": "bundles/{grid}/dms.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -101,6 +107,7 @@
     },
     "dust": {
       "path": "bundles/{grid}/dust.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -115,6 +122,7 @@
     },
     "ozone_pd": {
       "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -132,6 +140,7 @@
     },
     "ozone_pi": {
       "path": "bundles/{grid}_l{nlev}/ozone_pi.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -149,6 +158,7 @@
     },
     "oxidants_pd": {
       "path": "bundles/{grid}_l{nlev}/oxidants_pd.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -166,6 +176,7 @@
     },
     "oxidants_pi": {
       "path": "bundles/{grid}_l{nlev}/oxidants_pi.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -183,6 +194,7 @@
     },
     "forcing_amip": {
       "path": "bundles/{grid}/forcing_amip/{year}.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -200,6 +212,7 @@
     },
     "emissions_amip": {
       "path": "bundles/{grid}/emissions_amip/{year}.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -217,6 +230,7 @@
     },
     "ozone_amip": {
       "path": "bundles/{grid}_l{nlev}/ozone_amip/{year}.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -237,6 +251,7 @@
     },
     "forcing_era5": {
       "path": "bundles/{grid}/forcing_era5/{year}.nc",
+      "source": "mirror",
       "grids": [
         "t106",
         "t63"
@@ -249,6 +264,45 @@
       ],
       "alignment": "transient",
       "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "macv2_sp": {
+      "path": "data/bc/SPv2.1_18502023_CMIP7.nc",
+      "source": "packaged",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "macv2_file",
+      "auto": false,
+      "staged": true
+    },
+    "ozone_packaged": {
+      "path": "data/bc/*/ozone.nc",
+      "source": "packaged",
+      "grids": null,
+      "levels": [
+        47,
+        95
+      ],
+      "vertical": "hybrid",
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "ozone_file",
+      "auto": false,
+      "staged": true
+    },
+    "terrain_packaged": {
+      "path": "data/bc/*/terrain.nc",
+      "source": "packaged",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "terrain_file",
       "auto": false,
       "staged": true
     }

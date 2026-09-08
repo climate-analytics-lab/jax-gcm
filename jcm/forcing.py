@@ -1314,21 +1314,22 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-#: Repo-packaged MACv2-SP simple-plume file: SPv2.1 (CMIP7; Fiedler & Azoulay,
-#: University Heidelberg, 2025), the CEDS-scaled successor to Stevens et al.
-#: (2017) v1. Resolution-invariant (~19 KB), so it ships in the wheel under
-#: ``jcm/data/bc`` rather than on the HF mirror (see SOURCES.md for provenance +
-#: sha256). ``forcing.macv2_file=auto`` and ``from_bundles(aerosol="macv2sp")``
-#: both resolve to it; an explicit path overrides.
-PACKAGED_MACV2_FILE = "SPv2.1_18502023_CMIP7.nc"
-
-
 def packaged_macv2_path() -> str:
-    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``)."""
-    from importlib import resources
-    from pathlib import Path
-    return str(Path(str(resources.files("jcm")))
-               / "data" / "bc" / PACKAGED_MACV2_FILE)
+    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``).
+
+    The MACv2-SP simple-plume file — SPv2.1 (CMIP7; Fiedler & Azoulay, University
+    Heidelberg, 2025), the CEDS-scaled successor to Stevens et al. (2017) v1 — is
+    resolution-invariant (~19 KB), so it ships in the wheel under ``jcm/data/bc``
+    rather than on the HF mirror (SOURCES.md carries provenance + sha256). It is
+    the ``macv2_sp`` packaged product in the mirror manifest, resolved through
+    the one packaged-product mechanism (:func:`jcm.data.input_resolution.
+    resolve_packaged`); ``forcing.macv2_file=auto`` and
+    ``from_bundles(aerosol="macv2sp")`` both use this shim, an explicit path
+    overrides.
+    """
+    from jcm.data import input_resolution as ir
+    from jcm.data import mirror_manifest as mm
+    return ir.resolve_packaged(mm.load_manifest(), "macv2_sp")
 
 
 def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:

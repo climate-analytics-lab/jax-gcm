@@ -205,5 +205,62 @@ class TestResolveInput(unittest.TestCase):
             r.products, (["/bb_2000.nc", "/bb_2001.nc"], "/anthro.nc"))
 
 
+class TestResolvePackaged(unittest.TestCase):
+    """The one packaged-product mechanism (formerly three bespoke scans).
+
+    A direct file resolves straight to the wheel-relative path; a shape-keyed
+    ``*`` glob scans the packaged grid dirs and returns only a shape-matched
+    file (``lat``/``lon`` always, ``level`` too for a level-resolved product), so
+    a packaged file is used only on the grid it was built for — else ``None`` so
+    the caller falls back to the mirror variant.
+    """
+
+    def setUp(self):
+        self.man = mm.load_manifest()
+
+    def test_direct_file_resolves_to_package_path(self):
+        p = ir.resolve_packaged(self.man, "macv2_sp")
+        self.assertTrue(p.endswith("data/bc/SPv2.1_18502023_CMIP7.nc"))
+
+    def test_non_packaged_product_raises(self):
+        with self.assertRaises(ValueError):
+            ir.resolve_packaged(self.man, "ozone_pd")
+
+    def test_shape_scan_matches_and_reads_level(self):
+        # A fake package tree with one grid dir; a level-resolved ozone scan
+        # matches only when (lat, lon, level) all agree.
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "data" / "bc" / "g0").mkdir(parents=True)
+            xr.Dataset(
+                {"O3": (("time", "level", "lat", "lon"),
+                        np.zeros((1, 3, 4, 5)))}
+            ).to_netcdf(root / "data" / "bc" / "g0" / "ozone.nc")
+            hit = ir.resolve_packaged(self.man, "ozone_packaged",
+                                      nlev=3, nlat=4, nlon=5, root=root)
+            self.assertTrue(hit.endswith("g0/ozone.nc"))
+            # Wrong level → no match (falls through to None).
+            miss = ir.resolve_packaged(self.man, "ozone_packaged",
+                                       nlev=9, nlat=4, nlon=5, root=root)
+            self.assertIsNone(miss)
+
+    def test_shape_scan_terrain_ignores_level(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "data" / "bc" / "g0").mkdir(parents=True)
+            xr.Dataset(
+                {"orog": (("lat", "lon"), np.zeros((4, 5)))}
+            ).to_netcdf(root / "data" / "bc" / "g0" / "terrain.nc")
+            hit = ir.resolve_packaged(self.man, "terrain_packaged",
+                                      nlat=4, nlon=5, root=root)
+            self.assertTrue(hit.endswith("g0/terrain.nc"))
+            self.assertIsNone(ir.resolve_packaged(
+                self.man, "terrain_packaged", nlat=8, nlon=5, root=root))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -206,6 +206,8 @@ class TestRemoteCoverageVerification(unittest.TestCase):
         overrides = overrides or {}
         files = []
         for name, rec in man["products"].items():
+            if rec.get("source") == "packaged":
+                continue  # shipped in the wheel, never on the mirror listing
             transient = "{year}" in rec["path"]
             if not transient and not rec["staged"]:
                 continue
