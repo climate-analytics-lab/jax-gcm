@@ -414,3 +414,56 @@ def test_report_scales_every_gated_term(parsed):
     report = pt.render_report(result)
     assert "| tiedtke_convection | 0.02 | 80.0 | 0.20 |" in report
     assert "| dynamics | 0.01 | 20.0 | 0.05 |" in report
+
+
+# --------------------------------------------------------------------------
+# Trace completeness (#716): a report is only written if all three
+# by-construction-once-per-step probes are recovered for every step.
+# --------------------------------------------------------------------------
+
+def _full(steps: int) -> dict[str, int]:
+    """steps_seen with every probe complete, plus a noisy physics term."""
+    return {label: steps for label in pt.probe_labels()} | {
+        "tiedtke_convection": 3 * steps}
+
+
+def test_completeness_rejects_a_trace_with_no_probes_recovered():
+    """An empty probe set means the metadata join broke, not a cheap step."""
+    with pytest.raises(SystemExit) as e:
+        pt.check_trace_completeness({"tiedtke_convection": 40}, 20, 12345)
+    msg = str(e.value)
+    assert "recovered no" in msg
+    for label in pt.probe_labels():
+        assert label in msg
+
+
+def test_completeness_rejects_a_partially_recovered_probe_set():
+    """A subset is as broken as none, and the error names what is missing."""
+    from jcm import profiling
+
+    seen = _full(20)
+    del seen[profiling.BRIDGE_TO_PHYSICS]
+    with pytest.raises(SystemExit) as e:
+        pt.check_trace_completeness(seen, 20, 12345)
+    # Only the absent probe is named as missing; the recovered ones are not.
+    missing = str(e.value).split("recovered no ", 1)[1].split(" probe(s)", 1)[0]
+    assert missing == profiling.BRIDGE_TO_PHYSICS
+
+
+def test_completeness_rejects_a_short_trace_when_all_probes_are_present():
+    """All three probes recovered but short: the event buffer overflowed."""
+    from jcm import profiling
+
+    seen = _full(20)
+    seen[profiling.DYNAMICS] = 7
+    with pytest.raises(SystemExit) as e:
+        pt.check_trace_completeness(seen, 20, 12345, cycle=3)
+    msg = str(e.value)
+    assert "covers only 7 of the 20 steps" in msg
+    # The suggested retry keeps a whole number of radiation sub-cycles.
+    assert "--steps 6" in msg
+
+
+def test_completeness_accepts_a_full_trace():
+    """Every probe present at the full step count passes silently."""
+    assert pt.check_trace_completeness(_full(20), 20, 12345, cycle=10) is None

@@ -171,6 +171,14 @@ stage that deserves its own line in the report needs a scope adding there;
 individual physics terms need no changes, since the term loop already labels
 them by ``PhysicsTerm.name``.
 
+Before writing a report the tool checks that the trace is complete: the
+``dynamics``, ``bridge_to_physics`` and ``bridge_to_dynamics`` scopes sit
+outside every loop and branch in the step, so each must show up in the
+attribution exactly once per step. It fails — naming the labels — if any of the
+three is missing (the HLO-metadata join broke, so every number would be
+misattributed) or if any is short of the step count (the event buffer
+overflowed, so every number would be an undercount).
+
 Note that ``profile_terms.py`` disables CUDA graph capture — otherwise every
 kernel reports the same synthetic instruction and nothing is attributable — so
 its *total* step time reads high. For throughput use ``tools/benchmark.py`` and
