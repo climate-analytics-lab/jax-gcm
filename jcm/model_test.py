@@ -388,7 +388,8 @@ class TestModelUnit(unittest.TestCase):
             "unit parameter tangent produced an all-zero trajectory tangent",
         )
 
-    @pytest.mark.skip(reason="finite differencing produces nans")
+    # ~70 s: eight one-step T30 SPEEDY integrations (AD + central differences).
+    @pytest.mark.slow
     def test_speedy_model_state_gradient_check(self):
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -396,20 +397,42 @@ class TestModelUnit(unittest.TestCase):
         # Create model that goes through one timestep
         model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_dycore_state()
+        _ = model.run(total_time=0)  # to set up model fields
 
-        def f(state_f):
-            _ = model.run(total_time=0) # to set up model fields
-            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_dycore_state, predictions
-        
+        # check_vjp/check_jvp probe with unit-normal tangents, but the initial
+        # condition's spectral coefficients are O(1e-5): a unit perturbation
+        # drives the model into its humidity/temperature limiters, where the
+        # central difference is identically zero for any eps. Differentiating
+        # w.r.t. a small-amplitude perturbation is the same Jacobian at the
+        # same point, probed inside the model's linear regime.
+        perturbation_scale = 1e-5
+        zero_perturbation = jax.tree.map(jnp.zeros_like, state)
+
+        def f(delta):
+            perturbed = jax.tree.map(lambda x, d: x + perturbation_scale * d, state, delta)
+            predictions = model.run(initial_state=perturbed, save_interval=(1/48.), total_time=(1/48.))
+            # ModelPredictions also carries integer diagnostics (cloud-top
+            # level, step counters) and a bool flag, and finite differencing
+            # those is undefined ("numpy boolean subtract"), so the check
+            # covers the differentiable float leaves.
+            return [leaf for leaf in jax.tree.leaves(predictions)
+                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)]
+
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f) 
 
-        check_vjp(f, f_vjp, args = (state,), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state,), 
-                                atol=None, rtol=1, eps=0.001)    
+        # One eps for both checks: f perturbs the state by
+        # perturbation_scale * eps, so anything below ~1e-4 lands under a
+        # float32 ulp of the state and the difference is rounding noise.
+        # At 1e-3 the AD/FD gap is ~0.14 (vjp) / ~0.16 (jvp) and systematic,
+        # not noisy — a physics step's humidity and temperature limiters are
+        # where-branches the central difference straddles — so rtol keeps ~3x
+        # margin for branch flips that move with the platform.
+        check_vjp(f, f_vjp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)
+        check_jvp(f, f_jvp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)    
     
     @pytest.mark.slow
     def test_speedy_model_default_statistics(self):

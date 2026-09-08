@@ -123,10 +123,12 @@ class TestSolar(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # solar() is smooth away from the polar cap, so the float32 central
+        # difference matches AD to ~7e-4 (vjp) and ~6e-3 (jvp) here.
         check_vjp(f, f_vjp, args = (tyear, speedy_coords, csol), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=1e-2, eps=0.0001)
         check_jvp(f, f_jvp, args = (tyear, speedy_coords, csol), 
-                                atol=None, rtol=1, eps=0.000001)
+                                atol=None, rtol=2e-2, eps=0.000001)
         
 class TestShortWaveRadiation(unittest.TestCase):
 
@@ -447,13 +449,23 @@ class TestShortWaveRadiation(unittest.TestCase):
         self.assertFalse(df_dparams.isnan().any_true())
         self.assertFalse(df_dforcing.isnan().any_true())
 
-    @pytest.mark.skip(reason="JAX gradients are producing nans")
+    # solar() clips the hour angle with epsilon = 1e-9, which is a no-op in
+    # float32 (1-1e-9 rounds to 1.0), so arccos meets |x| = 1 and its -inf
+    # derivative times the clip's zero tangent is NaN. Needs a double-where in
+    # solar() itself; the fixture below is otherwise repaired and ready.
+    @pytest.mark.skip(reason="solar() NaNs its own gradient at polar day/night: "
+                             "clip(ch0, -1+1e-9, 1-1e-9) is a no-op in float32, so "
+                             "arccos hits |x|=1 where d/dx = -inf (issue #262)")
     def test_get_zonal_average_fields_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-        rh = qa/qsat
+        # qsat's top entry is a placeholder zero, so a bare qa/qsat leaves a NaN
+        # in rh that get_clouds passes straight through to its output and that
+        # finite differencing then turns into a NaN reference gradient. q = 0
+        # there, so the dry value 0 is the physical answer.
+        rh = jnp.where(qsat > 0, qa / jnp.where(qsat > 0, qsat, 1.0), 0.0)
         geopotential = jnp.arange(7, -1, -1, dtype = float)
         se = .1*geopotential
         xy = (ix, il)
@@ -473,7 +485,7 @@ class TestShortWaveRadiation(unittest.TestCase):
         date_data = DateData.set_date(
             jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
         )
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
         _, physics_data = get_clouds(state, physics_data, parameters, forcing, terrain)
 
@@ -496,11 +508,13 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_vjp = functools.partial(jax.vjp, f)  
 
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=2e-2, eps=0.00001)
+        # float32 resolves ~1e-7 relative, so eps must move the O(1e3) scalar
+        # leaves (dt_seconds, fsol) by several ulps: 1e-4 leaves them unchanged
+        # and reports a zero reference slope, 1e-3 does not.
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=2e-2, eps=0.001)
 
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_get_shortwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         """Test whether gradients are close for shortwave radiation"""
@@ -531,18 +545,28 @@ class TestShortWaveRadiation(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # PhysicsData.ones() is an unphysical state that puts mod_radcon.tau2 and
+        # stratc on the transmissivity where-branches, so their central
+        # difference is a step of size 1/eps that AD (correctly) reports as
+        # smooth; it dominates the inner product, which needs rtol=1 as a
+        # result. The jvp below compares leaf-by-leaf and is unaffected.
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
                                 atol=None, rtol=1, eps=0.00001)
+        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds, fsol) bit-unchanged
+        # in float32 and reports a zero reference slope; 1e-3 moves them by ulps.
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=2e-2, eps=0.001)
 
-    @pytest.mark.skip(reason="finite differencing produces nans")
     def test_clouds_gradient_check_realistic_values(self):
         from jcm.utils import convert_back, convert_to_float
 
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
-        rh = qa/qsat
+        # qsat's top entry is a placeholder zero, so a bare qa/qsat leaves a NaN
+        # in rh that get_clouds passes straight through to its output and that
+        # finite differencing then turns into a NaN reference gradient. q = 0
+        # there, so the dry value 0 is the physical answer.
+        rh = jnp.where(qsat > 0, qa / jnp.where(qsat > 0, qsat, 1.0), 0.0)
         geopotential = jnp.arange(7, -1, -1, dtype = float)
         se = .1*geopotential
 
@@ -567,34 +591,49 @@ class TestShortWaveRadiation(unittest.TestCase):
             jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-08-08'))
         )
 
-        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds)
+        physics_data = PhysicsData.zeros(xy,kx,surface_flux=surface_flux, humidity=humidity, convection=convection, condensation=condensation, shortwave_rad=sw_data, dt_seconds=date_data.dt_seconds, speedy_coords=speedy_coords)
         state = PhysicsState.zeros(zxy, specific_humidity=qa, geopotential=geopotential, normalized_surface_pressure=psa)
-        forcing = ForcingData.zeros(xy, fmask=fmask)
+        forcing = ForcingData.zeros(xy)
+        # The land-sea mask lives on TerrainData; get_clouds blends the stratiform
+        # cloud fraction towards its land value with it, so exercise a partly-land column.
+        terrain_land = terrain.copy(fmask=fmask)
 
         # Set float inputs
         physics_data_floats = convert_to_float(physics_data)
         state_floats = convert_to_float(state)
         parameters_floats = convert_to_float(parameters)
         forcing_floats = convert_to_float(forcing)
-        terrain_floats = convert_to_float(terrain)
+        terrain_floats = convert_to_float(terrain_land)
 
         def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
             tend_out, data_out = get_clouds(physics_data=convert_back(physics_data_f, physics_data), 
                                        state=convert_back(state_f, state), 
                                        parameters=convert_back(parameters_f, parameters), 
                                        forcing=convert_back(forcing_f, forcing), 
-                                       terrain=convert_back(terrain_f, terrain)
+                                       terrain=convert_back(terrain_f, terrain_land)
                                        )
+            # icltop is an integer cloud-top level index that convert_to_float
+            # promotes to a float leaf; its true slope is zero but a central
+            # difference across a level change is a 1/eps spike, which swamps
+            # the vjp inner product. Hold it fixed and check the rest.
+            data_out = data_out.copy(shortwave_rad=data_out.shortwave_rad.copy(
+                icltop=jnp.zeros_like(data_out.shortwave_rad.icltop)))
             return convert_to_float(data_out)
         
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # With icltop held fixed the inner product agrees to ~2.5e-2; the
+        # residual is float32 finite differencing of cloudc, which get_clouds
+        # clips at 1.
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=5e-2, eps=0.00001)
+        # float32 carries ~1e-7 relative resolution, so a central difference with
+        # eps=1e-6 leaves the O(1e3) scalar leaves (dt_seconds, fsol) bit-unchanged
+        # and reports a zero reference derivative; 1e-3 moves them by many ulps.
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+                                atol=None, rtol=2e-2, eps=0.001)
 
 class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma
