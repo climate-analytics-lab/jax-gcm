@@ -41,7 +41,8 @@ Common flags (see `python scripts/mkjob.py --help` for all):
 | `--physics` | `echam-jam` | `echam-rrtmgp-2m` for no aerosol |
 | `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
 | `--aquaplanet` | off | skips terrain/forcing files |
-| `--resume` | off | reuse the run dir's checkpoint |
+| `--resume` | off | reuse the run dir's checkpoint (without it the job deletes it) |
+| `--fresh` | off | refuse to generate if the run dir already has a checkpoint |
 | `--data` | `mirror` | HF bundles, prefetched at generation; `local` = legacy prepared files |
 | `--era` | `pd` | `pd` (2005–2014) or `pi` (1850s) mirror climatologies |
 | `--emissions` | (local mode) | legacy emissions file for `--data local` |
