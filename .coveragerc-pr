@@ -44,6 +44,11 @@ omit =
     # touch them through entry-point shims.
     jcm/utils.py
     jcm/runners.py
+    # Forcing orchestration split out of runners.py (#751 follow-through):
+    # same rationale as runners.py — the fast suite (forcing_test/runners_test)
+    # exercises the auto resolution + attach chain thoroughly; slow integration
+    # runs reach it only through the build_forcing entry-point shim.
+    jcm/forcing_assembly.py
     jcm/terrain.py
     jcm/date.py
     jcm/diagnostics.py

@@ -1469,6 +1469,7 @@ class TestForcingFromBundles(unittest.TestCase):
 
         from omegaconf import OmegaConf
 
+        from jcm import forcing_assembly as fa
         from jcm import runners
         from jcm.forcing import ForcingData
 
@@ -1479,8 +1480,11 @@ class TestForcingFromBundles(unittest.TestCase):
                 cfg.forcing, resolve=True)
             return ForcingData.zeros(shape)
 
+        # from_bundles now drives the forcing-side engine directly (arrow
+        # inverted, #751): intercept it there, on the PRE-resolution composed
+        # cfg, so the ancillary-epoch pinning is still observable.
         return [
-            mock.patch.object(runners, "build_forcing", side_effect=_capture),
+            mock.patch.object(fa, "build_forcing", side_effect=_capture),
             mock.patch.object(runners, "warn_emission_config_traps"),
         ], captured
 

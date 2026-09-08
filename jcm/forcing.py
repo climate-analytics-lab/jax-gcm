@@ -449,6 +449,7 @@ class ForcingData:
         from omegaconf import OmegaConf
         from dinosaur.hybrid_coordinates import HybridCoordinates
 
+        from jcm import forcing_assembly as fa
         from jcm import runners
         from jcm.data import bundle_names
         from jcm.data import input_resolution as ir
@@ -532,7 +533,11 @@ class ForcingData:
         physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
-        forcing = runners.build_forcing(cfg, coords)
+        # Invert the arrow (#751 follow-through): compose the config here and
+        # drive the forcing-side engine directly — the SAME engine the CLI door
+        # (``runners.build_forcing``) delegates to — so the two doors provably
+        # agree without this module depending on the runner's build.
+        forcing = fa.build_forcing(cfg, coords)
         # Same emission-family traps the CLI door fires (from the shared home).
         runners.warn_emission_config_traps(
             has_jam=(aerosol == "jam"), is_pyses=False, is_scm=False,
