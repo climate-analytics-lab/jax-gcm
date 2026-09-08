@@ -1,42 +1,41 @@
 # @package _global_
 #
-# ECHAM 1-moment microphysics + RRTMGP at T63L47 — validated benchmark configuration.
+# Middle-atmosphere JAM sweep at T106L95 — full JAM + semi-Lagrangian.
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=t63-echam-rrtmgp
+#   python -m jcm.main +configuration=ma-t106-l95
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
-#  - physics=echam: ECHAM 1-moment microphysics + RRTMGP.
-#  - grid=echam_t63_l47_hybrid: ECHAM standard production grid.
+#  - physics=echam-jam: ECHAM + JAM modal aerosol (auto emission inputs).
+#  - grid=echam_t106_l95_hybrid: middle-atmosphere resolution member.
 #  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
 #    fully DRY start. An isothermal cold start goes NaN within days at L47;
 #    the dry-JW init lets radiation + surface fluxes moisten the column and
 #    avoids the moist-init day-12 blow-up.
-#  - terrain=auto: native-grid orography (packaged jcm/data/bc/<grid> or the
-#    mirror bundle). Terrain must be native — interpolation corrupts the SSO
-#    sub-grid-orography fields.
-#  - forcing=from_file + hf:// present-day bundle: prescribed SST/sea-ice from
-#    the project data mirror (fetched once into the local HF cache). Ozone
-#    stays forcing.ozone_file: auto unless a level-matched bundle is set.
+#  - terrain=from_file + hf:// native terrain bundle (grid-native).
+#  - forcing=from_file + hf:// present-day SST/sea-ice bundle;
+#    forcing.ozone_file = the level-matched mirror bundle (L95 ozone
+#    must match the model levels — an L47 file is rejected by an L95 run).
 #  - run=longrun: 30-day health-gated chunks with the settled production
 #    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
-#    stratosphere; run.time_step=12 min is the conservative L47/L95 step.
+#    stratosphere; the 12-min L47/L95 step now comes from the shared default (run/default.yaml).
 #  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
 #    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
 #    stated explicitly so the recorded config documents the value used.
 defaults:
-  - override /physics: echam
-  - override /grid: echam_t63_l47_hybrid
+  - override /physics: echam-jam
+  - override /grid: echam_t106_l95_hybrid
   - override /init: jw
-  - override /terrain: auto
+  - override /terrain: from_file
   - override /forcing: from_file
   - override /run: longrun
 
 init:
   rh: 0.0
+terrain:
+  file: hf://bundles/t106/terrain.nc
 forcing:
-  file: hf://bundles/t63/forcing_pd.nc
-run:
-  time_step: 12
+  file: hf://bundles/t106/forcing_pd.nc
+  ozone_file: hf://bundles/t106_l95/ozone_pd.nc
 sl_off_centering: 0.2

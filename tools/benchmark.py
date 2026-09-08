@@ -85,15 +85,15 @@ _UNHEALTHY_RE = re.compile(r"atmosphere unhealthy|FAILED: T_min|FAILED: T_max"
                            r"|q_max=", re.I)
 _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 
-# The experiment-group Hydra compositions (jcm/config/experiment/*.yaml) are the
+# The configuration-group Hydra compositions (jcm/config/configuration/*.yaml) are the
 # single home of the validated override sets -- physics x grid x radiation
 # pairing x init x forcing -- each carrying a comment for WHY every setting is
 # what it is (an isothermal cold start with no sponge goes NaN within days at
 # L47, so these are not interchangeable with a bare ``grid=`` override). This
-# table is only a thin shim: it maps each benchmark id to ``+experiment=<name>``
+# table is only a thin shim: it maps each benchmark id to ``+configuration=<name>``
 # plus the benchmark-ONLY overrides the yaml deliberately leaves out. Keeping
 # the science in the yamls means a hand-composed ``python -m jcm.main
-# +experiment=<name>`` and a benchmark run share one validated definition rather
+# +configuration=<name>`` and a benchmark run share one validated definition rather
 # than drifting apart.
 #
 # The only benchmark-only overrides are machine-local data with no data-mirror
@@ -102,34 +102,34 @@ _SAVED_RE = re.compile(r"Saved .*_day(\d+)\.nc")
 _BC = pathlib.Path(os.environ.get("JCM_BC_DIR", "/scr/dwatsonparris/bc_l95"))
 
 
-def _exp(name: str, *extra: str) -> list[str]:
-    """``+experiment=<name>`` plus any benchmark-only overrides."""
-    return [f"+experiment={name}", *extra]
+def _cfg(name: str, *extra: str) -> list[str]:
+    """``+configuration=<name>`` plus any benchmark-only overrides."""
+    return [f"+configuration={name}", *extra]
 
 
 PRESETS: dict[str, list[str]] = {
-    "speedy-t31": _exp("speedy-t31"),
+    "speedy-t31": _cfg("speedy-t31"),
     # Release-matrix MACv2-SP members (#638): echam-1m/2m at t63/t106.
-    **{f"{t}-echam-{v}": _exp(f"{t}-echam-{v}")
+    **{f"{t}-echam-{v}": _cfg(f"{t}-echam-{v}")
        for t in ("t63", "t106") for v in ("1m", "2m")},
     # T63 RRTMGP / JAM family (historical benchmark ids).
-    "t63-echam-rrtmgp": _exp("t63-echam-rrtmgp"),
-    "t63-echam-rrtmgp-2m": _exp("t63-echam-rrtmgp-2m"),
-    "t63-echam-emulated-2m": _exp("t63-echam-emulated-2m"),
-    "t63-echam-jam": _exp("t63-echam-jam"),
-    "t63-echam-jam-aerocom": _exp("t63-echam-jam-aerocom"),
-    "t63-echam-jam-aerocom-optics": _exp("t63-echam-jam-aerocom-optics"),
+    "t63-echam-rrtmgp": _cfg("t63-echam-rrtmgp"),
+    "t63-echam-rrtmgp-2m": _cfg("t63-echam-rrtmgp-2m"),
+    "t63-echam-emulated-2m": _cfg("t63-echam-emulated-2m"),
+    "t63-echam-jam": _cfg("t63-echam-jam"),
+    "t63-echam-jam-aerocom": _cfg("t63-echam-jam-aerocom"),
+    "t63-echam-jam-aerocom-optics": _cfg("t63-echam-jam-aerocom-optics"),
     # Middle-atmosphere JAM sweep. t63/t106 are fully on the mirror; t119 has
     # no bundle, so its terrain + level-matched ozone stay machine-local.
-    **{f"ma-{t}-l{lv}": _exp(f"ma-{t}-l{lv}")
+    **{f"ma-{t}-l{lv}": _cfg(f"ma-{t}-l{lv}")
        for t in ("t63", "t106") for lv in (47, 95)},
-    **{f"ma-t119-l{lv}": _exp(
+    **{f"ma-t119-l{lv}": _cfg(
         f"ma-t119-l{lv}",
         f"terrain.file={_BC}/T119_terrain.nc",
         f"forcing.ozone_file={_BC}/t119_ozone_l{lv}.nc") for lv in (47, 95)},
     # pySES CAM-SE ne30 (dycore comparison); run=pyses_year drops a relative
     # checkpoint into cwd, so redirect it to the disposable scratch dir.
-    **{f"ma-ne30-l{lv}": _exp(
+    **{f"ma-ne30-l{lv}": _cfg(
         f"ma-ne30-l{lv}",
         f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt")
        for lv in (47, 95)},
@@ -142,7 +142,7 @@ def _compose_preset(overrides: list[str]):
     Cheap (pure Hydra composition -- no model build, no jcm import), so it is
     safe to call before a GPU is claimed. Used to enumerate the prescribed-input
     files a preset resolves to, which since the PRESETS shim now live inside the
-    ``+experiment`` yaml rather than in the override strings.
+    ``+configuration`` yaml rather than in the override strings.
     """
     from hydra import compose, initialize_config_dir
     cfgdir = str(REPO / "jcm" / "config")
@@ -150,30 +150,36 @@ def _compose_preset(overrides: list[str]):
         return compose(config_name="config", overrides=overrides)
 
 
-def _load_bundle_names():
-    """Load ``jcm.data.bundle_names`` WITHOUT importing the ``jcm`` package.
+def _load_mirror_manifest():
+    """Load ``jcm.data.mirror_manifest`` WITHOUT importing the ``jcm`` package.
 
-    Same rationale (and mechanism) as :func:`_hf_fetch`: reaching the module as
-    ``from jcm.data.bundle_names import ...`` executes ``jcm/__init__.py``,
-    which initialises a JAX backend and preallocates ~75 % of the device the
-    instant it is touched — before the free-GPU gate. ``bundle_names.py`` has
-    no intra-package imports (that is a maintained invariant), so loading it by
-    file path is safe and keeps the auto-bundle naming convention a single
-    source of truth shared with ``jcm.runners``.
+    Same rationale (and mechanism) as :func:`_hf_fetch`: reaching it through
+    ``jcm`` executes ``jcm/__init__.py``, which initialises a JAX backend and
+    preallocates ~75 % of the device before the free-GPU gate. The manifest
+    read-side is import-free (json + pathlib), so a file-path load is safe and
+    shares the availability source of truth with the runner (#751). Its
+    ``load_manifest`` reads the sibling JSON via ``__file__``, so the file-path
+    load resolves it the same way a package import would.
     """
     import importlib.util
-    src = REPO / "jcm" / "data" / "bundle_names.py"
-    spec = importlib.util.spec_from_file_location("_jcm_bundle_names", src)
+    src = REPO / "jcm" / "data" / "mirror_manifest.py"
+    spec = importlib.util.spec_from_file_location("_jcm_mirror_manifest", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
+#: The four prescribed-emission keys honouring ``auto`` (their auto product is
+#: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
+_EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
+                       "oxidants_file")
+
+
 def _load_expand_yearly_files():
     """Load ``jcm.data.yearly_files.expand_yearly_files`` WITHOUT importing ``jcm``.
 
-    Same rationale (and mechanism) as :func:`_load_bundle_names`: reaching it as
-    ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
+    Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
+    as ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
     — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
     backend, preallocating the GPU before the free-card gate. The expansion lives
     in the import-free leaf ``jcm/data/yearly_files.py`` precisely so the runner
@@ -196,7 +202,7 @@ def _auto_emission_files(cfg) -> list[str]:
     config, but the four prescribed-emission keys default to ``auto`` and are
     resolved lazily by ``jcm.runners`` during model construction — i.e. AFTER
     the GPU is claimed and the telemetry sampler is running. Enumerate them here
-    (from the same ``jcm.data.bundle_names`` convention the runner uses) so they
+    (from the same mirror manifest the runner's resolver consults) so they
     join the pre-GPU prefetch: an unreachable or non-existent bundle then
     refuses the run up front instead of stalling on a held card.
 
@@ -204,15 +210,13 @@ def _auto_emission_files(cfg) -> list[str]:
     bundle only when a prognostic-aerosol (JAM) *spectral* package is active. A
     non-JAM package consumes no emissions, and the pySES backend's native grids
     are not the spectral-token bundles — both resolve ``auto`` to nothing. The
-    mirror's published-bundle set is consulted per key
-    (``bundle_is_published``): a grid outside the published-grid whitelist has
-    no bundle at all; a published-horizontal / unpublished-level combo
-    (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
+    mirror manifest's ``is_published`` is consulted per key: a grid outside the
+    published-grid set has no bundle; a published-horizontal / unpublished-level
+    combo (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
     (token, nlev) — has no level-resolved oxidant bundle while its level-free
-    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those
-    keys here too. A key explicitly set to a path/``null`` in the preset is
-    honoured (the literal path is already picked up by ``_preset_data_files``;
-    ``null`` opts out).
+    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those keys
+    here too. A key explicitly set to a path/``null`` is honoured (the literal
+    path is already picked up by ``_preset_data_files``; ``null`` opts out).
     """
     phys = cfg.get("physics") or {}
     if str(phys.get("aerosol_module", "")) != "jam":
@@ -223,25 +227,25 @@ def _auto_emission_files(cfg) -> list[str]:
     trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
     if trunc is None or nlev is None:
         return []
-    names = _load_bundle_names()
+    mm = _load_mirror_manifest()
+    manifest = mm.load_manifest()
     forcing = cfg.get("forcing") or {}
-    token = names.grid_token(trunc)
-    # Level-resolved bundles (oxidants) are on hybrid-level pressures, so the
-    # runner's gate also rejects a sigma grid that merely shares a published
-    # (token, nlev); mirror that here so the prefetch never fetches an oxidant
-    # bundle the build will null.
+    # grid_token: ``t{truncation}`` — the same relation utils.get_coords uses.
+    token = f"t{int(trunc)}"
+    # Level-resolved bundles (oxidants) are on hybrid-level pressures, so
+    # is_published also rejects a sigma grid that merely shares a published
+    # (token, nlev); the shared manifest keeps this enumerator and the runner's
+    # ``auto`` resolver from disagreeing on which keys to fetch (F2).
     vertical = str(grid.get("vertical", "hybrid"))
-    # Mirror the runner's key-specific published-bundle check (F2): a
-    # non-mirrored grid has NO bundles, and a published-horizontal /
-    # unpublished-level combo (e.g. t63_l8) has no level-resolved oxidant
-    # bundle while its level-free emissions/dms/dust bundles still exist. The
-    # shared ``bundle_is_published`` keeps this enumerator and the runner's
-    # ``auto`` resolver from disagreeing on which keys to fetch.
-    return [path
-            for key, path in names.auto_emission_bundle_paths(
-                token, nlev).items()
-            if str(forcing.get(key, "auto")) == "auto"
-            and names.bundle_is_published(key, token, nlev, vertical)]
+    out = []
+    for key in _EMISSION_AUTO_KEYS:
+        if str(forcing.get(key, "auto")) != "auto":
+            continue
+        product = mm.product_for_key(manifest, key)
+        if mm.is_published(manifest, product, token, int(nlev), vertical):
+            out.append(
+                "hf://" + mm.bundle_path(manifest, product, token, int(nlev)))
+    return out
 
 
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,
@@ -533,7 +537,7 @@ def run(args) -> dict:
     # keeps the download out of the timed region and turns an unreachable
     # mirror into an immediate refusal instead of a stall on a held card.
     #
-    # The validated file references now live inside the ``+experiment`` yaml,
+    # The validated file references now live inside the ``+configuration`` yaml,
     # not in the override strings, so enumerate them from the COMPOSED config
     # (``auto``/``null`` inputs resolve lazily at build time and are skipped).
     #

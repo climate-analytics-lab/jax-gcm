@@ -69,6 +69,18 @@ files and uses the native CESM CEDS emissions product). The ne30pg3
 from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
 
+**MACv2-SP simple plumes are NOT on the mirror.** The Simple-Plumes
+parameter file (SPv2.1, CMIP7; Fiedler & Azoulay 2025 — the CEDS-scaled
+1850–2023 successor to Stevens et al. 2017 v1) is a single ~19 KB,
+resolution-invariant file (plume geometry + `year_weight`/`ann_cycle`
+scalings), so it ships **in the wheel** at
+`jcm/data/bc/SPv2.1_18502023_CMIP7.nc` rather than being mirrored.
+`forcing=macv2_sp` (i.e. `forcing.macv2_file=auto`) and
+`ForcingData.from_bundles(aerosol="macv2sp")` both resolve it through
+`jcm.forcing.packaged_macv2_path`; an explicit `forcing.macv2_file=/path`
+overrides. Provenance + sha256 are in `jcm/data/mirror/SOURCES.md`
+(source Zenodo <https://zenodo.org/records/15283189>).
+
 ## Fetching at runtime
 
 Any boundary-file path in the Hydra config accepts an `hf://` prefix,

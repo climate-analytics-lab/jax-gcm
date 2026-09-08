@@ -1,6 +1,30 @@
 Release Notes
 =============
 
+Unreleased — packaged config tree contract; ``experiment`` group renamed
+------------------------------------------------------------------------
+
+- **``jcm/config`` is now a documented public, packaged Hydra config tree**
+  (#757). A downstream Hydra app reaches every jcm group through
+  ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole validated
+  configuration under one of its own nodes with ``+configuration@<node>=<name>``.
+  ``jcm/config/__init__.py`` was added so Hydra's ``pkg://`` provider reports the
+  tree as available (a namespace-package ``jcm.config`` was read but flagged
+  "not available"). The public group names, the load-bearing
+  ``# @package _global_`` header plus absolute-override recipe style, and the
+  rename policy are documented in :doc:`design/packaged_config_tree`. There is
+  deliberately
+  **no** back-compatibility alias group — the contract plus a release note plus
+  a lockstep downstream update is the policy.
+- **Breaking for searchpath users:** the ``experiment`` config group was
+  renamed to ``configuration`` (the word "experiment" already means a *realized
+  simulation* elsewhere in the project). The CLI is now ``+configuration=<name>``
+  and the Python door is ``jcm.configurations`` (was ``jcm.experiments``). A
+  downstream app composing jcm through ``pkg://jcm.config`` must change
+  ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM in
+  particular composes ``+experiment@atmosphere=<name>`` and must update in the
+  same release cycle.
+
 Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
 -----------------------------------------------------------------
 

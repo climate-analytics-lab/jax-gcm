@@ -5,7 +5,10 @@
 # (``longrun``, ``smoke``, ``pyses_year``) inherit it via ``defaults: [default,
 # _self_]`` and only override the keys they change, so every run group exposes
 # the same key set and any run key can be set on the CLI without a ``+`` prefix.
-time_step: 10              # minutes
+# 12 min is the validated ECHAM L47/L95 production step, shared across both
+# doors (this CLI default and the Python no-limit fallback). SPEEDY pins 15;
+# pySES (run/pyses_year, time_step null) adopts the dycore's dt_seconds.
+time_step: 12              # minutes
 save_interval: 10          # days
 total_time: 10             # days
 

@@ -4,7 +4,7 @@
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=ma-ne30-l47
+#   python -m jcm.main +configuration=ma-ne30-l47
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
 #  - physics=echam-jam: same physics as the spectral MA sweep.

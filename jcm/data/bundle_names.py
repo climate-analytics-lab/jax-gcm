@@ -1,22 +1,18 @@
-"""Data-mirror bundle path naming for prescribed forcing inputs.
+"""Data-mirror bundle naming + availability — the DATA-SIDE source of truth.
 
 The mirror lays each grid's boundary data out as
 ``bundles/<grid>[_l<nlev>]/<product>`` (see
-``docs/source/design/data_mirror.md``). This module is the single source of
-truth for that layout and is deliberately free of any intra-package (``jcm``)
-import, so it can be loaded in isolation:
+``docs/source/design/data_mirror.md``). This module holds the published-set
+declarations (grids / levels / verticals) and the ``auto`` emission-key table,
+and is deliberately free of any intra-package (``jcm``) import.
 
-* :mod:`jcm.runners` imports it normally to resolve the ``auto`` emission
-  inputs at model-build time.
-* ``tools/benchmark.py`` loads it **by file path** (exactly as it loads
-  ``jcm/data/remote.py``) to enumerate those same auto inputs for its
-  pre-GPU prefetch **without importing** ``jcm`` — importing the package
-  initialises a JAX backend, which preallocates the GPU before the free-card
-  gate and makes the harness look like a tenant to its own gate (a six-job
-  sweep died that way; see ``tools/benchmark.py:_hf_fetch``).
-
-Keeping the naming convention here means the build-time resolver and the
-prefetch enumerator cannot drift apart.
+Since #751 the READ-side resolution lives in :mod:`jcm.data.mirror_manifest`
+(and the typed :mod:`jcm.data.input_resolution` above it), which
+``jcm.data.mirror.build_mirror`` GENERATES from the declarations here — so the
+runner's resolver and ``tools/benchmark.py``'s pre-GPU enumerator both consult
+the manifest, and this module is the generator input they cannot drift from.
+:func:`bundle_is_published` is retained as the pure predicate the manifest's
+``is_published`` is cross-checked against.
 """
 
 from __future__ import annotations
@@ -115,15 +111,3 @@ def grid_token(spectral_truncation) -> str:
     table can go stale.
     """
     return f"t{int(spectral_truncation)}"
-
-
-def emission_bundle_path(key: str, token: str, nlev) -> str:
-    """``hf://`` path of the ``auto`` bundle for one emission ``key``."""
-    subdir, name = EMISSION_AUTO_BUNDLES[key]
-    return f"hf://bundles/{token}{subdir.format(nlev=int(nlev))}/{name}"
-
-
-def auto_emission_bundle_paths(token: str, nlev) -> dict:
-    """``{key: hf-path}`` for all four ``auto`` emission bundles on a grid."""
-    return {key: emission_bundle_path(key, token, nlev)
-            for key in EMISSION_AUTO_BUNDLES}

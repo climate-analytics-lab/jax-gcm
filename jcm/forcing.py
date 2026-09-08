@@ -200,6 +200,32 @@ class SolarGeometry:
 
 
 # ---------------------------------------------------------------------------
+# Canonical mirror-bundle composition (ForcingData.from_bundles)
+# ---------------------------------------------------------------------------
+
+# Surface epoch -> its mirror surface-bundle product.
+_SURFACE_PRODUCTS = {
+    "pd": "forcing_pd", "pi": "forcing_pi",
+    "amip": "forcing_amip", "era5": "forcing_era5",
+}
+
+# Era consistency (F1): the surface epoch selects the ancillary epoch, so a PI
+# surface is never paired with present-day ozone/emissions/oxidants (and vice
+# versa). Only ozone/emissions/oxidants carry a PI variant; dms/dust are
+# epoch-free (one product each, always "auto"). amip/era5 pair with the
+# present-day *climatology* ancillaries — a transient ozone_amip/emissions_amip
+# pairing is a documented deferral (the mirror stages those products, but wiring
+# them per-year is future work), recorded here so every surface's choice is
+# explicit rather than implicit in "auto".
+_SURFACE_ANCILLARY_EPOCH = {
+    None: "pd", "pd": "pd", "pi": "pi", "amip": "pd", "era5": "pd",
+}
+
+# The ancillary keys whose product carries an epoch (dms/dust do not).
+_EPOCH_ANCILLARY_KEYS = ("ozone_file", "emissions_file", "oxidants_file")
+
+
+# ---------------------------------------------------------------------------
 # ForcingData
 # ---------------------------------------------------------------------------
 
@@ -384,6 +410,134 @@ class ForcingData:
             ds = xr.open_dataset(filename)
         return cls.from_dataset(ds, coords=coords,
                                 align_mode=align_mode, validate=validate)
+
+    @classmethod
+    def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
+                     fetch=None):
+        """Build the canonical mirror-bundle forcing set for a composition.
+
+        The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
+        it composes the surface bundle (``surface`` ∈
+        ``"pd"``/``"pi"``/``"amip"``/``"era5"``/``None``), ozone, and — for
+        ``aerosol="jam"`` — the emission/dms/dust/oxidant set, then routes the
+        composed config through the SAME engine ``jcm.runners.build_forcing``
+        uses, so the CLI and Python doors provably agree (#751; see the
+        equivalence test in ``forcing_test``). The emission-family config-trap
+        warnings fire here from the shared home too. ``aerosol="macv2sp"`` wires
+        the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
+        ``forcing.macv2_file`` so the real plume weights are attached — the file
+        is resolution-invariant and shipped in the wheel, so it needs no mirror
+        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        the CLI for the other products. ``fetch``
+        (default: the HF cache) pre-resolves the composed surface bundle via the
+        engine; the ``auto`` products use the cache.
+
+        Era consistency (F1): the surface epoch selects the ancillary epoch, so
+        an 1870s PI surface is not silently paired with present-day ancillaries.
+        The pairing is explicit for every surface (dms/dust are epoch-free):
+
+        =========  ====================================================
+        surface    ozone / emissions / oxidants
+        =========  ====================================================
+        ``pd``     present-day (``*_pd``, via ``auto``)
+        ``pi``     pre-industrial (``ozone_pi``/``emissions_pi``/``oxidants_pi``)
+        ``amip``   present-day climatology (transient pairing deferred)
+        ``era5``   present-day climatology (transient pairing deferred)
+        ``None``   present-day (aquaplanet surface, ``*_pd`` ancillaries)
+        =========  ====================================================
+        """
+        from omegaconf import OmegaConf
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        from jcm import runners
+        from jcm.data import bundle_names
+        from jcm.data import input_resolution as ir
+        from jcm.data import mirror_manifest as mm
+
+        manifest = mm.load_manifest()
+        grid_token = bundle_names.grid_token(
+            int(coords.horizontal.total_wavenumbers) - 2)
+        nlev = int(coords.nodal_shape[0])
+        vertical = ("hybrid" if isinstance(coords.vertical, HybridCoordinates)
+                    else "sigma")
+
+        if aerosol not in (None, "jam", "macv2sp"):
+            raise ValueError(
+                f"aerosol={aerosol!r}; expected None, 'jam' or 'macv2sp'.")
+        if surface is not None and surface not in _SURFACE_PRODUCTS:
+            raise ValueError(
+                f"surface={surface!r}; expected 'pd'/'pi'/'amip'/'era5'/None.")
+
+        macv2_file = None
+        if aerosol == "macv2sp":
+            # The MACv2-SP file is repo-packaged (resolution-invariant single
+            # file), so wire its packaged path straight into forcing.macv2_file;
+            # build_forcing then attaches the real weights instead of the all-ones
+            # default (F2). No mirror fetch or staging gate.
+            macv2_file = packaged_macv2_path()
+
+        forcing_dict = {
+            "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
+            "dust_file": "auto", "oxidants_file": "auto", "align": "auto",
+            "macv2_file": macv2_file,
+            "years": years, "available_years": None,
+            "ozone_available_years": None, "emissions_available_years": None,
+            "oxidants_available_years": None,
+        }
+
+        # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
+        # auto=True product, so it stays "auto" (keeping the silent-degrade on an
+        # unpublished grid + the JAM-gating that "auto" gives). A non-pd epoch
+        # pins the explicit ``*_<epoch>`` bundle, except on a grid where that
+        # product is unpublished — there it falls back to "auto" so it degrades
+        # to None exactly as the pd product would, not a 404. Emissions/oxidants
+        # are JAM-only (a non-JAM package consumes neither), so their epoch is
+        # pinned only for aerosol="jam"; ozone feeds radiation on every config,
+        # so its epoch is always pinned.
+        epoch = _SURFACE_ANCILLARY_EPOCH[surface]
+        if epoch != "pd":
+            keys = (_EPOCH_ANCILLARY_KEYS if aerosol == "jam"
+                    else ("ozone_file",))
+            for key in keys:
+                product = f"{key[:-len('_file')]}_{epoch}"
+                if mm.is_published(manifest, product, grid_token, nlev,
+                                   vertical):
+                    forcing_dict[key] = "hf://" + mm.bundle_path(
+                        manifest, product, grid_token, nlev)
+
+        if surface is None:
+            forcing_dict["kind"] = "default"
+        else:
+            product = _SURFACE_PRODUCTS[surface]
+            forcing_dict["kind"] = "from_file"
+            if mm.product(manifest, product)["alignment"] == "transient":
+                if years is None:
+                    raise ValueError(
+                        f"surface={surface!r} is a transient (per-year) bundle "
+                        "— pass years=[first, last].")
+                forcing_dict["align"] = "by_date_interp"
+                forcing_dict["available_years"] = mm.coverage(manifest, product)
+            file_spec = "hf://" + mm.bundle_path(manifest, product,
+                                                 grid_token, nlev)
+            if fetch is not None:
+                sr = ir.resolve_input(
+                    "file", file_spec, grid_token=grid_token, nlev=nlev,
+                    vertical=vertical, years=years,
+                    available=forcing_dict["available_years"],
+                    manifest=manifest, fetch=fetch)
+                file_spec = (list(sr.paths) if len(sr.paths) > 1
+                             else sr.paths[0])
+            forcing_dict["file"] = file_spec
+
+        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        cfg = OmegaConf.create(
+            {"forcing": forcing_dict, "physics": physics_dict})
+        forcing = runners.build_forcing(cfg, coords)
+        # Same emission-family traps the CLI door fires (from the shared home).
+        runners.warn_emission_config_traps(
+            has_jam=(aerosol == "jam"), is_pyses=False, is_scm=False,
+            forcing_cfg=cfg.forcing, coords=coords, forcing=forcing)
+        return forcing
 
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
@@ -1157,10 +1311,27 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
-    """Read MACv2.0-SP time-varying plume weights into two ``TimeSeries`` leaves.
+#: Repo-packaged MACv2-SP simple-plume file: SPv2.1 (CMIP7; Fiedler & Azoulay,
+#: University Heidelberg, 2025), the CEDS-scaled successor to Stevens et al.
+#: (2017) v1. Resolution-invariant (~19 KB), so it ships in the wheel under
+#: ``jcm/data/bc`` rather than on the HF mirror (see SOURCES.md for provenance +
+#: sha256). ``forcing.macv2_file=auto`` and ``from_bundles(aerosol="macv2sp")``
+#: both resolve to it; an explicit path overrides.
+PACKAGED_MACV2_FILE = "SPv2.1_18502023_CMIP7.nc"
 
-    The Stevens et al. (2017) "Simple Plumes" file ``MACv2.0-SP_v1.nc`` carries
+
+def packaged_macv2_path() -> str:
+    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``)."""
+    from importlib import resources
+    from pathlib import Path
+    return str(Path(str(resources.files("jcm")))
+               / "data" / "bc" / PACKAGED_MACV2_FILE)
+
+
+def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+    """Read MACv2-SP time-varying plume weights into two ``TimeSeries`` leaves.
+
+    The MACv2-SP file (the packaged SPv2.1 CMIP7 build, or the older v1) carries
     the static plume geometry (consumed separately by
     :meth:`AerosolParameters.from_dataset`) alongside two time-varying scaling
     arrays:
@@ -1168,10 +1339,12 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
     * ``year_weight(plume, year)`` over 1850..2100 — the per-year anthropogenic
       amplitude. Returned as ``forcing.aerosol_year_weight``: a ``BY_DATE``
       ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
-      calendar year. The v1 file only has valid data for 1850-2016; 2017-2100
-      are ``_FillValue`` (delivered as NaN), which would inject NaN AOD into a
-      post-2016 run, so the last valid year is forward-filled (a documented jcm
-      convention — the reference STOPs out of range).
+      calendar year. Only part of the axis carries real data (SPv2.1: 1850-2023;
+      v1: 1850-2016); the trailing years are ``_FillValue`` (delivered as NaN),
+      which would inject NaN AOD, so the last valid year is forward-filled (a
+      documented jcm convention — the reference STOPs out of range). The
+      forward-fill finds the last all-valid year dynamically, so it adapts to
+      either file's real span with no version-specific constant.
     * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
       ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
       ``(week, feature, plume)`` so a ``select(date)`` slice yields the

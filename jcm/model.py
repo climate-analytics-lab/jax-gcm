@@ -414,11 +414,13 @@ class Model:
                   terms by ``ComposablePhysics``), so grid-dependent
                   explicit-tendency stability limits — e.g. SPEEDY's surface
                   drag in the thin bottom sigma layer of high-``nlev`` grids,
-                  see docs/source/design/speedy_variable_levels.md — shrink the default below
-                  the historical 30 minutes only where needed. Physics
-                  without such a limit (ECHAM, Held-Suarez, ...) keeps
-                  30 minutes; SPEEDY's standard 7/8-level runs sit on the
-                  stable plateau and keep 30 minutes exactly.
+                  see docs/source/design/speedy_variable_levels.md — cap the
+                  step at the historical 30-min plateau and shrink it only
+                  where needed. Physics without such a limit (ECHAM,
+                  Held-Suarez, ...) adopt the 12-minute default (the validated
+                  ECHAM production step, matching run/default.yaml); SPEEDY's
+                  standard 7/8-level runs sit on the plateau and keep 30
+                  minutes exactly.
 
                 Pass an explicit value to override; with an explicit dycore
                 the value must match ``dycore.dt_seconds`` (a mismatch
@@ -631,10 +633,15 @@ class Model:
             f"physics={physics})"
         )
 
-    # Historical default model time step; also the ceiling for physics-
-    # suggested stable steps (a physics limit can only shrink the default,
-    # never silently enlarge it).
-    _DEFAULT_TIME_STEP_MINUTES = 30.0
+    # Default step when the active physics reports no stability limit (ECHAM,
+    # Held-Suarez, ...): the validated ECHAM L47/L95 production step, matching
+    # run/default.yaml so both doors resolve the same 12 minutes (#751).
+    _DEFAULT_TIME_STEP_MINUTES = 12.0
+
+    # Ceiling for a physics-suggested stable step (SPEEDY's surface-drag limit):
+    # a limit can only shrink the step, never enlarge it past the historical
+    # 30-min plateau that keeps standard SPEEDY runs bit-for-bit unchanged.
+    _MAX_PHYSICS_TIME_STEP_MINUTES = 30.0
 
     def _resolve_time_step_minutes(self, time_step, dycore, coords) -> float:
         """Resolve the model time step (minutes) from a single source of truth.
@@ -657,8 +664,10 @@ class Model:
           :meth:`Physics.stable_time_step_minutes` — the numerically binding
           constraint is a property of the physics scheme (e.g. SPEEDY's
           explicit surface drag in a thin bottom sigma layer), so the scheme
-          that imposes it owns the limit. The default is the historical
-          30 minutes, shrunk to the physics limit where one applies.
+          that imposes it owns the limit. With no limit the default is 12
+          minutes (the validated ECHAM production step, matching
+          run/default.yaml); a reported limit is capped at the historical
+          30-min plateau and shrinks the step where one applies.
         """
         dycore_dt_seconds = (
             getattr(dycore, "dt_seconds", None) if dycore is not None else None
@@ -682,7 +691,7 @@ class Model:
         limit = self.physics.stable_time_step_minutes(coords)
         if limit is None:
             return self._DEFAULT_TIME_STEP_MINUTES
-        return min(self._DEFAULT_TIME_STEP_MINUTES, float(limit))
+        return min(self._MAX_PHYSICS_TIME_STEP_MINUTES, float(limit))
 
     def _date_from_sim_time(self, sim_time) -> DateData:
         # Stop gradient: date/calendar computations use non-differentiable ops

@@ -27,6 +27,7 @@ namespaces = true
 [tool.setuptools.package-data]
 jcm = [
     "config/**/*.yaml",
+    "data/**/*.json",
     "data/**/*.nc",
     "data/**/*.npy",
     "data/**/*.npz",

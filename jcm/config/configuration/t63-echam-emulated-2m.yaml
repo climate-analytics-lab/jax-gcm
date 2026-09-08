@@ -1,15 +1,16 @@
 # @package _global_
 #
-# ECHAM physics + JAM prognostic modal aerosol at T63L47 — validated benchmark configuration.
+# ECHAM 2-moment microphysics + NN-emulated radiation at T63L47 — validated benchmark configuration.
 #
 # Compose it with a single command:
 #
-#   python -m jcm.main +experiment=t63-echam-jam
+#   python -m jcm.main +configuration=t63-echam-emulated-2m
 #
 # WHY each setting (mined from tools/benchmark.py's validated PRESETS):
-#  - physics=echam-jam: ECHAM physics + JAM prognostic modal aerosol.
-#  - JAM present-day emission/oxidant bundles resolve automatically
-#    (forcing.*_file: auto), so no hand-managed aerosol inputs needed.
+#  - physics=echam-emulated-2m: ECHAM 2-moment microphysics + NN-emulated radiation.
+#  - NOTE: the NN radiation emulator needs trained weights;
+#    pass physics.terms.nn_emulator_radiation.weights_file=... .
+#    Without them the term builds random weights and the run NaNs.
 #  - grid=echam_t63_l47_hybrid: ECHAM standard production grid.
 #  - init=jw, init.rh=0.0: Jablonowski-Williamson lapse-rate profile with a
 #    fully DRY start. An isothermal cold start goes NaN within days at L47;
@@ -23,12 +24,12 @@
 #    stays forcing.ozone_file: auto unless a level-matched bundle is set.
 #  - run=longrun: 30-day health-gated chunks with the settled production
 #    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
-#    stratosphere; run.time_step=12 min is the conservative L47/L95 step.
+#    stratosphere; the 12-min L47/L95 step now comes from the shared default (run/default.yaml).
 #  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
 #    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
 #    stated explicitly so the recorded config documents the value used.
 defaults:
-  - override /physics: echam-jam
+  - override /physics: echam-emulated-2m
   - override /grid: echam_t63_l47_hybrid
   - override /init: jw
   - override /terrain: auto
@@ -39,6 +40,4 @@ init:
   rh: 0.0
 forcing:
   file: hf://bundles/t63/forcing_pd.nc
-run:
-  time_step: 12
 sl_off_centering: 0.2

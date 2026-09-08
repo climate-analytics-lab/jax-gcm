@@ -26,19 +26,19 @@ align: by_date_interp
 years: ???
 available_years: [1979, 2024]
 ozone_file: hf://bundles/t63_l47/ozone_amip/{year}.nc
-# The FZJ ozone product ends in 2022, before this preset's forcing
-# coverage: its own expansion window stops there so runs near or past
-# the boundary do not request files that were never built. For 2023-24
-# run dates the time lookup clamps to the last (Dec 2022) sample —
-# reasonable for slowly-evolving ozone; override ozone_file with a
-# non-pattern path (e.g. hf://bundles/t63_l47/ozone_pd.nc) to use a
+# The FZJ ozone amip bundles are staged 1950-2022, within this preset's
+# 1979-2024 forcing coverage: their own expansion window stops at 2022 so
+# runs near or past the boundary do not request files that were never
+# built. For 2023-24 run dates the time lookup clamps to the last (Dec
+# 2022) sample — reasonable for slowly-evolving ozone; override ozone_file
+# with a non-pattern path (e.g. hf://bundles/t63_l47/ozone_pd.nc) to use a
 # climatology instead.
-ozone_available_years: [1850, 2022]
+ozone_available_years: [1950, 2022]
 # The transient emissions the JAM-transient warning recommends
 # (``emissions_file: hf://bundles/<grid>/emissions_amip/{year}.nc``) come from
-# the SAME --stage amip build as ozone_amip and likewise end in 2022 (CEDS
-# source 1850-2023, staged to 2022). Without this per-product clamp,
+# the SAME --stage amip build as ozone_amip and share its 1950-2022 staged span
+# (CEDS source runs wider, staged to 1950-2022). Without this per-product clamp,
 # forcing.years=[2023,2024] would expand the emissions pattern to 2023/2024
 # files that were never built; for run dates past 2022 the time lookup
 # clamps to the last (Dec 2022) sample.
-emissions_available_years: [1850, 2022]
+emissions_available_years: [1950, 2022]

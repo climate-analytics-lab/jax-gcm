@@ -82,7 +82,7 @@ class TestConfigComposition(unittest.TestCase):
         self.assertIn("speedy_convection", cfg.physics.terms)
         self.assertEqual(cfg.grid.vertical, "sigma")
         self.assertEqual(cfg.grid.layers, 8)
-        self.assertEqual(cfg.run.time_step, 10)
+        self.assertEqual(cfg.run.time_step, 12)
         self.assertEqual(cfg.init.kind, "isothermal")
         self.assertEqual(cfg.terrain.kind, "aquaplanet")
         self.assertEqual(cfg.forcing.kind, "default")
@@ -138,27 +138,27 @@ class TestConfigComposition(unittest.TestCase):
         self.assertEqual(cfg.init.kind, "jw")
 
 
-class TestExperimentGroup(unittest.TestCase):
-    """The ``experiment`` group promotes each validated benchmark preset to a
-    first-class ``python -m jcm.main +experiment=<name>`` composition (#640
+class TestConfigurationGroup(unittest.TestCase):
+    """The ``configuration`` group promotes each validated benchmark preset to a
+    first-class ``python -m jcm.main +configuration=<name>`` composition (#640
     smell 2), so users get a validated configuration instead of a cold start.
     """
 
-    EXPERIMENT_DIR = Path(__file__).parent / "config" / "experiment"
+    CONFIGURATION_DIR = Path(__file__).parent / "config" / "configuration"
 
     def _compose_hydra(self, name):
         # ``return_hydra_config`` exposes ``cfg.hydra.runtime.choices`` so we
-        # can assert which group option each experiment selected.
+        # can assert which group option each configuration selected.
         with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
             return compose(config_name="config",
-                           overrides=[f"+experiment={name}"],
+                           overrides=[f"+configuration={name}"],
                            return_hydra_config=True)
 
-    def test_every_experiment_composes(self):
-        names = sorted(p.stem for p in self.EXPERIMENT_DIR.glob("*.yaml"))
-        self.assertTrue(names, "experiment group is empty")
+    def test_every_configuration_composes(self):
+        names = sorted(p.stem for p in self.CONFIGURATION_DIR.glob("*.yaml"))
+        self.assertTrue(names, "configuration group is empty")
         for name in names:
-            with self.subTest(experiment=name):
+            with self.subTest(configuration=name):
                 cfg = self._compose_hydra(name)
                 self.assertIn("physics", cfg.hydra.runtime.choices)
                 # The run schema is complete, so ``time_step`` always exists.
@@ -176,7 +176,7 @@ class TestExperimentGroup(unittest.TestCase):
                                run="longrun", time_step=12),
         }
         for name, want in cases.items():
-            with self.subTest(experiment=name):
+            with self.subTest(configuration=name):
                 cfg = self._compose_hydra(name)
                 ch = cfg.hydra.runtime.choices
                 self.assertEqual(ch["physics"], want["physics"])
@@ -185,27 +185,27 @@ class TestExperimentGroup(unittest.TestCase):
                 self.assertEqual(ch["run"], want["run"])
                 self.assertEqual(cfg.run.time_step, want["time_step"])
 
-    def test_echam_experiments_use_dry_jw_and_sl_offcentering(self):
+    def test_echam_configurations_use_dry_jw_and_sl_offcentering(self):
         # The L47 stability recipe: fully-dry JW init + SL off-centering.
         cfg = self._compose_hydra("t63-echam-rrtmgp")
         self.assertEqual(cfg.init.kind, "jw")
         self.assertEqual(cfg.init.rh, 0.0)
         self.assertEqual(cfg.sl_off_centering, 0.2)
 
-    def test_pyses_experiment_keeps_isothermal_and_no_timestep(self):
+    def test_pyses_configuration_keeps_isothermal_and_no_timestep(self):
         # pySES rejects the dinosaur JW init and adopts the dycore dt_seconds,
-        # so its experiments override neither init nor run.time_step.
+        # so its configurations override neither init nor run.time_step.
         cfg = self._compose_hydra("ma-ne30-l47")
         self.assertEqual(cfg.hydra.runtime.choices["dycore"], "pyses_ne30l47")
         self.assertEqual(cfg.init.kind, "isothermal")
         self.assertIsNone(cfg.run.time_step)
 
-    def test_speedy_experiment_builds_model(self):
-        # Cheap model-construction smoke on the smallest experiment. The big
-        # JAM/pySES experiments are deliberately NOT built here (too expensive
+    def test_speedy_configuration_builds_model(self):
+        # Cheap model-construction smoke on the smallest configuration. The big
+        # JAM/pySES configurations are deliberately NOT built here (too expensive
         # and network-dependent); terrain/forcing are overridden to aquaplanet
         # so the build needs no boundary-file fetch.
-        cfg = _compose(["+experiment=speedy-t31",
+        cfg = _compose(["+configuration=speedy-t31",
                         "terrain=aquaplanet", "forcing=default"])
         model = build_model(cfg)
         self.assertIsNotNone(model)
@@ -2794,6 +2794,22 @@ class TestAttachMacv2Weights(unittest.TestCase):
         cfg = OmegaConf.create({"kind": "default", "macv2_file": None})
         self.assertIsNone(_attach_macv2_weights(None, cfg, None))
 
+    def test_macv2_file_auto_loads_packaged_spv2(self):
+        # macv2_file=auto (the forcing=macv2_sp default) resolves the repo-
+        # packaged SPv2.1 file and attaches its real (non-all-ones) weights.
+        import numpy as np
+        from omegaconf import OmegaConf
+
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.runners import _attach_macv2_weights
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        cfg = OmegaConf.create({"kind": "default", "macv2_file": "auto"})
+        forcing = _attach_macv2_weights(None, cfg, coords)
+        yw = np.asarray(forcing.aerosol_year_weight.values)
+        self.assertEqual(yw.shape, (251, 9))
+        self.assertFalse(np.allclose(yw, 1.0))
+
     def test_pyses_path_attaches_macv2_weights(self):
         """``forcing=macv2_sp`` on pySES must still load ``macv2_file`` (F1).
 
@@ -3080,17 +3096,17 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
         self.assertIsNone(out.get("oxidants_file"))
 
-    def test_t119_jam_experiment_resolves_emission_free(self):
-        """The ma-t119 experiments run emission-free (Codex P1).
+    def test_t119_jam_configuration_resolves_emission_free(self):
+        """The ma-t119 configurations run emission-free (Codex P1).
 
         T119 has no mirror bundle, so the JAM ``auto`` default cannot resolve
         the four emission keys (bundles/t119/*.nc do not exist and the fetch
-        would abort build_forcing). The experiment yamls null the keys
+        would abort build_forcing). The configuration yamls null the keys
         explicitly (round-1 documentation — no longer load-bearing now that the
         published-grid whitelist auto-nulls any non-mirrored grid, see
         ``test_jam_auto_nulls_on_non_mirrored_grid_without_fetch``); assert the
         resolver requests NO fetch and yields None either way, so
-        ``python -m jcm.main +experiment=ma-t119-l47`` is one command.
+        ``python -m jcm.main +configuration=ma-t119-l47`` is one command.
         """
         from unittest import mock
 
@@ -3098,7 +3114,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords
         for name in ("ma-t119-l47", "ma-t119-l95"):
             with self.subTest(name):
-                cfg = _compose([f"+experiment={name}"])
+                cfg = _compose([f"+configuration={name}"])
                 coords = build_coords(cfg)
                 calls = []
 

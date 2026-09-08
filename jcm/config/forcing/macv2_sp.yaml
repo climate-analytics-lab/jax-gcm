@@ -1,5 +1,5 @@
-# Realistic surface forcing PLUS real time-varying MACv2.0-SP anthropogenic
-# aerosol amplitudes (Stevens et al. 2017 "Simple Plumes"), issue #680 item 2.
+# Realistic surface forcing PLUS real time-varying MACv2-SP anthropogenic
+# aerosol amplitudes (Simple Plumes; SPv2.1 CMIP7 build), issue #680 item 2.
 #
 # Extends ``from_file`` (so it still needs a boundary file for SST/land, e.g.
 # ``forcing.file=hf://bundles/t63/forcing_pd.nc``) and additionally loads the
@@ -11,15 +11,13 @@
 #
 #     python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
 #         terrain=from_file terrain.file=/path/to/terrain.nc \
-#         forcing=macv2_sp forcing.file=/path/to/forcing.nc \
-#         forcing.macv2_file=/path/to/MACv2.0-SP_v1.nc
+#         forcing=macv2_sp forcing.file=/path/to/forcing.nc
 
 defaults:
   - from_file
 
-# The MACv2.0-SP netCDF (static plume geometry + ``year_weight`` +
-# ``ann_cycle``). Mandatory: the dataset is NOT on the jax-gcm HF mirror.
-# Obtain ``MACv2.0-SP_v1.nc`` from the MACv2-SP distribution
-# (https://doi.org/10.1594/WDCC/MACv2_SP_v1, also mirrored with the
-# ECHAM-HAM simple-plumes code) and point this key at the local copy.
-macv2_file: ???
+# The MACv2-SP netCDF (static plume geometry + ``year_weight`` + ``ann_cycle``).
+# ``auto`` loads the repo-packaged SPv2.1 CMIP7 file (resolution-invariant,
+# shipped in the wheel — no download, no mirror fetch). Override with a local
+# path (``forcing.macv2_file=/path/to/file.nc``) to use a different build.
+macv2_file: auto

@@ -89,9 +89,10 @@ class StableTimeStepTest(unittest.TestCase):
         self.assertAlmostEqual(override.dt_si.to(units.minute).m, 30.0, places=6)
 
     def test_non_speedy_physics_keeps_default_step(self):
-        # The stability limit is SPEEDY's (its explicit surface drag);
-        # physics without that term must keep the historical 30-minute
-        # default even on grids where SPEEDY would need a shorter step.
+        # The stability limit is SPEEDY's (its explicit surface drag); physics
+        # without that term reports None and adopts the 12-minute default (the
+        # validated ECHAM production step, matching run/default.yaml on the CLI)
+        # — SPEEDY's shorter-on-fine-grids limit does not apply to them.
         from jcm.physics.held_suarez.held_suarez_physics import (
             held_suarez_physics,
         )
@@ -100,7 +101,7 @@ class StableTimeStepTest(unittest.TestCase):
         self.assertIsNone(physics.stable_time_step_minutes(coords))
         model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
                       physics=physics)
-        self.assertAlmostEqual(model.dt_si.to(units.minute).m, 30.0, places=6)
+        self.assertAlmostEqual(model.dt_si.to(units.minute).m, 12.0, places=6)
 
     def test_explicit_dycore_owns_the_time_step(self):
         # With an explicit dycore and no time_step, the Model must adopt the
