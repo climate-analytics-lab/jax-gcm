@@ -9,7 +9,7 @@ the declarative product table both declared in ``build_mirror``, so the
 availability knowledge the resolver consults cannot drift from the build.
 
 This module is deliberately free of any intra-package (``jcm``) import — the same
-invariant :mod:`jcm.data.yearly_files` maintains —
+invariant :mod:`jcm.data.input_resolution` maintains —
 so it can be loaded in isolation (``spec_from_file_location``) by
 ``tools/benchmark.py``'s pre-GPU prefetch, which must not import ``jcm`` (that
 initialises a JAX backend and preallocates the GPU before the free-card gate).

@@ -8,13 +8,13 @@ from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes, CoordinateSystem
 from jcm.utils import VALID_TRUNCATIONS, VALID_NODAL_SHAPES, validate_ds
 from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
-# ``{year}`` pattern expansion lives in the import-free leaf
-# :mod:`jcm.data.yearly_files` so ``tools/benchmark.py`` can load it by file
+# ``{year}`` pattern expansion lives in the import-free engine
+# :mod:`jcm.data.input_resolution` so ``tools/benchmark.py`` can load it by file
 # path (jcm-free, before its GPU gate) and share this single source of truth;
 # forcing.py imports JAX/dinosaur/``jcm`` at module top and so cannot itself be
 # that shared leaf. Re-exported here — its historical home — for the runner and
 # tests (``from jcm.forcing import expand_yearly_files``).
-from jcm.data.yearly_files import expand_yearly_files as expand_yearly_files
+from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
     DEFAULT_CALENDAR,
@@ -1397,8 +1397,8 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
 
 
 # ``expand_yearly_files`` is re-exported from the top-of-module import of the
-# import-free leaf :mod:`jcm.data.yearly_files` (see the imports block); its
-# historical home is this module, so the runner and tests still reach it as
+# import-free engine :mod:`jcm.data.input_resolution` (see the imports block);
+# its historical home is this module, so the runner and tests still reach it as
 # ``jcm.forcing.expand_yearly_files``.
 
 

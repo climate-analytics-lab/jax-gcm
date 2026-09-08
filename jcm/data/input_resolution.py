@@ -16,10 +16,12 @@ is the single source of truth for which products exist on which grids/levels, so
 rather than conventions spread through code.
 
 Kept free of any intra-package (``jcm``) import at module top — stdlib +
-dataclasses only — so it loads without initialising JAX; the manifest,
-``fetch`` and year-expansion helpers are imported lazily (or injected), which
-also lets ``tools/benchmark``'s pre-GPU enumerator drive it without importing
-``jcm`` (see :mod:`jcm.data.mirror_manifest`).
+dataclasses only — so it loads without initialising JAX; the manifest and
+``fetch`` are imported lazily, which also lets ``tools/benchmark``'s pre-GPU
+enumerator drive it (and its jcm-free ``{year}`` expansion,
+:func:`expand_yearly_files`, folded in here from the former
+``jcm.data.yearly_files`` leaf) without importing ``jcm`` (see
+:mod:`jcm.data.mirror_manifest`).
 """
 
 from __future__ import annotations
@@ -117,21 +119,74 @@ def _is_seq(value) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# year expansion + product splitting (delegates to jcm.data.yearly_files)
+# {year} file-pattern expansion + product splitting
 # ---------------------------------------------------------------------------
 
-def expand_yearly(file_spec, years, available=None, *, expand=None):
-    """Expand one ``{year}`` pattern (see ``jcm.data.yearly_files``).
+def expand_yearly_files(file_spec, years, available=None):
+    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
 
-    The science — pattern detection, the ``years`` requirement, the one-year
-    by-date bracket, and the coverage clamp — lives in
-    :func:`jcm.data.yearly_files.expand_yearly_files`; this only picks that up
-    lazily (or an injected ``expand`` for a jcm-free caller) so the resolver
-    stays a single home for the rule without re-implementing it.
+    The transient AMIP bundles are one file per year (issue #610:
+    download only what you run, append new years without rewriting
+    history), so config points at a pattern plus an inclusive range:
+    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
+    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
+    than silently running with a literal ``{year}`` path. Non-pattern
+    specs (plain paths, lists, ``None``) pass through untouched even when
+    ``years`` is set — a run may mix yearly SST files with a static dust
+    climatology, all sharing one ``forcing.years`` range.
+
+    ``available`` (``forcing.available_years``, the product's inclusive
+    source coverage) widens the expansion by one year on each side,
+    clipped to that coverage: the yearly files hold *mid-month* samples,
+    so a run starting Jan 1 needs the previous December's sample (and a
+    run ending Dec 31 the next January's) for ``by_date_interp`` to
+    bracket the boundary instead of clamping to the nearest mid-month
+    value for ~half a month.
+
+    This expands a **single** product (one scalar spec). A ``{year}``
+    pattern becomes that product's list of yearly files — one product
+    concatenated along a single time axis downstream. A **list** spec
+    (e.g. ``emissions_file`` carrying a biomass-burning product plus an
+    anthropogenic one) names *several* products and is not flattened here:
+    :func:`forcing_products` splits it and expands each element through this
+    function, so each product is opened and time-aligned on its own (a
+    transient ``{year}`` product and a 12-month climatology in the same list
+    must not share one time axis — see that function).
+
+    Re-exported by :mod:`jcm.forcing` (its historical home) as
+    ``jcm.forcing.expand_yearly_files`` for the runner and tests. Kept jcm-free
+    (stdlib only) so ``tools/benchmark.py`` can load this module by file path —
+    before its GPU gate, without importing ``jcm`` — and share this ONE
+    implementation of the ``{year}`` mapping with the build-time resolver.
     """
-    fn = expand
-    if fn is None:
-        from jcm.data.yearly_files import expand_yearly_files as fn
+    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
+    if not has_pattern:
+        return file_spec
+    if years is None:
+        raise ValueError(
+            f"forcing file pattern {file_spec!r} contains {{year}} but "
+            "no year range is set — add e.g. forcing.years=[1979,1983]")
+    first, last = int(years[0]), int(years[-1])
+    if last < first:
+        raise ValueError(f"forcing.years range is reversed: {years!r}")
+    if available is not None:
+        lo, hi = int(available[0]), int(available[-1])
+        first, last = max(first - 1, lo), min(last + 1, hi)
+        # A requested range entirely outside coverage would invert here
+        # and expand to nothing; clamp to the nearest edge file instead
+        # (the time lookup then clamps to its first/last sample).
+        first, last = min(first, hi), max(last, lo)
+    return [file_spec.format(year=y) for y in range(first, last + 1)]
+
+
+def expand_yearly(file_spec, years, available=None, *, expand=None):
+    """Expand one ``{year}`` pattern (see :func:`expand_yearly_files`).
+
+    The rule lives in :func:`expand_yearly_files` (this module); this only lets a
+    caller inject an alternate ``expand`` and otherwise uses the local one, so
+    the resolver stays a single home for the mapping.
+    """
+    fn = expand or expand_yearly_files
     return fn(file_spec, years, available)
 
 
