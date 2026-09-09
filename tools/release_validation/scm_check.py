@@ -6,6 +6,11 @@ instabilities) while the JAM tracers evolve freely through vdiff,
 convective transport (updraft + downdraft + in-plume scavenging, #621/#622),
 microphysics and wet deposition.
 
+The column's well-mixed sub-cloud layer is load-bearing: ECHAM's ``cubase``
+trigger drops any column whose dry-lifted parcel is not buoyant, so a lapse
+rate running to the surface convects nowhere and takes the whole convective
+aerosol pathway with it (``docs/source/design/convective_trigger_soundings.md``).
+
 Seeded: equal boundary-layer mass in m_so4_acc (soluble, activatable
 accumulation mode) and m_poa_pcm (insoluble primary carbon). Checks:
   * everything stays finite over N days (stability);
