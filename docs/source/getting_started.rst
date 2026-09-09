@@ -193,8 +193,10 @@ initial state is already applied — e.g. the dry-JW start for the ECHAM family)
    # (no DictConfig leaks out). Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
-pySES recipes load only when the optional ``pyses`` backend is installed
-(a clear error otherwise). For forcing alone, reach for
+Recipes selecting optional components need their extra installed — ``jcm[mam4]``
+for the JAM recipes (as in the example above), ``jcm[pyses]`` for the pySES
+backend, ``jcm[cosp]`` for the COSP variant — and fail with a clear
+``ModuleNotFoundError`` at load otherwise. For forcing alone, reach for
 :meth:`~jcm.forcing.ForcingData.from_bundles` above.
 
 Customizing the Model

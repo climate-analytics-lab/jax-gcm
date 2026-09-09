@@ -93,6 +93,13 @@ command is one validated configuration::
    python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
    python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
 
+Some configurations need an **optional extra** on top of the base install: the
+JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
+``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
+satellite-simulator variant needs ``jcm[cosp]``; ERA5 init/nudging (below)
+needs ``jcm[era5]``. A missing extra fails at model construction
+(``ModuleNotFoundError``), not mid-run.
+
 Note the leading ``+``: a configuration is *added* to the default composition
 and then overrides the physics/grid/init/run/terrain/forcing groups it selects.
 Each ``jcm/config/configuration/*.yaml`` carries comments explaining WHY every
@@ -256,7 +263,8 @@ Nudging from config
 Relaxing the model toward an external reference state ("nudging") is one flag on
 the CLI: ``nudging=era5`` pulls the run window from WeatherBench2's public cloud
 ERA5 (regridded to the model grid and cached locally by :mod:`jcm.data.era5`),
-and ``init=era5`` starts the run from the ERA5 state at the same date::
+and ``init=era5`` starts the run from the ERA5 state at the same date.
+Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
 
    python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
        init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
