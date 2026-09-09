@@ -29,6 +29,7 @@ from jcm.physics.aerosol.jam.tracer_layout import gas_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
+from jcm.physics.aerosol.jam.emissions.surface_wind import wind_10m
 
 _CMH_TO_MS = 0.01 / 3600.0   # cm/h → m/s
 
@@ -91,7 +92,7 @@ class DmsEmissions(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         nlev, ncols = state.temperature.shape
 
-        u10 = jnp.sqrt(jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30))
+        u10 = wind_10m(state, diagnostics)
         sst = self._forcing_field(
             forcing, "sea_surface_temperature", ncols, 288.0
         )

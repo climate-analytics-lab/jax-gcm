@@ -450,7 +450,10 @@ def compute_turbulence_diagnostics(
     # shaped (ncol, nsfc_type) tensors, so the false-branch tracing
     # is cheap. The scheme field on ``params`` is a tracer under
     # JIT, hence cond rather than a Python ``if``.
-    from .surface_layer import compute_surface_exchange_coefficients_echam_louis
+    from .surface_layer import (
+        compute_surface_exchange_coefficients_echam_louis,
+        wind_10m_reduction,
+    )
 
     wind_speed_surface = jnp.sqrt(
         jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
@@ -494,6 +497,18 @@ def compute_turbulence_diagnostics(
     friction_velocity = compute_friction_velocity(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
     )
+
+    # 10 m wind (ECHAM ``nsurf_diag``), area-weighted over the tiles from the
+    # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
+    # calibrated to u10, not to the lowest model level — ~33 m at L47.
+    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    wind_10m = wind_speed_surface * jnp.sum(
+        state.surface_fraction * wind_10m_reduction(
+            surface_exchange_momentum, wind_speed_surface, z_ref,
+            state.roughness_length, params.z0m_min,
+        ),
+        axis=1,
+    )
     
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
@@ -508,6 +523,7 @@ def compute_turbulence_diagnostics(
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
+        wind_10m=wind_10m,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

@@ -263,7 +263,8 @@ def compute_surface_diagnostics(
     surface_state: SurfaceState,
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters = SurfaceParameters.default(),
+    wind_speed_10m: jnp.ndarray = None,
 ) -> SurfaceDiagnostics:
     """Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
     
@@ -273,6 +274,10 @@ def compute_surface_diagnostics(
         surface_fluxes: Surface fluxes
         resistances: Surface resistances
         params: Surface parameters
+        wind_speed_10m: 10 m wind speed [m/s] (ncol,) from the surface-layer
+            profile (ECHAM ``nsurf_diag``, diagnosed by the vertical-diffusion
+            term). ``None`` falls back to the lowest-level wind — the only
+            wind available when no surface-layer reduction is supplied.
         
     Returns:
         Surface diagnostics
@@ -300,10 +305,15 @@ def compute_surface_diagnostics(
     # 2m dew point (simplified)
     dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
     
-    # 10m wind (use atmospheric wind as approximation)
-    wind_speed_10m = jnp.sqrt(jnp.maximum(atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
-    u_wind_10m = atmospheric_state.u_wind
-    v_wind_10m = atmospheric_state.v_wind
+    # 10m wind: the surface-layer reduction when supplied, else the lowest
+    # model level. Components keep the lowest level's direction.
+    wind_speed_atm = jnp.sqrt(jnp.maximum(
+        atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
+    if wind_speed_10m is None:
+        wind_speed_10m = wind_speed_atm
+    reduction = wind_speed_10m / wind_speed_atm
+    u_wind_10m = reduction * atmospheric_state.u_wind
+    v_wind_10m = reduction * atmospheric_state.v_wind
     
     # Friction velocity
     momentum_flux_magnitude = jnp.sqrt(jnp.maximum(
@@ -317,7 +327,7 @@ def compute_surface_diagnostics(
         atmospheric_state.temperature, surface_state.temperature,
         atmospheric_state.humidity, 
         compute_surface_humidity(surface_state.temperature, atmospheric_state.pressure),
-        wind_speed_10m
+        wind_speed_atm
     ), axis=1)
     
     # Energy balance

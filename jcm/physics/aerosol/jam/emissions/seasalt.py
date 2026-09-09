@@ -31,6 +31,7 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
+from jcm.physics.aerosol.jam.emissions.surface_wind import wind_10m
 
 # Gong-scheme constants (mo_ham_m7_emi_seasalt.f90).
 _NBIN = 300
@@ -156,7 +157,7 @@ class SeaSaltEmissions(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         nlev, ncols = state.temperature.shape
 
-        u10 = jnp.sqrt(jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30))
+        u10 = wind_10m(state, diagnostics)
         seafrac = self._open_water_fraction(forcing, terrain, ncols)
         wind = p.scale * u10 ** p.wind_exponent * seafrac   # (ncols,)
 

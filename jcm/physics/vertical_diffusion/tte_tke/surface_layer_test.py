@@ -189,3 +189,71 @@ class TestECHAMLouisScheme:
             state.surface_temperature, state.temperature[:, -1],
         )
         np.testing.assert_allclose(np.asarray(sCH1), np.asarray(sCH2))
+
+
+class TestWind10mReduction:
+    """ECHAM ``nsurf_diag`` 10 m wind reduction (#723)."""
+
+    def _neutral(self, z_ref, z0):
+        """|U(10)|/|U(z_ref)| = ln(1 + (z/z0 - 1)*10/z) / ln(z/z0)."""
+        return (np.log1p((z_ref / z0 - 1.0) * 10.0 / z_ref)
+                / np.log(z_ref / z0))
+
+    def test_neutral_matches_the_log_profile(self):
+        from .surface_layer import wind_10m_reduction
+        karman = 0.4
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        cdn = karman ** 2 / np.log(z_ref / z0) ** 2
+        red = wind_10m_reduction(
+            jnp.full((1, 3), wind * cdn),          # neutral CM|U| = CDN|U|
+            jnp.asarray([wind]), jnp.asarray([z_ref]),
+            jnp.full((1, 3), z0), 1.0e-5)
+        expect = self._neutral(z_ref, z0)
+        assert abs(float(red[0, 0]) - expect) < 1e-5
+        # ~0.90 at L47's lowest level over the ocean: the |u|^3.41 sea-salt
+        # source is inflated ~1.4x by using the model level instead.
+        assert 0.88 < expect < 0.92
+
+    def test_ocean_roughness_range(self):
+        for z0, want in ((5e-5, 0.9124), (1.5e-4, 0.9036), (5e-4, 0.8935)):
+            assert abs(self._neutral(32.6, z0) - want) < 1e-3
+
+    def test_unstable_is_closer_to_one_than_stable(self):
+        from .surface_layer import wind_10m_reduction
+        karman, z_ref, z0, wind = 0.4, 32.6, 1.5e-4, 6.0
+        cfnc = wind * karman ** 2 / np.log(z_ref / z0) ** 2
+        args = (jnp.asarray([wind]), jnp.asarray([z_ref]),
+                jnp.full((1, 1), z0), 1.0e-5)
+        red = lambda f: float(
+            wind_10m_reduction(jnp.full((1, 1), f * cfnc), *args)[0, 0])
+        stable, neutral, unstable = red(0.4), red(1.0), red(3.0)
+        assert stable < neutral < unstable <= 1.0
+
+    def test_continuous_across_the_stability_branch(self):
+        from .surface_layer import wind_10m_reduction
+        karman, z_ref, z0, wind = 0.4, 32.6, 1.5e-4, 6.0
+        cfnc = wind * karman ** 2 / np.log(z_ref / z0) ** 2
+        args = (jnp.asarray([wind]), jnp.asarray([z_ref]),
+                jnp.full((1, 1), z0), 1.0e-5)
+        lo = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc * (1 - 1e-6)), *args)[0, 0])
+        hi = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc * (1 + 1e-6)), *args)[0, 0])
+        assert abs(lo - hi) < 1e-6
+
+    def test_no_reduction_below_10m_and_bounded(self):
+        from .surface_layer import wind_10m_reduction
+        red = wind_10m_reduction(
+            jnp.full((2, 3), 0.05), jnp.asarray([6.0, 6.0]),
+            jnp.asarray([5.0, 40.0]), jnp.full((2, 3), 1e-3), 1.0e-5)
+        assert np.all(np.asarray(red) <= 1.0) and np.all(np.asarray(red) >= 0.0)
+        # z_ref below the diagnostic height: zrat is capped at 1, no reduction.
+        assert abs(float(red[0, 0]) - 1.0) < 1e-6
+
+    def test_gradient_is_finite(self):
+        import jax
+        from .surface_layer import wind_10m_reduction
+        g = jax.grad(lambda cm: jnp.sum(wind_10m_reduction(
+            cm, jnp.asarray([6.0]), jnp.asarray([32.6]),
+            jnp.full((1, 3), 1.5e-4), 1.0e-5)))(jnp.full((1, 3), 0.01))
+        assert np.all(np.isfinite(np.asarray(g)))

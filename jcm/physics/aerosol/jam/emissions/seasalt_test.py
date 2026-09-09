@@ -120,3 +120,34 @@ class SeaSaltTermTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Wind10mTest(unittest.TestCase):
+    """The Gong source reads the diagnosed 10 m wind, not level 1 (#723)."""
+
+    @staticmethod
+    def _with_u10(args, u10):
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        state, diagnostics, forcing, terrain = args
+        nlev, ncols = state.temperature.shape
+        vd = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            wind_10m=jnp.full((ncols,), u10))
+        return state, {**diagnostics, "vertical_diffusion": vd}, forcing, terrain
+
+    def test_uses_the_diagnosed_10m_wind(self):
+        args = _inputs(wind=10.0)
+        lowest, _ = SeaSaltEmissions()(*args)
+        reduced, _ = SeaSaltEmissions()(*self._with_u10(args, 9.04))
+        key = mass_name("ss", "cor")
+        ratio = (float(reduced.tracers[key][-1, 0])
+                 / float(lowest.tracers[key][-1, 0]))
+        # u10**3.41: a 9.6 % wind reduction is a 28 % flux reduction.
+        self.assertAlmostEqual(ratio, (9.04 / 10.0) ** 3.41, places=4)
+
+    def test_falls_back_to_the_lowest_level_without_vdiff(self):
+        args = _inputs(wind=10.0)
+        self.assertNotIn("vertical_diffusion", args[1])
+        tend, _ = SeaSaltEmissions()(*args)
+        self.assertGreater(float(tend.tracers[mass_name("ss", "cor")][-1, 0]), 0.0)
