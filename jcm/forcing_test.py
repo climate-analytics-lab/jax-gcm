@@ -993,6 +993,25 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prep_jam_aux_inputs"):
             read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
 
+    def test_dust_reader_rejects_a_clipped_build_whose_max_rounds_above_one(self):
+        # Regridding a clipped map interpolates over the plateau: the shipped
+        # t106 bundle peaks at 1.0000000000000002, which an exact == 1.0 test
+        # read as "not clipped" and served silently.
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0 + 2e-16
+        vals[2, 2] = 0.7
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        with self.assertRaisesRegex(ValueError, "prep_jam_aux_inputs"):
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+
     def test_dust_reader_accepts_an_unclipped_cam_erodibility_build(self):
         import xarray as xr
         from jcm.forcing import read_dust_source

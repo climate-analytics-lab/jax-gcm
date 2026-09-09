@@ -67,8 +67,11 @@ def _validate_bc_fields(ds) -> None:
         "sst":  (220.0, 320.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
-        "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
-        "snowc":    (0.0, 20000.0),  # mm snow depth (we clip > 20000 to 0 anyway, but reject negatives)
+        # SPEEDY's vegetation-weighted root-zone availability INDEX, 1 at
+        # field capacity (jcm.data.bc.compile) — not a water depth. The bound
+        # stays loose to admit legacy files carrying an unnormalised field.
+        "soilw_am": (0.0, 5.0),  # fraction [0, 1]
+        "snowc":    (0.0, 20000.0),  # snow-cover fraction [0, 1]; the loose bound admits legacy mm-depth files, which are clipped later
     }
     for name, (lo, hi) in HARD_RANGES.items():
         if name not in ds.data_vars:
@@ -1171,7 +1174,11 @@ def _reject_truncated_erodibility(da, arr) -> None:
     text += " " + str(getattr(da, "name", ""))
     if "mbl_bsn_fct_geo" not in text and "/dst_" not in text:
         return
-    if not (arr.max() == 1.0 and (arr == 1.0).sum() > 1):
+    # Tolerant, not exact: regridding a clipped map interpolates over the
+    # plateau and lands a hair either side of 1 (the t106 bundle's maximum is
+    # 1.0000000000000002), which an == 1.0 test reads as "not clipped".
+    tol = 1e-9
+    if not (arr.max() <= 1.0 + tol and (arr >= 1.0 - tol).sum() > 1):
         return
     raise ValueError(
         "This CAM dust-erodibility map was clipped to [0, 1] when it was "
