@@ -157,8 +157,10 @@ in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
 
 **What we do.** Natural emissions are faithful ports of the HAMMOZ schemes — Gong
 (2003) sea-salt, Nightingale (2000) DMS, Tegen et al. (2002) dust — collapsed to
-differentiable jittable forms reading prescribed source/erodibility fields from
-``ForcingData`` (inert until supplied). Anthropogenic emissions are either bulk
+differentiable jittable forms. Gong sea salt is computed **online** from the
+lowest-level wind and open-water fraction, so it needs no input file; DMS and
+dust read prescribed seawater-concentration / erodibility fields from
+``ForcingData`` and are inert until those are supplied. Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields (#498/#513). Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a

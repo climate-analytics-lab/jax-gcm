@@ -53,8 +53,9 @@ alternative (all fields on one ERA5 land-sea mask).
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
 *not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
-detected and can be rejected at load. Emissions / oxidant / DMS / dust fields are
-inert until the data mirror supplies them. The GHG clamp beyond coverage is a
+detected and can be rejected at load. Prescribed emission / oxidant / DMS /
+dust fields are inert until the data mirror supplies them (online Gong sea
+salt needs no file — see {doc}`aerosol`). The GHG clamp beyond coverage is a
 simplification for slowly-evolving species.
 
 **Code pointers.**

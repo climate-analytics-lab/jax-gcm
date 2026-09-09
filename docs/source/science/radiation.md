@@ -68,10 +68,14 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   radius with no LWC dependence — is live on every 1M composition, including the
   release-validated ``t63-echam-1m`` / ``t106-echam-1m`` configurations (#717);
   2M configurations use microphysical effective radii.
-- `science` — the grey two-stream backend consumes only the *broadband* MACv2-SP
-  optics; it does not read the *per-band* online-aerosol optics that only
-  ``rrtmgp.py`` consumes. A grey + JAM-online-aerosol configuration therefore
-  silently drops the aerosol direct effect (see {doc}`configurations`, Tier 2).
+- `science` — the grey two-stream backend reads a single *broadband* aerosol
+  profile (``aerosol.aod_profile``/``ssa_profile``/``asy_profile`` plus a column
+  ``angstrom`` it band-scales itself) rather than the per-band arrays only
+  ``rrtmgp.py`` consumes. ``JamOpticsTerm`` writes those broadband fields from
+  the SW band centred nearest 550 nm, so a grey + JAM configuration keeps its
+  aerosol direct effect — at band-centre rather than exact-550 nm accuracy, and
+  only with ``jam_optics=True`` (the default; ``False`` leaves the carry slot
+  radiatively passive).
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
   (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
   direct-diffuse albedo needs a g-point→band map in the library (deferred).

@@ -99,10 +99,11 @@ mirror is reachable, except where noted.
 These compose and run but have no validation coverage; several have a known
 scientific gap, so treat results with care:
 
-- **Grey radiation + online (JAM) aerosol** — the grey two-stream scheme carries
-  no aerosol optics, so ``echam_physics(radiation_scheme="grey")`` with JAM
-  composes but the aerosol direct effect is silently absent (see
-  {doc}`radiation`). Reachable from either door: ``echam_physics(
+- **Grey radiation + online (JAM) aerosol** — the direct effect *is* carried,
+  through the broadband 550 nm-band profile ``JamOpticsTerm`` writes for grey
+  (see {doc}`radiation`), but at band-centre accuracy and with none of the
+  per-band spectral detail RRTMGP uses, and no validation campaign has been run
+  on the combination. Reachable from either door: ``echam_physics(
   aerosol_module="jam", radiation_scheme="grey", ...)`` or the CLI's
   factory-backed ``physics=echam-jam physics.radiation_scheme=grey``.
 - **Untabulated hybrid level counts with ``diffusion=auto``** — the ECHAM

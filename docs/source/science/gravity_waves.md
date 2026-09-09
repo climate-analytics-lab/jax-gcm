@@ -58,10 +58,14 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
 background + frontal storm-track deposition — frontal-only under-drags the
 subtropical jet, and some double-counting near strong fronts is accepted;
 retune ``taubgnd`` and the Hines source strength jointly if it shows) or
-``"none"``. The frontal term is inert without a dycore-supplied
-``"frontogenesis"`` diagnostic; a lat-lon provider exists for the dinosaur
-backend (``DinosaurDycore(compute_frontogenesis=True)``), while the pySES/pg2
-unstructured-grid provider is a follow-up (#568/#564).
+``"none"``. The frontal term needs a dycore-supplied ``"frontogenesis"``
+field; both backends provide one — dinosaur's lat-lon form and pySES's
+CAM-SE GLL-grid form averaged to pg2 (mirroring
+``gravity_waves_sources.F90``). ``Model`` switches a backend's
+``compute_frontogenesis`` flag on automatically when a composed term declares
+the field (provider flags are cost knobs, not configuration), and fails at
+construction if no provider exists at all — the term never silently runs
+inert.
 ``UpperTemperatureRelaxation`` is primarily a temperature relaxation; the CAM
 ``rayleigh_friction.F90`` tanh form appears only in its optional wind branch.
 
