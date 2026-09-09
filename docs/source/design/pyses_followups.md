@@ -1,1 +1,0 @@
-- [ ] JAM term: .at[].set with float64 value on float32 operand under x64 (FutureWarning in ne30 2m-jam run; find via JAX_DEBUG... or grep scatter sites in jam/) — pin like PR #564 conds
