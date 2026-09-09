@@ -10,21 +10,34 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+#: Per-column flag published by the emission terms: 1 where the emission wind
+#: fell back to the lowest model level, 0 where the diagnosed 10 m wind was
+#: used. Zeroed every step with the other emission diagnostics, so a run in
+#: which the fallback persists is visible instead of quietly emitting 37-46 %
+#: too much sea salt. Deliberately NOT an ``emis_``/``emi_`` name: those
+#: prefixes select emission *fluxes* in the forcing reader and the burden
+#: report.
+MODEL_LEVEL_WIND_KEY = "wind_10m_model_level"
 
-def wind_10m(state, diagnostics) -> jnp.ndarray:
-    """Diagnosed 10 m wind speed [m/s], shaped ``(ncols,)``.
 
-    Reads the ECHAM ``nsurf_diag`` reduction published by the vertical-diffusion
-    term (which owns the surface-layer profile). Emission terms run before
-    vdiff in the ECHAM ordering, so this is the previous step's 10 m wind —
-    the same one-step lag the dust term's ``u*`` already carries.
+def wind_10m(state, diagnostics):
+    """Emission wind [m/s] and its provenance, both shaped ``(ncols,)``.
 
-    The lowest model level is the fallback wherever no reduction has been
-    diagnosed: with no vertical-diffusion term composed there is no surface
-    layer to reduce through, and on the first step of a run its carry is still
-    zero (a zero 10 m wind under a moving lowest level can only mean "not
-    diagnosed yet", and emitting nothing for a step is worse than emitting
-    unreduced).
+    Returns ``(speed, from_model_level)`` — the ECHAM ``nsurf_diag`` 10 m
+    reduction published by the vertical-diffusion term, and a 0/1 flag per
+    column saying where that was unavailable and the lowest model level was
+    used instead.
+
+    Emission terms run before vdiff in the ECHAM ordering, so the value read
+    here is the previous step's. ``vertical_diffusion`` is a **declared**
+    cross-step slot (``Physics.initial_carry_state``), so this is the
+    deliberate carry #673 distinguishes from an undeclared stale read, and the
+    same one-step lag the dust term's ``u*`` already carries.
+
+    The fallback is therefore reachable only where no 10 m wind can exist: on
+    step 1 of a cold start, whose carry slot is still zero-filled because no
+    step has diagnosed a surface layer yet, or with no vdiff term composed at
+    all. A resumed run carries a real 10 m wind and never takes it.
     """
     lowest = jnp.sqrt(
         jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30)
@@ -32,6 +45,10 @@ def wind_10m(state, diagnostics) -> jnp.ndarray:
     vdiff = diagnostics.get("vertical_diffusion")
     speed_10m = getattr(vdiff, "wind_10m", None) if vdiff is not None else None
     if speed_10m is None:
-        return lowest
+        return lowest, jnp.ones_like(lowest)
     speed_10m = jnp.ravel(speed_10m)
-    return jnp.where(speed_10m > 0.0, speed_10m, lowest)
+    # A zero 10 m wind under a moving lowest level can only mean "not
+    # diagnosed yet": the reduction is strictly positive wherever it has run.
+    unset = speed_10m <= 0.0
+    return (jnp.where(unset, lowest, speed_10m),
+            unset.astype(lowest.dtype))

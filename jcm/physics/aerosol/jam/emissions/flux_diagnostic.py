@@ -24,6 +24,7 @@ from typing import ClassVar
 
 import jax.numpy as jnp
 
+from jcm.physics.aerosol.jam.emissions.surface_wind import MODEL_LEVEL_WIND_KEY
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
 
@@ -118,14 +119,15 @@ def all_flux_keys() -> tuple[str, ...]:
     """Every per-step-reset flux key any helper in this module publishes.
 
     The reset term zeroes the whole family — emissions, biomass-burning
-    splits and both deposition kinds — because all of them accumulate
-    additively within a step and would otherwise integrate across steps
+    splits, both deposition kinds, and the emission-wind provenance flag —
+    because all of them are per-step state that would otherwise carry over
     via the threaded-back diagnostics dict.
     """
     return (emission_flux_keys()
             + tuple(f"emi_bb_{s}" for s in BB_SPECIES)
             + tuple(f"dry_{s}" for s in DEPOSITED_SPECIES)
-            + tuple(f"wet_{s}" for s in DEPOSITED_SPECIES))
+            + tuple(f"wet_{s}" for s in DEPOSITED_SPECIES)
+            + (MODEL_LEVEL_WIND_KEY,))
 
 
 def accumulate_deposition_fluxes(

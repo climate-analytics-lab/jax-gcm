@@ -31,7 +31,8 @@ from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
-from jcm.physics.aerosol.jam.emissions.surface_wind import wind_10m
+from jcm.physics.aerosol.jam.emissions.surface_wind import (
+    MODEL_LEVEL_WIND_KEY, wind_10m)
 
 # Gong-scheme constants (mo_ham_m7_emi_seasalt.f90).
 _NBIN = 300
@@ -117,7 +118,8 @@ class SeaSaltEmissions(PhysicsTerm):
     name: ClassVar[str] = "jam_seasalt_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
-    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
+    provides: ClassVar[tuple[str, ...]] = (
+        emission_flux_keys() + (MODEL_LEVEL_WIND_KEY,))
 
     def __init__(
         self,
@@ -157,7 +159,7 @@ class SeaSaltEmissions(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         nlev, ncols = state.temperature.shape
 
-        u10 = wind_10m(state, diagnostics)
+        u10, from_model_level = wind_10m(state, diagnostics)
         seafrac = self._open_water_fraction(forcing, terrain, ncols)
         wind = p.scale * u10 ** p.wind_exponent * seafrac   # (ncols,)
 
@@ -181,5 +183,7 @@ class SeaSaltEmissions(PhysicsTerm):
             diagnostics, tracer_tends,
             diagnostics["air_density"],
             diagnostics["layer_thickness"])
+        diagnostics = {**diagnostics, MODEL_LEVEL_WIND_KEY: jnp.maximum(
+            diagnostics.get(MODEL_LEVEL_WIND_KEY, 0.0), from_model_level)}
 
         return tendency, diagnostics

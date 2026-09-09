@@ -291,11 +291,32 @@ merge = -(bn - bm)*10/z1                      stable   (CM|U| < CM_n|U|)
 Building it from the per-tile `CM·|U|` the surface stress already uses means the
 10 m wind cannot drift from the momentum exchange, and the stable/unstable
 branch needs no separate Richardson number (the two branches meet continuously
-at `Ri = 0`, where `CM|U| = CM_n|U|`). Emission terms read it through
-`emissions/surface_wind.py`; with no vdiff term composed there is no surface
-layer to reduce through and they fall back to the lowest level. Emissions run
-before vdiff in the ECHAM ordering, so the value is one step old — the same lag
-the dust term's `u*` already carries.
+at `Ri = 0`, where `CM|U| = CM_n|U|`). The profile factor is built from the
+`zepdu2`-floored speed the coefficients themselves used (`max(|U|, 1 m/s)`),
+or ECHAM's calm-wind floor would be misread as a stability signal; the
+reduction it yields then multiplies the true wind.
+
+Emission terms read the result through `emissions/surface_wind.py`. They run
+*before* vdiff in the ECHAM ordering, so the value is one step old. This is
+the **declared** cross-step carry — `vertical_diffusion` is one of the slots
+`Physics.initial_carry_state` seeds — i.e. the deliberate pattern #673
+distinguishes from an accidental stale `.get()`, and the same lag the dust
+term's `u*` already carries. When #673's `carry_slots` check lands this read
+is one to declare explicitly.
+
+**The fallback to the lowest model level is bootstrap-only, by construction.**
+The 10 m wind *cannot* exist on step 1 of a cold start: emissions run first,
+and the `vertical_diffusion` carry slot is seeded zero-filled
+(`initial_carry_state`; verified — `surface_friction_velocity` and `wind_10m`
+are both exactly 0 there), so no surface layer has been diagnosed yet.
+(A resumed run carries a real 10 m wind and never takes the fallback; nor does
+a composition with no vdiff term, where there is no surface layer at all.)
+Because taking it silently would mean emitting 37-46 % too much sea salt, the
+emission terms publish a per-column flag `wind_10m_model_level` — 1 where the
+model level was used, 0 where the diagnosed wind was — zeroed every step with
+the other emission diagnostics. It is 1 on step 1 of a cold start and 0
+thereafter; a run in which it stays non-zero is a bug, and the JAM integration
+test asserts exactly that.
 
 ### Dust source gating
 

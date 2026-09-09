@@ -32,12 +32,9 @@ class JamIntegrationTest(unittest.TestCase):
                 aerosol_module="jam", cloud_scheme="2m", **physics_kwargs
             ),
         )
-        # ~3 h (6 steps). Emission -> transport -> microphysics core ->
-        # activation is a multi-step chain on a cold start with no seeded
-        # aerosol, and the natural-emission terms read the previous step's
-        # surface layer, so at 3 steps the core still sees an empty aerosol
-        # state and the activation assertion below measures spin-up rate
-        # rather than coupling.
+        # ~3 h (6 steps): on a cold start with no seeded aerosol the
+        # emission -> transport -> core -> activation chain needs that long to
+        # produce anything, so 3 steps would assert on the spin-up rate.
         return model, model.run(save_interval=0.125, total_time=0.125)
 
     def test_runs_finite_with_ham_aerosol(self):
@@ -74,6 +71,15 @@ class JamIntegrationTest(unittest.TestCase):
         # fails here (measured on a healthy cold-start run: activated_cdnc max
         # ~66, qnc max ~3e-5 after 3 steps).
         physics = predictions.physics
+        # The emission wind fell back to the model level on step 1 only (#723):
+        # by the end of a multi-step run no column is still flagged.
+        from jcm.physics.aerosol.jam.emissions.surface_wind import (
+            MODEL_LEVEL_WIND_KEY,
+        )
+        self.assertEqual(
+            float(np.max(np.asarray(physics[MODEL_LEVEL_WIND_KEY]))), 0.0,
+            "emission wind still falling back to the lowest model level",
+        )
         self.assertIn("activated_cdnc", physics)
         self.assertGreater(
             float(np.max(np.asarray(physics["activated_cdnc"]))), 0.0,

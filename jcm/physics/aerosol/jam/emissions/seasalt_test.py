@@ -13,6 +13,9 @@ from jcm.physics.aerosol.jam.emissions.seasalt import (
     SeaSaltParameters,
     gong_class_factors,
 )
+from jcm.physics.aerosol.jam.emissions.surface_wind import (
+    MODEL_LEVEL_WIND_KEY,
+)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
 
@@ -149,5 +152,61 @@ class Wind10mTest(unittest.TestCase):
     def test_falls_back_to_the_lowest_level_without_vdiff(self):
         args = _inputs(wind=10.0)
         self.assertNotIn("vertical_diffusion", args[1])
-        tend, _ = SeaSaltEmissions()(*args)
+        tend, diag = SeaSaltEmissions()(*args)
         self.assertGreater(float(tend.tracers[mass_name("ss", "cor")][-1, 0]), 0.0)
+        # ... and says so: no vdiff term composed => every column flagged.
+        self.assertTrue(bool(jnp.all(diag[MODEL_LEVEL_WIND_KEY] == 1.0)))
+
+    def test_fallback_is_taken_on_step_one_and_never_again(self):
+        """The carry seeds step 1 with a zero-filled vdiff (#723, cf. #673)."""
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        state, diagnostics, forcing, terrain = _inputs(wind=10.0)
+        nlev, ncols = state.temperature.shape
+        key = mass_name("ss", "cor")
+
+        # Step 1: exactly what Model._build_initial_physics_carry supplies —
+        # the zero-filled structural template, no step having run yet.
+        step1 = {**diagnostics,
+                 "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev)}
+        tend1, diag1 = SeaSaltEmissions()(state, step1, forcing, terrain)
+        self.assertTrue(bool(jnp.all(diag1[MODEL_LEVEL_WIND_KEY] == 1.0)))
+        unreduced, _ = SeaSaltEmissions()(state, diagnostics, forcing, terrain)
+        self.assertAlmostEqual(float(tend1.tracers[key][-1, 0]),
+                               float(unreduced.tracers[key][-1, 0]), places=12)
+
+        # Step 2: vdiff has run, so the carried 10 m wind is real everywhere.
+        vd = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            wind_10m=jnp.full((ncols,), 9.04))
+        tend2, diag2 = SeaSaltEmissions()(
+            state, {**diagnostics, "vertical_diffusion": vd}, forcing, terrain)
+        self.assertTrue(bool(jnp.all(diag2[MODEL_LEVEL_WIND_KEY] == 0.0)))
+        self.assertAlmostEqual(
+            float(tend2.tracers[key][-1, 0]) / float(tend1.tracers[key][-1, 0]),
+            (9.04 / 10.0) ** 3.41, places=4)
+
+    def test_flag_is_per_column(self):
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        state, diagnostics, forcing, terrain = _inputs(wind=10.0, ncols=2)
+        nlev, ncols = state.temperature.shape
+        vd = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            wind_10m=jnp.asarray([9.0, 0.0]))
+        _, diag = SeaSaltEmissions()(
+            state, {**diagnostics, "vertical_diffusion": vd}, forcing, terrain)
+        np.testing.assert_allclose(np.asarray(diag[MODEL_LEVEL_WIND_KEY]),
+                                   [0.0, 1.0])
+
+    def test_reset_term_zeroes_the_flag_each_step(self):
+        """Otherwise step 1's flag would persist through the whole run."""
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            ResetEmissionFluxes, all_flux_keys,
+        )
+        self.assertIn(MODEL_LEVEL_WIND_KEY, all_flux_keys())
+        state, diagnostics, forcing, terrain = _inputs(wind=10.0)
+        _, diag = ResetEmissionFluxes()(
+            state, {**diagnostics, MODEL_LEVEL_WIND_KEY: jnp.ones((2,))},
+            forcing, terrain)
+        self.assertTrue(bool(jnp.all(diag[MODEL_LEVEL_WIND_KEY] == 0.0)))
