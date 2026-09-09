@@ -23,6 +23,10 @@ treatment):
   ENTERING each layer — stratiform from the microphysics ledger, convective
   from ``ConvectionData.precip_flux`` (the cuflx rain + snow budget) — so
   the collection rate follows the carrier that is actually falling there.
+  Both also partition the box by the STRATIFORM ``clear_fraction``, which is
+  the only cover the term has; a convective column with little stratiform
+  cloud therefore exposes nearly all its interstitial aerosol to convective
+  impaction through the cloud depth as well as below it (jax-gcm#781).
 * **Convective in-cloud scavenging** — the convective mirror of the
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
@@ -373,16 +377,10 @@ class WetScavenging(PhysicsTerm):
             conv_flux_in = jnp.zeros_like(state.temperature)
             rate_conv_incloud = jnp.zeros_like(state.temperature)
         else:
-            # Local carrier flux for impaction: the convective precip
-            # actually falling INTO each layer (cuflx generation above,
-            # less the evaporation already charged above), as in ECHAM
-            # xtwetdep and CAM. The surface flux applied from the
-            # convective cloud top down instead over-stated the carrier
-            # through the whole depth of the cloud, where the flux is
-            # still accumulating — up to ~6000x at cloud top, 1.6x on the
-            # column integral. Below cloud base the two agree to <3%; the
-            # flux profile also goes to zero above where precip first
-            # forms, which is the cloud-top confinement it replaces.
+            # Local carrier flux for impaction — the convective precip
+            # falling into this layer, as in ECHAM xtwetdep / CAM. It is
+            # zero above the first precip-forming level, which is itself
+            # the cloud-top confinement.
             conv_flux_in = conv.precip_flux
             conv_condensate = conv.qc_conv + conv.qi_conv
             if self._in_plume_convective:

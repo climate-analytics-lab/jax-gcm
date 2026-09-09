@@ -187,9 +187,11 @@ def convective_precip_fluxes(
     # Total precip flux crossing each layer's TOP interface: generation
     # above, less the sub-cloud evaporation already charged above (melting
     # only moves mass between the rain and snow legs). Bottom-interface
-    # value is ``cumsum(gen + zdrfl)``, which telescopes to
-    # ``rain_sfc + snow_sfc`` at the surface; shift by one layer for the
-    # top interface (zero at the model top).
+    # value is ``cumsum(gen + zdrfl)``, matching ``rain_sfc + snow_sfc`` at
+    # the surface; shift by one layer for the top interface (zero at the
+    # model top). The two differ only when a rain or snow leg goes negative
+    # mid-column and is clamped individually above, which the same floor
+    # here bounds.
     flux_bottom = jnp.maximum(jnp.cumsum(gen + zdrfl_per_level), 0.0)
     precip_flux = jnp.concatenate(
         [jnp.zeros_like(flux_bottom[:1]), flux_bottom[:-1]]
@@ -427,14 +429,15 @@ def calculate_tendencies(
     # exported precip the column never paid for (review finding 0.1).
     precip_rate = rain_sfc + snow_sfc
 
-    # In-plume condensate diagnostic (kg/kg where the updraft is active),
-    # phase-split by the full-level temperature exactly like the detrained
-    # condensate above. Consumers (wet deposition, convective tracer
-    # scavenging, COSP) read the SUM, so the split only makes the two
-    # diagnostics individually meaningful.
+    # In-plume condensate (kg/kg where the updraft is active), phase-split by
+    # the UPDRAFT temperature: ECHAM keys in-plume latent heat to ``ptu``
+    # (mo_cuascent.f90:370) and only environment quantities to ``ptenh``, so
+    # the plume's own freezing level is the plume's, not the environment's.
+    # Consumers read the SUM; the split makes each half meaningful on its own.
     lu_in_plume = jnp.where(updraft_state.mfu > 0, updraft_state.lu, 0.0)
-    qc_conv = liquid_frac * lu_in_plume
-    qi_conv = (1.0 - liquid_frac) * lu_in_plume
+    plume_liquid = jnp.where(updraft_state.tu > c.tmelt, 1.0, 0.0)
+    qc_conv = plume_liquid * lu_in_plume
+    qi_conv = (1.0 - plume_liquid) * lu_in_plume
 
     # Detrained-condensate tendencies (ECHAM zxtec = g/Δp·plude split by
     # full-level temperature into pxtecl/pxteci). Replaces the previous

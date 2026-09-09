@@ -952,6 +952,23 @@ built):
    sets, run each in a **separate process** (e.g. a fresh interpreter or a
    separate CLI invocation).
 
+Single-column RCE: the sub-cloud layer is part of the initial state
+-------------------------------------------------------------------
+
+``jcm.rce.rce_initial_state`` seeds a **dry-adiabatic (well-mixed) sub-cloud
+layer** below ``mixed_layer_top_m`` (default 800 m) under the ``lapse_rate``
+free troposphere. This is a change of default: an RCE case started before it
+began at ``lapse_rate`` all the way to the surface.
+
+It matters for any package containing ``TiedtkeConvection``. ECHAM's ``cubase``
+trigger lifts a dry parcel from the lowest level and drops the column the moment
+it is not buoyant, so a sounding running at 6.5 K/km to the surface loses more
+parcel buoyancy per level than the sub-grid excess ``zlift`` (≤ 1 K) can cover,
+never reaches its LCL, and gets **no convection at all** — silently, since
+turbulent mixing keeps the profiles looking plausible. Pass
+``mixed_layer_top_m=0.0`` to recover the previous unmixed profile. See
+:doc:`design/convective_trigger_soundings`.
+
 Next Steps
 ----------
 

@@ -5,6 +5,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.convection.tracer_transport import (
     ConvTransportParameters,
@@ -525,10 +526,12 @@ class ComposedColumnScavengingTest(unittest.TestCase):
     validation does — Tiedtke + convective tracer transport + JAM wet
     deposition — and asserts the STATE it is supposed to produce.
 
-    One prescribed day at 47 levels, ~35 s: under the repo's slow threshold
-    on purpose, so the guard runs on the push gate rather than only on a PR.
+    One prescribed day at 47 levels. ~34 s against a warm JAX compilation
+    cache but ~203 s cold, and CI's cache is job-local (run_test.yaml), so
+    by the cost CI actually pays this is a slow test.
     """
 
+    @pytest.mark.slow
     def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics

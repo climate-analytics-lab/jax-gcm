@@ -536,16 +536,36 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         self.assertTrue(np.any(cond > 0.0), "in-plume condensate is all zero")
         # Condensate lives where the plume does, and nowhere else.
         self.assertTrue(np.all(cond[mfu <= 0.0] == 0.0))
-        # Phase split by the environment temperature, as for detrainment.
-        warm = np.asarray(T) > 273.15
-        self.assertTrue(np.all(np.asarray(tend.qi_conv)[warm] == 0.0))
-        self.assertTrue(np.all(np.asarray(tend.qc_conv)[~warm] == 0.0))
+        # Phase split by the PLUME's temperature (ECHAM keys in-plume latent
+        # heat to ptu), not the environment's: the plume is warmer, so its
+        # freezing level sits above the environment's.
+        tu = np.asarray(state.tu)
+        qc, qi = np.asarray(tend.qc_conv), np.asarray(tend.qi_conv)
+        self.assertTrue(np.all(qi[tu > 273.15] == 0.0))
+        self.assertTrue(np.all(qc[tu <= 273.15] == 0.0))
+        env_warm_plume_cold = (np.asarray(T) > 273.15) & (tu <= 273.15)
+        self.assertTrue(
+            np.all(qc[env_warm_plume_cold] == 0.0),
+            "split follows the environment, not the plume",
+        )
         flux = np.asarray(tend.precip_flux)
         self.assertTrue(np.any(flux > 0.0), "convective precip flux is zero")
-        # The flux entering a layer is monotone downward (generation adds,
-        # sub-cloud evaporation removes) and reaches the surface value.
-        surf = np.argmax(np.asarray(p))
+        # The carrier flux must close against an INDEPENDENTLY computed
+        # quantity, not just be nonzero: the cuflx ledger telescopes, so the
+        # flux entering the bottom layer plus whatever that layer itself adds
+        # is the surface precipitation the scheme reports.
+        surf = int(np.argmax(np.asarray(p)))
         self.assertGreater(flux[surf], 0.0)
+        gen_sfc = float(np.asarray(tend.precip_formation)[surf])
+        np.testing.assert_allclose(
+            flux[surf] + gen_sfc, float(tend.precip_conv), rtol=2e-3,
+            err_msg="precip_flux does not telescope to precip_conv",
+        )
+        # ...and it only accumulates downward (generation adds, sub-cloud
+        # evaporation removes, melting only moves mass between the legs).
+        top_first = np.asarray(p)[0] < np.asarray(p)[-1]
+        prof = flux if top_first else flux[::-1]
+        self.assertGreaterEqual(float(np.min(np.diff(prof))), -1e-12)
 
 
 if __name__ == "__main__":
