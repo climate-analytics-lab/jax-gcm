@@ -97,8 +97,9 @@ scientific gap, so treat results with care:
 - **Grey radiation + online (JAM) aerosol** — the grey two-stream scheme carries
   no aerosol optics, so ``echam_physics(radiation_scheme="grey")`` with JAM
   composes but the aerosol direct effect is silently absent (see
-  {doc}`radiation`). Grey ECHAM is reachable only through the Python factory, not
-  the CLI.
+  {doc}`radiation`). Reachable from either door: ``echam_physics(
+  aerosol_module="jam", radiation_scheme="grey", ...)`` or the CLI's
+  factory-backed ``physics=echam-jam physics.radiation_scheme=grey``.
 - **Untabulated hybrid level counts with ``diffusion=auto``** — the ECHAM
   ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
   level count falls back to the uniform SPEEDY del² profile with a warning, which

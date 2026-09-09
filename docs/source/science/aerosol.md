@@ -14,13 +14,16 @@ carried as flat ``state.tracers`` keys (``m_``/``n_`` interstitial mass/number,
 ``mc_``/``nc_`` cloud-borne, ``g_`` gas precursors). It is assembled as an ordered
 HAMMOZ-style ``PhysicsTerm`` chain by
 ``jcm/physics/aerosol/jam/jam_terms.py::jam_aerosol_physics`` and spliced into
-``echam_physics``. The chain is: reset emission accumulators → natural emissions
-(sea-salt, DMS, dust) + optional anthropogenic / pre-speciated → prescribed
-oxidants + gas-phase sulfur chemistry → physics-side vertical transport (turbulent
-diffusion of all tracers + convective transport of interstitial/gas tracers) →
-cloud-borne carry store → **microphysics core** → optional online optics → ARG
+``echam_physics``. The chain is: aerosol carry-slot seeder → cloud-borne carry
+store → reset emission accumulators → natural emissions
+(sea-salt, DMS, dust) + optional anthropogenic / pre-speciated → physics-side
+vertical transport (turbulent diffusion of all tracers + convective transport of
+interstitial/gas tracers) → prescribed oxidants + gas-phase sulfur chemistry
+(producing the H₂SO₄/SOAG the core condenses the same step) →
+**microphysics core** → optional online optics → ARG
 activation → heterogeneous ice nucleation → sedimentation → dry deposition →
-cloud-borne exchange → aqueous sulfur chemistry → wet scavenging.
+cloud-borne exchange → aqueous sulfur chemistry → wet scavenging. Diagnostics
+thread in this call order, so custom compositions should preserve it.
 
 The microphysics core is a swap point: ``"placeholder"`` (the bare-factory
 default, keeping the Apache-2.0 core importable with no GPL dependency) is a
@@ -71,8 +74,9 @@ source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
 activation for the log-normal modes, using the **κ-Köhler** critical
 supersaturation with κ read from the MAM4 core's per-mode volume-weighted
 hygroscopicity, and a single characteristic updraft ``w = √(2·TKE/3)`` from the
-previous step's TTE-TKE. Two shape-coefficient variants are selectable
-(``arg2000`` default, ``ghosh2025`` revision).
+previous step's TTE-TKE. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
+configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
+original paper's) is the bare-factory default.
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
 
 **What ECHAM/CAM does.** This is CAM's ``ndrop.F90`` structure

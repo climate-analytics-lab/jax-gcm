@@ -60,7 +60,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   faithful ECHAM-style ``het_mxphase_freezing`` transliteration is defined and
   exported alongside it but is currently **unused** (#662).
 - The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
-  radius (#717); production configurations run 2M.
+  radius (#717) — live on the release-validated ``t63-echam-1m`` /
+  ``t106-echam-1m`` configurations; 2M paths use microphysical radii.
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step
   (#667).
