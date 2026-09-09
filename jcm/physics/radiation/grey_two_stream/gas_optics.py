@@ -5,7 +5,6 @@ for atmospheric gases in both shortwave and longwave spectral regions.
 
 Simplified implementation with parameterized absorption.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp

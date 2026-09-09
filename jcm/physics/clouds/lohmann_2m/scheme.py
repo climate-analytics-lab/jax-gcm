@@ -1,8 +1,9 @@
 """Lohmann 2M column-sweep orchestrator and composable physics term.
 
 ``cloud_microphysics_2m`` runs the full two-moment process chain over a
-column as one flux-coupled top-down ``lax.scan`` — a faithful
-transcription of ECHAM's ``column_processes`` loop — and
+column as one flux-coupled top-down ``lax.scan`` — the flux-coupling
+structure of ECHAM's ``column_processes`` loop, but with a process order
+that matches neither ECHAM nor CAM exactly (see the term docstring) — and
 ``Lohmann2MMicrophysics`` wraps it as a composable ``PhysicsTerm``.
 Design rationale and the state-splitting convention:
 ``docs/source/design/lohmann_2m_column_processes.md``.
@@ -91,13 +92,16 @@ def cloud_microphysics_2m(
     top-down ``lax.scan``, because in the reference every process at level
     ``jk`` sees the precipitation state (``prfl``/``pssfl``/``zclcpre``/
     ``zxiflux``) that the levels above produced *this step*. Splitting the
-    "level-independent" processes out of the sweep — the previous layout —
-    silently severed exactly those couplings: rain/snow-from-above
-    accretion ran on tracers that no longer existed (#662 finding 5), the
-    precipitation-cover geometry ``zclcstar`` was unavailable (#685), and
-    ice created mid-step never met its aggregation sink (#686).
+    "level-independent" processes out of the sweep would sever exactly those
+    couplings: rain/snow-from-above accretion would run on tracers that do
+    not yet exist (#662 finding 5), the precipitation-cover geometry
+    ``zclcstar`` would be unavailable (#685), and ice created mid-step would
+    never meet its aggregation sink (#686).
 
-    Per level, in ECHAM section order (numbers = Fortran comments):
+    Per level, ordered by ECHAM's section numbering (numbers = Fortran
+    comments) but matching neither reference exactly — the sediment→melt
+    sweep is MG/PUMAS's (3.1) and warm precipitation runs after condensation
+    and activation (7.1):
 
       4.    Ice sedimentation (:func:`sedimentation_ice`), then
       3.1   melting of snow / falling ice / in-cloud ice

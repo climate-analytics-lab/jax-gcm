@@ -36,7 +36,6 @@ Based on the ECHAM6/ICON microphysics as described in:
 - Neubauer et al. (2019): The global aerosol–climate model ECHAM6.3–HAM2.3 – Part 2:  Cloud evaluation, aerosol 
   radiative forcing, and climate sensitivity
 
-Date: 2025-12-15
 """
 
 # The scheme was split from a single ~3700-line module into this package

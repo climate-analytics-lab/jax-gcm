@@ -3,7 +3,6 @@
 This module defines the data structures and configuration parameters
 used throughout the radiation scheme.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
@@ -216,8 +215,8 @@ class RadiationData:
     #
     # Stored EXPLICITLY rather than re-derived from the flux slots each
     # step: the ratio is unrecoverable once the all-sky flux is zero, so a
-    # companion landing on a dark column used to erase the fraction and
-    # report a zero aerosol effect for the rest of the interval —
+    # companion landing on a dark column would otherwise erase the fraction
+    # and report a zero aerosol effect for the rest of the interval —
     # including after sunrise.
     #
     # Four separate nodal-shaped fields rather than one stacked (4, ...)
@@ -239,7 +238,7 @@ class RadiationData:
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
     # samples remain reproducible per (step, column). Lives on the carry
-    # so radiation no longer needs the model-wide step counter — the
+    # so radiation does not need the model-wide step counter — the
     # operator-split cross-step pass-through already threads this struct
     # from one ``dt`` to the next.
     step: jnp.ndarray                # Radiation step counter [int32] scalar
@@ -432,9 +431,9 @@ class RadiationState(NamedTuple):
     h2o_vmr: jnp.ndarray            # Water vapor volume mixing ratio [nlev]
     o3_vmr: jnp.ndarray             # Ozone volume mixing ratio [nlev]
     # Specific humidity is carried alongside ``h2o_vmr`` so the RRTMGP path
-    # never has to invert the grey scheme's vmr convention. Recovering q from
-    # h2o_vmr used to give back the MIXING RATIO q/(1-q), which the library
-    # then divided by (1-q) a second time (#678).
+    # never has to invert the grey scheme's vmr convention: recovering q from
+    # h2o_vmr would give back the MIXING RATIO q/(1-q), which the library
+    # would then divide by (1-q) a second time (#678).
     specific_humidity: jnp.ndarray  # Specific humidity (kg/kg) [nlev]
     
     # Cloud properties

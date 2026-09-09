@@ -4,7 +4,6 @@ This module defines the aerosol parameters following the SpeedyPhysics pattern
 using tree_math.struct for JAX compatibility. Based on the ICON implementation
 in mo_bc_aeropt_splumes.f90.
 
-Date: 2025-01-11
 """
 
 import jax.numpy as jnp

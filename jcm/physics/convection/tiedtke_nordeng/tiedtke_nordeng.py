@@ -17,7 +17,6 @@ References:
   scheme at ECMWF and their impact on the mean and transient activity of the
   model in the tropics. ECMWF Tech. Memo. 206.
 
-Date: 2025-01-09
 
 """
 
@@ -184,10 +183,9 @@ def find_cloud_base(temperature: jnp.ndarray,
 
     The consequence, which is ECHAM's and not an approximation of it: a
     column whose parcel is unbuoyant at its own LCL gets no convection,
-    however thin the inhibition layer is. An earlier version of this function
-    searched upward for the first level that was both condensing and buoyant
-    (the LFC) — that is NOT what the reference does, and it let a plume start
-    above a layer the parcel could never have crossed.
+    however thin the inhibition layer is. The reference does NOT search
+    upward for the first condensing-and-buoyant level (the LFC); doing so
+    would let a plume start above a layer the parcel could never have crossed.
 
     ``zlift`` is the sub-grid thermal excess from vdiff's prognostic θ_v
     variance (ECHAM ``pthvsig``); see :func:`cloud_base_lift`. It is what
@@ -849,13 +847,11 @@ def _tiedtke_convection_toa_first(
     #     the realized cloud is shallower than 200 hPa (line 752; see the
     #     demotion in ``apply_full_convection``).
     #
-    # Two non-ECHAM proxies used to live here and are gone: an RH-based
-    # relabel of moist-troposphere surface plumes as "mid-level" (a stand-in
-    # for the missing ``cubasmc`` that handed them ``entrmid`` = 1e-4 /m,
-    # 30x less entraining than the ``entrscv`` they get as shallow), and a
-    # CAPE sigmoid at 1000 J/kg standing in for the moisture-convergence
-    # test. Both mislabels selected the wrong entrainment for exactly the
-    # regimes that matter (#699 records the measured consequences).
+    # Type selection uses the moisture-convergence test — not an RH relabel
+    # of moist-troposphere surface plumes as "mid-level", nor a CAPE sigmoid
+    # at 1000 J/kg. Both proxies select the wrong entrainment (``entrmid`` =
+    # 1e-4 /m is 30x less entraining than the ``entrscv`` a shallow plume
+    # gets) for exactly the regimes that matter (#699).
     # --- Smooth trigger and type selection (maintainability review B.2.2) --
     # The hard ``lax.cond(cape > 100)`` activation and the deep/shallow/mid
     # ``lax.switch`` made every convection parameter's gradient exactly zero
@@ -1177,10 +1173,10 @@ def _tiedtke_convection_toa_first(
         )
         zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
         zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
-        # Bounds per ECHAM: the CFL cap above, cmfcmin (1e-10) below —
-        # an invented 0.001 floor here used to bind on weak first
-        # guesses, and a BOUND rescale target erases the closure/trigger
-        # dependence of the amplitude (rescale = const/zmfub), deadening
+        # Bounds per ECHAM: the CFL cap above, cmfcmin (1e-10) below. A
+        # larger (e.g. 0.001) floor would bind on weak first guesses, and a
+        # BOUND rescale target (rescale = const/zmfub) would erase the
+        # closure/trigger dependence of the amplitude, deadening
         # d/d(trigger_cape) everywhere.
         zmfub1 = jnp.clip(zmfub1, config.cmfcmin, mfu_cfl_max)
         # Deliberate deviation from ECHAM: the rescale applies only when the

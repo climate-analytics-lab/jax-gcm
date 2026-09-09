@@ -26,7 +26,6 @@ Typed sub-structs are written into the diagnostics dict under the legacy
 consumer terms migrate to scheme-named terms in later phases, this term
 will move to writing scheme-public keys directly.
 
-Date: 2026-05-07
 """
 
 from __future__ import annotations
