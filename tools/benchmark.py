@@ -257,6 +257,38 @@ def _auto_emission_files(cfg) -> list[str]:
     return out
 
 
+def _auto_ozone_files(cfg) -> list[str]:
+    """``hf://`` ozone bundle ``forcing.ozone_file=auto`` resolves to.
+
+    The same lazy-resolution gap :func:`_auto_emission_files` covers: ``auto``
+    is the shipped default and is resolved inside model construction, so the
+    literal-path walk cannot see it. jcm REFUSES an unresolvable ``auto`` ozone
+    rather than substituting the analytic profile (#774), which makes a cold
+    cache a hard failure the prefetch can prevent.
+
+    The packaged ``jcm/data/bc/*/ozone.nc`` may pre-empt the mirror bundle for
+    a grid it matches, so this can warm one file the run then does not open —
+    cheaper than resolving packaged shapes here, and it removes the cold-cache
+    failure for every grid.
+    """
+    forcing = cfg.get("forcing") or {}
+    if str(forcing.get("ozone_file", "auto")) != "auto":
+        return []
+    grid = cfg.get("grid") or {}
+    trunc, nlev = grid.get("spectral_truncation"), grid.get("layers")
+    if trunc is None or nlev is None:
+        return []
+    mm = _load_mirror_manifest()
+    manifest = mm.load_manifest()
+    product = mm.product_for_key(manifest, "ozone_file")
+    token = f"t{int(trunc)}"
+    if product is None or not mm.is_published(
+            manifest, product, token, int(nlev),
+            str(grid.get("vertical", "hybrid"))):
+        return []
+    return ["hf://" + mm.bundle_path(manifest, product, token, int(nlev))]
+
+
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,
 # mirroring ``jcm.runners._product_available_years`` — a preset may mix yearly
 # products with different coverage (era5 surface files run to 2024 while the
@@ -276,8 +308,9 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
     ``file`` and returns the concrete paths, skipping ``auto``/``null``/``none``
     (resolved lazily at build time) and unset ``???`` values — then ADDS the
-    ``auto`` emission bundles a JAM preset resolves lazily (see
-    :func:`_auto_emission_files`), which the ``file``-key walk cannot see.
+    ``auto`` emission and ozone bundles resolved lazily at build time (see
+    :func:`_auto_emission_files`, :func:`_auto_ozone_files`), which the
+    ``file``-key walk cannot see.
 
     A ``{year}`` pattern (transient emissions/oxidants/ozone/surface bundles)
     is EXPANDED to its concrete yearly files here — over ``forcing.years`` and
@@ -334,6 +367,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
             # ``*_available_years`` overrides live under ``forcing``).
             _add(v, _available_for(k) if group == "forcing" else None)
     out += _auto_emission_files(cfg)
+    out += _auto_ozone_files(cfg)
     return out
 
 

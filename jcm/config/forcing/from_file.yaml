@@ -51,10 +51,11 @@ oxidants_available_years: null
 align: auto
 
 # Ozone climatology netCDF, pre-interpolated to model levels (see
-# ``jcm.data.bc.interpolate_ozone``). ``auto`` (default) resolves the
-# packaged ``jcm/data/bc/<grid>/ozone.nc``, warning and falling back to
-# the analytical profile when none fits (~12 W/m² OLR low bias). ``null``
-# forces the analytical profile silently.
+# ``jcm.data.bc.interpolate_ozone``). ``auto`` (default) resolves the packaged
+# ``jcm/data/bc/<grid>/ozone.nc`` then the mirror bundle, and raises when
+# neither fits — the analytical profile's ~12 W/m² OLR low bias must be chosen,
+# not inherited. ``analytic`` (or ``null``) chooses it; a sigma grid, which has
+# no ozone product at all, still falls back with a warning.
 ozone_file: auto
 
 # --- Prescribed-emission inputs (JAM / online aerosol) -----------------------

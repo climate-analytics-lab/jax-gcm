@@ -24,6 +24,17 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 MEMBER = "speedy-t31"          # the cheapest member: no JAM aux-input lookup
 
 
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """Keep the input preflight off the network in every test.
+
+    The preflight's own behaviour is tested below by re-patching
+    ``_preset_data_files`` with a known input list.
+    """
+    monkeypatch.setattr(launch, "_hf_fetch", lambda rel: rel)
+    monkeypatch.setattr(launch, "_preset_data_files", lambda ovs: [])
+
+
 @pytest.fixture
 def scratch(tmp_path, monkeypatch):
     """Return a throwaway SCRATCH, so rundirs never touch the real one."""
@@ -169,3 +180,56 @@ def test_archive_setting_is_a_real_run_key():
     default = yaml.safe_load(
         (REPO / "jcm" / "config" / "run" / "default.yaml").read_text())
     assert "archive_ckpt_every" in default
+
+
+def test_prefetch_downloads_every_hf_input(monkeypatch):
+    """Every ``hf://`` input a member resolves to is pulled before submitting.
+
+    A matrix member is a ten-hour GPU job; an input that cannot be resolved
+    must fail on the submitting node, which has network, rather than inside
+    model construction on a compute node that does not (#774).
+    """
+    fetched = []
+    monkeypatch.setattr(launch, "_hf_fetch", lambda rel: fetched.append(rel))
+    monkeypatch.setattr(
+        launch, "_preset_data_files",
+        lambda ovs: ["hf://bundles/t63/terrain.nc",
+                     "hf://bundles/t63_l47/ozone_pd.nc"])
+    assert launch.prefetch(["physics=echam"]) == []
+    assert fetched == ["bundles/t63/terrain.nc", "bundles/t63_l47/ozone_pd.nc"]
+
+
+def test_prefetch_reports_an_unavailable_input(monkeypatch):
+    def boom(rel):
+        raise FileNotFoundError(f"hf://{rel} is not in the local cache")
+
+    monkeypatch.setattr(launch, "_hf_fetch", boom)
+    monkeypatch.setattr(launch, "_preset_data_files",
+                        lambda ovs: ["hf://bundles/t63_l47/ozone_pd.nc"])
+    missing = launch.prefetch([])
+    assert len(missing) == 1 and "ozone_pd.nc" in missing[0]
+
+
+def test_prefetch_reports_a_missing_local_input(monkeypatch, tmp_path):
+    monkeypatch.setattr(launch, "_preset_data_files",
+                        lambda ovs: [str(tmp_path / "nope.nc")])
+    assert launch.prefetch([]) == [str(tmp_path / "nope.nc")]
+
+
+def test_launch_refuses_when_an_input_is_unavailable(scratch, repo, monkeypatch):
+    """No job file is written when the preflight fails."""
+    monkeypatch.setattr(launch, "prefetch",
+                        lambda ovs: ["hf://bundles/t63_l47/ozone_pd.nc"])
+    with pytest.raises(SystemExit) as exc:
+        _launch(repo, "--tag", "prefetchfail")
+    assert "ozone_pd.nc" in str(exc.value)
+    assert not list((repo / "runs").glob("*.pbs"))
+
+
+def test_no_prefetch_generates_jobs_offline(scratch, repo, monkeypatch):
+    called = []
+    monkeypatch.setattr(launch, "prefetch",
+                        lambda ovs: called.append(ovs) or [])
+    _launch(repo, "--tag", "offlinegen", "--no-prefetch")
+    assert not called
+    assert list((repo / "runs").glob("*.pbs"))
