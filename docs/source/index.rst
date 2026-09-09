@@ -8,7 +8,7 @@ couples it to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages.
 
 The main target configuration is ECHAM physics on the T63L47 hybrid
 grid with RRTMGP radiation
-(``physics=echam grid=echam_t63_l47_hybrid``). The SPEEDY package
+(``+configuration=t63-echam-rrtmgp``). The SPEEDY package
 remains the lightweight default for quick tests, tutorials, and
 optimization examples.
 

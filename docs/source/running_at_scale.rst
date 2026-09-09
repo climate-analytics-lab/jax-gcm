@@ -21,17 +21,20 @@ executable, so it can be invoked either as a module or directly::
    # Default 10-day SPEEDY aquaplanet
    python -m jcm.main
 
-   # ECHAM T63L47 with the production RRTMGP radiation (physics=echam IS the
-   # RRTMGP one-moment package; there is no separate ``echam-rrtmgp`` group)
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
+   # ECHAM T63L47 with the production RRTMGP radiation, via the validated
+   # recipe (see "Validated configurations" below). The bare composition
+   # ``physics=echam grid=echam_t63_l47_hybrid`` also parses, but inherits the
+   # isothermal cold start, aquaplanet terrain and sponge-less run defaults —
+   # a combination that goes NaN within days at L47.
+   python -m jcm.main +configuration=t63-echam-rrtmgp
 
    # Held-Suarez dynamical-core test
    python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
        run.total_time=30 run.save_interval=1
 
-   # Chunked, resumable long run (run=longrun enables chunking; resumability
-   # additionally needs a stable checkpoint path)
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun \
+   # Chunked, resumable long run (the recipe includes run=longrun's chunking;
+   # resumability additionally needs a stable checkpoint path)
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
        run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
 
 The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
@@ -227,12 +230,13 @@ checkpoint intact). When the same command is launched again with the file
 already in place, the run restores from the checkpoint and only steps the
 remaining chunks::
 
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
-       run=longrun run.checkpoint_path=/scratch/$JOB_ID.ckpt
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
+       run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
 
 Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating
-checkpoint to a dated, never-overwritten archive, so a later experiment can
-restart from before a slowly-developing failure.
+checkpoint to a dated, never-overwritten archive at the first chunk boundary
+past each interval multiple (the cadence need not divide ``run.chunk_days``),
+so a later experiment can restart from before a slowly-developing failure.
 
 The same primitives are available directly to bring-your-own-driver workflows
 via :py:mod:`jcm.checkpoint`:
@@ -266,7 +270,7 @@ ERA5 (regridded to the model grid and cached locally by :mod:`jcm.data.era5`),
 and ``init=era5`` starts the run from the ERA5 state at the same date.
 Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
 
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
+   python -m jcm.main +configuration=t63-echam-rrtmgp \
        init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
 
 Prefetch on a login node first when compute nodes lack internet
@@ -316,13 +320,13 @@ Docker
 Build the CUDA-enabled image locally::
 
    docker build -t jcm .
-   docker run --rm --gpus all jcm physics=echam grid=echam_t63_l47_hybrid
+   docker run --rm --gpus all jcm +configuration=t63-echam-rrtmgp
 
 Arguments after the image name are passed straight to ``python -m jcm.main``.
 Mount ``/app/outputs`` to persist Hydra output directories::
 
    docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
-       physics=echam grid=echam_t63_l47_hybrid run.total_time=30
+       +configuration=t63-echam-rrtmgp run.total_time=30
 
 Kubernetes examples for the NRP Nautilus cluster are in ``deploy/k8s/``.
 

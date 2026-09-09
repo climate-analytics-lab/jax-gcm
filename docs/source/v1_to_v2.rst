@@ -106,7 +106,7 @@ For RRTMGP production runs, the CLI path remains the recommended default:
 
 .. code-block:: console
 
-   $ python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
+   $ python -m jcm.main +configuration=t63-echam-rrtmgp
 
 Forcing and Calendars
 ---------------------

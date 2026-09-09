@@ -1054,6 +1054,32 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
+    def test_archive_fires_on_interval_crossing_not_divisibility(self):
+        """``archive_ckpt_every`` need not divide ``chunk_days``.
+
+        With 1-day chunks and a 1.5-day cadence the boundaries never land on
+        an exact multiple; archiving keys on crossing each multiple, so the
+        day-2 boundary (first past 1.5) and day-3 boundary (first past 3.0)
+        both archive.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.total_time=3",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+                "run.archive_ckpt_every=1.5",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={tmpdir}/run.ckpt",
+            ])
+            run(cfg)
+            archives = sorted(p.name for p in Path(tmpdir).glob("chunk_day*.ckpt"))
+            self.assertEqual(archives, ["chunk_day2.ckpt", "chunk_day3.ckpt"])
+
     def test_chunked_resume_with_balanced_isothermal_init(self):
         """Resume-from-checkpoint bootstraps a template for state-based inits.
 
