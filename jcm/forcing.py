@@ -1154,6 +1154,37 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     )
 
 
+def _reject_truncated_erodibility(da, arr) -> None:
+    """Raise on a CAM erodibility map that was capped at 1 when it was built.
+
+    CAM's ``mbl_bsn_fct_geo`` is an unbounded weight (0-5.7); builds before
+    #768 clipped it to [0, 1], which silently truncates 15 % of the global
+    source weight in exactly the basins that dominate dust emission. Such a
+    file is identifiable — it says it is the CAM product and its maximum sits
+    at exactly 1.0 across many cells — so it is refused rather than used, since
+    nothing downstream could tell the truncated map from a correct one.
+    """
+    text = " ".join(str(da.attrs.get(k, "")) for k in ("long_name", "source"))
+    text += " " + str(getattr(da, "name", ""))
+    if "mbl_bsn_fct_geo" not in text and "/dst_" not in text:
+        return
+    if not (arr.max() == 1.0 and (arr == 1.0).sum() > 1):
+        return
+    raise ValueError(
+        "This CAM dust-erodibility map was clipped to [0, 1] when it was "
+        "built: mbl_bsn_fct_geo is an unbounded basin-factor WEIGHT (0-5.7) "
+        "and capping it truncates 15 % of the global source weight, "
+        "concentrated in the strongest source basins (#768). Rebuild it with "
+        "the fixed preparation tool:\n"
+        "  python tools/prep_jam_aux_inputs.py --target-truncation <T> "
+        "--outdir <dir>\n"
+        "and point forcing.dust_file at "
+        "<dir>/dust_erodibility_cam_f05_t<T>.nc (mirror maintainers: re-stage "
+        "bundles/<grid>/dust.nc from it, so `auto` resolves the fixed map). "
+        "forcing.dust_file=null runs dust-free in the meantime."
+    )
+
+
 def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
                      align_mode: str = "wrap_year"):
     """Read a dust-source/erodibility climatology for ``ForcingData.dust_source``.
@@ -1185,6 +1216,7 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     # Missing cells (NaN after decode, or the raw ``-1`` marker) mean "no dust
     # source"; NaN would pass straight through ``clip``, so zero it first.
     arr = np.maximum(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    _reject_truncated_erodibility(ds[var_name], arr)
     if "time" not in ds[var_name].dims:
         # Static (lat, lon) map → bare (lon, lat) array. No time axis to
         # build a TimeSeries from, and DustEmissions reads a 2-D field

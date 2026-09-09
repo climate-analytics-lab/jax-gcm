@@ -974,6 +974,59 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
+    def test_dust_reader_rejects_a_clipped_cam_erodibility_build(self):
+        # The pre-#768 build of the CAM map capped an unbounded basin-factor
+        # weight at 1; nothing downstream can tell it from a correct map, so
+        # the reader refuses it with the rebuild command.
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        vals[2, 2] = 0.7
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        with self.assertRaisesRegex(ValueError, "prep_jam_aux_inputs"):
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+
+    def test_dust_reader_accepts_an_unclipped_cam_erodibility_build(self):
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        vals[1, 1] = 4.4          # the basin maxima the clip used to remove
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        arr = np.asarray(
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON))
+        self.assertAlmostEqual(float(arr.max()), 4.4, places=5)
+
+    def test_dust_reader_accepts_a_unit_bounded_potential_source_map(self):
+        # A HAMMOZ potential-source FRACTION legitimately maxes at 1 — it must
+        # not trip the truncated-CAM-build check (different provenance).
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "Tegen potential dust source"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        arr = np.asarray(
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON))
+        self.assertAlmostEqual(float(arr.max()), 1.0)
+
     def test_dust_reader_accepts_static_lat_lon_map(self):
         # A time-invariant potential-source / erodibility map has no `time`
         # axis. DustEmissions reads a bare 2-D field, so the reader must
