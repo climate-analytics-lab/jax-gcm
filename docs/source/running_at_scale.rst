@@ -187,9 +187,9 @@ data mirror on Hugging Face by prefixing any file path with ``hf://`` (fetch
 once on a node with internet — afterwards the local cache serves compute nodes
 offline)::
 
-   python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
+   python -m jcm.main +configuration=t63-echam-jam \
        terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
-       forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc
+       forcing.file=hf://bundles/t63/forcing_pd.nc
 
 See :doc:`design/data_mirror` for the full bundle catalogue. The Python door
 onto the same bundles is :meth:`jcm.forcing.ForcingData.from_bundles` (in the
@@ -200,9 +200,10 @@ Emulated radiation
 
 ``physics=echam-emulated-2m`` swaps RRTMGP for a GRU emulator trained to
 reproduce it — a settled 4.4x end-to-end at T63L47 (22.7 → 5.1 s per sim day).
-Trained weights ship with the package, so it runs out of the box::
+Trained weights ship with the package, so the validated recipe runs out of
+the box::
 
-   python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
+   python -m jcm.main +configuration=t63-echam-emulated-2m
 
 Point ``physics.terms.nn_emulator_radiation.weights_file`` at another checkpoint
 to swap networks. The emulator sees ozone and CO2 but **not CH4 or N2O**, so
