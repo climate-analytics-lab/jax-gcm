@@ -29,8 +29,10 @@ executable, so it can be invoked either as a module or directly::
    python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
        run.total_time=30 run.save_interval=1
 
-   # Chunked, resumable long run
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun
+   # Chunked, resumable long run (run=longrun enables chunking; resumability
+   # additionally needs a stable checkpoint path)
+   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun \
+       run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
 
 The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
 netCDF written by an earlier run::

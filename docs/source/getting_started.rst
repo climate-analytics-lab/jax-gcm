@@ -458,9 +458,11 @@ years to continue from the previous state:
 
 xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
-long forcing records. (For unattended, preemptible long runs the Hydra
-runner's chunked/checkpointed loop does this for you — see
-:doc:`running_at_scale`.)
+long forcing records. (The Hydra runner's chunked/checkpointed loop — see
+:doc:`running_at_scale` — chunks the *integration* for preemptible runs,
+but it builds the full ``ForcingData`` up front; for a forcing record too
+large for memory, this manual per-year loop is the memory-efficient
+pattern.)
 
 Yearly forcing bundles
 ^^^^^^^^^^^^^^^^^^^^^^^
