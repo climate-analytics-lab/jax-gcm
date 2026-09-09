@@ -87,6 +87,28 @@ def _preset_grid(preset_name: str) -> str | None:
     return cfg.hydra.runtime.choices.get("grid")
 
 
+TAG_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def check_tag(tag: str) -> str:
+    """Return an explicit ``--tag``, refusing anything unsafe to embed.
+
+    The tag becomes a path segment, a PBS job name and the completion
+    marker, so a branch-style ``feature/foo`` writes the job into a
+    directory that does not exist and a tag carrying spaces or shell
+    metacharacters produces malformed PBS directives. Reject rather than
+    rewrite: folding ``a/b`` and ``a_b`` onto one tag would put two
+    launches in one rundir, the checkpoint collision this tool exists to
+    prevent (#701).
+    """
+    if not tag or TAG_UNSAFE.search(tag):
+        raise SystemExit(
+            f"--tag {tag!r} is not a usable run tag: it names a run "
+            "directory, a PBS job and the completion marker, so it must be "
+            "non-empty and made only of letters, digits and underscores.")
+    return tag
+
+
 def repo_tag(repo: str | Path) -> str:
     """Return the run tag for ``repo``: its HEAD short SHA where there is one.
 
@@ -103,8 +125,9 @@ def repo_tag(repo: str | Path) -> str:
         out = ""
     tag = out or "nogit_" + datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y%m%d")
-    # The tag lands in a PBS job name and a path, so keep it to safe characters.
-    return re.sub(r"[^A-Za-z0-9_]", "_", tag)
+    # Same safe character set check_tag demands of an explicit --tag, but
+    # derived rather than typed, so rewrite quietly instead of failing.
+    return TAG_UNSAFE.sub("_", tag)
 
 
 def check_fresh(rundir: str, resume: bool) -> None:
@@ -183,7 +206,8 @@ def main(argv=None):
     ap.add_argument("--members", default=None,
                     help="comma-separated subset (default: all)")
     ap.add_argument("--tag", default=None,
-                    help="rundir/job namespace (default: repo HEAD short SHA)")
+                    help="rundir/job namespace, letters/digits/underscore "
+                         "only (default: repo HEAD short SHA)")
     ap.add_argument("--resume", action="store_true",
                     help="continue an existing run rather than refusing to "
                          "start on top of its checkpoint")
@@ -201,7 +225,7 @@ def main(argv=None):
     outdir = Path(repo) / "runs"
     outdir.mkdir(exist_ok=True)
 
-    run_tag = a.tag or repo_tag(repo)
+    run_tag = check_tag(a.tag) if a.tag is not None else repo_tag(repo)
     print(f"run tag: {run_tag}")
 
     wanted = a.members.split(",") if a.members else list(cfg["members"])

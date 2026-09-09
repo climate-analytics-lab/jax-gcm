@@ -17,7 +17,9 @@ scripts/local_ci.sh --local-fast /path/to/worktree     # ...and a fast gate on t
 
 Lint runs on the current node; both test gates run in a single
 `develop`-queue PBS job (`select=1:ncpus=16:mem=200GB`), fast then slow,
-sequentially. Watch the job log for `FAST_EXIT=0` and `SLOW_EXIT=0`.
+sequentially. Watch the job log for `FAST_EXIT=0`, `SLOW_EXIT=0` and the
+closing `GATES PASSED`: the job exits non-zero if either gate failed, so a
+job that ends green means both passed.
 
 The gates go to a compute node because a login node caps you at 10 GiB
 (see `docs/source/design/test_suite_memory.md`) — well under what an

@@ -86,6 +86,19 @@ def test_explicit_tag_gives_each_launch_its_own_rundir(scratch, repo):
     assert len(ckpts) == 2
 
 
+@pytest.mark.parametrize("tag", ["feature/foo", "x y", "a;echo hi", ""])
+def test_unsafe_explicit_tag_is_refused(scratch, repo, tag):
+    """A tag that is not both a path segment and a job name is refused.
+
+    Unchecked, ``feature/foo`` wrote into a directory that does not exist and
+    ``x y`` produced a malformed ``#PBS -N`` directive.
+    """
+    with pytest.raises(SystemExit) as e:
+        _launch(repo, "--tag", tag)
+    assert "--tag" in str(e.value)
+    assert not list((repo / "runs").glob("*.pbs"))
+
+
 def _seed_checkpoint(scratch, tag):
     rundir = scratch / "jam_runs" / f"mx_speedy_t31_{tag}"
     rundir.mkdir(parents=True)

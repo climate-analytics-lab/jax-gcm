@@ -23,6 +23,7 @@ ruff check . || { echo "LINT FAILED"; exit 1; }
 
 # Runs before the qsub, never alongside it: pytest-cov erases and recombines
 # .coverage.* per worktree, so two concurrent suites destroy each other's data.
+LOCAL_FAST_STATUS=0
 if [ "$LOCAL_FAST" = 1 ]; then
     echo "=== fast gate (this node, -n 2) ==="
     echo "WARNING: interactive work on a login node lives in a 10 GiB per-user"
@@ -30,8 +31,9 @@ if [ "$LOCAL_FAST" = 1 ]; then
     echo "         (jcm/physics/radiation/, the JAM tests) may still be"
     echo "         OOM-killed, and a killed worker looks like unrelated test"
     echo "         failures. The PBS gate below is the authoritative run."
-    JAX_PLATFORMS=cpu pytest -n 2 -m "not slow" --cov=jcm --cov-fail-under=90 -q
-    echo "LOCAL_FAST_EXIT=$?"
+    JAX_PLATFORMS=cpu pytest -n 2 -m "not slow" --cov=jcm --cov-fail-under=90 -q \
+        || LOCAL_FAST_STATUS=$?
+    echo "LOCAL_FAST_EXIT=$LOCAL_FAST_STATUS"
 fi
 
 echo "=== submitting both gates to the develop queue ==="
@@ -53,13 +55,33 @@ export JAX_PLATFORMS=cpu
 export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
 
 # Sequential, not concurrent: the two gates share this worktree's .coverage.*.
+# Each status is kept rather than left in \$? (the next echo would replace it),
+# so the slow gate still runs after a fast-gate failure and the job's own exit
+# code still reports it -- a green job must mean both gates passed.
+FAST_STATUS=0
+SLOW_STATUS=0
+
 echo "=== fast gate (not slow, cov>=90) ==="
-pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90 -q
-echo "FAST_EXIT=\$?"
+pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90 -q || FAST_STATUS=\$?
+echo "FAST_EXIT=\$FAST_STATUS"
 
 echo "=== slow gate (slow only, cov>=80 vs .coveragerc-pr) ==="
-pytest -n 4 -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80
-echo "SLOW_EXIT=\$?"
+pytest -n 4 -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80 \
+    || SLOW_STATUS=\$?
+echo "SLOW_EXIT=\$SLOW_STATUS"
+
+if [ "\$FAST_STATUS" -ne 0 ] || [ "\$SLOW_STATUS" -ne 0 ]; then
+    echo "GATES FAILED (fast=\$FAST_STATUS slow=\$SLOW_STATUS)"
+    exit 1
+fi
+echo "GATES PASSED"
 EOF
 qsub "$JOB"
-echo "watch: grep -E 'FAST_EXIT|SLOW_EXIT' $REPO/jcm_ci.log"
+echo "watch: grep -E 'FAST_EXIT|SLOW_EXIT|GATES' $REPO/jcm_ci.log"
+
+# A failed local fast gate must not look like a clean wrapper run; the job is
+# still submitted, since it is the authoritative gate.
+if [ "$LOCAL_FAST_STATUS" -ne 0 ]; then
+    echo "LOCAL FAST GATE FAILED (exit $LOCAL_FAST_STATUS) — job submitted anyway"
+    exit "$LOCAL_FAST_STATUS"
+fi
