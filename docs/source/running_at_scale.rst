@@ -67,7 +67,8 @@ Group         What it selects
 ``forcing``   ``default``, ``amip``, ``era5``, ``from_file``, ``macv2_sp``
 ``nudging``   ``none``, ``era5``
 ``diffusion`` ``default``, ``strong``
-``dycore``    ``dinosaur`` (default), the ``pyses_*`` finite-volume backends
+``dycore``    ``dinosaur`` (default), the ``pyses_*`` spectral-element
+              (CAM-SE) backends
 ============= =================================================================
 
 Inspect the available choices and the fully-composed config::
