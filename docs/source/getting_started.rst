@@ -121,12 +121,17 @@ Canonical mirror-bundle forcing (``from_bundles``)
 
 :meth:`~jcm.forcing.ForcingData.from_bundles` is the Python door onto the same
 data-mirror bundles the CLI's ``auto`` defaults resolve — it composes the whole
-canonical input set for a composition in one call, fetching each per-grid bundle
-into the local Hugging Face cache. For a JAM (prognostic-aerosol) package it
-supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant set;
-a non-JAM package gets surface + ozone only. It routes the composed config
-through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
-``+configuration=t63-echam-jam`` run expressed in Python:
+canonical *forcing* set for a composition in one call, fetching each per-grid
+bundle into the local Hugging Face cache, through the same engine the CLI uses,
+so the two doors agree input-for-input. For a JAM (prognostic-aerosol) package
+it supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant
+set; a non-JAM package gets surface + ozone only. Reach for it when composing
+your *own* model, as below. It supplies only the forcing: a validated
+end-to-end setup such as ``t63-echam-jam`` also pins the radiation scheme,
+aerosol core, activation variant, native-grid terrain and sponge, so to
+reproduce one of those use :func:`jcm.configurations.load`
+(:ref:`next section <configurations-from-python>`) rather than rebuilding it
+by hand.
 
 .. code-block:: python
 
@@ -141,9 +146,12 @@ through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
    coords = get_coords(vertical_coords=get_echam_levels(47),
                        spectral_truncation=63)      # ECHAM T63L47 hybrid
    # JAM prognostic aerosol reads the 2-moment cloud scheme's process ledger,
-   # so it must be paired with cloud_scheme="2m".
-   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
-   terrain = TerrainData.from_coords(coords)
+   # so it must be paired with cloud_scheme="2m"; RRTMGP radiation consumes
+   # the aerosol optics (the grey default would ignore them).
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                           radiation_scheme="rrtmgp")
+   terrain = TerrainData.from_coords(coords)     # flat all-ocean; pass
+                                                 # terrain_file= for orography
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
    # Surface (present-day), ozone and the JAM emission/dms/dust/oxidant bundles,
