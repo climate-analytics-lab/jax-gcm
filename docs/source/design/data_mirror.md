@@ -190,9 +190,11 @@ inventory):
 - `soilw_am` is the SPEEDY soil-availability **fraction** in [0, 1],
   computed from ERA5 volumetric layers with the `jcm.data.bc.compile`
   formula (vegetation-gated deep layer, wilting/capacity thresholds);
-  `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`. Both
-  follow the packaged files' conventions exactly (see the `bundles.py`
-  docstring).
+  `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`, **zero
+  by construction where snow never melts** (ice sheets: their albedo is
+  already in the static `alb`, and blending toward fresh-snow albedo
+  would double-count it), so it is not an ice-sheet mask. Both follow the
+  packaged files' conventions exactly (see the `bundles.py` docstring).
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient

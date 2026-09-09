@@ -235,7 +235,10 @@ class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
-    snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
+    # Snow-cover fraction, ZERO where snow never melts (ice-sheet albedo lives
+    # in ``alb0`` instead, so blending it here would double-count): not an
+    # ice-sheet mask.
+    snowc_am: jnp.ndarray # snow cover
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value

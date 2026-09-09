@@ -135,6 +135,10 @@ def mobilization_fraction(land_fraction: jnp.ndarray, snow_cover: jnp.ndarray,
     Land only, reduced by snow cover, and shut off over frozen ground (CLM's
     ``liqfrac``, here ramped over the 2 K below the melting point since no soil
     ice content is carried). Ocean and sea ice contribute nothing.
+
+    The frozen-ground term is what masks the ice sheets: ``snowc_am`` is zeroed
+    on permanent snow by construction (their albedo lives in ``alb`` instead),
+    so a snow gate alone would emit dust from Antarctica.
     """
     liquid = jnp.clip(
         (land_temperature - (c.tmelt - _FREEZE_RANGE)) / _FREEZE_RANGE, 0.0, 1.0)
