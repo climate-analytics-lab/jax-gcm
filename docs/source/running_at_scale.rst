@@ -216,7 +216,9 @@ Chunked, resumable runs and checkpoints
 
 Long integrations run in **chunks** with a health gate between them. Setting
 ``run.chunk_days`` (``run=longrun`` uses 30) breaks the integration into pieces,
-writes each to ``{run.output_prefix}_day{N}.nc``, and runs
+writes each to ``{run.output_prefix}_day{N}.nc`` — a **relative** prefix by
+default (``longrun``/``chunked_run``), so point it at a durable absolute path
+when the working directory is ephemeral (a container, a scratch job) — and runs
 :func:`jcm.diagnostics.check_health` after each one. With
 ``run.bail_on_unhealthy`` (the runner default) the run aborts on the first
 unhealthy chunk instead of integrating a doomed state for hours; set it
@@ -324,10 +326,15 @@ Build the CUDA-enabled image locally::
    docker run --rm --gpus all jcm +configuration=t63-echam-rrtmgp
 
 Arguments after the image name are passed straight to ``python -m jcm.main``.
-Mount ``/app/outputs`` to persist Hydra output directories::
+Mount a host directory and send the run's output into it — with ``--rm``,
+anything written outside the mount dies with the container, and a chunked
+configuration writes its per-chunk netCDFs to ``run.output_prefix``, not to
+Hydra's output directory::
 
    docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
-       +configuration=t63-echam-rrtmgp run.total_time=30
+       +configuration=t63-echam-rrtmgp run.total_time=30 \
+       run.output_prefix=/app/outputs/t63 \
+       run.checkpoint_path=/app/outputs/t63.ckpt
 
 Kubernetes examples for the NRP Nautilus cluster are in ``deploy/k8s/``.
 
@@ -360,6 +367,7 @@ immediately, so over-provisioning the chain is harmless:
    cd "$PBS_O_WORKDIR"
    python -m jcm.main +configuration=t63-echam-jam run=longrun \
        run.total_time=365 \
+       run.output_prefix="$SCRATCH/t63-echam-jam" \
        run.checkpoint_path="$SCRATCH/t63-echam-jam.ckpt"
 
 Submit the chain with ``afterany`` dependencies (each link starts only when
