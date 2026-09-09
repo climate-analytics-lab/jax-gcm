@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """Report a convergence-checked throughput from a finished jcm run log.
 
-    python settled_rate.py <run.log> [--chunk-days 5] [--dt 15]
+    python settled_rate.py <PBS stdout log> [--chunk-days 5] [--dt 15]
+
+The log is the job's stdout (``runs/<tag>.log``), not Hydra's ``main.log``:
+the per-chunk ``Wall:`` lines are prints and never reach the Hydra log.
 
 Post-hoc counterpart to ``tools/benchmark.py``: that one *drives* a run and
 samples GPU telemetry alongside; this one reads a log that already exists,
@@ -17,10 +20,33 @@ import argparse
 import pathlib
 import sys
 
-# tools/ lives at the repo root; this script sits four levels below it
-# (.claude/skills/derecho-jcm-runs/scripts/).
-_REPO = pathlib.Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(_REPO / "tools"))
+import os
+
+
+def _find_tools() -> pathlib.Path:
+    """Locate the repo's ``tools/`` directory, wherever this script lives.
+
+    A fixed parent depth only works from the in-repo copy: the same skill
+    installed under ``~/.claude/skills/`` resolves to the home directory and
+    the ``chunk_timing`` import fails. Search upward from the script and from
+    the working directory for the module itself, honouring ``$JCM_REPO``
+    first, so ``settled_rate.py`` needs no PYTHONPATH from either location.
+    """
+    roots = []
+    if os.environ.get("JCM_REPO"):
+        roots.append(pathlib.Path(os.environ["JCM_REPO"]).expanduser())
+    roots += list(pathlib.Path(__file__).resolve().parents)
+    roots += list(pathlib.Path.cwd().resolve().parents) + [pathlib.Path.cwd()]
+    for root in roots:
+        if (root / "tools" / "chunk_timing.py").is_file():
+            return root / "tools"
+    raise SystemExit(
+        "cannot find the repo's tools/chunk_timing.py from "
+        f"{pathlib.Path(__file__).resolve()} or {pathlib.Path.cwd()} — run "
+        "this from inside a jax-gcm checkout, or set JCM_REPO to one.")
+
+
+sys.path.insert(0, str(_find_tools()))
 
 from chunk_timing import DEFAULT_TOL, analyse, parse_walls  # noqa: E402
 

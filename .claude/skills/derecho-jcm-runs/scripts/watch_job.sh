@@ -24,7 +24,13 @@ LOG="${2:?}"
 MARKER="${3:?}"
 POLL="${4:-300}"
 
-FAIL_RE='Traceback|unhealthy|RESOURCE_EXHAUSTED|not in struct|Error executing|CUDA_ERROR|Killed|Invalid horizontal'
+# Match the runner's health VERDICTS, not the word "unhealthy": jcm.main
+# echoes the composed config on stdout, so every log contains
+# "bail_on_unhealthy: true" and a bare 'unhealthy' failed every clean run.
+# The three real verdicts are runners.py's "*** atmosphere unhealthy at
+# day N" and "Checkpoint NOT updated (unhealthy chunk)", plus benchmark.py's
+# "because the run was unhealthy".
+FAIL_RE='Traceback|atmosphere unhealthy|unhealthy chunk|was unhealthy|RESOURCE_EXHAUSTED|not in struct|Error executing|CUDA_ERROR|Killed|Invalid horizontal'
 bad=0; gone=0
 
 while true; do
