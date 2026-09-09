@@ -329,6 +329,58 @@ def rce_initial_state(
     )
 
 
+#: Free-troposphere pressure window [Pa] the JAM aerosol-pathway checks
+#: compare soluble against insoluble loading in.
+JAM_COLUMN_FT_WINDOW = (150.0e2, 600.0e2)
+
+
+def jam_scavenging_column(vertical, physics, *, sst: float = 302.0,
+                          relative_humidity: float = 0.8,
+                          u_wind: float = 3.0):
+    """Prescribed tropical column + JAM tracer seeds for the aerosol pathway.
+
+    The release-validation SCM check and its unit-test regression guard run
+    the same column, so they share one builder rather than two copies that
+    drift apart. Seeds equal boundary-layer mass (and number) into a
+    soluble/activatable accumulation mode and an insoluble primary-carbon
+    mode: scavenging is then the only thing separating the two aloft.
+
+    Args:
+        vertical: Vertical coordinate (``get_echam_levels(nlev)``).
+        physics: The composed package, queried for the tracers to seed.
+        sst: Sea-surface temperature (K) anchoring the sounding.
+        relative_humidity: Uniform tropospheric RH.
+        u_wind: Background zonal wind (m/s) for the momentum path.
+
+    Returns:
+        ``(state, seed, pressure_full)`` — the column state, the initial
+        tracer dict, and the full-level pressures (Pa) for level masks.
+
+    """
+    state = rce_initial_state(vertical, sst=sst,
+                              relative_humidity=relative_humidity)
+    nlev = state.temperature.shape[0]
+    state = state.copy(u_wind=jnp.full(nlev, u_wind))
+
+    ps = float(c.p0)
+    pfull = np.asarray(_pressure_centers(vertical, jnp.asarray(ps)))
+
+    names: list[str] = []
+    for term in physics.terms:
+        for spec in term.required_tracers():
+            if spec.name not in names:
+                names.append(spec.name)
+    seed = {nm: jnp.full(nlev, 1e-30) for nm in names}
+    bl = jnp.zeros(nlev).at[-5:].set(1.0)      # lowest 5 levels (surface-last)
+    for nm, val in (("m_so4_acc", 2.0e-9), ("m_poa_pcm", 2.0e-9),
+                    ("n_acc", 2.0e8), ("n_pcm", 2.0e8)):
+        if nm in seed:
+            seed[nm] = jnp.asarray(bl * val + 1e-30, dtype=jnp.float32)
+    seed["qc"] = jnp.zeros(nlev)
+    seed["qi"] = jnp.zeros(nlev)
+    return state, seed, pfull
+
+
 def rce_column(
     *,
     sst: float = 300.0,

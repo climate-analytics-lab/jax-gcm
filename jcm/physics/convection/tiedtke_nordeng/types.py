@@ -315,6 +315,9 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.precip_conv": {
         "standard_name": "convective_precipitation_flux",
         "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.precip_flux": {
+        "units": "kg m-2 s-1",
+        "long_name": "convective precipitation flux entering each layer"},
     "convection.qc_conv": {
         "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
     "convection.precip_formation": {

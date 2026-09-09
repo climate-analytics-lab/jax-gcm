@@ -23,6 +23,17 @@ export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-${SCRATCH:-$HOME/.
 # ~100 unrelated failures bury the ones that matter. The worktree comes first
 # so it wins over any editable install in the venv.
 export JCM_DINOSAUR=${JCM_DINOSAUR:-$HOME/dinosaur-sl}
+if [ ! -d "$JCM_DINOSAUR/dinosaur" ]; then
+    echo "JCM_DINOSAUR=$JCM_DINOSAUR has no dinosaur package — set it to a"
+    echo "checkout of the semi-Lagrangian fork, or the gate reports ~100"
+    echo "model-construction failures with no useful diagnostic."
+    exit 1
+fi
+# Echo the revision: CI installs the pinned
+# `dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian`
+# (requirements.txt), so a drifted worktree measures a different dependency
+# — and a different coverage number — than CI will.
+echo "dinosaur: $JCM_DINOSAUR @ $(git -C "$JCM_DINOSAUR" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
 export PYTHONPATH=$JCM_DINOSAUR:$REPO${PYTHONPATH:+:$PYTHONPATH}
 
 echo "=== lint (here) ==="

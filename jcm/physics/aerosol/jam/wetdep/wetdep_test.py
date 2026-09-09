@@ -266,7 +266,7 @@ class WetDepTermTest(unittest.TestCase):
     def test_convective_precip_scavenges(self):
         # The convective pathway must strengthen removal vs the same state
         # without it: soluble modes via in-cloud + washout, the insoluble
-        # pcm mode via washout only (below-cloud sees the local flux).
+        # pcm mode via impaction only (which sees the local flux).
         state, diagnostics, spec, mass_name = self._setup()
         term = WetScavenging()
         tend_ref, _ = term(state, diagnostics, None, None)
@@ -300,11 +300,11 @@ class WetDepTermTest(unittest.TestCase):
         np.testing.assert_array_equal(dq[0], 0.0)      # nothing formed above
         self.assertTrue(np.all(dq[3] < 0.0))           # below cloud
 
-    def test_conv_washout_uses_the_local_flux_not_the_surface_flux(self):
-        # Below-cloud washout scales with the precipitation flux falling
-        # into THAT level. Feeding the surface flux to every sub-cloud
-        # level instead multiplied the removal by the number of levels
-        # below cloud base (~30 in deep convection).
+    def test_conv_washout_scales_with_the_local_flux(self):
+        # Impaction scales with the precipitation flux falling into THAT
+        # level. The surface flux applied from the convective cloud top
+        # down over-stated the carrier through the depth of the cloud,
+        # where the flux is still accumulating.
         nlev, ncols = 4, 2
         # Small enough that 1 - exp(-rate*dt) is linear in the rate to
         # well under the tolerance below.

@@ -68,7 +68,8 @@ def convective_precip_fluxes(
     pdmfup: jnp.ndarray,
     pdmfdp: jnp.ndarray,
     dt: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+           jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
 
     Walks the column top→bottom three times, exactly as the Fortran:
