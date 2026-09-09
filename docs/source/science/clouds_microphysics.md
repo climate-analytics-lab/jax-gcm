@@ -5,8 +5,11 @@
 
 - **Sundqvist diagnostic cloud fraction**
   (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``) — RH-based cloud
-  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``), plus a
-  linearised-Newton condensation/evaporation step consumed by the 2M scheme.
+  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). It is
+  a **pure diagnostic** — the term emits zero T/q/qc/qi tendencies; the
+  saturation adjustment lives downstream in each microphysics scheme (the 2M
+  path's ``mixed_phase_deposition_and_corrections``, and ``echam_1m.py``'s own
+  port of the same linearised-Newton step).
 - **ECHAM 1-moment microphysics**
   (``jcm/physics/clouds/echam_1m.py::Echam1MMicrophysics``) — a flux-coupled
   top-down column sweep: autoconversion (Beheng 1994 default or KK2000),

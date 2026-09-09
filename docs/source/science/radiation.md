@@ -31,8 +31,12 @@ deterministic overlap-derived expectation (no stochastic sampling); **SPEEDY**
 carries its own cloud formulation. Swapping backends therefore changes the
 cloud-overlap treatment, not just the gas optics. The AeroCom
 total-cloud-cover diagnostic uses the maximum-random closure.
-Radiation **sub-steps**: a gate (``radiation_should_compute``) skips the expensive
-solve and rescales cached heating on intermediate steps.
+Radiation **sub-steps** on the ECHAM-family backends (grey, RRTMGP, NN
+emulator): a gate (``radiation_should_compute``) skips the expensive solve and
+rescales cached heating on intermediate steps. SPEEDY has its own, different
+cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls and the skipped
+calls contribute a *zero* shortwave tendency rather than replaying cached
+heating (#752).
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For

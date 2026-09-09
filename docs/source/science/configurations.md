@@ -77,11 +77,16 @@ mirror is reachable, except where noted.
   plumbing; present as historical benchmark ids for the same compositions.
 - ``t63-echam-emulated-2m`` — the NN radiation emulator in the 2M composition
   (ships trained weights via ``weights_file: auto``).
-- ``t63-echam-jam``, ``t63-echam-jam-aerocom``, ``t63-echam-jam-aerocom-optics`` —
-  the JAM aerosol package at T63 L47, with progressively more AeroCom diagnostics.
+- ``t63-echam-jam`` and ``t63-echam-jam-aerocom`` — the JAM aerosol package at
+  T63 L47, the latter adding the AeroCom phase-4 diagnostics (including the
+  per-species/per-mode spectral optics, which ``echam-jam-aerocom`` enables by
+  default). ``t63-echam-jam-aerocom-optics`` is an **alias** for the same
+  physics options, kept as a named entry point the benchmark presets reference.
 - ``ma-t106-l47``, ``ma-t106-l95`` — the JAM middle-atmosphere sweep at T106.
 - ``ma-t119-l47``, ``ma-t119-l95`` — T119; **no mirror bundle** exists, so terrain
-  and level-matched ozone are machine-local, and these ship emission-free.
+  and level-matched ozone are machine-local, and these ship
+  **prescribed-emission-free** — the four file-backed inputs are nulled, so only
+  online Gong sea salt is active.
 - ``ma-ne30-l47``, ``ma-ne30-l95`` — the JAM physics on the pySES CAM-SE ne30
   cubed sphere (``dycore=pyses_ne30l{47,95}``, ``run=pyses_year``,
   ``init=isothermal`` — pySES rejects JW). These configurations set the scalar
