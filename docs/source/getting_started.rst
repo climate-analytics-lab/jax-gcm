@@ -697,6 +697,11 @@ through the standard physics-coupling path. The same setup works under
 SPEEDY, ECHAM, or any other physics package, on any
 :class:`DynamicalCore` backend.
 
+.. note::
+   ``NudgingTarget`` fields use the model-state units: winds in m/s,
+   temperature in K, and specific humidity in **g/kg**. ERA5 stores
+   humidity in kg/kg, so multiply by 1000 before building the target.
+
 Composing extra terms: the upper sponge
 ----------------------------------------
 
