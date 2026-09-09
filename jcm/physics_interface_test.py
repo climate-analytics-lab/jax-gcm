@@ -240,7 +240,10 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
             shape, tracers={"m_ss_cor": jnp.full(shape, -1e-20)},
         )
         result = verify_tendencies(state, tend, time_step=1800.0)
-        self.assertTrue(bool(jnp.all(result.tracers["m_ss_cor"] == 0.0)))
+        got = result.tracers["m_ss_cor"]
+        # The invariant: never positive. The pre-fix ``-value/dt`` returned
+        # +5.6e-22 here, lifting the ringing negative to zero out of nothing.
+        self.assertTrue(bool(jnp.all(got <= 0.0)), f"got {got[0, 0, 0]!r}")
 
     def test_aerosol_state_is_not_clipped_on_entry(self):
         """The entry clip stays off aerosol: the #713 budget gauge reads the
