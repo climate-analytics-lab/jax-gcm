@@ -5,6 +5,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.convection.tracer_transport import (
     ConvTransportParameters,
@@ -513,6 +514,85 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
     def test_misaligned_scav_weights_rejected(self):
         with self.assertRaises(ValueError):
             ConvectiveTracerTransport(("a", "b"), scav_weights=(1.0,))
+
+
+class ComposedColumnScavengingTest(unittest.TestCase):
+    """The convective aerosol sink through the FULL composed ECHAM column.
+
+    Every unit test above hands the transport term a synthetic
+    ``ConvectionData``, so all of them stayed green while the composed
+    column produced no plume at all and ``_conv_scav_flux`` was exactly
+    zero for every tracer (#773). This runs the same stack the release
+    validation does — Tiedtke + convective tracer transport + JAM wet
+    deposition — and asserts the STATE it is supposed to produce.
+    """
+
+    @pytest.mark.slow
+    def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.rce import rce_initial_state
+        from jcm.single_column_model import SingleColumnModel
+
+        nlev, dt, nsteps = 47, 900.0, 96          # one day
+        vertical = get_echam_levels(nlev)
+        physics = echam_physics(cloud_scheme="2m", aerosol_module="jam",
+                                radiation_scheme="grey")
+        scm = SingleColumnModel(physics=physics, vertical=vertical,
+                                lat_deg=0.0, lon_deg=150.0, dt_seconds=dt)
+        # Warm tropical column, prescribed (re-imposed every step) so the
+        # plume keeps firing; a light background wind for the momentum path.
+        state = rce_initial_state(vertical, sst=302.0, relative_humidity=0.8)
+        state = state.copy(u_wind=jnp.full(nlev, 3.0))
+        states = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (nsteps,) + jnp.shape(x)), state,
+        )
+
+        names = []
+        for term in physics.terms:
+            for spec in term.required_tracers():
+                if spec.name not in names:
+                    names.append(spec.name)
+        seed = {nm: jnp.full(nlev, 1e-30) for nm in names}
+        # Equal boundary-layer mass in a soluble/activatable mode and an
+        # insoluble one: the only thing that separates them is scavenging.
+        bl = jnp.zeros(nlev).at[-5:].set(1.0)
+        for nm, val in (("m_so4_acc", 2.0e-9), ("m_poa_pcm", 2.0e-9),
+                        ("n_acc", 2.0e8), ("n_pcm", 2.0e8)):
+            if nm in seed:
+                seed[nm] = bl * val + 1e-30
+        seed["qc"] = jnp.zeros(nlev)
+        seed["qi"] = jnp.zeros(nlev)
+
+        preds = scm.run(states, initial_tracers=seed,
+                        times=jnp.arange(nsteps) * dt / 86400.0)
+
+        conv = preds.physics_data["convection"]
+        self.assertGreater(float(jnp.max(conv.mass_flux_up)), 0.0,
+                           "no convection in the composed column")
+        self.assertGreater(
+            float(jnp.max(conv.qc_conv + conv.qi_conv)), 0.0,
+            "convection ran but published no in-plume condensate",
+        )
+        self.assertGreater(float(jnp.max(conv.precip_flux)), 0.0)
+
+        scav = preds.physics_data["_conv_scav_flux"]["m_so4_acc"]
+        self.assertGreater(float(jnp.sum(scav)), 0.0,
+                           "in-plume scavenging removed nothing")
+
+        # State assertion, not a ledger check: with equal seeds the soluble
+        # tracer must end up far less abundant aloft than the insoluble one.
+        ps = 101325.0
+        a_b = np.asarray(vertical.a_boundaries)
+        b_b = np.asarray(vertical.b_boundaries)
+        ph = a_b + b_b * ps
+        p = 0.5 * (ph[:-1] + ph[1:])
+        ft = (p > 150e2) & (p < 600e2)
+        so4 = np.asarray(preds.tracer_states["m_so4_acc"])[-1][ft].mean()
+        pom = np.asarray(preds.tracer_states["m_poa_pcm"])[-1][ft].mean()
+        self.assertGreater(pom, 1e-20, "nothing was lofted at all")
+        self.assertLess(so4, 0.5 * pom,
+                        f"soluble {so4:.2e} not depleted vs insoluble {pom:.2e}")
 
 
 if __name__ == "__main__":
