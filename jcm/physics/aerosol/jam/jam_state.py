@@ -2,7 +2,7 @@
 
 The active microphysics core writes per-step physical state needed by the
 downstream harness terms (activation, dry/wet deposition, sedimentation):
-per-class dry/wet radius, particle density and hygroscopicity, plus the
+per-class dry/wet radius, wet particle density and hygroscopicity, plus the
 gathered per-class mass and number. Stored under the underscored diagnostics
 key ``"_jam_state"`` (inter-term plumbing, auto-flattened to ``jam_state.*``
 in xarray output, mirroring the ``_radiation`` / ``_humidity`` pattern).
@@ -26,7 +26,9 @@ class JamAerosolState:
 
     r_dry: jnp.ndarray   # dry radius [m]              (n_aer, nlev, ncols)
     r_wet: jnp.ndarray   # wet (ambient) radius [m]    (n_aer, nlev, ncols)
-    rho: jnp.ndarray     # particle density [kg/m³]    (n_aer, nlev, ncols)
+    # WET particle density (dry material + condensed water), the density
+    # that pairs with r_wet in the settling/deposition velocities.
+    rho: jnp.ndarray     # wet density [kg/m³]        (n_aer, nlev, ncols)
     kappa: jnp.ndarray   # hygroscopicity κ [-]        (n_aer, nlev, ncols)
     mass: jnp.ndarray    # total dry mass [kg/kg]      (n_aer, nlev, ncols)
     number: jnp.ndarray  # number [kg^-1]              (n_aer, nlev, ncols)
