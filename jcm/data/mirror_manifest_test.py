@@ -1,14 +1,17 @@
 """Tests for the packaged mirror manifest + its read-side view.
 
 The manifest is the data-driven source of truth the typed resolver consults, so
-these pin: that it stays in sync with the ``jcm.data.bundle_names`` availability
-predicate it generalises (they must never drift), and that the packaged JSON
-matches what ``build_mirror.build_manifest`` regenerates (no stale hand edits).
+these pin: that its ``is_published`` gate publishes exactly the intended
+grid/level/vertical matrix, and that the packaged JSON matches what
+``build_mirror.build_manifest`` regenerates (no stale hand edits) from the
+``PUBLISHED_*`` sets declared there.
 """
 
 import unittest
 
-from jcm.data import bundle_names, mirror_manifest as mm
+from jcm.data import mirror_manifest as mm
+from jcm.data.mirror.build_mirror import (PUBLISHED_GRIDS, PUBLISHED_LEVELS,
+                                          PUBLISHED_VERTICALS)
 
 
 class TestManifestLoads(unittest.TestCase):
@@ -16,14 +19,14 @@ class TestManifestLoads(unittest.TestCase):
         self.manifest = mm.load_manifest()
 
     def test_top_level_matches_published_sets(self):
-        # The manifest's published sets are generated FROM bundle_names, so they
-        # carry the same grids/levels/verticals.
-        self.assertEqual(set(self.manifest["grids"]) & set(bundle_names.PUBLISHED_GRIDS),
-                         set(bundle_names.PUBLISHED_GRIDS))
-        self.assertEqual(set(self.manifest["levels"]),
-                         set(bundle_names.PUBLISHED_LEVELS))
+        # The manifest's published sets are generated FROM build_mirror's
+        # ``PUBLISHED_*`` declarations, so they carry the same grids/levels/
+        # verticals (the Gaussian whitelist; the column ne30pg3 is extra).
+        self.assertEqual(set(self.manifest["grids"]) & set(PUBLISHED_GRIDS),
+                         set(PUBLISHED_GRIDS))
+        self.assertEqual(set(self.manifest["levels"]), set(PUBLISHED_LEVELS))
         self.assertEqual(set(self.manifest["verticals"]),
-                         set(bundle_names.PUBLISHED_VERTICALS))
+                         set(PUBLISHED_VERTICALS))
 
     def test_auto_product_per_forcing_key(self):
         # macv2_file is intentionally absent: the MACv2-SP file is repo-packaged
@@ -58,24 +61,35 @@ class TestManifestLoads(unittest.TestCase):
         self.assertIsNone(mm.coverage(self.manifest, "emissions_pd"))
 
 
-class TestManifestMatchesBundleNames(unittest.TestCase):
-    """``is_published`` must agree with the predicate it generalises."""
+class TestIsPublishedMatrix(unittest.TestCase):
+    """``is_published`` over the grid/level/vertical matrix — its sole home.
 
-    _KEY_TO_PRODUCT = {"emissions_file": "emissions_pd", "dms_file": "dms",
-                       "dust_file": "dust", "oxidants_file": "oxidants_pd"}
+    The manifest view is the ONE availability predicate (#751), so the matrix
+    is pinned directly against the intended rule: a
+    grid must be published (t63/t106); a level-resolved product (oxidants)
+    additionally needs a published layer count AND a hybrid vertical (its bundle
+    is on hybrid-level pressures); level-free products (emissions/dms/dust) are
+    purely horizontal.
+    """
 
-    def test_publication_matrix_agrees(self):
+    def _expected(self, product, grid, nlev, vertical):
+        if grid not in ("t63", "t106"):
+            return False
+        if product == "oxidants_pd":
+            return nlev in (47, 95) and vertical == "hybrid"
+        return True
+
+    def test_publication_matrix(self):
         manifest = mm.load_manifest()
-        for key, product in self._KEY_TO_PRODUCT.items():
+        for product in ("emissions_pd", "dms", "dust", "oxidants_pd"):
             for grid in ("t42", "t63", "t106"):
                 for nlev in (8, 47, 95):
                     for vertical in ("hybrid", "sigma"):
                         self.assertEqual(
                             mm.is_published(manifest, product, grid, nlev,
                                             vertical),
-                            bundle_names.bundle_is_published(
-                                key, grid, nlev, vertical),
-                            (key, grid, nlev, vertical))
+                            self._expected(product, grid, nlev, vertical),
+                            (product, grid, nlev, vertical))
 
 
 class TestManifestRegen(unittest.TestCase):
@@ -191,6 +205,8 @@ class TestRemoteCoverageVerification(unittest.TestCase):
         overrides = overrides or {}
         files = []
         for name, rec in man["products"].items():
+            if rec.get("source") == "packaged":
+                continue  # shipped in the wheel, never on the mirror listing
             transient = "{year}" in rec["path"]
             if not transient and not rec["staged"]:
                 continue

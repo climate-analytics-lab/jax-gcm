@@ -33,15 +33,23 @@ from pathlib import Path
 
 import numpy as np
 
-from jcm.data.bundle_names import (PUBLISHED_GRIDS, PUBLISHED_LEVELS,
-                                   PUBLISHED_VERTICALS)
+#: The mirror's published sets — the source of truth the manifest is generated
+#: from (``build_manifest`` expands the product table over these, and the
+#: read-side ``mirror_manifest`` view carries them at top level for the resolver
+#: + the benchmark prefetch). Declared beside the build loop so the declaration
+#: and what actually gets staged cannot drift.
+#: ``PUBLISHED_GRIDS`` is the Gaussian-grid whitelist; ``PUBLISHED_LEVELS`` the
+#: layer counts carrying level-resolved (oxidant/ozone) bundles; and level-
+#: resolved products are only correct on a ``PUBLISHED_VERTICALS`` (hybrid) grid
+#: (they are on hybrid-level pressures — a sigma grid sharing a (token, nlev)
+#: must not pull one).
+PUBLISHED_GRIDS = frozenset({"t63", "t106"})
+PUBLISHED_LEVELS = frozenset({47, 95})
+PUBLISHED_VERTICALS = frozenset({"hybrid"})
 
-# Per-grid Gaussian latitude count. The *set* of published grids is owned by
-# ``jcm.data.bundle_names.PUBLISHED_GRIDS`` (the whitelist the runner's ``auto``
-# resolver and the benchmark prefetch both consult) so the build loop here and
-# that resolver cannot drift; this dict only adds each grid's ``nlat``. Missing
-# an entry for a published grid raises loudly below rather than silently
-# skipping it.
+# Per-grid Gaussian latitude count. The *set* of published grids is
+# :data:`PUBLISHED_GRIDS`; this dict only adds each grid's ``nlat``. Missing an
+# entry for a published grid raises loudly below rather than silently skipping.
 _NLAT = {"t63": 96, "t106": 160}
 GRIDS = {grid: _NLAT[grid] for grid in sorted(PUBLISHED_GRIDS)}
 
@@ -123,9 +131,26 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
     {"name": "forcing_era5", "path": "bundles/{grid}/forcing_era5/{year}.nc",
      "grids": "gaussian", "levels": False, "coverage": [1979, 2024],
      "alignment": "transient", "key": "file", "auto": False, "staged": True},
-    # The MACv2-SP simple-plume file is NOT mirrored: it is resolution-invariant
-    # (~19 KB) and ships in the wheel at jcm/data/bc (see jcm.forcing
-    # .packaged_macv2_path); forcing.macv2_file=auto resolves it directly.
+    # Packaged products (``source: "packaged"``): boundary files shipped in the
+    # wheel under ``jcm/data/bc`` (path relative to the ``jcm`` package), NOT on
+    # the HF mirror. The engine resolves them via
+    # ``jcm.data.input_resolution.resolve_packaged``: a direct file for the
+    # grid-independent MACv2-SP plumes; a shape-keyed ``*`` glob for the ozone /
+    # terrain climatologies, which have BOTH a packaged variant (tried first, on
+    # the grid it was built for) and the mirrored ``ozone_pd`` / ``terrain``
+    # variant above (the fallback). ``grids``/``coverage`` are ``None`` (grid-
+    # free / no {grid} expansion — the glob spans the packaged dirs itself).
+    {"name": "macv2_sp", "path": "data/bc/SPv2.1_18502023_CMIP7.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "macv2_file", "auto": False, "staged": True},
+    {"name": "ozone_packaged", "path": "data/bc/*/ozone.nc",
+     "source": "packaged", "grids": None, "levels": True, "coverage": None,
+     "alignment": "climatology", "key": "ozone_file", "auto": False,
+     "staged": True},
+    {"name": "terrain_packaged", "path": "data/bc/*/terrain.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "static", "key": "terrain_file", "auto": False,
+     "staged": True},
 )
 NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
@@ -464,8 +489,9 @@ def build_manifest(staged_coverage: dict = None) -> dict:
     Expands each row's ``{grid}``/``{nlev}`` template against the published grid
     (:data:`GRIDS` + column grids), level (:data:`PUBLISHED_LEVELS`) and vertical
     (:data:`PUBLISHED_VERTICALS`) sets so the availability knowledge the resolver
-    consults is generated, never hand-listed. The published sets stay owned by
-    ``jcm.data.bundle_names`` so this and the runner's ``auto`` gate cannot drift.
+    consults is generated, never hand-listed. The published sets (:data:`
+    PUBLISHED_GRIDS` etc.) are declared here so this and the read-side manifest
+    view cannot drift.
 
     ``coverage`` for a ``{year}``-series product is the ACTUAL staged span when
     the staging sidecar records it (``staged_coverage``, default
@@ -494,6 +520,9 @@ def build_manifest(staged_coverage: dict = None) -> dict:
             grids = None
         products[row["name"]] = {
             "path": row["path"],
+            # ``source`` selects the resolver: "mirror" (default) fetches the HF
+            # bundle, "packaged" reads a wheel-shipped file (resolve_packaged).
+            "source": row.get("source", "mirror"),
             "grids": grids,
             "levels": sorted(PUBLISHED_LEVELS) if row["levels"] else None,
             "vertical": (sorted(PUBLISHED_VERTICALS)[0]
@@ -649,6 +678,10 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     coverage = remote_transient_coverage(files, manifest)
     drift = {}
     for name, rec in manifest["products"].items():
+        # Packaged products ship in the wheel, not on the mirror — nothing to
+        # cross-check against list_repo_files.
+        if rec.get("source") == "packaged":
+            continue
         if "{year}" in rec["path"]:
             declared = rec["coverage"]
             remote_variants = coverage.get(name, {})

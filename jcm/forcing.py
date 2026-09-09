@@ -8,13 +8,13 @@ from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes, CoordinateSystem
 from jcm.utils import VALID_TRUNCATIONS, VALID_NODAL_SHAPES, validate_ds
 from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
-# ``{year}`` pattern expansion lives in the import-free leaf
-# :mod:`jcm.data.yearly_files` so ``tools/benchmark.py`` can load it by file
+# ``{year}`` pattern expansion lives in the import-free engine
+# :mod:`jcm.data.input_resolution` so ``tools/benchmark.py`` can load it by file
 # path (jcm-free, before its GPU gate) and share this single source of truth;
 # forcing.py imports JAX/dinosaur/``jcm`` at module top and so cannot itself be
 # that shared leaf. Re-exported here — its historical home — for the runner and
 # tests (``from jcm.forcing import expand_yearly_files``).
-from jcm.data.yearly_files import expand_yearly_files as expand_yearly_files
+from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
     DEFAULT_CALENDAR,
@@ -420,8 +420,10 @@ class ForcingData:
         it composes the surface bundle (``surface`` ∈
         ``"pd"``/``"pi"``/``"amip"``/``"era5"``/``None``), ozone, and — for
         ``aerosol="jam"`` — the emission/dms/dust/oxidant set, then routes the
-        composed config through the SAME engine ``jcm.runners.build_forcing``
-        uses, so the CLI and Python doors provably agree (#751; see the
+        composed config through the SAME engine
+        (:func:`jcm.forcing_assembly.build_forcing`, which the CLI door
+        ``jcm.runners.build_forcing`` also delegates to), so the CLI and Python
+        doors provably agree (#751; see the
         equivalence test in ``forcing_test``). The emission-family config-trap
         warnings fire here from the shared home too. ``aerosol="macv2sp"`` wires
         the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
@@ -449,14 +451,13 @@ class ForcingData:
         from omegaconf import OmegaConf
         from dinosaur.hybrid_coordinates import HybridCoordinates
 
+        from jcm import forcing_assembly as fa
         from jcm import runners
-        from jcm.data import bundle_names
         from jcm.data import input_resolution as ir
         from jcm.data import mirror_manifest as mm
 
         manifest = mm.load_manifest()
-        grid_token = bundle_names.grid_token(
-            int(coords.horizontal.total_wavenumbers) - 2)
+        grid_token = fa._grid_token(coords)
         nlev = int(coords.nodal_shape[0])
         vertical = ("hybrid" if isinstance(coords.vertical, HybridCoordinates)
                     else "sigma")
@@ -532,7 +533,10 @@ class ForcingData:
         physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
-        forcing = runners.build_forcing(cfg, coords)
+        # Drive the forcing-side engine directly — the SAME engine the CLI door
+        # (``runners.build_forcing``) delegates to — so the two doors provably
+        # agree without this module depending on the runner's build (#751).
+        forcing = fa.build_forcing(cfg, coords)
         # Same emission-family traps the CLI door fires (from the shared home).
         runners.warn_emission_config_traps(
             has_jam=(aerosol == "jam"), is_pyses=False, is_scm=False,
@@ -1311,21 +1315,22 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-#: Repo-packaged MACv2-SP simple-plume file: SPv2.1 (CMIP7; Fiedler & Azoulay,
-#: University Heidelberg, 2025), the CEDS-scaled successor to Stevens et al.
-#: (2017) v1. Resolution-invariant (~19 KB), so it ships in the wheel under
-#: ``jcm/data/bc`` rather than on the HF mirror (see SOURCES.md for provenance +
-#: sha256). ``forcing.macv2_file=auto`` and ``from_bundles(aerosol="macv2sp")``
-#: both resolve to it; an explicit path overrides.
-PACKAGED_MACV2_FILE = "SPv2.1_18502023_CMIP7.nc"
-
-
 def packaged_macv2_path() -> str:
-    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``)."""
-    from importlib import resources
-    from pathlib import Path
-    return str(Path(str(resources.files("jcm")))
-               / "data" / "bc" / PACKAGED_MACV2_FILE)
+    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``).
+
+    The MACv2-SP simple-plume file — SPv2.1 (CMIP7; Fiedler & Azoulay, University
+    Heidelberg, 2025), the CEDS-scaled successor to Stevens et al. (2017) v1 — is
+    resolution-invariant (~19 KB), so it ships in the wheel under ``jcm/data/bc``
+    rather than on the HF mirror (SOURCES.md carries provenance + sha256). It is
+    the ``macv2_sp`` packaged product in the mirror manifest, resolved through
+    the one packaged-product mechanism (:func:`jcm.data.input_resolution.
+    resolve_packaged`); ``forcing.macv2_file=auto`` and
+    ``from_bundles(aerosol="macv2sp")`` both use this shim, an explicit path
+    overrides.
+    """
+    from jcm.data import input_resolution as ir
+    from jcm.data import mirror_manifest as mm
+    return ir.resolve_packaged(mm.load_manifest(), "macv2_sp")
 
 
 def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
@@ -1393,8 +1398,8 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
 
 
 # ``expand_yearly_files`` is re-exported from the top-of-module import of the
-# import-free leaf :mod:`jcm.data.yearly_files` (see the imports block); its
-# historical home is this module, so the runner and tests still reach it as
+# import-free engine :mod:`jcm.data.input_resolution` (see the imports block);
+# its historical home is this module, so the runner and tests still reach it as
 # ``jcm.forcing.expand_yearly_files``.
 
 

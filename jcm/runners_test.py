@@ -15,6 +15,9 @@ import numpy as np
 import pytest
 from hydra import compose, initialize_config_dir
 
+# Path/auto resolution lives in the forcing-side engine; tests stub it THERE
+# so the stub reaches every caller (both doors + the pySES branch internals).
+from jcm import forcing_assembly
 from jcm.runners import (
     build_coords,
     build_diffusion,
@@ -2858,7 +2861,7 @@ class TestEmissionAutoResolution(unittest.TestCase):
     """The ``auto`` prescribed-emission resolution (issue #640).
 
     ``auto`` is the only grid-portable mechanism: it composes the concrete
-    per-grid bundle path from :mod:`jcm.data.bundle_names` + the grid token, so
+    per-grid bundle path from the mirror manifest + the grid token, so
     one config follows the grid. There is no user-facing ``{grid}``/``{nlev}``
     path template (removed as a redundant simplification, #640) — an explicit
     path is taken verbatim; only ``{year}`` is expanded downstream.
@@ -2897,7 +2900,7 @@ class TestEmissionAutoResolution(unittest.TestCase):
         coords = self._coords()
         # Echo the hf:// path instead of fetching, so we can assert what the
         # auto default resolved to.
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p):
             emis = runners._resolve_one_emission_input(
                 "auto", "emissions_file", coords, jam=True, is_pyses=False)
@@ -2930,7 +2933,7 @@ class TestEmissionAutoResolution(unittest.TestCase):
         def _raise(_p):
             raise FileNotFoundError("cold cache")
 
-        with mock.patch.object(runners, "_resolve_data_path", side_effect=_raise):
+        with mock.patch.object(forcing_assembly, "_resolve_data_path", side_effect=_raise):
             with self.assertRaises(FileNotFoundError) as ctx:
                 runners._resolve_one_emission_input(
                     "auto", "emissions_file", coords, jam=True, is_pyses=False)
@@ -2992,7 +2995,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         def _no_fetch(path):
             raise AssertionError(f"no fetch expected, got {path!r}")
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=_no_fetch):
             out = runners._resolve_emission_inputs(
                 cfg.forcing, cfg, coords, is_pyses=False)
@@ -3020,7 +3023,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                         "physics.radiation_scheme=grey"])
         coords = build_coords(cfg)
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p):
             out = runners._resolve_emission_inputs(
                 cfg.forcing, cfg, coords, is_pyses=False)
@@ -3050,7 +3053,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                                 "physics.jam_microphysics=placeholder",
                                 "physics.radiation_scheme=grey"])
                 coords = build_coords(cfg)
-                with mock.patch.object(runners, "_resolve_data_path",
+                with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                        side_effect=lambda p: p):
                     out = runners._resolve_emission_inputs(
                         cfg.forcing, cfg, coords, is_pyses=False)
@@ -3084,7 +3087,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertIsInstance(coords.vertical, SigmaCoordinates)
         self.assertEqual(coords.nodal_shape[0], 47)
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p):
             out = runners._resolve_emission_inputs(
                 cfg.forcing, cfg, coords, is_pyses=False)
@@ -3122,7 +3125,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                     calls.append(path)
                     raise AssertionError("no emission fetch expected")
 
-                with mock.patch.object(runners, "_resolve_data_path",
+                with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                        side_effect=_record):
                     out = runners._resolve_emission_inputs(
                         cfg.forcing, cfg, coords, is_pyses=False)
@@ -3142,7 +3145,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         import xarray as xr
         from omegaconf import OmegaConf
 
-        from jcm import runners
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
@@ -3165,7 +3167,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["paths"] = list(paths)
             return xr.Dataset()
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_mfdataset",
                            side_effect=_capture_mfdataset), \
@@ -3194,7 +3196,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         import xarray as xr
         from omegaconf import OmegaConf
 
-        from jcm import runners
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
@@ -3221,7 +3222,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(
                 coords={"time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_mfdataset",
                            side_effect=_capture_mfdataset), \
@@ -3254,7 +3255,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         import xarray as xr
         from omegaconf import OmegaConf
 
-        from jcm import runners
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
@@ -3276,7 +3276,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_mfdataset",
                            side_effect=_capture_mfdataset), \
@@ -3304,7 +3304,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         import xarray as xr
         from omegaconf import OmegaConf
 
-        from jcm import runners
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
@@ -3321,7 +3320,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_mixed):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
@@ -3359,7 +3358,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
@@ -3379,7 +3377,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_dt), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",
@@ -3399,7 +3397,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
@@ -3419,7 +3416,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_dt), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",
@@ -3441,7 +3438,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
@@ -3461,7 +3457,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_dt), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",
@@ -3485,7 +3481,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
         cfg = self._pyses_cfg(
@@ -3497,7 +3492,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={
                 "time": np.array(["2000-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_mixed):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
@@ -3519,7 +3514,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         import xarray as xr
 
-        from jcm import runners
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
         cfg = self._pyses_cfg(
@@ -3543,7 +3537,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={"time": np.array(
                 [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_by_path):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
@@ -3562,7 +3556,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
 
         import xarray as xr
 
-        from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
@@ -3587,7 +3580,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={"time": np.array(
                 [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_by_year), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",
@@ -3612,7 +3605,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         import xarray as xr
         from omegaconf import OmegaConf
 
-        from jcm import runners
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
@@ -3642,7 +3634,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             return xr.Dataset(coords={"time": np.array(
                 [f"{m.group(1)}-06-15"], dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_mfdataset",
                            side_effect=_capture_mfdataset), \
@@ -3707,7 +3699,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
         cfg = self._pyses_cfg(
@@ -3727,7 +3718,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                     ["2000-06-15"], dtype="datetime64[ns]")})
             return xr.Dataset()
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_by_path):
             with self.assertRaisesRegex(ValueError, "incompatible time axes"):
@@ -3742,7 +3733,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         """
         import xarray as xr
 
-        from jcm import runners
         from jcm.forcing import ForcingData
         from jcm.runners import build_forcing
         dycore, coords = self._pyses_dycore_and_coords()
@@ -3764,7 +3754,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 [f"2000-{m:02d}-15" for m in range(1, 13)],
                 dtype="datetime64[ns]")})
 
-        with mock.patch.object(runners, "_resolve_data_path",
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                side_effect=lambda p: p), \
                 mock.patch("xarray.open_dataset", side_effect=_open_same_axis), \
                 mock.patch("jcm.dycore.pyses.forcing.build_forcing",

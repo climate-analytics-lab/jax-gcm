@@ -4,12 +4,12 @@ The manifest is the data-driven source of truth for what the project data mirror
 publishes: per product, which grids / vertical levels carry it, its yearly
 coverage (or ``None`` for a climatology/static file), the mirror-relative path
 template, and its time-alignment kind. It is generated data-side by
-``jcm.data.mirror.build_mirror.stage_manifest`` from the ``PUBLISHED_*`` sets in
-:mod:`jcm.data.bundle_names` plus that module's declarative product table, so the
+``jcm.data.mirror.build_mirror.stage_manifest`` from the ``PUBLISHED_*`` sets and
+the declarative product table both declared in ``build_mirror``, so the
 availability knowledge the resolver consults cannot drift from the build.
 
 This module is deliberately free of any intra-package (``jcm``) import — the same
-invariant :mod:`jcm.data.bundle_names` and :mod:`jcm.data.yearly_files` maintain —
+invariant :mod:`jcm.data.input_resolution` maintains —
 so it can be loaded in isolation (``spec_from_file_location``) by
 ``tools/benchmark.py``'s pre-GPU prefetch, which must not import ``jcm`` (that
 initialises a JAX backend and preallocates the GPU before the free-card gate).
@@ -59,7 +59,7 @@ def is_published(manifest: dict, name: str, grid: str, nlev=None,
                  vertical: str = "hybrid") -> bool:
     """Whether the mirror publishes ``name`` for this (grid, nlev, vertical).
 
-    Generalises :func:`jcm.data.bundle_names.bundle_is_published` over the whole
+    The single availability predicate, over the whole
     product table: the ``grids`` list must carry the grid (a grid-free product —
     ``grids is None`` — publishes on any grid), and a level-dependent product
     (``levels`` set) additionally requires ``nlev`` in that list AND a matching

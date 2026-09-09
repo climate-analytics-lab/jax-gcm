@@ -176,21 +176,30 @@ _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
 
 
 def _load_expand_yearly_files():
-    """Load ``jcm.data.yearly_files.expand_yearly_files`` WITHOUT importing ``jcm``.
+    """Load ``expand_yearly_files`` from the engine WITHOUT importing ``jcm``.
 
     Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
     as ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
     — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
     backend, preallocating the GPU before the free-card gate. The expansion lives
-    in the import-free leaf ``jcm/data/yearly_files.py`` precisely so the runner
-    (via ``jcm.forcing``'s re-export) and this pre-GPU prefetch share ONE
-    implementation of the ``{year}`` → yearly-file mapping without either copy
-    drifting.
+    in the import-free engine ``jcm/data/input_resolution.py`` (stdlib-only at
+    module top) precisely so the runner (via ``jcm.forcing``'s re-export) and
+    this pre-GPU prefetch share ONE implementation of the ``{year}`` →
+    yearly-file mapping without either copy drifting.
     """
     import importlib.util
-    src = REPO / "jcm" / "data" / "yearly_files.py"
-    spec = importlib.util.spec_from_file_location("_jcm_yearly_files", src)
+    import sys
+    src = REPO / "jcm" / "data" / "input_resolution.py"
+    name = "_jcm_input_resolution"
+    spec = importlib.util.spec_from_file_location(name, src)
     mod = importlib.util.module_from_spec(spec)
+    # Register BEFORE exec: this module defines dataclasses, and dataclass
+    # construction resolves the (string, ``from __future__`` deferred)
+    # annotations by looking the module up in ``sys.modules`` — absent it, the
+    # exec dies with ``NoneType has no attribute __dict__``. Still jcm-free: the
+    # module's ``jcm`` imports are lazy (inside resolve_input/fetch), never hit
+    # by ``expand_yearly_files``.
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod.expand_yearly_files
 
@@ -273,7 +282,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     A ``{year}`` pattern (transient emissions/oxidants/ozone/surface bundles)
     is EXPANDED to its concrete yearly files here — over ``forcing.years`` and
     the per-product ``*_available_years`` clamps — using the same
-    ``jcm.data.yearly_files.expand_yearly_files`` the runner uses (loaded by
+    ``jcm.data.input_resolution.expand_yearly_files`` the runner uses (loaded by
     file path, jcm-free). Without this the prefetch would try to fetch a literal
     ``{year}.nc`` and die before the run even starts.
     """
