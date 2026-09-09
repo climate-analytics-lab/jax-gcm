@@ -204,6 +204,10 @@ class ConvectionTendencies(NamedTuple):
     
     # Surface fluxes
     precip_conv: jnp.ndarray # Convective precipitation (kg/m²/s)
+    # Total convective precip flux entering each layer from above
+    # [kg/m²/s] (nlev,) — the local carrier flux for below-cloud
+    # (impaction) aerosol washout.
+    precip_flux: jnp.ndarray
     
     # Fixed tracer tendencies (qc, qi only)
     dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
@@ -242,6 +246,8 @@ class ConvectionData:
                                      # by the Sundqvist stratocumulus guard
                                      # (ECHAM gates on ktype==0) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    precip_flux: jnp.ndarray         # Convective precip flux entering each
+                                     # layer from above [kg/m²/s] (nlev, ncols)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     precip_formation: jnp.ndarray    # Per-layer updraft precip generation
                                      # [kg/m²/s] (nlev, ncols)
@@ -270,6 +276,7 @@ class ConvectionData:
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
+            precip_flux=jnp.zeros((nlev,) + nodal_shape),
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),

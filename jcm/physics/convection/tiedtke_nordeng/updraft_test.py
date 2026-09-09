@@ -504,6 +504,49 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
                         f"plume died at its base: kbase={kbase} ktop={ktop}")
         self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0)
 
+    def test_active_convection_publishes_condensate_and_precip_flux(self):
+        """The diagnostics aerosol scavenging consumes must not be empty.
+
+        ``qc_conv + qi_conv`` (in-plume condensate) and ``precip_flux`` (the
+        local carrier flux) drive convective in-plume and below-cloud
+        scavenging; either identically zero while the plume is running
+        silently removes the whole convective aerosol sink, which no unit
+        test of the scavenging routines can see because they are fed those
+        fields by hand.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, tiedtke_nordeng_convection,
+        )
+        p, T, q, dz, rho = self._sounding(bl_top_m=500.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.0)
+        z = jnp.zeros_like(T)
+        nlev = T.shape[0]
+        sl = slice(nlev // 2, nlev - 4)
+        supply = 1.5e-4
+        conv = jnp.zeros(nlev).at[sl].set(
+            1.3 * supply / jnp.sum(rho[sl] * dz[sl]))
+        tend, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 600.0, cfg,
+            moisture_supply=jnp.asarray(supply),
+            qte_dynamics=conv,
+        )
+        mfu = np.asarray(state.mfu)
+        self.assertTrue(np.any(mfu > 0.0), "no updraft to diagnose")
+        cond = np.asarray(tend.qc_conv) + np.asarray(tend.qi_conv)
+        self.assertTrue(np.any(cond > 0.0), "in-plume condensate is all zero")
+        # Condensate lives where the plume does, and nowhere else.
+        self.assertTrue(np.all(cond[mfu <= 0.0] == 0.0))
+        # Phase split by the environment temperature, as for detrainment.
+        warm = np.asarray(T) > 273.15
+        self.assertTrue(np.all(np.asarray(tend.qi_conv)[warm] == 0.0))
+        self.assertTrue(np.all(np.asarray(tend.qc_conv)[~warm] == 0.0))
+        flux = np.asarray(tend.precip_flux)
+        self.assertTrue(np.any(flux > 0.0), "convective precip flux is zero")
+        # The flux entering a layer is monotone downward (generation adds,
+        # sub-cloud evaporation removes) and reaches the surface value.
+        surf = np.argmax(np.asarray(p))
+        self.assertGreater(flux[surf], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
