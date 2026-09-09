@@ -11,10 +11,14 @@ the aerosol code (``jcm/physics/aerosol/jam/chemistry/``), not under
 **What we do.** A lightweight ECHAM-physics chemistry
 (``jcm/physics/chemistry/simple_chemistry.py``) providing an **analytic fixed
 ozone distribution** (a stratospheric-max profile parameterised by scale height,
-max VMR, tropopause height and a stratosphere coefficient) plus a basic methane
-oxidation (relaxation to climatology / linear OH-scaled decay). CO₂ is
-deliberately *not* here — it is a prescribed forcing (``forcing.co2_vmr``) read
-directly by radiation.
+max VMR, tropopause height and a stratosphere coefficient). Methane is
+**prescribed, not prognostic**: ``EchamBoundaryConditions`` overwrites the
+chemistry carry's CH₄ with ``forcing.ch4_vmr`` every step, so the linear
+OH-scaled decay ``SimpleChemistry`` computes survives only as the
+``methane_loss`` diagnostic (a sink-rate readout) — radiation sees the
+prescribed VMR and there is no evolving CH₄ budget. CO₂ is deliberately *not*
+here — it is a prescribed forcing (``forcing.co2_vmr``) read directly by
+radiation.
 
 **What ECHAM/CAM does.** A stand-in for prescribed CMIP ozone/GHG chemistry; the
 analytic ozone profile is a jcm interim, not a port.
@@ -26,7 +30,9 @@ analytic ozone profile is a jcm interim, not a port.
   {doc}`boundary_conditions`), so ``SimpleChemistry``'s ozone is a fallback.
 
 **Status & known limitations.** Analytic ozone is a documented low-fidelity
-fallback; methane oxidation is a simple relaxation, not a mechanism.
+fallback. A prognostic CH₄ budget would need the per-step prescribed reseed
+lifted; today ``methane_loss`` is diagnostic-only and nothing downstream
+consumes it.
 
 **Code pointers.** ``jcm/physics/chemistry/simple_chemistry.py`` —
 ``ChemistryParameters`` (ozone + methane, explicit no-CO₂ note),

@@ -47,9 +47,13 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``zmfmax = layer_mass/dt`` bounds the column-integrated flux but not per-level
   latent-heat spikes inside the updraft loop. Until the per-level limits land, an
   explicitly-labelled stopgap caps the convective T-tendency at 5 K/hr
-  (``_DTDT_MAX``) and rescales the whole per-level ledger homogeneously (preserving
-  column conservation by linearity, exactly as ECHAM's ``zmfub1`` amplitude
-  scaling). This is the documented cause of a cap-pinned single-layer heating
+  (``_DTDT_MAX``) and rescales the thermodynamic ledger homogeneously — T, q,
+  qc/qi, precipitation, and the mass fluxes with the tracer transport they
+  drive — preserving column conservation by linearity, as ECHAM's ``zmfub1``
+  amplitude scaling does. The **momentum tendencies are the exception**:
+  ``dudt``/``dvdt`` are returned unscaled, so a capped plume's momentum
+  transport keeps full amplitude (tracked with the other ledger gaps in #676).
+  This cap is the documented cause of a cap-pinned single-layer heating
   artifact in pathological columns.
 
 **Status & known limitations.**

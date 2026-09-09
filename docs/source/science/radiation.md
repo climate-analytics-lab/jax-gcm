@@ -58,9 +58,10 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **Why we differ.**
 - `science` — the liquid effective-radius fallback deliberately does *not* apply
   CAM4's land/ocean contrast, because ``cdnc_factor`` already carries the
-  aerosol/CCN effect (applying both double-counts it). It is live only on the 1M
-  ``physics=echam`` preset (#717); every production configuration is 2M and uses
-  microphysical effective radii.
+  aerosol/CCN effect (applying both double-counts it). The fallback — a constant
+  radius with no LWC dependence — is live on every 1M composition, including the
+  release-validated ``t63-echam-1m`` / ``t106-echam-1m`` configurations (#717);
+  2M configurations use microphysical effective radii.
 - `science` — the grey two-stream backend consumes only the *broadband* MACv2-SP
   optics; it does not read the *per-band* online-aerosol optics that only
   ``rrtmgp.py`` consumes. A grey + JAM-online-aerosol configuration therefore

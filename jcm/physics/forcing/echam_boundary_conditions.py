@@ -198,11 +198,11 @@ class EchamBoundaryConditions(PhysicsTerm):
         surface_temperature = surface_temperature.reshape(ncols)
         roughness_length = roughness_length.reshape(ncols)
 
-        # CH4 comes from ``ForcingData`` (#347) and seeds the chemistry
-        # diagnostic (where the methane-loss scheme evolves it). CO2 is *not*
-        # seeded here: it is a prescribed forcing read straight from
-        # ``forcing.co2_vmr`` by radiation, so the chemistry diagnostic never
-        # carries it.
+        # CH4 is PRESCRIBED: overwritten here from ``ForcingData`` (#347)
+        # every step, so SimpleChemistry's OH-scaled decay survives only as
+        # the ``methane_loss`` diagnostic — there is no evolving CH4 budget.
+        # CO2 is not seeded here: radiation reads ``forcing.co2_vmr``
+        # directly, so the chemistry diagnostic never carries it.
         ch4_vmr_value = forcing.ch4_vmr
 
         # O3: prefer the realistic CMIP6/ECHAM-style climatology carried

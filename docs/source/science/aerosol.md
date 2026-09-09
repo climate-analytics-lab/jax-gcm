@@ -22,7 +22,8 @@ cloud-borne carry store → **microphysics core** → optional online optics →
 activation → heterogeneous ice nucleation → sedimentation → dry deposition →
 cloud-borne exchange → aqueous sulfur chemistry → wet scavenging.
 
-The microphysics core is a swap point: ``"placeholder"`` (default) is a
+The microphysics core is a swap point: ``"placeholder"`` (the bare-factory
+default, keeping the Apache-2.0 core importable with no GPL dependency) is a
 **κ-Köhler equilibrium** core with zero tendency that still exposes the real MAM4
 mode/species geometry so the full harness runs end-to-end; ``"mam4_jax"`` is the
 real MAM4-JAX box model (GPL-3.0, optional ``jcm[mam4]`` extra, imported lazily)
@@ -54,8 +55,10 @@ structural gaps (below). See {doc}`../design/jam_carbon_aging`.
   precision. Gas tracers into the core are ``h2so4`` / ``soag`` only (SO₂/DMS
   oxidation is jcm-side).
 
-**Status & known limitations.** The default core is the zero-tendency κ-Köhler
-placeholder; the real MAM4-JAX core is opt-in. The core's cloudy ``amicphys``
+**Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
+``jam_microphysics: mam4_jax`` (requiring the ``jcm[mam4]`` extra); the
+zero-tendency κ-Köhler placeholder is the bare-factory default and the
+documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
 lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
