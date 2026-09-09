@@ -32,8 +32,13 @@ class JamIntegrationTest(unittest.TestCase):
                 aerosol_module="jam", cloud_scheme="2m", **physics_kwargs
             ),
         )
-        # ~1.5 h (3 steps) — enough to exercise tracer transport + coupling.
-        return model, model.run(save_interval=0.0625, total_time=0.0625)
+        # ~3 h (6 steps). Emission -> transport -> microphysics core ->
+        # activation is a multi-step chain on a cold start with no seeded
+        # aerosol, and the natural-emission terms read the previous step's
+        # surface layer, so at 3 steps the core still sees an empty aerosol
+        # state and the activation assertion below measures spin-up rate
+        # rather than coupling.
+        return model, model.run(save_interval=0.125, total_time=0.125)
 
     def test_runs_finite_with_ham_aerosol(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name

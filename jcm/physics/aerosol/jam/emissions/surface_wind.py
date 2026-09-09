@@ -17,14 +17,21 @@ def wind_10m(state, diagnostics) -> jnp.ndarray:
     Reads the ECHAM ``nsurf_diag`` reduction published by the vertical-diffusion
     term (which owns the surface-layer profile). Emission terms run before
     vdiff in the ECHAM ordering, so this is the previous step's 10 m wind —
-    the same one-step lag the dust term's ``u*`` already carries. With no
-    vertical-diffusion term composed at all there is no surface layer to
-    reduce through, and the lowest model level is the only wind available.
+    the same one-step lag the dust term's ``u*`` already carries.
+
+    The lowest model level is the fallback wherever no reduction has been
+    diagnosed: with no vertical-diffusion term composed there is no surface
+    layer to reduce through, and on the first step of a run its carry is still
+    zero (a zero 10 m wind under a moving lowest level can only mean "not
+    diagnosed yet", and emitting nothing for a step is worse than emitting
+    unreduced).
     """
-    vdiff = diagnostics.get("vertical_diffusion")
-    speed_10m = getattr(vdiff, "wind_10m", None) if vdiff is not None else None
-    if speed_10m is not None:
-        return jnp.ravel(speed_10m)
-    return jnp.sqrt(
+    lowest = jnp.sqrt(
         jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30)
     )
+    vdiff = diagnostics.get("vertical_diffusion")
+    speed_10m = getattr(vdiff, "wind_10m", None) if vdiff is not None else None
+    if speed_10m is None:
+        return lowest
+    speed_10m = jnp.ravel(speed_10m)
+    return jnp.where(speed_10m > 0.0, speed_10m, lowest)
