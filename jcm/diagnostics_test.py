@@ -166,6 +166,66 @@ def _budget_dataset(dtype, dyn=0.0, mass=1.0, ptend=5e-12,
     return xr.Dataset(data, coords={"lat": lat, "lon": lon})
 
 
+class TestEmissionWindProvenance(unittest.TestCase):
+    """The bootstrap-only guarantee of #723, enforced per chunk."""
+
+    DT = 30.0 * 60.0          # 30-minute model step
+    ONE_STEP_DAYS = DT / 86400.0
+
+    def _ds(self, flagged_fraction: float):
+        ds = _make_dataset(250.0, 300.0)
+        nt, nx, ny = ds["temperature"].shape
+        flag = np.zeros((nt, nx, ny))
+        n = int(round(flagged_fraction * nx * ny))
+        flag.reshape(nt, -1)[:, :n] = 1.0
+        ds["wind_10m_model_level"] = (("time", "lon", "lat"), flag)
+        return ds
+
+    def test_flag_after_the_first_step_fails_the_chunk(self):
+        ok, report = check_health(self._ds(1.0), 3, 90.0)
+        self.assertFalse(ok)
+        self.assertIn("emission wind", "; ".join(report["reasons"]))
+        self.assertEqual(report["emission_wind_model_level_frac"], 1.0)
+
+    def test_a_single_flagged_column_is_enough(self):
+        ok, _ = check_health(self._ds(1.0 / 16.0), 3, 90.0)
+        self.assertFalse(ok)
+
+    def test_cold_start_first_step_is_exempt(self):
+        # A first chunk exactly one step long ends ON the bootstrap step, where
+        # no surface layer has been diagnosed yet — common in tests, SCM runs
+        # and smoke configs, and not a defect.
+        ok, report = check_health(self._ds(1.0), 0, self.ONE_STEP_DAYS,
+                                  cold_start_step_seconds=self.DT)
+        self.assertTrue(ok)
+        self.assertTrue(report["emission_wind_bootstrap_chunk"])
+        # The flag is still reported, just not fatal.
+        self.assertEqual(report["emission_wind_model_level_frac"], 1.0)
+
+    def test_the_exemption_does_not_loosen_the_gate(self):
+        one = self.ONE_STEP_DAYS
+        # A resume's first chunk carries a real 10 m wind, so no exemption.
+        self.assertFalse(check_health(self._ds(1.0), 0, one)[0])
+        # A cold start whose first chunk is longer than one step must not be
+        # ending on the bootstrap step.
+        self.assertFalse(check_health(self._ds(1.0), 0, 6 * one,
+                                      cold_start_step_seconds=self.DT)[0])
+        # A later chunk never is, whatever its length.
+        self.assertFalse(check_health(self._ds(1.0), 4, one,
+                                      cold_start_step_seconds=self.DT)[0])
+
+    def test_unflagged_chunk_passes(self):
+        ok, report = check_health(self._ds(0.0), 3, 90.0)
+        self.assertTrue(ok)
+        self.assertEqual(report["emission_wind_model_level_frac"], 0.0)
+
+    def test_absent_field_is_not_a_failure(self):
+        # Non-JAM runs publish no such field.
+        ok, report = check_health(_make_dataset(250.0, 300.0), 0, 5.0)
+        self.assertTrue(ok)
+        self.assertNotIn("emission_wind_model_level_frac", report)
+
+
 class TestAerosolBudgetReport(unittest.TestCase):
     def test_no_budget_gauges_returns_empty(self):
         ds = xr.Dataset({"temperature": (("time",), np.zeros(1))})

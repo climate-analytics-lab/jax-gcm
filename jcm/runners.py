@@ -1766,7 +1766,14 @@ def run_chunked(
         elapsed_sim_days += cur_chunk
 
         ds = preds.to_xarray()
-        ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
+        ok, report = check_health(
+            ds, chunk_idx, elapsed_sim_days,
+            # Only a COLD start's first chunk can legitimately end on step 1
+            # with the emission-wind fallback still flagged (#723); a resume
+            # carries a real 10 m wind from the checkpoint.
+            cold_start_step_seconds=(
+                float(cfg.run.time_step) * 60.0 if first_fresh_chunk else None),
+        )
         report["wall_seconds"] = chunk_wall
         reports.append(report)
         print_report(report)
