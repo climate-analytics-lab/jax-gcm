@@ -20,11 +20,17 @@ selected by config:
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
 
-**Partial-cloud / overlap** is full **McICA** (``jcm/physics/radiation/mcica.py``):
-one stochastic binary cloud profile per g-point, seeded deterministically per
-column and model step. Three overlap rules are supported — random, maximum-random
-(Geleyn-Hollingsworth), and generalised-exponential with a decorrelation length.
-The AeroCom total-cloud-cover diagnostic uses the maximum-random closure.
+**Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
+(``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
+g-point, seeded deterministically per column and model step, with three overlap
+rules — random, maximum-random (Geleyn-Hollingsworth), and
+generalised-exponential with a decorrelation length. The **grey** backend
+instead combines one clear and one cloudy beam weighted by the overlap-derived
+total cover (``column_total_cover``); the **NN emulator** consumes a
+deterministic overlap-derived expectation (no stochastic sampling); **SPEEDY**
+carries its own cloud formulation. Swapping backends therefore changes the
+cloud-overlap treatment, not just the gas optics. The AeroCom
+total-cloud-cover diagnostic uses the maximum-random closure.
 Radiation **sub-steps**: a gate (``radiation_should_compute``) skips the expensive
 solve and rescales cached heating on intermediate steps.
 

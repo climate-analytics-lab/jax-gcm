@@ -1,11 +1,14 @@
 # Boundary conditions, ozone and forcing
 
-**What we do.** ``jcm/forcing.py::ForcingData`` is the immutable pytree of all
+**What we do.** ``jcm/forcing.py::ForcingData`` is the pytree of all
 boundary conditions (SST, sea ice, land T, snow/soil, GHG scalars, ozone
-climatology, aerosol/emission/oxidant/DMS/dust fields). The build engine lives in
-``jcm/runners.py`` (``build_forcing`` and the ``_attach_*`` helpers) with the typed
-input-resolution layer in ``jcm/forcing_assembly.py``, driven by the Hydra
-``forcing`` group (``jcm/config/forcing/{default,from_file,amip,era5}.yaml``).
+climatology, aerosol/emission/oxidant/DMS/dust fields), updated by convention
+through ``.copy(...)`` rather than field assignment (``tree_math.struct`` does
+not freeze instances). The build engine lives in ``jcm/forcing_assembly.py``
+(``build_forcing`` and the attach chain) over the typed input-resolution layer
+in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
+(``jcm/config/forcing/{default,from_file,amip,era5}.yaml``); the CLI's
+``jcm/runners.py::build_forcing`` is a thin delegate.
 
 - **Climatological vs transient bundles.** ``amip.yaml`` and ``era5.yaml`` are
   transient yearly bundles: one file per year, a ``years`` range, and
