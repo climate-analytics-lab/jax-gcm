@@ -225,6 +225,23 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
             self.assertTrue(bool(jnp.all(nxt >= 0.0)), n)
             self.assertTrue(bool(jnp.allclose(nxt, 0.0)), n)
 
+    def test_negative_aerosol_tracer_is_not_topped_up(self):
+        """A tracer that arrives negative has its sink stopped, not filled.
+
+        The cap drains to zero; it must never invent mass to lift a ringing
+        negative up to zero, which would make the guard a source.
+        """
+        from jcm.physics_interface import PhysicsTendency, verify_tendencies
+        shape = (4, 8, 8)
+        state = PhysicsState.zeros(
+            shape, tracers={"m_ss_cor": jnp.full(shape, -1e-18)},
+        )
+        tend = PhysicsTendency.zeros(
+            shape, tracers={"m_ss_cor": jnp.full(shape, -1e-20)},
+        )
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        self.assertTrue(bool(jnp.all(result.tracers["m_ss_cor"] == 0.0)))
+
     def test_aerosol_state_is_not_clipped_on_entry(self):
         """The entry clip stays off aerosol: the #713 budget gauge reads the
         same verified state and must still see the advection ringing.

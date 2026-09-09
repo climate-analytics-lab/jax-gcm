@@ -422,7 +422,13 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         # silently detaching those cells from any parameter being
         # calibrated. Positivity in the forward pass is unaffected.
         next_value = value + time_step * tend
-        capped = jnp.where(next_value < 0, -value / time_step, tend)
+        # Drain to zero, never fill TO zero: a tracer that arrives negative
+        # (aerosol is not clipped on entry — see the prefix list above)
+        # must have its removal stopped, not be topped up with invented
+        # mass. For the entry-clipped fields value >= 0 and this is the
+        # plain -value/dt cap.
+        capped = jnp.where(
+            next_value < 0, -jnp.maximum(value, 0.0) / time_step, tend)
         # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
         # tend)) is bitwise ``capped`` in the forward pass (the tend
         # terms cancel exactly), unlike tend + stop_grad(capped - tend)
