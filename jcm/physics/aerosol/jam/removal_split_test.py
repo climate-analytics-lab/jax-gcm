@@ -130,6 +130,28 @@ class SequentialRemovalTest(unittest.TestCase):
         self.assertGreaterEqual(
             float(np.asarray(state.tracers[key] + DT * acc[key]).min()), 0.0)
 
+    def test_upstream_sources_are_visible_to_the_removal_chain(self):
+        # The split is the FULL sequential one: aerosol an upstream term
+        # emitted or formed this step is present to be removed. Injecting a
+        # source ahead of the chain must increase what the chain removes.
+        state, diagnostics, spec, mass_name, _ = _column()
+        key = mass_name("ss", "cor")
+        plain, _ = _run_chain(state, diagnostics)
+
+        emitted = {name: jnp.zeros_like(q) for name, q in state.tracers.items()}
+        emitted[key] = jnp.full_like(state.tracers[key], 1.0e-9 / DT)
+        acc = dict(emitted)
+        diags = dict(diagnostics)
+        for term in (StokesSedimentation(), SlinnDryDeposition(),
+                     WetScavenging()):
+            diags["_tendency_run"] = {"tracers": acc}
+            tend, diags = term(state, diags, None, None)
+            acc = {n: v + tend.tracers.get(n, 0.0) for n, v in acc.items()}
+        removed_with_source = float(np.sum(
+            np.asarray(emitted[key] - acc[key])))
+        removed_plain = -float(np.sum(np.asarray(plain[key])))
+        self.assertGreater(removed_with_source, removed_plain * 1.2)
+
     def test_pathway_diagnostics_sum_to_the_mass_change(self):
         # dry_* (settling + surface deposition) and wet_* (scavenging net of
         # re-evaporation) must together account for exactly the interstitial

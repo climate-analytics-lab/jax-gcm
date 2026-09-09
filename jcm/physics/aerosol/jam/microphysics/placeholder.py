@@ -15,6 +15,8 @@ from typing import ClassVar
 
 import jax.numpy as jnp
 
+import jcm.constants as c
+
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
@@ -25,8 +27,6 @@ from jcm.physics_interface import PhysicsTendency
 #: Floors to keep radius/density/κ finite where a mode is empty.
 _TINY_NUM = 1.0e-30      # kg^-1
 _TINY_VOL = 1.0e-40      # m³/kg
-#: Density of liquid water [kg/m³] for the wet-particle mixture.
-_RHO_WATER = 1000.0
 
 
 def saturation_ratio(
@@ -112,15 +112,11 @@ def equilibrium_modal_state(
         growth = jnp.cbrt(1.0 + kappa * saturation / (1.0 - saturation))
         r_wet = r_dry * growth
 
-        # Wet particle density: the mass-weighted mixture of dry material
-        # and the condensed water, ρ_wet = (ρ_dry + (g³-1)ρ_w)/g³. The
-        # settling/deposition velocities use the WET radius, so they must
-        # use the density of that same wet particle — carrying the dry
-        # density with the wet radius overstates the mass being settled
-        # (1.6x for coarse sea salt at 80 % RH, 1.9x at 99 %). CAM passes
-        # ``wetdens`` from ``modal_aero_wateruptake`` for this reason.
+        # ρ_wet = (ρ_dry + (g³-1)ρ_w)/g³ — settling and deposition use the
+        # wet radius, so they need the density of that same particle
+        # (CAM's ``wetdens`` from ``modal_aero_wateruptake``).
         vol_growth = growth ** 3
-        rho = (rho_dry + (vol_growth - 1.0) * _RHO_WATER) / vol_growth
+        rho = (rho_dry + (vol_growth - 1.0) * c.rhow) / vol_growth
 
         r_dry_modes.append(r_dry)
         r_wet_modes.append(r_wet)

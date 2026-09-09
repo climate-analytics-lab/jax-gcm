@@ -1,5 +1,6 @@
 import unittest
 import jax.numpy as jnp
+import numpy as np
 from dinosaur import primitive_equations_states
 from dinosaur.scales import units
 from jcm.constants import p0
@@ -240,10 +241,25 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
             shape, tracers={"m_ss_cor": jnp.full(shape, -1e-20)},
         )
         result = verify_tendencies(state, tend, time_step=1800.0)
-        got = result.tracers["m_ss_cor"]
-        # The invariant: never positive. The pre-fix ``-value/dt`` returned
-        # +5.6e-22 here, lifting the ringing negative to zero out of nothing.
-        self.assertTrue(bool(jnp.all(got <= 0.0)), f"got {got[0, 0, 0]!r}")
+        self.assertTrue(bool(jnp.all(result.tracers["m_ss_cor"] <= 0.0)))
+
+    def test_source_on_a_negative_tracer_survives(self):
+        """The cap floors sinks; it must not clip a source.
+
+        A tracer arriving negative (aerosol is not entry-clipped) still
+        receives emissions, chemistry and wet-dep re-injection; a guard
+        keyed only on "the step ends below zero" would zero them.
+        """
+        from jcm.physics_interface import PhysicsTendency, verify_tendencies
+        shape = (4, 8, 8)
+        state = PhysicsState.zeros(
+            shape, tracers={"m_ss_cor": jnp.full(shape, -1e-18)},
+        )
+        source = jnp.full(shape, 1e-22)
+        tend = PhysicsTendency.zeros(shape, tracers={"m_ss_cor": source})
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        np.testing.assert_allclose(
+            np.asarray(result.tracers["m_ss_cor"]), np.asarray(source))
 
     def test_aerosol_state_is_not_clipped_on_entry(self):
         """The entry clip stays off aerosol: the #713 budget gauge reads the

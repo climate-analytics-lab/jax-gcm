@@ -5,13 +5,15 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
+
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     equilibrium_modal_state,
 )
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
-RHO_WATER = 1000.0
+RHO_WATER = c.rhow
 
 
 def _pure_species_state(species, saturation, mass=1.0e-9, number=1.0e8):

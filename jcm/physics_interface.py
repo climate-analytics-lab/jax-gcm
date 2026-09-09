@@ -16,6 +16,7 @@ import tree_math
 from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+import re
 from typing import Tuple, Any, Dict, TypeAlias
 import logging
 
@@ -328,26 +329,19 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
-# JAM aerosol/gas families, whose names are built per population
-# (``m_<species>_<class>``, ``n_<class>``, their ``mc_``/``nc_``
-# cloud-borne partners, ``g_<species>``) and so cannot be listed.
-# Non-negative for the same reason as the names above, and covered by the
-# TENDENCY cap only: sedimentation, dry deposition and wet scavenging each
-# bound their own removal but the driver sums them, so this is the last
-# guard on that sum (CAM/HAMMOZ get it instead by applying removals
-# sequentially to a working copy, which the terms now also do).
-#
-# Deliberately NOT added to the entry clip in ``verify_state``: that would
-# hide the advection ringing on aerosol tracers from the #713 mass-budget
-# gauge, which reads the same verified state, and every removal term
-# already floors its own reads at zero.
-_NON_NEGATIVE_TENDENCY_PREFIXES = ("m_", "mc_", "n_", "nc_", "g_")
+# JAM aerosol mass/number and gas tracers. Their names are built per
+# population (``tracer_layout``) so they cannot be listed; the pattern is
+# anchored rather than a bare prefix test so an unrelated tracer starting
+# with ``n_`` or ``g_`` is not silently capped. They are guarded on the
+# tendency side only — the ``verify_state`` entry clip would hide the
+# advection ringing from the #713 mass-budget gauge, which reads the same
+# verified state.
+_JAM_TRACER_RE = re.compile(r"^(?:mc?_[a-z0-9]+_[a-z0-9]+|nc?_[a-z0-9]+|g_[a-z0-9]+)$")
 
 
 def has_non_negative_tendency(name: str) -> bool:
     """Whether a tracer's tendency must not drive it below zero."""
-    return (name in _NON_NEGATIVE_TRACERS
-            or name.startswith(_NON_NEGATIVE_TENDENCY_PREFIXES))
+    return name in _NON_NEGATIVE_TRACERS or bool(_JAM_TRACER_RE.match(name))
 
 
 def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
@@ -364,7 +358,7 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     Clips ``specific_humidity`` and every positive-definite tracer (cloud
     water, ice, rain, snow, droplet- and ice-number concentrations, GHG
     volume mixing ratios) to ``>= 0``. Aerosol and gas tracers are
-    deliberately left alone here (see the prefix list below) and guarded
+    deliberately left alone here (see :data:`_JAM_TRACER_RE`) and guarded
     on the tendency side instead. We deliberately do NOT clip to an
     upper bound — aggressive caps hide bugs in the physics (particularly
     convection) that should surface as unphysical values rather than be
@@ -421,14 +415,12 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         # fires routinely wherever precip/evaporation drives q toward 0,
         # silently detaching those cells from any parameter being
         # calibrated. Positivity in the forward pass is unaffected.
-        next_value = value + time_step * tend
-        # Drain to zero, never fill TO zero: a tracer that arrives negative
-        # (aerosol is not clipped on entry — see the prefix list above)
-        # must have its removal stopped, not be topped up with invented
-        # mass. For the entry-clipped fields value >= 0 and this is the
-        # plain -value/dt cap.
-        capped = jnp.where(
-            next_value < 0, -jnp.maximum(value, 0.0) / time_step, tend)
+        # Floor the tendency at the drain rate that empties the tracer and
+        # no further. ``max(tend, -max(value,0)/dt)`` equals the plain
+        # ``-value/dt`` cap wherever ``value >= 0``, leaves any source
+        # untouched, and on a tracer that arrives negative (aerosol is not
+        # entry-clipped) stops the sink rather than inventing mass.
+        capped = jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
         # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
         # tend)) is bitwise ``capped`` in the forward pass (the tend
         # terms cancel exactly), unlike tend + stop_grad(capped - tend)

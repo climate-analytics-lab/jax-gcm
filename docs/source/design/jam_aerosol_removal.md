@@ -28,10 +28,12 @@ rain rate inside `odds`, leaving a first-order removal rate
 ```
 
 with `R` the precipitation flux (kg m⁻² s⁻¹ ≡ mm s⁻¹) and `Λ₁` the
-impaction scavenging coefficient in 1/mm. jcm applies this with the
-clear-sky fraction `1 - cf` in place of `cldv`, because its in-cloud
-pathway is already keyed to the cloudy fraction — the two together
-partition the box exactly once, where CAM's `cldt`/`cldv` pair overlaps.
+impaction scavenging coefficient in 1/mm. There is no cloud weighting
+left: it acts on the whole grid-mean interstitial mixing ratio. That is
+consistent because interstitial aerosol is by definition the out-of-droplet
+population, and — exactly as in CAM, where `sol_facti = 0` for interstitial
+aerosol — jcm's stratiform in-cloud pathway acts on the cloud-borne phase,
+not on it. `sol_factb` is the only reduction applied.
 
 `Λ₁` comes from CAM's `calc_1_impact_rate` (`aero_model.F90`), a double
 sum over a raindrop spectrum and the mode's lognormal, weighted by Slinn's
@@ -73,6 +75,12 @@ CAM's fallback when the namelist leaves it unset is the mode's
 mass-weighted hygroscopicity; no supported CAM configuration uses that
 path, so jcm carries the scalar as a differentiable parameter instead.
 
+Two harmless departures from `modal_aero_bcscavcoef_get`: CAM
+short-circuits a growth ratio within 1 % of unity to node 0 exactly, where
+`_interp_log_table` always interpolates (numerically indistinguishable);
+and CAM gates the lookup on an `isprx` precipitation mask, where jcm relies
+on `Λ ∝ R` vanishing without precip — equivalent, and why there is no mask.
+
 ## Wet particle density
 
 Settling and Slinn deposition use the **wet** radius, so they must use the
@@ -99,11 +107,18 @@ sinks can sum past the available mass; a raining marine surface cell
 removed 164 % of its coarse sea salt.
 
 ECHAM and CAM avoid this by operator splitting, and so does jcm: each
-removal term reads the state the previous ones left, reconstructed from
-the running tendency `ComposablePhysics` publishes as `_tendency_run`
-(`removal_split.split_view`). Removing a fraction of what remains can
-never exceed the whole, and each term still reports exactly the mass it
-took.
+removal term reads the working copy the previous terms left, reconstructed
+from the running tendency `ComposablePhysics` publishes as `_tendency_run`
+on both its whole-grid and column-vectorized hosts
+(`removal_split.split_view`). Removing a fraction of what remains can never
+exceed the whole, and each term still reports exactly the mass it took.
+
+The reconstruction folds in **every** term already run this step, not only
+the removal chain: emissions, convective transport, chemistry, the
+microphysics core and activation all precede sedimentation in
+`jam_aerosol_physics`. That is the full sequential split, and it is what
+the removal terms want — aerosol emitted or formed this step is there to be
+removed, and aerosol convection has already exported is not.
 
 Sequential splitting was chosen over a joint limiter that rescales the
 three tendencies to fit: the limiter changes the answer only in the cells
@@ -132,8 +147,10 @@ surface deposition; `wet_<species>` is scavenging net of re-evaporation,
 plus the in-plume convective scavenging the transport term performs. Each
 term column-integrates its own tendencies
 (`flux_diagnostic.accumulate_deposition_fluxes`), so the ledger cannot
-drift from the mass actually removed — with operator splitting in place,
-`dry_* + wet_*` equals the chain's total mass change exactly.
+drift from the mass actually removed: with operator splitting in place,
+`dry_* + wet_*` equals the chain's total mass change, up to the interface
+guard below (each term records its ledger before `verify_tendencies` sees
+the summed tendency).
 
 ## Known gaps
 

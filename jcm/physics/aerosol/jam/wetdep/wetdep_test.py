@@ -69,23 +69,20 @@ class ScavengingFunctionTest(unittest.TestCase):
         # Λ = sol_factb·Λ₁·R: coarse-mode aerosol sits above the
         # Greenfield gap and is collected far more efficiently.
         precip = jnp.full((1, 1), 1.0e-4)
-        cf = jnp.zeros((1, 1))
         params = WetDepParameters.default()
         table = build_impaction_table(0.11e-6, 1.8, 1770.0)
         coarse_table = build_impaction_table(2.0e-6, 1.8, 2600.0)
         _, accum_coef = bcscavcoef(jnp.full((1, 1), 0.055e-6), table)
         _, coarse_coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), coarse_table)
-        accum = below_cloud_rate(precip, cf, accum_coef, params)
-        coarse = below_cloud_rate(precip, cf, coarse_coef, params)
+        accum = below_cloud_rate(precip, accum_coef, params)
+        coarse = below_cloud_rate(precip, coarse_coef, params)
         self.assertGreater(float(coarse[0, 0]), float(accum[0, 0]))
 
     def test_no_precip_no_below_cloud(self):
         params = WetDepParameters.default()
         table = build_impaction_table(2.0e-6, 1.8, 2600.0)
         _, coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), table)
-        rate = below_cloud_rate(
-            jnp.zeros((1, 1)), jnp.zeros((1, 1)), coef, params,
-        )
+        rate = below_cloud_rate(jnp.zeros((1, 1)), coef, params)
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
 
     def test_conv_in_cloud_hammoz_form(self):

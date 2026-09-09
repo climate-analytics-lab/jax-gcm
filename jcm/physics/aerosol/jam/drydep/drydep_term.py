@@ -184,9 +184,9 @@ class SlinnDryDeposition(PhysicsTerm):
             tracers=tracer_tends,
         )
         # AeroCom deposition fluxes (jax-gcm#581): turbulent/Brownian dry
-        # removal belongs in ``dry_*`` alongside gravitational settling —
-        # it is ~45 % of the coarse-mode dry sink. Cloud-borne removals go
-        # into the carry, so they are folded in explicitly.
+        # removal belongs in ``dry_*`` alongside gravitational settling.
+        # Cloud-borne removals go into the carry, so they are folded in
+        # explicitly.
         from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
             accumulate_deposition_fluxes)
         diagnostics = accumulate_deposition_fluxes(
