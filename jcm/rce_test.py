@@ -189,14 +189,26 @@ class TestRceColumnConstruction(unittest.TestCase):
         _cb, found = find_cloud_base(ic.temperature, ic.specific_humidity,
                                      pfull, cfg, None, dz)
         self.assertTrue(bool(found), "no cloud base in the seeded RCE column")
-        # ...because the sub-cloud layer is well mixed: potential
-        # temperature is constant through it.
+        # ...because the sub-cloud layer is well mixed. Compare the
+        # potential-temperature spread through it against the unmixed
+        # profile rather than an absolute threshold: the seeded height is a
+        # scale-height estimate, so the mixed layer is near-neutral rather
+        # than exactly isentropic in the true (p, T) coordinates.
+        unmixed = rce_initial_state(vertical, sst=302.0, relative_humidity=0.8,
+                                    mixed_layer_top_m=0.0)
+        exner = (float(c.p0) / np.asarray(pfull)) ** (float(c.rd) / float(c.cpd))
         z = np.asarray(ic.geopotential) / c.grav
-        theta = np.asarray(ic.temperature) * (
-            float(c.p0) / np.asarray(pfull)) ** (float(c.rd) / float(c.cpd))
         ml = z < 700.0
         self.assertTrue(np.any(ml))
-        self.assertLess(float(np.ptp(theta[ml])), 0.5)
+        spread = float(np.ptp(np.asarray(ic.temperature)[ml] * exner[ml]))
+        spread_unmixed = float(
+            np.ptp(np.asarray(unmixed.temperature)[ml] * exner[ml]))
+        self.assertLess(spread, 0.5 * spread_unmixed)
+        _cb2, found_unmixed = find_cloud_base(
+            unmixed.temperature, unmixed.specific_humidity, pfull, cfg, None, dz,
+        )
+        self.assertFalse(bool(found_unmixed),
+                         "the unmixed profile should not trigger cubase")
 
     def test_interactive_humidity_frees_q_and_drops_closure(self):
         scm = rce_column(relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),

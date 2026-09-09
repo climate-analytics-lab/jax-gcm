@@ -18,6 +18,13 @@ cd "$REPO"
 # location as jcm.runners.maybe_enable_compilation_cache uses for runs.
 export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-${SCRATCH:-$HOME/.cache/jcm}/jcm-jax-cache}
 
+# The dinosaur backend requires the semi-Lagrangian fork (neuralgcm/dinosaur
+# PR #135); without it on the path every model-construction test raises and
+# ~100 unrelated failures bury the ones that matter. The worktree comes first
+# so it wins over any editable install in the venv.
+export JCM_DINOSAUR=${JCM_DINOSAUR:-$HOME/dinosaur-sl}
+export PYTHONPATH=$JCM_DINOSAUR:$REPO${PYTHONPATH:+:$PYTHONPATH}
+
 echo "=== lint (here) ==="
 ruff check . || { echo "LINT FAILED"; exit 1; }
 
@@ -53,6 +60,7 @@ source $VENV/bin/activate
 cd $REPO
 export JAX_PLATFORMS=cpu
 export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
+export PYTHONPATH=$JCM_DINOSAUR:$REPO
 
 # Sequential, not concurrent: the two gates share this worktree's .coverage.*.
 # Each status is kept rather than left in \$? (the next echo would replace it),
