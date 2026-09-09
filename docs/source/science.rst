@@ -29,8 +29,11 @@ fixed template:
   ``file::symbol`` so they survive line-number churn.
 - **Validation evidence** — the tests, A/Bs and validation runs that back it up.
 
-The reference trees this document is checked against are ECHAM 6.3-HAM2.3 and
-ESCOMP/CAM (with the MAM4 lineage tracing to E3SM, not CAM). Where a component
+The reference trees this document is checked against are ECHAM 6.3-HAM2.3
+(release r7492) and ESCOMP/CAM at tag ``cam6_4_196`` — with ``zm_conv``,
+``wv_sat_methods`` and ``cloud_fraction`` read from the ``atmos_phys`` external
+at its pinned tag ``atmos_phys0_27_000``, and the MAM4 lineage tracing to E3SM,
+not CAM. Where a component
 was found to carry an inherited reference label that its code does not follow, the
 *true* reference and the deviation are both recorded here — that reconciliation is
 the reason this document exists. The engineering "how" lives in the
