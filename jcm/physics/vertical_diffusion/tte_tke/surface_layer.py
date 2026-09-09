@@ -249,8 +249,9 @@ def wind_10m_reduction(
 
     Args:
         exchange_momentum: CM·|U| per tile [m/s] (ncol, nsfc_type).
-        wind_speed: lowest-level wind speed [m/s] (ncol,), the same
-            (``zepdu2``-floored) speed the coefficients were built from.
+        wind_speed: the speed the coefficients were built from [m/s] (ncol,) —
+            ECHAM floors it at ``zepdu2`` (1 m/s), and passing the raw wind
+            instead would misread that floor as a stability signal.
         z_ref: lowest full-level height above the surface [m] (ncol,).
         roughness_momentum: z0m per tile [m] (ncol, nsfc_type).
         z0m_min: roughness floor [m].

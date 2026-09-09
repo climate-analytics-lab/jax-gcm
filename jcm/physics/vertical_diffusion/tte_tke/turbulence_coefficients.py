@@ -502,9 +502,13 @@ def compute_turbulence_diagnostics(
     # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
     # calibrated to u10, not to the lowest model level — ~33 m at L47.
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    # The profile factor must be built from the SAME zepdu2-floored speed the
+    # exchange coefficients were (ECHAM zdu2 = max(|U|^2, 1)); the reduction it
+    # yields then multiplies the true wind.
     wind_10m = wind_speed_surface * jnp.sum(
         state.surface_fraction * wind_10m_reduction(
-            surface_exchange_momentum, wind_speed_surface, z_ref,
+            surface_exchange_momentum,
+            jnp.sqrt(jnp.maximum(wind_speed_surface ** 2, 1.0)), z_ref,
             state.roughness_length, params.z0m_min,
         ),
         axis=1,
