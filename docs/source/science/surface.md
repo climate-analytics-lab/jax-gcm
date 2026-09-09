@@ -9,13 +9,17 @@ mean ``merged = sea + fmask·(land − sea)``; near-surface air properties are
 extrapolated to σ = 0.99 using a lapse rate anchored at a fixed sigma, and land
 includes an interactive skin-temperature energy balance and an orographic drag
 enhancement. The **ECHAM multi-tile** scheme (``jcm/physics/surface/echam/``)
-resolves water/ice/land tiles (``ocean.py``, ``sea_ice.py``, ``land.py``) and
-does the albedo/radiative/tile energy-balance bookkeeping in
-``surface_physics.py::EchamSurface``. Crucially, the ECHAM turbulent surface
-fluxes are *delivered* by the vdiff term (which carries the surface exchange as
-the bottom-row Robin BC of its implicit solve, see {doc}`vertical_diffusion`), so
-``EchamSurface`` returns zero u/v/T/qᵥ tendencies and republishes the
-vdiff-delivered fluxes as the public ``"surface"`` fields.
+carries water/ice/land tile machinery (``ocean.py``, ``sea_ice.py``,
+``land.py``), but its per-step albedo/radiative/tile energy-balance computation
+(``surface_physics.py::surface_physics_step``) is currently **diagnostic-only
+and discarded**: the tile state is re-initialised from prescribed forcing every
+call (no prognostic memory — no precipitation input, snow, or soil moisture;
+#672), and the active surface albedos come from ``EchamBoundaryConditions``
+instead. The ECHAM turbulent surface fluxes are *delivered* by the vdiff term
+(which carries the surface exchange as the bottom-row Robin BC of its implicit
+solve, see {doc}`vertical_diffusion`), so ``EchamSurface`` returns zero
+u/v/T/qᵥ tendencies and republishes the vdiff-delivered fluxes as the public
+``"surface"`` fields.
 
 **What ECHAM/CAM does.** ECHAM6's ``vdiff``/``mo_surface`` scheme couples the
 surface into a single tridiagonal spanning the column plus the surface exchange,

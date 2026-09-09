@@ -42,8 +42,10 @@ alternative (all fields on one ERA5 land-sea mask).
   and must not be mixed within one configuration (documented in ``era5.yaml``).
   GHG and ozone beyond coverage are clamped, not extrapolated.
 - `differentiability` — all ``ForcingData`` numeric fields (GHG scalars,
-  emission/ozone fields) are pytree leaves, so boundary conditions enter tendencies
-  linearly and remain calibratable by gradient.
+  emission/ozone fields) are pytree leaves, so autodiff traces through them and
+  boundary conditions remain calibratable by gradient (their *effect* is
+  generally nonlinear — gas optics, reaction integration — so sensitivities are
+  state-dependent).
 
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
