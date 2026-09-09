@@ -43,8 +43,8 @@ for _p in (str(_REPO), str(_TOOLS)):
 from jcm.analysis import area_weights, global_mean  # noqa: E402
 from jam_burden_report import _SPECIES  # noqa: E402
 from aerosol_stats import (  # noqa: E402
-    _AOD_KEYS, collect, format_table, is_jam_run, physics_gates, summarize,
-    timestep_seconds)
+    _AOD_KEYS, collect, format_table, is_jam_run, missing_jam_diagnostics,
+    physics_gates, summarize, timestep_seconds, unscored_gates)
 
 #: Gate slack: the release gate is the climatological anchor range from
 #: the shared species table widened by this factor each way — a "did the
@@ -151,6 +151,7 @@ def main():
     # before #640), MACv2-SP runs publish macsp.od550aer; whichever is present
     # is the scheme's AOD. The JAM keys are shared with aerosol_stats so a run
     # the aerosol block can score is never skipped here.
+    _aod_names = "/".join(_AOD_KEYS + ("macsp.od550aer",))
     aod = None
     for key in _AOD_KEYS + ("macsp.od550aer",):
         if key in ds:
@@ -159,8 +160,7 @@ def main():
     if aod is not None:
         check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
     else:
-        print("NOTE  no AOD field found "
-              "(jam_optics.aod_550/macsp.od550aer); skipping")
+        print(f"NOTE  no AOD field found ({_aod_names}); skipping")
 
     # JAM aerosol block (#762). The statistics are built chunk by chunk
     # (a year of JAM output does not fit in memory), so this takes the file
@@ -170,28 +170,42 @@ def main():
     # closure — the latter are what catch a slow runaway that stays inside a
     # x3-slack range gate until its final fortnight.
     if is_jam_run(ds):
+        for namespace in missing_jam_diagnostics(ds):
+            print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
+                  "statistics that read them are absent from the report")
         days, series = collect(files)
         # The dynamics-conservation gate is per STEP, so it needs the run's
-        # timestep; without a saved Hydra config it stays unscored.
+        # timestep; ``unscored_gates`` reports it when either is missing.
         dt = timestep_seconds(a.run_dir)
         stats = summarize(days, series, dt)
-        if dt is None:
-            print("NOTE  no .hydra/config.yaml timestep — the dynamics-"
-                  "conservation gate is not scored")
         for sp, (lo, hi) in BURDEN_RANGES.items():
             key = f"burden_{sp}_mg_m2"
             if key not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
+                continue
+            if stats[key] == 0.0:
+                # A species the run does not carry is exempted from the drift
+                # gate; the anchor gate must agree, or the two tiers contradict
+                # each other on the same line of the report.
+                print(f"NOTE  {sp} burden is identically zero — the run "
+                      "carries no such aerosol; anchor gate not scored")
                 continue
             check(key, stats[key], lo, hi)
         for name, value, limit, good in physics_gates(stats):
             print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
                   f"(expected {limit})")
             ok = ok and good
+        unscored = unscored_gates(days, series, dt)
+        for name, reason in unscored:
+            print(f"UNSCORED  {name}: {reason}")
+        if unscored:
+            print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
+                  "evaluated; they have passed nothing")
         print()
         print(format_table(stats, []))
     else:
-        print("NOTE  not a JAM run; skipping the aerosol statistics")
+        print("NOTE  no m_<species>_<mode> aerosol tracers in the output — "
+              "not a JAM run; skipping the aerosol statistics")
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())

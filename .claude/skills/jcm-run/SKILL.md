@@ -115,14 +115,18 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
 - **Ozone**: `forcing.ozone_file: auto` is the shipped default and resolves a
   packaged climatology matching the grid (`jcm/data/bc/t63/ozone.nc` — already
   on L47 levels, already S→N). Leave it alone. Confirm in the log:
-  `forcing.ozone_file=auto resolved to .../t63/ozone.nc`. If instead you see a
-  warning about the **ANALYTIC** profile, the grid did not match and the run
-  has ~7.6× the tropospheric ozone column — a large clear-sky OLR bias, and
-  not a valid basis for any radiation comparison.
-  Preferred fix for any other grid: the HF mirror ships level-resolved
-  ozone per grid — `forcing.ozone_file=hf://bundles/<grid>_l<levels>/ozone_pd.nc`
-  (prefetch on a node with internet). Regenerating a packaged file with
-  `jcm.data.bc.interpolate_ozone` remains possible for offline work.
+  `forcing.ozone_file=auto resolved to .../t63/ozone.nc`. On a hybrid grid
+  `auto` now **raises** rather than degrading if it resolves nothing: the
+  analytic profile carries ~7.6× the tropospheric ozone column, a large
+  clear-sky OLR bias and not a valid basis for any radiation comparison. The
+  error distinguishes a missing product from a cold cache and names the remedy.
+  For any other grid `auto` also consults the HF mirror's level-resolved
+  bundles; set one explicitly with
+  `forcing.ozone_file=hf://bundles/<grid>_l<levels>/ozone_pd.nc` (prefetch on a
+  node with internet), or regenerate a packaged file with
+  `jcm.data.bc.interpolate_ozone` for offline work. `forcing.ozone_file=analytic`
+  takes the analytic profile deliberately; a **sigma** grid, for which no ozone
+  product exists, still warns and falls back.
 
 ## Watching a run
 

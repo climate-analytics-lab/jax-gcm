@@ -103,10 +103,10 @@ files, and a grid/level mismatch fails at generation, not in the queue.
 `--data local` keeps the legacy prepared-file behaviour (`JAM_INPUTS` /
 `JCM_EMISSIONS`, existence-checked before qsub). Its inputs are all
 grid-specific — level-resolved (ozone, oxidants) or horizontally
-validated (emissions, DMS, dust) — and **ozone is the dangerous one**:
-`forcing.ozone_file: auto` resolves only a *packaged* climatology
-(T63L47) and silently falls back to an ANALYTIC profile with ~7.6x the
-tropospheric ozone column on any other grid. Prefer the mirror.
+validated (emissions, DMS, dust). `forcing.ozone_file: auto` resolves the
+packaged climatology (T63L47) and then the mirror's per-grid bundle, and on
+a hybrid grid **raises** if neither resolves rather than substituting the
+analytic profile (~7.6x the tropospheric ozone column). Prefer the mirror.
 
 ## 5. PBS facts specific to this machine
 

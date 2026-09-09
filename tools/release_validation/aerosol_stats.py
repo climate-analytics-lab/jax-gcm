@@ -6,11 +6,10 @@ release gate can score, and applies the two tolerance tiers described in
 
 * **absolute physics gates** — the exponential drift ``|d ln B/dt|`` of every
   species' burden over the final six months, the mass-budget residual, and the
-  per-step dynamics residual from the #713 in-step gauge.
-  These are the runaway detector: the August-2026 T63 L47 year grew sulfate
-  13 -> 771 mg/m2 in its last forty days while temperature and surface
-  pressure stayed flat, and a climatological range gate with x3 slack only
-  notices that in the final fortnight.
+  per-step dynamics residual from the #713 in-step gauge. These are the runaway
+  detector: an aerosol runaway grows multiplicatively with the meteorology
+  entirely normal, so a climatological range gate does not notice it until the
+  final fortnight of a year that was unusable months earlier.
 * **climatological anchors** — the shared ``jam_burden_report._SPECIES``
   ranges widened by the release gate's slack, unchanged.
 * **regression tolerances** — ``max(3 sigma, 15 %)`` against a reference run
@@ -72,12 +71,13 @@ LIFETIME_SPECIES = ("so4", "bc", "du", "ss")
 PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa")
 
 #: Kilograms of sulfate AEROSOL per kilogram of each sulfur carrier, so the
-#: whole family can be totalled in one mass unit. jcm's ``so4`` tracer is
-#: ammonium bisulfate NH4HSO4 at 115.0 g/mol (``jam/species.py``) — not SO4 at
-#: 96.06 — so converting SO2 (64.06) and DMS (62.13) emissions with the sulfate
-#: molar mass instead understates the source by 20 % and turns a modest closure
-#: error into an apparent leak.
-_M_SO4_AEROSOL = 0.115
+#: whole family can be totalled in one mass unit. Read from jcm's own species
+#: table rather than restated: the ``so4`` tracer is ammonium bisulfate, not
+#: SO4, and converting SO2/DMS emissions with the SO4 molar mass instead
+#: understates the sulfate source by 20 %.
+from jcm.physics.aerosol.jam.species import SPECIES as _JAM_SPECIES  # noqa: E402
+
+_M_SO4_AEROSOL = _JAM_SPECIES["so4"].molar_mass
 _SULFUR_CARRIERS = {"so2": _M_SO4_AEROSOL / 0.0640648,     # 1.795
                     "dms": _M_SO4_AEROSOL / 0.0621324,     # 1.851
                     "h2so4": _M_SO4_AEROSOL / 0.0980784,   # 1.172
@@ -89,35 +89,40 @@ _S_FAMILY_GASES = ("so2", "dms", "h2so4")
 _S_FAMILY_EMIS = ("so2", "dms", "so4")
 
 #: Dynamics-conservation gate. ``budget_dyn_<sp>`` (#713) is the mass the
-#: transport machinery created or destroyed per step, so ``|dyn|*dt/mass`` is
-#: the fractional error the semi-Lagrangian advection commits each step. Its
-#: honest magnitude is O(1e-3) per step and one-signed under a strong sink,
-#: which is how it compounded into the August-2026 runaway; 0.1 %/step is
-#: therefore set AT that magnitude, to trip on a transport error that has
-#: become systematic rather than on ordinary interpolation noise. It is also
-#: ~500x tighter than the [2/3, 1.5] clip on dev's proportional mass fixer,
-#: so the gate fires long before the fixer saturates.
+#: transport created or destroyed per step, so ``|dyn|*dt/mass`` is the
+#: fractional error semi-Lagrangian advection commits each step. Set AT that
+#: error's honest magnitude, so it trips on a transport error that has become
+#: systematic rather than on ordinary interpolation noise, and ~500x tighter
+#: than the [2/3, 1.5] clip on the proportional mass fixer.
 DYN_RESIDUAL_PER_STEP = 1.0e-3
 
-#: Absolute physics gates (see the design doc). The drift limit is set so a
-#: burden may change by a factor e over the ~500 days it takes to matter, but
-#: not by the factor 60 in 40 days a #658-class runaway produces. The drift
-#: statistic reads burdens only, so it is independent of the deposition ledger
-#: and is the gate to trust when the ledger is incomplete.
+#: Absolute physics gates (see the design doc). The drift limit admits a
+#: factor e over ~500 days — slower than any runaway, faster than a burden that
+#: has genuinely settled. It reads burdens only, so it stays trustworthy when
+#: the deposition ledger is incomplete.
 DRIFT_LIMIT_PER_DAY = 0.002
 BUDGET_RESIDUAL_LIMIT = 0.05
 
-#: The closure gate's sign carries information, and the two directions have
-#: different diagnoses. A NEGATIVE residual means more mass was deposited than
-#: entered the column: no missing ledger entry can produce that, so it is mass
-#: creation. A POSITIVE one means emitted mass is unaccounted for, which a
-#: *missing sink diagnostic* looks exactly like — and on output written before
-#: the #722 removal-ledger fix, ``dry_*`` omits the Slinn turbulent/Brownian
-#: deposition entirely (it captures only ~31 % of the dust dry sink), so a
-#: positive residual on such a run is expected and is not evidence of a leak.
+#: The closure gate's sign carries the diagnosis. NEGATIVE means more mass was
+#: deposited than entered the column, which no missing ledger entry can produce
+#: — it is mass creation. POSITIVE means emitted mass is unaccounted for, which
+#: a missing sink *diagnostic* looks exactly like: before the #722 ledger fix
+#: ``dry_*`` omits Slinn deposition, so a positive residual on such output is
+#: expected rather than evidence of a leak.
 _POSITIVE_RESIDUAL_CAVEAT = (
     "unaccounted emission; on output written before the #722 removal-ledger "
     "fix, dry_* omits Slinn dry deposition and reads positive by construction")
+
+#: Shortest window on which the drift and closure statistics are scored. A
+#: least-squares slope has noise ``sigma_resid / (dt * sqrt(N(N^2-1)/12))``; at
+#: the 5-day output cadence and the ~0.07 log-burden scatter of a settled
+#: species, 3 sigma of that falls below ``DRIFT_LIMIT_PER_DAY`` only past ~90
+#: days. On a shorter fit the statistic is noise, so it is reported UNSCORED
+#: rather than gated — the same "not measurable is not scored" rule the drift
+#: statistic already applies to a species the run does not carry. The closure
+#: residual shares the limit: its storage term is one endpoint difference, which
+#: over a few chunks swamps the flux integral it is compared against.
+MIN_WINDOW_DAYS = 90.0
 
 #: Regression tolerance: whichever of a 3-sigma excursion and a 15 % relative
 #: change is larger. 3 sigma alone is far too tight for a well-sampled mean
@@ -125,6 +130,27 @@ _POSITIVE_RESIDUAL_CAVEAT = (
 #: through on a noisy statistic.
 _N_SIGMA = 3.0
 _REL_TOLERANCE = 0.15
+
+#: Statistics the regression tier does NOT score: each has an absolute physics
+#: gate of its own, and their references are ~1e-3, so a 15 % relative
+#: tolerance would be tighter than the gate and fail every real run.
+_GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_")
+
+#: Absolute tolerance floors [statistic units], so a reference that is legibly
+#: zero (an unused species' burden) does not collapse the tolerance to zero and
+#: fail on any nonzero value. Matched by prefix, longest first.
+_TOLERANCE_FLOORS = {
+    "burden_": 0.05,            # mg/m2
+    "so4_burden_": 0.05,        # mg/m2
+    "lifetime_": 0.1,           # days
+    "aod_550": 0.002,
+    "angstrom": 0.02,
+    "cdnc_": 1.0,               # cm-3
+    "N100_": 1.0,               # cm-3
+    "r_dry_": 0.001,            # um
+    "so4_frac_above_500hPa": 0.01,
+    "so4_nh_sh_ratio": 0.05,
+}
 
 #: Pressure [Pa] used for the near-surface aerosol-number diagnostics, and the
 #: divide separating the free troposphere reservoir from the boundary layer.
@@ -140,16 +166,32 @@ def is_jam_run(ds: xr.Dataset) -> bool:
     """Report whether ``ds`` carries JAM's prognostic modal aerosol tracers.
 
     Detected from the variables present rather than from a config file, so a
-    run directory alone is enough. Requires an interstitial mass tracer *and*
-    a JAM-specific diagnostic namespace, so a MACv2-SP run (which publishes
-    AOD but no ``m_<sp>_<mode>``) is not mistaken for one.
+    run directory alone is enough. The test is the interstitial mass tracers
+    alone: they are what every statistic here is built from, and a MACv2-SP run
+    (which publishes AOD but no ``m_<sp>_<mode>``) has none. Requiring a
+    ``jam_*`` diagnostic namespace as well would let a JAM run with a trimmed
+    output set skip the aerosol gates silently, which is the one outcome this
+    block exists to prevent — a trimmed run is a misconfiguration to name (see
+    :func:`missing_jam_diagnostics`), not a reason to skip.
     """
-    has_mass = any(re.fullmatch(r"m_[a-z0-9]+_[a-z]+", str(v))
-                   for v in ds.data_vars)
-    has_jam = any(str(v).startswith(("jam_state.", "jam_cloud_borne.",
-                                     "jam_optics.", "jam_band_optics."))
-                  for v in ds.data_vars)
-    return has_mass and has_jam
+    return any(re.fullmatch(r"m_[a-z0-9]+_[a-z]+", str(v))
+               for v in ds.data_vars)
+
+
+def missing_jam_diagnostics(ds: xr.Dataset) -> list[str]:
+    """JAM diagnostic namespaces absent from a run that carries JAM tracers.
+
+    Their absence does not stop the burdens being computed, but it does silently
+    drop the cloud-borne phase, the optics and the modal radii from the report,
+    so it is named rather than left to be inferred from missing rows.
+    """
+    present = {str(v).split(".", 1)[0] for v in ds.data_vars if "." in str(v)}
+    wanted = ("jam_cloud_borne", "jam_state")
+    optics = ("jam_optics", "jam_band_optics")
+    missing = [n for n in wanted if n not in present]
+    if not any(n in present for n in optics):
+        missing.append("/".join(optics))
+    return missing
 
 
 def _band_indices(ds: xr.Dataset, lo: float, hi: float) -> np.ndarray:
@@ -336,9 +378,21 @@ def standard_error(values: np.ndarray) -> float:
     return float(np.std(v, ddof=1) / np.sqrt(n_eff))
 
 
-def regression_tolerance(reference: float, sigma: float) -> float:
-    """``max(3 sigma, 15 % of the reference)`` — see the design doc."""
-    return max(_N_SIGMA * sigma, _REL_TOLERANCE * abs(reference))
+def tolerance_floor(name: str) -> float:
+    """Absolute tolerance floor for a statistic, by longest matching prefix."""
+    matches = [v for k, v in _TOLERANCE_FLOORS.items() if name.startswith(k)]
+    return max(matches) if matches else 0.0
+
+
+def regression_tolerance(reference: float, sigma: float,
+                         floor: float = 0.0) -> float:
+    """``max(3 sigma, 15 % of the reference, an absolute floor)``.
+
+    The floor is what keeps a legitimately-zero reference — an unused species'
+    burden — from collapsing the tolerance to zero and failing on any nonzero
+    value. See the design doc.
+    """
+    return max(_N_SIGMA * sigma, _REL_TOLERANCE * abs(reference), floor)
 
 
 def _budget_residual(days, series, species) -> float | None:
@@ -356,12 +410,10 @@ def _budget_residual(days, series, species) -> float | None:
         return None
 
     def integral(key):
-        # The storage term is a difference between the FIRST and LAST chunk
-        # means, i.e. between chunk centres, so the flux integral must cover
-        # that same interval: the chunks after the first, times the span
-        # between the centres. Averaging all N chunks over an (N-1)-chunk span
-        # understates the integral by 1/N — 1.4 % on a 73-chunk year, but 25 %
-        # on a four-chunk window, straight into a residual gated at 5 %.
+        # The storage term differences the first and last chunk MEANS, i.e.
+        # chunk centres, so the flux integral spans the same interval: the
+        # chunks after the first, times the centre-to-centre span. Averaging
+        # all N chunks over an (N-1)-chunk span understates it by 1/N.
         v = series.get(key)
         return None if v is None else float(np.nanmean(v[1:])) * span * 86400e6
 
@@ -393,7 +445,13 @@ def _budget_residual(days, series, species) -> float | None:
             deposited += contribution
     if not np.isfinite(emitted) or emitted <= 0:
         return None
-    return float((emitted - deposited - (stored[-1] - stored[0])) / emitted)
+    residual = float((emitted - deposited - (stored[-1] - stored[0])) / emitted)
+    # The storage endpoints are as capable of being NaN as the emission was: a
+    # chunk missing a burden or a gas reservoir poisons the difference. A NaN
+    # here would score as a gate FAIL for something never measured, and would
+    # win ``max(..., key=abs)`` too, since every comparison against NaN is
+    # False.
+    return residual if np.isfinite(residual) else None
 
 
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
@@ -411,14 +469,13 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         if b is None:
             continue
         stats[f"burden_{species}_mg_m2"] = float(np.nanmean(b))
-        # Emit the drift only when it could actually be fitted. A species the
-        # run never carries (soa with no SOAG production) and a record too
-        # short for a slope both yield NaN, and a NaN scored against the gate
-        # reads as a FAIL for something that was never measured — which is how
-        # ``health.py --last-n 2`` on a healthy run reported an aerosol
-        # failure. Not measurable is "not scored", not "failed".
+        # Emit the drift only where it is measurable: a species the run does
+        # not carry yields NaN, and a window shorter than MIN_WINDOW_DAYS
+        # yields a slope dominated by its own noise. Both are reported
+        # unscored (see :func:`unscored_gates`) rather than gated, because a
+        # gate FAIL for something never measured is worse than no number.
         drift = log_drift(days, b)
-        if np.isfinite(drift):
+        if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
             stats[f"dlnB_dt_{species}_per_day"] = drift
 
     for species in LIFETIME_SPECIES:
@@ -438,7 +495,8 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
 
     residuals = {}
     for species in ("so4",) + PRIMARY_BUDGET_SPECIES:
-        r = _budget_residual(days, series, species)
+        r = (_budget_residual(days, series, species)
+             if span_days >= MIN_WINDOW_DAYS else None)
         if r is not None:
             residuals[species] = r
             stats[f"budget_residual_{species}"] = r
@@ -518,6 +576,11 @@ def compare_to_reference(stats: dict[str, float],
     for key in sorted(reference):
         if key not in stats or key == "record_days":
             continue
+        # Statistics with an absolute physics gate are not scored here too:
+        # their references are ~1e-3, so a relative tolerance would be tighter
+        # than their own gate.
+        if key.startswith(_GATED_PREFIXES):
+            continue
         value, ref = stats[key], reference[key]
         sigma = 0.0
         if series is not None:
@@ -526,9 +589,52 @@ def compare_to_reference(stats: dict[str, float],
                 if candidate in series:
                     sigma = standard_error(series[candidate])
                     break
-        tol = regression_tolerance(ref, sigma)
+        tol = regression_tolerance(ref, sigma, tolerance_floor(key))
         ok = abs(value - ref) <= tol
         rows.append((key, value, f"{ref:.5g} +- {tol:.3g}", bool(ok)))
+    return rows
+
+
+def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
+                   timestep_seconds: float | None = None
+                   ) -> list[tuple[str, str]]:
+    """Gates that could NOT be evaluated, each with the reason.
+
+    A gate that is absent from :func:`physics_gates` has passed nothing — it
+    was never run. Reporting the absence is what stops a run with no dynamics
+    gauge, or a window too short to fit a slope, from reading as clean.
+    Returns ``(gate_name, reason)`` pairs for the caller to print.
+    """
+    span = float(days[-1] - days[0]) if days.size > 1 else 0.0
+    short_slope = (f"window spans {span:.0f} days; a slope needs "
+                   f"{MIN_WINDOW_DAYS:.0f} to rise above its own fit noise")
+    short_budget = (f"window spans {span:.0f} days; the storage endpoints "
+                    f"swamp the flux integral below {MIN_WINDOW_DAYS:.0f}")
+    rows: list[tuple[str, str]] = []
+
+    for species in _SPECIES:
+        b = series.get(f"burden_{species}")
+        if b is None:
+            continue
+        name = f"dlnB_dt_{species}_per_day"
+        if not np.any(np.isfinite(b) & (b > 0)):
+            rows.append((name, "the run carries no burden of this species"))
+        elif span < MIN_WINDOW_DAYS:
+            rows.append((name, short_slope))
+
+    if span < MIN_WINDOW_DAYS:
+        rows.append(("budget_residual_max", short_budget))
+
+    # The dynamics gate needs BOTH the #713 in-step gauge and a timestep to
+    # express it per step; say which is missing rather than omitting the row.
+    has_gauge = any(k.startswith("budget_dyn_") for k in series)
+    if not has_gauge:
+        rows.append(("dyn_frac_per_step", "the run publishes no budget_dyn_* "
+                                          "gauge (output predates #713)"))
+    elif not timestep_seconds:
+        rows.append(("dyn_frac_per_step", "no run timestep is available "
+                     "(.hydra/config.yaml absent, or run.time_step is null as "
+                     "on the pySES backend), and the gate is per step"))
     return rows
 
 
@@ -608,6 +714,11 @@ def main() -> int:
         loaded = np.load(args.series_in)
         days = loaded["_days"]
         series = {k: loaded[k] for k in loaded.files if k != "_days"}
+        if args.last_n:
+            # Applied here too: silently ignoring it would score a different
+            # window than the one asked for.
+            days = days[-args.last_n:]
+            series = {k: v[-args.last_n:] for k, v in series.items()}
     else:
         files = run_files(args.run_dir)
         if not files:
@@ -620,11 +731,11 @@ def main() -> int:
         np.savez(args.series_out, _days=days, **series)
     dt = timestep_seconds(args.run_dir) if args.run_dir else None
     stats = summarize(days, series, dt)
-    if dt is None:
-        print("NOTE  no .hydra/config.yaml timestep — the dynamics-"
-              "conservation gate is not scored\n")
     gates = physics_gates(stats)
     print(format_table(stats, gates))
+    unscored = unscored_gates(days, series, dt)
+    for name, reason in unscored:
+        print(f"UNSCORED  {name}: {reason}")
     ok = all(row[3] for row in gates)
 
     if args.reference:
@@ -640,7 +751,10 @@ def main() -> int:
                   f"{'PASS' if good else 'FAIL'}")
         ok = ok and all(row[3] for row in rows)
 
-    print("\nAEROSOL:", "PASS" if ok else "FAIL")
+    # Say how much was actually measured: a PASS over zero scored gates is
+    # not the same result as a PASS over all of them.
+    print(f"\nAEROSOL: {'PASS' if ok else 'FAIL'} "
+          f"({len(gates)} gate(s) scored, {len(unscored)} unscored)")
     return 0 if ok else 1
 
 

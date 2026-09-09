@@ -47,14 +47,13 @@ hidden:
 A third consequence is a hard ceiling on the window. The profiler's event
 buffer holds ~1e6 events and a T63L47 JAM step emits ~19,000 kernels, so ~20
 steps is all that fits at that resolution; past it the profiler stops recording
-and the averages silently come out low. The default window is ONE radiation
-sub-cycle for that reason — two sat on the ceiling and overflowed at
-ma-t63-l47, and since the window must also span a whole number of sub-cycles
-that left no usable default for the very configuration this tool is for. The
-tool fails rather than reports if the buffer overflows, naming the largest
-window that is both admissible and within the buffer. Nothing is lost by the short window: kernel shapes are static
-and the model takes no data-dependent branches, so a step's cost does not vary
-with the state.
+and the averages silently come out low. The window must also span a whole
+number of radiation sub-cycles, so the default is ONE sub-cycle: the largest
+window that satisfies both. The tool fails rather than reports if the buffer
+overflows, naming the largest window that is both admissible and within it.
+Nothing is lost by the short window: kernel shapes are static and the model
+takes no data-dependent branches, so a step's cost does not vary with the
+state.
 
 Methodology follows the ``jcm-benchmark`` skill: run only on a verified-free
 GPU, discard the compile pass, and quote steady state only.
@@ -798,23 +797,19 @@ def main(argv=None) -> int:
                    help="configuration to profile (shared with benchmark.py)")
     p.add_argument("--gpu", type=int, required=True,
                    help="GPU index; must be free (see tools/gpu_util.py)")
-    # Default: ONE radiation sub-cycle (10 steps at dt=12 min, 2 h radiation).
-    # Not a whole simulated day, though that is the intuitive choice, and not
-    # two sub-cycles, which was the previous default.
+    # Default: ONE radiation sub-cycle (10 steps at dt=12 min, 2 h radiation),
+    # not a whole simulated day, for two reasons.
     #
     # A longer window is not needed: every kernel in a step has a static shape
     # and the model takes no data-dependent branches, so a step's cost does not
     # vary with the state or the time of day. Once the window spans a whole
-    # number of radiation sub-cycles the per-step average is already exact, and
-    # further steps only reduce timing jitter.
+    # number of sub-cycles the per-step average is exact; further steps only
+    # reduce timing jitter.
     #
     # And it does not fit: the profiler's event buffer holds ~1e6 events and a
-    # T63L47 JAM step emits ~19,000 kernels, so ~20 steps is the ceiling at
-    # that resolution — which the old two-cycle default sat exactly on, so it
-    # overflowed on ma-t63-l47, the flagship config this tool exists for. With
-    # the whole-sub-cycle rule that left ``--steps 10`` as the only admissible
-    # value and made the default unusable. One sub-cycle is the largest window
-    # that is both admissible and reliably within the buffer.
+    # T63L47 JAM step emits ~19,000 kernels, so ~20 steps is the ceiling there.
+    # Since the window must also span a whole sub-cycle, one cycle is the
+    # largest window that is both admissible and reliably inside the buffer.
     p.add_argument("--cycles", type=int, default=1,
                    help="radiation sub-cycles to trace (default 1: the "
                         "largest window that fits the profiler's event buffer "

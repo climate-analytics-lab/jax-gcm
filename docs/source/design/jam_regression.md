@@ -50,9 +50,11 @@ record.
   115.0 g/mol (`jam/species.py`), *not* SO₄ at 96.06. Using the wrong one
   understates the source by 20 % and turns a modest closure error into an
   apparent leak.
-* SOA is not scored for closure at all. Its source is condensation of the SOAG
-  gas, which has no `emi_*` channel, so a residual computed for it measures a
-  missing diagnostic rather than a mass leak.
+* SOA is not scored for closure at all. `emi_soa` exists but carries only
+  primary emission, which is zero in the supported configurations; SOA's real
+  source is condensation of the SOAG gas, and no `emi_*` channel accounts for
+  it. A residual computed for SOA would therefore measure an unrepresented
+  source rather than a mass leak.
 
 ## The two tolerance tiers
 
@@ -72,7 +74,12 @@ so they are the same number for every member and every release.
 loading" check, not a calibration.
 
 **Tier 3 — regression tolerances**, for comparing a run against a stored
-reference: `max(3σ, 15 % relative)`. σ is the standard error of the record mean,
+reference: `max(3σ, 15 % relative, an absolute floor)`. The floor matters
+because a legitimately-zero reference — an unused species' burden — would
+otherwise give a zero tolerance that any nonzero value fails. Statistics with an
+absolute gate of their own (drift, closure, dynamics) are **not** scored here:
+their references are ~1e-3, so a relative tolerance would be tighter than the
+gate they already have. σ is the standard error of the record mean,
 with the effective sample size taken from the chunk series' own lag-1
 autocorrelation, `N_eff = N(1−a)/(1+a)`. Neither half alone works: 5-day burden
 samples are strongly autocorrelated, so an uncorrected σ is far too small
@@ -102,7 +109,25 @@ range at all.
 
 A species the run never carries (SOA with no SOAG production, say) has a
 correctly-zero burden and no drift to measure; it is skipped rather than scored
-as NaN.
+as NaN, and the **climatological anchor gate skips it on the same grounds** —
+the two tiers must not contradict each other about the same species on adjacent
+lines of one report.
+
+The window itself has a floor. A least-squares slope carries noise
+`σ_resid / (Δt·√(N(N²−1)/12))`; at the 5-day output cadence and the ~0.07
+log-burden scatter of a settled species, three of those falls below the
+0.002/day limit only past **90 days**. `health.py --last-n` is the documented
+way to score the settled months, and on a shorter window the fitted slope is
+noise — so below that span the statistic is reported **UNSCORED**, with the
+number of days it needs, rather than gated. The closure residual takes the same
+floor: its storage term is a single endpoint difference, which over a few
+chunks swamps the flux integral it is compared against.
+
+**No gate ever passes by absence.** Anything that could not be evaluated —
+a species the run does not carry, a window too short, a run with no
+`budget_dyn_*` gauge or no timestep to express the dynamics gate per step —
+is printed as `UNSCORED` with its reason. A missing row is otherwise
+indistinguishable from a row that passed.
 
 ## The closure gate, and its sign
 
@@ -110,8 +135,10 @@ The residual is `(Σ emitted − Σ deposited − ΔB) / Σ emitted` over the re
 Its **sign** is the diagnosis:
 
 * **Negative** — more mass was deposited than ever entered the column. No
-  missing ledger entry can produce that. It is mass creation, and it is a defect
-  in the physics.
+  missing ledger entry can produce that, so it is mass creation. It does *not*
+  say where: the ledger carries emission, deposition and storage but no
+  transport term, so a negative residual indicts the model, not the physics
+  specifically — the dynamics gate below is what separates the two.
 * **Positive** — emitted mass is unaccounted for. That is what a real leak looks
   like, but it is *also* exactly what a missing sink **diagnostic** looks like.
   On output written before the #722 removal-ledger fix, `dry_*` omits the Slinn

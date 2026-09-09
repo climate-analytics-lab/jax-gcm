@@ -161,7 +161,15 @@ def prefetch(ovs: list[str]) -> list[str]:
     compute node with no network (#774).
     """
     missing = []
-    for path in _preset_data_files(ovs):
+    try:
+        paths = _preset_data_files(ovs)
+    except Exception as e:                  # noqa: BLE001 — reported, not raised
+        # Enumeration itself reaches the mirror manifest (the ``auto`` ozone and
+        # emission bundles), so it can fail for the same reasons a fetch can.
+        # Report it as this member's problem rather than aborting the whole
+        # plan with a traceback.
+        return [f"could not enumerate inputs ({type(e).__name__}: {e})"]
+    for path in paths:
         if path.startswith("hf://"):
             try:
                 _hf_fetch(path[len("hf://"):])

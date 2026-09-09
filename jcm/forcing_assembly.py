@@ -126,6 +126,15 @@ def _resolve_auto_ozone(coords):
         return packaged
     token = _grid_token(coords)
     product = mm.product_for_key(manifest, "ozone_file")
+    if product is None:
+        # Same guard tools/benchmark.py applies: the manifest declares no auto
+        # ozone product, so there is nothing to fetch and no path to name.
+        raise FileNotFoundError(
+            "forcing.ozone_file=auto: no packaged ozone matches this grid "
+            f"({nlon}x{nlat}, {nlev} levels) and the mirror manifest declares "
+            "no automatic ozone product at all. Point forcing.ozone_file at a "
+            "climatology, or set forcing.ozone_file=analytic."
+        )
     rel = mm.bundle_path(manifest, product, token, nlev)
     from jcm.data.remote import fetch
     try:

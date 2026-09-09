@@ -292,8 +292,8 @@ class TestBudget:
 class TestDynamicsConservation:
     """The #713 in-step gauge: transport that does not conserve mass.
 
-    The August-2026 runaway was semi-Lagrangian transport creating mass, not a
-    physics defect, so it needs its own gate — the burden drift sees the
+    Transport that creates mass is a different failure from aerosol physics
+    that creates mass, and needs its own gate: the burden drift sees the
     symptom, this sees the cause.
     """
 
@@ -465,3 +465,142 @@ class TestGates:
         stats = self._stats(np.full(73, 3.0))
         text = A.format_table(stats, A.physics_gates(stats))
         assert "dlnB_dt_so4_per_day" in text and "PASS" in text
+
+
+class TestMinimumWindow:
+    """No statistic whose fit is noise-dominated may reach a gate."""
+
+    def _series(self, n):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        rng = np.random.default_rng(4)
+        return days, {"burden_bc": 3.0 * np.exp(0.05 * rng.standard_normal(n))}
+
+    def test_short_window_is_unscored_not_failed(self):
+        days, series = self._series(4)               # 15 days
+        stats = A.summarize(days, series)
+        assert "dlnB_dt_bc_per_day" not in stats
+        assert not any(name.startswith("dlnB_dt_")
+                       for name, *_ in A.physics_gates(stats))
+        reasons = dict(A.unscored_gates(days, series))
+        assert "dlnB_dt_bc_per_day" in reasons
+        assert "90" in reasons["dlnB_dt_bc_per_day"]
+
+    def test_long_window_is_scored(self):
+        days, series = self._series(40)              # 195 days
+        stats = A.summarize(days, series)
+        assert "dlnB_dt_bc_per_day" in stats
+        assert not any(name.startswith("dlnB_dt_")
+                       for name, _r in A.unscored_gates(days, series))
+
+    def test_short_window_does_not_score_the_residual_either(self):
+        n = 4
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": np.zeros(n)}
+        stats = A.summarize(days, series)
+        assert "budget_residual_max" not in stats
+        assert "budget_residual_max" in dict(A.unscored_gates(days, series))
+
+    def test_a_stationary_species_is_not_failed_by_a_short_fit(self):
+        """The regression this guard exists for: --last-n on a settled run."""
+        rng = np.random.default_rng(5)
+        for n in (3, 4, 6):
+            days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+            series = {"burden_bc": 3.0 * np.exp(0.05 *
+                                                rng.standard_normal(n))}
+            stats = A.summarize(days, series)
+            assert all(ok for *_r, ok in A.physics_gates(stats)), n
+
+
+class TestNothingPassesByAbsence:
+    def test_missing_gauge_is_reported_even_with_a_timestep(self):
+        """Pre-#713 output has a config but no gauge: still must not be silent."""
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0)}
+        stats = A.summarize(days, series, timestep_seconds=720.0)
+        assert not any(name.startswith("dyn_")
+                       for name, *_ in A.physics_gates(stats))
+        reason = dict(A.unscored_gates(days, series, 720.0))["dyn_frac_per_step"]
+        assert "budget_dyn" in reason and "713" in reason
+
+    def test_missing_timestep_is_reported_when_the_gauge_is_present(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0),
+                  "budget_mass_bc": np.full(n, 4.0e-6),
+                  "budget_dyn_bc": np.zeros(n)}
+        reason = dict(A.unscored_gates(days, series, None))["dyn_frac_per_step"]
+        assert "timestep" in reason
+
+    def test_a_scored_dynamics_gate_is_not_reported_unscored(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0),
+                  "budget_mass_bc": np.full(n, 4.0e-6),
+                  "budget_dyn_bc": np.zeros(n)}
+        assert "dyn_frac_per_step" not in dict(
+            A.unscored_gates(days, series, 720.0))
+
+    def test_species_the_run_does_not_carry_is_reported(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_soa": np.zeros(n)}
+        assert "carries no burden" in dict(
+            A.unscored_gates(days, series))["dlnB_dt_soa_per_day"]
+
+
+class TestResidualNaNGuard:
+    def test_a_nan_storage_endpoint_yields_no_residual(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        burden = np.full(n, 5.0)
+        burden[-1] = np.nan
+        emi = np.full(n, 1.0 / 86400e6)
+        series = {"burden_bc": burden, "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": emi}
+        assert A._budget_residual(days, series, "bc") is None
+        stats = A.summarize(days, series)
+        assert "budget_residual_bc" not in stats
+        assert "budget_residual_max" not in stats
+        assert all(ok for *_r, ok in A.physics_gates(stats))
+
+
+class TestRegressionTiers:
+    def test_gated_statistics_are_not_double_scored(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0)}
+        stats = A.summarize(days, series)
+        names = [name for name, *_ in A.compare_to_reference(stats, stats)]
+        assert not any(n_.startswith(A._GATED_PREFIXES) for n_ in names)
+        assert "burden_bc_mg_m2" in names
+
+    def test_a_zero_reference_gets_an_absolute_floor(self):
+        """A zero tolerance would fail any nonzero value against a zero reference."""
+        assert A.tolerance_floor("burden_soa_mg_m2") > 0
+        tol = A.regression_tolerance(0.0, 0.0,
+                                     A.tolerance_floor("burden_soa_mg_m2"))
+        assert tol > 0
+        rows = A.compare_to_reference({"burden_soa_mg_m2": 0.0},
+                                      {"burden_soa_mg_m2": 0.0})
+        assert all(ok for *_r, ok in rows)
+
+    def test_the_floor_does_not_swallow_a_real_change(self):
+        rows = A.compare_to_reference({"burden_so4_mg_m2": 3.0},
+                                      {"burden_so4_mg_m2": 0.0})
+        assert not rows[0][3]
+
+
+class TestJamDetection:
+    def test_a_trimmed_jam_run_is_still_detected(self):
+        """Mass tracers alone: a trimmed output set must not skip the gates."""
+        ds = synthetic_chunk().drop_vars(
+            ["jam_state.r_dry", "jam_cloud_borne.mc_so4_acc",
+             "jam_optics.aod_550"])
+        assert A.is_jam_run(ds)
+        assert A.missing_jam_diagnostics(ds)
+
+    def test_a_complete_run_reports_nothing_missing(self):
+        assert A.missing_jam_diagnostics(synthetic_chunk()) == []

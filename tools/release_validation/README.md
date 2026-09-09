@@ -71,9 +71,8 @@ lifetimes, the mass-budget residual, sulfate's upper-level and hemispheric
 distribution, AOD/Ångström, near-surface CDNC and N100, and the modal dry
 radii. Three of those are **absolute gates**, not climatological ranges:
 `|d ln B/dt| < 0.002 /day`, `|budget residual| < 5 %`, and the per-step
-dynamics residual `budget_dyn/mass < 0.1 %/step` from the #713 in-step gauge
-(unscored on output that predates it, or in a run directory with no saved
-Hydra config to read the timestep from). They exist
+dynamics residual `budget_dyn/mass < 0.1 %/step` from the #713 in-step gauge.
+They exist
 because an aerosol runaway (#658) stays inside a ×3-slack range gate until
 its final fortnight — the drift statistic is what sees it coming, and the
 residual says whether the cause is a source or a sink.
@@ -86,8 +85,16 @@ deposition entirely — so the gate names that caveat instead of calling it a
 leak. The drift gate reads burdens only and is unaffected either way.
 
 The dynamics gate answers a different question from both: whether the
-*transport* conserved mass. The August-2026 runaway was semi-Lagrangian
-non-conservation, not aerosol physics — see the design doc.
+*transport* conserved mass. The runaway that motivated these gates was
+semi-Lagrangian non-conservation, not aerosol physics — see the design doc.
+
+**Nothing passes by absence.** The drift and closure statistics need a window
+of at least 90 days (below that a fitted slope is its own noise), the dynamics
+gate needs both the gauge and a timestep, and a species the run does not carry
+has no burden to score. Every one of those is printed as `UNSCORED` with its
+reason and counted in the summary line, because a missing row would otherwise
+be indistinguishable from one that passed. Use `--last-n` to pick the settled
+months, not to shrink the window below the floor.
 
 Non-JAM members skip the block. Rationale and the regression tolerance tiers:
 `docs/source/design/jam_regression.md`.
