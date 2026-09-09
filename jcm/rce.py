@@ -272,14 +272,28 @@ def rce_initial_state(
     lapse_rate: float = 6.5e-3,
     stratosphere_temperature: float = 200.0,
     surface_pressure: float | None = None,
+    mixed_layer_top_m: float = 800.0,
 ) -> PhysicsState:
     """Build a 1-D column ``PhysicsState`` initial condition for an RCE run.
 
-    A ``lapse_rate`` (K/m) profile from ``sst`` capped at
+    A dry-adiabatic (well-mixed) sub-cloud layer below ``mixed_layer_top_m``
+    under a ``lapse_rate`` (K/m) free troposphere from ``sst``, capped at
     ``stratosphere_temperature``, with humidity at fixed ``relative_humidity``
     (the same closure the run uses, so step 0 starts consistent). Winds are
     zero; ``qc``/``qi`` tracers are zero. Surface pressure defaults to the
     thermodynamic reference ``c.p0``.
+
+    The mixed layer is physics, not cosmetics: ECHAM's ``cubase`` trigger
+    lifts a dry parcel from the lowest level and drops the column the moment
+    it is not buoyant, so a sounding running at ``lapse_rate`` down to the
+    surface loses ~3.3 K/km of parcel buoyancy and cannot trigger Tiedtke at
+    any physical ``zlift`` (≤ 1 K). Real tropical sub-cloud layers — and the
+    ones jcm's own vdiff produces — are near-neutral. Pass
+    ``mixed_layer_top_m=0.0`` for the unmixed profile.
+
+    Args:
+        mixed_layer_top_m: Depth (m) of the dry-adiabatic sub-cloud layer.
+
     """
     ps = c.p0 if surface_pressure is None else float(surface_pressure)
     pfull = _pressure_centers(vertical, jnp.asarray(ps))
@@ -287,7 +301,18 @@ def rce_initial_state(
     # Hydrostatic height with a 7.6 km scale height (matches #523's prototype),
     # purely to seed a plausible lapse-rate profile.
     z = -7.6e3 * jnp.log(pfull / ps)
-    temperature = jnp.maximum(sst - lapse_rate * z, stratosphere_temperature)
+    # Continuous at the mixed-layer top: dry adiabat below, ``lapse_rate``
+    # above, so the free troposphere keeps its conditional instability.
+    z_ml = float(mixed_layer_top_m)
+    dry_lapse = c.grav / c.cpd
+    temperature = jnp.maximum(
+        jnp.where(
+            z <= z_ml,
+            sst - dry_lapse * z,
+            sst - dry_lapse * z_ml - lapse_rate * (z - z_ml),
+        ),
+        stratosphere_temperature,
+    )
     q = _fixed_rh_specific_humidity(
         pfull, jnp.asarray(ps), temperature, float(relative_humidity),
     )
