@@ -25,6 +25,7 @@ Contents
    :caption: Contents:
 
    getting_started
+   running_at_scale
    speedy_physics
    echam_physics
    release_notes
