@@ -118,6 +118,13 @@ Cloud-borne tracers live in the physics carry, which the removal terms
 already integrate sequentially through `cloud_borne_store.apply_updates`,
 so they need no reconstruction.
 
+Behind the splitting, `physics_interface.verify_tendencies` caps every
+sink at `-max(q, 0)/Δt` for the aerosol and gas name families
+(`has_non_negative_tendency`). It drains to zero and never fills to zero:
+aerosol tracers are deliberately left out of the `verify_state` entry clip
+so the #713 mass-budget gauge still sees the advection ringing, and a
+guard that lifted a ringing negative to zero would be a mass source.
+
 ## Deposition-flux ledger
 
 `dry_<species>` is gravitational settling **plus** turbulent/Brownian
