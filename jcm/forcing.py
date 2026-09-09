@@ -1180,7 +1180,8 @@ def _reject_truncated_erodibility(da, arr) -> None:
         "--outdir <dir>\n"
         "and point forcing.dust_file at "
         "<dir>/dust_erodibility_cam_f05_t<T>.nc (mirror maintainers: re-stage "
-        "bundles/<grid>/dust.nc from it, so `auto` resolves the fixed map). "
+        "bundles/<grid>/dust_erodibility.nc from it, so `auto` resolves the "
+        "fixed map). "
         "forcing.dust_file=null runs dust-free in the meantime."
     )
 

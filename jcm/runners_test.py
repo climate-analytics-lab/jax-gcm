@@ -890,10 +890,11 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             self.assertEqual(leaf.values.shape, shape)
             self.assertGreater(float(np.abs(np.asarray(leaf.values)).min()),
                                0.0)
-        # DMS converted nmol/L → kg/m³; dust clipped to 1.
+        # DMS converted nmol/L → kg/m³; the dust erodibility weight keeps its
+        # values above 1 (CAM's basin factor is unbounded, #768).
         self.assertAlmostEqual(float(f.dms_seawater.values[0, 0, 0]),
                                2.0 * 6.21324e-8, places=12)
-        self.assertEqual(float(f.dust_source.values.max()), 1.0)
+        self.assertEqual(float(f.dust_source.values.max()), 1.5)
         # kind=default parent keeps the aquaplanet cos²-lat SST profile.
         from jcm.forcing import default_forcing
         np.testing.assert_array_equal(
@@ -2437,7 +2438,7 @@ class TestWarnOnConfigTraps:
         cfg = self._cfg(terrain="from_file",
                         emissions_file="hf://bundles/t63/emissions_pd.nc",
                         dms_file="hf://bundles/t63/dms.nc",
-                        dust_file="hf://bundles/t63/dust.nc",
+                        dust_file="hf://bundles/t63/dust_erodibility.nc",
                         oxidants_file="hf://bundles/t63_l47/oxidants_pd.nc")
         with caplog.at_level("WARNING"):
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
@@ -3031,7 +3032,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_erodibility.nc")
         # The level-dependent oxidant bundle does not exist at l8 → auto→None.
         self.assertIsNone(out.get("oxidants_file"))
 
@@ -3095,7 +3097,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_erodibility.nc")
         # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
         self.assertIsNone(out.get("oxidants_file"))
 

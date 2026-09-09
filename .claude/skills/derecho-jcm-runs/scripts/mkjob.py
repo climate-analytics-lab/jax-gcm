@@ -70,7 +70,7 @@ def fetch_bundles(a) -> dict[str, str]:
         "forcing": f"bundles/{gtag}/forcing_{era}.nc",
         "emissions_file": f"bundles/{gtag}/emissions_{era}.nc",
         "dms_file": f"bundles/{gtag}/dms.nc",
-        "dust_file": f"bundles/{gtag}/dust.nc",
+        "dust_file": f"bundles/{gtag}/dust_erodibility.nc",
         "oxidants_file": f"bundles/{gtag}_{ltag}/oxidants_{era}.nc",
         "ozone_file": f"bundles/{gtag}_{ltag}/ozone_{era}.nc",
     }

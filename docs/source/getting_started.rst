@@ -140,7 +140,9 @@ with year-matched products for a consistent transient run.
 ``cam_erodibility`` (default)
    CAM's geomorphic basin factor ``mbl_bsn_fct_geo`` — an **unbounded** weight
    (0-5.7), zeroed below 0.1 as CAM does. This is what the mirror bundle
-   ``bundles/<grid>/dust.nc`` carries.
+   ``bundles/<grid>/dust_erodibility.nc`` carries. (The legacy
+   ``bundles/<grid>/dust.nc`` is the pre-#768 build whose weights were
+   capped at 1; the reader refuses it.)
 ``tegen_potential``
    A HAMMOZ-style potential-source **fraction** in [0, 1] whose preprocessing
    already embeds the vegetation/land-cover mask, so no threshold is applied.

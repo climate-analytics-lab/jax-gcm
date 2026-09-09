@@ -97,6 +97,16 @@ def prep_dust(out: Path) -> None:
     print(f"wrote {out} {dict(out_ds.sizes)} max={arr.max():.2f}")
 
 
+def _dust_is_clipped(path: Path) -> bool:
+    """Whether a cached dust intermediate is a pre-#768 build capped at 1."""
+    with xr.open_dataset(path) as ds:
+        arr = ds["pot_source"].values
+    stale = bool(arr.max() == 1.0 and (arr == 1.0).sum() > 1)
+    if stale:
+        print(f"{path}: pre-#768 build (capped at 1) — regenerating")
+    return stale
+
+
 def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     """Vertically remap the CAM L26 oxidant climatology onto ECHAM L47.
 
@@ -281,7 +291,10 @@ def main() -> None:
                 outdir / oxid_name]
     if not products[0].exists():
         prep_dms(products[0])
-    if not products[1].exists():
+    if not products[1].exists() or _dust_is_clipped(products[1]):
+        # Regenerate rather than reuse: a build tree from before #768 holds a
+        # base file whose weights were capped at 1, and reusing it would
+        # republish the truncated map under the corrected product name.
         prep_dust(products[1])
     if not products[2].exists():
         if args.oxid_source == "waccm":

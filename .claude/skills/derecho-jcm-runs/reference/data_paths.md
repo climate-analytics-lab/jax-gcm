@@ -14,7 +14,7 @@ Per Gaussian grid `<g>` (t63, t106):
     bundles/<g>/terrain.nc                 GMTED2010 SSO + fractional ERA5 land mask
     bundles/<g>/forcing_{pd,pi}.nc         PCMDI-AMIP SST/ice + ERA5 land climatology
     bundles/<g>/emissions_{pd,pi}.nc       CEDS+BB4CMIP7, 4 super-sectors x 3 species
-    bundles/<g>/dms.nc, dust.nc            Lana 2011; 0.23x0.31 deg erodibility
+    bundles/<g>/dms.nc, dust_erodibility.nc  Lana 2011; 0.23x0.31 deg erodibility
     bundles/<g>_<l>/ozone_{pd,pi}.nc       FZJ CMIP7, pre-interpolated per level count
     bundles/<g>_<l>/oxidants_{pd,pi}.nc    WACCM CCMI full-lid, per level count
 
