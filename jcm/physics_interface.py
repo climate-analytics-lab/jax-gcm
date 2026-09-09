@@ -328,6 +328,27 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
+# JAM aerosol/gas families, whose names are built per population
+# (``m_<species>_<class>``, ``n_<class>``, their ``mc_``/``nc_``
+# cloud-borne partners, ``g_<species>``) and so cannot be listed.
+# Non-negative for the same reason as the names above, and covered by the
+# TENDENCY cap only: sedimentation, dry deposition and wet scavenging each
+# bound their own removal but the driver sums them, so this is the last
+# guard on that sum (CAM/HAMMOZ get it instead by applying removals
+# sequentially to a working copy, which the terms now also do).
+#
+# Deliberately NOT added to the entry clip in ``verify_state``: that would
+# hide the advection ringing on aerosol tracers from the #713 mass-budget
+# gauge, which reads the same verified state, and every removal term
+# already floors its own reads at zero.
+_NON_NEGATIVE_TENDENCY_PREFIXES = ("m_", "mc_", "n_", "nc_", "g_")
+
+
+def has_non_negative_tendency(name: str) -> bool:
+    """Whether a tracer's tendency must not drive it below zero."""
+    return (name in _NON_NEGATIVE_TRACERS
+            or name.startswith(_NON_NEGATIVE_TENDENCY_PREFIXES))
+
 
 def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
     """Return a copy of ``tracers`` with positive-definite ones clamped to ``>= 0``."""
@@ -342,7 +363,9 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 
     Clips ``specific_humidity`` and every positive-definite tracer (cloud
     water, ice, rain, snow, droplet- and ice-number concentrations, GHG
-    volume mixing ratios) to ``>= 0``. We deliberately do NOT clip to an
+    volume mixing ratios) to ``>= 0``. Aerosol and gas tracers are
+    deliberately left alone here (see the prefix list below) and guarded
+    on the tendency side instead. We deliberately do NOT clip to an
     upper bound — aggressive caps hide bugs in the physics (particularly
     convection) that should surface as unphysical values rather than be
     silently masked. Individual physics routines apply local NaN-avoidance
@@ -372,11 +395,12 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
     """Adjust tendencies to prevent the state from becoming physically invalid in the next time step.
 
-    For every positive-definite scalar (``specific_humidity`` plus the
-    set of tracers in ``_NON_NEGATIVE_TRACERS``) we cap the negative part
-    of the tendency at ``-state / dt``, i.e. just enough to drive the
+    For every positive-definite scalar (``specific_humidity`` plus every
+    tracer :func:`has_non_negative_tendency` accepts) we cap the negative
+    part of the tendency at ``-state / dt``, i.e. just enough to drive the
     field to zero rather than below. This mirrors what an implicit step
-    on a linear sink would do for the same field.
+    on a linear sink would do for the same field, and is the last guard
+    on the SUM of several sinks acting on one tracer.
 
     Args:
         state: The current ``PhysicsState`` (already passed through
@@ -414,7 +438,7 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     clipped_tracer_tends = {
         name: (
             _cap_negative_tend(state.tracers[name], tend)
-            if name in _NON_NEGATIVE_TRACERS and name in state.tracers
+            if has_non_negative_tendency(name) and name in state.tracers
             else tend
         )
         for name, tend in tendencies.tracers.items()

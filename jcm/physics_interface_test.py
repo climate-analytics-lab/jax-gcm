@@ -199,6 +199,46 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
         qc_next = state.tracers["qc"] + 1800.0 * result.tracers["qc"]
         self.assertTrue(jnp.all(qc_next >= 0.0))
 
+    def test_aerosol_and_gas_tracer_tendencies_cap_at_zero(self):
+        """The summed aerosol sinks cannot drive a tracer below zero.
+
+        Sedimentation, dry deposition and wet scavenging each cap their own
+        removal at 100 %, but the driver sums them; the JAM name families
+        (``m_``/``mc_``/``n_``/``nc_``/``g_``) must therefore be covered by
+        the tendency guard, as CAM/HAMMOZ cover them by applying removals
+        sequentially to a working copy.
+        """
+        from jcm.physics_interface import PhysicsTendency, verify_tendencies
+        shape = (4, 8, 8)
+        names = ("m_ss_cor", "mc_ss_cor", "n_cor", "nc_cor", "g_so2")
+        state = PhysicsState.zeros(
+            shape, tracers={n: jnp.full(shape, 2e-9) for n in names},
+        )
+        # Three sinks that each remove <100 % but sum to 164 %.
+        tend = PhysicsTendency.zeros(
+            shape,
+            tracers={n: jnp.full(shape, -1.64 * 2e-9 / 1800.0) for n in names},
+        )
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        for n in names:
+            nxt = state.tracers[n] + 1800.0 * result.tracers[n]
+            self.assertTrue(bool(jnp.all(nxt >= 0.0)), n)
+            self.assertTrue(bool(jnp.allclose(nxt, 0.0)), n)
+
+    def test_aerosol_state_is_not_clipped_on_entry(self):
+        """The entry clip stays off aerosol: the #713 budget gauge reads the
+        same verified state and must still see the advection ringing.
+        """
+        from jcm.physics_interface import verify_state
+        shape = (4, 8, 8)
+        names = ("m_du_acc", "n_acc", "g_dms")
+        state = PhysicsState.zeros(
+            shape, tracers={n: jnp.full(shape, -1e-18) for n in names},
+        )
+        result = verify_state(state)
+        for n in names:
+            self.assertTrue(bool(jnp.all(result.tracers[n] < 0.0)), n)
+
     def test_unknown_tracer_tendency_passes_through(self):
         """Tendencies of tracers not in the positive-definite set must
         pass through unchanged (same rationale as ``test_unknown_tracer
