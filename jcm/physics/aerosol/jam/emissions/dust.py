@@ -24,7 +24,7 @@ uses, so the surface gating below follows CLM/CAM directly:
   mask. ``source_kind`` selects which convention the field follows.
 * ``mobilization`` — CLM ``lnd_frc_mbl``: the land fraction that is snow-free
   and unfrozen. CLM's vegetation term ``1 − VAI/0.3`` has no counterpart here
-  because no LAI/vegetation boundary field is carried (#769); a vegetation-
+  because no LAI/vegetation boundary field is carried (#777); a vegetation-
   masked monthly source map is the ``tegen_potential`` alternative.
 * ``u*t`` — raised over moist soil by the Fecan et al. (1999) factor CLM
   applies in ``frc_thr_wet_fct``.

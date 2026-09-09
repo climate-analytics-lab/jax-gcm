@@ -216,9 +216,10 @@ model grid and flipped to model order; a mismatched grid raises):
   e.g. `emiss_fields_dms_sea_monthly_T63.nc`). Converted to kg-DMS/m³ at load
   so `DmsEmissions`' `piston_velocity · dms_seawater` product is directly a
   kg/m²/s flux; `_FillValue` land cells → 0.
-- `forcing.dust_file` — potential-dust-source map (`pot_source`, 0–1,
-  e.g. `dust_potential_sources_T63.nc`), clipped to `DustEmissions`' [0, 1]
-  erodibility contract (the file's `-1` missing marker → 0).
+- `forcing.dust_file` — dust source map (`pot_source`). Two conventions are
+  supported, selected by `physics.jam_dust_source`; only the lower bound is
+  imposed at load (the file's `-1` missing marker and NaN → 0). See
+  "Dust source gating" below.
 - `forcing.oxidants_file` — monthly `OH/NO3/O3/H2O2_VMR_avrg` mole fractions on
   ECHAM hybrid model levels (e.g. `ham_oxidants_monthly_T63L47_macc.nc` with
   `grid=echam_t63_l47_hybrid`). Levels are mapped one-to-one onto the model
@@ -263,6 +264,101 @@ carbon; `SO2`→gas; `num_*`→number; the energy-sector `*_ene_vertical` 3-D
 layer(s) at GCM resolution). This reproduces CESM's global budget, including the
 **2.5 % primary-sulfate split recovered to 3 decimals** — the validation
 counterpart to the differentiable path.
+
+## Natural emissions: source gating, emitted size, and the 10 m wind
+
+Three corrections to the natural-emission terms (#768, #723), all grounded in
+CAM/CLM's Zender-2003 dust chain and ECHAM's `vdiff` surface-layer diagnostic.
+
+### The emission wind is 10 m, not the lowest model level
+
+Gong sea salt (`u10**3.41`) and Nightingale DMS (`k_w ~ u10**2`) are fitted to
+the 10 m wind; HAMMOZ passes `vphysc%velo10m`. Reading the lowest full level
+instead — ~33 m at L47 — inflates sea salt by 37-46 % and DMS by 20-25 %.
+
+`TteTkeVerticalDiffusion` now publishes `VerticalDiffusionData.wind_10m`, the
+ECHAM/ICON `nsurf_diag` reduction of the lowest-level wind along the same
+surface-layer profile that produced the drag:
+
+```
+bn  = ln(z1/z0m)                              neutral profile factor
+bm  = bn * sqrt(CM_n|U| / CM|U|)              stability-corrected
+red = [ln(1 + (e^bn - 1)*10/z1) + merge] / bm
+merge = -(bn - bm)*10/z1                      stable   (CM|U| < CM_n|U|)
+      = -ln(1 + (e^(bn-bm) - 1)*10/z1)        unstable
+```
+
+Building it from the per-tile `CM·|U|` the surface stress already uses means the
+10 m wind cannot drift from the momentum exchange, and the stable/unstable
+branch needs no separate Richardson number (the two branches meet continuously
+at `Ri = 0`, where `CM|U| = CM_n|U|`). Emission terms read it through
+`emissions/surface_wind.py`; with no vdiff term composed there is no surface
+layer to reduce through and they fall back to the lowest level. Emissions run
+before vdiff in the ECHAM ordering, so the value is one step old — the same lag
+the dust term's `u*` already carries.
+
+### Dust source gating
+
+`forcing.dust_source` is a *prescribed* erodibility; the physics it needs
+around it is CLM's, because CAM's `dust_flux_in` arrives from CLM already
+masked. The term now applies, per column:
+
+| factor | reference | field used |
+| --- | --- | --- |
+| erodibility, zeroed below 0.1, **not** bounded above | CAM `dust_model.F90` `soil_erod_threshold` | `forcing.dust_source` |
+| land fraction | CLM operates on land columns | `terrain.fmask` |
+| snow-free fraction | CLM `lnd_frc_mbl` | `forcing.snowc_am` |
+| unfrozen fraction (ramp over the 2 K below `tmelt`) | CLM `liqfrac` | `forcing.stl_am` |
+| `u*t` x `sqrt(1 + 1.21*(100*(w - w_thr))^0.68)` | Fecan (1999), CLM `frc_thr_wet_fct` | `forcing.soilw_am` |
+
+`source_kind` (`physics.jam_dust_source`) chooses how the map itself is read:
+`cam_erodibility` is CAM's geomorphic basin factor `mbl_bsn_fct_geo`, an
+unbounded 0-5.7 weight — clipping it at 1 truncated 15 % of the global source
+weight, concentrated in exactly the closed basins that are the world's
+strongest sources — while `tegen_potential` is a HAMMOZ potential-source
+fraction in [0, 1] that needs no threshold because its own preprocessing
+embeds the land-cover mask. The default is `cam_erodibility`, matching the map
+the data mirror ships.
+
+**Known gap.** CLM's vegetation gate `1 - VAI/0.3` has no counterpart: no LAI,
+VAI or land-cover field exists on `ForcingData`/`TerrainData`. It matters
+because the basin factor is purely topographic — the Amazon (7.2 % of global
+source weight, peak 4.40) and Congo (3.5 %, peak 2.16) carry *larger* values
+than the Sahara, and in CAM they emit nothing only because CLM's LAI gate
+zeroes them. Here the Fecan moisture factor suppresses them (~3.4x higher
+`u*t` at 0.95 relative wetness) but does not eliminate them. Adding the field
+is issue #777; a monthly VAI-masked map would also be the natural
+`tegen_potential` product.
+
+### Emitted number comes from the emitted size, not the mode's size
+
+Freshly emitted particles are not at their mode's equilibrium size, so
+converting an emitted mass flux to number with the mode geometry
+(`rho/number_factor` at `dgnum`) is wrong by the cube of the size ratio. CAM
+and the CESM emission-file generator both use the volume-mean diameter of the
+*emission* size distribution, `x_mton = 6/(pi rho D^3)`:
+
+| species / class | D [um] | source |
+| --- | --- | --- |
+| dust accumulation (0.1-1 um bin) | 0.7806 | CAM `dust_common::dust_set_params` |
+| dust coarse (1-10 um bin) | 3.8983 | same |
+| primary carbon (BC, POA) | 0.134 | CMIP7 `num_bc_a4`/`num_pom_a4` `mapping_equation` |
+| accumulation sulfate (surface, biomass) | 0.134 | `num_so4_a1_ag` |
+| accumulation sulfate (energy/industry, shipping) | 0.261 | `num_so4_a1_ene_vertical`, `num_so4_a1_ship_slv` |
+| Aitken sulfate | 0.0504 | `num_so4_a2_res_trs` |
+
+For accumulation dust this is 1.54e15 #/kg against the 1.17e17 #/kg the mode's
+0.11 um `dgnum` gives — 75x. Every diameter is a differentiable parameter
+(`DustParameters.emission_diameter`, `EmissionParameters.emission_diameter`),
+not static config, so the emitted number stays calibratable like the rest of
+the physics.
+
+The dust mass split also follows CAM's `dust_emis_sclfctr`: 2.1 %
+accumulation / 97.9 % coarse over those two bins, replacing an assumed
+10/90. (CAM's third, 1.65e-5 Aitken share has no home in a population whose
+Aitken mode carries no dust.) Sea salt needs neither correction: it already
+partitions the Gong spectrum across the modes and derives its number from the
+same spectrum.
 
 ## Status and caveats
 

@@ -134,6 +134,21 @@ present-day aerosol emissions over a historical circulation — the runner warns
 and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
 with year-matched products for a consistent transient run.
 
+``forcing.dust_file`` carries a source map in one of two conventions, and
+``physics.jam_dust_source`` says which one the file follows:
+
+``cam_erodibility`` (default)
+   CAM's geomorphic basin factor ``mbl_bsn_fct_geo`` — an **unbounded** weight
+   (0-5.7), zeroed below 0.1 as CAM does. This is what the mirror bundle
+   ``bundles/<grid>/dust.nc`` carries.
+``tegen_potential``
+   A HAMMOZ-style potential-source **fraction** in [0, 1] whose preprocessing
+   already embeds the vegetation/land-cover mask, so no threshold is applied.
+
+Either way the dust term gates the map at run time by land fraction, snow
+cover, frozen ground and soil moisture, so a source map alone no longer emits
+dust from ice sheets or open ocean.
+
 Quick Start Examples
 --------------------
 
