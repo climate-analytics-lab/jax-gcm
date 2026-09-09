@@ -145,6 +145,7 @@ def jam_aerosol_physics(
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
+    dust_source: str = "cam_erodibility",
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
     prescribed_speciated: bool = False,
@@ -183,6 +184,12 @@ def jam_aerosol_physics(
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
+        dust_source: which convention the prescribed dust source map follows
+            — ``"cam_erodibility"`` (default: CAM's geomorphic basin factor,
+            thresholded at 0.1 and unbounded above) or ``"tegen_potential"``
+            (a HAMMOZ-style potential-source fraction in [0, 1] whose own
+            preprocessing embeds the land-cover mask). It selects the gating,
+            not the file: pair it with the matching ``forcing.dust_file``.
         anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
             the *bulk* path (in-model differentiable speciation + smooth
             injection); ``anthropogenic_params`` overrides the defaults.
@@ -237,7 +244,7 @@ def jam_aerosol_physics(
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec),
         DmsEmissions(params=dms, spec=spec),
-        DustEmissions(params=dust, spec=spec),
+        DustEmissions(params=dust, spec=spec, source_kind=dust_source),
     ]
     if anthropogenic:
         # Prescribed CEDS anthropogenic SO2/BC/OC (#498); inert until forcing

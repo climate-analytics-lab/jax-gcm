@@ -81,6 +81,7 @@ def echam_physics(
     jam_optics: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
+    jam_dust_source: str = "cam_erodibility",
     jam_ice_scheme: str = "niemand",
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
@@ -180,6 +181,8 @@ def echam_physics(
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_dust_source: convention the ``forcing.dust_file`` source map
+            follows — ``"cam_erodibility"`` (default) or ``"tegen_potential"``.
         jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
@@ -443,6 +446,7 @@ def echam_physics(
             optics=jam_optics,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
+            dust_source=jam_dust_source,
             ice_scheme=jam_ice_scheme,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
