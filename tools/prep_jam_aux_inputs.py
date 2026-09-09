@@ -12,9 +12,9 @@ Sources (all under /glade/campaign/cesm/cesmdata/inputdata):
 * DMS seawater concentration: ``Csw_DMS_Lana2011_f09f09_1750_2100`` — the
   Lana et al. (2011) surface-ocean climatology in nmol/L (verified constant
   across years; any 12-month block is *the* climatology).
-* Dust erodibility: ``dst_1.9x2.5_c090203.nc`` ``mbl_bsn_fct_geo`` — CAM's
-  static geomorphic mobilization-basin factor, used as the [0, 1]
-  potential-source map ``DustEmissions`` expects.
+* Dust erodibility: ``dst_0.23x0.31_c130710.nc`` ``mbl_bsn_fct_geo`` — CAM's
+  static geomorphic mobilization-basin factor (0-5.7, unbounded above), the
+  ``source_kind="cam_erodibility"`` map ``DustEmissions`` expects.
 * Oxidants: ``oxid_1.9x2.5_L26_1850-2015`` OH/NO3/O3/H2O2 [mol/mol] on CAM
   L26 hybrid levels, sampled as 12-month blocks per selected year (1849,
   1855, ..., 2005, 2015). The block nearest ``--year`` is vertically
@@ -74,9 +74,16 @@ def prep_dms(out: Path) -> None:
 
 
 def prep_dust(out: Path) -> None:
-    """Write the static erodibility map: mbl_bsn_fct_geo -> pot_source (lat, lon)."""
+    """Write the static erodibility map: mbl_bsn_fct_geo -> pot_source (lat, lon).
+
+    The basin factor is a *weight*, not a fraction: it runs to 5.7 in the
+    large closed basins that are the world's strongest dust sources, and CAM
+    (``dust_model.F90``) applies no upper bound. Only negatives / missing
+    cells are floored — capping at 1 would truncate 15 % of the global source
+    weight, disproportionately in the Sahara/Taklamakan/Arabian maxima.
+    """
     ds = xr.open_dataset(_DUST_SRC)
-    arr = np.clip(np.nan_to_num(ds["mbl_bsn_fct_geo"].values), 0.0, 1.0)
+    arr = np.maximum(np.nan_to_num(ds["mbl_bsn_fct_geo"].values), 0.0)
     out_ds = xr.Dataset(
         {"pot_source": (("lat", "lon"), arr,
                         {"units": "1",

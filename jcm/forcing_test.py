@@ -953,11 +953,11 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "latitudes"):
             read_dms_seawater(ds, lat_deg=self.LAT_DESC + 5.0)
 
-    def test_dust_reader_clips_to_unit_interval(self):
+    def test_dust_reader_floors_at_zero_and_keeps_weights_above_one(self):
         from jcm.forcing import WRAP_YEAR, read_dust_source
         vals = np.zeros((12, self.NLAT, self.NLON))
         vals[:, 0, 0] = -1.0    # the file's missing marker
-        vals[:, 1, 1] = 1.5     # interpolation overshoot
+        vals[:, 1, 1] = 1.5     # CAM basin factor > 1 (runs to 5.7)
         vals[:, 2, 2] = 0.7
         vals[0, 3, 3] = np.nan
         ds = self._dataset("pot_source", vals, units="1.")
@@ -965,11 +965,12 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(int(ts.align_mode), WRAP_YEAR)
         arr = np.asarray(ts.values)
         self.assertEqual(arr.shape, (12, self.NLON, self.NLAT))
-        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
-        # -1 → 0; 1.5 → 1; 0.7 preserved (lat flipped: file lat idx i →
-        # ascending idx 3 - i).
+        self.assertTrue((arr >= 0.0).all())
+        # -1 → 0; 1.5 PRESERVED (an unbounded erodibility weight — capping it
+        # truncated the strongest source basins, #768); 0.7 preserved (lat
+        # flipped: file lat idx i → ascending idx 3 - i).
         self.assertEqual(arr[0, 0, 3], 0.0)
-        self.assertEqual(arr[0, 1, 2], 1.0)
+        self.assertEqual(arr[0, 1, 2], 1.5)
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
@@ -982,7 +983,7 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         from jcm.forcing import TimeSeries, read_dust_source
         vals = np.zeros((self.NLAT, self.NLON))
         vals[0, 0] = -1.0    # missing marker → 0
-        vals[1, 1] = 1.5     # overshoot → 1
+        vals[1, 1] = 1.5     # erodibility weight > 1, preserved
         vals[2, 2] = 0.7
         ds = xr.Dataset(
             {"pot_source": (("lat", "lon"), vals, {"units": "1."})},
@@ -996,11 +997,11 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertNotIsInstance(out, TimeSeries)
         arr = np.asarray(out)
         self.assertEqual(arr.shape, (self.NLON, self.NLAT))
-        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
-        # Same clip semantics as the monthly path (lat flips: file idx i →
-        # ascending idx 3 - i).
+        self.assertTrue((arr >= 0.0).all())
+        # Same floor-only semantics as the monthly path (lat flips: file idx i
+        # → ascending idx 3 - i).
         self.assertEqual(arr[0, 3], 0.0)
-        self.assertEqual(arr[1, 2], 1.0)
+        self.assertEqual(arr[1, 2], 1.5)
         self.assertAlmostEqual(float(arr[2, 1]), 0.7)
 
     def _oxidant_ds(self, nlev=5, hybm=None, drop=None):

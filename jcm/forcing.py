@@ -1169,10 +1169,12 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
       ``ForcingData.select`` passes non-``TimeSeries`` leaves through
       untouched, so the same field reaches ``DustEmissions`` every step.
 
-    :class:`DustEmissions`' contract is a dimensionless erodibility in
-    **[0, 1]**, so values are clipped — the file encodes missing cells as
-    ``-1`` (its ``missing`` attribute), which the clip maps to zero (no
-    source), and interpolation overshoot above 1 is capped.
+    :class:`DustEmissions` gates the field per its ``source_kind``, so only
+    the lower bound is imposed here: the HAMMOZ file encodes missing cells as
+    ``-1`` (its ``missing`` attribute) and NaN decodes to no source. Values
+    above 1 are kept — CAM's basin factor is an unbounded weight (0-5.7), and
+    capping it truncated 15 % of the global source weight in the strongest
+    source basins (#768).
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -1182,7 +1184,7 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     # Missing cells (NaN after decode, or the raw ``-1`` marker) mean "no dust
     # source"; NaN would pass straight through ``clip``, so zero it first.
-    arr = np.clip(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    arr = np.maximum(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
     if "time" not in ds[var_name].dims:
         # Static (lat, lon) map → bare (lon, lat) array. No time axis to
         # build a TimeSeries from, and DustEmissions reads a 2-D field
