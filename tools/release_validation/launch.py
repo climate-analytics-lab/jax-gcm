@@ -169,7 +169,12 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            f"run.output_prefix={rundir}/{name}",
            # checkpoint_path is now a universal run key (the run schema is one
            # base -- #640), so a plain override sets it on every run group.
-           f"run.checkpoint_path={rundir}/checkpoint.msgpack"]
+           f"run.checkpoint_path={rundir}/checkpoint.msgpack",
+           # Permanent archives alongside the rotating checkpoint, so a
+           # member whose failure develops slowly still has a state from
+           # before the onset to restart from.
+           "run.archive_ckpt_every="
+           f"{m.get('archive_ckpt_every', d.get('archive_ckpt_every', 0))}"]
     if m.get("jam_inputs"):
         ovs += jam_aux(grid, m["jam_inputs"])
     return ovs

@@ -7,6 +7,12 @@ defaults:
   chunk_days: 5
   save_interval: 5
   hours: 10
+  # Permanent checkpoint archives, in sim-days (0 = off). Only the JAM
+  # members set one: their failure mode is a slow aerosol runaway, and by the
+  # time it is visible the rotating checkpoint and its .prev have both been
+  # written from poisoned state, leaving nothing to restart from before the
+  # onset. 30 days costs ~12 archives a year at ~1 GB each.
+  archive_ckpt_every: 0
 
 members:
   speedy-t31:        {preset: speedy-t31, hours: 2}
@@ -14,5 +20,7 @@ members:
   echam-1m-t106:     {preset: t106-echam-1m}
   echam-2m-t63:      {preset: t63-echam-2m}
   echam-2m-t106:     {preset: t106-echam-2m}
-  echam-jam-t63-l47: {preset: ma-t63-l47, jam_inputs: l47}
-  echam-jam-t63-l95: {preset: ma-t63-l95, jam_inputs: l95, hours: 12}
+  echam-jam-t63-l47: {preset: ma-t63-l47, jam_inputs: l47,
+                      archive_ckpt_every: 30}
+  echam-jam-t63-l95: {preset: ma-t63-l95, jam_inputs: l95, hours: 12,
+                      archive_ckpt_every: 30}

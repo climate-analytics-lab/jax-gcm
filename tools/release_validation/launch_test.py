@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import launch  # noqa: E402
@@ -145,3 +146,26 @@ def test_submit_qsubs_the_written_job(scratch, repo, monkeypatch):
     _launch(repo, "--tag", "aaa1111", "--submit")
     path = repo / "runs" / "mx_speedy_t31_aaa1111.pbs"
     assert calls == [["qsub", str(path)]]
+
+
+def test_jam_members_archive_a_pre_onset_checkpoint():
+    """JAM members must keep permanent archives, not only the rotating pair.
+
+    A JAM aerosol runaway develops over weeks, so by the time it is visible
+    both ``checkpoint.msgpack`` and its ``.prev`` have been written from
+    poisoned state and there is nothing left to restart from before the onset.
+    """
+    cfg = yaml.safe_load((pathlib.Path(launch.HERE) / "matrix.yaml").read_text())
+    for name, member in cfg["members"].items():
+        ovs = launch.overrides(name, member, cfg["defaults"], "/tmp/rundir")
+        setting = [o for o in ovs if o.startswith("run.archive_ckpt_every=")]
+        assert len(setting) == 1, name
+        expected = 30 if "jam" in name else 0
+        assert setting[0] == f"run.archive_ckpt_every={expected}", name
+
+
+def test_archive_setting_is_a_real_run_key():
+    """Guards against a silently-ignored Hydra override."""
+    default = yaml.safe_load(
+        (REPO / "jcm" / "config" / "run" / "default.yaml").read_text())
+    assert "archive_ckpt_every" in default
