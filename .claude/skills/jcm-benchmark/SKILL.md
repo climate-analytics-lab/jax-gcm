@@ -172,7 +172,7 @@ output times dies in `to_xarray()` with an opaque
 
 ## A/B'ing a library version
 
-`jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` are **editable installs — the
+`jcm`, `jax-rrtmgp` and `mam4-jax` are **editable installs — the
 working tree is the running code.** Never `git checkout` a different branch in
 the shared clone to benchmark it; that silently changes the code under anyone
 else's concurrent run.
@@ -201,7 +201,7 @@ do: a six-config sweep here had jax-rrtmgp switch from a feature branch to
 `main` between config 1 and config 2 because someone merged a PR, so the two
 were measuring different radiation code. Nothing failed; the numbers were
 simply incomparable. It was caught only because the report records resolved
-SHAs. Put all of `jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` on
+SHAs. Put all of `jcm`, `jax-rrtmgp` and `mam4-jax` on
 `--pythonpath` as pinned worktrees for any run whose numbers you intend to
 compare across hours.
 

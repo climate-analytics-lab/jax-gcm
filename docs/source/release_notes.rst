@@ -1,6 +1,15 @@
 Release Notes
 =============
 
+Unreleased — dinosaur pinned to a release
+-----------------------------------------
+
+- ``requirements.txt`` requires ``dinosaur>=1.5.0`` instead of the
+  semi-Lagrangian development branch, so jcm can be published to PyPI again.
+  1.5.0 also fixes the hybrid-coordinate temperature equation
+  (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
+  runs made with earlier dinosaur builds; sigma-level runs are unchanged.
+
 Unreleased — packaged config tree contract; ``experiment`` group renamed
 ------------------------------------------------------------------------
 

@@ -51,7 +51,7 @@ pip install -e .
 ```
 
 JCM requires Python 3.11 or newer. The full dependency set is listed in
-[`requirements.txt`](requirements.txt), including JAX, Flax, Dinosaur,
+[`requirements.txt`](requirements.txt), including JAX, Flax, Dinosaur (≥ 1.5.0),
 Hydra, xarray, and optional RRTMGP support.
 
 ## Quick Start

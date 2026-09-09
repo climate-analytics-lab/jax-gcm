@@ -32,12 +32,6 @@ import sites as site_profile  # noqa: E402  (local module)
 REPOS = {
     "jcm": ("https://github.com/climate-analytics-lab/jax-gcm",
             "feat/derecho-runs-skill"),
-    # shoyer's semi-lagrangian branch, NOT neuralgcm/dinosaur main: the
-    # SemiLagrangianPrimitiveEquationsHybrid class the SL dycore needs lives
-    # in PR #135 and is not upstream. Pointing at upstream main gets a clone
-    # that imports fine and then fails at model construction with
-    # AttributeError — which is how this was found.
-    "dinosaur-sl": ("https://github.com/shoyer/dinosaur", "semi-lagrangian"),
     "jax-rrtmgp": ("https://github.com/climate-analytics-lab/jax-rrtmgp",
                    "main"),
     # Required by every echam-jam preset and NOT present in the published
@@ -165,7 +159,7 @@ def job(preset: str, a) -> dict:
         for d, (url, sha) in a._resolved.items()
     )
     pythonpath = ":".join(
-        f"/work/{d}" for d in ("dinosaur-sl", "jax-rrtmgp", "mam4-jax"))
+        f"/work/{d}" for d in ("jax-rrtmgp", "mam4-jax"))
     bench = (
         f"python /work/jcm/tools/benchmark.py --preset {preset} "
         f"--months {a.months} --gpu 0 --chunk-days {a.chunk_days} "

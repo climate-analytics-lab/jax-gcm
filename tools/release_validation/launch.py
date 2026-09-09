@@ -186,7 +186,7 @@ PBS = """#!/bin/bash
 #PBS -o {logdir}/{name}.log
 set -euo pipefail
 source {venv}/bin/activate
-export PYTHONPATH={dinosaur}:{repo}
+export PYTHONPATH={repo}
 export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93
@@ -221,7 +221,6 @@ def main(argv=None):
     repo = str(Path(a.repo).resolve())
     scratch = os.environ.get("SCRATCH", f"{HOME}/scratch")
     venv = os.environ.get("JCM_VENV", f"{HOME}/.venvs/jaxgcm")
-    dinosaur = os.environ.get("JCM_DINOSAUR", f"{HOME}/dinosaur-sl")
     outdir = Path(repo) / "runs"
     outdir.mkdir(exist_ok=True)
 
@@ -244,7 +243,7 @@ def main(argv=None):
             overrides(tag, m, d, rundir) + [f"hydra.run.dir={rundir}"])
         job = PBS.format(
             name=tag, account=a.account, hours=m.get("hours", d["hours"]),
-            logdir=str(outdir), venv=venv, dinosaur=dinosaur, repo=repo,
+            logdir=str(outdir), venv=venv, repo=repo,
             rundir=rundir, ovs=ovs, marker=f"{tag.upper()}_COMPLETE",
         )
         path = outdir / f"{tag}.pbs"
