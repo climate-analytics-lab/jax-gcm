@@ -88,7 +88,7 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dms_file", "auto": True,
      "staged": True},
-    {"name": "dust", "path": "bundles/{grid}/dust.nc",
+    {"name": "dust", "path": "bundles/{grid}/dust_erodibility.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dust_file", "auto": True,
      "staged": True},
@@ -361,9 +361,13 @@ def stage_bundles() -> None:
         g = UPLOAD / "bundles" / grid
         shutil.copy(BUILD / "aux" / f"dms_lana2011_climo_t{trunc[grid]}.nc",
                     g / "dms.nc")
+        # Published under its own name, not the legacy ``dust.nc``: that file
+        # is the pre-#768 build whose values were capped at 1, and the runtime
+        # fetch is cache-first, so re-staging in place would leave warm caches
+        # silently on the truncated map.
         shutil.copy(BUILD / "aux" /
                     f"dust_erodibility_cam_f05_t{trunc[grid]}.nc",
-                    g / "dust.nc")
+                    g / "dust_erodibility.nc")
 
     d = UPLOAD / "bundles" / "ne30pg3"
     d.mkdir(parents=True, exist_ok=True)
