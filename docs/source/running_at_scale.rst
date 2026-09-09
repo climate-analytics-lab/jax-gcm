@@ -58,8 +58,9 @@ Group         What it selects
 ``physics``   ``speedy``, ``held_suarez``, ``echam`` (RRTMGP 1-moment),
               ``echam-rrtmgp-2m``, ``echam-emulated-2m``, the ``echam-jam*``
               prognostic-aerosol packages, …
-``grid``      ``speedy_t31_l8``, ``held_suarez_t31_l8``, the
-              ``echam_t{63,85,106,119}_l{47,95}_hybrid`` grids, …
+``grid``      ``speedy_t31_l8``, ``held_suarez_t31_l8``,
+              ``echam_t{63,106,119}_l{47,95}_hybrid``,
+              ``echam_t85_l47_hybrid``, …
 ``run``       ``default``, ``longrun``, ``smoke``, ``pyses_year``
 ``init``      ``isothermal``, ``balanced_isothermal``, ``jw``, ``era5``,
               ``from_state``
@@ -328,9 +329,13 @@ shell, writing the state and a resumable checkpoint to fast scratch::
        run.checkpoint_path=/scratch/$USER/run.ckpt \
        run.total_time=365 > /scratch/$USER/run.log 2>&1 &
 
-On a PBS/Torque cluster the same command drops into a job script; because
-``run.checkpoint_path`` makes the run resumable, a walltime-limited job can
-requeue itself and pick up where it left off:
+On a PBS/Torque cluster the same command drops into a job script. The
+scheduler does not extend a job past its walltime, so a long run is a *chain*
+of jobs sharing one checkpoint: each job resumes from
+``run.checkpoint_path``, integrates until the walltime kills it, and the next
+job in the chain picks up at the last completed chunk. Once the run reaches
+``run.total_time`` a resubmitted job restores the checkpoint and exits
+immediately, so over-provisioning the chain is harmless:
 
 .. code-block:: bash
 
@@ -340,11 +345,18 @@ requeue itself and pick up where it left off:
    cd "$PBS_O_WORKDIR"
    python -m jcm.main +configuration=t63-echam-jam run=longrun \
        run.total_time=365 \
-       run.checkpoint_path="$SCRATCH/$PBS_JOBID.ckpt"
+       run.checkpoint_path="$SCRATCH/t63-echam-jam.ckpt"
 
-Point ``run.checkpoint_path`` at a path that persists across job restarts, and
-size ``run.chunk_days`` so at least one chunk completes comfortably inside the
-walltime.
+Submit the chain with ``afterany`` dependencies (each link starts only when
+the previous one ends, however it ended)::
+
+   jid=$(qsub run.pbs)
+   for i in $(seq 5); do jid=$(qsub -W depend=afterany:$jid run.pbs); done
+
+The checkpoint path must be **stable across jobs** — deriving it from
+``$PBS_JOBID`` would give every link a fresh checkpoint and restart the run
+from day zero. Size ``run.chunk_days`` so at least one chunk completes
+comfortably inside the walltime; progress only persists at chunk boundaries.
 
 .. _packaged-config-tree:
 
