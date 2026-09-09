@@ -159,13 +159,18 @@ def test_submit_qsubs_the_written_job(scratch, repo, monkeypatch):
     assert calls == [["qsub", str(path)]]
 
 
-def test_jam_members_archive_a_pre_onset_checkpoint():
+def test_jam_members_archive_a_pre_onset_checkpoint(monkeypatch):
     """JAM members must keep permanent archives, not only the rotating pair.
 
     A JAM aerosol runaway develops over weeks, so by the time it is visible
     both ``checkpoint.msgpack`` and its ``.prev`` have been written from
     poisoned state and there is nothing left to restart from before the onset.
+
+    ``jam_aux`` is stubbed out: it globs ``$JAM_INPUTS`` and exits when the
+    staged oxidant/emission files are absent, which is every machine but a
+    prepared one. The override under test does not come from it.
     """
+    monkeypatch.setattr(launch, "jam_aux", lambda grid, levels: [])
     cfg = yaml.safe_load((pathlib.Path(launch.HERE) / "matrix.yaml").read_text())
     for name, member in cfg["members"].items():
         ovs = launch.overrides(name, member, cfg["defaults"], "/tmp/rundir")

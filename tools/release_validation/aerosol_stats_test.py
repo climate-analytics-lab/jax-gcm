@@ -205,6 +205,22 @@ class TestBudget:
         days, series = self._closed()
         assert abs(A._budget_residual(days, series, "bc")) < 1e-9
 
+    def test_the_flux_integral_matches_the_storage_interval(self):
+        """A short record must not read as a leak from a window mismatch.
+
+        The storage term spans chunk CENTRES, so the flux integral must too;
+        averaging all N chunks over an (N-1)-chunk span understates it by 1/N,
+        which on a four-chunk window is 25 % into a gate set at 5 %.
+        """
+        for n_chunks in (4, 10, 73):
+            days = np.arange(5.0, 5.0 * n_chunks + 5.0, 5.0)
+            emi = np.full(n_chunks, 1.0 / 86400e6)      # 1 mg/m²/day
+            series = {"burden_bc": np.full(n_chunks, 5.0),
+                      "emi_bc": emi, "dry_bc": np.zeros(n_chunks),
+                      "wet_bc": emi}
+            residual = A._budget_residual(days, series, "bc")
+            assert abs(residual) < 1e-9, n_chunks
+
     def test_a_leak_is_reported_at_its_size(self):
         days, series = self._closed(leak_fraction=0.3)
         assert np.isclose(A._budget_residual(days, series, "bc"), 0.3,
@@ -258,6 +274,19 @@ class TestBudget:
     def test_soa_is_not_scored(self):
         """SOA's source is the SOAG gas, which has no ``emi_*`` channel."""
         assert "soa" not in A.PRIMARY_BUDGET_SPECIES
+
+    def test_every_budget_species_has_a_burden_to_close_against(self):
+        """A species with no burden can never be scored — do not advertise it.
+
+        ``moa`` has emi/dry/wet ledgers but no entry in the shared anchor
+        table, so ``burden_moa`` is never computed and its residual would be
+        silently dropped from ``budget_residual_max``.
+        """
+        from jam_burden_report import _SPECIES
+        for species in A.PRIMARY_BUDGET_SPECIES:
+            assert species in _SPECIES, species
+        for species in A.LIFETIME_SPECIES:
+            assert species in _SPECIES, species
 
 
 class TestDynamicsConservation:
@@ -356,6 +385,13 @@ class TestGates:
         stats = A.summarize(days, {"burden_soa": np.zeros(n)})
         assert stats["burden_soa_mg_m2"] == 0.0
         assert "dlnB_dt_soa_per_day" not in stats
+        assert all(ok for *_rest, ok in A.physics_gates(stats))
+
+    def test_a_record_too_short_to_fit_is_not_scored(self):
+        """``--last-n 2`` on a healthy run must not report an aerosol failure."""
+        stats = A.summarize(np.array([355.0, 360.0]),
+                            {"burden_so4": np.array([2.0, 2.1])})
+        assert "dlnB_dt_so4_per_day" not in stats
         assert all(ok for *_rest, ok in A.physics_gates(stats))
 
     def test_lifetime_is_burden_over_deposition(self):

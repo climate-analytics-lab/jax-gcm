@@ -65,7 +65,11 @@ LIFETIME_SPECIES = ("so4", "bc", "du", "ss")
 #: ``emi - dep - dB`` is expected to close. ``soa`` is excluded: its source is
 #: condensation of the SOAG gas, which has no ``emi_*`` channel, so a residual
 #: computed for it would measure a missing diagnostic, not a mass leak.
-PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa", "moa")
+#: ``moa`` is excluded for a different reason — it has emission and deposition
+#: ledgers but no entry in the shared ``_SPECIES`` anchor table, so no burden
+#: is computed for it and there is no storage term to close against. Adding it
+#: needs a climatological anchor range, which is a calibration decision.
+PRIMARY_BUDGET_SPECIES = ("bc", "du", "ss", "poa")
 
 #: Kilograms of sulfate AEROSOL per kilogram of each sulfur carrier, so the
 #: whole family can be totalled in one mass unit. jcm's ``so4`` tracer is
@@ -348,12 +352,18 @@ def _budget_residual(days, series, species) -> float | None:
     stored mass includes the gas-phase reservoirs.
     """
     span = float(days[-1] - days[0])
-    if span <= 0:
+    if span <= 0 or days.size < 2:
         return None
 
     def integral(key):
+        # The storage term is a difference between the FIRST and LAST chunk
+        # means, i.e. between chunk centres, so the flux integral must cover
+        # that same interval: the chunks after the first, times the span
+        # between the centres. Averaging all N chunks over an (N-1)-chunk span
+        # understates the integral by 1/N — 1.4 % on a 73-chunk year, but 25 %
+        # on a four-chunk window, straight into a residual gated at 5 %.
         v = series.get(key)
-        return None if v is None else float(np.nanmean(v)) * span * 86400e6
+        return None if v is None else float(np.nanmean(v[1:])) * span * 86400e6
 
     if species == "so4":
         # Every carrier converted to sulfate-AEROSOL mass, the unit the
@@ -401,11 +411,15 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         if b is None:
             continue
         stats[f"burden_{species}_mg_m2"] = float(np.nanmean(b))
-        # A species the run never carries (soa with no SOAG production, say)
-        # has no logarithmic drift to measure; emitting NaN would fail the
-        # gate for a burden that is correctly zero.
-        if np.any(np.isfinite(b) & (b > 0)):
-            stats[f"dlnB_dt_{species}_per_day"] = log_drift(days, b)
+        # Emit the drift only when it could actually be fitted. A species the
+        # run never carries (soa with no SOAG production) and a record too
+        # short for a slope both yield NaN, and a NaN scored against the gate
+        # reads as a FAIL for something that was never measured — which is how
+        # ``health.py --last-n 2`` on a healthy run reported an aerosol
+        # failure. Not measurable is "not scored", not "failed".
+        drift = log_drift(days, b)
+        if np.isfinite(drift):
+            stats[f"dlnB_dt_{species}_per_day"] = drift
 
     for species in LIFETIME_SPECIES:
         b = series.get(f"burden_{species}")

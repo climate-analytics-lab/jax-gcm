@@ -341,7 +341,10 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
         # A ``{year}`` scalar expands to its yearly-file list; a plain path
         # passes through. Lists name several independent products — expand each
         # element with the same coverage clamp (mirrors _forcing_products).
-        if isinstance(v, str) and v not in ("auto", "null", "none", "???"):
+        # ``analytic`` joins the sentinels: it selects the analytic ozone
+        # profile (#774), not a file, and must not reach the prefetch.
+        if isinstance(v, str) and v not in ("auto", "null", "none", "???",
+                                            "analytic"):
             expanded = expand(v, years, available)
             if isinstance(expanded, (list, tuple)):
                 out.extend(str(x) for x in expanded)
