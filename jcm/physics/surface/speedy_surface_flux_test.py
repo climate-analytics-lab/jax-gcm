@@ -214,9 +214,6 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         for name, value in vars(physics_data.surface_flux).items():
             self.assertEqual(value.shape, XY, f"{name} is not a 2D map")
 
-    @unittest.skipUnless(jax.config.read("jax_enable_x64"),
-                         "needs x64 to build a forcing that differs in precision "
-                         "from the state")
     def test_land_branch_tolerates_higher_precision_forcing(self):
         """Forcing may arrive at a different precision from the state.
 
@@ -224,22 +221,27 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         back, while the model state stays float32. The land fluxes inherit
         the forcing dtype, so the zero arm of the land branch has to inherit
         it too or ``lax.cond`` rejects the pair outright.
-        """
-        args = build_inputs()
-        to_f32 = lambda tree: jax.tree.map(
-            lambda leaf: jnp.asarray(leaf, jnp.float32)
-            if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) else leaf, tree)
-        for key in ("state", "physics_data", "terrain"):
-            args[key] = to_f32(args[key])
-        args["forcing"] = jax.tree.map(
-            lambda leaf: jnp.asarray(leaf, jnp.float64)
-            if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) else leaf,
-            args["forcing"])
-        self.assertEqual(args["forcing"].stl_am.dtype, jnp.float64)
-        self.assertEqual(args["state"].temperature.dtype, jnp.float32)
 
-        _, physics_data = get_surface_fluxes(**args)
-        self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface_flux.hfluxn)))
+        Enables x64 for the duration rather than skipping without it: the
+        session pins the flag off, so a skip condition read at import time
+        could never be true.
+        """
+        with jax.enable_x64():
+            args = build_inputs()
+            to_f32 = lambda tree: jax.tree.map(
+                lambda leaf: jnp.asarray(leaf, jnp.float32)
+                if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) else leaf, tree)
+            for key in ("state", "physics_data", "terrain"):
+                args[key] = to_f32(args[key])
+            args["forcing"] = jax.tree.map(
+                lambda leaf: jnp.asarray(leaf, jnp.float64)
+                if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) else leaf,
+                args["forcing"])
+            self.assertEqual(args["forcing"].stl_am.dtype, jnp.float64)
+            self.assertEqual(args["state"].temperature.dtype, jnp.float32)
+
+            _, physics_data = get_surface_fluxes(**args)
+            self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface_flux.hfluxn)))
 
     def test_fluxes_are_linear_in_the_land_fraction(self):
         """Each published flux is the fmask weighting of its two components.

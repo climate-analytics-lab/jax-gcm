@@ -13,14 +13,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-# Importing mam4_jax flips jax_enable_x64 on globally (it needs float64).
-# Capture and restore the flag around the import so *collection* of this module
-# doesn't leave x64 on and corrupt sibling tests' float32 dtype assertions when
-# the optional dependency is installed. Each test below re-enables x64 (via the
-# term's lazy import) and restores it in tearDown.
+# Importing mam4_jax flips jax_enable_x64 on globally (it needs float64), so
+# restore the flag around the import to keep *collection* of this module from
+# corrupting sibling tests' float32 dtype assertions. The ``finally`` matters:
+# a missing/too-old mam4-jax leaves x64 on via the partial import before
+# ``importorskip`` raises ``Skipped`` (issue #729).
 _x64_at_import = jax.config.read("jax_enable_x64")
-pytest.importorskip("mam4_jax.coupling")
-jax.config.update("jax_enable_x64", _x64_at_import)
+try:
+    pytest.importorskip("mam4_jax.coupling")
+finally:
+    jax.config.update("jax_enable_x64", _x64_at_import)
 
 
 def _column_state(nlev=4, ncols=2):

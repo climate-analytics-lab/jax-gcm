@@ -97,18 +97,33 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics_interface import PhysicsTendency
 
+@contextlib.contextmanager
+def _preserved_x64():
+    """Undo any process-wide ``jax_enable_x64`` flip made inside the block."""
+    prior = jax.config.read("jax_enable_x64")
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
 # MAM4-JAX (GPL-3.0) core. Imported at module level — this whole adapter module
 # is itself only imported when JAM selects the mam4_jax core (lazily, via
-# ``jam_terms``), so a plain jcm import never reaches this GPL dependency. The
-# import enables ``jax_enable_x64`` by default; ``__init__`` sets the final
-# precision per-instance (see ``enable_x64``). If the ``jcm[mam4]`` extra isn't
-# installed this raises ``ImportError`` here, which is the right signal.
-import mam4_jax  # noqa: F401
-from mam4_jax.core import data
-from mam4_jax.coupling import amicphys as _amicphys
-from mam4_jax.coupling.amicphys import amicphys
-from mam4_jax.physics.calcsize import calcsize
-from mam4_jax.physics.wateruptake import wateruptake
+# ``jam_terms``), so a plain jcm import never reaches this GPL dependency. If
+# the ``jcm[mam4]`` extra isn't installed this raises ``ImportError`` here,
+# which is the right signal.
+#
+# The import turns ``jax_enable_x64`` on process-wide; it is restored here so
+# merely importing the adapter cannot change the dtype of unrelated code
+# (issue #729). ``__init__`` sets the precision each instance needs, so the
+# import-time flip is redundant.
+with _preserved_x64():
+    import mam4_jax  # noqa: F401
+    from mam4_jax.core import data
+    from mam4_jax.coupling import amicphys as _amicphys
+    from mam4_jax.coupling.amicphys import amicphys
+    from mam4_jax.physics.calcsize import calcsize
+    from mam4_jax.physics.wateruptake import wateruptake
 
 # amicphys ``name_gas`` order (igas): 0 = SOA gas, 1 = H₂SO₄. ``data.LMAP_GAS``
 # maps each to its pcnst slot, so jcm's gas tokens resolve to q indices.

@@ -11,12 +11,23 @@ Reproduces the three CI gates from `.github/workflows/run_test.yaml` +
 ## One command
 
 ```bash
-scripts/local_ci.sh /path/to/worktree     # lint + fast gate locally, slow gate via qsub
+scripts/local_ci.sh /path/to/worktree                  # lint here, both gates via qsub
+scripts/local_ci.sh --local-fast /path/to/worktree     # ...and a fast gate on this node
 ```
 
-It runs lint and the fast gate on the current node (~3–5 min with
-`-n 12`) and submits the slow gate as a `develop`-queue PBS job
-(~30–45 min). Watch the job log for `SLOW_EXIT=0`.
+Lint runs on the current node; both test gates run in a single
+`develop`-queue PBS job (`select=1:ncpus=16:mem=200GB`), fast then slow,
+sequentially. Watch the job log for `FAST_EXIT=0`, `SLOW_EXIT=0` and the
+closing `GATES PASSED`: the job exits non-zero if either gate failed, so a
+job that ends green means both passed.
+
+The gates go to a compute node because a login node caps you at 10 GiB
+(see `docs/source/design/test_suite_memory.md`) — well under what an
+`-n 12` fast suite needs, so a local run there reports OOM-killed workers
+as unrelated test failures. `--local-fast` opts into an `-n 2` fast run on
+the current node anyway, for a quick read before the job lands; it runs
+*before* the submission, never alongside it, because both would fight over
+the same worktree's `.coverage.*`.
 
 ## The gates, individually
 
@@ -32,14 +43,16 @@ JAX_PLATFORMS=cpu pytest -n 4 -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
-Gate 3 is real compute — run it on a `develop`-queue node
-(8 cpus / 220 GB, ~13 min with `-n 4`), not a login node. The `-n 4` is
+Gates 2 and 3 are real compute — run them on a `develop`-queue node, not
+a login node; `local_ci.sh` does. The `-n 4` on gate 3 is
 **mandatory on Derecho**, not an optimization: a single serial process
 accumulates thousands of mmap'd XLA JIT code sections and dies mid-suite
 with `LLVM ERROR: Unable to allocate section memory!` (SIGSEGV/SIGABRT —
 three attempts at 120–220 GB all failed identically; RAM is not the
 issue, per-process map count is). Splitting across workers resets the
 budget. GitHub's runners tolerate the serial run; Derecho's do not.
+(`docs/source/design/test_suite_memory.md` covers the related growth in
+retained XLA executables that the root `conftest.py` bounds.)
 
 ## Local Claude review
 
@@ -71,9 +84,8 @@ replying — Codex has been right (forcing unit conventions) and wrong
 - **Login-node load produces phantom failures.** A `-n 12` fast-suite
   run on a busy login node has produced 50+ failures across unrelated
   subsystems that all pass serially (twice now: 55 in July, 53 in
-  August). Before believing a red local run, rerun a sample of the
-  failures serially; better, don't share the node with heavy I/O jobs
-  during the run.
+  August). That is why the fast gate is a PBS job too. Before believing a
+  red `--local-fast` run, rerun a sample of the failures serially.
 - **Never run two coverage suites concurrently in one worktree.**
   pytest-cov erases `.coverage.*` at startup and combines at exit, so a
   fast-gate run (or a stray `rm .coverage*`) deletes an overlapping
@@ -97,6 +109,8 @@ replying — Codex has been right (forcing unit conventions) and wrong
   repo's documented mechanism, see the header comment there.
 - `JAX_PLATFORMS=cpu` is mandatory on GPU nodes (xdist workers
   otherwise fight over the GPU).
+- The gate job asks for 16 cpus so `-n 12` (fast) and `-n 4` (slow) both
+  fit, and 200 GB because the suite is memory-bound, not CPU-bound.
 - `local_ci.sh` exports `JAX_COMPILATION_CACHE_DIR` (default
   `$SCRATCH/jcm-jax-cache`) so xdist workers and successive gate runs
   share XLA compiles of identical jitted modules instead of each
