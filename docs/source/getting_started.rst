@@ -31,108 +31,12 @@ Requirements
 
 See ``requirements.txt`` for the complete list of dependencies.
 
-Command-line interface
-----------------------
+.. note::
 
-Most simulations can be launched without writing any Python via the bundled
-Hydra CLI. ``jcm/main.py`` is executable so it can be invoked either as a
-module or directly::
-
-   ./jcm/main.py                                               # direct invocation
-   python -m jcm.main                                          # equivalent module form
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
-   python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
-   python -m jcm.main physics=held_suarez grid=held_suarez_t31_l8 \
-       run.total_time=30 run.save_interval=1
-   python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpen=4e-4
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
-   python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
-   python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
-       run.column.lat_deg=0 run.column.lon_deg=180
-
-The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
-netCDF written by an earlier run. Both the vertical orientation and the tracer
-list are handled for you: output files are surface-first and are flipped into
-the top-first physics frame on load, and with ``run.tracer_vars`` unset (the
-default) every tracer the configured physics declares — ``qc``/``qi`` for the
-one-moment cloud scheme, plus ``qnc``/``qni`` for the two-moment one — is
-loaded from the file when it carries it. Pass an explicit mapping to rename
-variables, or ``run.tracer_vars={}`` to load none.
-
-Inspect the available config groups and the fully-composed config::
-
-   python -m jcm.main --help                                   # config-group choices
-   python -m jcm.main --cfg job                                # composed config
-   python -m jcm.main --cfg job grid=echam_t63_l47_hybrid       # with overrides
-
-Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
-``init``, ``terrain``, ``forcing``, ``diffusion``, ``configuration``.
-
-Validated configurations — the ``configuration`` group
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Composing a run by hand (``physics=… grid=… init=… run=… terrain=… forcing=…``)
-is powerful but easy to get subtly wrong — an isothermal cold start with no
-sponge, for instance, goes NaN within days at L47. The ``configuration`` group
-promotes each *known-good* combination to a single named composition, so one
-command is one validated configuration::
-
-   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
-   python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
-   python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
-
-Note the leading ``+``: a configuration is *added* to the default composition and
-then overrides the physics/grid/init/run/terrain/forcing groups it selects. Each
-``jcm/config/configuration/*.yaml`` carries comments explaining WHY every setting
-is what it is (the dry-JW init, the production sponge, the semi-Lagrangian
-off-centering, the level-matched ozone, …), and is the single source of truth
-for that configuration — ``tools/benchmark.py`` and the release-validation
-matrix compose the very same yaml rather than a private override list. Override
-individual keys on top as usual, e.g.
-``python -m jcm.main +configuration=t63-echam-jam run.total_time=30``. The very
-same recipes are loadable from Python without touching Hydra — see
-:ref:`configurations-from-python` below.
-
-The whole ``jcm/config`` tree is also a **public, packaged** config tree: a
-downstream Hydra app (a coupled Earth-system CLI, say) reaches every jcm group
-through ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole
-validated configuration under one of its own nodes with
-``+configuration@<node>=<name>``. That contract — the public group names, the
-load-bearing ``# @package _global_`` header plus absolute-override recipe style,
-and the group-rename policy (this release renamed the ``experiment`` group to
-``configuration``, so a searchpath user must change ``+experiment@<node>=`` to
-``+configuration@<node>=``) — is documented in
-:doc:`design/packaged_config_tree`.
-
-One run schema — no ``+``/``++`` guesswork for run keys
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Every ``run`` group (``default``, ``longrun``, ``smoke``, ``pyses_year``) now
-exposes the **same** complete set of keys. ``run/default.yaml`` is the base
-schema and the others inherit it (``defaults: [default, _self_]``), overriding
-only what they change. So any run key can be set with a plain override on any
-group — ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though
-the old ``longrun`` had no ``checkpoint_path`` key. The rule is simply:
-**``run.<key>=<value>`` always works**; reserve the ``+`` (add-new-key) and
-``++`` (add-or-override) prefixes for keys *outside* the run schema.
-
-Online-aerosol (JAM) inputs default to ``auto``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-When a prognostic-aerosol package is active (``physics=echam-jam`` and its
-AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
-``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
-default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
-project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
-at build time, so ``python -m jcm.main +configuration=t63-echam-jam`` composes a
-fully-specified online-aerosol run with no hand-managed emission paths. For any
-non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
-bundle to override one, or ``null`` to opt out (the runner then warns the run is
-emission-free). ``auto`` always resolves the *present-day* ``*_pd`` bundle, so a
-transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
-present-day aerosol emissions over a historical circulation — the runner warns
-and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
-with year-matched products for a consistent transient run.
+   This guide drives the model from **Python**. To launch and manage runs from
+   the command line instead — the ``python -m jcm.main`` Hydra CLI, validated
+   ``+configuration=`` recipes, chunked/resumable production runs, Docker and
+   batch-queue patterns — see :doc:`running_at_scale`.
 
 Quick Start Examples
 --------------------
@@ -213,7 +117,7 @@ For a more realistic simulation with orography and time-varying boundary conditi
    ds.to_netcdf("output.nc")
 
 Canonical mirror-bundle forcing (``from_bundles``)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 :meth:`~jcm.forcing.ForcingData.from_bundles` is the Python door onto the same
 data-mirror bundles the CLI's ``auto`` defaults resolve — it composes the whole
@@ -236,7 +140,9 @@ through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
 
    coords = get_coords(vertical_coords=get_echam_levels(47),
                        spectral_truncation=63)      # ECHAM T63L47 hybrid
-   physics = echam_physics(aerosol_module="jam")     # JAM prognostic aerosol
+   # JAM prognostic aerosol reads the 2-moment cloud scheme's process ledger,
+   # so it must be paired with cloud_scheme="2m".
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
    terrain = TerrainData.from_coords(coords)
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
@@ -252,8 +158,8 @@ through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
 
 Unpublished grids / verticals degrade exactly as the CLI does (``auto`` inputs
 that the mirror does not carry resolve to nothing, with a warning), and
-``aerosol="macv2sp"`` raises a precise error until the MACv2-SP weights are
-staged on the mirror.
+``aerosol="macv2sp"`` wires the repo-packaged MACv2-SP plume file into the
+forcing.
 
 .. _configurations-from-python:
 
@@ -377,14 +283,13 @@ save_interval, total_time)`` as ``observer_xs``.
 **Logging**: ``Model(log_level=...)`` defaults to ``logging.WARNING`` and is
 applied to the ``jcm`` logger rather than the root logger, so jcm's warnings
 about a run stay audible without jcm reconfiguring logging for your
-application. Pass ``logging.CRITICAL`` to quieten it. The Hydra CLI exposes
-the same knob as ``run.log_level`` (also ``WARNING`` by default).
+application. Pass ``logging.CRITICAL`` to quieten it. (The Hydra CLI exposes
+the same knob as ``run.log_level``.)
 
 **Dynamical core**: Pass a backend explicitly when you need backend-specific
 configuration. ``Model(coords=...)`` remains the shorthand for constructing
-the shipped Dinosaur backend with default settings. The v2.0 Hydra CLI also
-uses Dinosaur; explicit backend selection is currently a Python-API workflow.
-An explicitly-constructed backend owns the time step: the Model adopts its
+the shipped Dinosaur backend with default settings. An
+explicitly-constructed backend owns the time step: the Model adopts its
 ``dt_seconds``, and passing a conflicting ``Model(time_step=...)`` raises
 (see "Choosing the time step" above).
 
@@ -477,7 +382,7 @@ The other builders follow the identical pattern:
 
   (Restoring a *checkpoint* to continue a preempted run of your own — keeping
   the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`
-  path documented under "Checkpointing for preemptible runs" below.)
+  path documented under :doc:`running_at_scale`.)
 
 
 Calendar-aware durations and resampling
@@ -545,7 +450,9 @@ years to continue from the previous state:
 
 xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
-long forcing records.
+long forcing records. (For unattended, preemptible long runs the Hydra
+runner's chunked/checkpointed loop does this for you — see
+:doc:`running_at_scale`.)
 
 Yearly forcing bundles
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -578,45 +485,6 @@ dust climatology under one ``forcing.years`` range. When you hand-assemble a
 physics expects.
 
 
-Checkpointing for preemptible runs
-----------------------------------
-
-Multi-day integrations on preemptible compute (spot instances, Slurm
-``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
-``run.checkpoint_path`` to make a chunked run resumable: after each
-chunk the runner persists the modal + physics state and the elapsed
-sim-day count to that file (atomic write via tmpfile + rename, so a
-kill mid-write leaves the previous checkpoint intact). When the same
-command is launched again with the file already in place, the run
-restores from the checkpoint and only steps the remaining chunks.
-
-.. code-block:: bash
-
-   python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
-       run=longrun run.checkpoint_path=/scratch/$JOB_ID.ckpt
-
-The same primitives are available directly to bring-your-own-driver
-workflows via :py:mod:`jcm.checkpoint`:
-
-.. code-block:: python
-
-   from jcm.checkpoint import save_checkpoint, load_checkpoint
-
-   model.run(forcing=forcing, total_time=10)
-   save_checkpoint(model, '/scratch/run.ckpt', elapsed_days=10.0)
-
-   # ... later, in a fresh process ...
-   model = build_model(cfg)            # same coords + physics
-   model.bootstrap_state()             # populate template pytrees
-   elapsed = load_checkpoint(model, '/scratch/run.ckpt')
-   model.resume(forcing=forcing, total_time=20 - elapsed)
-
-The on-disk format is flax's msgpack codec applied to flattened lists
-of arrays — small (state pytrees are a few MB even at T63L47) and
-portable across hosts as long as the destination ``Model`` was built
-with the same coords and physics term composition.
-
-
 Nudging the model toward an external state
 -------------------------------------------
 
@@ -639,25 +507,7 @@ let everything else evolve freely, so the model gets the right
 synoptic-scale circulation while its physics still has the freedom to
 respond.
 
-**From config** the whole setup is one flag: ``nudging=era5`` pulls the
-run window from WeatherBench2's public cloud ERA5 (regridded to the
-model grid and cached locally by :mod:`jcm.data.era5`), and
-``init=era5`` starts the run from the ERA5 state at the same date:
-
-.. code-block:: console
-
-   $ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
-         init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
-
-Prefetch on a login node first when compute nodes lack internet
-(``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start
-2010-01-01 --end 2010-01-31 --init``). The WB2 stores carry 13 pressure
-levels up to 50 hPa, so nudging is automatically masked off above
-``nudging.min_pressure_hpa`` (default 60), and requires internet or a
-warm cache; see ``jcm/config/nudging/era5.yaml`` for the knobs
-(``tau_hours``, ``pbl_levels``, ``nudge_temperature``, ``freq``).
-
-**In code**, wire it manually against any reference dataset:
+To wire it manually against any reference dataset:
 
 .. code-block:: python
 
@@ -695,7 +545,9 @@ Nudging is dycore-agnostic — it's just another :class:`PhysicsTerm`,
 producing a gridpoint :class:`PhysicsTendency` that the dycore consumes
 through the standard physics-coupling path. The same setup works under
 SPEEDY, ECHAM, or any other physics package, on any
-:class:`DynamicalCore` backend.
+:class:`DynamicalCore` backend. The whole setup is also available as a single
+CLI flag (``nudging=era5``, pulling the run window from cloud ERA5) — see
+:doc:`running_at_scale`.
 
 Composing extra terms: the upper sponge
 ----------------------------------------
@@ -722,62 +574,6 @@ levels and everything above ``min_pressure_hpa``). See the
 :mod:`jcm.nudging` and :mod:`jcm.physics.dissipation.upper_sponge` module
 docstrings for the full set of knobs, and :doc:`design/composable_physics`
 for the composition API (``+``, ``replace``, ``remove``).
-
-Multi-Device Parallelization
------------------------------
-
-JCM supports multi-device parallelization using JAX's SPMD (Single Program Multiple Data) sharding. This allows you to split computation across multiple GPUs or TPUs for faster execution, especially useful for higher resolution simulations.
-
-If you don't specify ``spmd_mesh`` when building your coords, JCM runs on a single device by default. This is the recommended approach for smaller resolutions (T31, T42) or when you only have a single GPU/TPU available.
-
-Basic Concepts
-^^^^^^^^^^^^^^
-
-**SPMD Mesh**: Defines how to partition data across devices. The mesh has three dimensions corresponding to ``(x, y, z)`` or ``(longitude, latitude, vertical)``.
-
-**Sharding Strategy**: Typically, for SPEEDY Physics simulations,  you want to shard the longitude dimension first since it usually has the most grid points. 
-For Physics implementations with more layers (e.g. 32 or 64 layers) however, you may find that sharding the dycore in the vertical dimension to be most effective. 
-Future implementations may allow for more flexible sharding strategies.
-
-Enabling Parallelization
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-To enable multi-device parallelization, pass ``spmd_mesh`` to the coords helper
-(e.g. ``get_speedy_coords`` or ``get_coords``) and build the ``Model`` with those coords:
-
-.. code-block:: python
-
-   import jax
-   from jcm.model import Model
-   from jcm.physics.speedy.speedy_coords import get_speedy_coords
-
-   # Check available devices
-   print(f"Available devices: {jax.devices()}")
-   print(f"Number of devices: {len(jax.devices())}")
-
-   # Define a mesh to split longitude across 4 devices
-   # Mesh shape (4, 1, 1) means:
-   #   - Split longitude dimension across 4 devices
-   #   - Don't split latitude (1)
-   #   - Don't split vertical (1)
-   coords = get_speedy_coords(spmd_mesh=(4, 1, 1))
-   model = Model(coords=coords)
-   predictions = model.run(save_interval=5.0, total_time=30.0)
-
-Mesh Configuration Guidelines
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The product of mesh dimensions must equal the number of available devices:
-
-- ``(4, 1, 1)``: Split longitude across 4 devices
-- ``(2, 2, 1)``: Split longitude (2) and latitude (2) across 4 devices total
-- ``(8, 1, 1)``: Split longitude across 8 devices (for higher resolutions)
-
-**Rules of thumb:**
-
-1. Product of mesh dimensions = number of devices
-2. Longitude (x) usually has most grid points → split first
-3. Higher resolutions (T85+) benefit more from sharding
 
 Analyzing Output
 ----------------
@@ -882,6 +678,8 @@ coordinates, so ``p = a + b * p_s`` is reproducible from the file alone. See
 written before this convention was unified, where the interface axis was
 stored top-first.
 
+.. _overriding-constants:
+
 Overriding physical constants
 -----------------------------
 
@@ -921,12 +719,8 @@ both the dynamical core and the physics pick up the override:
    coords = get_speedy_coords(layers=8, spectral_truncation=31)
    model = Model(coords=coords)       # honours the override
 
-From the CLI, use the ``constants`` config group (applied before the model is
-built):
-
-.. code-block:: bash
-
-   python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
+The CLI exposes the same override through the ``constants`` config group
+(``+constants.grav=9.80665``) — see :doc:`running_at_scale`.
 
 .. note::
 
@@ -955,6 +749,7 @@ built):
 Next Steps
 ----------
 
+- See :doc:`running_at_scale` to launch and manage runs from the Hydra CLI
 - See :doc:`design` to understand the model architecture
 - See :doc:`api` for detailed API documentation
 - Check example notebooks in the ``notebooks/`` directory of the GitHub repo
