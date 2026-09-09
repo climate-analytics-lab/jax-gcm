@@ -13,10 +13,14 @@ cubed sphere (``jcm/dycore/pyses/dycore.py::PysesCamSEDycore``,
 column physics through a pg2 finite-volume physics grid (see
 {doc}`../design/pyses_cam_se_dycore`).
 
-Tracer transport is **semi-Lagrangian only** — dinosaur's departure-point
-transport with a Bermejo–Staniforth quasi-monotone limiter. Every jcm extra
-tracer (aerosol mass/number, gases, cloud condensate) rides as a *nodal* tracer
-while ``specific_humidity`` stays modal for the implicit q↔Tᵥ coupling.
+On the **dinosaur** backend tracer transport is **semi-Lagrangian only** —
+departure-point transport with a Bermejo–Staniforth quasi-monotone limiter.
+Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
+a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
+q↔Tᵥ coupling. The **pySES** backend instead carries every declared tracer as a
+pySES passive tracer in physical units — advected and vertically remapped by
+the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
+so transport differs between the backends by construction.
 Horizontal hyperdiffusion is configured by ``jcm/diffusion.py::DiffusionFilter``:
 for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects the
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
@@ -52,10 +56,12 @@ resolution-aware timestep to stay stable (see
 profiles exist only for L47/L95; other hybrid grids fall back to the uniform
 SPEEDY profile with a warning (#579). The pySES backend has open production gaps:
 per-column longitudes are collapsed to a reference longitude in the physics
-``cache_coords``, full-float32 ECHAM physics is not yet dtype-stable (ECHAM
-requires ``physics_dtype=float64`` there), and multi-GPU sharding of the element
-and physics-column axes is unreconciled (see
-{doc}`../design/pyses_cam_se_dycore`).
+``cache_coords``, and multi-GPU sharding of the element and physics-column axes
+is unreconciled (see {doc}`../design/pyses_cam_se_dycore`). Its precision seam
+is float64 dynamics driving float32 physics by default
+(``physics_dtype=float32``; ``ComposablePhysics`` pins tendency dtypes to the
+working state), which the canonical ``pyses_ne30l47``/``l95`` configurations
+rely on.
 
 **Code pointers.**
 - ``jcm/dycore/base.py`` — ``DynamicalCore`` protocol (``initial_state``,

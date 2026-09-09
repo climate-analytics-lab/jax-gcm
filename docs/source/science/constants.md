@@ -23,14 +23,21 @@ constants such as ``alf = als − alv`` computed once at init). CAM uses
   singleton read by attribute access, rather than a set of frozen compile-time
   ``PARAMETER``s. This lets ``set_constants(...)`` retune a base value (a
   different planet, a sensitivity study, gradient-based calibration) before model
-  construction and have both dynamics and every physics consumer pick it up,
-  while the derived-quantity properties recompute consistently. The documented
-  trap: ``from jcm.constants import grav`` binds the value at import time and will
-  *not* track overrides — new code must use ``c.<name>`` attribute access.
+  construction, with the derived-quantity properties recomputing consistently,
+  for the dynamics and for every consumer that follows the contract's
+  ``c.<name>`` attribute access. The documented trap: ``from jcm.constants
+  import grav`` binds the value at import time and will *not* track overrides —
+  new code must use attribute access.
 
 **Status & known limitations.** Only *base* fields may be overridden by keyword;
 passing a derived quantity to ``set_constants`` raises. ``alhf`` is derived (not
 an independent base) so the fusion enthalpy always equals ``alhs − alhc``.
+Overrides do **not** yet reach everything: about a dozen modules — the JAM
+activation/sedimentation/dry-deposition/dust/ice-nucleation chain, the Hines and
+Lott-Miller gravity-wave schemes, the 2M parameter defaults, and the moist-air
+diagnostics — still bind constants at import time and would silently keep Earth
+values after an override (#772). Until that lands, a ``set_constants`` run is
+only consistent for configurations avoiding those terms.
 
 **Code pointers.**
 - ``jcm/constants.py`` — ``PhysicalConstants``, the ``physical_constants``

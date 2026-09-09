@@ -53,12 +53,15 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
   ECHAM's m≠0 spectral modes; ``enspodi`` defaults to 2.0 (softening downward)
   rather than ECHAM's uniform 1.0.
 
-**Status & known limitations.** The frontal term is inert without a
-dycore-supplied ``"frontogenesis"`` diagnostic; a lat-lon provider exists for the
-dinosaur backend (``DinosaurDycore(compute_frontogenesis=True)``), but the
-pySES/pg2 unstructured-grid provider and wiring the term into ``echam_physics()``
-are follow-ups (#568/#564). Hines and frontal are exclusive alternatives
-(``echam_physics(gw_scheme=...)``) to avoid double-counting mid-atmosphere drag.
+**Status & known limitations.** ``echam_physics(gw_scheme=...)`` selects
+``"hines"`` (default), ``"frontal"``, ``"both"`` (Hines broad-spectrum
+background + frontal storm-track deposition — frontal-only under-drags the
+subtropical jet, and some double-counting near strong fronts is accepted;
+retune ``taubgnd`` and the Hines source strength jointly if it shows) or
+``"none"``. The frontal term is inert without a dycore-supplied
+``"frontogenesis"`` diagnostic; a lat-lon provider exists for the dinosaur
+backend (``DinosaurDycore(compute_frontogenesis=True)``), while the pySES/pg2
+unstructured-grid provider is a follow-up (#568/#564).
 ``UpperTemperatureRelaxation`` is primarily a temperature relaxation; the CAM
 ``rayleigh_friction.F90`` tanh form appears only in its optional wind branch.
 

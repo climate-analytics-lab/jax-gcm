@@ -12,9 +12,19 @@ projects the native state with ``dycore.to_physics_state``, calls
 dynamics and applies backend filters. Trajectories are a nested ``lax.scan`` with
 ``jax.checkpoint`` on each inner step; both snapshot and time-averaged output
 modes save the cross-step physics carry the integration actually consumed. Within
-a physics call, ``ComposablePhysics`` is **process-parallel** — every term sees
-the same input state and the tendencies are summed (order-independent). The full
-engineering treatment is {doc}`../design/operator_split_physics`.
+a physics call, ``ComposablePhysics`` is **state-parallel but
+diagnostics-sequential**: every term reads the same input *state* and the
+tendencies are summed, but terms run in list order and each receives the
+``diagnostics`` dict its predecessors produced (validated against declared
+``requires``/``provides``). Tightly-coupled pairs use that channel to couple
+sequentially anyway — vertical diffusion and convection publish their updated
+thermodynamics via ``advance_thermo_run``
+(``jcm/physics/diagnostics/moist_air_state.py``), which downstream convection
+and microphysics consume — so term order is **not** free:
+``echam_physics()`` ships the validated ECHAM ``physc`` sequence, and
+reordering coupled terms (e.g. convection before vertical diffusion) is a
+known-unstable configuration. The full engineering treatment is
+{doc}`../design/operator_split_physics`.
 
 **What ECHAM/CAM does.** ECHAM6 op-splits identically: physics tendencies
 accumulate into gridpoint buffers (``mo_scan_buffer.f90``) inside ``physc.f90``
@@ -26,11 +36,13 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
 ``dt``.
 
 **Why we differ.**
-- `science` — within-physics coupling is process-parallel rather than ECHAM's
-  sequential accumulation. This preserves the composability algebra
-  (``A+B+C == B+A+C`` under ``replace()`` / ``remove()`` / ``__add__()``) at a
-  small accuracy cost for tightly-coupled term pairs. Sequential coupling is a
-  documented future option.
+- `science` — the *state* is not sequentially updated between terms (tendencies
+  sum against one input state), unlike ECHAM's ``tte += …`` accumulation. This
+  keeps the ``replace()`` / ``remove()`` / ``__add__()`` composition algebra
+  simple for loosely-coupled terms, at a small accuracy cost; where the
+  sequential coupling *matters* (vdiff → convection → clouds thermodynamics) it
+  is restored explicitly through the ``advance_thermo_run`` diagnostics channel,
+  which is why the shipped orderings are load-bearing rather than arbitrary.
 - `compute` / `differentiability` — one physics call per ``dt`` (rather than one
   per RK substage) keeps the autodiff tape small under ``jax.checkpoint``, and
   the ``physics_state`` carry is threaded as an explicit JAX pytree rather than
