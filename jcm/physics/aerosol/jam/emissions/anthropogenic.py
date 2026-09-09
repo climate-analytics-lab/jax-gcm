@@ -32,6 +32,7 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.emissions.distributors import (
     emit_over_profile,
+    particle_mean_mass,
 )
 from jcm.physics.aerosol.jam.emissions.injection import (
     gaussian_injection_weights,
@@ -69,6 +70,10 @@ class EmissionParameters:
     injection_thickness: jnp.ndarray    # (n_sector,) [m]
     so4_primary_fraction: jnp.ndarray   # (n_sector,) [-]
     scale: jnp.ndarray                  # overall emission scale
+    # Volume-mean diameters of the emitted size distributions, per super-sector
+    # (see :class:`~...sectors.SectorDefaults`). They set the emitted NUMBER
+    # for a given mass, so they are load-bearing for CCN.
+    emission_diameter: dict             # {class_short: (n_sector,) [m]}
 
     @classmethod
     def default(cls) -> "EmissionParameters":
@@ -83,6 +88,17 @@ class EmissionParameters:
                 len(SUPER_SECTORS), SO4_PRIMARY_FRACTION
             ),
             scale=jnp.asarray(1.0),
+            emission_diameter={
+                "acc": jnp.asarray(
+                    [SECTOR_DEFAULTS[s].so4_accum_diameter for s in SUPER_SECTORS]
+                ),
+                "ait": jnp.asarray(
+                    [SECTOR_DEFAULTS[s].so4_aitken_diameter for s in SUPER_SECTORS]
+                ),
+                "pcm": jnp.asarray(
+                    [SECTOR_DEFAULTS[s].carbon_diameter for s in SUPER_SECTORS]
+                ),
+            },
         )
 
 
@@ -140,17 +156,22 @@ class AnthropogenicEmissions(PhysicsTerm):
                 flux2d, weights, rho, dz
             )
 
-        def add_aerosol(species, mode, flux2d, weights):
-            # Mass into (species, class); implied number from the class's
-            # ``number_factor`` (the family-agnostic mass→number conversion, so
-            # this is unchanged for a sectional bin), both over the same profile.
+        def add_aerosol(species, mode, flux2d, weights, diameter):
+            # Mass into (species, class); implied number from the mean mass of
+            # a freshly emitted particle at this sector's emission volume-mean
+            # diameter (CESM's mass→number convention, m_p = ρ·(π/6)·D³). A
+            # class with no emission size falls back to its own geometry.
             add_mass(mass_name(species, mode.short), flux2d, weights)
             density = self._spec.species_props(species).density
-            add_mass(number_name(mode.short),
-                     flux2d * mode.number_factor / density, weights)
+            m_p = particle_mean_mass(mode, density, diameter)
+            add_mass(number_name(mode.short), flux2d / m_p, weights)
 
         emi_bb: dict[str, jnp.ndarray] = {}
         for i, sector in enumerate(SUPER_SECTORS):
+            def diameter(mode, i=i):
+                d = p.emission_diameter.get(mode.short)
+                return None if d is None else d[i]
+
             weights = gaussian_injection_weights(
                 height_full, dz,
                 p.injection_height[i], p.injection_thickness[i],
@@ -165,7 +186,8 @@ class AnthropogenicEmissions(PhysicsTerm):
             frac = p.so4_primary_fraction[i]
             so4_mass = frac * so2 * SO2_TO_SO4_MASS
             for mode, mode_frac in self._spec.primary_split("so4"):
-                add_aerosol("so4", mode, so4_mass * mode_frac, weights)
+                add_aerosol("so4", mode, so4_mass * mode_frac, weights,
+                            diameter(mode))
             add_mass(gas_name("so2"), (1.0 - frac) * so2, weights)
 
             # Primary carbonaceous mass → the population's primary-carbon
@@ -175,9 +197,10 @@ class AnthropogenicEmissions(PhysicsTerm):
                 # (SO2 as SO2, OC as OC), before speciation/OM scaling.
                 emi_bb = {"so2": so2, "bc": bc, "oc": oc}
             for mode, mode_frac in self._spec.primary_split("bc"):
-                add_aerosol("bc", mode, bc * mode_frac, weights)
+                add_aerosol("bc", mode, bc * mode_frac, weights, diameter(mode))
             for mode, mode_frac in self._spec.primary_split("poa"):
-                add_aerosol("poa", mode, oc * OM_OC_RATIO * mode_frac, weights)
+                add_aerosol("poa", mode, oc * OM_OC_RATIO * mode_frac, weights,
+                            diameter(mode))
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),

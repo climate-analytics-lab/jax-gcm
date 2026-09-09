@@ -114,6 +114,7 @@ class AnthropogenicEmissionsTest(unittest.TestCase):
                 injection_thickness=base.injection_thickness.at[0].set(thickness),
                 so4_primary_fraction=base.so4_primary_fraction.at[0].set(frac),
                 scale=base.scale,
+                emission_diameter=base.emission_diameter,
             )
             tend, _ = AnthropogenicEmissions(params=p)(
                 state, diagnostics, forcing, None
@@ -178,6 +179,7 @@ class BiomassBurningTest(unittest.TestCase):
                 injection_thickness=base.injection_thickness,
                 so4_primary_fraction=base.so4_primary_fraction,
                 scale=base.scale,
+                emission_diameter=base.emission_diameter,
             )
             tend, _ = AnthropogenicEmissions(params=p)(
                 state, diagnostics, forcing, None)
@@ -204,3 +206,42 @@ class FactoryWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmissionSizeTest(unittest.TestCase):
+    """Emitted number uses CESM's per-sector volume-mean diameters (#768)."""
+
+    def _number_per_mass(self, sector, channel, mode_short, species):
+        from jcm.physics.aerosol.jam.tracer_layout import number_name
+        state, diagnostics, forcing = _setup(**{channel: _F_BC})
+        tend, _ = AnthropogenicEmissions()(state, diagnostics, forcing, None)
+        rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
+        number = _column_integral(tend.tracers[number_name(mode_short)], rho, dz)
+        mass = _column_integral(
+            tend.tracers[mass_name(species, mode_short)], rho, dz)
+        return float(number[0] / mass[0])
+
+    def test_primary_carbon_number_matches_cesm(self):
+        # num_bc_a4 = 1.0*BC ... 0.134e-6 1700  (CMIP7 emission-file mapping)
+        x_mton = 6.0 / (np.pi * SPECIES["bc"].density * 0.134e-6 ** 3)
+        got = self._number_per_mass(
+            "surface_combustion", "emis_surface_combustion_bc", "pcm", "bc")
+        self.assertAlmostEqual(got / x_mton, 1.0, places=4)
+
+    def test_shipping_sulfate_is_emitted_coarser_than_surface(self):
+        from jcm.physics.aerosol.jam.emissions.sectors import SECTOR_DEFAULTS
+        self.assertAlmostEqual(
+            SECTOR_DEFAULTS["shipping"].so4_accum_diameter, 0.261e-6)
+        self.assertAlmostEqual(
+            SECTOR_DEFAULTS["surface_combustion"].so4_accum_diameter, 0.134e-6)
+        surface = self._number_per_mass(
+            "surface_combustion", "emis_surface_combustion_so2", "acc", "so4")
+        shipping = self._number_per_mass(
+            "shipping", "emis_shipping_so2", "acc", "so4")
+        self.assertAlmostEqual(surface / shipping, (0.261 / 0.134) ** 3, places=3)
+
+    def test_aitken_sulfate_number_matches_cesm(self):
+        x_mton = 6.0 / (np.pi * SPECIES["so4"].density * 0.0504e-6 ** 3)
+        got = self._number_per_mass(
+            "surface_combustion", "emis_surface_combustion_so2", "ait", "so4")
+        self.assertAlmostEqual(got / x_mton, 1.0, places=4)
