@@ -41,7 +41,10 @@ for _p in (str(_REPO), str(_TOOLS)):
 # tools/jam_burden_report.py (it includes cloud-borne tracers and the
 # pressure_half level-orientation handling).
 from jcm.analysis import area_weights, global_mean  # noqa: E402
-from jam_burden_report import _SPECIES, burden  # noqa: E402
+from jam_burden_report import _SPECIES  # noqa: E402
+from aerosol_stats import (  # noqa: E402
+    _AOD_KEYS, collect, format_table, is_jam_run, physics_gates, summarize,
+    timestep_seconds)
 
 #: Gate slack: the release gate is the climatological anchor range from
 #: the shared species table widened by this factor each way — a "did the
@@ -144,10 +147,12 @@ def main():
     t_low = ds["temperature"].isel(level=0)
     check("near_surface_T", wmean(t_low, weights), *RANGES["near_surface_T"])
 
-    # 550 nm AOD — JAM publishes jam_optics.aod_550, MACv2-SP runs
-    # publish macsp.od550aer; whichever is present is the scheme's AOD.
+    # 550 nm AOD — JAM publishes jam_optics.aod_550 (jam_band_optics.aod_550
+    # before #640), MACv2-SP runs publish macsp.od550aer; whichever is present
+    # is the scheme's AOD. The JAM keys are shared with aerosol_stats so a run
+    # the aerosol block can score is never skipped here.
     aod = None
-    for key in ("jam_optics.aod_550", "macsp.od550aer"):
+    for key in _AOD_KEYS + ("macsp.od550aer",):
         if key in ds:
             aod = ds[key]
             break
@@ -157,17 +162,36 @@ def main():
         print("NOTE  no AOD field found "
               "(jam_optics.aod_550/macsp.od550aer); skipping")
 
-    # Per-species global burdens (JAM runs): the shared ``burden`` sums
-    # interstitial + cloud-borne mass over the species' modes and
-    # integrates q·Δp/g from the file's own pressure_half.
-    if any(re.fullmatch(r"m_\w+_\w+", v) for v in ds.data_vars):
+    # JAM aerosol block (#762). The statistics are built chunk by chunk
+    # (a year of JAM output does not fit in memory), so this takes the file
+    # list rather than the opened Dataset. Two tiers, per
+    # ``docs/source/design/jam_regression.md``: the climatological anchor
+    # ranges, and the absolute physics gates on burden drift and mass-budget
+    # closure — the latter are what catch a slow runaway that stays inside a
+    # x3-slack range gate until its final fortnight.
+    if is_jam_run(ds):
+        days, series = collect(files)
+        # The dynamics-conservation gate is per STEP, so it needs the run's
+        # timestep; without a saved Hydra config it stays unscored.
+        dt = timestep_seconds(a.run_dir)
+        stats = summarize(days, series, dt)
+        if dt is None:
+            print("NOTE  no .hydra/config.yaml timestep — the dynamics-"
+                  "conservation gate is not scored")
         for sp, (lo, hi) in BURDEN_RANGES.items():
-            col = burden(ds, sp, _SPECIES[sp][0])
-            if col is None:
+            key = f"burden_{sp}_mg_m2"
+            if key not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
                 continue
-            check(f"burden_{sp}_mg_m2",
-                  float(global_mean(col.compute(), weights)), lo, hi)
+            check(key, stats[key], lo, hi)
+        for name, value, limit, good in physics_gates(stats):
+            print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
+                  f"(expected {limit})")
+            ok = ok and good
+        print()
+        print(format_table(stats, []))
+    else:
+        print("NOTE  not a JAM run; skipping the aerosol statistics")
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())
