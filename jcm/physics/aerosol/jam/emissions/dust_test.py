@@ -61,20 +61,31 @@ class SourceGatingTest(unittest.TestCase):
             land_fraction=jnp.asarray([0.0, 1.0, 1.0, 0.5, 1.0]),
             snow_cover=jnp.asarray([0.0, 1.0, 0.0, 0.0, 0.0]),
             land_temperature=jnp.asarray([290.0, 275.0, 240.0, 290.0, 290.0]),
+            freeze_range=DustParameters.default().freeze_range,
         )
         np.testing.assert_allclose(np.asarray(m), [0.0, 0.0, 0.0, 0.5, 1.0])
 
     def test_fecan_wetness_raises_threshold_only_above_gwc_threshold(self):
-        f = wet_threshold_factor(jnp.asarray([0.0, 0.1, 1.0]), jnp.asarray(0.04))
-        # 0.1 relative wetness -> gwc 0.03 < 0.04: still the dry threshold.
+        scale = float(DustParameters.default().soil_water_gwc_scale)
+        f = wet_threshold_factor(jnp.asarray([0.0, 0.1, 1.0]),
+                                 jnp.asarray(0.04), jnp.asarray(scale))
+        # 0.1 of the index -> gwc 0.02 < 0.04: still the dry threshold.
         np.testing.assert_allclose(np.asarray(f[:2]), [1.0, 1.0])
-        expect = math.sqrt(1.0 + 1.21 * (100.0 * (0.30 - 0.04)) ** 0.68)
+        expect = math.sqrt(1.0 + 1.21 * (100.0 * (scale - 0.04)) ** 0.68)
         self.assertAlmostEqual(float(f[2]), expect, places=4)
 
+    def test_gwc_scale_is_field_capacity_not_porosity(self):
+        """soilw_am saturates at field capacity, so the mapping must too."""
+        # swcap = 0.30 vol over a (1 - watsat)*2700 = 1485 kg/m3 bulk density.
+        self.assertAlmostEqual(
+            float(DustParameters.default().soil_water_gwc_scale),
+            0.30 * 1000.0 / 1485.0, places=3)
+
     def test_fecan_gradient_finite_at_the_threshold(self):
-        g = jax.grad(lambda w: jnp.sum(
-            wet_threshold_factor(w, jnp.asarray(0.04))))(
-                jnp.asarray([0.04 / 0.30, 0.5]))
+        scale = float(DustParameters.default().soil_water_gwc_scale)
+        g = jax.grad(lambda w: jnp.sum(wet_threshold_factor(
+            w, jnp.asarray(0.04), jnp.asarray(scale))))(
+                jnp.asarray([0.04 / scale, 0.5]))
         self.assertTrue(np.all(np.isfinite(np.asarray(g))))
 
 
@@ -169,7 +180,10 @@ class DustTermTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(p.emission_diameter),
                                    [0.7806e-6, 3.8983e-6], rtol=1e-4)
         # ~1.5e15 #/kg for accumulation dust, not the 1.2e17 the mode's
-        # equilibrium size would give.
+        # equilibrium size would give. The density is jcm's own 2600 (MAM4
+        # specdens_dust), deliberately, not CAM dust_model's mo_constants
+        # 2500 — mass and number must use one density inside this model, and
+        # the 3.8 % difference is a CAM-internal inconsistency.
         rho = MAM4_SPEC.species_props("du").density
         self.assertAlmostEqual(
             6.0 / (math.pi * rho * float(p.emission_diameter[0]) ** 3) / 1.5445e15,
@@ -223,27 +237,36 @@ class DustTermTest(unittest.TestCase):
         self.assertGreater(float(g), 0.0)
 
     def test_grad_through_gating_and_emission_size(self):
-        """Every new knob is a differentiable leaf, not static config."""
+        """The new knobs are differentiable leaves, not static config.
+
+        ``source_threshold`` is the exception by construction: it appears only
+        as a ``jnp.where`` predicate (CAM's hard cut-off), so its gradient is
+        identically zero and only finiteness is asserted for it.
+        """
         state, diagnostics, forcing, terrain = _inputs(u_star=0.8, source=1.0,
                                                        soilw=0.5)
         base = DustParameters.default()
 
-        def loss(threshold, gwc_thr, diameter):
+        def loss(threshold, gwc_thr, diameter, gwc_scale, freeze_range):
             p = dataclasses.replace(
                 base, source_threshold=threshold,
-                soil_moisture_threshold=gwc_thr, emission_diameter=diameter)
+                soil_moisture_threshold=gwc_thr, emission_diameter=diameter,
+                soil_water_gwc_scale=gwc_scale, freeze_range=freeze_range)
             tend, _ = DustEmissions(params=p)(state, diagnostics, forcing,
                                               terrain)
             return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
 
-        g = jax.grad(loss, argnums=(0, 1, 2))(
+        g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(
             jnp.asarray(0.1), jnp.asarray(0.04),
-            jnp.asarray([0.7806e-6, 3.8983e-6]))
+            jnp.asarray([0.7806e-6, 3.8983e-6]), jnp.asarray(0.202),
+            jnp.asarray(2.0))
         for leaf in jax.tree_util.tree_leaves(g):
             self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
-        # The wetness threshold and the emission size move the answer.
+        # The wetness threshold, the emission size and the gwc scale move the
+        # answer; the freezing ramp does not here (the column is warm).
         self.assertGreater(abs(float(g[1])), 0.0)
         self.assertTrue(np.any(np.abs(np.asarray(g[2])) > 0.0))
+        self.assertGreater(abs(float(g[3])), 0.0)
 
     def test_no_gating_fields_still_emits(self):
         """Absent boundary fields (aquaplanet/unit tests) fall back to bare land."""
@@ -254,7 +277,8 @@ class DustTermTest(unittest.TestCase):
 
     def test_freezing_ramp_uses_the_melting_point(self):
         m = mobilization_fraction(jnp.asarray(1.0), jnp.asarray(0.0),
-                                  jnp.asarray(c.tmelt))
+                                  jnp.asarray(c.tmelt),
+                                  DustParameters.default().freeze_range)
         self.assertAlmostEqual(float(m), 1.0)
 
 

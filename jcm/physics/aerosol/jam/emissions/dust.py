@@ -27,7 +27,10 @@ uses, so the surface gating below follows CLM/CAM directly:
   because no LAI/vegetation boundary field is carried (#777); a vegetation-
   masked monthly source map is the ``tegen_potential`` alternative.
 * ``u*t`` — raised over moist soil by the Fecan et al. (1999) factor CLM
-  applies in ``frc_thr_wet_fct``.
+  applies in ``frc_thr_wet_fct``, on a proxy for the wetness it is defined on
+  (see :func:`wet_threshold_factor`). CLM's ``1/√ρ_air`` dependence of the dry
+  threshold is NOT applied — it is ~10 % over the high-altitude sources and is
+  left folded into the calibratable ``u_threshold``.
 
 Emitted mass is split accum/coarse with CAM's ``dust_emis_sclfctr`` and
 converted to number at the emission bins' volume-mean diameters
@@ -57,17 +60,6 @@ from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
 #: Source-field conventions ``forcing.dust_source`` may follow.
 SOURCE_KINDS = ("cam_erodibility", "tegen_potential")
 
-#: Gravimetric soil-water content at saturation [kg/kg], used to read the
-#: model's relative soil wetness in the units Fecan's threshold is defined in
-#: (porosity 0.45 over a 1485 kg/m³ dry bulk density, CLM's ``watsat``/``bd``).
-_GWC_SATURATED = 0.30
-
-#: Width of the frozen-ground ramp below the melting point [K]. CLM uses the
-#: top soil layer's liquid fraction; with only a land surface temperature
-#: available the liquid fraction is ramped over the last 2 K.
-_FREEZE_RANGE = 2.0
-
-
 @tree_math.struct
 class DustParameters:
     """Calibratable knobs for the Tegen wind-erosion flux."""
@@ -79,6 +71,8 @@ class DustParameters:
     u_star_default: jnp.ndarray    # fallback friction velocity [m/s]
     source_threshold: jnp.ndarray  # erodibility below this emits nothing [-]
     soil_moisture_threshold: jnp.ndarray  # Fecan gravimetric threshold [kg/kg]
+    soil_water_gwc_scale: jnp.ndarray  # gravimetric water at soilw_am = 1 [kg/kg]
+    freeze_range: jnp.ndarray      # frozen-ground ramp below tmelt [K]
     emission_diameter: jnp.ndarray  # (accum, coarse) volume-mean diameter [m]
 
     @classmethod
@@ -96,6 +90,10 @@ class DustParameters:
             # Fecan gwc_thr for ~20 % clay soil (CLM derives it per gridcell
             # from clay content, which no boundary field here carries).
             soil_moisture_threshold=jnp.asarray(0.04),
+            # ``soilw_am`` = 1 is FIELD CAPACITY (swcap = 0.30 vol), so the
+            # gravimetric water there is swcap·ρ_w/bd with bd = (1−watsat)·2700.
+            soil_water_gwc_scale=jnp.asarray(0.202),
+            freeze_range=jnp.asarray(2.0),
             # ``dust_common::dust_set_params`` mass-weighted diameters of the
             # emitted lognormal (D_vma = 3.5 µm, σ = 2) over those two bins.
             emission_diameter=jnp.asarray([0.7806e-6, 3.8983e-6]),
@@ -129,32 +127,45 @@ def source_weight(source: jnp.ndarray, source_kind: str,
 
 
 def mobilization_fraction(land_fraction: jnp.ndarray, snow_cover: jnp.ndarray,
-                          land_temperature: jnp.ndarray) -> jnp.ndarray:
+                          land_temperature: jnp.ndarray,
+                          freeze_range: jnp.ndarray) -> jnp.ndarray:
     """Fraction of a gridcell that can mobilize dust (CLM ``lnd_frc_mbl``).
 
-    Land only, reduced by snow cover, and shut off over frozen ground (CLM's
-    ``liqfrac``, here ramped over the 2 K below the melting point since no soil
-    ice content is carried). Ocean and sea ice contribute nothing.
+    Land only, reduced by snow cover, and shut off over frozen ground. CLM's
+    ``liqfrac`` is the top soil layer's actual liquid/(liquid+ice) partition,
+    which this model cannot form, so it is approximated by a ramp over
+    ``freeze_range`` below the melting point.
 
     The frozen-ground term is what masks the ice sheets: ``snowc_am`` is zeroed
     on permanent snow by construction (their albedo lives in ``alb`` instead),
     so a snow gate alone would emit dust from Antarctica.
     """
     liquid = jnp.clip(
-        (land_temperature - (c.tmelt - _FREEZE_RANGE)) / _FREEZE_RANGE, 0.0, 1.0)
+        (land_temperature - (c.tmelt - freeze_range)) / freeze_range, 0.0, 1.0)
     return (jnp.clip(land_fraction, 0.0, 1.0)
             * (1.0 - jnp.clip(snow_cover, 0.0, 1.0)) * liquid)
 
 
 def wet_threshold_factor(soil_wetness: jnp.ndarray,
-                         gwc_threshold: jnp.ndarray) -> jnp.ndarray:
+                         gwc_threshold: jnp.ndarray,
+                         gwc_scale: jnp.ndarray) -> jnp.ndarray:
     """Fecan (1999) moist-soil increase of u*t (CLM ``frc_thr_wet_fct``).
 
     ``√(1 + 1.21·(100·(w − w_thr))^0.68)`` above the threshold gravimetric
-    water content, 1 below it. The model carries a relative soil wetness, so
-    ``w = wetness · _GWC_SATURATED``.
+    water content, 1 below it, with ``w = soilw_am · gwc_scale``.
+
+    **The input is a proxy.** Fecan is defined on the TOP soil layer's
+    volumetric water, which no boundary field here carries; ``forcing.soilw_am``
+    is SPEEDY's vegetation-weighted root-zone availability index (#787), which
+    differs three ways: it saturates at field capacity (so ``gwc_scale``
+    defaults to swcap·ρ_w/bd, not porosity/bd — using the latter would
+    overstate the wet end ~1.5x), it blends the 7-28 cm layer that does not dry
+    on the saltation timescale, and it is already vegetation-weighted, which
+    double-counts against the vegetation gate (#777). Deserts sit at
+    ``soilw_am ≈ 0`` where none of this bites; the marginal sources (Sahel,
+    Australia, central Asia) are where it does.
     """
-    gwc = jnp.clip(soil_wetness, 0.0, 1.0) * _GWC_SATURATED
+    gwc = jnp.clip(soil_wetness, 0.0, 1.0) * gwc_scale
     excess = gwc - gwc_threshold
     # Guarded operand: x**0.68 has an infinite derivative at x = 0, which the
     # ``where`` masks in value but not in the reverse pass.
@@ -216,10 +227,11 @@ class DustEmissions(PhysicsTerm):
         mobilization = mobilization_fraction(
             self._surface_field(terrain, "fmask", ncols, 1.0),
             self._surface_field(forcing, "snowc_am", ncols, 0.0),
-            self._surface_field(forcing, "stl_am", ncols, c.tmelt + 15.0))
+            self._surface_field(forcing, "stl_am", ncols, c.tmelt + 15.0),
+            p.freeze_range)
         u_threshold = p.u_threshold * wet_threshold_factor(
             self._surface_field(forcing, "soilw_am", ncols, 0.0),
-            p.soil_moisture_threshold)
+            p.soil_moisture_threshold, p.soil_water_gwc_scale)
 
         u_star = self._u_star(diagnostics, ncols, p)
         g_flux = horizontal_flux(u_star, u_threshold, air_density[-1], p.scale)
