@@ -146,6 +146,13 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report["precip_conv_mean_mmday"] = float(np.nanmean(precip)) * 86400
         report["precip_conv_max_mmday"] = float(np.nanmax(precip)) * 86400
 
+    # Emission wind provenance (#723): the surface-flux schemes fall back to
+    # the lowest model level only on step 1, so any column still flagged in a
+    # saved chunk means they are emitting ~40 % too much sea salt.
+    if "wind_10m_model_level" in ds:
+        flag = ds["wind_10m_model_level"].isel(time=-1).values
+        report["emission_wind_model_level_frac"] = float(np.nanmean(flag))
+
     ok = True
     reasons: list[str] = []
     # Any NaN in temperature is a failure — the integration has either
@@ -162,6 +169,12 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     if report.get("q_max_gkg", 0) > 100:
         ok = False
         reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
+    if report.get("emission_wind_model_level_frac", 0) > 0:
+        ok = False
+        reasons.append(
+            "emission wind fell back to the lowest model level in "
+            f"{report['emission_wind_model_level_frac']:.1%} of columns"
+        )
 
     report["ok"] = ok
     report["reasons"] = reasons

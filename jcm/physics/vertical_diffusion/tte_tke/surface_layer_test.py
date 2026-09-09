@@ -200,14 +200,16 @@ class TestWind10mReduction:
                 / np.log(z_ref / z0))
 
     def test_neutral_matches_the_log_profile(self):
+        import jcm.constants as c
         from .surface_layer import wind_10m_reduction
-        karman = 0.4
+        karman = c.karman_const
         z_ref, z0, wind = 32.6, 1.5e-4, 6.0
-        cdn = karman ** 2 / np.log(z_ref / z0) ** 2
+        bn = np.log(z_ref / z0)
+        cfnc = wind * karman ** 2 / bn ** 2
         red = wind_10m_reduction(
-            jnp.full((1, 3), wind * cdn),          # neutral CM|U| = CDN|U|
-            jnp.asarray([wind]), jnp.asarray([z_ref]),
-            jnp.full((1, 3), z0), 1.0e-5)
+            jnp.full((1, 3), cfnc),                # neutral: CM|U| = CM_n|U|
+            jnp.full((1, 3), cfnc), jnp.full((1, 3), bn),
+            jnp.asarray([z_ref]))
         expect = self._neutral(z_ref, z0)
         assert abs(float(red[0, 0]) - expect) < 1e-5
         # ~0.90 at L47's lowest level over the ocean: the |u|^3.41 sea-salt
@@ -218,23 +220,46 @@ class TestWind10mReduction:
         for z0, want in ((5e-5, 0.9124), (1.5e-4, 0.9036), (5e-4, 0.8935)):
             assert abs(self._neutral(32.6, z0) - want) < 1e-3
 
-    def test_unstable_is_closer_to_one_than_stable(self):
+    def test_each_scheme_uses_its_own_neutral_drag(self):
+        """A shared reference reads stability at exact neutral (#783 review)."""
+        import jcm.constants as c
         from .surface_layer import wind_10m_reduction
-        karman, z_ref, z0, wind = 0.4, 32.6, 1.5e-4, 6.0
-        cfnc = wind * karman ** 2 / np.log(z_ref / z0) ** 2
-        args = (jnp.asarray([wind]), jnp.asarray([z_ref]),
-                jnp.full((1, 1), z0), 1.0e-5)
+        z_ref, wind = 32.6, 6.0
+        # Businger-Dyer's hard-coded ocean z0 against a Charnock state z0.
+        bn_bd = np.log(max(z_ref, 1.0) / 1e-4)
+        bn_louis = np.log(z_ref / 2.2e-4)
+        cfnc_bd = wind * c.karman_const ** 2 / bn_bd ** 2
+        own = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc_bd), jnp.full((1, 1), cfnc_bd),
+            jnp.full((1, 1), bn_bd), jnp.asarray([z_ref]))[0, 0])
+        mixed = float(wind_10m_reduction(
+            jnp.full((1, 1), cfnc_bd),
+            jnp.full((1, 1), wind * c.karman_const ** 2 / bn_louis ** 2),
+            jnp.full((1, 1), bn_louis), jnp.asarray([z_ref]))[0, 0])
+        assert abs(own - self._neutral(z_ref, 1e-4)) < 1e-4   # true neutral
+        assert mixed < own - 0.03                             # spuriously stable
+
+    def test_unstable_is_closer_to_one_than_stable(self):
+        import jcm.constants as c
+        from .surface_layer import wind_10m_reduction
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        bn = np.log(z_ref / z0)
+        cfnc = wind * c.karman_const ** 2 / bn ** 2
+        args = (jnp.full((1, 1), cfnc), jnp.full((1, 1), bn),
+                jnp.asarray([z_ref]))
         red = lambda f: float(
             wind_10m_reduction(jnp.full((1, 1), f * cfnc), *args)[0, 0])
         stable, neutral, unstable = red(0.4), red(1.0), red(3.0)
         assert stable < neutral < unstable <= 1.0
 
     def test_continuous_across_the_stability_branch(self):
+        import jcm.constants as c
         from .surface_layer import wind_10m_reduction
-        karman, z_ref, z0, wind = 0.4, 32.6, 1.5e-4, 6.0
-        cfnc = wind * karman ** 2 / np.log(z_ref / z0) ** 2
-        args = (jnp.asarray([wind]), jnp.asarray([z_ref]),
-                jnp.full((1, 1), z0), 1.0e-5)
+        z_ref, z0, wind = 32.6, 1.5e-4, 6.0
+        bn = np.log(z_ref / z0)
+        cfnc = wind * c.karman_const ** 2 / bn ** 2
+        args = (jnp.full((1, 1), cfnc), jnp.full((1, 1), bn),
+                jnp.asarray([z_ref]))
         lo = float(wind_10m_reduction(
             jnp.full((1, 1), cfnc * (1 - 1e-6)), *args)[0, 0])
         hi = float(wind_10m_reduction(
@@ -243,9 +268,10 @@ class TestWind10mReduction:
 
     def test_no_reduction_below_10m_and_bounded(self):
         from .surface_layer import wind_10m_reduction
+        bn = np.log(np.asarray([5.0, 40.0])[:, None] / 1e-3)
         red = wind_10m_reduction(
-            jnp.full((2, 3), 0.05), jnp.asarray([6.0, 6.0]),
-            jnp.asarray([5.0, 40.0]), jnp.full((2, 3), 1e-3), 1.0e-5)
+            jnp.full((2, 3), 0.05), jnp.full((2, 3), 0.05),
+            jnp.asarray(bn * np.ones((1, 3))), jnp.asarray([5.0, 40.0]))
         assert np.all(np.asarray(red) <= 1.0) and np.all(np.asarray(red) >= 0.0)
         # z_ref below the diagnostic height: zrat is capped at 1, no reduction.
         assert abs(float(red[0, 0]) - 1.0) < 1e-6
@@ -253,7 +279,8 @@ class TestWind10mReduction:
     def test_gradient_is_finite(self):
         import jax
         from .surface_layer import wind_10m_reduction
+        bn = float(np.log(32.6 / 1.5e-4))
         g = jax.grad(lambda cm: jnp.sum(wind_10m_reduction(
-            cm, jnp.asarray([6.0]), jnp.asarray([32.6]),
-            jnp.full((1, 3), 1.5e-4), 1.0e-5)))(jnp.full((1, 3), 0.01))
+            cm, jnp.full((1, 3), 6.0 * 0.4 ** 2 / bn ** 2),
+            jnp.full((1, 3), bn), jnp.asarray([32.6]))))(jnp.full((1, 3), 0.01))
         assert np.all(np.isfinite(np.asarray(g)))

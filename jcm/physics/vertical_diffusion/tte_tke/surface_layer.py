@@ -222,10 +222,9 @@ def compute_surface_exchange_coefficients_echam_louis(
 @jax.jit
 def wind_10m_reduction(
     exchange_momentum: jnp.ndarray,
-    wind_speed: jnp.ndarray,
+    neutral_exchange_momentum: jnp.ndarray,
+    log_z_over_z0: jnp.ndarray,
     z_ref: jnp.ndarray,
-    roughness_momentum: jnp.ndarray,
-    z0m_min: jnp.ndarray,
     reference_height: float = 10.0,
 ) -> jnp.ndarray:
     """Per-tile ``|U(10 m)| / |U(z_ref)|`` (ECHAM ``nsurf_diag`` 10 m wind).
@@ -241,6 +240,14 @@ def wind_10m_reduction(
         cbu  = −ln(1 + (e^(bn−bm) − 1)·zrat)     unstable
         red  = (cbn + [cbs|cbu]) / bm
 
+    The neutral profile factor and the neutral exchange velocity are supplied
+    by the caller rather than rebuilt here, because they must be the surface
+    layer scheme's OWN: the two schemes differ in roughness (``z0m_min``-floored
+    ``state.roughness_length`` vs a hard-coded table), in the bound on
+    ``z/z0``, and in whether the wind is ``zepdu2``-floored. Deriving them here
+    would silently mix two drag formulations and read stability where there is
+    none.
+
     The stable/unstable branch is selected by ``CM·|U| < CM_n·|U|``, which is
     exactly ``Ri > 0`` for both surface-layer schemes here (their stability
     factors are <1 for stable, ≥1 for unstable, and both equal 1 — with equal
@@ -249,34 +256,44 @@ def wind_10m_reduction(
 
     Args:
         exchange_momentum: CM·|U| per tile [m/s] (ncol, nsfc_type).
-        wind_speed: the speed the coefficients were built from [m/s] (ncol,) —
-            ECHAM floors it at ``zepdu2`` (1 m/s), and passing the raw wind
-            instead would misread that floor as a stability signal.
+        neutral_exchange_momentum: the same scheme's NEUTRAL CM_n·|U| [m/s]
+            (ncol, nsfc_type).
+        log_z_over_z0: that scheme's neutral profile factor ``ln(z_ref/z0m)``
+            (ncol, nsfc_type).
         z_ref: lowest full-level height above the surface [m] (ncol,).
-        roughness_momentum: z0m per tile [m] (ncol, nsfc_type).
-        z0m_min: roughness floor [m].
         reference_height: diagnostic height [m], 10 m by default.
 
     Returns:
         Reduction factor per tile (ncol, nsfc_type), in [0, 1].
 
     """
-    karman = c.karman_const
-    z0 = jnp.maximum(roughness_momentum, z0m_min)
-    # Same bounded z/z0 as the neutral drag the schemes use, so bn is exactly
-    # κ/√CDN and the ratio below is the schemes' own stability factor.
-    zeta = jnp.maximum(z_ref[:, None] / z0, jnp.exp(2.0))
-    bn = jnp.log(zeta)
-    cfnc = wind_speed[:, None] * karman ** 2 / bn ** 2      # neutral CM·|U|
-    f_m = jnp.maximum(exchange_momentum, 1e-12) / jnp.maximum(cfnc, 1e-12)
+    bn = log_z_over_z0
+    f_m = (jnp.maximum(exchange_momentum, 1e-12)
+           / jnp.maximum(neutral_exchange_momentum, 1e-12))
     bm = bn / jnp.sqrt(f_m)
 
-    # A lowest level below 10 m leaves the wind unreduced (zrat ≤ 1).
-    zrat = reference_height / jnp.maximum(z_ref, reference_height)[:, None]
-    cbn = jnp.log1p((zeta - 1.0) * zrat)
+    # Same 1 m floor on z_ref the exchange coefficients use. A lowest level
+    # below 10 m leaves the wind unreduced (zrat ≤ 1).
+    z1 = jnp.maximum(z_ref, 1.0)
+    zrat = reference_height / jnp.maximum(z1, reference_height)[:, None]
+    cbn = jnp.log1p(jnp.expm1(jnp.clip(bn, 0.0, 30.0)) * zrat)
     cbs = -(bn - bm) * zrat
     cbu = -jnp.log1p(jnp.expm1(jnp.clip(bn - bm, -30.0, 30.0)) * zrat)
     merge = jnp.where(f_m < 1.0, cbs, cbu)
     # Math-safety clip only: the log profile cannot amplify the wind between
     # 10 m and the lowest level, nor reverse it.
     return jnp.clip((cbn + merge) / bm, 0.0, 1.0)
+
+
+def echam_louis_neutral_drag(state, params, wind_speed):
+    """``(ln(z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
+
+    The bounded ``z/z0`` and the ``zepdu2``-floored wind are exactly what
+    :func:`compute_surface_exchange_coefficients_echam_louis` builds its drag
+    from, so ``bn = κ/√CDN`` holds for the pair.
+    """
+    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    z0 = jnp.maximum(state.roughness_length, params.z0m_min)
+    bn = jnp.log(jnp.maximum(z_ref[:, None] / z0, jnp.exp(2.0)))
+    floored = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[:, None]
+    return bn, floored * c.karman_const ** 2 / bn ** 2

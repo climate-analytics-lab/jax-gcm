@@ -355,15 +355,15 @@ class VerticalDiffusionData:
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
 
+    # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
+    # height the surface-flux emission schemes are calibrated to.
+    wind_10m: jnp.ndarray            # |U(10 m)| [m/s] (ncols,)
+
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
     # column solve this step (diagnosed from the implicit solution, so they
     # equal the column-integrated vdiff tendencies exactly — the ECHAM
     # ``pev_vdiff == pqhfla`` identity). ``EchamSurface`` republishes these
     # as the public ``surface`` fluxes.
-    # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
-    # height the surface-flux emission schemes are calibrated to.
-    wind_10m: jnp.ndarray                # |U(10 m)| [m/s] (ncols,)
-
     surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
     surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
     surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
