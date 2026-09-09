@@ -420,8 +420,10 @@ class ForcingData:
         it composes the surface bundle (``surface`` ∈
         ``"pd"``/``"pi"``/``"amip"``/``"era5"``/``None``), ozone, and — for
         ``aerosol="jam"`` — the emission/dms/dust/oxidant set, then routes the
-        composed config through the SAME engine ``jcm.runners.build_forcing``
-        uses, so the CLI and Python doors provably agree (#751; see the
+        composed config through the SAME engine
+        (:func:`jcm.forcing_assembly.build_forcing`, which the CLI door
+        ``jcm.runners.build_forcing`` also delegates to), so the CLI and Python
+        doors provably agree (#751; see the
         equivalence test in ``forcing_test``). The emission-family config-trap
         warnings fire here from the shared home too. ``aerosol="macv2sp"`` wires
         the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
@@ -531,10 +533,9 @@ class ForcingData:
         physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
         cfg = OmegaConf.create(
             {"forcing": forcing_dict, "physics": physics_dict})
-        # Invert the arrow (#751 follow-through): compose the config here and
-        # drive the forcing-side engine directly — the SAME engine the CLI door
+        # Drive the forcing-side engine directly — the SAME engine the CLI door
         # (``runners.build_forcing``) delegates to — so the two doors provably
-        # agree without this module depending on the runner's build.
+        # agree without this module depending on the runner's build (#751).
         forcing = fa.build_forcing(cfg, coords)
         # Same emission-family traps the CLI door fires (from the shared home).
         runners.warn_emission_config_traps(

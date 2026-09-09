@@ -62,11 +62,10 @@ class TestManifestLoads(unittest.TestCase):
 
 
 class TestIsPublishedMatrix(unittest.TestCase):
-    """``is_published`` over the grid/level/vertical matrix — the sole home now.
+    """``is_published`` over the grid/level/vertical matrix — its sole home.
 
-    The predicate formerly cross-checked against ``jcm.data.bundle_names
-    .bundle_is_published``; that module folded into build_mirror + this manifest
-    view (#751), so the matrix is pinned directly against the intended rule: a
+    The manifest view is the ONE availability predicate (#751), so the matrix
+    is pinned directly against the intended rule: a
     grid must be published (t63/t106); a level-resolved product (oxidants)
     additionally needs a published layer count AND a hybrid vertical (its bundle
     is on hybrid-level pressures); level-free products (emissions/dms/dust) are

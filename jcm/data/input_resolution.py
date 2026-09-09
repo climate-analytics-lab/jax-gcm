@@ -18,9 +18,8 @@ rather than conventions spread through code.
 Kept free of any intra-package (``jcm``) import at module top — stdlib +
 dataclasses only — so it loads without initialising JAX; the manifest and
 ``fetch`` are imported lazily, which also lets ``tools/benchmark``'s pre-GPU
-enumerator drive it (and its jcm-free ``{year}`` expansion,
-:func:`expand_yearly_files`, folded in here from the former
-``jcm.data.yearly_files`` leaf) without importing ``jcm`` (see
+enumerator drive it (including the jcm-free ``{year}`` expansion,
+:func:`expand_yearly_files`) without importing ``jcm`` (see
 :mod:`jcm.data.mirror_manifest`).
 """
 
@@ -309,9 +308,9 @@ def resolve_packaged(manifest, name, *, nlev=None, nlat=None, nlon=None,
                      root=None):
     """Local path to a manifest ``source: "packaged"`` product, or ``None``.
 
-    The one mechanism for the boundary files shipped in the wheel (formerly the
-    bespoke ``packaged_macv2_path`` + the ``_resolve_auto_ozone`` /
-    ``_resolve_auto_terrain`` packaged-first scans). The product's ``path`` is
+    The one mechanism for the boundary files shipped in the wheel (the MACv2-SP
+    plumes and the packaged ozone/terrain grids under ``jcm/data/bc``). The
+    product's ``path`` is
     relative to the package ``root`` (``importlib.resources.files("jcm")`` by
     default; a filesystem path is injectable for tests):
 

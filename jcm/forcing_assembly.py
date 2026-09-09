@@ -2,21 +2,21 @@
 
 The single home for composing a boundary-forcing struct out of a resolved
 ``forcing`` config + model ``coords``: the ``auto`` emission resolution, the
-per-product ``{year}``/``hf://`` resolution, the merge-compatibility guard, and
-the ozone / emissions / dms / dust / oxidant / MACv2 attach chain. Both the CLI
-door (:func:`jcm.runners.build_forcing`, a thin config-unpacker) and the Python
-door (:meth:`jcm.forcing.ForcingData.from_bundles`) call
-:func:`assemble_spectral_forcing` here, so the two provably agree
-pytree-for-pytree (#751; the equivalence test in ``forcing_test``).
+per-product ``{year}``/``hf://`` resolution (incl. ``_resolve_data_path``'s
+provenance-recording fetch and the packaged/mirror auto-ozone/terrain
+discovery), the merge-compatibility guard, and the ozone / emissions / dms /
+dust / oxidant / MACv2 attach chain. Both the CLI door
+(:func:`jcm.runners.build_forcing`, a thin config-unpacker) and the Python door
+(:meth:`jcm.forcing.ForcingData.from_bundles`) drive :func:`build_forcing`
+here, so the two provably agree pytree-for-pytree (#751; the equivalence test
+in ``forcing_test``).
 
-Split out of ``jcm.runners`` (#751 follow-through): the forcing science lives
-next to the readers it drives in :mod:`jcm.forcing`, and the runner keeps only
-the cfg dispatch + the pySES column-sampling branch (which is deliberately not
+This module is the shared engine and depends only on :mod:`jcm.forcing` /
+:mod:`jcm.data` — never on the CLI adapter (:mod:`jcm.runners`). The runner
+holds the cfg dispatch plus the pySES column-sampling branch (deliberately not
 unified — it delegates to ``attach_jam_forcing`` but shares the resolution
-helpers here). The two runner utilities the equivalence test patches —
-``_resolve_data_path`` (hf:// fetch + provenance) and ``_resolve_auto_ozone``
-(packaged/mirror ozone discovery) — stay in the runner and are called back
-through the module, so a ``mock.patch.object(runners, ...)`` reaches both doors.
+helpers here); tests that stub the resolution helpers patch them on THIS
+module, which reaches both doors.
 """
 
 from __future__ import annotations
@@ -42,6 +42,121 @@ _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
 # ---------------------------------------------------------------------------
 # small config/path helpers (shared by the attach chain)
 # ---------------------------------------------------------------------------
+
+def _resolve_data_path(path):
+    """Resolve a boundary-file path from config.
+
+    ``hf://<path-in-dataset>`` fetches (or reuses from the local HF cache)
+    the file from the project data mirror via :mod:`jcm.data.remote`, e.g.
+    ``hf://bundles/t63/terrain.nc``. Anything else passes through
+    unchanged. Fetch on a login/head node first — compute nodes usually
+    have no internet, but a warm cache needs none.
+
+    The ``hf://`` scheme is parsed in ONE place —
+    :func:`jcm.data.input_resolution._fetch_path` — this wrapper adds the
+    provenance recording (fetched pairs and plain local paths) and recurses
+    element-wise over lists so each element records its own provenance.
+    """
+    if ir._is_seq(path):
+        # emissions_file may be a list of paths (incl. Hydra ListConfig).
+        # Mappings/bytes fail _is_seq and pass through untouched — iterating
+        # them would silently turn a mis-typed config into a list of keys/ints.
+        return [_resolve_data_path(p) for p in path]
+
+    def _fetch(rel):
+        from jcm.data.remote import fetch
+        resolved = fetch(rel)
+        provenance.record_input(f"hf://{rel}", resolved)
+        return resolved
+
+    resolved = ir._fetch_path(path, _fetch)
+    if isinstance(resolved, str) and resolved == path:
+        provenance.record_input(path)   # plain path; hf:// recorded in _fetch
+    return resolved
+
+
+def _resolve_auto_ozone(coords):
+    """Find an ozone climatology matching the model grid.
+
+    Two-stage discovery: (1) the packaged ``ozone_packaged`` product
+    (``jcm/data/bc/*/ozone.nc``) shape-matched on (nlev, nlat, nlon) via the one
+    packaged-product mechanism (:func:`jcm.data.input_resolution.
+    resolve_packaged`); (2) the data mirror's per-grid ``bundles/<grid>_l<nlev>/
+    ozone_pd.nc`` (cache-first fetch — works offline once cached; the loader
+    rejects any grid mismatch). Grid identity is then fully validated by
+    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage finds a
+    file — the caller warns and falls back to the analytic profile, whose ~7.6×
+    tropospheric ozone column biases clear-sky OLR ~12 W/m² low.
+
+    Auto resolves to ``None`` on a **sigma** grid: every ozone product (packaged
+    and mirror alike) is written by ``jcm.data.bc.interpolate_ozone`` onto the
+    model's *hybrid*-level centre pressures and mapped level-for-level, so a
+    sigma grid that merely shares a published (token, nlev) would wire
+    stratospheric-pressure ozone onto unrelated sigma levels — the same silent
+    corruption the oxidant gate rejects (the manifest's hybrid-only verticals).
+    ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
+    vertical coordinate, so nothing downstream would catch it.
+    """
+    if _vertical_kind(coords) != "hybrid":
+        logger.warning(
+            "forcing.ozone_file=auto on a %s-vertical grid — the packaged and "
+            "mirror ozone products are interpolated onto hybrid-level pressures "
+            "and would be mapped level-for-level onto unrelated sigma levels. "
+            "Falling back to the ANALYTIC ozone profile; supply an on-grid "
+            "forcing.ozone_file (built for this vertical grid) for production "
+            "radiation.",
+            _vertical_kind(coords),
+        )
+        return None
+    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
+    nlev = int(coords.nodal_shape[0])
+    packaged = ir.resolve_packaged(mm.load_manifest(), "ozone_packaged",
+                                   nlev=nlev, nlat=nlat, nlon=nlon)
+    if packaged is not None:
+        return packaged
+    token = _grid_token(coords)
+    from jcm.data.remote import bundle_file
+    try:
+        return str(bundle_file(f"{token}_l{nlev}", "ozone_pd.nc"))
+    except Exception as e:  # noqa: BLE001 — degrade, but LOUDLY
+        # Warning, not info: the analytic-profile fallback biases
+        # clear-sky OLR ~12 W/m² and the generic no-packaged-file
+        # warning downstream does not mention the failed mirror fetch.
+        logger.warning(
+            "auto-ozone: mirror fetch bundles/%s_l%d/ozone_pd.nc failed "
+            "(%s); falling back to the analytic ozone profile.",
+            token, nlev, e,
+        )
+    return None
+
+
+def _resolve_auto_terrain(coords):
+    """Native-grid terrain path for ``terrain.kind: auto``.
+
+    Terrain must be NATIVE to the model grid: horizontally interpolating
+    a coarser file breaks the Lott-Miller SSO sub-grid orography fields
+    (shape mismatch inside the column vmap). Stages: the packaged
+    ``terrain_packaged`` product (``jcm/data/bc/*/terrain.nc``) shape-matched on
+    (nlat, nlon) via :func:`jcm.data.input_resolution.resolve_packaged`, then the
+    mirror's ``bundles/<grid>/terrain.nc``. Raises when neither exists, because a
+    silently substituted terrain corrupts the run.
+    """
+    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
+    packaged = ir.resolve_packaged(mm.load_manifest(), "terrain_packaged",
+                                   nlat=nlat, nlon=nlon)
+    if packaged is not None:
+        return packaged
+    token = _grid_token(coords)
+    from jcm.data.remote import bundle_file
+    try:
+        return str(bundle_file(token, "terrain.nc"))
+    except Exception as e:  # noqa: BLE001
+        raise FileNotFoundError(
+            f"terrain.kind=auto: no packaged terrain matches "
+            f"({nlon}x{nlat}) and the mirror fetch of "
+            f"bundles/{token}/terrain.nc failed: {e}"
+        ) from e
+
 
 def _forcing_products(file_spec, years, available):
     """Split a forcing spec into per-product, year-expanded file sets.
@@ -184,7 +299,6 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
       left intact for :func:`_expand_years` (there is no ``{grid}``/``{nlev}``
       substitution — use ``auto`` to let a config follow the grid).
     """
-    from jcm import runners
     if value == "auto":
         if _emission_auto_resolves_to_none(key, coords, jam, is_pyses):
             # Non-mirrored grid / unpublished level / pySES / non-JAM: resolve
@@ -195,7 +309,7 @@ def _resolve_one_emission_input(value, key, coords, jam, is_pyses):
         r = ir.resolve_input(
             key, "auto", grid_token=_grid_token(coords),
             nlev=int(coords.nodal_shape[0]), vertical=_vertical_kind(coords),
-            fetch=lambda rel: runners._resolve_data_path("hf://" + rel))
+            fetch=lambda rel: _resolve_data_path("hf://" + rel))
         return r.paths[0] if not r.is_none else None
     if value in (None, "", "null", "none"):
         return None
@@ -231,32 +345,27 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
 # the shared engine (both doors call this)
 # ---------------------------------------------------------------------------
 
-def build_forcing(cfg, coords, dycore=None):
-    """Build a ``ForcingData`` from ``cfg`` — the single forcing engine.
+def build_forcing(cfg, coords):
+    """Build a spectral-grid ``ForcingData`` from ``cfg`` — the forcing engine.
 
-    Unpacks ``cfg.forcing``, resolves its ``auto`` emission keys, then dispatches
-    to the pySES column backend (``jcm.runners._build_pyses_forcing``, kept in
-    the runner and deliberately not unified — it column-samples via
-    ``attach_jam_forcing``) when ``dycore`` is a pySES core, else the shared
-    spectral assembly (:func:`assemble_spectral_forcing`). Both the CLI door
-    (:func:`jcm.runners.build_forcing`, which delegates here) and the Python door
+    Unpacks ``cfg.forcing``, resolves its ``auto`` emission keys, then runs the
+    shared spectral assembly (:func:`assemble_spectral_forcing`). Both the CLI
+    door (:func:`jcm.runners.build_forcing`, which delegates here for every
+    non-pySES dycore) and the Python door
     (:meth:`jcm.forcing.ForcingData.from_bundles`) go through this one entry, so
-    they provably agree pytree-for-pytree (#751).
+    they provably agree pytree-for-pytree (#751). The pySES column backend is
+    dispatched adapter-side (in the runner) so this engine never depends on it.
 
     ``kind: default`` yields ``None`` (``Model.run`` falls back to the aquaplanet
     ``default_forcing``); ``kind: from_file`` loads a netCDF boundary file. The
     four prescribed-emission keys default to ``auto`` — a JAM package composes
-    the per-grid HF bundles by itself while non-JAM/pySES leave them empty;
+    the per-grid HF bundles by itself while non-JAM packages leave them empty;
     ``forcing.<key>=null`` opts out.
     """
-    from jcm import runners
-    is_pyses = dycore is not None and hasattr(dycore, "colmap")
     _forcing_cfg = cfg.get("forcing", None)
     if _forcing_cfg is not None:
         _forcing_cfg = _resolve_emission_inputs(
-            _forcing_cfg, cfg, coords, is_pyses)
-    if is_pyses:
-        return runners._build_pyses_forcing(_forcing_cfg, dycore, coords)
+            _forcing_cfg, cfg, coords, is_pyses=False)
     return assemble_spectral_forcing(_forcing_cfg, coords)
 
 
@@ -271,7 +380,6 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     (spectral path) and :meth:`jcm.forcing.ForcingData.from_bundles` call, so
     they agree pytree-for-pytree.
     """
-    from jcm import runners
     if forcing_cfg is None or forcing_cfg.kind == "default":
         forcing = None
     elif forcing_cfg.kind == "from_file":
@@ -279,7 +387,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
         files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
                               forcing_cfg.get("available_years", None))
         forcing = ForcingData.from_file(
-            runners._resolve_data_path(files), coords=coords,
+            _resolve_data_path(files), coords=coords,
             align_mode=str(forcing_cfg.get("align", "auto")))
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
@@ -312,10 +420,9 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     288.15 K placeholder, materially changing the boundary conditions
     for any run configured with only ``ozone_file``.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return forcing
-    ozone_file = runners._resolve_data_path(_expand_years(
+    ozone_file = _resolve_data_path(_expand_years(
         forcing_cfg.get("ozone_file", None),
         forcing_cfg.get("years", None),
         _product_available_years(forcing_cfg, "ozone_available_years")))
@@ -325,7 +432,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         provenance.record_fact("ozone_source", "analytic (no ozone_file)")
         return forcing
     if ozone_file == "auto":
-        ozone_file = runners._resolve_auto_ozone(coords)
+        ozone_file = _resolve_auto_ozone(coords)
         if ozone_file is None:
             provenance.record_fact(
                 "ozone_source", "analytic (auto found no packaged match)")
@@ -423,7 +530,6 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     The matching emission term must also be in the physics package (e.g.
     ``physics=echam-jam``) for the fields to be consumed.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return forcing
     raw = forcing_cfg.get("emissions_file", None)
@@ -467,7 +573,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     anthro_src: dict = {}
     speciated_src: dict = {}
     for product in _forcing_products(raw, years, available):
-        path = runners._resolve_data_path(product)
+        path = _resolve_data_path(product)
         if path in (None, "", "null"):
             continue
         ds = _open_forcing_dataset(path)
@@ -536,10 +642,9 @@ def _attach_dms(forcing, forcing_cfg, coords):
     CLI would look like the file "did nothing". Needs a JAM physics package
     (e.g. ``physics=echam-jam``) for the field to be consumed.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return forcing
-    path = runners._resolve_data_path(
+    path = _resolve_data_path(
         _reject_year_pattern(forcing_cfg.get("dms_file", None), "dms_file"))
     if path in (None, "", "null"):
         return forcing
@@ -562,10 +667,9 @@ def _attach_dust(forcing, forcing_cfg, coords):
     ``WRAP_YEAR`` ``TimeSeries`` on ``forcing.dust_source``. Grid handling as
     in :func:`_attach_dms`.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return forcing
-    path = runners._resolve_data_path(
+    path = _resolve_data_path(
         _reject_year_pattern(forcing_cfg.get("dust_file", None), "dust_file"))
     if path in (None, "", "null"):
         return forcing
@@ -587,10 +691,10 @@ def _resolve_oxidant_paths(forcing_cfg):
     """Resolve ``forcing.oxidants_file`` into the single oxidant product's files.
 
     Shared by the spectral (:func:`_attach_oxidants`) and pySES
-    (:func:`jcm.runners.build_forcing`) paths so ``{year}`` expansion, ``hf://``
-    resolution and the uniform-time-axis validation cannot drift between the
-    two — the forked bypass that previously let the pySES branch hand a literal
-    ``{year}`` brace path (or an unfetched ``hf://`` URL) straight to
+    (``jcm.runners._build_pyses_forcing``) paths so ``{year}`` expansion,
+    ``hf://`` resolution and the uniform-time-axis validation cannot drift
+    between the two — a forked pySES bypass would hand a literal ``{year}``
+    brace path (or an unfetched ``hf://`` URL) straight to
     ``xr.open_dataset``. A ``{year}`` pattern expands to the product's yearly
     files; an explicit list is taken verbatim as that one product's file set;
     either way the set is opened together (``open_mfdataset``, by-coords)
@@ -598,7 +702,6 @@ def _resolve_oxidant_paths(forcing_cfg):
     a mixed set up front. Returns a non-empty list of string paths, or ``None``
     when ``oxidants_file`` is unset/empty.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return None
     raw = forcing_cfg.get("oxidants_file", None)
@@ -611,7 +714,7 @@ def _resolve_oxidant_paths(forcing_cfg):
     # oxidants product, but a user bringing their own series whose coverage
     # differs from the surface forcing's sets ``oxidants_available_years``; it
     # falls back to the shared ``available_years`` when unset.
-    files = runners._resolve_data_path(_expand_years(
+    files = _resolve_data_path(_expand_years(
         raw, forcing_cfg.get("years", None),
         _product_available_years(forcing_cfg, "oxidants_available_years")))
     if isinstance(files, (list, tuple, ListConfig)):
@@ -655,7 +758,6 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     non-empty list of string paths, or ``None`` when ``emissions_file`` is
     unset/empty.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return None
     raw = forcing_cfg.get("emissions_file", None)
@@ -670,7 +772,7 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     # ``attach_jam_forcing`` opens by-coords.
     products: list[list[str]] = []
     for product in _forcing_products(raw, years, available):
-        resolved = runners._resolve_data_path(product)
+        resolved = _resolve_data_path(product)
         if isinstance(resolved, (list, tuple)):
             files = [str(p) for p in resolved
                      if str(p) not in ("", "null", "none", "None")]
@@ -796,14 +898,13 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
     (:func:`jcm.forcing.packaged_macv2_path`); an explicit path overrides. The
     weights are plume-indexed and grid-independent, so no regridding is needed.
     """
-    from jcm import runners
     if forcing_cfg is None:
         return forcing
     raw = forcing_cfg.get("macv2_file", None)
     if raw in (None, "", "null"):
         return forcing
     from jcm.forcing import packaged_macv2_path
-    path = runners._resolve_data_path(
+    path = _resolve_data_path(
         packaged_macv2_path() if raw == "auto" else raw)
     from jcm.forcing import read_macv2_weights
     year_weight, ann_cycle = read_macv2_weights(str(path))

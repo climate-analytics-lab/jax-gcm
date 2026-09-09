@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from jcm import configurations, runners
+from jcm import configurations, forcing_assembly, runners
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 
@@ -242,8 +242,12 @@ def _patched_engine(shape):
     """
     base = ForcingData.zeros(shape)
     return [
-        mock.patch.object(runners, "_resolve_data_path", side_effect=lambda p: p),
-        mock.patch.object(runners, "_resolve_auto_ozone", return_value=None),
+        # Engine-side resolvers: both doors run through forcing_assembly, so
+        # one patch there reaches each build identically.
+        mock.patch.object(forcing_assembly, "_resolve_data_path",
+                          side_effect=lambda p: p),
+        mock.patch.object(forcing_assembly, "_resolve_auto_ozone",
+                          return_value=None),
         mock.patch.object(runners, "build_terrain",
                           side_effect=lambda cfg, c: TerrainData.aquaplanet(c)),
         mock.patch.object(ForcingData, "from_file", return_value=base),

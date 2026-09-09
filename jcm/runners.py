@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import os
 import types
-from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -479,31 +478,6 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
 # Terrain
 # ---------------------------------------------------------------------------
 
-def _resolve_data_path(path):
-    """Resolve a boundary-file path from config.
-
-    ``hf://<path-in-dataset>`` fetches (or reuses from the local HF cache)
-    the file from the project data mirror via :mod:`jcm.data.remote`, e.g.
-    ``hf://bundles/t63/terrain.nc``. Anything else passes through
-    unchanged. Fetch on a login/head node first — compute nodes usually
-    have no internet, but a warm cache needs none.
-    """
-    if isinstance(path, str) and path.startswith("hf://"):
-        from jcm.data.remote import fetch
-        resolved = fetch(path[len("hf://"):])
-        provenance.record_input(path, resolved)
-        return resolved
-    if (not isinstance(path, (str, bytes, Mapping))
-            and isinstance(path, Iterable)):
-        # emissions_file may be a list of paths (incl. Hydra ListConfig).
-        # Mappings/bytes pass through untouched — iterating them would
-        # silently turn a mis-typed config into a list of keys/ints.
-        return [_resolve_data_path(p) for p in path]
-    if isinstance(path, str):
-        provenance.record_input(path)   # no-op unless it is a real file
-    return path
-
-
 #: Yearly ``{year}`` file-pattern expansion; the science lives in
 #: :func:`jcm.forcing.expand_yearly_files`. Aliased for the many call sites
 #: (and TestYearExpansionAndStartDate) that reference the private name.
@@ -877,11 +851,14 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 # Forcing
 # ---------------------------------------------------------------------------
 
-# The forcing-assembly science — ``auto`` resolution, the attach chain, the
-# merge-compatibility guard — lives in :mod:`jcm.forcing_assembly` next to the
-# readers it drives; the runner keeps only the cfg dispatch (``build_forcing``)
-# plus the pySES column-sampling branch. These names are re-exported so existing
-# ``runners.<name>`` call sites and test patch targets keep resolving.
+# The forcing-assembly science — ``auto`` resolution, path/provenance
+# resolution, the attach chain, the merge-compatibility guard — lives in
+# :mod:`jcm.forcing_assembly` next to the readers it drives; the runner keeps
+# only the cfg dispatch (``build_forcing``) plus the pySES column-sampling
+# branch. These names are re-exported so ``runners.<name>`` call sites (incl.
+# the terrain/init/pySES paths below) keep resolving; tests that STUB them
+# patch :mod:`jcm.forcing_assembly` so the stub reaches both doors.
+from jcm import forcing_assembly  # noqa: E402
 from jcm.forcing_assembly import (  # noqa: E402
     _assert_uniform_time_axis as _assert_uniform_time_axis,
     _attach_dms as _attach_dms,
@@ -900,6 +877,9 @@ from jcm.forcing_assembly import (  # noqa: E402
     _product_available_years as _product_available_years,
     _product_time_axis as _product_time_axis,
     _reject_year_pattern as _reject_year_pattern,
+    _resolve_auto_ozone as _resolve_auto_ozone,
+    _resolve_auto_terrain as _resolve_auto_terrain,
+    _resolve_data_path as _resolve_data_path,
     _resolve_emission_inputs as _resolve_emission_inputs,
     _resolve_one_emission_input as _resolve_one_emission_input,
     _resolve_oxidant_paths as _resolve_oxidant_paths,
@@ -910,16 +890,22 @@ from jcm.forcing_assembly import (  # noqa: E402
 
 
 def build_forcing(cfg: DictConfig, coords, dycore=None):
-    """Build a ``ForcingData`` from ``cfg.forcing`` (thin CLI-door delegate).
+    """Build a ``ForcingData`` from ``cfg.forcing`` (the CLI door).
 
-    The engine lives forcing-side in :func:`jcm.forcing_assembly.build_forcing`
-    (the same one the Python door ``ForcingData.from_bundles`` drives, so the two
-    provably agree, #751); this door only forwards the composed ``cfg``. The
-    pySES column branch it dispatches to (:func:`_build_pyses_forcing`) stays in
-    the runner — deliberately not unified with the spectral assembly.
+    Adapter-side dispatch only: a pySES ``dycore`` routes to the runner-held
+    column branch (:func:`_build_pyses_forcing`) after the same ``auto``
+    emission resolution the engine applies; every other dycore delegates to the
+    forcing-side engine :func:`jcm.forcing_assembly.build_forcing` — the one the
+    Python door ``ForcingData.from_bundles`` drives too, so the two doors
+    provably agree (#751). The engine never depends on this adapter.
     """
-    from jcm import forcing_assembly as fa
-    return fa.build_forcing(cfg, coords, dycore=dycore)
+    if dycore is not None and hasattr(dycore, "colmap"):
+        _forcing_cfg = cfg.get("forcing", None)
+        if _forcing_cfg is not None:
+            _forcing_cfg = _resolve_emission_inputs(
+                _forcing_cfg, cfg, coords, is_pyses=True)
+        return _build_pyses_forcing(_forcing_cfg, dycore, coords)
+    return forcing_assembly.build_forcing(cfg, coords)
 
 
 def _build_pyses_forcing(_forcing_cfg, dycore, coords):
@@ -1037,94 +1023,6 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     # instead. Nudging is likewise dinosaur-only — attached later in ``run``,
     # not here, and gated off on pySES.)
     return _attach_macv2_weights(forcing, _forcing_cfg, coords)
-
-
-def _resolve_auto_ozone(coords):
-    """Find an ozone climatology matching the model grid (coords→facts shim).
-
-    Two-stage discovery: (1) the packaged ``ozone_packaged`` product
-    (``jcm/data/bc/*/ozone.nc``) shape-matched on (nlev, nlat, nlon) via the one
-    packaged-product mechanism (:func:`jcm.data.input_resolution.
-    resolve_packaged`); (2) the data mirror's per-grid ``bundles/<grid>_l<nlev>/
-    ozone_pd.nc`` (cache-first fetch — works offline once cached; the loader
-    rejects any grid mismatch). Grid identity is then fully validated by
-    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage finds a
-    file — the caller warns and falls back to the analytic profile, whose ~7.6×
-    tropospheric ozone column biases clear-sky OLR ~12 W/m² low.
-
-    Auto resolves to ``None`` on a **sigma** grid: every ozone product (packaged
-    and mirror alike) is written by ``jcm.data.bc.interpolate_ozone`` onto the
-    model's *hybrid*-level centre pressures and mapped level-for-level, so a
-    sigma grid that merely shares a published (token, nlev) would wire
-    stratospheric-pressure ozone onto unrelated sigma levels — the same silent
-    corruption the oxidant gate rejects (the manifest's hybrid-only verticals).
-    ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
-    vertical coordinate, so nothing downstream would catch it. This shim reads
-    the (coords-adjacent) nodal facts + sigma gate and drives the engine.
-    """
-    from jcm.data import input_resolution as ir
-
-    if _vertical_kind(coords) != "hybrid":
-        logger.warning(
-            "forcing.ozone_file=auto on a %s-vertical grid — the packaged and "
-            "mirror ozone products are interpolated onto hybrid-level pressures "
-            "and would be mapped level-for-level onto unrelated sigma levels. "
-            "Falling back to the ANALYTIC ozone profile; supply an on-grid "
-            "forcing.ozone_file (built for this vertical grid) for production "
-            "radiation.",
-            _vertical_kind(coords),
-        )
-        return None
-    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
-    nlev = int(coords.nodal_shape[0])
-    packaged = ir.resolve_packaged(mm.load_manifest(), "ozone_packaged",
-                                   nlev=nlev, nlat=nlat, nlon=nlon)
-    if packaged is not None:
-        return packaged
-    token = _grid_token(coords)
-    from jcm.data.remote import bundle_file
-    try:
-        return str(bundle_file(f"{token}_l{nlev}", "ozone_pd.nc"))
-    except Exception as e:  # noqa: BLE001 — degrade, but LOUDLY
-        # Warning, not info: the analytic-profile fallback biases
-        # clear-sky OLR ~12 W/m² and the generic no-packaged-file
-        # warning downstream does not mention the failed mirror fetch.
-        logger.warning(
-            "auto-ozone: mirror fetch bundles/%s_l%d/ozone_pd.nc failed "
-            "(%s); falling back to the analytic ozone profile.",
-            token, nlev, e,
-        )
-    return None
-
-
-def _resolve_auto_terrain(coords):
-    """Native-grid terrain path for ``terrain.kind: auto`` (coords→facts shim).
-
-    Terrain must be NATIVE to the model grid: horizontally interpolating
-    a coarser file breaks the Lott-Miller SSO sub-grid orography fields
-    (shape mismatch inside the column vmap). Stages: the packaged
-    ``terrain_packaged`` product (``jcm/data/bc/*/terrain.nc``) shape-matched on
-    (nlat, nlon) via :func:`jcm.data.input_resolution.resolve_packaged`, then the
-    mirror's ``bundles/<grid>/terrain.nc``. Raises when neither exists, because a
-    silently substituted terrain corrupts the run.
-    """
-    from jcm.data import input_resolution as ir
-
-    nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
-    packaged = ir.resolve_packaged(mm.load_manifest(), "terrain_packaged",
-                                   nlat=nlat, nlon=nlon)
-    if packaged is not None:
-        return packaged
-    token = _grid_token(coords)
-    from jcm.data.remote import bundle_file
-    try:
-        return str(bundle_file(token, "terrain.nc"))
-    except Exception as e:  # noqa: BLE001
-        raise FileNotFoundError(
-            f"terrain.kind=auto: no packaged terrain matches "
-            f"({nlon}x{nlat}) and the mirror fetch of "
-            f"bundles/{token}/terrain.nc failed: {e}"
-        ) from e
 
 
 # ---------------------------------------------------------------------------

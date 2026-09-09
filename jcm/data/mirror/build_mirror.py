@@ -36,8 +36,8 @@ import numpy as np
 #: The mirror's published sets — the source of truth the manifest is generated
 #: from (``build_manifest`` expands the product table over these, and the
 #: read-side ``mirror_manifest`` view carries them at top level for the resolver
-#: + the benchmark prefetch). Folded here from the former ``jcm.data
-#: .bundle_names`` so the declaration and the build loop cannot drift.
+#: + the benchmark prefetch). Declared beside the build loop so the declaration
+#: and what actually gets staged cannot drift.
 #: ``PUBLISHED_GRIDS`` is the Gaussian-grid whitelist; ``PUBLISHED_LEVELS`` the
 #: layer counts carrying level-resolved (oxidant/ozone) bundles; and level-
 #: resolved products are only correct on a ``PUBLISHED_VERTICALS`` (hybrid) grid

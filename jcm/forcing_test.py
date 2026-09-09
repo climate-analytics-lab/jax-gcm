@@ -1400,7 +1400,7 @@ class TestForcingFromBundles(unittest.TestCase):
         from unittest import mock
 
         import xarray as xr
-        from jcm import runners
+        from jcm import forcing_assembly as fa
         from jcm.forcing import ForcingData
 
         base = ForcingData.zeros(shape)
@@ -1408,10 +1408,12 @@ class TestForcingFromBundles(unittest.TestCase):
         dms = jnp.ones(shape)
         dust = jnp.ones(shape)
         oxi = {"oh": jnp.ones((1, *shape))}
+        # The resolvers live in the forcing-side engine, which BOTH doors run
+        # through — one patch there reaches each build identically.
         return [
-            mock.patch.object(runners, "_resolve_data_path",
+            mock.patch.object(fa, "_resolve_data_path",
                               side_effect=lambda p: p),
-            mock.patch.object(runners, "_resolve_auto_ozone",
+            mock.patch.object(fa, "_resolve_auto_ozone",
                               return_value=None),
             mock.patch.object(ForcingData, "from_file", return_value=base),
             mock.patch("xarray.open_dataset", return_value=xr.Dataset()),
@@ -1480,9 +1482,9 @@ class TestForcingFromBundles(unittest.TestCase):
                 cfg.forcing, resolve=True)
             return ForcingData.zeros(shape)
 
-        # from_bundles now drives the forcing-side engine directly (arrow
-        # inverted, #751): intercept it there, on the PRE-resolution composed
-        # cfg, so the ancillary-epoch pinning is still observable.
+        # from_bundles drives the forcing-side engine directly (#751):
+        # intercept it there, on the PRE-resolution composed cfg, so the
+        # ancillary-epoch pinning is observable.
         return [
             mock.patch.object(fa, "build_forcing", side_effect=_capture),
             mock.patch.object(runners, "warn_emission_config_traps"),
