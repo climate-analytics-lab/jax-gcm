@@ -10,8 +10,13 @@ plus two upper-boundary dissipation terms:
 - **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
   sub-grid orographic drag with blocked-flow form drag below the blocking level
   and a saturated gravity-wave stress profile above, from seven sub-grid
-  orography descriptors (derived on the fly from Baines-Palmer statistics when no
-  preprocessed DEM is available).
+  orography descriptors. Provenance matters here, because the descriptors set the
+  drag: a terrain file carrying all six preprocessed fields is used as-is;
+  source orography finer than the target grid yields Baines-Palmer statistics;
+  and a native-grid file with only ``orog``/``lsm`` falls back to
+  ``terrain.py::get_simplified_sso_descriptors``, whose **hard-coded
+  approximations** (``orostd = 0.25·orog``, slope 0.1 over land, anisotropy 0.5)
+  are a placeholder rather than a measurement.
 - **Frontal spectral GWD** (``jcm/physics/gravity_waves/spectral/term.py::FrontalGravityWaveDrag``):
   a faithful JAX port of CAM's spectral non-orographic scheme with a
   frontogenesis-triggered source. See {doc}`../design/frontal_gravity_wave_drag`.

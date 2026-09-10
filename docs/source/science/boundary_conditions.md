@@ -10,7 +10,8 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
 (``jcm/config/forcing/{default,from_file,amip,era5}.yaml``); the CLI's
 ``jcm/runners.py::build_forcing`` is a thin delegate.
 
-- **Climatological vs transient bundles.** ``amip.yaml`` and ``era5.yaml`` are
+- **Climatological vs transient bundles.** ``jcm/config/forcing/amip.yaml`` and
+  ``jcm/config/forcing/era5.yaml`` are
   transient yearly bundles: one file per year, a ``years`` range, and
   ``align: by_date_interp`` (linear interpolation between month-start / mid-month
   boundary samples). Plain single-file paths use ``align: auto``, which chooses
@@ -42,7 +43,8 @@ alternative (all fields on one ERA5 land-sea mask).
 
 **Why we differ.**
 - `science` — the ``era5`` and ``amip`` SST constructions differ by ~0.16 K RMS
-  and must not be mixed within one configuration (documented in ``era5.yaml``).
+  and must not be mixed within one configuration (documented in
+  ``jcm/config/forcing/era5.yaml``).
   GHG and ozone beyond coverage are clamped, not extrapolated.
 - `differentiability` — all ``ForcingData`` numeric fields (GHG scalars,
   emission/ozone fields) are pytree leaves, so autodiff traces through them and

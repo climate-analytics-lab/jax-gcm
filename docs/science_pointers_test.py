@@ -27,12 +27,24 @@ def _pages():
     return pages
 
 
+class Ambiguous(list):
+    """More than one file matches a non-repo-relative pointer fragment."""
+
+
 def _resolve(rel: str):
-    """Locate a pointer path, which may be repo-relative or a trailing fragment."""
+    """Locate a pointer path, which may be repo-relative or a trailing fragment.
+
+    A fragment (``lohmann_2m/types.py``) must match exactly one file: accepting
+    the first of several would let the guard validate a pointer against an
+    unrelated same-named module and stay green after the real one moved.
+    """
     direct = REPO / rel
     if direct.exists():
         return direct
-    return next(REPO.glob(f"**/{rel}"), None)
+    matches = [m for m in REPO.glob(f"**/{rel}") if ".git" not in m.parts]
+    if len(matches) > 1:
+        return Ambiguous(sorted(str(m.relative_to(REPO)) for m in matches))
+    return matches[0] if matches else None
 
 
 class TestSciencePointersResolve(unittest.TestCase):
@@ -47,6 +59,19 @@ class TestSciencePointersResolve(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "science-doc pointers name missing files")
 
+    def test_pointers_resolve_unambiguously(self):
+        ambiguous = [
+            f"{page.name}: {rel} matches {list(hit)}"
+            for page in _pages()
+            for rel, _ in _POINTER.findall(page.read_text())
+            if isinstance(hit := _resolve(rel), Ambiguous)
+        ]
+        self.assertEqual(
+            ambiguous, [],
+            "science-doc pointers match several files — write them "
+            "repo-relative so the guard checks the intended one",
+        )
+
     def test_pointer_symbols_exist(self):
         missing = []
         for page in _pages():
@@ -54,8 +79,8 @@ class TestSciencePointersResolve(unittest.TestCase):
                 if not symbol:
                     continue
                 target = _resolve(rel)
-                if target is None:
-                    continue  # reported by the file test
+                if target is None or isinstance(target, Ambiguous):
+                    continue  # reported by the file / ambiguity tests
                 # Dotted pointers (``Class.method``) are checked at their root:
                 # the point is that the named entity still lives in that file.
                 root = symbol.split(".")[0]

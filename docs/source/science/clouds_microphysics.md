@@ -57,9 +57,14 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 **Status & known limitations (stated openly).**
 - **Ice treatment is much unresolved** and depends on choices that exist in no
   single reference. The live heterogeneous ice-nucleating-particle path is a
-  **direct read of DeMott et al. (2010)**
-  (``lohmann_2m/deposition_freezing.py::demott2010_inp``, called from
-  ``scheme.py``) — it appears in neither the ECHAM nor the CAM source tree. A
+  prognostic JAM ``ice_nuclei`` field where an online dust/BC source exists —
+  ``n_inp = where(ice_nuclei > 0, ice_nuclei, demott_floor)`` — so JAM+2M
+  configurations run genuine aerosol–ice-cloud coupling and the **DeMott et al.
+  (2010)** parameterisation
+  (``jcm/physics/clouds/lohmann_2m/deposition_freezing.py::demott2010_inp``,
+  called from ``jcm/physics/clouds/lohmann_2m/scheme.py``) is the floor in cells
+  with no online source. That floor appears in neither the ECHAM nor the CAM
+  source tree. A
   faithful ECHAM-style ``het_mxphase_freezing`` transliteration is defined and
   exported alongside it but is currently **unused**.
 - The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
@@ -75,7 +80,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 - ``jcm/physics/clouds/lohmann_2m/`` — ``scheme.py`` (``cloud_microphysics_2m``,
   ``Lohmann2MMicrophysics``, process-order docstring), ``deposition_freezing.py``
   (``demott2010_inp`` used; ``het_mxphase_freezing`` defined/exported/unused),
-  ``sedimentation_melt.py``, ``precip.py``, ``assembly.py``, ``types.py``;
+  ``sedimentation_melt.py``, ``precip.py``, ``assembly.py``,
+  ``jcm/physics/clouds/lohmann_2m/types.py``;
   ``jcm/physics/clouds/lohmann_2m_params.py`` (``CloudParams2M``).
 
 **Validation evidence.** ``jcm/physics/clouds/sundqvist_test.py`` and
