@@ -6,7 +6,9 @@ plus two upper-boundary dissipation terms:
 - **Hines non-orographic** (``jcm/physics/gravity_waves/hines/hines.py::HinesGwd``):
   a Doppler-spread spectral scheme launching an 8-azimuth wave spectrum from a
   fixed launch level, sweeping cutoff vertical wavenumbers upward, with momentum
-  deposition, heating and diffusion.
+  deposition and heating applied to the state; the vertical diffusion
+  coefficient the sweep also computes (``diffco``) is currently a **discarded
+  diagnostic** — no term consumes it.
 - **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
   sub-grid orographic drag with blocked-flow form drag below the blocking level
   and a saturated gravity-wave stress profile above, from seven sub-grid
@@ -21,7 +23,10 @@ plus two upper-boundary dissipation terms:
   a faithful JAX port of CAM's spectral non-orographic scheme with a
   frontogenesis-triggered source. See {doc}`../design/frontal_gravity_wave_drag`.
 - **Simple GWD fallback** (``jcm/physics/gravity_waves/simple/simple_gwd.py::SimpleGwd``):
-  a single-wave orographic-source breaking scheme.
+  a single-wave breaking scheme whose source is a **synthetic uniform 200 m
+  sub-grid orography in every column, ocean included** — it ignores the
+  supplied terrain, so its drag pattern is wind-driven, not an orographic
+  response (Lott-Miller is the scheme that reads ``terrain.orostd``).
 
 Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
 (``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on
