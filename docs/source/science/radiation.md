@@ -26,8 +26,11 @@ g-point, seeded deterministically per column and model step, with three overlap
 rules — random, maximum-random (Geleyn-Hollingsworth), and
 generalised-exponential with a decorrelation length. The **grey** backend
 instead combines one clear and one cloudy beam weighted by the overlap-derived
-total cover (``column_total_cover``); the **NN emulator** consumes a
-deterministic overlap-derived expectation (no stochastic sampling); **SPEEDY**
+total cover (``column_total_cover``); the **NN emulator's** fluxes carry
+whatever overlap its RRTMGP training labels embedded — the network sees only
+layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
+``cloud_decorrelation_km`` knobs change its *reported total-cover diagnostic*
+(a post-hoc ``expected_total_cover``) and not its heating or fluxes; **SPEEDY**
 carries its own cloud formulation. Swapping backends therefore changes the
 cloud-overlap treatment, not just the gas optics. The AeroCom
 total-cloud-cover diagnostic uses the maximum-random closure.
