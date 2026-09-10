@@ -108,10 +108,10 @@ def _bullet_claims(text: str):
     bullet, each bare ``Symbol`` literal is checked against the nearest
     *preceding* file pointer; config-value literals are skipped.
     """
-    m = re.search(r"\*\*Code pointers\.?\*\*(.*?)(?=\n\*\*|\Z)", text, re.S)
-    if not m:
-        return
-    for bullet in re.split(r"\n(?=- )", m.group(1)):
+    sections = re.findall(
+        r"\*\*Code pointers[^*\n]*\*\*(.*?)(?=\n\*\*|\Z)", text, re.S,
+    )
+    for bullet in (b for s in sections for b in re.split(r"\n(?=- )", s)):
         bullet = " ".join(bullet.splitlines())
         events = []
         for m in _POINTER.finditer(bullet):
