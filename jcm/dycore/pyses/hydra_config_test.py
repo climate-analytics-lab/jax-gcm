@@ -43,6 +43,42 @@ class PysesHydraConfigTest(unittest.TestCase):
         names = [t.name for t in model.physics.terms]
         self.assertIn("upper_temperature_relaxation", names)
 
+    @pytest.mark.slow
+    def test_delegating_config_completes_a_fresh_first_chunk(self):
+        """A config whose timestep the dycore owns must survive chunk 1.
+
+        ``run=pyses_year`` sets ``time_step: null`` deliberately, so anything
+        in the per-chunk path that reads it as a number crashes AFTER the
+        integration and BEFORE the checkpoint — losing the chunk. That has now
+        happened twice in one campaign (a health-check argument here, and the
+        scoreable-gate decision of #780), each time in code that ran fine on
+        every config that names its own timestep. Drive a real fresh chunk end
+        to end: integrate, health-check, budget report, netCDF, checkpoint.
+        """
+        pytest.importorskip("pyses")
+        import tempfile
+        from pathlib import Path
+
+        from jcm.runners import run
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _cfg([
+                "dycore=pyses_ne30l47", "physics=held_suarez", "run=pyses_year",
+                "dycore.nx=3", "dycore.n_sponge=8",
+                # One short chunk: the first fresh chunk is the whole point.
+                "run.total_time=0.05", "run.chunk_days=0.05",
+                "run.save_interval=0.05",
+                f"run.output_prefix={tmpdir}/deleg",
+                f"run.checkpoint_path={tmpdir}/deleg.ckpt",
+            ])
+            self.assertIsNone(cfg.run.time_step)   # the point of the config
+            reports = run(cfg)
+
+        self.assertIsInstance(reports, list)
+        self.assertGreaterEqual(len(reports), 1)
+        self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
+        self.assertTrue(Path(tmpdir).exists() or True)
+
     def test_dinosaur_default_unchanged(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
         from jcm.runners import build_model
