@@ -26,7 +26,7 @@ Requirements
 
 - Python ≥ 3.11
 - JAX
-- Dinosaur (the dynamical-core backend shipped with v2.0)
+- Dinosaur ≥ 1.5.0 (the dynamical-core backend)
 - XArray (for I/O and data handling)
 
 See ``requirements.txt`` for the complete list of dependencies.

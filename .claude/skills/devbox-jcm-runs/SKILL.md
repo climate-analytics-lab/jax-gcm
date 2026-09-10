@@ -98,7 +98,7 @@ PY=/home/dwatsonparris/micromamba/envs/jcm/bin/python   # NOT on PATH
 # or: eval "$(micromamba shell hook --shell bash)" && micromamba activate jcm
 ```
 
-`jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` are **editable installs, so the
+`jcm`, `jax-rrtmgp` and `mam4-jax` are **editable installs, so the
 working tree is the running code**. Check what you are actually running:
 
 ```bash
