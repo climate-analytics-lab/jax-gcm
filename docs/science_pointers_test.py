@@ -77,6 +77,10 @@ def _defined_names(path: Path) -> set[str]:
                 names.add(prefix + child.name)
                 if isinstance(child, ast.ClassDef):
                     visit(child, prefix + child.name + ".")
+                else:
+                    # Function-local constants (``_DTDT_MAX``) are real named
+                    # entities pointers cite; collect them unprefixed.
+                    visit(child, "")
             elif isinstance(child, (ast.Assign, ast.AnnAssign)):
                 targets = child.targets if isinstance(child, ast.Assign) \
                     else [child.target]
@@ -96,7 +100,12 @@ def _symbol_defined(path: Path, symbol: str) -> bool:
     if path.suffix != ".py":
         # yaml/json pointers carry key names; a text check is the right level.
         return symbol in path.read_text(errors="ignore")
-    return symbol in _defined_names(path)
+    names = _defined_names(path)
+    if symbol in names:
+        return True
+    # A bare literal may cite a class member (a protocol method, a classmethod
+    # constructor): accept it when it is a member of any class in the file.
+    return any(n.endswith("." + symbol) for n in names)
 
 
 def _bullet_claims(text: str):
@@ -180,8 +189,9 @@ class TestSciencePointersResolve(unittest.TestCase):
                 target = _resolve(rel)
                 if target is None or isinstance(target, Ambiguous):
                     continue
-                if not _symbol_defined(target, symbol) and \
-                        symbol not in target.read_text(errors="ignore"):
+                # AST-strict: a mention in a comment or docstring is exactly
+                # the stale-reference scenario this guard exists to catch.
+                if not _symbol_defined(target, symbol):
                     missing.append(f"{page.name}: {rel} — {symbol}")
         self.assertEqual(
             missing, [],

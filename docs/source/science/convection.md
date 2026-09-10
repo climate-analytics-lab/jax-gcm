@@ -4,11 +4,16 @@
 
 - **Tiedtke-Nordeng mass-flux**
   (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::TiedtkeConvection``)
-  — the ECHAM/ICON scheme: deep (CAPE closure), shallow (moisture-convergence
-  closure) and mid-level convection, convective momentum transport, and downdrafts
-  (``updraft.py``, ``downdraft.py``, ``flux_tendencies.py``). Cloud-base closure
-  selects between a moisture-budget flux ``E/(q_u−q_e)`` and a bounded CAPE flux,
-  gated by ECHAM's ``zlo1`` validity test (``mo_cumastr.f90``). The saturation
+  — the ECHAM/ICON scheme: deep, shallow and mid-level convection, convective
+  momentum transport, and downdrafts (``updraft.py``, ``downdraft.py``,
+  ``flux_tendencies.py``). Moisture convergence *classifies* deep vs shallow
+  (ECHAM's ``mo_cumastr.f90`` test), while the cloud-base *closure* routes
+  independently of that type: any active surface plume takes the
+  moisture-budget flux ``E/(q_u−q_e)`` where it is valid (ECHAM's ``zlo1``
+  test — near-saturated cloud bases and negligible evaporation fail it) and
+  the bounded CAPE flux otherwise, so surface evaporation, not CAPE, sets the
+  steady-state flux of a healthy plume. Mid-level (``cubasmc``) plumes take
+  neither: their base flux is the resolved ascent that triggered them. The saturation
   adjustment ``cuadjtq`` is a faithful linearised-Newton port of ``mo_cuadjust.f90``
   (``adjustment.py``) with the three ``kcall`` modes. The precipitation budget
   (rain/snow partition, snow melt, sub-cloud Kessler evaporation, proportional
@@ -39,9 +44,12 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 64, 1959-1976 (Isca ``betts_miller.f90``).
 
 **Why we differ.**
-- `differentiability` — the hard ``ldcum`` activation and the deep/shallow/mid
-  selection are replaced by smooth sigmoid weights, so convective parameters are
-  differentiable.
+- `differentiability` — the hard ``ldcum`` activation and the deep/shallow
+  split are replaced by smooth sigmoid weights, so those convective parameters
+  are differentiable. **Mid-level selection stays discrete** (a boolean
+  ``use_midlev`` that forces full trigger weight, as ECHAM's ``cubasmc``
+  conditions ARE the activation), so gradients do not flow across mid-level
+  onset.
 - `science` / `compute` (stopgap) — the **per-level moist-adjustment limits in
   ``mo_cuadjust.f90`` are not yet ported**. The cloud-base mass-flux **CFL cap**
   ``zmfmax = layer_mass/dt`` bounds the column-integrated flux but not per-level
@@ -69,9 +77,10 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
-  (``TiedtkeConvection``, the CFL cap, the ``zlo1`` gate, ``_DTDT_MAX``, the
-  unported-``mo_cuadjust`` note), ``adjustment.py`` (``cuadjtq``),
-  ``flux_tendencies.py`` (``cuflx`` budget, CAPE mass-flux closure),
+  (``TiedtkeConvection``, the CFL cap, the ``moisture_valid`` closure gate
+  [ECHAM zlo1], ``_DTDT_MAX``, the unported-mo_cuadjust note),
+  ``adjustment.py`` (``cuadjtq``), ``flux_tendencies.py``
+  (``convective_precip_fluxes`` [ECHAM cuflx], ``mass_flux_closure_blend``),
   ``updraft.py``, ``downdraft.py``.
 - ``jcm/physics/convection/speedy_convection.py`` — ``diagnose_convection``.
 - ``jcm/physics/convection/betts_miller/`` — ``betts_miller.py``,
