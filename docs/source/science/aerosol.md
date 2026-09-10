@@ -10,8 +10,10 @@ deviations, which is the whole reason the living document exists.
 
 **What we do.** JAM is an online, prognostic modal aerosol package built on the
 **MAM4-MOM 4-mode** population (accumulation, Aitken, coarse, primary-carbon),
-carried as flat ``state.tracers`` keys (``m_``/``n_`` interstitial mass/number,
-``mc_``/``nc_`` cloud-borne, ``g_`` gas precursors). It is assembled as an ordered
+with the interstitial mass/number (``m_``/``n_``) and gas precursors (``g_``)
+carried as flat ``state.tracers`` keys, and the cloud-borne mirrors
+(``mc_``/``nc_``) living in the cross-step physics carry rather than the tracer
+set (see the cloud-borne store below). It is assembled as an ordered
 HAMMOZ-style ``PhysicsTerm`` chain by
 ``jcm/physics/aerosol/jam/jam_terms.py::jam_aerosol_physics`` and spliced into
 ``echam_physics``. The chain is: aerosol carry-slot seeder → cloud-borne carry

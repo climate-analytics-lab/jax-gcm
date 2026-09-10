@@ -32,12 +32,14 @@ constants such as ``alf = als − alv`` computed once at init). CAM uses
 **Status & known limitations.** Only *base* fields may be overridden by keyword;
 passing a derived quantity to ``set_constants`` raises. ``alhf`` is derived (not
 an independent base) so the fusion enthalpy always equals ``alhs − alhc``.
-Overrides do **not** yet reach everything: about a dozen modules — the JAM
-activation/sedimentation/dry-deposition/dust/ice-nucleation chain, the Hines and
-Lott-Miller gravity-wave schemes, the 2M parameter defaults, and the moist-air
-diagnostics — still bind constants at import time and would silently keep Earth
-values after an override (#772). Until that lands, a ``set_constants`` run is
-only consistent for configurations avoiding those terms.
+Overrides do **not** yet reach everything: seven modules — the JAM
+activation / sedimentation / dry-deposition / dust / ice-nucleation chain, the
+dinosaur dycore wrapper and the WMO-tropopause diagnostic — bind values with
+``from jcm.constants import <name>`` at import time and would silently keep
+Earth values after an override (#772). Consumers following the contract
+(``import jcm.constants as c``, read ``c.<name>`` when traced or at
+construction) are unaffected — so until #772 lands, a ``set_constants`` run is
+consistent everywhere except a composition using those seven.
 
 **Code pointers.**
 - ``jcm/constants.py`` — ``PhysicalConstants``, the ``physical_constants``

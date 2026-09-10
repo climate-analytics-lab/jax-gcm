@@ -54,9 +54,8 @@ vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
 profiles exist only for L47/L95; other hybrid grids fall back to the uniform
-SPEEDY profile with a warning. The pySES backend has open production gaps:
-per-column longitudes are collapsed to a reference longitude in the physics
-``cache_coords``, and multi-GPU sharding of the element and physics-column axes
+SPEEDY profile with a warning. The pySES backend's open production gap is that
+multi-GPU sharding of the element and physics-column axes
 is unreconciled (see {doc}`../design/pyses_cam_se_dycore`). Its precision seam
 is float64 dynamics driving float32 physics by default
 (``physics_dtype=float32``; ``ComposablePhysics`` pins tendency dtypes to the

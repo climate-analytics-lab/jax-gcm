@@ -34,7 +34,7 @@ all constituents likewise.
   form matching ECHAM/ICON to order of magnitude across the Richardson-number
   range, not a bit-exact reproduction of every ECHAM branch.
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
-  (u, v, T, q, qc, qi, TKE, TTE), so aerosol/gas tracers are mixed by the
+  (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
   ; its boundaries are zero-flux (surface exchange is dry deposition's job).
 

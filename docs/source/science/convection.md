@@ -24,7 +24,7 @@
   reference at RH ``rhbm`` over ``tau_bm``, with ``do_shallower`` / ``do_changeqref``
   siblings. Written broadcasting-native (vertical on axis 0).
 
-Activation is a **smooth sigmoid trigger** on CAPE rather than a hard
+**Tiedtke's** activation is a **smooth sigmoid trigger** on CAPE rather than a hard
 ``cape > threshold`` branch, so tau / entrainment / threshold parameters carry
 nonzero gradients near the trigger. Saturation thermodynamics are shared
 (``jcm/physics/convection/saturation.py``, Tetens).

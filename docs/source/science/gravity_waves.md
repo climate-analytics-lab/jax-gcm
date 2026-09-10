@@ -20,7 +20,12 @@ plus two upper-boundary dissipation terms:
 
 Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
 (``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on
-(u, v) and relaxation of T toward its zonal mean over the top N levels — and
+(u, v) and relaxation of T toward its zonal mean over the top N levels, plus an
+optional relaxation toward an **absolute** target that the production
+``run=longrun`` sponge switches on (``target_T_K: 250``), adding
+``-(T − 250)/τ``. The absolute branch has no ECHAM analogue: ``uspnge`` damps
+only the m≠0 anomaly, so the m=0 term here is a deliberate deviation that holds
+the JW-dry lid's energy budget. Alongside it is
 ``jcm/physics/dissipation/upper_temperature_relaxation.py::UpperTemperatureRelaxation``,
 a Newtonian relaxation of the top-level *temperatures* toward a reference profile
 (e.g. USSA-1976) purpose-built for finite mesospheric lids, with an *optional*
