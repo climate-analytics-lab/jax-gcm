@@ -51,10 +51,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install pytest
-        run: pip install pytest
-
       - name: Run the science-register rot guard
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pytest -q docs/science_pointers_test.py
+        # Invoked directly (unittest main), NOT via pytest: the repo-root
+        # conftest.py imports jax, which this dependency-free job does not
+        # install.
+        run: python docs/science_pointers_test.py -v
