@@ -7,6 +7,7 @@ limitation into a claim the reader believes was fixed. These tests make the
 CLAUDE.md maintenance rule enforceable rather than aspirational.
 """
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -19,6 +20,13 @@ SCIENCE = REPO / "docs" / "source" / "science"
 _POINTER = re.compile(
     r"``([A-Za-z0-9_./-]+\.(?:py|yaml|json))(?:::([A-Za-z0-9_.]+))?``"
 )
+# A bare ``Symbol`` / ``dotted.Symbol`` literal, as used in Code-pointer
+# bullets of the form ``file.py`` — ``ClassA``, ``func_b``.
+_BARE_SYMBOL = re.compile(r"``([A-Za-z_][A-Za-z0-9_.]*)``")
+# Backtick literals that are config values / knobs, not Python symbols.
+_NON_SYMBOLS = frozenset({
+    "auto", "null", "true", "false", "none", "default", "hybrid", "sigma",
+})
 
 
 def _pages():
@@ -47,6 +55,84 @@ def _resolve(rel: str):
     return matches[0] if matches else None
 
 
+def _defined_names(path: Path) -> set[str]:
+    """Every name a module defines, as dotted paths down to class members.
+
+    Walking the AST (rather than grepping ``def name``) is what lets a dotted
+    pointer like ``Model.resume`` fail when the *method* is renamed while the
+    class survives. Module-level assignments count too — several pointers name
+    constants (``_DTDT_MAX``) and re-export aliases.
+    """
+    try:
+        tree = ast.parse(path.read_text(errors="ignore"))
+    except SyntaxError:
+        return set()
+
+    names: set[str] = set()
+
+    def visit(node, prefix=""):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                names.add(prefix + child.name)
+                if isinstance(child, ast.ClassDef):
+                    visit(child, prefix + child.name + ".")
+            elif isinstance(child, (ast.Assign, ast.AnnAssign)):
+                targets = child.targets if isinstance(child, ast.Assign) \
+                    else [child.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        names.add(prefix + t.id)
+            elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                for alias in child.names:
+                    names.add(prefix + (alias.asname or
+                                        alias.name.split(".")[0]))
+
+    visit(tree)
+    return names
+
+
+def _symbol_defined(path: Path, symbol: str) -> bool:
+    if path.suffix != ".py":
+        # yaml/json pointers carry key names; a text check is the right level.
+        return symbol in path.read_text(errors="ignore")
+    return symbol in _defined_names(path)
+
+
+def _bullet_claims(text: str):
+    """Yield (file, symbol) claims from **Code pointers** sections.
+
+    Only those sections use the reliable ``file.py`` — ``X``, ``Y`` convention;
+    elsewhere a bare literal after a file mention is usually a reference-model
+    name (``physc``, ``micro_mg``) and would be a false claim. Within a
+    bullet, each bare ``Symbol`` literal is checked against the nearest
+    *preceding* file pointer; config-value literals are skipped.
+    """
+    m = re.search(r"\*\*Code pointers\.?\*\*(.*?)(?=\n\*\*|\Z)", text, re.S)
+    if not m:
+        return
+    for bullet in re.split(r"\n(?=- )", m.group(1)):
+        bullet = " ".join(bullet.splitlines())
+        events = []
+        for m in _POINTER.finditer(bullet):
+            events.append((m.start(), "file", m.group(1)))
+        for m in _BARE_SYMBOL.finditer(bullet):
+            name = m.group(1)
+            if ("." in name and name.rsplit(".", 1)[-1] in
+                    ("py", "yaml", "json", "f90", "F90", "nc", "csv", "md")):
+                continue
+            if name.lower() in _NON_SYMBOLS or name.startswith("mo_"):
+                continue
+            events.append((m.start(), "symbol", name))
+        events.sort()
+        current = None
+        for _, kind, value in events:
+            if kind == "file":
+                current = value
+            elif current is not None:
+                yield current, value
+
+
 class TestSciencePointersResolve(unittest.TestCase):
     """Every ``file::symbol`` pointer names code that exists."""
 
@@ -72,7 +158,8 @@ class TestSciencePointersResolve(unittest.TestCase):
             "repo-relative so the guard checks the intended one",
         )
 
-    def test_pointer_symbols_exist(self):
+    def test_qualified_symbols_exist(self):
+        """``file::symbol`` pointers, resolved on the full dotted path."""
         missing = []
         for page in _pages():
             for rel, symbol in _POINTER.findall(page.read_text()):
@@ -81,14 +168,25 @@ class TestSciencePointersResolve(unittest.TestCase):
                 target = _resolve(rel)
                 if target is None or isinstance(target, Ambiguous):
                     continue  # reported by the file / ambiguity tests
-                # Dotted pointers (``Class.method``) are checked at their root:
-                # the point is that the named entity still lives in that file.
-                root = symbol.split(".")[0]
-                body = target.read_text(errors="ignore")
-                if not re.search(rf"\b(def|class)\s+{re.escape(root)}\b", body) \
-                        and root not in body:
+                if not _symbol_defined(target, symbol):
                     missing.append(f"{page.name}: {rel}::{symbol}")
         self.assertEqual(missing, [], "science-doc pointers name missing symbols")
+
+    def test_bullet_symbols_exist(self):
+        """Bare ``Symbol`` literals following a file pointer in one bullet."""
+        missing = []
+        for page in _pages():
+            for rel, symbol in _bullet_claims(page.read_text()):
+                target = _resolve(rel)
+                if target is None or isinstance(target, Ambiguous):
+                    continue
+                if not _symbol_defined(target, symbol) and \
+                        symbol not in target.read_text(errors="ignore"):
+                    missing.append(f"{page.name}: {rel} — {symbol}")
+        self.assertEqual(
+            missing, [],
+            "code-pointer bullets name symbols their file does not define",
+        )
 
 
 class TestSciencePagesAreWired(unittest.TestCase):
