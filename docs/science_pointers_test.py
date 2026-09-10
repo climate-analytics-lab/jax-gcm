@@ -20,6 +20,12 @@ SCIENCE = REPO / "docs" / "source" / "science"
 _POINTER = re.compile(
     r"``([A-Za-z0-9_./-]+\.(?:py|yaml|json))(?:::([A-Za-z0-9_.]+))?``"
 )
+# ``some/package/`` — a directory pointer (trailing slash is the convention).
+_DIR_POINTER = re.compile(r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/)``")
+# Tracked-gap references. The register's rule is that an issue number means an
+# OPEN gap; a closed one silently converts a documented limitation into a
+# claim the reader believes was fixed.
+_ISSUE_REF = re.compile(r"#(\d{3,4})\b")
 # A bare ``Symbol`` / ``dotted.Symbol`` literal, as used in Code-pointer
 # bullets of the form ``file.py`` — ``ClassA``, ``func_b``.
 _BARE_SYMBOL = re.compile(r"``([A-Za-z_][A-Za-z0-9_.]*)``")
@@ -154,6 +160,18 @@ class TestSciencePointersResolve(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "science-doc pointers name missing files")
 
+    def test_directory_pointers_exist(self):
+        missing = []
+        for page in _pages():
+            for rel in _DIR_POINTER.findall(page.read_text()):
+                hit = _resolve(rel.rstrip("/"))
+                if hit is None or (not isinstance(hit, Ambiguous)
+                                   and not hit.is_dir()):
+                    missing.append(f"{page.name}: {rel}")
+        self.assertEqual(
+            missing, [], "science-doc pointers name missing directories",
+        )
+
     def test_pointers_resolve_unambiguously(self):
         ambiguous = [
             f"{page.name}: {rel} matches {list(hit)}"
@@ -206,6 +224,46 @@ class TestSciencePagesAreWired(unittest.TestCase):
         toctree = (REPO / "docs" / "source" / "science.rst").read_text()
         orphans = [p.name for p in _pages() if f"science/{p.stem}" not in toctree]
         self.assertEqual(orphans, [], "science pages missing from science.rst")
+
+
+class TestTrackedGapsAreOpen(unittest.TestCase):
+    """Every ``#NNN`` reference points at an OPEN issue.
+
+    Queries the public GitHub API (unauthenticated; a handful of requests) and
+    skips cleanly when the network or the API is unavailable, so offline runs
+    and rate-limited CI are not broken by it.
+    """
+
+    def test_issue_refs_are_open(self):
+        import json
+        import urllib.error
+        import urllib.request
+
+        refs: dict[str, list[str]] = {}
+        for page in _pages():
+            for num in _ISSUE_REF.findall(page.read_text()):
+                refs.setdefault(num, []).append(page.name)
+        self.assertTrue(refs, "the register should carry tracked-gap refs")
+
+        stale = []
+        for num, pages in sorted(refs.items()):
+            url = ("https://api.github.com/repos/"
+                   f"climate-analytics-lab/jax-gcm/issues/{num}")
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/vnd.github+json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    state = json.load(resp).get("state")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                self.skipTest(f"GitHub API unreachable ({e}); "
+                              "issue-state check skipped")
+            if state != "open":
+                stale.append(f"#{num} is {state} (cited in {sorted(set(pages))})")
+        self.assertEqual(
+            stale, [],
+            "closed issues cited as tracked gaps — either the gap is fixed "
+            "(update the section) or it needs a new open issue",
+        )
 
 
 if __name__ == "__main__":

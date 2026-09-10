@@ -11,8 +11,9 @@ the aerosol code (``jcm/physics/aerosol/jam/chemistry/``), not under
 **What we do.** Radiation's ozone and methane are both supplied by
 ``EchamBoundaryConditions``, which seeds ``chemistry.ozone_vmr`` (the forcing
 climatology, or an **analytic fixed distribution** — a stratospheric-max profile
-parameterised by scale height, max VMR, tropopause height and a stratosphere
-coefficient — when no file is given) and ``chemistry.methane_vmr`` every step.
+parameterised by scale height, max VMR and tropopause height (the declared
+``ozone_stratosphere_coeff`` is inert, #799) — when no file is given) and
+``chemistry.methane_vmr`` every step.
 ``jcm/physics/chemistry/simple_chemistry.py::SimpleChemistry`` runs alongside it
 as a **diagnostic** relaxation: it recomputes ozone production/loss and the
 methane sink from that seeded state, but what it returns for the VMRs does not
