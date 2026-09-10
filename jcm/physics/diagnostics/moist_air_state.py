@@ -9,6 +9,15 @@ Computes the pressure / height / density / humidity diagnostics that
   half-level extrapolated using the top-layer thickness and the surface
   half-level extrapolated using the bottom-layer thickness.
 - ``air_density`` from the ideal-gas law.
+- ``pressure_thickness`` — the per-layer ``Δp`` in **Pa** (``diff`` of
+  ``pressure_half``), positive in the top-first physics frame. This is the
+  quantity to mass-weight a ``level`` field with: a column burden is
+  ``sum(q · pressure_thickness / g)``. Emitting it saves consumers from
+  reconstructing it from ``pressure_half``, where the interface/mid-level
+  axis mismatch is a documented trap (a Codex review caught a burden example
+  that silently evaluated to 0.0, #710). Contrast ``layer_thickness`` below,
+  which is a geometric height in **metres** with a 10 m floor and is
+  therefore unusable for mass-weighting.
 - ``layer_thickness`` from ``Δp / (ρ g)`` with a 10 m floor so that very
   thin uniform sigma layers don't blow up downstream divisions.
 - ``surface_pressure`` (Pa).
@@ -51,6 +60,7 @@ MOIST_AIR_FIELDS: tuple[str, ...] = (
     "height_full",
     "height_half",
     "air_density",
+    "pressure_thickness",
     "layer_thickness",
     "surface_pressure",
     "relative_humidity",
@@ -129,7 +139,11 @@ class MoistAirColumnState(PhysicsTerm):
     construction time.
 
     Provides the keys listed in :data:`MOIST_AIR_FIELDS` to every
-    downstream term.
+    downstream term. Consequently those diagnostics — including
+    ``pressure_thickness`` — reach the output only for physics packages that
+    compose this prepare term (the ECHAM stacks and ``rce.py``). SPEEDY does
+    not run it, so a SPEEDY run's output carries no ``pressure_thickness``;
+    that is expected, not a gap.
     """
 
     name: ClassVar[str] = "moist_air_column_state"
@@ -181,11 +195,21 @@ class MoistAirColumnState(PhysicsTerm):
 
         surface_pressure = state.normalized_surface_pressure * p0  # Pa
         # Hybrid-coordinate pressure: works for pure sigma (a=0) too.
+        #
+        # The vertical coefficients are reshaped against however many
+        # horizontal axes the host actually has. Indexing them as
+        # ``a_full[:, None]`` against ``surface_pressure[None, :]`` hardcodes
+        # exactly one trailing axis, which broadcasts on a column-vectorized
+        # ``(nlev, ncols)`` host and raises on a whole ``(nlev, nlon, nlat)``
+        # grid. See the broadcasting-native convention in CLAUDE.md.
+        vshape = (-1,) + (1,) * surface_pressure.ndim
         pressure_full = (
-            a_full[:, None] + b_full[:, None] * surface_pressure[None, :]
+            a_full.reshape(vshape) + b_full.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
         pressure_half = (
-            a_half[:, None] + b_half[:, None] * surface_pressure[None, :]
+            a_half.reshape(vshape) + b_half.reshape(vshape)
+            * surface_pressure[jnp.newaxis]
         )
 
         height_full = state.geopotential / physical_constants.grav
@@ -209,9 +233,14 @@ class MoistAirColumnState(PhysicsTerm):
         air_density = pressure_full / (
             physical_constants.rd * state.temperature
         )
+        # Per-layer pressure thickness Δp [Pa], positive here because axis 0
+        # runs top-first in the physics frame (pressure increases downward).
+        # Emitted as ``pressure_thickness`` for mass-weighting on the output
+        # ``level`` axis; see the module docstring for why this — not
+        # ``layer_thickness`` (metres, floored) — is the burden weight.
+        dp = jnp.diff(pressure_half, axis=0)
         # Clamp layer thickness floor at 10 m for numerical stability with
         # very thin uniform sigma layers — matches the legacy behaviour.
-        dp = jnp.diff(pressure_half, axis=0)
         layer_thickness = jnp.maximum(
             dp / (air_density * physical_constants.grav), 10.0,
         )
@@ -256,6 +285,7 @@ class MoistAirColumnState(PhysicsTerm):
             "height_full": height_full,
             "height_half": height_half,
             "air_density": air_density,
+            "pressure_thickness": dp,
             "layer_thickness": layer_thickness,
             "surface_pressure": surface_pressure,
             "relative_humidity": relative_humidity,

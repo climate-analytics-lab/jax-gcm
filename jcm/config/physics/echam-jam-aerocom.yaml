@@ -1,0 +1,75 @@
+# ECHAM + JAM aerosol with the AeroCom phase-4 diagnostics attached.
+#
+# The AP4-CTRL / aci-baseline / MMPPE / imo2020 submissions need derived
+# fields (cloud-top sampled quantities, column integrals, pressure-level
+# winds, aerosol number metrics) that are not part of the normal output.
+# This preset turns them on; post-process with tools/aerocom_cmor.py.
+#
+#     python -m jcm.main physics=echam-jam-aerocom grid=echam_t63_l47_hybrid
+#
+# The diagnostics are computed AFTER every other term and add no tendency.
+#
+# MEASURED COST (T63L47, A100, warm compiled step, vs the same run with
+# enable_aerocom=false):
+#
+#   cloud                          +3.3 %
+#   column                         +3.3 %
+#   plev                           +3.0 %
+#   aerosol                        +3.2 %
+#   cloud+column+plev              +4.4 %
+#   cloud+column+plev+aerosol      +9.4 %   <-- this preset's DIAGNOSTIC cost
+#
+# That +9.4 % is the diagnostic groups only. This preset also sets
+# `aerosol_free: exact` below, which is a further ~+64 %, so the preset as
+# shipped costs roughly +80 % over a bare echam-jam run. The two are gated
+# separately because they are separable choices.
+#
+# Most of a single group's ~3 % is the term's fixed per-step overhead, so
+# the groups are much cheaper together than their sum; the aerosol group is
+# the largest true increment (~5 % on top of the other three) because of the
+# per-mode lognormal integrals. Drop `aerosol` from the list below if a run
+# does not need N70/N100/PM/burdens and you want to stay nearer ~4 %.
+#
+# The aerosol-free (*noa) radiation diagnostic needs a second radiation
+# call. Radiation is ~87 % of a *radiation* step but only runs one step in
+# N, so the whole-run overhead depends on the radiation gate as well as on
+# the solve — which is why it is quoted below as a measured wall-clock
+# number rather than derived from the 87 %. It has its own knob further
+# down (`aerosol_free`) — see jax-gcm#583.
+#
+# Also gated separately: the per-species / per-mode / spectral aerosol
+# optics (#584), which need a second Mie sweep — use the
+# ``echam-jam-aerocom-optics`` preset. Remaining coverage gap: #586
+# (3-hourly instantaneous output).
+
+defaults:
+  - echam-jam
+
+enable_aerocom: true
+# cloud: cloud-top sampling + optical depths + condensate paths
+# column: water-vapour path, column number, albedo
+# plev: winds on pressure surfaces + LTS
+# aerosol: per-species burdens + N70/N100/PM1/PM10 (needs the JAM module)
+# The plev group's wap/w500/w700 come from the dycore omega provider,
+# which the runner enables automatically for this preset (see
+# dycore.compute_omega; set it false to opt out and zero-fill them).
+aerocom_groups: [cloud, column, plev, aerosol, nearsurface]
+# Should match the radiation scheme's overlap assumption.
+aerocom_overlap: maximum-random
+
+# Per-species / per-mode / spectral aerosol optics (jax-gcm#584). ON by
+# default: measured cost is 241.1 vs 240.7 s/sim-day at T63L47/A100 — below the
+# single-run noise floor — because the extra Mie sweep rides the radiation gate
+# (5 diagnostic wavelengths against the shortwave's 14 already-gated bands). It
+# supplies the AeroCom-standard AOD names (od550aer, etc.) that the burden/AOD
+# analyses need, so this preset should carry them. The now-equivalent
+# ``echam-jam-aerocom-optics`` alias remains for callers naming it explicitly.
+aerocom_optics: true
+# Aerosol-free (*noa) TOA fluxes for AeroCom ERFari (#583).
+#
+#   null   no *noa fluxes, no ERFari, no extra cost
+#   1      companion every radiation step — the exact reference
+#   N > 1  companion every Nth step, aerosol effect held in between
+#
+# See docs/source/design/aerocom_erfari_sampling.md.
+aerosol_free_interval: 1

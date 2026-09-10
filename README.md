@@ -20,7 +20,7 @@ The v2.0 release focus is the ECHAM T63L47 hybrid-coordinate stack with
 RRTMGP radiation:
 
 ```bash
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
+python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun
 ```
 
 ## Highlights
@@ -85,14 +85,15 @@ Most production runs use the Hydra CLI:
 # Default 10-day SPEEDY aquaplanet
 python -m jcm.main
 
-# ECHAM T63L47 with production RRTMGP radiation
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid
-
-# Cheaper ECHAM development run with grey two-stream radiation
+# ECHAM T63L47 with the production RRTMGP radiation
 python -m jcm.main physics=echam grid=echam_t63_l47_hybrid
 
-# Chunked, resumable long run
-python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun \
+# One validated configuration, one command (the configuration group)
+python -m jcm.main +configuration=t63-echam-jam
+
+# Chunked, resumable long run. Every run group shares one complete key
+# schema now, so run.checkpoint_path sets cleanly without a +/++ prefix.
+python -m jcm.main physics=echam grid=echam_t63_l47_hybrid run=longrun \
     run.checkpoint_path=/scratch/$JOB_ID.ckpt
 
 # Inspect available config groups and the composed config
@@ -101,7 +102,41 @@ python -m jcm.main --cfg job grid=echam_t63_l47_hybrid
 ```
 
 Config groups live under [`jcm/config/`](jcm/config/) (`physics`, `grid`,
-`run`, `init`, `terrain`, `forcing`, and `diffusion`).
+`run`, `init`, `terrain`, `forcing`, `diffusion`, and `configuration` — the
+last promotes each validated physics×grid×init×forcing combination to a
+single `+configuration=<name>` composition).
+
+Boundary-condition and emissions files can be pulled straight from the
+project data mirror on Hugging Face by prefixing any file path with
+`hf://` (fetch once on a node with internet — afterwards the local cache serves compute nodes offline):
+
+```bash
+python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
+    terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+    forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc
+```
+
+See `docs/source/design/data_mirror.md` for the full bundle catalogue.
+
+### Emulated radiation
+
+``physics=echam-emulated-2m`` swaps RRTMGP for a GRU emulator trained to
+reproduce it — a settled 4.4x end-to-end at T63L47 (22.7 -> 5.1 s per sim day; see `docs/source/design/radiation_nn_emulator.md`). Trained weights ship with the package (``weights_file: auto``
+resolves ``jcm/data/emulator_weights_per_band_u64.nc``), so it runs out of
+the box:
+
+```bash
+python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
+```
+
+Point ``physics.terms.nn_emulator_radiation.weights_file`` at another
+checkpoint to swap networks. The emulator sees ozone and CO2 but **not
+CH4 or N2O**, so runs varying those gases are refused with a pointer to
+``physics=echam-rrtmgp-2m`` (jax-gcm#738). Generate labels and train with
+``tools/radiation_emulator/`` — see
+`docs/source/design/radiation_nn_emulator.md`. ``weights_file: null``
+initialises randomly, which is only useful for cost benchmarking and must
+be paired with ``zero_tendency: true``.
 
 ## Physics Packages
 
@@ -146,14 +181,14 @@ Build the CUDA-enabled image locally:
 
 ```bash
 docker build -t jcm .
-docker run --rm --gpus all jcm physics=echam-rrtmgp grid=echam_t63_l47_hybrid
+docker run --rm --gpus all jcm physics=echam grid=echam_t63_l47_hybrid
 ```
 
 Mount `/app/outputs` to persist Hydra output directories:
 
 ```bash
 docker run --rm --gpus all -v "$(pwd)/outputs:/app/outputs" jcm \
-    physics=echam-rrtmgp grid=echam_t63_l47_hybrid run.total_time=30
+    physics=echam grid=echam_t63_l47_hybrid run.total_time=30
 ```
 
 Kubernetes examples for the NRP Nautilus cluster are in
@@ -190,11 +225,20 @@ work should target the `dev` branch; clean release points are merged to
 If you use JAX-GCM in your research, please cite:
 
 ```bibtex
-@software{jax_gcm,
-  title = {JAX-GCM: A Differentiable General Circulation Model},
-  author = {J. Madan, E. Davenport, et al.},
-  year = {2025},
-  url = {https://github.com/climate-analytics-lab/jax-gcm}
+@article{jcm_gmd_2026,
+  title   = {{JCM} v1.1: a differentiable, intermediate-complexity atmospheric model},
+  author  = {Davenport, Ellen H. and Madan, J. Varan and Gjini, Rebecca and
+             Brzenski, Jared and Ho, Nick and Hsu, Tien-Yiao and Liang, Yueshan and
+             Liu, Zhixing and Manivannan, Veeramakali and Pham, Eric and
+             Vutukuru, Rohith and Williams, Andrew I. L. and Yang, Zhiqi and
+             Yu, Rose and Lutsko, Nicholas J. and Hoyer, Stephan and
+             Watson-Parris, Duncan},
+  journal = {Geoscientific Model Development},
+  volume  = {19},
+  pages   = {6451--6466},
+  year    = {2026},
+  doi     = {10.5194/gmd-19-6451-2026},
+  url     = {https://gmd.copernicus.org/articles/19/6451/2026/}
 }
 ```
 

@@ -2,10 +2,12 @@ defaults:
   - _self_
   - physics: speedy
   - grid: speedy_t31_l8
+  - dycore: dinosaur
   - run: default
   - init: isothermal
   - terrain: aquaplanet
   - forcing: default
+  - nudging: none
   - diffusion: default
   - override hydra/help: custom_help
 

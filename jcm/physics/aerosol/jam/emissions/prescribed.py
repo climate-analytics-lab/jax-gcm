@@ -36,6 +36,8 @@ import jax.numpy as jnp
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+    accumulate_emission_fluxes, emission_flux_keys)
 
 
 class PreSpeciatedEmissions(PhysicsTerm):
@@ -44,7 +46,7 @@ class PreSpeciatedEmissions(PhysicsTerm):
     name: ClassVar[str] = "jam_prescribed_aerosol_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
-    provides: ClassVar[tuple[str, ...]] = ()
+    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
 
     def __init__(self, *, scale: float = 1.0):
         """Hold an overall (differentiable) emission scale."""
@@ -82,4 +84,11 @@ class PreSpeciatedEmissions(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tends,
         )
+        # Publish this term's contribution to the AeroCom per-species
+        # emission fluxes (accumulated across all emitting terms).
+        diagnostics = accumulate_emission_fluxes(
+            diagnostics, tends,
+            diagnostics["air_density"],
+            diagnostics["layer_thickness"])
+
         return tendency, diagnostics

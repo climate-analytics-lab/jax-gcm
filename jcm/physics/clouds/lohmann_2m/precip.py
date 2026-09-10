@@ -14,7 +14,7 @@ import jcm.constants as c
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     consistency_number_to_mass,
-    eff_ice_crystal_radius,
+    ice_volume_mean_radius,
     gridbox_frac_falling_hydrometeor,
 )
 from .types import microphysics_dt_constants
@@ -312,6 +312,8 @@ def precip_formation_warm(
     autoconversion_rate     : paclc*(zraut+zrac2) + pclcstar*zrac1
     autoconversion_rate_in_cloud : zraut+zrac1+zrac2 (only where ld_prcp_warm)
     droplet_number_removal_rate    : (zraut+zrac1+zrac2)/(old_cloud_water+eps) (only where ld_prcp_warm)
+    autoconversion_only : grid-mean mass to rain by autoconversion alone [kg/kg]
+    accretion_only      : grid-mean mass to rain by accretion alone [kg/kg]
 
     """
     # -------------------------------------------------------------------------
@@ -440,7 +442,16 @@ def precip_formation_warm(
     droplet_number_new = jnp.maximum(droplet_number - droplet_number_removal_rate, params.cqtmin)
     droplet_number = jnp.where(warm_precip_mask, droplet_number_new, droplet_number)
 
-    return droplet_number, cloud_water, autoconversion_rate_in_cloud, autoconversion_rate, droplet_number_removal_rate
+    # Grid-mean mass increments of the two warm-rain pathways, kept separate
+    # for the AeroCom `autoconv` / `accretn` diagnostics (the combined
+    # `autoconversion_rate` above mixes them). Weighting matches that of the
+    # combined term: zraut is in-cloud, zrac1 follows the precip cover.
+    autoconversion_only = cloud_fraction * zraut
+    accretion_only = cloud_fraction * zrac2 + minimum_cloud_precip_fraction * zrac1
+
+    return (droplet_number, cloud_water, autoconversion_rate_in_cloud,
+            autoconversion_rate, droplet_number_removal_rate,
+            autoconversion_only, accretion_only)
 
 def precip_formation_cold(
     cloud_mask: jnp.ndarray,                      # ld_cc
@@ -522,16 +533,8 @@ def precip_formation_cold(
     # Convert in-cloud ice from kg/kg to in-cloud g/m^3: 1000*pxib*prho
     ice_gm3 = 1000.0 * in_cloud_ice * air_density
 
-    # eff_ice_crystal_radius expects (ice_gm3, icnc). If you already have such a helper,
-    # call it; otherwise this will need to be implemented.
-    zrieff = eff_ice_crystal_radius(ice_gm3, ice_number, params)  # [micron] typically (scheme-dependent)
-
-    # Clip effective radius bounds
-    zrieff = jnp.minimum(jnp.maximum(zrieff, params.ceffmin), params.ceffmax)
-
-    # Compute zrih then zris = 1e-6 * zrih**(1/3)
-    zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * zrieff**3)
-    zris = 1.0e-6 * (zrih ** (1.0 / 3.0))
+    # Volume-mean crystal radius [m] for the aggregation kernel below.
+    zris = ice_volume_mean_radius(ice_gm3, ice_number, params)
 
     # Fortran MERGE(..., 1., ll1): just ensure non-zero where masked off
     zris = jnp.where(ll1, zris, 1.0)

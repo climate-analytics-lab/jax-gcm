@@ -18,8 +18,9 @@ from typing import NamedTuple, Tuple
 from functools import partial
 
 import jcm.constants as c
+from jcm.physics.convection.saturation import cuadjtq_newton_evap
 from .tiedtke_nordeng import (
-    ConvectionParameters, saturation_mixing_ratio
+    ConvectionParameters
 )
 
 
@@ -43,40 +44,27 @@ def wetbulb_temperature(
     humidity: jnp.ndarray,
     pressure: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate wet-bulb temperature and humidity
-    
-    Simplified version - full implementation would iterate
-    
+    """Calculate wet-bulb temperature and humidity.
+
+    ECHAM ``cuadjtq(kcall=2)`` — the evaporation-only damped Newton
+    adjustment (see :func:`~jcm.physics.convection.saturation.
+    cuadjtq_newton_evap`). Conserves moist static energy exactly
+    (``cp·ΔT + L·Δq = 0``), and already-saturated air comes back unchanged
+    because the evaporation-only clip zeroes the step. This replaced a
+    hand-rolled ``T − 0.3·(L/cp)·(qs − q)`` + unconditional re-saturation
+    that broke MSE by up to 5 kJ/kg with a height-dependent sign (#694).
+
     Args:
         temperature: Environmental temperature (K)
         humidity: Environmental humidity (kg/kg)
         pressure: Pressure (Pa)
-        
+
     Returns:
         Tuple of (wetbulb_temp, wetbulb_humidity)
 
     """
-    # Get saturation values
-    qs = saturation_mixing_ratio(pressure, temperature)
-    
-    # If already saturated, wet-bulb equals dry-bulb
-    is_saturated = humidity >= qs
-    
-    def calculate_wetbulb():
-        # Simplified: assume wet-bulb is slightly cooler
-        # Full version would iterate to find equilibrium
-        cooling = (qs - humidity) * c.alhc / c.cpd
-        twb = temperature - 0.3 * cooling  # Damping factor
-        qwb = saturation_mixing_ratio(pressure, twb)
-        return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
-
-    def already_saturated():
-        return temperature, humidity
-
-    # Both branches must return identical dtypes for ``lax.cond``. Tie them to
-    # the inputs (not a hardcoded float32) so the convection scheme is correct
-    # whether the model runs in float32 or float64.
-    return lax.cond(is_saturated, already_saturated, calculate_wetbulb)
+    twb, qwb = cuadjtq_newton_evap(temperature, humidity, pressure)
+    return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
 
 
 def find_lfs(
@@ -113,10 +101,8 @@ def find_lfs(
     
     # Scan from cloud top down to find LFS
     def check_lfs(k):
-        # Check if outside cloud bounds - handled by calling function now
-        # if k < ktop or k > kbase:
-        #     return False, 0.0
-            
+        # Cloud-bound checks (k within [ktop, kbase]) are the calling
+        # function's responsibility.
         # Calculate wet-bulb values for environment
         twb, qwb = wetbulb_temperature(temperature[k], humidity[k], pressure[k])
         
@@ -172,6 +158,38 @@ def find_lfs(
     lfs_level = jnp.where(lfs_found, first_lfs_idx, ktop)
     
     return lfs_level, lfs_found
+
+
+def downdraft_entrainment_ledger(
+    mfd: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    entrdd: float,
+) -> jnp.ndarray:
+    """Absolute per-layer downdraft entrainment flux [kg/m²/s] (#622).
+
+    ECHAM ``cuddraf`` entrains ``zentr = entrdd·|mfd(k-1)|·dz`` into each
+    descent layer (matched by an equal detrainment in the bulk, so
+    |mfd| is conserved going down); entrainment is shut off in the two
+    surface-taper layers. ``mfd[k]`` is the flux leaving layer k through
+    its BOTTOM interface, so the flux entering from above is
+    ``mfd[k-1]`` — zero at and above the LFS, which zeroes the ledger
+    there without an explicit LFS index. Where the downdraft died
+    mid-descent (``mfd[k] == 0`` with inflow above), the ledger is also
+    zero so plume continuity dumps the arriving flux as pure
+    detrainment, matching the Fortran's buoyancy shut-off.
+
+    Vertical on axis 0; trailing axes broadcast (a ``(nlev,)`` column and
+    a ``(nlev, ncols)`` block agree per column).
+    """
+    nlev = mfd.shape[0]
+    mfd_in = jnp.concatenate(
+        [jnp.zeros_like(mfd[:1]), mfd[:-1]], axis=0
+    )
+    levels = jnp.arange(nlev).reshape((nlev,) + (1,) * (mfd.ndim - 1))
+    in_bulk = (mfd < 0.0) & (levels < nlev - 2)
+    return jnp.where(
+        in_bulk, entrdd * jnp.abs(mfd_in) * layer_thickness, 0.0
+    )
 
 
 def downdraft_step(
@@ -360,10 +378,10 @@ def calculate_downdraft(
 
         # Initial downdraft mass flux: ECHAM cudlfs uses
         #   zmftop = -cmfdeps * pmfub
-        # where pmfub = mfu(kcbot) is the cloud-base mass flux. The
-        # previous code used ``cmfctop`` (a different parameter that
-        # controls cloud-top mass flux fraction in the updraft) which is
-        # numerically similar (~0.2-0.3) but conceptually wrong.
+        # where pmfub = mfu(kcbot) is the cloud-base mass flux. Do NOT use
+        # an updraft cloud-top mass-flux fraction (~0.2) here: it is
+        # numerically similar to ``cmfdeps`` but conceptually a different,
+        # updraft-side quantity.
         mfd_new = mfd_init.at[lfs].set(
             -config.cmfdeps * updraft_state.mfu[kbase]
         )

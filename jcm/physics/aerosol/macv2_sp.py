@@ -1,4 +1,6 @@
 import jax.numpy as jnp
+
+from jcm.physics.coords_util import column_lat_lon
 from jcm.physics_interface import PhysicsTendency
 from jcm.forcing import ForcingData
 from .macv2_sp_params import AerosolParameters
@@ -419,6 +421,63 @@ class Macv2SpAerosol(PhysicsTerm):
     category: ClassVar[str] = "aerosol"
     requires: ClassVar[tuple[str, ...]] = ("height_full", "layer_thickness")
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+    # Publish the MACv2-SP diagnostics under an explicit ``macsp.*`` namespace
+    # (#640) with the CF/AeroCom name where one exists (``od550aer`` for the
+    # total column AOD). The shared ``aerosol`` struct that radiation and the
+    # microphysics read by attribute is untouched — only the OUTPUT keys move.
+    # The per-SW/LW-band optics are dropped by ``_EXCLUDED_OUTPUT_KEYS``.
+    output_key_map: ClassVar[dict[str, str]] = {
+        "aerosol.aod_total": "macsp.od550aer",
+        "aerosol.aod_anthropogenic": "macsp.aod_anthropogenic",
+        "aerosol.aod_background": "macsp.aod_background",
+        "aerosol.aod_profile": "macsp.aod_profile",
+        "aerosol.ssa_profile": "macsp.ssa_profile",
+        "aerosol.asy_profile": "macsp.asy_profile",
+        "aerosol.cdnc_factor": "macsp.cdnc_factor",
+        "aerosol.Nccn": "macsp.nccn",
+        "aerosol.angstrom": "macsp.angstrom",
+    }
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "macsp.od550aer": {
+            "units": "1",
+            "standard_name": (
+                "atmosphere_optical_thickness_due_to_ambient_aerosol_particles"
+            ),
+            "long_name": "MACv2-SP total-column aerosol optical depth at 550 nm",
+        },
+        "macsp.aod_anthropogenic": {
+            "units": "1",
+            "long_name": "MACv2-SP anthropogenic-plume AOD at 550 nm",
+        },
+        "macsp.aod_background": {
+            "units": "1",
+            "long_name": "MACv2-SP natural-background AOD at 550 nm",
+        },
+        "macsp.aod_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm aerosol optical depth per layer",
+        },
+        "macsp.ssa_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm single-scattering albedo per layer",
+        },
+        "macsp.asy_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm asymmetry parameter per layer",
+        },
+        "macsp.cdnc_factor": {
+            "units": "1",
+            "long_name": "MACv2-SP Twomey CDNC enhancement factor",
+        },
+        "macsp.nccn": {
+            "units": "cm-3",
+            "long_name": "MACv2-SP cloud condensation nuclei concentration",
+        },
+        "macsp.angstrom": {
+            "units": "1",
+            "long_name": "MACv2-SP column Angstrom exponent",
+        },
+    }
     # Carry seeded as zeros; ``get_simple_aerosol`` rebuilds
     # AOD/SSA/asymmetry from the plume parameterisation every step
     # using the slot only as a shape source.
@@ -446,15 +505,13 @@ class Macv2SpAerosol(PhysicsTerm):
         construction time avoids repeating the ``meshgrid`` inside the
         jitted compute_tendencies loop.
         """
-        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
-        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
-        # Match get_simple_aerosol's previous meshgrid convention:
-        # ``meshgrid(lat, lon)`` returned (lat[None,:].repeat(nlon, 0),
-        # lon[:,None].repeat(nlat, 1)) reshaped to (nlon*nlat,) ==
-        # (ncols,) with longitude varying fastest.
-        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
-        self._lats = nnx.Variable(lat_2d.reshape(-1))
-        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        # column_lat_lon reproduces get_simple_aerosol's legacy
+        # meshgrid(lat, lon) -> (ncols,) convention on separable grids
+        # (longitude varying fastest) and returns true per-column pairs on
+        # scattered-column grids (pySES SE).
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
     def cache_band_config(self, band_config) -> None:

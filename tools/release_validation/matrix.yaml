@@ -1,0 +1,18 @@
+# The supported-configuration matrix (issue #638). Each member references a
+# validated preset in tools/benchmark.py's PRESETS — the single home of
+# known-good override sets — plus the walltime and (for JAM) which aux-input
+# level set to stage. Every member runs on one A100.
+defaults:
+  days: 365
+  chunk_days: 5
+  save_interval: 5
+  hours: 10
+
+members:
+  speedy-t31:        {preset: speedy-t31, hours: 2}
+  echam-1m-t63:      {preset: t63-echam-1m}
+  echam-1m-t106:     {preset: t106-echam-1m}
+  echam-2m-t63:      {preset: t63-echam-2m}
+  echam-2m-t106:     {preset: t106-echam-2m}
+  echam-jam-t63-l47: {preset: ma-t63-l47, jam_inputs: l47}
+  echam-jam-t63-l95: {preset: ma-t63-l95, jam_inputs: l95, hours: 12}

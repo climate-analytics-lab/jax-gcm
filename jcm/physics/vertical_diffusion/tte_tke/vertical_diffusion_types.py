@@ -53,6 +53,49 @@ class VDiffParameters:
 
     SCHEME_BUSINGER_DYER = 0
     SCHEME_ECHAM_LOUIS = 1
+    # Documented string aliases → canonical int flag. Kept as a class
+    # attribute (no annotation, so not a dataclass field) so both the
+    # ``default()`` door and the Hydra-override door (``runners._build_term``,
+    # which reconstructs the class directly) map through the SAME table.
+    _SCHEME_ALIASES = {
+        "businger_dyer": SCHEME_BUSINGER_DYER,
+        "echam_louis": SCHEME_ECHAM_LOUIS,
+    }
+
+    @classmethod
+    def _normalize_scheme(cls, scheme):
+        """Map a string alias to the canonical int flag; pass ints through.
+
+        A traced leaf (under a jit trace, when the struct is unflattened) is
+        not a ``str`` and passes through unchanged.
+        """
+        if isinstance(scheme, str):
+            try:
+                return cls._SCHEME_ALIASES[scheme]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown surface_layer_scheme {scheme!r}; expected one of "
+                    f"{sorted(cls._SCHEME_ALIASES)} or the int constants "
+                    f"{cls.SCHEME_BUSINGER_DYER} (Businger-Dyer) / "
+                    f"{cls.SCHEME_ECHAM_LOUIS} (ECHAM-Louis)."
+                )
+        return scheme
+
+    def __post_init__(self):
+        """Normalize the scheme selector to its canonical int at construction.
+
+        The STORED field is canonical regardless of which door built the
+        instance — ``default()`` OR ``_build_term``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra override. The
+        ``lax.cond`` dispatch in ``turbulence_coefficients`` then only ever
+        compares an int, so the documented ``"businger_dyer"`` /
+        ``"echam_louis"`` string aliases select the same branch as the int
+        constants (companion fix to echam_1m's autoconversion_scheme, #674).
+        """
+        object.__setattr__(
+            self, "surface_layer_scheme",
+            self._normalize_scheme(self.surface_layer_scheme),
+        )
 
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
@@ -65,15 +108,10 @@ class VDiffParameters:
 
         ``surface_layer_scheme`` accepts either the int constant
         (``SCHEME_BUSINGER_DYER`` / ``SCHEME_ECHAM_LOUIS``) or the
-        string aliases ``"businger_dyer"`` / ``"echam_louis"``.
+        string aliases ``"businger_dyer"`` / ``"echam_louis"`` —
+        ``__post_init__`` normalizes either form to the canonical int on
+        the constructed instance.
         """
-        if isinstance(surface_layer_scheme, str):
-            scheme_map = {
-                "businger_dyer": cls.SCHEME_BUSINGER_DYER,
-                "echam_louis":   cls.SCHEME_ECHAM_LOUIS,
-            }
-            surface_layer_scheme = scheme_map[surface_layer_scheme]
-
         return cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
@@ -86,7 +124,7 @@ class VDiffParameters:
             iice=iice,
             ilnd=ilnd,
             itop=itop,
-            surface_layer_scheme=int(surface_layer_scheme),
+            surface_layer_scheme=surface_layer_scheme,
             surface_layer_fsl=jnp.array(surface_layer_fsl),
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
@@ -288,6 +326,18 @@ class VerticalDiffusionData:
     # Turbulent kinetic energy
     tke: jnp.ndarray                 # TKE [m²/s²] (nlev, ncols)
 
+    # Variance of virtual potential temperature. PROGNOSTIC — carried from
+    # step to step exactly like TKE (ECHAM ``pthvvar``), because its budget
+    # is a slow balance of production against dissipation and restarting it
+    # from zero each step would leave it permanently near its floor.
+    thv_variance: jnp.ndarray        # σ²(θ_v) [K²] (nlev, ncols)
+
+    # Sub-grid σ(θ_v) at the second-lowest full level — ECHAM
+    # ``pthvsig = SQRT(pthvvar(klev-1))`` (vdiff.f90:1338). This is the
+    # thermal excess of the warmest boundary-layer plumes over the grid
+    # mean, and it is what sets the convective trigger's ``zlift``.
+    thv_sigma: jnp.ndarray           # σ(θ_v) at klev-1 [K] (ncols,)
+
     # Moisture tendency profile applied by this step's vdiff solve
     # (interior mixing + the surface-evaporation bottom boundary row).
     # This is the same-step ECHAM ``pqte``-at-``cucall``-time analog that
@@ -322,6 +372,8 @@ class VerticalDiffusionData:
             surface_exchange_moisture=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_exchange_momentum=jnp.zeros(nodal_shape + (nsfc_type,)),
             tke=jnp.zeros((nlev,) + nodal_shape),
+            thv_variance=jnp.zeros((nlev,) + nodal_shape),
+            thv_sigma=jnp.zeros(nodal_shape),
             qv_tendency=jnp.zeros((nlev,) + nodal_shape),
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
@@ -341,6 +393,8 @@ class VerticalDiffusionData:
             'surface_exchange_moisture': self.surface_exchange_moisture,
             'surface_exchange_momentum': self.surface_exchange_momentum,
             'tke': self.tke,
+            'thv_variance': self.thv_variance,
+            'thv_sigma': self.thv_sigma,
             'qv_tendency': self.qv_tendency,
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,

@@ -13,7 +13,7 @@ Date: 2026-04-12
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping
 
 import jax.numpy as jnp
 from flax import nnx
@@ -74,8 +74,67 @@ class PhysicsTerm(nnx.Module):
 
     name: ClassVar[str] = ""
     category: ClassVar[str] = ""
+    # Diagnostics keys this term reads UNCONDITIONALLY in ``__call__``.
+    # Convention (enforced by ``jcm/physics/requires_audit_test.py``):
+    # every bare ``diagnostics["key"]`` read must appear here (or in
+    # ``provides``/``carry_slots``/``requires_dycore_fields``); optional
+    # dependencies must be read via ``diagnostics.get("key")`` or behind
+    # an ``if "key" in diagnostics`` guard, with a documented fallback.
+    # Prognostic fields (temperature, specific_humidity, winds, tracers)
+    # arrive on ``PhysicsState``, not diagnostics, and are never listed.
+    # The framework-injected plumbing keys (``_dt_seconds``,
+    # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # CSV mapping this term's output variable names to units and
+    # descriptions, which ``ModelPredictions.to_xarray`` attaches to the
+    # dataset. Columns: Variable, Units, <source name>, Description.
+    UNITS_TABLE_CSV_PATH: ClassVar = None
+
+    # CF/units metadata for the OUTPUT variables this term produces, keyed by
+    # the variable names as they appear in the xarray Dataset — a top-level
+    # diagnostic key (e.g. ``"cloud_fraction"``) or a dotted sub-struct key
+    # (e.g. ``"radiation.lw_flux_up"``, the flattening of the ``radiation``
+    # diagnostic's ``lw_flux_up`` field). Each value is an attribute dict:
+    # ``units`` (required), and optionally ``standard_name`` / ``long_name``.
+    #
+    # This is the home for a diagnostic's metadata: it lives next to the code
+    # that computes the field, not in a separate drifting CSV. ``predictions``
+    # aggregates it across terms (see ``ComposablePhysics.output_attrs``) and
+    # applies it to the Dataset AFTER the per-physics units CSVs — so a term
+    # declaration overrides the CSV — but BEFORE ``cf_metadata``, whose few
+    # curated names (the vertical-coordinate neighbourhood, core prognostics)
+    # win last (#740). Only claim units the code actually documents; a wrong
+    # unit is worse than an absent one.
+    output_attrs: ClassVar[Mapping[str, Mapping[str, str]]] = {}
+
+    # Output-key renames applied by ``ComposablePhysics.data_struct_to_dict``:
+    # ``{internal_dotted_key: output_key}``. Lets a scheme publish its
+    # diagnostics under an explicit namespace (e.g. MACv2-SP's ``aerosol.*``
+    # struct fields → ``macsp.*`` with CF-style names, #640) WITHOUT renaming
+    # the internal ``aerosol`` struct that radiation/microphysics read by
+    # attribute — those stay scheme-agnostic. The FIRST term to claim a key
+    # wins, matching the ``output_attrs`` / units-table precedence rule.
+    output_key_map: ClassVar[Mapping[str, str]] = {}
+
+    def withheld_output_keys(self) -> tuple[str, ...]:
+        """``<struct>.<field>`` keys this configuration never populates.
+
+        A term's carry struct has a fixed set of fields, but a given
+        configuration may not fill all of them — and the unfilled ones hold
+        a zero default that is indistinguishable from real data once
+        written to netCDF. Declaring them here keeps them out of the
+        output entirely, so a consumer sees a variable that is *absent*
+        rather than one that is present and wrong (jax-gcm#647).
+        """
+        return ()
+    # Diagnostic fields this term needs the DYCORE (or an upstream term)
+    # to supply each step — e.g. the frontogenesis function, a
+    # horizontal-gradient quantity only the dynamical core can compute
+    # faithfully. Model validates at construction that each named field
+    # is covered by DynamicalCore.physics_field_names() or an upstream
+    # term's ``provides``.
+    requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
     # Declarative carry slots. Each entry maps a public ``physics_state``
     # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``

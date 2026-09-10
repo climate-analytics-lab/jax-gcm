@@ -65,9 +65,11 @@ class PhysicalConstants(NamedTuple):
     p0s1_bg: float = 101325.0
 
     # --- Latent heats (J/kg) ------------------------------------------------
+    # Only condensation and sublimation are independent; fusion is derived
+    # (see the ``alhf`` property), exactly as ECHAM's mo_physical_constants
+    # defines ``alf = als - alv``.
     alhc: float = 2.501e6              # Condensation
     alhs: float = 2.834e6              # Sublimation
-    alhf: float = 3.34e5               # Fusion
 
     # --- Radiation ----------------------------------------------------------
     sbc: float = 5.67e-8               # Stefan-Boltzmann constant (W/m²/K⁴)
@@ -95,6 +97,19 @@ class PhysicalConstants(NamedTuple):
     def rgrav(self) -> float:
         """Reciprocal of gravity (s²/m)."""
         return 1.0 / self.grav
+
+    @property
+    def alhf(self) -> float:
+        """Latent heat of fusion (J/kg) = alhs - alhc (ECHAM: alf = als - alv).
+
+        Derived, not a base field: the heat of fusion is fixed by energy
+        conservation once condensation and sublimation are chosen. The former
+        independent base value (3.34e5) disagreed with ``alhs - alhc``
+        (3.33e5) by 0.3 %, and both conventions were used interchangeably for
+        the same physical quantity — any column enthalpy budget then misses by
+        that 0.3 % depending on which branch a scheme took (#681).
+        """
+        return self.alhs - self.alhc
 
     @property
     def rd(self) -> float:

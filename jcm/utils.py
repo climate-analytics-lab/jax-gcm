@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
+import logging
 import numpy as np
-from jax import jit
 from jax.tree_util import tree_map
 from importlib import resources
 import dinosaur
@@ -13,6 +13,8 @@ from dinosaur import typing
 from typing import Any, Mapping, MutableMapping, Union
 from dinosaur.xarray_utils import _maybe_update_shape_and_dim_with_realization_time_sample
 import xarray
+
+from jcm import cf_metadata
 
 DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
@@ -168,18 +170,8 @@ def validate_ds(ds, expected_structure):
                 f"Variable '{var}' has dims {actual_dims}, expected {expected_dims}"
             )
 
-@jit
-def pass_fn(operand):
-    return operand
-
 def ones_like(x):
     return tree_map(jnp.ones_like, x)
-
-def _index_if_3d(arr, key):
-    return arr[:, :, key] if arr.ndim > 2 else arr
-
-def tree_index_3d(tree, key):
-    return tree_map(lambda arr: _index_if_3d(jnp.array(arr), key), tree)
 
 def _check_type_ones_like_tangent(x):
         if jnp.result_type(x) == jnp.result_type(float):
@@ -191,14 +183,6 @@ def _check_type_ones_like_tangent(x):
 
 def ones_like_tangent(pytree):
     return tree_map(_check_type_ones_like_tangent, pytree)
-
-def _check_type_zeros_like_tangent(x):
-        if jnp.result_type(x) == jnp.result_type(float):
-            return jnp.zeros_like(x)
-        return np.zeros((), dtype=jax.dtypes.float0)
-
-def zeros_like_tangent(pytree):
-    return tree_map(_check_type_zeros_like_tangent, pytree)
 
 def _check_type_convert_to_float(x):
     return jnp.asarray(x, dtype=float)
@@ -305,7 +289,13 @@ def _infer_dims_shape_and_coords(
     # Half-level fields (e.g. fluxes, half-pressure) — emit them on a
     # ``level_i`` (interface) axis so they don't clash with the full-level
     # ``level`` coord, which has length nlev.
-    XR_LEVEL_INTERFACE_NAME = 'level_i'
+    #
+    # Both vertical axes are in the physics-internal TOA-first frame here, and
+    # the interface axis is a bare index. ``jcm.cf_metadata.finalize_output``
+    # is what turns a trajectory into the *file* convention (both axes
+    # surface-first, real sigma values, CF attributes) — this function stays
+    # the low-level shape->dims mapper.
+    XR_LEVEL_INTERFACE_NAME = cf_metadata.LEVEL_INTERFACE_DIM
     if XR_LEVEL_INTERFACE_NAME not in all_xr_coords:
         all_xr_coords[XR_LEVEL_INTERFACE_NAME] = np.arange(nlev + 1)
     basic_shape_to_dims[(nlev + 1,) + nodal_shape] = (
@@ -474,6 +464,144 @@ def data_to_xarray(
 # Helpers for ``SingleColumnModel`` / ``PrescribedStateModel``
 # ---------------------------------------------------------------------------
 
+def _tracer_names(required_tracers) -> tuple[str, ...]:
+    """Names from ``required_tracers``, which may be specs or bare strings.
+
+    ``ComposablePhysics.required_tracers()`` returns ``TracerSpec`` objects;
+    callers that only know names (a notebook, a test) may pass strings.
+    """
+    return tuple(t if isinstance(t, str) else t.name for t in required_tracers)
+
+
+def _resolve_tracer_vars(ds, tracer_vars, required_tracers) -> dict[str, str]:
+    """Decide which file variables become ``PhysicsState.tracers`` (#718).
+
+    An explicit ``tracer_vars`` mapping always wins — the empty mapping
+    included, which is how a caller says "load no tracers". ``None`` means
+    *infer*, and inference is only possible when the caller declares what it
+    needs: the file alone cannot tell a prognostic tracer from a diagnostic,
+    since both are written as ordinary level-dimensioned variables. So the
+    names come from the configured physics' ``required_tracers()``, and the
+    identically-named variables the file actually carries are picked up.
+
+    Inferring from the physics rather than matching a hardcoded ``qc``/``qi``
+    list is what makes this work for every scheme: the two-moment cloud
+    scheme also needs ``qnc``/``qni``, and JAM declares a tracer per aerosol
+    species. Those declarations already exist; this just reads them.
+
+    Loading nothing when nothing is declared is correct. Loading nothing when
+    the physics *does* declare ``qc``/``qi`` and the file has them is the #718
+    failure — radiation then sees a cloud-free sky and returns plausible,
+    wrong fluxes with no error — so both the pick-up and every drop are
+    logged.
+    """
+    names = _tracer_names(required_tracers or ())
+
+    if tracer_vars is None:
+        resolved = {name: name for name in names if name in ds}
+        if resolved:
+            logging.info(
+                "load_states_from_xarray: loading tracer(s) %s, declared by "
+                "the physics and present in the state file.",
+                ", ".join(resolved),
+            )
+        missing = [name for name in names if name not in resolved]
+        if missing:
+            logging.warning(
+                "load_states_from_xarray: the physics declares tracer(s) %s "
+                "but the state file carries no such variable(s); physics will "
+                "see them as absent (zero).",
+                ", ".join(missing),
+            )
+        return resolved
+
+    dropped = [name for name in names if name not in tracer_vars and name in ds]
+    if dropped:
+        logging.warning(
+            "load_states_from_xarray: tracer(s) %s are declared by the physics "
+            "and present in the state file, but the explicit tracer_vars "
+            "mapping omits them; physics will see them as zero.",
+            ", ".join(dropped),
+        )
+    return dict(tracer_vars)
+
+
+def _check_top_first_pressures(ds, surface_pressure_var: str) -> None:
+    """Verify the converted Dataset really is in the top-first physics frame.
+
+    Orientation is *inferred* from the ``level`` coordinate, and a file whose
+    ``level`` is a bare index carries no orientation at all — so the
+    inference needs an independent check (#718). In the top-first frame
+    ``pressure_full`` must increase with index, and its last (surface) entry
+    must be within a factor of two of the surface pressure the state itself
+    carries. Both hold to within a percent or so for any real hybrid or sigma
+    column — the lowest full level sits just above the surface — while an
+    inverted column misses by the ratio of surface to model-top pressure,
+    four or five orders of magnitude. The factor of two is deliberately far
+    looser than any physical column needs: this is a wrong-orientation
+    detector, not a precision check on the vertical grid.
+
+    Skipped when the file has no ``pressure_full`` (a trimmed restart file
+    holding only the prognostic fields, e.g. ``spinup_state.nc``) or when the
+    sampled column is not finite; those fall back to the ``level``-coordinate
+    inference alone.
+
+    Args:
+      ds: Dataset already converted to the top-first frame.
+      surface_pressure_var: name of the variable holding
+        ``normalized_surface_pressure`` — p_s / p0 by definition of the
+        ``PhysicsState`` field, whatever the file calls it.
+
+    Raises:
+      ValueError: the state is not top-first, so physics would pair each
+        level's fields with another level's pressure.
+
+    """
+    if cf_metadata.PRESSURE_FULL not in ds:
+        return
+
+    from jcm import constants as c
+
+    def _first_column(da):
+        """One column: every non-level dimension reduced to its first index."""
+        return da.isel({
+            dim: 0 for dim in da.dims if dim != cf_metadata.LEVEL_DIM
+        })
+
+    pressure = np.asarray(
+        _first_column(ds[cf_metadata.PRESSURE_FULL]).values, dtype=float)
+    if (pressure.ndim != 1 or pressure.size < 2
+            or not np.all(np.isfinite(pressure))):
+        return
+
+    if not np.all(np.diff(pressure) > 0):
+        raise ValueError(
+            f"{cf_metadata.PRESSURE_FULL!r} does not increase with level index "
+            f"after conversion to the top-first physics frame "
+            f"({pressure[0]:.4g} Pa at index 0, {pressure[-1]:.4g} Pa at the "
+            f"last index). The file's vertical orientation could not be read "
+            f"from its {cf_metadata.LEVEL_DIM!r} coordinate, so physics would "
+            f"be handed each level's fields paired with another level's "
+            f"pressure (#718). Reverse the level axis before loading, or write "
+            f"the file through jcm.cf_metadata.finalize_output."
+        )
+
+    if surface_pressure_var not in ds:
+        return
+    surface_pressure = c.p0 * float(np.asarray(
+        _first_column(ds[surface_pressure_var]).values, dtype=float).ravel()[0])
+    if not np.isfinite(surface_pressure) or surface_pressure <= 0.0:
+        return
+    if not 0.5 < pressure[-1] / surface_pressure < 2.0:
+        raise ValueError(
+            f"the loaded state's surface {cf_metadata.PRESSURE_FULL} "
+            f"({pressure[-1]:.4g} Pa) disagrees with the surface pressure it "
+            f"carries ({surface_pressure:.4g} Pa) by more than a factor of "
+            f"two. The vertical axis is inconsistent with the state's own "
+            f"surface pressure — most likely an inverted column (#718)."
+        )
+
+
 def load_states_from_xarray(
     ds,
     u_wind_var: str = 'u_wind',
@@ -483,25 +611,91 @@ def load_states_from_xarray(
     geopotential_var: str = 'geopotential',
     surface_pressure_var: str = 'normalized_surface_pressure',
     tracer_vars: Mapping[str, str] | None = None,
+    required_tracers=None,
 ):
     """Load a ``PhysicsState`` time series from an xarray ``Dataset``.
+
+    The returned state is **always** in the top-first physics-internal frame
+    (index 0 = model top), which is what ``PhysicsState`` and the dycore
+    expect. Because every JCM output file is written surface-first (see
+    :mod:`jcm.cf_metadata`), the file's vertical orientation is detected and
+    the Dataset is flipped to top-first before values are extracted (#741).
+
+    Orientation is inferred from the ``level`` coordinate **values**, not its
+    attributes — attributes do not survive all xarray operations. A ``level``
+    coordinate that is numeric, longer than one element, and *descending*
+    (``level[0] > level[-1]``, i.e. sigma falling from ~1 at the surface to ~0
+    at the top) marks a surface-first file, which is reversed via
+    :func:`jcm.cf_metadata.orient_top_first`. An ascending ``level`` is already
+    top-first and passes through. If the ``level`` coordinate is absent or
+    non-numeric (a bare integer index), orientation cannot be determined; the
+    data passes through unflipped, top-first is assumed, and a warning is
+    logged. That inference is then *checked* against the file's own
+    ``pressure_full`` where it has one, and a state that is not top-first is
+    rejected rather than handed to physics (#718).
+
+    Tracers beyond ``specific_humidity`` are resolved from ``tracer_vars`` when
+    given and otherwise inferred from ``required_tracers`` — see
+    :func:`_resolve_tracer_vars`. Passing neither loads no tracers, which for
+    cloud-aware physics means a cloud-free sky, so callers that have a physics
+    object should pass its ``required_tracers()``.
 
     Args:
       ds: Dataset containing the required variables.
       *_var: Variable names in ``ds`` for each ``PhysicsState`` field.
-      tracer_vars: Mapping ``tracer_name → ds_variable_name`` for additional
-        tracers beyond ``specific_humidity``.
+      tracer_vars: Explicit mapping ``tracer_name → ds_variable_name`` for
+        tracers beyond ``specific_humidity``. ``None`` (the default) infers
+        from ``required_tracers``; an empty mapping loads no tracers.
+      required_tracers: What the consuming physics needs — an iterable of
+        ``TracerSpec`` (as ``ComposablePhysics.required_tracers()`` returns)
+        or of bare names. Used only to infer ``tracer_vars`` and to warn about
+        declared tracers the file has but the caller drops.
 
     Returns:
-      ``PhysicsState`` whose leading axis is time.
+      ``PhysicsState`` whose leading axis is time, in the top-first physics
+      frame.
+
+    Raises:
+      ValueError: the Dataset's vertical orientation is inconsistent with its
+        own pressures, so no faithful top-first state can be built.
 
     """
     from jcm.physics_interface import PhysicsState
 
-    tracers = {}
-    if tracer_vars:
-        for tracer_name, var_name in tracer_vars.items():
-            tracers[tracer_name] = jnp.asarray(ds[var_name].values)
+    # Detect the file's vertical orientation from the ``level`` coordinate
+    # values (attributes do not survive all xarray ops) and convert to the
+    # top-first physics frame. A descending numeric ``level`` (sigma falling
+    # from the surface to the top) is a surface-first file; anything else is
+    # left as-is with top-first assumed.
+    if cf_metadata.LEVEL_DIM in ds.coords:
+        level = np.asarray(ds[cf_metadata.LEVEL_DIM].values)
+        if np.issubdtype(level.dtype, np.number) and level.size > 1:
+            if level[0] > level[-1]:
+                ds = cf_metadata.orient_top_first(ds)
+            # else: ascending sigma is already top-first; pass through.
+        else:
+            logging.warning(
+                "load_states_from_xarray: %r coordinate is non-numeric or "
+                "size<=1; cannot determine vertical orientation. Assuming the "
+                "Dataset is already top-first (physics frame).",
+                cf_metadata.LEVEL_DIM,
+            )
+    else:
+        logging.warning(
+            "load_states_from_xarray: no %r coordinate present; cannot "
+            "determine vertical orientation. Assuming the Dataset is already "
+            "top-first (physics frame).",
+            cf_metadata.LEVEL_DIM,
+        )
+
+    # The orientation above is inferred; this is the independent check on it.
+    _check_top_first_pressures(ds, surface_pressure_var)
+
+    tracers = {
+        tracer_name: jnp.asarray(ds[var_name].values)
+        for tracer_name, var_name
+        in _resolve_tracer_vars(ds, tracer_vars, required_tracers).items()
+    }
 
     return PhysicsState(
         u_wind=jnp.asarray(ds[u_wind_var].values),

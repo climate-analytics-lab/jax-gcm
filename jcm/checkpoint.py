@@ -71,10 +71,9 @@ def load_checkpoint(model, path) -> float:
     """Restore ``_final_dycore_state`` + ``_final_physics_state`` from ``path``.
 
     The model must already have been bootstrapped (e.g. by an earlier
-    ``Model.run``, ``Model.bootstrap_state``, or one of the
-    ``inject_*_profile`` helpers in :mod:`jcm.runners`) so that its
-    state pytrees provide a treedef + per-leaf shape/dtype templates
-    that match the checkpoint.
+    ``Model.run``, ``Model.bootstrap_state``, or one of the initial-state
+    builders in :mod:`jcm.initial_states`) so that its state pytrees provide
+    a treedef + per-leaf shape/dtype templates that match the checkpoint.
 
     Args:
         model: A ``jcm.model.Model`` with populated final states to use
@@ -99,7 +98,31 @@ def load_checkpoint(model, path) -> float:
         "dycore_leaves": dycore_leaves_template,
         "physics_leaves": physics_leaves_template,
     }
-    payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
+    try:
+        payload = flax.serialization.from_bytes(template, Path(path).read_bytes())
+    except ValueError as exc:
+        # from_bytes reports a bare leaf-count mismatch with no file name.
+        # A count mismatch means a different physics composition wrote the
+        # file, or a struct gained/lost a field since it was written.
+        raise ValueError(
+            f"Checkpoint {path} does not match the composed model: {exc}. "
+            "It was written by a different physics composition, or by a "
+            "jcm version whose diagnostic structs had different fields."
+        ) from exc
+
+    # from_bytes validates structure (leaf count) but not leaf shapes: a
+    # same-composition state for the WRONG grid/levels deserializes cleanly
+    # and only explodes later inside the jitted step, far from the cause.
+    # Check every leaf against the template so the error names the file.
+    for group, tmpl in (("dycore_leaves", dycore_leaves_template),
+                        ("physics_leaves", physics_leaves_template)):
+        for i, (got, want) in enumerate(zip(payload[group], tmpl)):
+            if hasattr(want, "shape") and got.shape != want.shape:
+                raise ValueError(
+                    f"Checkpoint {path} does not match the composed model: "
+                    f"{group}[{i}] has shape {got.shape}, model expects "
+                    f"{want.shape} (wrong grid/levels/physics for this file)."
+                )
 
     _, dycore_treedef = jax.tree_util.tree_flatten(model._final_dycore_state)
     _, physics_treedef = jax.tree_util.tree_flatten(model._final_physics_state)

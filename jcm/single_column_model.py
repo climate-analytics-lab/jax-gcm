@@ -32,7 +32,6 @@ and computes tendencies for every cell with ``vmap``.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import jax
@@ -43,6 +42,7 @@ import tree_math
 from jax import lax
 from jax.tree_util import tree_map
 
+from jcm import column_coordinates
 from jcm.date import DateData
 from jcm.forcing import ForcingData
 from jcm.physics_interface import (
@@ -52,6 +52,11 @@ from jcm.physics_interface import (
     verify_state,
 )
 from jcm.terrain import TerrainData
+
+#: Prognostic state variables, as opposed to tracers. ``free_evolve`` accepts
+#: either, but the two take different paths through a step: prognostics go
+#: through the nudged/free integrator, tracers through the tendency update.
+_PROGNOSTIC_VARS = ("u_wind", "v_wind", "temperature", "specific_humidity")
 
 
 @tree_math.struct
@@ -85,46 +90,23 @@ class SCMPredictions:
 
 
 def _vertical_nlev(vertical) -> int:
-    if hasattr(vertical, "centers"):
-        return int(np.asarray(vertical.centers).shape[0])
-    if hasattr(vertical, "a_boundaries"):
-        return int(np.asarray(vertical.a_boundaries).shape[0]) - 1
-    raise TypeError(
-        f"Unsupported vertical coordinate type {type(vertical).__name__!r}; "
-        "expected SigmaCoordinates or HybridCoordinates."
-    )
+    # Retained as an alias: the implementation moved to
+    # ``column_coordinates`` with the first-class coordinate type.
+    return column_coordinates._vertical_nlev(vertical)
 
 
 def _make_single_column_coords(vertical, lat_deg: float, lon_deg: float):
-    """Duck-typed ``CoordinateSystem`` analogue at the user's column.
+    """Column coordinates at the user's location.
 
-    The SCM's physics packages only read ``coords.vertical``,
-    ``coords.horizontal.{latitudes, longitudes, nodal_shape}`` and
-    ``coords.nodal_shape`` from whatever they're handed, so a
-    ``SimpleNamespace`` with those attributes is enough — no real
-    horizontal grid needed.
-
-    The horizontal shape is ``(1, 1)``: a single column at the requested
-    ``(lat_deg, lon_deg)``. ICON's term setup (e.g.
-    ``EchamTermBase.cache_coords``) assumes a 3-tuple ``(nlev, nlon, nlat)``
-    nodal shape, so we keep that convention rather than collapsing to
-    ``(nlev, 1)``.
+    Previously a duck-typed ``SimpleNamespace``; now the first-class
+    :class:`jcm.column_coordinates.ColumnCoordinates`, which implements
+    the same consumed surface (``vertical``, ``nodal_shape``,
+    ``horizontal.{latitudes, longitudes, nodal_shape, nodal_axes}``)
+    with a type to test against and explanatory errors for spectral
+    attributes a column cannot provide.
     """
-    nlev = _vertical_nlev(vertical)
-    lat_rad = jnp.asarray([float(np.deg2rad(lat_deg))])
-    lon_rad = jnp.asarray([float(np.deg2rad(lon_deg))])
-    horizontal = SimpleNamespace(
-        nodal_shape=(1, 1),
-        latitudes=lat_rad,
-        longitudes=lon_rad,
-        # ``nodal_axes`` returns (lon, sin(lat)) by convention; included so
-        # any helper that touches it on a stub coord still works.
-        nodal_axes=(lon_rad, jnp.sin(lat_rad)),
-    )
-    return SimpleNamespace(
-        horizontal=horizontal,
-        vertical=vertical,
-        nodal_shape=(nlev, 1, 1),
+    return column_coordinates.ColumnCoordinates.at_location(
+        vertical, lat_deg, lon_deg
     )
 
 
@@ -172,6 +154,32 @@ def _squeeze_tendency(tend: PhysicsTendency) -> PhysicsTendency:
     return type(tend)(**args)
 
 
+def select_column(states, ds, lat_deg: float, lon_deg: float):
+    """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
+
+    The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
+    JCM run that wrote it; pick by nearest neighbour so users can give
+    physical degrees rather than grid indices.
+    """
+    import numpy as np
+
+    lat = np.asarray(ds["lat"].values)
+    lon = np.asarray(ds["lon"].values)
+    i_lat = int(np.argmin(np.abs(lat - lat_deg)))
+    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
+
+    def slice_field(arr):
+        # JCM xarray output is laid out (time, level, lon, lat) for column
+        # variables and (time, lon, lat) for surface scalars.
+        if arr.ndim == 4:
+            return arr[:, :, i_lon, i_lat]
+        if arr.ndim == 3:
+            return arr[:, i_lon, i_lat]
+        return arr
+
+    return tree_map(slice_field, states), (i_lon, i_lat, float(lat[i_lat]), float(lon[i_lon]))
+
+
 class SingleColumnModel:
     """Evolve physics tracers for one column at one ``(lat, lon)`` location.
 
@@ -207,19 +215,27 @@ class SingleColumnModel:
         calendar: Calendar string (``"365_day"`` or ``"gregorian"``) used for
             the date/forcing selection.
         apply_tracer_tendencies: When ``False`` tracers are reported
-            diagnostically but not advanced.
+            diagnostically but not advanced — except any named in
+            ``free_evolve``, which still evolve. Set it ``False`` and list the
+            tracers of interest to hold the column's other fields fixed: a
+            prescribed-state column has no ascent, so a seeded ``qc`` rains out
+            within hours and never re-forms, and any cloud-mediated aerosol
+            sink then goes untested. Prescribing the cloud and freeing the
+            aerosol is the configuration that tests one.
         relaxation_timescales: Optional ``{var_name: tau_seconds}`` mapping.
             Listed prognostic variables (``u_wind``, ``v_wind``,
             ``temperature``, ``specific_humidity``) are nudged toward the
             prescribed state with timescale ``tau`` while still receiving
             their physics tendency.
-        free_evolve: Optional tuple of prognostic-variable names that evolve
-            under their physics tendency alone — no nudging toward the
-            prescribed state. This is what turns the SCM into a free-running
-            single-column model: e.g. ``free_evolve=("temperature",)`` lets
-            temperature seek radiative-convective equilibrium. A variable may
-            be in ``free_evolve`` *or* ``relaxation_timescales`` but not both
-            (free evolution is just relaxation with no nudging term).
+        free_evolve: Optional tuple of names that evolve under their physics
+            tendency alone — no nudging toward the prescribed state. Accepts
+            both prognostic variables and tracers. For a prognostic, e.g.
+            ``free_evolve=("temperature",)`` lets temperature seek
+            radiative-convective equilibrium; a variable may be in
+            ``free_evolve`` *or* ``relaxation_timescales`` but not both (free
+            evolution is just relaxation with no nudging term). For a tracer it
+            only has an effect alongside ``apply_tracer_tendencies=False``,
+            where it exempts that tracer from being held fixed.
         state_closure: Optional ``f(state, forcing) -> state`` applied to the
             assembled column *each step, before physics*. Use it to re-derive
             diagnostic fields from the freely evolving prognostics so the
@@ -270,8 +286,13 @@ class SingleColumnModel:
                 "relaxation_timescales; a variable is either nudged or free, "
                 "not both."
             )
+        # ``free_evolve`` spans prognostics and tracers; only the prognostic
+        # ones take part in the nudged/free integrator below. Which names are
+        # tracers is not known until ``run`` sees the column, so the split
+        # happens there.
         self._evolving_timescales: dict[str, float | None] = {
-            **{name: None for name in self.free_evolve},
+            **{name: None for name in self.free_evolve
+               if name in _PROGNOSTIC_VARS},
             **self.relaxation_timescales,
         }
 
@@ -320,6 +341,7 @@ class SingleColumnModel:
         forcing: ForcingData,
         apply_tendencies: bool,
         tracer_names: tuple[str, ...],
+        free_tracers: tuple[str, ...],
         evolving_var_params: tuple[tuple[str, float | None], ...],
         state_closure: Callable | None,
         forcing_steps: ForcingData | None = None,
@@ -364,16 +386,17 @@ class SingleColumnModel:
             )
             tendencies = _squeeze_tendency(tendencies_grid)
 
-            if apply_tendencies:
-                updated_tracers = {}
-                for name in tracer_names:
-                    tracer = tracers[name]
-                    tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
-                    updated_tracers[name] = jnp.maximum(
-                        tracer + dt_seconds * tracer_tend, 0.0,
-                    )
-            else:
-                updated_tracers = tracers
+            updated_tracers = {}
+            for name in tracer_names:
+                tracer = tracers[name]
+                if not (apply_tendencies or name in free_tracers):
+                    # Held at the value the column prescribes.
+                    updated_tracers[name] = tracer
+                    continue
+                tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
+                updated_tracers[name] = jnp.maximum(
+                    tracer + dt_seconds * tracer_tend, 0.0,
+                )
 
             updated_evolving_vars = {}
             for name, tau in evolving_var_params:
@@ -488,10 +511,23 @@ class SingleColumnModel:
         if times is None:
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
 
+        # Names in free_evolve that are neither prognostics nor tracers of this
+        # column are a typo, not a silent no-op.
+        free_tracers = tuple(n for n in self.free_evolve if n in initial_tracers)
+        unknown = sorted(set(self.free_evolve) - set(initial_tracers)
+                         - set(_PROGNOSTIC_VARS))
+        if unknown:
+            raise ValueError(
+                f"free_evolve names {unknown} are neither prognostic variables "
+                f"{sorted(_PROGNOSTIC_VARS)} nor tracers of this column "
+                f"({sorted(initial_tracers)})"
+            )
+
         step_fn = self._make_step_fn(
             forcing=forcing,
             apply_tendencies=self.apply_tracer_tendencies,
             tracer_names=tuple(initial_tracers.keys()),
+            free_tracers=free_tracers,
             evolving_var_params=evolving_var_params,
             state_closure=self.state_closure,
             forcing_steps=forcing_steps,

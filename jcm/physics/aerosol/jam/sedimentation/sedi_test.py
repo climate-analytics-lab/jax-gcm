@@ -14,17 +14,24 @@ from jcm.physics.aerosol.jam.sedimentation.sedi_term import (
 
 
 class StokesVelocityTest(unittest.TestCase):
+    # A monodisperse mode (sigma = 1) reduces the moment weighting to 1, so
+    # these shape checks isolate the single-particle physics.
+    MONO = dict(geom_std_dev=1.0, moment=0)
+
     def test_larger_particles_fall_faster(self):
         t = jnp.full((1,), 280.0)
         p = jnp.full((1,), 9.0e4)
-        v_small = stokes_velocity(jnp.full((1,), 0.05e-6), jnp.full((1,), 1800.0), t, p)
-        v_big = stokes_velocity(jnp.full((1,), 2.0e-6), jnp.full((1,), 1800.0), t, p)
+        v_small = stokes_velocity(jnp.full((1,), 0.05e-6), jnp.full((1,), 1800.0), t, p,
+                                  **self.MONO)
+        v_big = stokes_velocity(jnp.full((1,), 2.0e-6), jnp.full((1,), 1800.0), t, p,
+                                **self.MONO)
         self.assertGreater(float(v_big[0]), float(v_small[0]))
 
     def test_velocity_positive_and_finite(self):
         t = jnp.full((3, 2), 270.0)
         p = jnp.full((3, 2), 8.0e4)
-        v = stokes_velocity(jnp.full((3, 2), 1.0e-6), jnp.full((3, 2), 2000.0), t, p)
+        v = stokes_velocity(jnp.full((3, 2), 1.0e-6), jnp.full((3, 2), 2000.0), t, p,
+                            **self.MONO)
         self.assertTrue(bool(jnp.all(v > 0)))
         self.assertTrue(np.all(np.isfinite(np.asarray(v))))
 
@@ -32,9 +39,64 @@ class StokesVelocityTest(unittest.TestCase):
         # 1 µm radius, 2600 kg/m³ → order 1e-4..1e-3 m/s.
         v = stokes_velocity(
             jnp.array([1.0e-6]), jnp.array([2600.0]),
-            jnp.array([288.0]), jnp.array([1.0e5]),
+            jnp.array([288.0]), jnp.array([1.0e5]), **self.MONO,
         )
         self.assertTrue(1e-5 < float(v[0]) < 1e-2)
+
+    def test_matches_seinfeld_pandis_single_particle(self):
+        """Monodisperse velocities match Seinfeld & Pandis Table 9.5.
+
+        Unit-density spheres at 1 atm / 298 K. This pins the single-particle
+        physics (slip correction, viscosity, mean free path) independently of
+        the lognormal weighting below.
+        """
+        for diameter_um, expected in ((0.1, 8.6e-7), (1.0, 3.5e-5), (10.0, 3.1e-3)):
+            v = stokes_velocity(
+                jnp.array([diameter_um * 0.5e-6]), jnp.array([1000.0]),
+                jnp.array([298.0]), jnp.array([101325.0]), **self.MONO,
+            )
+            self.assertAlmostEqual(float(v[0]) / expected, 1.0, delta=0.05,
+                                   msg=f"D = {diameter_um} um")
+
+    def test_mass_settles_faster_than_number(self):
+        """Mass rides the coarse tail of the mode, so it settles faster.
+
+        For v proportional to r^2 the ratio is exp(6 ln^2 sigma) in the
+        continuum limit; the slip correction is weaker at the larger
+        mass-median radius, so the realised ratio is somewhat smaller.
+        """
+        args = (jnp.array([0.055e-6]), jnp.array([1770.0]),
+                jnp.array([288.0]), jnp.array([1.0e5]))
+        v_num = stokes_velocity(*args, geom_std_dev=1.8, moment=0)
+        v_mass = stokes_velocity(*args, geom_std_dev=1.8, moment=3)
+        ratio = float(v_mass[0] / v_num[0])
+        self.assertGreater(ratio, 3.0)
+        self.assertLess(ratio, np.exp(6 * np.log(1.8) ** 2))
+
+    def test_matches_cam_modal_aero_depvel_part(self):
+        """Reproduce CAM's bulk settling velocity for the accumulation mode.
+
+        Reference values from ``modal_aero_depvel_part``
+        (ESCOMP/CAM cam_development, ``aero_model.F90:1575-1596``) evaluated
+        for MAM4 accumulation: dg = 0.11 um, sigma = 1.8, rho = 1770 kg/m3.
+        CAM's slightly different Sutherland constants keep this to ~1%.
+        """
+        cases = (
+            # (pressure Pa, temperature K, moment, CAM v_grav m/s)
+            (1.0e5, 288.0, 0, 3.45e-6),
+            (1.0e5, 288.0, 3, 1.58e-5),
+            (2.0e4, 220.0, 0, 1.20e-5),
+            (2.0e4, 220.0, 3, 4.00e-5),
+        )
+        for pressure, temperature, moment, expected in cases:
+            v = stokes_velocity(
+                jnp.array([0.055e-6]), jnp.array([1770.0]),
+                jnp.array([temperature]), jnp.array([pressure]),
+                geom_std_dev=1.8, moment=moment,
+            )
+            self.assertAlmostEqual(
+                float(v[0]) / expected, 1.0, delta=0.03,
+                msg=f"p={pressure} T={temperature} moment={moment}")
 
     def test_wet_radius_capped(self):
         # HAMMOZ caps the settling diameter at 50 µm (25 µm radius), so a
@@ -42,9 +104,9 @@ class StokesVelocityTest(unittest.TestCase):
         # velocity at 25 µm and 1 mm must be identical (both clamped to 25 µm),
         # and strictly above a sub-cap radius.
         t, p, rho = jnp.array([280.0]), jnp.array([9.0e4]), jnp.array([1800.0])
-        v_cap = stokes_velocity(jnp.array([25.0e-6]), rho, t, p)
-        v_huge = stokes_velocity(jnp.array([1.0e-3]), rho, t, p)
-        v_sub = stokes_velocity(jnp.array([10.0e-6]), rho, t, p)
+        v_cap = stokes_velocity(jnp.array([25.0e-6]), rho, t, p, **self.MONO)
+        v_huge = stokes_velocity(jnp.array([1.0e-3]), rho, t, p, **self.MONO)
+        v_sub = stokes_velocity(jnp.array([10.0e-6]), rho, t, p, **self.MONO)
         np.testing.assert_allclose(float(v_huge[0]), float(v_cap[0]), rtol=1e-6)
         self.assertGreater(float(v_cap[0]), float(v_sub[0]))
 

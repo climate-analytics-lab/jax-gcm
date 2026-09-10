@@ -32,8 +32,17 @@ def _moist_tropical_column(nlev=20, t_sfc=300.0):
     return t, q, p, jnp.abs(dz), rho
 
 
-def _precip(params, t_sfc=300.0, supply=2e-5):
+def _precip(params, t_sfc=300.0, supply=2e-5, convergence=0.5):
     t, q, p, dz, rho = _moist_tropical_column(t_sfc=t_sfc)
+    # Resolved moisture convergence of ``convergence``*supply beyond the
+    # surface flux: since #699 the deep/shallow split is ECHAM's zdqcv
+    # test, so a column that should exercise the DEEP path (entrpen, the
+    # Nordeng closure) has to be fed convergence the way the atmosphere
+    # would feed it — a CAPE value no longer selects deep by itself.
+    nlev = t.shape[0]
+    sl = slice(nlev // 2, nlev - 4)
+    conv = jnp.zeros(nlev).at[sl].set(
+        convergence * supply / jnp.sum(rho[sl] * dz[sl]))
     tend, state = tiedtke_nordeng_convection(
         t, q, p, dz, rho,
         jnp.zeros_like(t), jnp.zeros_like(t),
@@ -41,6 +50,7 @@ def _precip(params, t_sfc=300.0, supply=2e-5):
         dt=900.0, config=params,
         moisture_supply=jnp.asarray(supply),
         land_fraction=jnp.asarray(0.0),
+        qte_dynamics=conv,
     )
     return tend.precip_conv
 

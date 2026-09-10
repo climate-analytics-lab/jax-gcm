@@ -1,0 +1,7 @@
+# T106 / 95 hybrid levels — classic ECHAM high-resolution truncation
+# (320 lon x 160 lat) on the middle-atmosphere L47 grid. Fallback from
+# T127L47 when the latter exceeds single-GPU memory.
+vertical: hybrid
+layers: 47
+spectral_truncation: 106
+spmd_mesh: null

@@ -6,7 +6,10 @@ Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 import unittest
 import jax.numpy as jnp
 import numpy as np
-from jcm.forcing import ForcingData, _fixed_ssts, default_forcing
+import pytest
+from jcm.forcing import (
+    ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
+)
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 
@@ -1075,6 +1078,508 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(
             sliced.oxidant_vmr["oh"].shape, (5, self.NLON, self.NLAT)
         )
+
+
+class TestByDateInterp(unittest.TestCase):
+    """BY_DATE_INTERP: linear interpolation between transient samples (#610)."""
+
+    def _date(self, iso):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        return DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(iso)),
+            calendar='gregorian',
+        )
+
+    def _series(self, isodates, values):
+        import jax_datetime as jdt
+
+        from jcm.date import absolute_seconds_since_epoch
+        from jcm.forcing import BY_DATE_INTERP, make_time_series
+        time_seconds = jnp.asarray([
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
+            for s in isodates
+        ])
+        return make_time_series(jnp.asarray(values), time_seconds,
+                                align_mode=BY_DATE_INTERP)
+
+    def test_midpoint_interpolates_linearly(self):
+        from jcm.forcing import ForcingData
+        ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        got = float(forcing.select(self._date('2000-01-02'),
+                                   calendar='gregorian').co2_vmr)
+        self.assertAlmostEqual(got, 301.0, places=3)
+
+    def test_exact_sample_and_end_clamps(self):
+        from jcm.forcing import ForcingData
+        ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        for iso, expected in [('2000-01-01', 300.0),   # exact sample
+                              ('1999-06-01', 300.0),   # before axis -> clamp
+                              ('2000-02-01', 302.0)]:  # after axis -> clamp
+            got = float(forcing.select(self._date(iso),
+                                       calendar='gregorian').co2_vmr)
+            self.assertAlmostEqual(got, expected, places=3, msg=iso)
+
+    def test_by_date_mode_stays_piecewise_constant(self):
+        # The interp branch must not leak into plain BY_DATE leaves.
+        from jcm.date import absolute_seconds_since_epoch
+        from jcm.forcing import BY_DATE, ForcingData, make_time_series
+        import jax_datetime as jdt
+        time_seconds = jnp.asarray([
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
+            for s in ['2000-01-01', '2000-01-03']
+        ])
+        ts = make_time_series(jnp.asarray([300.0, 302.0]), time_seconds,
+                              align_mode=BY_DATE)
+        forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
+        got = float(forcing.select(self._date('2000-01-02'),
+                                   calendar='gregorian').co2_vmr)
+        self.assertAlmostEqual(got, 300.0, places=3)
+
+
+class TestYearlyForcingFiles(unittest.TestCase):
+    """Multi-file (yearly-bundle) loading through ``from_file`` (#610)."""
+
+    VALID_SHAPE = (96, 48)  # T31
+
+    def _yearly_ds(self, year, sst_value):
+        import pandas as pd
+        import xarray as xr
+        # 12 mid-month timestamps — the AMIP yearly-bundle layout.
+        times = pd.date_range(f"{year}-01-01", periods=12, freq="MS") \
+            + pd.Timedelta(days=14)
+        shape = (*self.VALID_SHAPE, 12)
+        return xr.Dataset(
+            data_vars={
+                'stl': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'icec': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'sst': (['lon', 'lat', 'time'],
+                        np.full(shape, float(sst_value))),
+                'alb': (['lon', 'lat'], np.zeros(self.VALID_SHAPE)),
+                'soilw_am': (['lon', 'lat', 'time'], np.zeros(shape)),
+                'snowc': (['lon', 'lat', 'time'], np.zeros(shape)),
+            },
+            coords={'time': times},
+        )
+
+    def test_list_of_yearly_files_concatenates_by_date(self):
+        import os
+        import tempfile
+
+        from jcm.forcing import BY_DATE_INTERP, ForcingData
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for year, sst in [(1980, 290.0), (1981, 292.0)]:
+                p = os.path.join(d, f"{year}.nc")
+                self._yearly_ds(year, sst).to_netcdf(p)
+                paths.append(p)
+            forcing = ForcingData.from_file(
+                paths, align_mode="by_date_interp", validate=False)
+        sst_ts = forcing.sea_surface_temperature
+        self.assertEqual(sst_ts.values.shape, (24, *self.VALID_SHAPE))
+        self.assertEqual(int(sst_ts.align_mode), BY_DATE_INTERP)
+        # Mid-1981 lands on the second year's constant value.
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime('1981-07-02')),
+            calendar='gregorian')
+        sliced = forcing.select(date, calendar='gregorian')
+        self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, 292.0))
+
+    def test_single_year_interp_keeps_real_dates(self):
+        # A lone 12-step transient file must NOT be daily-interpolated as a
+        # climatology when by_date_interp is forced: real timestamps and
+        # length-12 axis survive.
+        import os
+        import tempfile
+
+        from jcm.forcing import BY_DATE_INTERP, ForcingData
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "1980.nc")
+            self._yearly_ds(1980, 290.0).to_netcdf(p)
+            forcing = ForcingData.from_file(
+                p, align_mode="by_date_interp", validate=False)
+        sst_ts = forcing.sea_surface_temperature
+        self.assertEqual(sst_ts.values.shape[0], 12)
+        self.assertEqual(int(sst_ts.align_mode), BY_DATE_INTERP)
+
+
+class TestExpandYearlyFiles(unittest.TestCase):
+    """{year} pattern expansion for yearly forcing bundles (#610)."""
+
+    def test_pattern_expands_inclusive_range(self):
+        out = expand_yearly_files("hf://bundles/t63/forcing_amip/{year}.nc",
+                                  [1979, 1981])
+        self.assertEqual(out, [
+            "hf://bundles/t63/forcing_amip/1979.nc",
+            "hf://bundles/t63/forcing_amip/1980.nc",
+            "hf://bundles/t63/forcing_amip/1981.nc",
+        ])
+
+    def test_available_years_pads_one_each_side(self):
+        # Mid-month samples need a bracketing December/January from the
+        # neighbouring years, else by_date_interp clamps at the run
+        # boundaries (Codex P1 on #611).
+        out = expand_yearly_files("/x/{year}.nc", [1979, 1980],
+                                  available=[1870, 2022])
+        self.assertEqual(out, ["/x/1978.nc", "/x/1979.nc",
+                               "/x/1980.nc", "/x/1981.nc"])
+
+    def test_available_years_clips_at_coverage_edges(self):
+        self.assertEqual(
+            expand_yearly_files("/x/{year}.nc", [1870, 1871],
+                                available=[1870, 2022])[0],
+            "/x/1870.nc")
+        self.assertEqual(
+            expand_yearly_files("/x/{year}.nc", [2021, 2022],
+                                available=[1870, 2022])[-1],
+            "/x/2022.nc")
+
+    def test_plain_paths_and_none_pass_through(self):
+        self.assertEqual(expand_yearly_files("/x/forcing.nc", [1979, 1981]),
+                         "/x/forcing.nc")
+        self.assertIsNone(expand_yearly_files(None, [1979, 1981]))
+        self.assertEqual(expand_yearly_files("/x/forcing.nc", None),
+                         "/x/forcing.nc")
+
+    def test_pattern_without_years_raises(self):
+        with self.assertRaisesRegex(ValueError, "year range"):
+            expand_yearly_files("/x/forcing_{year}.nc", None)
+
+    def test_reversed_range_raises(self):
+        with self.assertRaisesRegex(ValueError, "reversed"):
+            expand_yearly_files("/x/forcing_{year}.nc", [1981, 1979])
+
+
+class TestValidateEmissionsGrid(unittest.TestCase):
+    """The public emissions horizontal-grid guard (promoted from runners, #640)."""
+
+    def _coords(self, nlon=8, nlat=4):
+        import types
+        return types.SimpleNamespace(
+            horizontal=types.SimpleNamespace(nodal_shape=(nlon, nlat)))
+
+    def test_matching_grid_passes(self):
+        from jcm.forcing import validate_emissions_grid
+        coords = self._coords()
+        mapping = {"emis_surface_combustion_bc": np.zeros((12, 8, 4))}
+        validate_emissions_grid(mapping, coords, "emis.nc")   # no raise
+
+    def test_mismatched_grid_raises(self):
+        from jcm.forcing import validate_emissions_grid
+        coords = self._coords()
+        mapping = {"emis_surface_combustion_bc": np.zeros((12, 10, 4))}
+        with self.assertRaisesRegex(ValueError, "model grid"):
+            validate_emissions_grid(mapping, coords, "emis.nc")
+
+
+class TestValidateOxidantLevels(unittest.TestCase):
+    """The public oxidant hybrid-coefficient guard (promoted from runners, #640)."""
+
+    def _coords(self):
+        import types
+
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+        a = np.array([0.0, 200.0, 5000.0, 20000.0, 0.0])
+        b = np.array([0.0, 0.02, 0.2, 0.6, 1.0])
+        return types.SimpleNamespace(
+            vertical=HybridCoordinates(a_boundaries=a, b_boundaries=b))
+
+    def _matching_ds(self, coords):
+        import xarray as xr
+        a = np.asarray(coords.vertical.a_boundaries, dtype=float)
+        b = np.asarray(coords.vertical.b_boundaries, dtype=float)
+        a_full = 0.5 * (a[:-1] + a[1:])
+        b_full = 0.5 * (b[:-1] + b[1:])
+        return xr.Dataset({"hyam": (("mlev",), a_full),
+                           "hybm": (("mlev",), b_full)}), a_full, b_full
+
+    def test_matching_hybrid_coefficients_pass(self):
+        from jcm.forcing import validate_oxidant_levels
+        coords = self._coords()
+        ds, _, _ = self._matching_ds(coords)
+        validate_oxidant_levels(ds, coords, "ox.nc")          # no raise
+
+    def test_mismatched_hybrid_coefficients_raise(self):
+        from jcm.forcing import validate_oxidant_levels
+        coords = self._coords()
+        ds, _, b_full = self._matching_ds(coords)
+        ds["hybm"] = (("mlev",), b_full + 0.1)                # shift midpoints
+        with self.assertRaisesRegex(ValueError, "hyam/hybm"):
+            validate_oxidant_levels(ds, coords, "ox.nc")
+
+
+class TestReadMacv2Weights(unittest.TestCase):
+    """The reusable MACv2.0-SP time-weight loader (issue #680 item 2)."""
+
+    @staticmethod
+    def _synthetic_macv2(nplume=9, years=(2013, 2014, 2015, 2016, 2017),
+                         nweek=52, nfeat=2, fill_last=True):
+        import xarray as xr
+
+        nyear = len(years)
+        yw = np.arange(nplume * nyear, dtype=float).reshape(nplume, nyear)
+        if fill_last:
+            # Mirror the v1 file: the final year(s) are NaN _FillValue.
+            yw[:, -1] = np.nan
+        ac = np.arange(nplume * nweek * nfeat,
+                       dtype=float).reshape(nplume, nweek, nfeat)
+        return xr.Dataset(
+            {"year_weight": (("plume", "years"), yw),
+             "ann_cycle": (("plume", "week", "feature"), ac)},
+            coords={"years": np.asarray(years)},
+        ), yw, ac
+
+    def test_shapes_orientation_and_align_modes(self):
+        from jcm.forcing import BY_DATE, WRAP_YEAR, read_macv2_weights
+        ds, _, ac = self._synthetic_macv2()
+        yw_ts, ac_ts = read_macv2_weights(ds)
+        # year_weight -> (year, plume), BY_DATE so the model tracks the year.
+        self.assertEqual(yw_ts.values.shape, (5, 9))
+        self.assertEqual(int(yw_ts.align_mode), BY_DATE)
+        # ann_cycle -> (week, feature, plume), WRAP_YEAR (repeats yearly).
+        self.assertEqual(ac_ts.values.shape, (52, 2, 9))
+        self.assertEqual(int(ac_ts.align_mode), WRAP_YEAR)
+        # The (plume, week, feature) -> (week, feature, plume) transpose holds.
+        np.testing.assert_allclose(np.asarray(ac_ts.values)[0, 0, :],
+                                   ac[:, 0, 0])
+
+    def test_forward_fills_nan_fill_years(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2()
+        yw_ts, _ = read_macv2_weights(ds)
+        vals = np.asarray(yw_ts.values)
+        self.assertFalse(np.isnan(vals).any())
+        # The 2017 fill row reuses the last valid year (2016).
+        np.testing.assert_allclose(vals[-1], vals[-2])
+
+    def test_time_axis_is_year_starts_since_epoch(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2(years=(1970, 1971))
+        yw_ts, _ = read_macv2_weights(ds)
+        # 1970-01-01 is MODEL_EPOCH -> 0 s; 1971-01-01 is 365 days later.
+        np.testing.assert_allclose(np.asarray(yw_ts.time_seconds),
+                                   [0.0, 365 * 86400.0])
+
+
+def _t63l47_coords():
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=get_echam_levels(47),
+                      spectral_truncation=63)
+
+
+def _t42l8_sigma_coords():
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=SigmaCoordinates.equidistant(8),
+                      spectral_truncation=42)
+
+
+class TestForcingFromBundles(unittest.TestCase):
+    """The Python door ``ForcingData.from_bundles`` (#751 Part 4).
+
+    It composes the canonical mirror-bundle config and routes it through the
+    SAME ``jcm.runners.build_forcing`` engine the CLI uses, so the flagship
+    proves the two doors agree pytree-for-pytree on a JAM T63L47 configuration.
+    """
+
+    @staticmethod
+    def _patch_readers(shape):
+        # Deterministic, network-free stand-ins so BOTH doors traverse the same
+        # patched engine and any difference is a config-composition defect. The
+        # readers return FIXED objects (identity-stable across both builds).
+        from unittest import mock
+
+        import xarray as xr
+        from jcm import forcing_assembly as fa
+        from jcm.forcing import ForcingData
+
+        base = ForcingData.zeros(shape)
+        anthro = {"emis_so2_ant": jnp.ones(shape)}
+        dms = jnp.ones(shape)
+        dust = jnp.ones(shape)
+        oxi = {"oh": jnp.ones((1, *shape))}
+        # The resolvers live in the forcing-side engine, which BOTH doors run
+        # through — one patch there reaches each build identically.
+        return [
+            mock.patch.object(fa, "_resolve_data_path",
+                              side_effect=lambda p: p),
+            mock.patch.object(fa, "_resolve_auto_ozone",
+                              return_value=None),
+            mock.patch.object(ForcingData, "from_file", return_value=base),
+            mock.patch("xarray.open_dataset", return_value=xr.Dataset()),
+            mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                       return_value=anthro),
+            mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                       return_value=None),
+            mock.patch("jcm.forcing.validate_emissions_grid"),
+            mock.patch("jcm.forcing.read_dms_seawater", return_value=dms),
+            mock.patch("jcm.forcing.read_dust_source", return_value=dust),
+            mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
+            mock.patch("jcm.forcing.validate_oxidant_levels"),
+        ]
+
+    def test_jam_pd_equivalent_to_build_forcing(self):
+        import contextlib
+
+        import jax
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        # The equivalent composed cfg: forcing=from_file + the present-day
+        # surface bundle + the auto defaults, JAM active.
+        ref_cfg = OmegaConf.create({
+            "forcing": {"kind": "from_file",
+                        "file": "hf://bundles/t63/forcing_pd.nc",
+                        "ozone_file": "auto", "emissions_file": "auto",
+                        "dms_file": "auto", "dust_file": "auto",
+                        "oxidants_file": "auto"},
+            "physics": {"aerosol_module": "jam"}})
+
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_readers(shape):
+                stack.enter_context(p)
+            door = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+            ref = runners.build_forcing(ref_cfg, coords)
+
+        la = jax.tree_util.tree_leaves(door)
+        lb = jax.tree_util.tree_leaves(ref)
+        self.assertEqual(len(la), len(lb))
+        for x, y in zip(la, lb):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    @staticmethod
+    def _capture_forcing_cfg(shape):
+        # Intercept the composed cfg reaching the shared engine so a test can
+        # assert what ancillary epoch from_bundles pinned, without needing the
+        # bundle files. Returns (patches, captured) where captured["forcing"] is
+        # the resolved forcing dict once from_bundles has run.
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        captured: dict = {}
+
+        def _capture(cfg, coords, **kw):
+            captured["forcing"] = OmegaConf.to_container(
+                cfg.forcing, resolve=True)
+            return ForcingData.zeros(shape)
+
+        # from_bundles drives the forcing-side engine directly (#751):
+        # intercept it there, on the PRE-resolution composed cfg, so the
+        # ancillary-epoch pinning is observable.
+        return [
+            mock.patch.object(fa, "build_forcing", side_effect=_capture),
+            mock.patch.object(runners, "warn_emission_config_traps"),
+        ], captured
+
+    def test_pi_surface_composes_pi_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pi")
+        fc = captured["forcing"]
+        # A PI surface pins the PI ozone/emissions/oxidants bundles...
+        self.assertIn("ozone_pi", fc["ozone_file"])
+        self.assertIn("emissions_pi", fc["emissions_file"])
+        self.assertIn("oxidants_pi", fc["oxidants_file"])
+        # ...while the epoch-free dms/dust stay on "auto".
+        self.assertEqual(fc["dms_file"], "auto")
+        self.assertEqual(fc["dust_file"], "auto")
+
+    def test_pd_surface_keeps_auto_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+        fc = captured["forcing"]
+        for key in ("ozone_file", "emissions_file", "oxidants_file",
+                    "dms_file", "dust_file"):
+            self.assertEqual(fc[key], "auto")
+
+    def test_ancillary_epoch_table_covers_every_surface(self):
+        # The pairing table must name a choice for every valid surface (the four
+        # named surfaces + None), so nothing is left implicit.
+        from jcm import forcing as F
+        self.assertEqual(set(F._SURFACE_ANCILLARY_EPOCH),
+                         {None, *F._SURFACE_PRODUCTS})
+
+    def test_macv2sp_attaches_packaged_weights(self):
+        # F2: from_bundles(aerosol="macv2sp") wires the repo-packaged SPv2.1 file
+        # into forcing.macv2_file, so build_forcing attaches the real (non-all-
+        # ones) weights spanning the file's 1850-2023 valid range instead of the
+        # all-ones default. No mirror fetch, no staging gate.
+        coords = _t42l8_sigma_coords()  # weights are grid-independent
+        forcing = ForcingData.from_bundles(coords, aerosol="macv2sp",
+                                           surface=None)
+        yw = np.asarray(forcing.aerosol_year_weight.values)
+        self.assertFalse(np.allclose(yw, 1.0))
+        # The packaged file carries 251 annual samples (1850..2100).
+        self.assertEqual(yw.shape[0], 251)
+
+    def test_invalid_arguments_raise(self):
+        coords = _t42l8_sigma_coords()
+        with self.assertRaisesRegex(ValueError, "aerosol="):
+            ForcingData.from_bundles(coords, aerosol="bogus")
+        with self.assertRaisesRegex(ValueError, "surface="):
+            ForcingData.from_bundles(coords, surface="bogus")
+        with self.assertRaisesRegex(ValueError, "transient"):
+            ForcingData.from_bundles(coords, surface="amip")  # years missing
+
+
+class TestForcingFromBundlesWarnings:
+    """The emission-family config traps fire on the Python door too (#751)."""
+
+    @pytest.fixture(autouse=True)
+    def _audible_jcm_logger(self):
+        import logging
+        jcm_logger = logging.getLogger("jcm")
+        prev = jcm_logger.level
+        jcm_logger.setLevel(logging.WARNING)
+        try:
+            yield
+        finally:
+            jcm_logger.setLevel(prev)
+
+    def test_zero_emission_warns_on_unpublished_grid(self, caplog):
+        import logging
+
+        from jcm.forcing import ForcingData
+        coords = _t42l8_sigma_coords()
+        # An unpublished grid nulls every auto emission key with no fetch, so the
+        # JAM baseline is sea-salt-only — the same degradation + warning the CLI
+        # door fires (surface=None keeps the build offline).
+        with caplog.at_level(logging.WARNING, logger="jcm.runners"):
+            ForcingData.from_bundles(coords, aerosol="jam", surface=None)
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "t42" in caplog.text
 
 
 if __name__ == '__main__':

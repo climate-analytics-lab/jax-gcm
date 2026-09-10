@@ -46,8 +46,18 @@ module or directly::
        run.total_time=30 run.save_interval=1
    python -m jcm.main physics=echam +physics.terms.tiedtke_convection.params.entrpen=4e-4
    python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid run=longrun
+   python -m jcm.main physics=echam-emulated-2m grid=echam_t63_l47_hybrid
    python -m jcm.main run.mode=scm run.state_file=path/to/state.nc \
        run.column.lat_deg=0 run.column.lon_deg=180
+
+The state-file modes (``run.mode=scm`` and ``run.mode=prescribed``) read a
+netCDF written by an earlier run. Both the vertical orientation and the tracer
+list are handled for you: output files are surface-first and are flipped into
+the top-first physics frame on load, and with ``run.tracer_vars`` unset (the
+default) every tracer the configured physics declares — ``qc``/``qi`` for the
+one-moment cloud scheme, plus ``qnc``/``qni`` for the two-moment one — is
+loaded from the file when it carries it. Pass an explicit mapping to rename
+variables, or ``run.tracer_vars={}`` to load none.
 
 Inspect the available config groups and the fully-composed config::
 
@@ -56,7 +66,73 @@ Inspect the available config groups and the fully-composed config::
    python -m jcm.main --cfg job grid=echam_t63_l47_hybrid       # with overrides
 
 Config groups live under ``jcm/config/``: ``physics``, ``grid``, ``run``,
-``init``, ``terrain``, ``forcing``, ``diffusion``.
+``init``, ``terrain``, ``forcing``, ``diffusion``, ``configuration``.
+
+Validated configurations — the ``configuration`` group
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Composing a run by hand (``physics=… grid=… init=… run=… terrain=… forcing=…``)
+is powerful but easy to get subtly wrong — an isothermal cold start with no
+sponge, for instance, goes NaN within days at L47. The ``configuration`` group
+promotes each *known-good* combination to a single named composition, so one
+command is one validated configuration::
+
+   python -m jcm.main +configuration=t63-echam-jam     # T63L47 ECHAM + JAM aerosol
+   python -m jcm.main +configuration=speedy-t31        # SPEEDY T31L8 reference
+   python -m jcm.main +configuration=ma-t63-l95        # middle-atmosphere JAM sweep
+
+Note the leading ``+``: a configuration is *added* to the default composition and
+then overrides the physics/grid/init/run/terrain/forcing groups it selects. Each
+``jcm/config/configuration/*.yaml`` carries comments explaining WHY every setting
+is what it is (the dry-JW init, the production sponge, the semi-Lagrangian
+off-centering, the level-matched ozone, …), and is the single source of truth
+for that configuration — ``tools/benchmark.py`` and the release-validation
+matrix compose the very same yaml rather than a private override list. Override
+individual keys on top as usual, e.g.
+``python -m jcm.main +configuration=t63-echam-jam run.total_time=30``. The very
+same recipes are loadable from Python without touching Hydra — see
+:ref:`configurations-from-python` below.
+
+The whole ``jcm/config`` tree is also a **public, packaged** config tree: a
+downstream Hydra app (a coupled Earth-system CLI, say) reaches every jcm group
+through ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole
+validated configuration under one of its own nodes with
+``+configuration@<node>=<name>``. That contract — the public group names, the
+load-bearing ``# @package _global_`` header plus absolute-override recipe style,
+and the group-rename policy (this release renamed the ``experiment`` group to
+``configuration``, so a searchpath user must change ``+experiment@<node>=`` to
+``+configuration@<node>=``) — is documented in
+:doc:`design/packaged_config_tree`.
+
+One run schema — no ``+``/``++`` guesswork for run keys
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every ``run`` group (``default``, ``longrun``, ``smoke``, ``pyses_year``) now
+exposes the **same** complete set of keys. ``run/default.yaml`` is the base
+schema and the others inherit it (``defaults: [default, _self_]``), overriding
+only what they change. So any run key can be set with a plain override on any
+group — ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though
+the old ``longrun`` had no ``checkpoint_path`` key. The rule is simply:
+**``run.<key>=<value>`` always works**; reserve the ``+`` (add-new-key) and
+``++`` (add-or-override) prefixes for keys *outside* the run schema.
+
+Online-aerosol (JAM) inputs default to ``auto``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a prognostic-aerosol package is active (``physics=echam-jam`` and its
+AeroCom variants), the prescribed-emission inputs — ``forcing.emissions_file``,
+``forcing.dms_file``, ``forcing.dust_file`` and ``forcing.oxidants_file`` —
+default to ``auto``. ``auto`` resolves the per-grid present-day bundle from the
+project data mirror for the composed grid (e.g. ``bundles/t63/emissions_pd.nc``)
+at build time, so ``python -m jcm.main +configuration=t63-echam-jam`` composes a
+fully-specified online-aerosol run with no hand-managed emission paths. For any
+non-JAM package these keys resolve to nothing; set an explicit path or ``hf://``
+bundle to override one, or ``null`` to opt out (the runner then warns the run is
+emission-free). ``auto`` always resolves the *present-day* ``*_pd`` bundle, so a
+transient by-date run (``forcing=amip``/``era5``) left on ``auto`` breathes
+present-day aerosol emissions over a historical circulation — the runner warns
+and names the keys; override ``forcing.emissions_file``/``forcing.oxidants_file``
+with year-matched products for a consistent transient run.
 
 Quick Start Examples
 --------------------
@@ -136,6 +212,77 @@ For a more realistic simulation with orography and time-varying boundary conditi
    ds = predictions.to_xarray()
    ds.to_netcdf("output.nc")
 
+Canonical mirror-bundle forcing (``from_bundles``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:meth:`~jcm.forcing.ForcingData.from_bundles` is the Python door onto the same
+data-mirror bundles the CLI's ``auto`` defaults resolve — it composes the whole
+canonical input set for a composition in one call, fetching each per-grid bundle
+into the local Hugging Face cache. For a JAM (prognostic-aerosol) package it
+supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant set;
+a non-JAM package gets surface + ozone only. It routes the composed config
+through the *same* engine :mod:`jcm.runners` uses, so this is exactly the
+``+configuration=t63-echam-jam`` run expressed in Python:
+
+.. code-block:: python
+
+   from jcm.model import Model
+   from jcm.terrain import TerrainData
+   from jcm.forcing import ForcingData
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.physics.echam.echam_levels import get_echam_levels
+   from jcm.initial_states import jw_state
+   from jcm.utils import get_coords
+
+   coords = get_coords(vertical_coords=get_echam_levels(47),
+                       spectral_truncation=63)      # ECHAM T63L47 hybrid
+   physics = echam_physics(aerosol_module="jam")     # JAM prognostic aerosol
+   terrain = TerrainData.from_coords(coords)
+   model = Model(coords=coords, terrain=terrain, physics=physics)
+
+   # Surface (present-day), ozone and the JAM emission/dms/dust/oxidant bundles,
+   # all for the model grid. surface="amip"/"era5" take a transient years=[...]
+   # range; aerosol=None supplies surface + ozone only.
+   forcing = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+
+   predictions = model.run(
+       initial_state=jw_state(model, rh=0.0),
+       forcing=forcing, total_time="1 year", save_interval="1 day",
+   )
+
+Unpublished grids / verticals degrade exactly as the CLI does (``auto`` inputs
+that the mirror does not carry resolve to nothing, with a warning), and
+``aerosol="macv2sp"`` raises a precise error until the MACv2-SP weights are
+staged on the mirror.
+
+.. _configurations-from-python:
+
+The same recipes from Python (``jcm.configurations``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:func:`jcm.configurations.load` is the recipe door: it composes the same
+``jcm/config/configuration/*.yaml`` the CLI's ``+configuration=`` uses — internally,
+with Hydra invisible — and returns built objects. ``model.run(**exp.run_kwargs)``
+reproduces ``python -m jcm.main +configuration=<name>``'s integration (the recipe's
+initial state is already applied — e.g. the dry-JW start for the ECHAM family):
+
+.. code-block:: python
+
+   import jcm.configurations as configurations
+
+   configurations.available()          # {name: one-line summary} for every recipe
+
+   exp = configurations.load("t63-echam-jam")
+   predictions = exp.model.run(**exp.run_kwargs)   # same run as the CLI
+
+   # exp.forcing is the built ForcingData; exp.config is a plain resolved dict
+   # (no DictConfig leaks out). Override any key with Hydra dotted syntax:
+   exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
+
+pySES recipes load only when the optional ``pyses`` backend is installed
+(a clear error otherwise). For forcing alone, reach for
+:meth:`~jcm.forcing.ForcingData.from_bundles` above.
+
 Customizing the Model
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -174,10 +321,13 @@ resolved from a single source of truth:
   itself), the active physics is consulted via
   :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`.
   Physics without a grid-dependent stability limit (ECHAM, Held–Suarez,
-  ...) keep the historical 30-minute default; SPEEDY shortens the step
-  only for high-vertical-level / high-truncation grids where its explicit
-  surface drag would otherwise be unstable (standard 7/8-level SPEEDY
-  runs stay at exactly 30 minutes). See
+  ...) adopt the 12-minute default — the validated ECHAM L47/L95
+  production step, the same value ``run/default.yaml`` uses on the CLI, so
+  both doors resolve one rule. SPEEDY reports its own limit instead: it is
+  capped at the historical 30-min plateau and shortened only for
+  high-vertical-level / high-truncation grids where its explicit surface
+  drag would otherwise be unstable (standard 7/8-level SPEEDY runs stay at
+  exactly 30 minutes). See
   :doc:`design/speedy_variable_levels` for the stability analysis.
 
 **Physics**: Use different physics packages or configurations
@@ -199,6 +349,36 @@ resolved from a single source of truth:
       time_step=30.0,
       physics=physics
    )
+
+Parameters must be set **before** the Model is built, as above. jcm binds
+them into the compiled executable when the physics is first traced
+(``Model._run_from_state`` takes ``self`` as a static jit argument), and
+editing the parameters a live model already holds is unreliable: whether a
+later run sees the edit depends on which of JAX's compilation caches it
+hits, so the results cannot be trusted either way. jcm logs a warning and
+flags ``preds.params`` when it detects that. To sweep a parameter, build a
+Model per value inside a single ``jax.jit``, which makes the rebuild a
+trace-time cost paid once instead of a recompile per iteration::
+
+   @jax.jit
+   def forecast(albsea):
+       p = Parameters.default()
+       p = p.replace(mod_radcon=p.mod_radcon.replace(albsea=albsea))
+       model = Model(coords=coords, physics=speedy_physics(parameters=p))
+       return summarize(model.run(save_interval=0.25, total_time=0.25))
+
+A Model with ``observers=`` needs one extra argument under an outer
+``jit``, because the observers' sampling tables are built on the host from
+the window's start time and that is a tracer there: pass a concrete
+``observer_t0_days``, or, to reuse one compilation across *different*
+windows, pass tables from ``model.prepare_observers(t0_days,
+save_interval, total_time)`` as ``observer_xs``.
+
+**Logging**: ``Model(log_level=...)`` defaults to ``logging.WARNING`` and is
+applied to the ``jcm`` logger rather than the root logger, so jcm's warnings
+about a run stay audible without jcm reconfiguring logging for your
+application. Pass ``logging.CRITICAL`` to quieten it. The Hydra CLI exposes
+the same knob as ``run.log_level`` (also ``WARNING`` by default).
 
 **Dynamical core**: Pass a backend explicitly when you need backend-specific
 configuration. ``Model(coords=...)`` remains the shorthand for constructing
@@ -227,6 +407,9 @@ An explicitly-constructed backend owns the time step: the Model adopts its
 
 **Initial Conditions**: Start from a specific state
 
+The simplest path is to hand :meth:`~jcm.model.Model.run` a
+:class:`~jcm.physics_interface.PhysicsState` you built yourself:
+
 .. code-block:: python
 
    from jcm.physics_interface import PhysicsState
@@ -239,6 +422,62 @@ An explicitly-constructed backend owns the time step: the Model adopts its
        save_interval=1.0,
        total_time=10.0
    )
+
+For the common starting states there are ready-made *state builders* in
+:mod:`jcm.initial_states` — the same ones the CLI's ``init`` config group
+exposes. Each one **returns** a starting state; hand it to
+:meth:`~jcm.model.Model.run` via ``initial_state=``.
+
+.. code-block:: python
+
+   from jcm.model import Model
+   from jcm.terrain import TerrainData
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.initial_states import jw_state
+
+   coords = ...                       # your CoordinateSystem
+   terrain = TerrainData.from_coords(coords)
+   model = Model(coords=coords, terrain=terrain, physics=echam_physics())
+
+   # Jablonowski–Williamson-style lapse-rate atmosphere at 60 % RH,
+   # with surface pressure rebalanced over the orography.
+   predictions = model.run(
+       initial_state=jw_state(model, rh=0.6),
+       total_time=10.0, save_interval=1.0,
+   )
+
+The other builders follow the identical pattern:
+
+* :func:`~jcm.initial_states.balanced_isothermal_state` — a uniform
+  288 K rest state with the same orography-balanced surface pressure; a robust
+  spin-up state for moist physics over real terrain.
+* :func:`~jcm.initial_states.era5_state` ``(coords, date)`` — a ``PhysicsState``
+  seeded from an ERA5 (WeatherBench2) slice at an ISO date, regridded via
+  :mod:`jcm.data.era5` (re-exported here for discoverability).
+* :func:`~jcm.initial_states.checkpoint_state` ``(model, path)`` — a
+  **warm start** from a saved state (e.g. a hosted equilibrated state under
+  ``bundles/<grid>_<levels>/init_states/``). It returns
+  ``(state, physics_carry, donor_days)``; unlike a checkpoint *resume* the
+  donor's elapsed-day count is discarded, so the clock starts at the model's
+  ``start_date`` — this skips the ~9-month from-cold spin-up without
+  inheriting the donor run's calendar. Pass ``physics_carry`` to
+  ``initial_physics_state`` so the warm start keeps the donor's cross-step
+  physics carry (radiation sub-cycle cache, prior-step TKE) rather than
+  resetting it at the run seam:
+
+  .. code-block:: python
+
+     from jcm.initial_states import checkpoint_state
+
+     state, physics_carry, _ = checkpoint_state(
+         model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
+     predictions = model.run(
+         initial_state=state, initial_physics_state=physics_carry,
+         forcing=forcing, total_time='1 year', save_interval='1 day')
+
+  (Restoring a *checkpoint* to continue a preempted run of your own — keeping
+  the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`
+  path documented under "Checkpointing for preemptible runs" below.)
 
 
 Calendar-aware durations and resampling
@@ -308,6 +547,36 @@ xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
 long forcing records.
 
+Yearly forcing bundles
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The transient AMIP boundary conditions ship as one file per year (download
+only the years you run, append new years without rewriting history). A config
+points at a ``{year}`` pattern plus an inclusive range;
+:func:`jcm.forcing.expand_yearly_files` turns that into the concrete file list
+that :meth:`~jcm.forcing.ForcingData.from_file` concatenates along ``time``:
+
+.. code-block:: python
+
+   from jcm.forcing import ForcingData, expand_yearly_files
+
+   files = expand_yearly_files(
+       'hf://bundles/t63/forcing_amip/{year}.nc',
+       years=[1979, 1983],            # inclusive
+       available=[1979, 2022],        # optional: product's source coverage
+   )
+   forcing = ForcingData.from_file(files, coords=coords)
+
+Passing ``available`` widens the expansion by one year on each side (clipped to
+coverage) so the mid-month samples bracket the run's start/end instead of
+clamping for ~half a month. Non-pattern specs (plain paths, lists, ``None``)
+pass through untouched, so a run can mix a yearly SST pattern with a static
+dust climatology under one ``forcing.years`` range. When you hand-assemble a
+:class:`~jcm.forcing.ForcingData` rather than loading a validated bundle,
+:func:`jcm.forcing.validate_emissions_grid` and
+:func:`jcm.forcing.validate_oxidant_levels` guard the grid/level layout the
+physics expects.
+
 
 Checkpointing for preemptible runs
 ----------------------------------
@@ -368,7 +637,27 @@ relaxation timescale.
 The most common pattern is to nudge winds above the boundary layer and
 let everything else evolve freely, so the model gets the right
 synoptic-scale circulation while its physics still has the freedom to
-respond:
+respond.
+
+**From config** the whole setup is one flag: ``nudging=era5`` pulls the
+run window from WeatherBench2's public cloud ERA5 (regridded to the
+model grid and cached locally by :mod:`jcm.data.era5`), and
+``init=era5`` starts the run from the ERA5 state at the same date:
+
+.. code-block:: console
+
+   $ python -m jcm.main physics=echam-rrtmgp grid=echam_t63_l47_hybrid \
+         init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
+
+Prefetch on a login node first when compute nodes lack internet
+(``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start
+2010-01-01 --end 2010-01-31 --init``). The WB2 stores carry 13 pressure
+levels up to 50 hPa, so nudging is automatically masked off above
+``nudging.min_pressure_hpa`` (default 60), and requires internet or a
+warm cache; see ``jcm/config/nudging/era5.yaml`` for the knobs
+(``tau_hours``, ``pbl_levels``, ``nudge_temperature``, ``freq``).
+
+**In code**, wire it manually against any reference dataset:
 
 .. code-block:: python
 
@@ -407,6 +696,32 @@ producing a gridpoint :class:`PhysicsTendency` that the dycore consumes
 through the standard physics-coupling path. The same setup works under
 SPEEDY, ECHAM, or any other physics package, on any
 :class:`DynamicalCore` backend.
+
+Composing extra terms: the upper sponge
+----------------------------------------
+
+Because physics is *composable*, adding a scheme is just ``+``-ing a
+:class:`~jcm.physics.physics_term.PhysicsTerm` onto the package. An
+:class:`~jcm.physics.dissipation.UpperSponge` — Rayleigh drag on the winds
+plus zonal-mean relaxation of temperature at the top few levels — damps
+spectral ringing near a rigid model lid:
+
+.. code-block:: python
+
+   from jcm.physics.dissipation import UpperSponge
+   from jcm.physics.echam.echam_terms import echam_physics
+
+   physics = echam_physics() + UpperSponge(n_sponge_levels=5,
+                                           sponge_timescale_s=3 * 3600.0)
+   model = Model(coords=coords, terrain=terrain, physics=physics)
+
+The relaxation timescales that both the sponge and the nudging term use follow
+a masked per-level ``1/tau`` profile; :func:`jcm.nudging.inv_tau_profile`
+builds one from a dycore vertical coordinate (zeroing the boundary-layer
+levels and everything above ``min_pressure_hpa``). See the
+:mod:`jcm.nudging` and :mod:`jcm.physics.dissipation.upper_sponge` module
+docstrings for the full set of knobs, and :doc:`design/composable_physics`
+for the composition API (``+``, ``replace``, ``remove``).
 
 Multi-Device Parallelization
 -----------------------------
@@ -479,15 +794,93 @@ The model output is a :py:class:`Predictions` object containing the model state 
    # Print variables
    print(ds.data_vars)
 
-   # Plot surface temperature evolution
-   ds['temperature'].isel(level=7).mean(dim='lon').plot()
+   # Plot surface temperature evolution. Output is surface-first, so index 0
+   # is the level nearest the ground on both vertical axes.
+   ds['temperature'].isel(level=0).mean(dim='lon').plot()
    plt.title('Zonal Mean Surface Temperature')
    plt.show()
 
-   # Calculate global mean quantities
+   # Calculate global mean quantities (see jcm.analysis below for the
+   # conservation-grade weights)
    global_mean_temp = ds['temperature'].weighted(
        ds['lat'].pipe(lambda x: np.cos(np.deg2rad(x)))
    ).mean(dim=['lon', 'lat'])
+
+Post-processing with ``jcm.analysis``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:mod:`jcm.analysis` is the one home for the xarray post-processing recipes that
+otherwise get re-implemented per script — area weights, global means, layer
+pressure thicknesses and column burdens, all computed on *saved* netCDF output:
+
+.. code-block:: python
+
+   import xarray as xr
+   from jcm import analysis
+
+   ds = xr.open_dataset('output.nc')
+
+   # Area-weighted global mean over the horizontal dims (everything except
+   # time / level / level_i / mode). On a dinosaur (Gauss-Legendre) output
+   # grid this uses the *exact* quadrature weights, not the cos(lat)
+   # approximation — so conservation residuals actually integrate to zero.
+   T_global = analysis.global_mean(ds['temperature'])
+
+   # Column burden [kg/m^2] of a tracer, mass-weighted with the file's own
+   # layer thickness. layer_pressure_thickness() prefers the model's
+   # pressure_thickness diagnostic and falls back to differencing
+   # pressure_half; both output vertical axes are surface-first (#710).
+   dp = analysis.layer_pressure_thickness(ds)
+   qc_burden = analysis.column_integral(ds['qc'], dp)   # or, in one step:
+   qc_burden = analysis.column_burden(ds, 'qc')
+
+   # column_burden already time-broadcasts, so a global-mean burden time series is:
+   burden_ts = analysis.global_mean(analysis.column_burden(ds, 'qc'))
+
+:func:`~jcm.analysis.area_weights` deliberately returns a dims-only
+``DataArray`` (no ``lat`` coordinate) so ``.weighted()`` broadcasts it by
+dimension name without float32/float64 coordinate-alignment surprises. Files
+written before the #710 vertical-convention unification are **not** supported by
+``layer_pressure_thickness`` — see :doc:`design/output_vertical_conventions`.
+
+Vertical coordinates in the output
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Output files carry two vertical axes: ``level`` (``nlev`` layer mid-levels —
+temperature, tracers, ``pressure_full``) and ``level_i`` (``nlev+1``
+interfaces — ``pressure_half``, radiative fluxes). **Both run surface-first**,
+so index 0 is the level nearest the ground and ``level[k]`` sits between
+``level_i[k]`` and ``level_i[k+1]``.
+
+To mass-weight a ``level`` field — a column burden, say — use the layer
+pressure thickness ``pressure_thickness`` [Pa], which is written directly on
+the ``level`` axis (positive, already aligned with the tracers) by the ECHAM
+physics stacks:
+
+.. code-block:: python
+
+   burden = (ds['qc'] * ds['pressure_thickness'] / 9.81).sum('level')  # kg/m^2
+
+For a file written before ``pressure_thickness`` existed (or a SPEEDY run,
+which does not compute it), reconstruct Δp from ``pressure_half`` instead —
+mixing the two axes is safe because both run surface-first:
+
+.. code-block:: python
+
+   # diff() keeps the *interface* sigma labels, so after renaming the dim the
+   # mid-level coordinate must be assigned explicitly — otherwise xarray's
+   # alignment finds no matching labels and the product is silently empty.
+   dp = (-ds['pressure_half'].diff('level_i')
+         .rename(level_i='level').assign_coords(level=ds['level']))
+   burden = (ds['qc'] * dp / 9.81).sum('level')     # kg/m^2
+
+Both axes are CF-labelled nominal sigma (``a/p0 + b``) and carry
+``positive = "down"``; the hybrid ``(a, b)`` tables travel with the file as the
+``hybrid_a_full`` / ``hybrid_b_full`` / ``hybrid_a_half`` / ``hybrid_b_half``
+coordinates, so ``p = a + b * p_s`` is reproducible from the file alone. See
+:doc:`design/output_vertical_conventions` — including for how to read files
+written before this convention was unified, where the interface axis was
+stored top-first.
 
 Overriding physical constants
 -----------------------------
@@ -499,6 +892,16 @@ Each quantity has exactly one canonical name (e.g. dry-air specific heat is
 *Derived* quantities (``rd = akap·cpd``, ``cvd``, ``rgrav``, the ``vtmpc*``
 coefficients) are computed on access, so they always stay consistent with the
 base values.
+
+.. note::
+
+   jcm's default gravitational acceleration is ``grav = 9.81`` m/s² (the value
+   the physics ports were tuned against), **not** the WMO standard 9.80665.
+   When you compare a burden or mass budget against an external tool, weight
+   with the *same* ``g`` the model used — read it from :mod:`jcm.constants`
+   (``import jcm.constants as c; c.grav``) rather than hardcoding a literal.
+   :mod:`jcm.analysis`'s column integrals already use the live singleton for
+   exactly this reason.
 
 To run with non-default constants — say for a different planet or a sensitivity
 study — call :func:`jcm.constants.set_constants` **before constructing the

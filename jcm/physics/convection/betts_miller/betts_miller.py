@@ -120,7 +120,31 @@ def _parcel_ascent(tin, qin, pfull, phalf, buoyancy_kick, t_floor):
 
         t_k = jnp.where(is_sat, t_moist, t_dry)
         # Parcel humidity: saturated above the LCL, conserved (q_parcel) below.
-        q_k = jnp.where(is_sat, qsat_moist, q_parcel)
+        # Capped at the water the parcel actually lifted: on a pseudoadiabat
+        # the parcel sheds condensate as precipitation, so its vapour can only
+        # ever DECREASE from ``q_parcel`` — it must never be credited with
+        # more. The cap binds at the LCL-crossing level, where ``t_moist`` is
+        # integrated with the moist lapse rate across the whole layer from a
+        # ``t_prev`` that was still on the dry adiabat, so ``qsat(t_moist)``
+        # exceeds ``q_parcel``: measured +26 % (10.42 -> 13.18 g/kg) for a
+        # 292 K parcel crossing saturation over 900 -> 825 hPa. That invented
+        # moisture then feeds ``_moist_dtdlnp`` on every subsequent step, so
+        # the parcel collects extra latent heating for the rest of the ascent
+        # and inflates CAPE, the LZB and the ``t_ref`` relaxation target.
+        # Same defect, and the same one-line fix, as the Tiedtke CAPE parcel
+        # in ``tiedtke_nordeng.calculate_cape_cin`` (issue #661).
+        #
+        # The cap removes the invented water but NOT the temperature overshoot
+        # that causes it: ``t_k`` still takes a whole layer of moist-lapse
+        # warming for a level the parcel has only just saturated in, leaving
+        # the crossing level internally inconsistent (subsaturated at its own
+        # temperature). Against the same ascent on a 400x finer grid the parcel
+        # runs +0.95 K warm, essentially unchanged from the +0.96 K before the
+        # cap. Switching on ``q_parcel >= qsat_moist`` instead is 3.5x more
+        # accurate (-0.45 K) but errs COLD and moves convective onset on this
+        # scheme's own fixture from RH 0.90 to 0.95, so it is not a free swap.
+        # The unbiased fix is to resolve the LCL inside the layer: #695.
+        q_k = jnp.where(is_sat, jnp.minimum(qsat_moist, q_parcel), q_parcel)
 
         buoyant = t_k > t_env_k
         # Buoyancy contribution to CAPE (energy per unit mass), guard log at top.
@@ -320,7 +344,11 @@ def _do_shallower(tdel, qdel, cloud, dp):
     below = jnp.sum(jnp.where(keep_full, lp, 0.0), axis=0)   # = cumsurf[j], >= 0
     lp_b = jnp.sum(jnp.where(at_boundary, lp, 0.0), axis=0)  # boundary (moistening) layer
     # kept precip = below + frac*lp_b == 0  ->  frac = -below/lp_b  (in [0, 1]).
-    frac = jnp.where(jnp.abs(lp_b) > 1e-12, -below / lp_b, 0.0)
+    # Guard the denominator BEFORE dividing: a raw 0/0 in the masked branch
+    # poisons reverse-mode gradients through the where (#558 pattern).
+    has_boundary = jnp.abs(lp_b) > 1e-12
+    frac = jnp.where(has_boundary,
+                     -below / jnp.where(has_boundary, lp_b, 1.0), 0.0)
     scale = jnp.where(keep_full, 1.0, jnp.where(at_boundary, frac, 0.0))
 
     new_tdel = tdel * scale

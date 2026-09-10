@@ -28,6 +28,21 @@ from jcm.physics_interface import PhysicsTendency
 
 
 @tree_math.struct
+class JamActivationData:
+    """Per-mode ARG activated fractions (the ``_jam_activation`` key).
+
+    Written each step for the cloud-borne exchange term (#602): the fraction
+    of each mode's interstitial number and mass that would reside in cloud
+    droplets at the diagnosed maximum supersaturation. Mode axis first,
+    ``(n_aer, nlev, ncols)``, matching ``_jam_state``; zero for modes that
+    cannot activate.
+    """
+
+    number_frac: jnp.ndarray   # activated number fraction [-]
+    mass_frac: jnp.ndarray     # activated mass fraction [-]
+
+
+@tree_math.struct
 class ArgParameters:
     """Tunable knobs for ARG activation (differentiable)."""
 
@@ -53,7 +68,7 @@ class ArgActivation(PhysicsTerm):
         "_jam_state", "pressure_full", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "activated_cdnc", "activated_fraction",
+        "activated_cdnc", "activated_fraction", "_jam_activation",
     )
 
     def __init__(
@@ -101,7 +116,8 @@ class ArgActivation(PhysicsTerm):
 
         updraft = self._updraft(diagnostics, state.temperature.shape, params)
 
-        activated_cdnc, activated_fraction, _ = arg_activation(
+        activated_cdnc, activated_fraction, _, number_frac, mass_frac = (
+            arg_activation(
             r_dry=aer.r_dry,
             kappa=aer.kappa,
             number_vol=number_vol,
@@ -112,11 +128,14 @@ class ArgActivation(PhysicsTerm):
             pressure=diagnostics["pressure_full"],
             sigma_acc=self._sigma_acc,
             variant=self._variant,
-        )
+        ))
 
         tendency = PhysicsTendency.zeros(state.temperature.shape)
         return tendency, {
             **diagnostics,
             "activated_cdnc": activated_cdnc,
             "activated_fraction": activated_fraction,
+            "_jam_activation": JamActivationData(
+                number_frac=number_frac, mass_frac=mass_frac,
+            ),
         }

@@ -41,10 +41,6 @@ class CloudParameters:
     inversion_z_max: float   # Highest altitude for inversion search (m)
     inversion_z_min: float   # Lowest altitude for inversion search (m)
 
-    # Cloud droplet parameters
-    ceffmin: float       # Minimum cloud droplet radius (microns)
-    ceffmax: float       # Maximum cloud droplet radius (microns)
-
     # Numerical parameters
     epsilon: float       # Small number for numerical stability
 
@@ -74,8 +70,7 @@ class CloudParameters:
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
                  csatsc=0.7, cinv=0.25,
                  inversion_z_max=2000.0, inversion_z_min=500.0,
-                 ceffmin=10.0,
-                 ceffmax=150.0, epsilon=1.0e-12,
+                 epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
                  cloud_top_pressure_pa=1000.0,
                  smooth_b0=0.02, smooth_inv_score=5.0e-4,
@@ -99,8 +94,6 @@ class CloudParameters:
             cinv=jnp.array(cinv),
             inversion_z_max=jnp.array(inversion_z_max),
             inversion_z_min=jnp.array(inversion_z_min),
-            ceffmin=jnp.array(ceffmin),
-            ceffmax=jnp.array(ceffmax),
             epsilon=jnp.array(epsilon),
             t_ice=jnp.array(t_ice),
             t_mix_min=jnp.array(t_mix_min),
@@ -159,15 +152,20 @@ def saturation_vapor_pressure_ice(temperature: jnp.ndarray) -> jnp.ndarray:
 
 
 def saturation_specific_humidity(
-    pressure: jnp.ndarray, 
-    temperature: jnp.ndarray
+    pressure: jnp.ndarray,
+    temperature: jnp.ndarray,
+    t_mix_min: float = 238.15,
 ) -> jnp.ndarray:
     """Calculate saturation specific humidity
-    
+
     Args:
         pressure: Pressure (Pa)
         temperature: Temperature (K)
-        
+        t_mix_min: Lower endpoint of the mixed-phase blend (K). Callers
+            holding a :class:`CloudParameters` must pass
+            ``config.t_mix_min`` so the ``es`` ramp cannot desynchronise
+            from the latent-heat ramp built on the same field (#667).
+
     Returns:
         Saturation specific humidity (kg/kg)
 
@@ -175,16 +173,20 @@ def saturation_specific_humidity(
     # Use appropriate saturation vapor pressure based on temperature
     es_water = saturation_vapor_pressure_water(temperature)
     es_ice = saturation_vapor_pressure_ice(temperature)
-    
+
     # Blend between ice and water saturation in mixed phase region
-    # Linear interpolation between t_ice and tmelt.
+    # Linear interpolation between t_mix_min and tmelt. This is CAM's
+    # default mixed-phase qsat form (wv_sat_methods.F90:479-513), with the
+    # width an ECHAM-derived default (tmelt − cthomi = 35 K) rather than
+    # CAM's 20 K — see #667 for the reference comparison.
     # NOTE (review 2.27): ECHAM mo_cover uses a BINARY lo2 switch (ice qs
     # only below cthomi or when ice > csecfrl is already present) rather
     # than this blend; the cloud-fraction path applies that switch via
     # _qs_cover below. The blended form remains for callers without a qi
-    # field (and for the condensation Newton pair, which must switch qs
-    # and L together with the 1M sweep lo2 work - tracked follow-up).
-    weight = jnp.clip((temperature - 238.15) / (c.tmelt - 238.15), 0.0, 1.0)
+    # field (and for the condensation Newton pair, which switches qs
+    # and L together on the same weight).
+    weight = jnp.clip(
+        (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
     es = weight * es_water + (1.0 - weight) * es_ice
 
     # Convert to saturation specific humidity
@@ -198,17 +200,20 @@ def _qs_cover(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
     cloud_ice: jnp.ndarray,
+    t_ice: float = 238.15,
 ) -> jnp.ndarray:
     # qs for the CLOUD-COVER decision: ECHAM binary lo2 phase switch,
     #   lo2 = (T < cthomi) OR (T < tmelt AND qi > csecfrl)
     # (ice memory: ice saturation only where ice already exists or
     # homogeneous freezing guarantees it; csecfrl = 5e-6 kg/kg at T63).
+    # ``t_ice`` is the homogeneous-freezing threshold (ECHAM cthomi),
+    # wired from ``CloudParameters.t_ice`` (#667 — the field was dead).
     # The previous unconditional blend inflated RH by up to ~35 % near
     # -35 C in ice-free air (over-diagnosing cloud) and under-diagnosed
     # cirrus where ice exists (review finding 2.27).
     es_water = saturation_vapor_pressure_water(temperature)
     es_ice = saturation_vapor_pressure_ice(temperature)
-    lo2 = (temperature < 238.15) | (
+    lo2 = (temperature < t_ice) | (
         (temperature < c.tmelt) & (cloud_ice > 5.0e-6)
     )
     es = jnp.where(lo2, es_ice, es_water)
@@ -370,7 +375,7 @@ def calculate_cloud_fraction(
     """
     if cloud_ice is None:
         cloud_ice = jnp.zeros_like(temperature)
-    qs = _qs_cover(pressure, temperature, cloud_ice)
+    qs = _qs_cover(pressure, temperature, cloud_ice, t_ice=config.t_ice)
 
     # Diagnostic relative humidity — NOT clipped at 1. ECHAM uses
     # ``zqr = q/(qsat·zsat)`` directly without clipping; super-saturated
@@ -428,17 +433,22 @@ def calculate_cloud_fraction(
 def _qs_and_dqs_dt(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
+    t_mix_min: float = 238.15,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Saturation specific humidity and its temperature derivative.
 
     Closed-form derivative of :func:`saturation_specific_humidity` for
     the mixed-phase Tetens-style formulation, so the Newton step is
     bit-reproducible under JIT without finite-difference noise. Mirrors
-    what ECHAM's ``ua / dua`` lookup tables provide.
+    what ECHAM's ``ua / dua`` lookup tables provide. ``t_mix_min`` must
+    be the same value the caller's latent-heat ramp uses (#667: this was
+    hardcoded while the L ramp read the live ``config.t_mix_min``, so a
+    CLI override moved the two ramps apart).
     """
     es_water = saturation_vapor_pressure_water(temperature)
     es_ice = saturation_vapor_pressure_ice(temperature)
-    weight = jnp.clip((temperature - 238.15) / (c.tmelt - 238.15), 0.0, 1.0)
+    weight = jnp.clip(
+        (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
     es = weight * es_water + (1.0 - weight) * es_ice
 
     p_safe = jnp.maximum(pressure, 1.0)
@@ -528,7 +538,8 @@ def condensation_evaporation(
 
     # ---- Pass 1: linearised Newton step ---------------------------------
     # ECHAM's ``cuadjtq`` and ``mo_cloud`` lines 776-779 (``zqcon``).
-    qs, dqs_dt = _qs_and_dqs_dt(pressure, temperature)
+    qs, dqs_dt = _qs_and_dqs_dt(
+        pressure, temperature, t_mix_min=config.t_mix_min)
     q_excess = specific_humidity - qs
     cond1 = q_excess / (1.0 + L_cp * dqs_dt)
 
@@ -546,7 +557,7 @@ def condensation_evaporation(
     # (small per-step condensation due to the warming-feedback denominator).
     T_p1 = temperature + L_cp * cond1
     q_p1 = specific_humidity - cond1
-    qs_p1, _ = _qs_and_dqs_dt(pressure, T_p1)
+    qs_p1, _ = _qs_and_dqs_dt(pressure, T_p1, t_mix_min=config.t_mix_min)
     oversat_tol = 0.01 * qs_p1                   # ECHAM's ``zoversat``
     cond2 = jnp.maximum(
         (q_p1 - qs_p1 - oversat_tol) / (1.0 + L_cp * dqs_dt),
@@ -611,7 +622,10 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
-from jcm.physics.clouds.cloud_data import CloudData  # noqa: E402
+from jcm.physics.clouds.cloud_data import (  # noqa: E402
+    CLOUD_OUTPUT_ATTRS,
+    CloudData,
+)
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -653,6 +667,9 @@ class SundqvistCloudFraction(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = ("clouds", "relative_humidity")
+    # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
+    # the microphysics terms that fill the rest of the CloudData struct.
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
     # step from RH and the dynamics tracers, so the zero seed is
     # overwritten on the first compute call. Downstream microphysics

@@ -5,8 +5,10 @@ import unittest
 import jax
 import jax_datetime as jdt
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 import pytest
+from jax.tree_util import tree_map
 from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
@@ -50,6 +52,26 @@ class _DryingPhysics(Physics):
     def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
         tend = PhysicsTendency.zeros(state.temperature.shape).copy(
             specific_humidity=jnp.full_like(state.specific_humidity, -1.0),
+        )
+        return tend, (prev_physics_data if prev_physics_data is not None else {})
+
+    def get_empty_data(self, coords):
+        return {}
+
+    def initial_carry_state(self, coords):
+        return {}
+
+
+class _ConstantTracerTendencyPhysics(Physics):
+    """Gives every tracer the same constant positive tendency."""
+
+    def __init__(self, rate: float = 1e-6):
+        self.rate = rate
+
+    def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
+        tend = PhysicsTendency.zeros(state.temperature.shape).copy(
+            tracers={k: jnp.full_like(v, self.rate)
+                     for k, v in state.tracers.items()},
         )
         return tend, (prev_physics_data if prev_physics_data is not None else {})
 
@@ -466,3 +488,96 @@ class TestSCMHeldSuarezSlow(TestSCMHeldSuarez):
 @pytest.mark.slow
 class TestSCMEchamSlow(TestSCMEcham):
     pass
+
+
+class FreeEvolveTracersTest(unittest.TestCase):
+    """``free_evolve`` accepts tracers, so a column can prescribe its cloud.
+
+    A prescribed-state column has no ascent, so a freely evolving ``qc`` rains
+    out within hours and never re-forms — which leaves any cloud-mediated
+    aerosol sink untested. Holding the condensate fixed while the aerosol runs
+    is the configuration that exercises one.
+    """
+
+    def _column(self, nlev=4):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+
+        from jcm.physics_interface import PhysicsState
+        vertical = SigmaCoordinates.equidistant(nlev)
+        state = PhysicsState(
+            u_wind=jnp.zeros(nlev), v_wind=jnp.zeros(nlev),
+            temperature=jnp.full(nlev, 280.0),
+            specific_humidity=jnp.full(nlev, 1e-3),
+            geopotential=jnp.zeros(nlev),
+            normalized_surface_pressure=jnp.asarray(1.0),
+        )
+        return vertical, state
+
+    def test_named_tracers_evolve_while_the_rest_are_held(self):
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=1e-6),
+            vertical=vertical, dt_seconds=900.0,
+            apply_tracer_tendencies=False, free_evolve=("free_one",),
+        )
+        states = tree_map(lambda x: jnp.broadcast_to(x, (4,) + jnp.shape(x)), state)
+        seed = {"free_one": jnp.zeros(4), "held_one": jnp.zeros(4)}
+        out = scm.run(states, initial_tracers=seed,
+                      times=jnp.arange(4) * 900.0 / 86400.0)
+        free = np.asarray(out.tracer_states["free_one"])
+        held = np.asarray(out.tracer_states["held_one"])
+        self.assertGreater(float(free[-1].max()), 0.0)
+        np.testing.assert_array_equal(held, np.zeros_like(held))
+
+    def test_unknown_free_evolve_name_raises(self):
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=1e-6),
+            vertical=vertical, free_evolve=("not_a_tracer",),
+        )
+        states = tree_map(lambda x: jnp.broadcast_to(x, (2,) + jnp.shape(x)), state)
+        with self.assertRaisesRegex(ValueError, "not_a_tracer"):
+            scm.run(states, initial_tracers={"free_one": jnp.zeros(4)},
+                    times=jnp.arange(2) * 0.01)
+
+
+class TestSelectColumn(unittest.TestCase):
+    """Nearest-neighbour column extraction for the SCM warm start."""
+
+    def _synthetic(self):
+        import xarray as xr
+
+        nt, nlev, nlon, nlat = 3, 4, 5, 6
+        lat = np.linspace(-75.0, 75.0, nlat)
+        lon = np.linspace(0.0, 300.0, nlon)
+        # Distinct per-(lon, lat) signature so the picked column is identifiable.
+        col = np.arange(nlon)[:, None] * 100.0 + np.arange(nlat)[None, :]
+        temperature = np.broadcast_to(
+            col[None, None], (nt, nlev, nlon, nlat)).astype(float)
+        surface = np.broadcast_to(col[None], (nt, nlon, nlat)).astype(float)
+        ds = xr.Dataset(coords={"lat": lat, "lon": lon})
+        states = {
+            "temperature": temperature,   # (time, level, lon, lat)
+            "surface": surface,           # (time, lon, lat)
+        }
+        return states, ds, lat, lon
+
+    def test_nearest_neighbour_pick_and_slicing(self):
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, lon = self._synthetic()
+        # Request a point closest to lon index 2, lat index 4.
+        lat_req = float(lat[4]) + 3.0
+        lon_req = float(lon[2]) - 4.0
+        column, (i_lon, i_lat, actual_lat, actual_lon) = select_column(
+            states, ds, lat_req, lon_req)
+
+        self.assertEqual((i_lon, i_lat), (2, 4))
+        self.assertEqual(actual_lat, float(lat[4]))
+        self.assertEqual(actual_lon, float(lon[2]))
+        # 4D column variable collapses to (time, level); 3D surface to (time,).
+        self.assertEqual(column["temperature"].shape, (3, 4))
+        self.assertEqual(column["surface"].shape, (3,))
+        expected = 2 * 100.0 + 4
+        np.testing.assert_array_equal(column["temperature"], expected)
+        np.testing.assert_array_equal(column["surface"], expected)

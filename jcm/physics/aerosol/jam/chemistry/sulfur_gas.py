@@ -106,11 +106,20 @@ def _k_dms_no3(t: jnp.ndarray) -> jnp.ndarray:
 class SulfurGasParameters:
     """Tunable knobs for the gas-phase sulfur chemistry (differentiable)."""
 
-    soag_production: jnp.ndarray   # interim SOAG source [kg/kg/s] at the surface
+    soag_production: jnp.ndarray   # prescribed SOAG source [kg/kg/s], BL-weighted
 
     @classmethod
     def default(cls) -> "SulfurGasParameters":
-        return cls(soag_production=jnp.asarray(2.0e-15))
+        # 0 by default: jcm has no biogenic VOC chemistry yet, so any
+        # nonzero value here is an unopposed global SOA source. The
+        # previous 2e-15 "interim" default (~0.9 mg SOA/m²/day column-
+        # integrated) was the sole SOA source in every JAM run and, being
+        # ~5× the total sulfur source with only weak accumulation-mode
+        # removal against it, drove multi-hundred-mg/m² SOA burdens that
+        # in turn distorted sulfate removal (jax-gcm#654). Until real
+        # biogenic emissions land, JAM carries zero SOA unless a run
+        # opts in explicitly.
+        return cls(soag_production=jnp.asarray(0.0))
 
 
 def sulfur_gas_tendencies(

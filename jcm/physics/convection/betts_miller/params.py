@@ -75,7 +75,11 @@ class BettsMillerParameters:
     t_floor: jnp.ndarray = 173.16
 
     # --- Static configuration (selects code paths; not differentiated) ------
-    shallow: ShallowScheme = struct.field(pytree_node=False, default=ShallowScheme.SIMP)
+    # SHALLOWER, not Isca's nominal SIMP default: SIMP zeroes the shallow
+    # branch entirely and in practice Isca runs are always configured to
+    # SHALLOWER (#524).
+    shallow: ShallowScheme = struct.field(
+        pytree_node=False, default=ShallowScheme.SHALLOWER)
     do_envsat: bool = struct.field(pytree_node=False, default=False)
     do_taucape: bool = struct.field(pytree_node=False, default=False)
 

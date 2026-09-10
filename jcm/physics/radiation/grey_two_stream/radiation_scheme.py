@@ -7,6 +7,8 @@ Date: 2025-01-10
 """
 
 import jax.numpy as jnp
+
+from jcm.physics.coords_util import column_lat_lon
 from typing import Tuple, Optional
 
 from ..radiation_types import (
@@ -22,7 +24,11 @@ from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
 from ..cloud_optics import cloud_optics
-from ..mcica import column_total_cover, in_cloud_path
+from ..mcica import (
+    column_total_cover,
+    effective_cloud_fraction,
+    in_cloud_path,
+)
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 
@@ -183,6 +189,7 @@ def prepare_radiation_state(
         pressure_interfaces=pressure_interfaces,
         h2o_vmr=h2o_vmr,
         o3_vmr=ozone_vmr,
+        specific_humidity=q_clipped,
         cloud_fraction=cloud_fraction,
         cloud_water_path=cloud_water_path,
         cloud_ice_path=cloud_ice_path,
@@ -382,9 +389,11 @@ def radiation_scheme(
     # gpoint count makes per-gpoint sub-columns effectively free.
     in_cloud_lwp = in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
     in_cloud_ipath = in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
 
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
@@ -491,9 +500,15 @@ def radiation_scheme(
     )
 
     # Column-total cloud cover under the configured overlap rule, used
-    # only as the scalar weight between the clear and cloudy beams.
+    # only as the scalar weight between the clear and cloudy beams. Threshold
+    # the fraction on the SAME clear-cell criterion ``in_cloud_path`` used to
+    # zero the in-cloud condensate above (cf <= 2*cld_frac_min): a cell whose
+    # condensate was zeroed is optically empty and must not weight the cloudy
+    # beam (see ``effective_cloud_fraction``).
     c_col = column_total_cover(
-        rad_state.cloud_fraction, parameters.cloud_overlap,
+        effective_cloud_fraction(
+            rad_state.cloud_fraction, eps=parameters.cld_frac_min),
+        parameters.cloud_overlap,
     )
     flux_up_lw = (1.0 - c_col) * flux_up_lw_clear + c_col * flux_up_lw_cloudy
     flux_down_lw = (
@@ -508,6 +523,10 @@ def radiation_scheme(
     is_daylight = cos_zenith > 0
     flux_up_sw = jnp.where(is_daylight, flux_up_sw, 0.0)
     flux_down_sw = jnp.where(is_daylight, flux_down_sw, 0.0)
+    # The clear beam is also published as a profile diagnostic, so it
+    # takes the same night mask and stays comparable to the all-sky one.
+    flux_up_sw_clear = jnp.where(is_daylight, flux_up_sw_clear, 0.0)
+    flux_down_sw_clear = jnp.where(is_daylight, flux_down_sw_clear, 0.0)
     
     # Convert fluxes to heating rates
     lw_heating_rate = flux_to_heating_rate(
@@ -535,11 +554,8 @@ def radiation_scheme(
     surface_lw_up = jnp.sum(flux_up_lw[-1, :])
 
     # Clear-sky TOA fluxes from the beam-split's clear branch — exposed
-    # for cloud-radiative-effect diagnostics. SW: zero out at night to
-    # match the all-sky convention used by ``flux_up_sw`` above.
-    toa_sw_up_clear = jnp.where(
-        is_daylight, jnp.sum(flux_up_sw_clear[0, :]), 0.0,
-    )
+    # for cloud-radiative-effect diagnostics.
+    toa_sw_up_clear = jnp.sum(flux_up_sw_clear[0, :])
     toa_lw_up_clear = jnp.sum(flux_up_lw_clear[0, :])
     
     # Create output structures
@@ -563,6 +579,12 @@ def radiation_scheme(
         lw_flux_down=flux_down_lw,
         sw_heating_rate=sw_heating_rate,
         lw_heating_rate=lw_heating_rate,
+        # The beam-split already solves a clear branch, so the clear-sky
+        # profiles are exact here rather than a second solve.
+        sw_flux_up_clear=flux_up_sw_clear,
+        sw_flux_down_clear=flux_down_sw_clear,
+        lw_flux_up_clear=flux_up_lw_clear,
+        lw_flux_down_clear=flux_down_lw_clear,
         toa_sw_down=toa_sw_down,
         toa_sw_up=toa_sw_up,
         toa_lw_up=olr,
@@ -572,6 +594,19 @@ def radiation_scheme(
         surface_lw_up=surface_lw_up,
         toa_sw_up_clear=toa_sw_up_clear,
         toa_lw_up_clear=toa_lw_up_clear,
+        # Aerosol-free fluxes are an RRTMGP-only diagnostic (#583); the
+        # grey scheme carries no aerosol optics, so these stay zero.
+        toa_sw_up_noa=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_noa=jnp.zeros_like(toa_lw_up_clear),
+        toa_sw_up_clear_noa=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_sw_up=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_lw_up=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up_clear),
+        noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up_clear),
+        toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
+        # Grey two-stream has no McICA sub-columns; the radiation-view
+        # cloud-cover diagnostic is defined as 0 here (see RadiationData).
+        total_cloud_cover=jnp.zeros_like(olr),
         step=jnp.int32(0),
     )
 
@@ -589,11 +624,16 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields  # noqa: E402
-from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
+from jcm.physics.radiation.radiation_types import (  # noqa: E402
+    RADIATION_OUTPUT_ATTRS,
+    RadiationData,
+)
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
+    current_cos_zenith,
     radiation_should_compute,
+    rescale_cached_radiation,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -632,6 +672,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         "radiation", "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("radiation", "clouds")
+    # CF/units metadata for the ``radiation.*`` output fields (#740).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = RADIATION_OUTPUT_ATTRS
 
     def __init__(self, params: RadiationParameters | None = None):
         """Hold the scheme-native :class:`RadiationParameters`."""
@@ -640,11 +682,9 @@ class GreyTwoStreamRadiation(PhysicsTerm):
 
     def cache_coords(self, coords) -> None:
         """Cache per-column lat/lon (deg) for the radiation scheme."""
-        lat_deg = jnp.asarray(coords.horizontal.latitudes) * 180.0 / jnp.pi
-        lon_deg = jnp.asarray(coords.horizontal.longitudes) * 180.0 / jnp.pi
-        lat_2d, lon_2d = jnp.meshgrid(lat_deg, lon_deg)
-        self._lats = nnx.Variable(lat_2d.reshape(-1))
-        self._lons = nnx.Variable(lon_2d.reshape(-1))
+        lat, lon = column_lat_lon(coords.horizontal)
+        self._lats = nnx.Variable(lat * 180.0 / jnp.pi)
+        self._lons = nnx.Variable(lon * 180.0 / jnp.pi)
         self._coords_cached = True
 
     def __call__(
@@ -658,14 +698,35 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
         radiation = diagnostics["radiation"]
+        # Solar geometry now. Needed on both branches: the compute branch
+        # stamps it so a later cached step knows which sun the fluxes were
+        # solved under, and the cached branch rescales the shortwave by the
+        # ratio of the two (#671). Pure trig, so it is cheap every step.
+        mu0_now = current_cos_zenith(
+            forcing.solar, self._lons.get_value(), self._lats.get_value(),
+        ).astype(radiation.cos_zenith.dtype)
 
         def _compute():
-            return self._compute_full(state, diagnostics, forcing, params)
+            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            # Pin the compute branch to the carry's leaf dtypes: under
+            # jax_enable_x64 (e.g. driving this scheme from a float64
+            # dycore with float32 physics state) some strong table
+            # constants promote a subset of the freshly-computed leaves
+            # to float64, and the two lax.cond branches would fail to
+            # type-check against the uniform-dtype cached carry.
+            rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, rad
 
         def _use_cached():
-            return cached_radiation_tendency(
-                radiation, state.temperature.shape,
-            ), radiation
+            rad = rescale_cached_radiation(radiation, mu0_now)
+            tend = cached_radiation_tendency(rad, state.temperature.shape)
+            # Same dtype pin as _compute: under x64 the cached heating ->
+            # tendency arithmetic can promote through float64 scalars.
+            tend = jax.tree.map(
+                lambda t: t.astype(state.temperature.dtype), tend)
+            return tend, rad
 
         tendency, new_radiation = jax.lax.cond(
             radiation_should_compute(diagnostics, params),
@@ -800,6 +861,10 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             lw_flux_up=diagnostics_vmapped.lw_flux_up.transpose(1, 0, 2).sum(axis=-1),
             lw_flux_down=diagnostics_vmapped.lw_flux_down.transpose(1, 0, 2).sum(axis=-1),
             lw_heating_rate=tendencies_vmapped.longwave_heating.T,
+            sw_flux_up_clear=diagnostics_vmapped.sw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            sw_flux_down_clear=diagnostics_vmapped.sw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_up_clear=diagnostics_vmapped.lw_flux_up_clear.transpose(1, 0, 2).sum(axis=-1),
+            lw_flux_down_clear=diagnostics_vmapped.lw_flux_down_clear.transpose(1, 0, 2).sum(axis=-1),
             surface_sw_down=_column_vector(
                 diagnostics_vmapped.surface_sw_down, ncols,
             ),
@@ -817,11 +882,22 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             toa_sw_down=_column_vector(
                 diagnostics_vmapped.toa_sw_down, ncols,
             ),
+            toa_sw_up_noa=jnp.zeros((ncols,)),
+            toa_lw_up_noa=jnp.zeros((ncols,)),
+            toa_sw_up_clear_noa=jnp.zeros((ncols,)),
+            noa_frac_toa_sw_up=jnp.zeros((ncols,)),
+            noa_frac_toa_lw_up=jnp.zeros((ncols,)),
+            noa_frac_toa_sw_up_clear=jnp.zeros((ncols,)),
+            noa_frac_toa_lw_up_clear=jnp.zeros((ncols,)),
+            toa_lw_up_clear_noa=jnp.zeros((ncols,)),
             toa_sw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_sw_up_clear, ncols,
             ),
             toa_lw_up_clear=_column_vector(
                 diagnostics_vmapped.toa_lw_up_clear, ncols,
+            ),
+            total_cloud_cover=_column_vector(
+                diagnostics_vmapped.total_cloud_cover, ncols,
             ),
             # Placeholder — the enclosing ``__call__`` overwrites this
             # via ``new_radiation.copy(step=radiation.step + 1)`` after

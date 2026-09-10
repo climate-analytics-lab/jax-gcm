@@ -74,6 +74,32 @@ def in_cloud_path(
     return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
 
 
+def effective_cloud_fraction(
+    cloud_fraction: jnp.ndarray,
+    eps: float = 1.0e-3,
+) -> jnp.ndarray:
+    """Zero the cloud fraction in the cells :func:`in_cloud_path` zeros.
+
+    ``in_cloud_path`` zeros the in-cloud condensate wherever
+    ``cloud_fraction <= 2*eps``, so those cells are radiatively **empty**. The
+    fraction that drives the McICA sub-column sampler and the total-cover
+    diagnostic must agree with that: an optically-empty cell must not be
+    reported as cloud cover, nor act as a cloudy layer that bridges
+    maximum-random overlap across an otherwise-clear gap. Returning
+    ``where(cloud_fraction > 2*eps, cloud_fraction, 0)`` ties the two together
+    on the **same** criterion.
+
+    This mirrors ECHAM ``mo_psrad_interface.f90:232`` — the WHERE that zeros
+    the in-cloud water (``ziwgkg_vr``/``zlwgkg_vr``) ALSO clears the
+    layer-cloudy flag ``icldlyr`` on the identical ``cld_frc_vr > 2*EPSILON``
+    test, so the sampler and the optics see a consistent "this cell is clear".
+    In ECHAM ``EPSILON`` is machine epsilon, so this only ever bites exactly
+    empty cells; here ``eps`` is a *physical* threshold (``cld_frac_min``,
+    default 1e-3), so the tie must be made explicit.
+    """
+    return jnp.where(cloud_fraction > 2.0 * eps, cloud_fraction, 0.0)
+
+
 def _alpha_from_overlap(
     cloud_fraction: jnp.ndarray,
     layer_thickness: jnp.ndarray,
@@ -226,3 +252,59 @@ def column_total_cover(
             lambda: c_max,       # 2 exponential (max approximation)
         ],
     )
+
+
+def expected_total_cover(
+    cloud_fraction: jnp.ndarray,
+    layer_thickness: jnp.ndarray,
+    overlap: _OverlapRule = "exponential",
+    decorrelation_km: float = 2.0,
+) -> jnp.ndarray:
+    """Closed-form expectation of the sub-column total cloud cover.
+
+    The diagnostic counterpart of :func:`generate_subcolumns`: the EXACT
+    expectation of the total cover under the rank chain that
+    ``per_subcol`` samples, with the SAME per-interface correlations
+    ``_alpha_from_overlap`` produces for the configured rule — so a scheme
+    that cannot afford sub-column draws (the NN emulator) publishes the
+    cover the McICA sampler reports in expectation, for any rule.
+
+    The chain inherits the previous rank with probability ``a_k`` and
+    refreshes it otherwise, so a column partitions into rank *segments*
+    sharing one uniform; a segment spanning layers ``s..k`` is clear with
+    probability ``1 - max(cf_s..cf_k)``. Conditioning on the start of the
+    final segment gives the O(nlev^2) recursion (B_j = P(first j layers
+    clear))::
+
+        B_{k+1} = sum_s [start_s * prod(a_{s..k-1})] B_s (1 - max cf_{s..k})
+
+    A pairwise-conditional product (Hogan & Illingworth style) is NOT this
+    expectation: an inherited rank keeps its history across several
+    interfaces, and the pairwise form can overstate cover by several
+    points on three-layer profiles (PR #730 review). At a = 0 this reduces
+    to the random product, and under maximum_random's bank-structured a
+    (1 within a cloud bank, 0 across clear) to the classic max-random
+    product.
+
+    Unlike :func:`column_total_cover` (the grey beam-split's deliberate
+    ``max`` approximation), this is for DIAGNOSTIC output (CMIP ``clt``).
+    """
+    cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    alpha = _alpha_from_overlap(cf, layer_thickness, overlap, decorrelation_km)
+    nlev = cf.shape[0]
+    # B[j] = P(first j layers all clear); python loops over STATIC level
+    # indices trace ~nlev^2/2 fused scalar ops — fine for a per-column
+    # diagnostic evaluated once per radiation call.
+    B = [jnp.ones(cf.shape[1:]), 1.0 - cf[0]]
+    for k in range(1, nlev):
+        contrib = jnp.zeros(cf.shape[1:])
+        prod_a = jnp.ones(cf.shape[1:])
+        seg_max = cf[k]
+        for s in range(k, -1, -1):
+            seg_max = jnp.maximum(seg_max, cf[s])
+            start = (1.0 - alpha[s - 1]) if s > 0 else 1.0
+            contrib = contrib + start * prod_a * B[s] * (1.0 - seg_max)
+            if s > 0:
+                prod_a = prod_a * alpha[s - 1]
+        B.append(contrib)
+    return 1.0 - B[nlev]

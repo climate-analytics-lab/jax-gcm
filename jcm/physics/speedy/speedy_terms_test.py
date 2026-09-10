@@ -114,6 +114,25 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         # Should produce valid (non-NaN) tendencies
         self.assertFalse(jnp.any(jnp.isnan(tend.temperature)))
 
+    def test_every_output_variable_is_documented(self):
+        """Every published variable carries units and a description.
+
+        The SPEEDY units table reaches the output through the terms that
+        publish the diagnostics, so a term family with no table — or a new
+        diagnostic added without a row — ships an undocumented variable.
+        """
+        from jcm.model import Model
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        model = Model(coords=coords, terrain=TerrainData.from_coords(coords),
+                      physics=speedy_physics(checkpoint_terms=False))
+        ds = model.run(save_interval=1.0, total_time=1.0).to_xarray()
+
+        undocumented = sorted(str(v) for v in ds.data_vars
+                              if not ds[v].attrs.get("description"))
+        self.assertEqual(undocumented, [],
+                         "add a row to jcm/physics/speedy/units_table.csv")
+
 
 if __name__ == "__main__":
     unittest.main()

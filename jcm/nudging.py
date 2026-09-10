@@ -158,13 +158,46 @@ class NudgingConfig:
         )
 
 
+def inv_tau_profile(vertical, *, tau_hours: float = 6.0,
+                    min_pressure_hpa: float = 60.0,
+                    pbl_levels: int = 0):
+    """Per-level inverse-timescale profile for Newtonian relaxation.
+
+    One ``1/tau`` value masked to zero (a) in the bottom ``pbl_levels``
+    layers, and (b) above ``min_pressure_hpa`` — the WB2 ERA5 stores
+    stop at 50 hPa, and values above that clamp, so relaxing the
+    stratosphere toward them would drag it to 50-hPa winds.
+
+    ``vertical`` is a dycore vertical-coordinate object; hybrid coordinates
+    (``a_centers``/``b_centers``) and sigma coordinates (``centers``) are
+    both handled by evaluating reference mid-level pressures at a standard
+    surface pressure of 101325 Pa.
+
+    Returns the ``(nlev,)`` inverse-timescale array (per second).
+    """
+    import numpy as np
+    if hasattr(vertical, "a_centers"):
+        p_ref = (np.asarray(vertical.a_centers)
+                 + np.asarray(vertical.b_centers) * 101325.0)
+    else:
+        p_ref = np.asarray(vertical.centers) * 101325.0
+    nlev = p_ref.size
+    mask = np.ones(nlev)
+    mask[p_ref < float(min_pressure_hpa) * 100.0] = 0.0
+    pbl = int(pbl_levels)
+    if pbl > 0:
+        mask[nlev - pbl:] = 0.0
+    return mask / (float(tau_hours) * 3600.0)
+
+
 # ---------------------------------------------------------------------------
 # Tendency helper (split out so unit tests can call it without a Model)
 # ---------------------------------------------------------------------------
 
 
 def nudging_tendency(state: PhysicsState, target: NudgingTarget,
-                     config: NudgingConfig) -> PhysicsTendency:
+                     config: NudgingConfig,
+                     nodal_shape: tuple | None = None) -> PhysicsTendency:
     """Newtonian relaxation tendency in gridpoint space.
 
     ``dX/dt = inv_tau · (X_ref − X)`` per relaxed variable. Variables with
@@ -184,12 +217,65 @@ def nudging_tendency(state: PhysicsState, target: NudgingTarget,
         representation if needed.
 
     """
-    inv_tau_wind = config.inv_tau_wind[:, jnp.newaxis, jnp.newaxis]
-    inv_tau_temp = config.inv_tau_temperature[:, jnp.newaxis, jnp.newaxis]
+    # Broadcasting-native, per the column-physics convention: level profile on
+    # axis 0, with as many trailing singleton axes as the state has horizontal
+    # axes. A hard-coded ``[:, None, None]`` assumes a (nlev, nlon, nlat) host
+    # and fails the moment ``ComposablePhysics`` runs with
+    # ``vectorize_columns=True`` and hands this term (nlev, ncols).
+    def _profile(p):
+        return p.reshape((-1,) + (1,) * (state.temperature.ndim - 1))
 
-    u_t = inv_tau_wind * (target.u_wind - state.u_wind)
-    v_t = inv_tau_wind * (target.v_wind - state.v_wind)
-    T_t = inv_tau_temp * (target.temperature - state.temperature)
+    inv_tau_wind = _profile(config.inv_tau_wind)
+    inv_tau_temp = _profile(config.inv_tau_temperature)
+
+    # The target is assembled on the dycore's nodal (nlev, nlon, nlat) grid,
+    # but under column vectorisation the state arriving here has already been
+    # flattened to (nlev, nlon*nlat) by the same row-major reshape
+    # ``ComposablePhysics`` applies, so one target serves either host.
+    def _match(ref, like):
+        if ref.shape == like.shape:
+            return ref
+        # ONLY the nodal -> column-vectorised transition is reshaped:
+        # (nlev, nlon, nlat) -> (nlev, nlon*nlat), same leading level axis.
+        # Element count alone is NOT sufficient grounds: a target stored
+        # (nlev, nlat, nlon) has the same size — and the same axis product —
+        # but needs a TRANSPOSE, and a row-major reshape would quietly nudge
+        # every column toward the wrong reference values instead of failing.
+        # Distinguishing the two needs the model's actual (nlon, nlat), which
+        # only ``cache_coords`` knows, so the term passes it in.
+        if like.ndim == 2 and ref.ndim == 3 and ref.shape[0] == like.shape[0]:
+            if nodal_shape is None:
+                raise ValueError(
+                    f"cannot safely flatten a nudging target {ref.shape} onto "
+                    f"a column-vectorised state {like.shape} without the "
+                    "model's nodal shape — the target's horizontal axes could "
+                    "be either (nlon, nlat) or (nlat, nlon) and the two need "
+                    "different treatment. Call cache_coords on the term (the "
+                    "Model does this), or pass nodal_shape explicitly."
+                )
+            if tuple(ref.shape[1:]) != tuple(nodal_shape):
+                hint = (" — the axes are a permutation of the model's, so the "
+                        "target looks TRANSPOSED"
+                        if sorted(ref.shape[1:]) == sorted(nodal_shape) else "")
+                raise ValueError(
+                    f"nudging target horizontal axes {tuple(ref.shape[1:])} "
+                    f"are incompatible with the state: model grid is "
+                    f"{tuple(nodal_shape)}{hint}. Build the target on the "
+                    "model's nodal (nlon, nlat) grid; this code will not "
+                    "guess an axis order."
+                )
+            return ref.reshape(like.shape)
+        raise ValueError(
+            f"nudging target shape {ref.shape} is incompatible with the "
+            f"state's {like.shape}. The target must be on the model's nodal "
+            "grid (nlev, nlon, nlat); the only layout change applied here is "
+            "the nodal -> column flatten ComposablePhysics performs."
+        )
+
+    u_t = inv_tau_wind * (_match(target.u_wind, state.u_wind) - state.u_wind)
+    v_t = inv_tau_wind * (_match(target.v_wind, state.v_wind) - state.v_wind)
+    T_t = inv_tau_temp * (
+        _match(target.temperature, state.temperature) - state.temperature)
     q_zeros = jnp.zeros_like(state.specific_humidity)
     tracer_zeros = {name: jnp.zeros_like(t) for name, t in state.tracers.items()}
 
@@ -231,6 +317,14 @@ class NudgingTerm(PhysicsTerm):
     # ``nnx.data`` so flax's pytree machinery traverses it.
     config: NudgingConfig = nnx.data(None)
 
+    def cache_coords(self, coords) -> None:
+        """Remember the model's nodal (nlon, nlat).
+
+        Needed to tell a correctly-oriented target from a transposed one when
+        flattening onto a column-vectorised state — see ``nudging_tendency``.
+        """
+        self._nodal_shape = tuple(coords.horizontal.nodal_shape)
+
     def __init__(self, config: NudgingConfig):
         """Initialise the term with the relaxation timescales."""
         self.config = config
@@ -252,7 +346,10 @@ class NudgingTerm(PhysicsTerm):
                 tracers={name: jnp.zeros_like(t) for name, t in state.tracers.items()},
             )
             return tend, diagnostics
-        return nudging_tendency(state, target, self.config), diagnostics
+        return nudging_tendency(
+            state, target, self.config,
+            nodal_shape=getattr(self, "_nodal_shape", None),
+        ), diagnostics
 
 
 # ---------------------------------------------------------------------------

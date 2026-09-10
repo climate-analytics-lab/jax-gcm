@@ -13,7 +13,7 @@ Key Characteristics
 
 - **Comprehensive Physics**: Full representation of radiation, convection, clouds, microphysics, turbulence, surface processes, gravity waves, aerosols, and chemistry
 - **Prognostic Cloud Scheme**: Separate prognostic equations for cloud water and cloud ice with single-moment microphysics
-- **Flexible Vertical Resolution**: Designed for 40+ vertical levels on hybrid sigma-pressure coordinates
+- **Flexible Vertical Resolution**: Designed for 47 or 95 vertical levels on hybrid sigma-pressure coordinates
 - **Aerosol-Cloud Coupling**: MACv2-SP aerosol scheme with Twomey effect on cloud droplet number and Angstrom spectral scaling
 - **Differentiability**: Fully compatible with JAX automatic differentiation (``jit``, ``grad``, ``vmap``)
 - **Column-Based Vectorization**: Physics operates on ``(nlev, ncols)`` format with ``jax.vmap`` for efficient GPU/TPU execution
@@ -126,7 +126,9 @@ The grey scheme is a simplified two-stream scheme with hand-tuned band coefficie
 - Aerosol direct effects with Angstrom spectral scaling (AOD(λ) = AOD(550nm) · (λ/0.55)^(-α))
 - Aerosol indirect (Twomey) effect via CDNC modification of droplet effective radius
 - Solar geometry from ``jax_solar`` (zenith angle, day/night, orbital parameters)
-- Heating-rate caching: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps via ``_radiation_with_caching``. This matches the ECHAM/ICON convention — radiation is the slowest physics term and varies on hour timescales, so caching is essentially free at the accuracy level. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+- Heating-rate caching with solar rescaling: by default radiation is recomputed every 7200 s (2 hr) and reused on intermediate dynamics steps. This matches the ECHAM/ICON convention — radiation is the slowest physics term and the atmosphere's transmissivity varies on hour timescales. The **sun does not**, so on cached steps every shortwave quantity (heating rate, surface and TOA fluxes, clear-sky and aerosol-free slots) is rescaled by ``cos_zenith_now / cos_zenith_when_solved``. This is ECHAM psrad's scheme of caching transmissivity and rescaling by the instantaneous solar flux; without it a column crossing the terminator receives either zero or full daylight for the whole interval, worst at the equinoxes and at high latitude. Longwave is not rescaled. Set ``RadiationParameters.radiation_interval = 0`` to compute every step.
+
+  One residual error is bounded by the interval rather than removed: a column whose cached shortwave is zero — dark when radiation last ran, or gone dark since — cannot be brought back by a multiplicative factor, so it stays dark until the next full solve even if the sun rises within the interval. That is the main reason not to push ``radiation_interval`` far past a couple of hours.
 
 **Configurable parameters** (:py:class:`jcm.physics.radiation.radiation_types.RadiationParameters`)
 
@@ -170,16 +172,31 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
-- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent.
+- **Cuadjtq saturation adjustment** (faithful port of ECHAM ``mo_cuadjust.f90``): the iterative linearised Newton step ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` with all three ``kcall`` modes (saturation, evaporation, downdraft) is in :py:mod:`jcm.physics.convection.tiedtke_nordeng.adjustment`. Used by the parcel-lifting and detrainment branches to keep the in-cloud thermodynamic state consistent. The condensation-only (``kcall=1``) flavour used by the updraft and by the cloud-base and CAPE parcels is :py:func:`jcm.physics.convection.saturation.cuadjtq_newton`; the ``1 + L/cp · dqs/dT`` denominator is what makes it conserve total water, and every parcel-lifting site now goes through it rather than condensing ``q - qs(T)`` undamped.
 - **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
 
-Convection activates based on the diagnosed convection type (``ktype``):
+``ktype`` records which trigger fired and how ECHAM's moisture-budget test
+classified it:
 
-1. **Deep convection**: Triggered by conditional instability with sufficient CAPE; CAPE closure timescale ``tau``
-2. **Shallow convection**: Triggered by moisture convergence in the boundary layer
-3. **Mid-level convection**: Triggered by conditional instability above the boundary layer
+1. **Deep convection** (``ktype=1``): a surface (``cubase``) plume in a column
+   whose moisture convergence exceeds 1.1x the surface latent flux
+   (``zdqcv > 1.1·E``, ``mo_cumastr.f90:571``) — large-scale convergence
+   beyond what the surface itself supplies. Demoted to shallow if the
+   realized cloud is thinner than 200 hPa.
+2. **Shallow convection** (``ktype=2``): a surface plume fed essentially by
+   its own surface flux (no excess convergence).
+3. **Mid-level convection** (``ktype=3``): a ``cubasmc``-initiated plume with
+   no surface connection (see the mid-level trigger above).
+
+The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
+tendency plus the dynamics (advection + hyperdiffusion) tendency of the
+just-completed dycore step, reconstructed one step lagged from the physics
+carry — the same information provenance as ECHAM's leapfrog dynamics
+tendency. It enters only this classification switch, never a closure
+amplitude (a lagged amplitude is the compounding convergence feedback the
+closure work deliberately excluded).
 
 **Configurable Parameters** (:py:class:`ConvectionParameters`):
 
@@ -214,9 +231,107 @@ Convection activates based on the diagnosed convection type (``ktype``):
    * - ``cprcon``
      - Precipitation conversion coefficient (1/m)
      - 1.4e-3
-   * - ``dt_conv``
-     - Convection time step (s)
-     - 3600.0
+   * - ``cu_dqcv_width``
+     - Width of the deep/shallow moisture-convergence sigmoid (kg/m²/s);
+       ECHAM's hard switch in a differentiable form
+     - 2.0e-7
+   * - ``cu_cminbuoy``
+     - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
+     - 0.2
+   * - ``cu_cmaxbuoy``
+     - Ceiling on ``zlift`` (K)
+     - 1.0
+   * - ``cu_cbfac``
+     - Multiplier applied to ``thvsig`` when forming ``zlift`` (-)
+     - 1.0
+   * - ``cu_thvsig``
+     - Fallback :math:`\sigma(\theta_v)` (K), used only when no vdiff term
+       is present; the model path reads vdiff's prognostic value
+     - 1.0
+   * - ``cu_lmfmid``
+     - ECHAM ``lmfmid``: enable the ``cubasmc`` mid-level trigger
+     - ``True``
+   * - ``cu_midlev_rh``
+     - Environmental RH a mid-level cloud base must exceed (-)
+     - 0.90
+   * - ``cu_midlev_zmin``
+     - Minimum height above the surface for a mid-level cloud base (m)
+     - 1500.0
+   * - ``cu_midlev_ptop``
+     - Pressure floor for a mid-level cloud base, ECHAM ``nmctop`` (Pa)
+     - 30000.0
+
+**Cloud-base determination** follows ECHAM ``cubase``'s ``klab`` walk
+(``mo_cuinitialize.f90``). A parcel carrying the lowest level's temperature and
+humidity is walked upward one level at a time, conserving dry static energy. At
+each level it must be positively buoyant — otherwise the column is dropped and
+gets **no convection at all** — and the walk stops at the first level where the
+parcel condenses. That level is the cloud base if, and only if, the parcel is
+buoyant there with condensate loading included, crediting the sub-grid thermal
+excess
+
+.. math::
+
+   z_\mathrm{lift} = \min\!\big(\max(c_\mathrm{minbuoy},
+   \min(c_\mathrm{maxbuoy}, \sigma_{\theta_v} \cdot c_\mathrm{bfac})), 1\,\mathrm{K}\big)
+
+The practical consequence is that this trigger requires a **well-mixed boundary
+layer**: a sounding running 6.5 K/km down to the surface loses roughly 0.4 K of
+parcel buoyancy per model layer, more than any physical ``zlift``, and cannot
+trigger. That strictness is deliberate, because it is only half of ECHAM's
+trigger.
+
+**Mid-level convection** (ECHAM ``cubasmc``, ``mo_cuascent.f90``) is the other
+half, and it starts a plume with no surface connection at all. Scanning upward,
+the lowest level that is
+
+* within 10 % of saturation (:math:`q > 0.90\,q_s`),
+* being lifted by resolved ascent (:math:`\omega < 0`),
+* more than 1500 m above the surface, and
+* below the 300 hPa ``nmctop`` ceiling
+
+becomes a cloud base, provided the plume seeded there survives its first ascent
+step (ECHAM otherwise retries one level higher). The parcel is the
+**environment at that level** — not a surface parcel lifted to it — and the
+cloud-base mass flux is the resolved ascent itself,
+:math:`\max(c_\mathrm{mfcmin}, \min(c_\mathrm{mfcmax}, -\omega/g))`, with no
+CAPE or moisture-budget closure and no Nordeng rescale (ECHAM gates that on
+``ktype == 1``). This is what covers elevated convection above a stable layer,
+warm-conveyor and frontal ascent, and nocturnal elevated convection over land.
+
+``ktype`` therefore records **which trigger fired**, not a diagnosis of the
+column: 3 means ``cubasmc``, while 1/2 are ``cubase`` plumes split deep/shallow.
+
+``zlift`` appears in the cloud-base test of both triggers, and in exactly one
+ascent test: ECHAM adds it where the level below is still sub-cloud
+(``klab == 1``), which happens only at the first step above a ``cubasmc`` base —
+``cubase`` sets ``klab = 2`` at its own cloud base. Everywhere else the
+updraft's termination test uses the parcel's true buoyancy.
+
+.. note::
+
+   The mid-level trigger needs :math:`\omega` from the dynamical core, so
+   composing Tiedtke convection makes the ``omega`` dycore field a hard
+   requirement. Backends that can supply it have the provider switched on
+   automatically; one that cannot (currently pySES) fails at ``Model``
+   construction, and the trigger must then be disabled explicitly with
+   ECHAM's own namelist switch,
+   ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``. That is a
+   real loss of capability, not a formality — such a run has no elevated
+   convection.
+
+:math:`\sigma_{\theta_v}` is **not** a tunable: it is the standard deviation of
+virtual potential temperature at the second-lowest full level, taken from the
+TTE-TKE scheme's prognostic :math:`\theta_v` variance (ECHAM ``pthvsig``,
+``vdiff.f90:1338``) and published as ``vertical_diffusion.thv_sigma``. The
+variance carries its own production/dissipation budget
+(:func:`~jcm.physics.vertical_diffusion.tte_tke.tke_budget.echam_thv_variance_source_update`),
+so convective onset follows the boundary layer's turbulent state. Measured on
+a 3-day T63L47 run it spans 0.01–1.14 K with a land mean of 0.30 K against an
+ocean mean of 0.15 K — structure a constant cannot produce.
+
+``cu_thvsig`` remains only as the fallback for configurations with no vertical
+diffusion term (column-mode tests, dry dynamical-core runs).
 
 .. admonition:: Gap vs. ICON-A
 
@@ -281,8 +396,8 @@ Key processes:
 
 1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
 
-   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is the rate prefactor (default 15.0).
-   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut`` is the qc threshold above which autoconversion fires (small g/kg-scale value, e.g. 1e-5).
+   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is its rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut_kk_threshold`` is the in-cloud qc threshold above which autoconversion fires (default 1e-5 kg/kg).
 
 2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
 3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
@@ -294,6 +409,12 @@ Key processes:
    - Rain and snow use the simpler instantaneous form
 
 7. **Evaporation / sublimation** of precipitation in subsaturated layers
+8. **Droplet effective radius** for radiation, from the ECHAM law
+   ``r_eff = 1e6 · κ(N) · (3 ρ q_l,in-cloud / (4 π ρ_w N))^(1/3)`` with the Peng &
+   Lohmann (2003) breadth factor — the same
+   :py:func:`~jcm.physics.clouds.cloud_utils.eff_liquid_droplet_radius` helper the
+   2-moment scheme uses. Published as ``clouds.r_eff_liq``; cloud-free cells stay
+   at exactly 0 so radiation falls back to its diagnostic formula there.
 
 The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 
@@ -310,20 +431,14 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
      - 0 (Beheng) or 1 (KK2000); accepts ``"beheng"`` / ``"kk2000"``
      - 0 (Beheng)
    * - ``ccraut``
-     - Autoconversion rate prefactor (Beheng) or qc threshold (KK2000)
+     - Beheng autoconversion rate prefactor
      - 15.0
+   * - ``ccraut_kk_threshold``
+     - KK2000 in-cloud qc threshold for autoconversion onset (kg/kg)
+     - 1.0e-5
    * - ``ccracl``
      - Accretion coefficient (cloud → rain)
      - 6.0
-   * - ``cthomi``
-     - Homogeneous ice nucleation temperature (K)
-     - 233.15
-   * - ``ccollec``
-     - Collection efficiency rain/cloud
-     - 0.7
-   * - ``ccollei``
-     - Collection efficiency snow/ice
-     - 0.3
    * - ``cn0s``
      - Snow particle number density (1/m³)
      - 3.0e6
@@ -333,12 +448,6 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice content-dependent terminal velocity factor
      - 3.29
-   * - ``vt_rain_a`` / ``vt_rain_b``
-     - Rain terminal velocity coefficient and exponent
-     - 386.0 / 0.67
-   * - ``vt_snow_a`` / ``vt_snow_b``
-     - Snow terminal velocity coefficient and exponent
-     - 8.8 / 0.15
    * - ``base_cdnc``
      - Baseline CDNC in clean air (1/m³)
      - 100e6
@@ -653,9 +762,6 @@ Aerosol Scheme (MACv2-SP)
    * - Parameter
      - Description
      - Default
-   * - ``nplumes``
-     - Number of anthropogenic plumes
-     - 9
    * - ``aod_spmx``
      - Maximum AOD at 550 nm per plume
      - [0.30, 0.15, ...]
@@ -895,7 +1001,7 @@ Assumptions and Limitations
 
 **Vertical Resolution**:
 
-- Designed for 40 vertical levels with hybrid sigma-pressure coordinates
+- Designed for 47 or 95 vertical levels with hybrid sigma-pressure coordinates
 - Parameters are tuned for this configuration; performance may vary at other resolutions
 - Sub-grid processes (e.g., turbulence, convection) scale with level count
 
@@ -949,7 +1055,7 @@ Comparison with SPEEDY Physics
      - Slow
    * - Vertical Levels
      - 8 (typical)
-     - 40 (typical)
+     - 47 (typical)
      - 47--95
    * - Radiation Bands
      - 2 SW, 3 LW

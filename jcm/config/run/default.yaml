@@ -1,17 +1,45 @@
 # Default run configuration: short integration with daily snapshots.
-time_step: 10              # minutes
+#
+# This file is also the COMPLETE base schema for the ``run`` group: every run
+# key lives here with a default and a comment. The other run groups
+# (``longrun``, ``smoke``, ``pyses_year``) inherit it via ``defaults: [default,
+# _self_]`` and only override the keys they change, so every run group exposes
+# the same key set and any run key can be set on the CLI without a ``+`` prefix.
+# 12 min is the validated ECHAM L47/L95 production step, shared across both
+# doors (this CLI default and the Python no-limit fallback). SPEEDY pins 15;
+# pySES (run/pyses_year, time_step null) adopts the dycore's dt_seconds.
+time_step: 12              # minutes
 save_interval: 10          # days
 total_time: 10             # days
+
+# Model start date (ISO string, e.g. "1979-01-01"). Null keeps the
+# default 2000-01-01. Transient (by-date) forcing files are sampled at
+# the absolute model date, so historical/AMIP runs must set this to sit
+# on the forcing calendar (issue #610).
+start_date: null
+
 output_averages: false
 output: model_state.nc
-log_level: CRITICAL
+# WARNING, not CRITICAL: jcm warns about results it cannot vouch for
+# (e.g. an in-place physics-parameter change that never reached the
+# computation, #735), and a silent run is not the same as a clean one.
+log_level: WARNING
 
 # Optional upper-sponge layer applied to (u, v) in the topmost ``levels``.
 # Off by default — set ``run.sponge.levels`` to a positive integer to enable.
+# ``damp_temperature`` (default true on ``UpperSponge``) and ``target_T_K``
+# (null = zonal-mean-only relaxation, no absolute target) only take effect
+# once ``levels`` is positive; they are listed here so every run group shares
+# one schema and the keys can be overridden without a ``+``. This base sponge
+# is the dinosaur-style upper sponge; the pySES finite-lid sponge is separate
+# and lives in ``dycore.lid_sponge`` (``run=pyses_year`` inherits ``levels: 0``
+# here, i.e. no dinosaur sponge, and relies on that lid sponge instead).
 sponge:
   levels: 0
   timescale_h: 3.0
   enspodi: 2.0
+  damp_temperature: true
+  target_T_K: null
 
 # Chunked-mode options. When ``chunk_days > 0`` the integration is broken
 # into chunks and run through ``jcm.diagnostics.check_health`` between each
@@ -20,12 +48,33 @@ sponge:
 chunk_days: 0
 output_prefix: chunked_run
 
+# Interval-instantaneous snapshot stream (jax-gcm#586): with
+# ``output_averages: true``, sample the listed 2-D diagnostics
+# instantaneously every ``snapshot_interval`` (days; must divide
+# save_interval) alongside the interval means. Written to
+# ``<output stem>_snapshots.nc``. Fields are top-level diagnostics keys
+# or dotted struct fields, e.g. [aerocom_clt, "radiation.toa_sw_up"].
+snapshot_interval: null
+snapshot_variables: []
+
 # Checkpointing for preemptible chunked runs. When set, the model state
 # (modal + physics carry) and elapsed sim-day count are saved to this
 # path after each chunk; if the file already exists at startup the run
 # resumes from it, skipping completed chunks. Single file per run, flax
 # msgpack format. Leave ``null`` to disable.
 checkpoint_path: null
+
+# Permanent checkpoint archives: every ``archive_ckpt_every`` sim-days (0 =
+# off) the rotating ``checkpoint_path`` is also copied to a dated, never-
+# overwritten archive, so a later experiment can restart from before a
+# slowly-developing failure. No effect unless ``checkpoint_path`` is set.
+archive_ckpt_every: 0
+
+# Chunked-mode health gate: with ``chunk_days > 0`` the state is checked
+# between chunks and, when ``true`` (the runner default), the run aborts on
+# the first unhealthy chunk instead of continuing. Set ``false`` to log the
+# failure and keep integrating.
+bail_on_unhealthy: true
 
 # Runtime mode:
 #   full        — standard dynamical-core integration (Model.run)
@@ -40,8 +89,16 @@ mode: full
 state_file: null
 
 # Tracer variables to load from the state file (mapping tracer name →
-# variable name). Defaults to none; set e.g. ``{qc: qc, qi: qi}`` for the
-# ICON 1-moment scheme.
+# variable name), for ``mode`` ``prescribed`` / ``scm``.
+#
+# ``null`` (the default) means AUTO: every tracer the configured physics
+# declares via ``required_tracers()`` is loaded from the identically-named
+# variable when the file has one. That is what keeps a saved state's cloud
+# condensate from being silently dropped — radiation driven on a state whose
+# ``qc``/``qi`` went missing returns a plausible-looking clear sky (#718).
+#
+# Set an explicit mapping (e.g. ``{qc: qc, qi: qi}``) to override the names,
+# or ``{}`` to deliberately load no tracers at all.
 tracer_vars: null
 
 # Column location for ``mode: scm`` (degrees).

@@ -190,7 +190,7 @@ def get_upward_longwave_rad_fluxes(
     tau2 = physics_data.mod_radcon.tau2
     stratc = physics_data.mod_radcon.stratc
 
-    rlus = physics_data.surface_flux.rlus[:,:,2] # FIXME
+    rlus = physics_data.surface_flux.rlus
     ts = physics_data.surface_flux.tsfc # called tsfc in surface_fluxes.f90
     refsfc = 1.0 - parameters.mod_radcon.emisfc
     epslw = parameters.mod_radcon.epslw

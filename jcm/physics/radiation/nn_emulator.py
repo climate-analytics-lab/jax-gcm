@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 import tree_math
 
+import jcm.constants as c
+
 
 # ---------------------------------------------------------------------------
 # Activation functions
@@ -107,17 +109,37 @@ class LWEmulatorWeights:
 
 @tree_math.struct
 class EmulatorWeights:
-    """All weights for the emulated radiation scheme."""
+    """All weights for the emulated radiation scheme.
 
-    sw: SWEmulatorWeights
+    Both slots hold :class:`LWEmulatorWeights`-shaped weights: upstream's
+    shipped shortwave model (``bigru_gru_16``) uses this surface-aux
+    architecture, not the bidirectional one, and it is the only variant
+    verified against a real checkpoint. It also emits at ``nlev+1``
+    interfaces, where the fluxes actually live. The aux input is surface
+    albedo for SW and emissivity for LW.
+
+    :class:`SWEmulatorWeights` and :func:`sw_emulator_column` remain as
+    the bidirectional alternative for the architecture sweep.
+    """
+
+    sw: LWEmulatorWeights
     lw: LWEmulatorWeights
 
 
 @tree_math.struct
 class InputScaling:
-    """Min-max scaling coefficients for NN inputs: x_scaled = x / x_max."""
+    """Affine input scaling: ``x_scaled = (x - x_offset) / x_max``.
+
+    ``x_offset`` defaults to 0, which reduces this to the reference
+    divide-by-max convention and is what upstream checkpoints want. Fitting
+    an offset matters for features whose useful range sits far from zero:
+    temperature spans ~200-320 K, so divide-by-max alone leaves it in
+    [0.62, 1.0] with a standard deviation of 0.04, and the network has to
+    learn large weights to resolve the variation it cares about.
+    """
 
     x_max: jnp.ndarray  # (n_features,)
+    x_offset: jnp.ndarray = 0.0  # (n_features,) or scalar
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +219,7 @@ def gru_backward_sequence(
     x_seq: jnp.ndarray,
     h0: jnp.ndarray,
     weights: GRUWeights,
+    realign: bool = True,
 ) -> jnp.ndarray:
     """Run a GRU backward over a sequence (go_backwards=True).
 
@@ -204,14 +227,20 @@ def gru_backward_sequence(
         x_seq: Input sequence (seq_len, input_dim).
         h0: Initial hidden state (units,).
         weights: GRU weights.
+        realign: If True, reverse the output back so element ``i`` is the
+            state *at* level ``i``, which is what a concat against a
+            forward pass needs (Keras ``Bidirectional`` semantics). If
+            False, leave it in computation order — a bare Keras
+            ``GRU(go_backwards=True, return_sequences=True)`` does not
+            reverse its output, so reproducing upstream ``rte-rrtmgp-nn``
+            checkpoints requires this.
 
     Returns:
-        Hidden states at all time steps (seq_len, units), reversed back
-        to original ordering.
+        Hidden states at all time steps (seq_len, units).
 
     """
     hidden_rev = gru_forward_sequence(x_seq[::-1], h0, weights)
-    return hidden_rev[::-1]
+    return hidden_rev[::-1] if realign else hidden_rev
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +263,110 @@ def dense(x: jnp.ndarray, weights: DenseWeights, activation=None) -> jnp.ndarray
 # Input preprocessing
 # ---------------------------------------------------------------------------
 
+# Smallest mixing ratio fed to the quartic-root transform. A spectral
+# dycore delivers small negative humidity from Gibbs ringing and
+# (-1e-12) ** 0.25 is NaN, so the floor is required, not defensive.
+# 1e-15 kg/kg is far below any radiatively active amount.
+GAS_FLOOR = 1e-15
+
+# Floor for cloud water/ice paths (kg/m^2) before the fourth-root feature
+# transform. 1e-12 kg/m^2 is ~9 orders of magnitude below a radiatively
+# detectable path; it exists to keep the derivative finite at zero cloud.
+CLOUD_PATH_FLOOR = 1e-12
+
+
+def _band_features(
+    aod: jnp.ndarray,
+    ssa: jnp.ndarray,
+    asy: jnp.ndarray,
+    band_mode: str,
+) -> list[jnp.ndarray]:
+    """Turn per-band aerosol optics into per-level input features.
+
+    Args:
+        aod / ssa / asy: Per-band optics, ``(n_bnd, nlev)``.
+        band_mode: ``"per_band"`` keeps every band (highest fidelity,
+            ``3 * n_bnd`` features); ``"broadband"`` collapses to three
+            (AOD summed over bands, AOD-weighted SSA and asymmetry);
+            ``"none"`` drops aerosol entirely, matching the upstream
+            feature set.
+
+    Band optics are strongly correlated across bands, so ``"broadband"``
+    buys a 16x narrower input for a modest fidelity loss. Which is the
+    better trade is an empirical question for the training sweep, hence
+    the switch rather than a fixed layout.
+
+    Returns:
+        List of ``(nlev,)`` feature arrays.
+
+    """
+    if band_mode == "none":
+        return []
+    if band_mode == "per_band":
+        return [*aod, *ssa, *asy]
+    if band_mode == "broadband":
+        # AOD-weighted means: SSA and asymmetry are intensive, so summing
+        # them across bands would be meaningless.
+        total = jnp.sum(aod, axis=0)
+        weight = jnp.maximum(total, 1e-30)
+        return [total,
+                jnp.sum(ssa * aod, axis=0) / weight,
+                jnp.sum(asy * aod, axis=0) / weight]
+    raise ValueError(
+        f"Unknown band_mode {band_mode!r}; expected 'per_band', "
+        "'broadband' or 'none'."
+    )
+
+
+def n_input_features(band_mode: str, n_bnd: int, n_base: int = 10) -> int:
+    """Return the number of input features a given band handling produces.
+
+    Lets the weight initialisers and the training driver size the input
+    layer without building a dummy column first. ``n_base`` is 10 for the
+    features this module builds; earlier jax-gcm checkpoints predate the two
+    effective-radius features and need ``n_base=8``, and upstream
+    ``rte-rrtmgp-nn`` ones also predate cloud fraction and need ``n_base=7``.
+    """
+    extra = {"none": 0, "broadband": 3, "per_band": 3 * n_bnd}
+    if band_mode not in extra:
+        raise ValueError(
+            f"Unknown band_mode {band_mode!r}; expected 'per_band', "
+            "'broadband' or 'none'."
+        )
+    return n_base + extra[band_mode]
+
+
+def _cloud_path_feature(path: jnp.ndarray) -> jnp.ndarray:
+    """Fourth-root transform of a cloud water/ice path.
+
+    The raw paths are extremely skewed -- most columns are clear and a few
+    carry three orders of magnitude more condensate -- so dividing by their
+    maximum crushes almost every value to ~0.004 and hides the cloud signal.
+    The same fourth root the gas features use spreads them across the range
+    the GRU can resolve, and is a reasonable compression of an optical depth
+    that enters transmittance exponentially.
+
+    Floored like the gas features, and for a sharper reason: d/dx x^0.25 is
+    infinite at x = 0, and cloud path is EXACTLY zero over most of the grid.
+    Offline that is harmless (features are constants with respect to the
+    weights), but in a differentiated rollout cloud water at step n depends on
+    the emulator's heating at step n-1, so the infinity enters the weight
+    gradient and NaNs it. The floor is far below any radiatively meaningful
+    path, so the forward function is unchanged to float32 precision.
+    """
+    return jnp.maximum(path, CLOUD_PATH_FLOOR) ** 0.25
+
+
+def apply_input_scaling(x: jnp.ndarray, scaling: InputScaling) -> jnp.ndarray:
+    """Apply the affine input scaling (see :class:`InputScaling`).
+
+    Public because the offline trainer scales its features with it too: train
+    and inference must agree bit for bit, so they share one implementation
+    rather than two that can drift.
+    """
+    return (x - scaling.x_offset) / jnp.maximum(scaling.x_max, 1e-30)
+
+
 def preprocess_sw_inputs(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
@@ -241,8 +374,15 @@ def preprocess_sw_inputs(
     o3: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     cos_zenith: jnp.ndarray,
     scaling: InputScaling,
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
+    aerosol_aod: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asy: Optional[jnp.ndarray] = None,
+    band_mode: str = "none",
 ) -> jnp.ndarray:
     """Prepare SW NN inputs from atmospheric profiles.
 
@@ -256,25 +396,49 @@ def preprocess_sw_inputs(
         o3: Ozone mass mixing ratio (nlev,) [kg/kg].
         cloud_water: Cloud liquid water path (nlev,) [kg/m^2].
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
+        cloud_fraction: Cloud area fraction (nlev,) [0-1].
         cos_zenith: Cosine of solar zenith angle (scalar).
         scaling: Input normalization coefficients.
+        r_eff_liq_um / r_eff_ice_um: RESOLVED cloud effective radii (um,
+            nlev), i.e. the output of
+            :func:`~jcm.physics.radiation.cloud_optics.resolve_effective_radii`
+            rather than the raw microphysics carry. See below.
+        aerosol_aod / aerosol_ssa / aerosol_asy: Per-SW-band optics,
+            ``(n_bnd_sw, nlev)``. Required unless ``band_mode="none"``.
+        band_mode: See :func:`_band_features`.
 
     Returns:
-        Scaled input array (nlev, n_features).
+        Scaled input array (nlev, n_features), features ordered
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, cf, mu0, r_liq, r_ice,
+        *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
-    h2o_t = h2o ** 0.25
-    o3_t = o3 ** 0.25
+    h2o_t = jnp.maximum(h2o, GAS_FLOOR) ** 0.25
+    o3_t = jnp.maximum(o3, GAS_FLOOR) ** 0.25
 
     mu0 = jnp.broadcast_to(cos_zenith, temperature.shape)
 
-    # Stack features: [T, log(p), h2o^1/4, o3^1/4, lwp, iwp, mu0]
-    x = jnp.stack([temperature, log_p, h2o_t, o3_t,
-                    cloud_water, cloud_ice, mu0], axis=-1)
-
-    # Divide-by-max scaling
-    return x / jnp.maximum(scaling.x_max, 1e-30)
+    # Cloud fraction is a separate feature, not folded into the paths. The
+    # paths are grid means (in-cloud water x cf), so at equal mean path a thin
+    # overcast layer and a thick broken one are indistinguishable without it --
+    # and their shortwave reflectance is not, being nonlinear in optical depth.
+    # Effective radius enters because optical depth goes as LWP/r_eff: at a
+    # fixed water path a 5 um droplet cloud is ~2x the optical depth of an
+    # 11 um one, and without this the network can only predict the training
+    # mean. Fed as the RESOLVED radius (post-fallback) rather than the raw
+    # carry, which is zero outside cloud and in 1M runs -- a discontinuity
+    # that describes no cloud at all. The labels are generated by RRTMGP
+    # driven with these same resolved values.
+    features = [temperature, log_p, h2o_t, o3_t,
+                _cloud_path_feature(cloud_water),
+                _cloud_path_feature(cloud_ice), cloud_fraction, mu0,
+                r_eff_liq_um, r_eff_ice_um]
+    if band_mode != "none":
+        features += _band_features(
+            aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
+        )
+    return apply_input_scaling(jnp.stack(features, axis=-1), scaling)
 
 
 def preprocess_lw_inputs(
@@ -284,8 +448,15 @@ def preprocess_lw_inputs(
     o3: jnp.ndarray,
     cloud_water: jnp.ndarray,
     cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     co2_vmr: float,
     scaling: InputScaling,
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
+    aerosol_aod: Optional[jnp.ndarray] = None,
+    aerosol_ssa: Optional[jnp.ndarray] = None,
+    aerosol_asy: Optional[jnp.ndarray] = None,
+    band_mode: str = "none",
 ) -> jnp.ndarray:
     """Prepare LW NN inputs from atmospheric profiles.
 
@@ -296,23 +467,35 @@ def preprocess_lw_inputs(
         o3: Ozone mass mixing ratio (nlev,) [kg/kg].
         cloud_water: Cloud liquid water path (nlev,) [kg/m^2].
         cloud_ice: Cloud ice water path (nlev,) [kg/m^2].
+        cloud_fraction: Cloud area fraction (nlev,) [0-1].
         co2_vmr: CO2 volume mixing ratio (scalar).
         scaling: Input normalization coefficients.
+        aerosol_aod / aerosol_ssa / aerosol_asy: Per-LW-band optics,
+            ``(n_bnd_lw, nlev)``. Required unless ``band_mode="none"``.
+        band_mode: See :func:`_band_features`.
 
     Returns:
-        Scaled input array (nlev, n_features).
+        Scaled input array (nlev, n_features), features ordered
+        ``[T, log(p), h2o^1/4, o3^1/4, lwp, iwp, cf, co2, r_liq, r_ice,
+        *aerosol]``.
 
     """
     log_p = jnp.log(jnp.maximum(pressure, 1.0))
-    h2o_t = h2o ** 0.25
-    o3_t = o3 ** 0.25
+    h2o_t = jnp.maximum(h2o, GAS_FLOOR) ** 0.25
+    o3_t = jnp.maximum(o3, GAS_FLOOR) ** 0.25
     co2 = jnp.broadcast_to(jnp.asarray(co2_vmr), temperature.shape)
 
-    # Stack features: [T, log(p), h2o^1/4, o3^1/4, lwp, iwp, co2]
-    x = jnp.stack([temperature, log_p, h2o_t, o3_t,
-                    cloud_water, cloud_ice, co2], axis=-1)
-
-    return x / jnp.maximum(scaling.x_max, 1e-30)
+    # Resolved effective radii; see :func:`preprocess_sw_inputs`. Ice radius
+    # matters more here than liquid: cirrus emissivity depends on it directly.
+    features = [temperature, log_p, h2o_t, o3_t,
+                _cloud_path_feature(cloud_water),
+                _cloud_path_feature(cloud_ice), cloud_fraction, co2,
+                r_eff_liq_um, r_eff_ice_um]
+    if band_mode != "none":
+        features += _band_features(
+            aerosol_aod, aerosol_ssa, aerosol_asy, band_mode,
+        )
+    return apply_input_scaling(jnp.stack(features, axis=-1), scaling)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +570,82 @@ def reconstruct_sw_fluxes(
     return rsd, rsu
 
 
+def reconstruct_sw_interface_fluxes(
+    nn_output: jnp.ndarray,
+    toa_sw_down: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale normalized all-sky + clear-sky SW output to W/m^2.
+
+    Args:
+        nn_output: NN predictions at interfaces (nlev+1, 4), ordered
+            (down, up, down_clear, up_clear) as fractions of the
+            incoming TOA flux.
+        toa_sw_down: Incoming SW flux at TOA (scalar, W/m^2).
+
+    Normalizing by the incoming flux makes the target scale-free, so the
+    network sees the same distribution at every solar zenith angle and at
+    night. The TOA downward boundary is then exact by construction rather
+    than something the network has to learn.
+
+    Returns:
+        ``(down, up, down_clear, up_clear)``, each (nlev+1,) [W/m^2].
+
+    """
+    fluxes = nn_output * toa_sw_down
+    down = fluxes[:, 0].at[0].set(toa_sw_down)
+    down_clear = fluxes[:, 2].at[0].set(toa_sw_down)
+    return down, fluxes[:, 1], down_clear, fluxes[:, 3]
+
+
+def lw_flux_scale(
+    surface_temperature: jnp.ndarray,
+    temperature: jnp.ndarray,
+) -> jnp.ndarray:
+    """Return the longwave flux normalizing scale sigma*T_max^4 [W/m^2].
+
+    ``T_max`` is the warmest temperature anywhere in the column, surface
+    included. No longwave flux at any interface can exceed black-body
+    emission at that temperature, so every normalized target lands in
+    [0, 1] — which is exactly the range the network's sigmoid output can
+    represent.
+
+    Scaling by the *surface emission* eps*sigma*T_s^4 instead does not
+    have that property: over a cold surface under a warmer atmosphere
+    (polar night, Antarctica) the outgoing longwave exceeds the surface
+    emission, and in RRTMGP-labelled T63L47 columns ~14% of upward
+    longwave values land above 1 that way, reaching 1.28 — unreachable
+    for a sigmoid, so the error could not be trained away.
+    """
+    t_max = jnp.maximum(surface_temperature, jnp.max(temperature))
+    return c.sbc * t_max ** 4
+
+
+def reconstruct_lw_interface_fluxes(
+    nn_output: jnp.ndarray,
+    surface_temperature: jnp.ndarray,
+    temperature: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scale normalized all-sky + clear-sky LW output to W/m^2.
+
+    Args:
+        nn_output: NN predictions at interfaces (nlev+1, 4), ordered
+            (down, up, down_clear, up_clear), normalized by
+            :func:`lw_flux_scale`.
+        surface_temperature: Surface temperature (scalar, K).
+        temperature: Column temperature profile (nlev,) [K].
+
+    Surface emissivity is not part of the scale; the network receives it
+    as the auxiliary input to its surface dense layer instead, so the
+    dependence is learned rather than imposed.
+
+    Returns:
+        ``(down, up, down_clear, up_clear)``, each (nlev+1,) [W/m^2].
+
+    """
+    fluxes = nn_output * lw_flux_scale(surface_temperature, temperature)
+    return fluxes[:, 0], fluxes[:, 1], fluxes[:, 2], fluxes[:, 3]
+
+
 # ---------------------------------------------------------------------------
 # LW emulator (forward-backward GRU — brnn2.py architecture)
 # ---------------------------------------------------------------------------
@@ -395,6 +654,7 @@ def lw_emulator_column(
     x_seq: jnp.ndarray,
     surface_emissivity: jnp.ndarray,
     weights: LWEmulatorWeights,
+    realign_backward: bool = True,
 ) -> jnp.ndarray:
     """Run the LW forward-backward GRU emulator for one column.
 
@@ -405,6 +665,11 @@ def lw_emulator_column(
         x_seq: Preprocessed input features (nlev, n_features).
         surface_emissivity: Surface emissivity (1,).
         weights: LW emulator weights.
+        realign_backward: Pair the backward state *at* each level with the
+            forward state there. False reproduces upstream checkpoints,
+            whose bare Keras ``go_backwards`` GRU leaves its output in
+            computation order and so concatenates level ``i`` against
+            level ``nlev - i``. See :func:`gru_backward_sequence`.
 
     Returns:
         Normalized flux predictions (nlev+1, 2) — (rld_norm, rlu_norm).
@@ -428,7 +693,9 @@ def lw_emulator_column(
 
     # Backward GRU on extended sequence
     h0_bwd = jnp.zeros(nneur)
-    hidden_bwd = gru_backward_sequence(hidden_fwd_extended, h0_bwd, weights.gru_bwd)
+    hidden_bwd = gru_backward_sequence(
+        hidden_fwd_extended, h0_bwd, weights.gru_bwd, realign=realign_backward,
+    )
 
     # Concatenate forward and backward
     hidden_concat = jnp.concatenate([hidden_fwd_extended, hidden_bwd], axis=-1)
@@ -459,10 +726,8 @@ def reconstruct_lw_fluxes(
         lw_flux_up: Upward LW flux at interfaces (nlev+1,) [W/m^2].
 
     """
-    sigma = 5.670374419e-8  # Stefan-Boltzmann constant
-
     # Scale factor: surface blackbody emission
-    surface_emission = surface_emissivity * sigma * surface_temperature ** 4
+    surface_emission = surface_emissivity * c.sbc * surface_temperature ** 4
 
     rld = nn_output[:, 0] * surface_emission
     rlu = nn_output[:, 1] * surface_emission
@@ -492,20 +757,155 @@ def flux_to_heating_rate(
         Heating rate at full levels (nlev,) [K/s].
 
     """
-    g = 9.81
-    cp = 1004.0
-
     net_flux = flux_down - flux_up  # positive downward
     d_net_flux = jnp.diff(net_flux)  # (nlev,)
     dp = jnp.diff(pressure_interfaces)  # (nlev,)
 
-    # dT/dt = (g/cp) * dF_net/dp  (positive heating when net flux increases downward)
-    return (g / cp) * d_net_flux / dp
+    # Energy convergence into layer i is net[i] - net[i+1] = -diff(net), so
+    # the minus is required: without it shortwave absorption reads as cooling
+    # and longwave emission as warming. Column-integrated heating must equal
+    # the net flux convergence across the column, which is what the energy
+    # closure test asserts.
+    return -(c.grav / c.cpd) * d_net_flux / dp
 
 
 # ---------------------------------------------------------------------------
 # Weight loading from NetCDF
 # ---------------------------------------------------------------------------
+
+# Sub-weight layout of :class:`LWEmulatorWeights`, written out explicitly
+# so the on-disk variable names are fixed by this table. Reflecting over
+# the pytree instead would let a struct field rename silently change the
+# file format and break every previously trained checkpoint.
+_GRU_FIELDS = ("kernel", "recurrent_kernel", "bias")
+_DENSE_FIELDS = ("kernel", "bias")
+_EMULATOR_LAYERS = (
+    ("gru_fwd", GRUWeights, _GRU_FIELDS),
+    ("surface_dense", DenseWeights, _DENSE_FIELDS),
+    ("gru_bwd", GRUWeights, _GRU_FIELDS),
+    ("gru3", GRUWeights, _GRU_FIELDS),
+    ("output_dense", DenseWeights, _DENSE_FIELDS),
+)
+
+
+def _weight_dims(name: str, array) -> tuple[str, ...]:
+    """Per-variable dimension names, so no two variables can clash.
+
+    Every array gets private dims rather than shared ones like ``units``:
+    the layers have genuinely independent sizes and a shared name would
+    make xarray reject a file the moment two of them differed.
+    """
+    stem = name.replace(".", "_")
+    return tuple(f"{stem}_dim{i}" for i in range(array.ndim))
+
+
+def save_emulator_weights(
+    filepath: str,
+    weights: EmulatorWeights,
+    sw_scaling: InputScaling,
+    lw_scaling: InputScaling,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Write trained emulator weights and input scalings to NetCDF.
+
+    This is jax-gcm's *own* checkpoint format — flat, explicitly named
+    variables such as ``sw.gru_fwd.kernel`` plus ``sw_x_max`` /
+    ``lw_x_max``. It is unrelated to :func:`load_weights_from_netcdf`,
+    which reads the upstream rte-rrtmgp-nn dense-layer format
+    (``w1``/``b1``/...). Only files written here can be fed to
+    :func:`load_emulator_weights` or to ``NNEmulatorRadiation``'s
+    ``weights_file``.
+
+    Args:
+        filepath: Destination ``.nc`` path.
+        weights: Trained weights. Both slots are
+            :class:`LWEmulatorWeights` (see :class:`EmulatorWeights`).
+        sw_scaling / lw_scaling: Input normalization for each network.
+        metadata: Small scalars/strings stored as NetCDF global
+            attributes and returned by :func:`load_emulator_weights`.
+            ``band_mode`` belongs here — the physics term refuses to load
+            a file without it, since the band handling fixes the input
+            width and a mismatch is otherwise silent.
+
+    Arrays are stored in their native dtype with no packing, so a
+    float32 round trip is bit-identical.
+
+    """
+    import numpy as np
+    import xarray as xr
+
+    data_vars = {}
+
+    def _put(name: str, array) -> None:
+        values = np.asarray(array)
+        data_vars[name] = (_weight_dims(name, values), values)
+
+    for side, side_weights in (("sw", weights.sw), ("lw", weights.lw)):
+        for layer, _, fields in _EMULATOR_LAYERS:
+            layer_weights = getattr(side_weights, layer)
+            for field in fields:
+                _put(f"{side}.{layer}.{field}", getattr(layer_weights, field))
+    _put("sw_x_max", sw_scaling.x_max)
+    _put("lw_x_max", lw_scaling.x_max)
+    _put("sw_x_offset", jnp.broadcast_to(sw_scaling.x_offset,
+                                         jnp.shape(sw_scaling.x_max)))
+    _put("lw_x_offset", jnp.broadcast_to(lw_scaling.x_offset,
+                                         jnp.shape(lw_scaling.x_max)))
+
+    ds = xr.Dataset(data_vars, attrs=dict(metadata or {}))
+    ds.to_netcdf(filepath)
+    ds.close()
+
+
+def load_emulator_weights(
+    filepath: str,
+) -> tuple[EmulatorWeights, InputScaling, InputScaling, dict]:
+    """Read back a checkpoint written by :func:`save_emulator_weights`.
+
+    Reads jax-gcm's own emulator format, *not* the upstream
+    rte-rrtmgp-nn one handled by :func:`load_weights_from_netcdf`.
+
+    Args:
+        filepath: Path to the ``.nc`` file.
+
+    Returns:
+        ``(weights, sw_scaling, lw_scaling, metadata)``. ``metadata`` is
+        the file's global attributes, empty if it carries none.
+
+    """
+    import xarray as xr
+
+    with xr.open_dataset(filepath) as ds:
+        def _get(name: str):
+            if name not in ds.variables:
+                raise KeyError(
+                    f"{filepath!r} has no variable {name!r}; it is not an "
+                    "emulator checkpoint written by save_emulator_weights."
+                )
+            return jnp.asarray(ds[name].values)
+
+        def _side(side: str) -> LWEmulatorWeights:
+            return LWEmulatorWeights(**{
+                layer: cls(**{f: _get(f"{side}.{layer}.{f}") for f in fields})
+                for layer, cls, fields in _EMULATOR_LAYERS
+            })
+
+        def _offset(side: str):
+            # Checkpoints predating the affine offset carry only x_max; 0
+            # reproduces exactly the divide-by-max scaling they were fitted
+            # with, so they keep loading correctly.
+            name = f"{side}_x_offset"
+            return jnp.asarray(ds[name].values) if name in ds.variables else 0.0
+
+        weights = EmulatorWeights(sw=_side("sw"), lw=_side("lw"))
+        sw_scaling = InputScaling(x_max=_get("sw_x_max"),
+                                  x_offset=_offset("sw"))
+        lw_scaling = InputScaling(x_max=_get("lw_x_max"),
+                                  x_offset=_offset("lw"))
+        metadata = dict(ds.attrs)
+
+    return weights, sw_scaling, lw_scaling, metadata
+
 
 def load_weights_from_netcdf(filepath: str) -> tuple:
     """Load NN weights from a NetCDF file in the rte-rrtmgp-nn format.
@@ -513,8 +913,9 @@ def load_weights_from_netcdf(filepath: str) -> tuple:
     User-facing utility (no internal callers): use it to load pretrained
     rte-rrtmgp-nn weights when configuring :class:`NNEmulatorRadiation`.
 
-    The NetCDF file contains weight matrices and bias vectors for each layer,
-    along with activation function names and scaling coefficients.
+    This reads the *upstream* per-layer ``w1``/``b1``/... dense format
+    from peterukk/rte-rrtmgp-nn. It is NOT the format jax-gcm's own
+    trainer writes — for that use :func:`load_emulator_weights`.
 
     Args:
         filepath: Path to the .nc file.
@@ -640,18 +1041,33 @@ def init_emulator_weights(
     sw_features: int = 7,
     lw_features: int = 7,
     units: int = 16,
+    n_outputs: int = 4,
     key: Optional[jax.Array] = None,
 ) -> EmulatorWeights:
     """Initialize random weights for both SW and LW emulators.
 
-    User-facing utility (no internal callers): the starting point for
-    training an emulator from scratch rather than loading pretrained
-    weights via :func:`load_weights_from_netcdf`.
+    The starting point for training from scratch. Both slots get the
+    surface-aux architecture (see :class:`EmulatorWeights`). Four outputs
+    by default: all-sky and clear-sky, up and down.
+
+    Args:
+        sw_features / lw_features: Input feature counts, from
+            :func:`n_input_features` for the chosen ``band_mode``.
+        units: GRU hidden size.
+        n_outputs: Channels per interface.
+        key: PRNG key (default: key(42)).
+
     """
     if key is None:
         key = jax.random.key(42)
     k1, k2 = jax.random.split(key)
     return EmulatorWeights(
-        sw=init_sw_emulator_weights(n_features=sw_features, units=units, key=k1),
-        lw=init_lw_emulator_weights(n_features=lw_features, units=units, key=k2),
+        sw=init_lw_emulator_weights(
+            n_features=sw_features, units=units,
+            n_outputs=n_outputs, key=k1,
+        ),
+        lw=init_lw_emulator_weights(
+            n_features=lw_features, units=units,
+            n_outputs=n_outputs, key=k2,
+        ),
     )

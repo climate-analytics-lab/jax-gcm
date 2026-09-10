@@ -91,6 +91,13 @@ Run the test suite to ensure your changes don't break existing functionality:
 
 Write tests for your changes in the appropriate test file (e.g., ``jcm/module_name_test.py``). We aim for high unit test coverage to support the increasing complexity of physics going forward.
 
+The suite is memory-bound, and a process killed by a memory ceiling shows up
+as an arbitrary set of "failures" rather than an error. Before running it in
+parallel — in particular on a Derecho login node, where a 10 GiB per-user
+cgroup makes ``-n 12`` an OOM rather than a test result — see
+:doc:`design/test_suite_memory`, which also covers the ``jax_enable_x64``
+isolation the root ``conftest.py`` provides.
+
 Code Quality
 ^^^^^^^^^^^^
 
@@ -134,12 +141,60 @@ When writing code for JAX-GCM, keep in mind:
 - **No Python Control Flow**: Use ``jax.lax.cond`` instead of ``if`` in JIT-compiled code
 - **Static Shapes**: Array shapes should be statically known where possible
 
-See ``JAX_gotchas.md`` in the repository for more details.
+See :doc:`jax_gotchas` for more details.
 
 Profiling
 ^^^^^^^^^
 
-To profile the model and identify performance bottlenecks:
+Where a timestep's time goes
+""""""""""""""""""""""""""""
+
+For the usual question — *which physics term is this configuration spending its
+time in?* — use the ready-made tool rather than a hand-rolled trace:
+
+.. code-block:: console
+
+   $ python tools/profile_terms.py --preset ma-t63-l47 --gpu 3
+
+It runs the preset twice to warm up (both discarded), traces a third run, and
+prints milliseconds per step for the dynamical core, each direction of the
+dynamics/physics bridge, and every physics term individually, alongside the
+fraction of device time it could not attribute cleanly.
+
+The default window is two radiation sub-cycles. Resist lengthening it: the
+profiler's event buffer holds about a million events and a T63L47 JAM step
+emits ~19,000 kernels, so a longer window overflows it and undercounts. The
+short window loses nothing, because kernel shapes are static and the model
+takes no data-dependent branches, so a step's cost does not vary with the
+state.
+
+The attribution works because :mod:`jcm.profiling` wraps the dycore call, the
+bridge and each :class:`~jcm.physics.physics_term.PhysicsTerm` in a
+:func:`jax.named_scope`. XLA records that scope in the ``op_name`` metadata of
+every instruction traced inside it, and the profiler reports the instruction
+behind each GPU kernel, so kernel time joins back to the component that emitted
+it. The scopes are always on and cost nothing at runtime. A new driver-level
+stage that deserves its own line in the report needs a scope adding there;
+individual physics terms need no changes, since the term loop already labels
+them by ``PhysicsTerm.name``.
+
+Before writing a report the tool checks that the trace is complete: the
+``dynamics``, ``bridge_to_physics`` and ``bridge_to_dynamics`` scopes sit
+outside every loop and branch in the step, so each must show up in the
+attribution exactly once per step. It fails — naming the labels — if any of the
+three is missing (the HLO-metadata join broke, so every number would be
+misattributed) or if any is short of the step count (the event buffer
+overflowed, so every number would be an undercount).
+
+Note that ``profile_terms.py`` disables CUDA graph capture — otherwise every
+kernel reports the same synthetic instruction and nothing is attributable — so
+its *total* step time reads high. For throughput use ``tools/benchmark.py`` and
+the ``jcm-benchmark`` skill's methodology.
+
+Raw traces
+""""""""""
+
+To inspect the timeline directly:
 
 .. code-block:: python
 

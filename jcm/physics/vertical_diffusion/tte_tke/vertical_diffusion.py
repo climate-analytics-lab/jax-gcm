@@ -24,6 +24,7 @@ from .tke_budget import (
     compute_tke_exchange_coefficient,
     compute_tke_diagnostics,
     echam_tke_source_update,
+    echam_thv_variance_source_update,
 )
 
 
@@ -235,11 +236,41 @@ def vertical_diffusion_column(
         dt=dt,
     )
 
+    # Step 1b: the SAME split for the variance of virtual potential
+    # temperature. ECHAM advances ``pthvvar`` in the same loop as TKE
+    # (vdiff.f90:857-860) and then hands it to the same implicit transport
+    # solve, so the two prognostics stay on the same footing. Without this
+    # the variance had no source at all and only ever decayed toward its
+    # floor — which is why ``pthvsig`` could not be used and the convective
+    # ``zlift`` had to fall back to a constant.
+    thv_gradient = _column_thv_gradient(
+        state.temperature, state.pressure_full,
+        state.qv, state.qc, state.qi, state.height_full,
+    )
+    # PRE-source TKE, deliberately: ECHAM evaluates BOTH variance terms at
+    # ``ztkesq = SQRT(ptkem1)`` — the previous time level — (vdiff.f90:849,
+    # 857-858; only the transport coefficients at :855-856 rescale to the
+    # post-source ``ztkevn``). ``exchange_coeff_heat`` above already carries
+    # √(state.tke), so production and dissipation share one turbulent
+    # velocity scale, which is also what makes the documented equilibrium
+    # cancellation var* = 2·c_h·l²·G²/c_d exact. Passing the post-source
+    # TKE here mixed the two levels (Codex on #690).
+    post_source_thv_var = echam_thv_variance_source_update(
+        prev_thv_variance=state.thv_variance,
+        thv_gradient=thv_gradient,
+        exchange_coeff_heat=exchange_coeff_heat,
+        tke=state.tke,
+        mixing_length=mixing_length,
+        dt=dt,
+    )
+
     # Step 2: matrix solver for vertical transport, with the post-source
-    # TKE as input. Build a shallow-copied state so we don't mutate the
-    # caller-owned ``state`` and so other variables still see the original
-    # ``state.tke`` for their own coupling (if any).
-    state_for_solver = state._replace(tke=post_source_tke)
+    # TKE and θ_v variance as input. Build a shallow-copied state so we
+    # don't mutate the caller-owned ``state`` and so other variables still
+    # see the original ``state.tke`` for their own coupling (if any).
+    state_for_solver = state._replace(
+        tke=post_source_tke, thv_variance=post_source_thv_var,
+    )
 
     tke_exchange_coeff = compute_tke_exchange_coefficient(
         post_source_tke, mixing_length,
@@ -340,7 +371,18 @@ def vertical_diffusion_column(
     tke_tend_rebased = (
         tendencies.tke_tendency + (post_source_tke - state.tke) / dt
     )
-    tendencies = tendencies._replace(tke_tendency=tke_tend_rebased)
+    # The θ_v variance goes through the identical split (source step then
+    # implicit transport), so it needs the identical rebase — without it the
+    # carried variance would silently lose the source increment every step,
+    # which is the same way it ended up pinned at its floor before.
+    thv_var_tend_rebased = (
+        tendencies.thv_var_tendency
+        + (post_source_thv_var - state.thv_variance) / dt
+    )
+    tendencies = tendencies._replace(
+        tke_tendency=tke_tend_rebased,
+        thv_var_tendency=thv_var_tend_rebased,
+    )
     diagnostics = diagnostics._replace(surface_fluxes=surface_fluxes)
 
     return tendencies, diagnostics
@@ -383,6 +425,39 @@ def _column_buoyancy_freq_squared(temperature: jnp.ndarray,
     dT_dz_full = jnp.concatenate([dT_dz[:, :1], dT_dz], axis=1)
     lapse = c.grav / c.cpd
     return (c.grav / temperature) * (dT_dz_full + lapse)
+
+
+def _column_thv_gradient(temperature: jnp.ndarray,
+                         pressure_full: jnp.ndarray,
+                         qv: jnp.ndarray,
+                         qc: jnp.ndarray,
+                         qi: jnp.ndarray,
+                         height_full: jnp.ndarray) -> jnp.ndarray:
+    """∂θ_v/∂z [K/m], the source gradient of the θ_v-variance budget.
+
+    ECHAM ``vdiff.f90``:
+
+        zteta1    = T * (p0/p)**kappa
+        ztvir1    = zteta1 * (1 + vtmpc1*q - x)          (x = qc + qi)
+        zthvirdif = (ztvir1(jk) - ztvir1(jk+1)) / zhh(jk) * grav
+
+    where ``zhh`` is the geopotential thickness, so the ``* grav`` converts
+    it to a per-metre gradient. Condensate loading (``- x``) is part of the
+    reference definition and is kept: it is what makes a cloud-topped
+    boundary layer's variance differ from a clear one.
+
+    Index 0 is the model top and ``nlev-1`` the surface, so a forward
+    difference along the level axis is ``(upper - lower)`` and dz is
+    negative-definite going down; taking the difference of both in the same
+    direction gives the right sign either way.
+    """
+    theta = temperature * (c.p0 / pressure_full) ** c.akap
+    theta_v = theta * (1.0 + c.vtmpc1 * qv - (qc + qi))
+    dz = jnp.diff(height_full, axis=1)
+    dthv_dz = jnp.diff(theta_v, axis=1) / dz
+    # Repeat the topmost interior value so the result is (ncol, nlev), the
+    # same convention ``_column_buoyancy_freq_squared`` uses.
+    return jnp.concatenate([dthv_dz[:, :1], dthv_dz], axis=1)
 
 
 @jax.jit
@@ -552,6 +627,12 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         nlev, ncols = carry["vertical_diffusion"].tke.shape
         carry["vertical_diffusion"] = carry["vertical_diffusion"].copy(
             tke=jnp.full((nlev, ncols), 0.01),
+            # θ_v variance seeds at ECHAM's ``ztkemin`` rather than the TKE
+            # floor: it is a variance in K², and its budget builds it up
+            # from the ambient gradient within the first few steps. Seeding
+            # it high would hand the convective trigger a large spurious
+            # ``zlift`` on step 0.
+            thv_variance=jnp.full((nlev, ncols), 1.0e-10),
         )
         return carry
 
@@ -579,7 +660,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         tke = prev_vdiff.tke
         if tke.ndim == 3:
             tke = tke.reshape(nlev, ncols)
-        thv_variance = jnp.zeros((nlev, ncols))
+        # Carried from the previous step exactly like TKE (ECHAM keeps
+        # ``pthvvar`` in the restart file). This used to be re-zeroed every
+        # step, which made the variance non-prognostic in practice: its
+        # source/dissipation balance never had more than one step to build
+        # up, so it sat at its floor and could not be used for anything —
+        # the reason the convective ``zlift`` had to read a constant.
+        thv_variance = prev_vdiff.thv_variance
+        if thv_variance.ndim == 3:
+            thv_variance = thv_variance.reshape(nlev, ncols)
 
         # Surface tile fractions: 0=water, 1=sea-ice, 2=land.
         nsfc_type = 3
@@ -681,6 +770,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         qc_tend = vdiff_tendencies.qc_tendency.T
         qi_tend = vdiff_tendencies.qi_tendency.T
         tke_tend = vdiff_tendencies.tke_tendency.T
+        thv_var_tend = vdiff_tendencies.thv_var_tendency.T
 
         km = vdiff_diagnostics.exchange_coeff_momentum.T
         kh = vdiff_diagnostics.exchange_coeff_heat.T
@@ -710,6 +800,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # and bounded by the production/dissipation equilibrium, so the
         # standard 0.01 m²/s² floor is the only safeguard needed here.
         new_tke = jnp.maximum(tke + dt * tke_tend, 0.01)
+        # ECHAM floors pthvvar at ztkemin = 1e-10 K² after both the
+        # source step and the implicit transport (vdiff.f90:860,1311).
+        new_thv_var = jnp.maximum(thv_variance + dt * thv_var_tend, 1.0e-10)
+        # pthvsig = SQRT(pthvvar(klev-1)) — the SECOND-lowest full level,
+        # not the lowest (vdiff.f90:1338). Levels here run top-first, so
+        # klev-1 is index -2.
+        new_thv_sigma = jnp.sqrt(new_thv_var[-2])
 
         tendency = PhysicsTendency(
             u_wind=u_tend,
@@ -721,6 +818,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
 
         vdiff_out = prev_vdiff.copy(
             tke=new_tke,
+            thv_variance=new_thv_var,
+            thv_sigma=new_thv_sigma,
             km=km,
             kh=kh,
             # Same-step moisture-tendency profile for the Tiedtke zdqpbl

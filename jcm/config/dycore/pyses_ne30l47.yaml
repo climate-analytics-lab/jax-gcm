@@ -1,0 +1,65 @@
+# pySES CAM-SE spectral-element backend — canonical ne30L47 configuration.
+#
+# These are the PRODUCTION-VALIDATED stability settings from the 2026-07
+# ne30 campaign (a full 365-day ECHAM+RRTMGP+2M+JAM year, zero NaN):
+#   * dt = 900 s: pySES's lump-coupling forward-Euler physics kick is the
+#     destabilizer at winter-vortex fronts; 900 s + dribbled dynamics
+#     coupling clears what 1800 s cannot.
+#   * coupling = hybrid (CAM-SE se_ftype 2): tracers lumped for
+#     mass/shape preservation, u/v/T dribbled across dynamics substeps.
+#   * hypervis = quasi_uniform: CAM-SE production dissipation with the
+#     divergent wind damped nu_div_factor(=2.5)x harder — the
+#     vortex-edge front killer. (The tensor config has no divergence
+#     enhancement and lost eight probe runs to day-146 fronts.)
+#   * nu_top = 2.5e5 m^2/s: pySES's own default; the 2.5e4 the prototype
+#     used (to cut sponge sub-cycling cost) under-damps the lid.
+#   * tracer_substeps = 5 at dt=900 -> dt_tracer 180 s (~240 m/s
+#     advective headroom; pySES's CFL sizing assumes 120 m/s, which the
+#     winter polar-night jet exceeds).
+#   * lid_sponge: USSA temperature relaxation + implicit tanh-profile
+#     Rayleigh wind friction over the top levels — the finite ~1 Pa lid
+#     sits outside the radiation schemes' validity and refrigerates /
+#     accelerates unbounded without it.
+#
+# NOTE: the ``grid`` group is IGNORED with this backend — resolution comes
+# from nx/npt/nlev here. ``run.time_step`` is also ignored (the Model
+# adopts dt_seconds). Requires `pip install jcm[pyses]`.
+#
+# NOTE: pySES exposes no ``omega`` provider (it computes the vertical
+# pressure velocity internally but does not publish it — #698), so ECHAM's
+# ``lmfmid`` mid-level convection trigger (``cubasmc``, #697) cannot run on
+# this backend. Model construction will refuse to build an ECHAM package
+# here until you turn that trigger off with the reference's own switch:
+#
+#   +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+#
+# That is a real capability gap, not a formality: elevated convection above
+# a stable layer is simply absent from such a run. Prefer fixing #698.
+name: pyses
+nx: 30
+npt: 4
+nlev: 47
+dt_seconds: 900.0
+coupling: hybrid
+hypervis: quasi_uniform
+nu_div_factor: 2.5
+nu_top: 2.5e5
+n_sponge: 8
+tracer_substeps: 5
+dyn_substeps_per_tracer: -1
+compute_frontogenesis: false
+# Terrain source. Null -> the packaged T63 climatology (a downscale).
+# Preferred: the assembled native ne30pg3 terrain bundle (GMTED2010 SSO,
+# CESM LANDFRAC land fraction, exact GLL orography from the topo
+# product's PHIS_gll) —
+#   terrain_file: hf://bundles/ne30pg3/terrain.nc
+# The bundle keeps full pg3 resolution (48,600 cells); pySES's pg2
+# physics columns (21,600) nearest-neighbor sample it, so the logged
+# column-count warning is expected and benign here.
+# Regular lon/lat jcm-canonical terrain files also work (bilinearly
+# interpolated onto the columns). hf:// paths resolve via jcm.data.remote.
+terrain_file: null
+lid_sponge:
+  levels: 8
+  t_hours: 6.0
+  uv_hours: 72.0

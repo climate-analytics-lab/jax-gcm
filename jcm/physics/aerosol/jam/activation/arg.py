@@ -110,10 +110,15 @@ def arg_activation(
 ):
     """ARG closed-form activation.
 
-    Returns ``(activated_cdnc, activated_fraction, s_max)``:
+    Returns ``(activated_cdnc, activated_fraction, s_max, number_frac,
+    mass_frac)``:
       * ``activated_cdnc``  (nlev, ncols) total activated number [m^-3]
       * ``activated_fraction`` (nlev, ncols) number-weighted fraction [-]
       * ``s_max`` (nlev, ncols) maximum supersaturation [-]
+      * ``number_frac`` (M, nlev, ncols) per-mode activated number fraction,
+        zero for non-activatable modes
+      * ``mass_frac`` (M, nlev, ncols) per-mode activated mass fraction
+        (the log-normal number erf shifted by ``3·lnσ/√2``), same masking
     """
     # Floor the modal number at 0: spectral advection of the aerosol-number
     # tracers leaves small NEGATIVE number on the near-zero cold-start field
@@ -167,11 +172,17 @@ def arg_activation(
     inv_smax2 = jnp.sum(can_activate * term / sm ** 2, axis=0)
     s_max = 1.0 / jnp.sqrt(jnp.maximum(inv_smax2, _TINY))
 
-    # Activated fraction per mode and total.
+    # Activated fraction per mode and total. The mass fraction is the same
+    # log-normal integral evaluated against the mass distribution, whose
+    # median is ``exp(3·ln²σ)`` above the number median — the standard ARG
+    # ``u_m = u − 3·lnσ/√2`` shift.
     u = (2.0 * jnp.log(sm / s_max)) / (3.0 * jnp.sqrt(2.0) * ln_sigma)
     f_act = 0.5 * (1.0 - erf(u))
+    f_mass = 0.5 * (1.0 - erf(u - 3.0 * ln_sigma / jnp.sqrt(2.0)))
     n_act = jnp.sum(can_activate * number_vol * f_act, axis=0)
 
     n_total = jnp.sum(can_activate * number_vol, axis=0)
     activated_fraction = n_act / jnp.maximum(n_total, _TINY)
-    return n_act, activated_fraction, s_max
+    return n_act, activated_fraction, s_max, can_activate * f_act, (
+        can_activate * f_mass
+    )

@@ -20,6 +20,7 @@ See docs/design/composable_physics.md for the full design.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 import jax
@@ -27,9 +28,11 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
+from jcm import profiling
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
+from jcm.physics.budget_gauge import gauge_aerosol_budget
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
 
@@ -87,6 +90,21 @@ class ComposablePhysics(nnx.Module, Physics):
 
         """
         self.terms = nnx.List(terms)
+        # Fields a term's struct carries but this configuration never
+        # fills; withheld from output so their zero default cannot be read
+        # as data (see _term_withheld_keys).
+        self._term_withheld_keys = frozenset(
+            key for t in terms for key in t.withheld_output_keys())
+        # Per-term output-key renames (e.g. the MACv2-SP ``aerosol.*`` struct
+        # fields → the ``macsp.*`` namespace, #640). Keyed by the INTERNAL
+        # dotted diagnostics name and applied in ``data_struct_to_dict`` after
+        # flattening; the FIRST term to claim a key wins (composition order),
+        # matching the units-table / output_attrs precedence rule.
+        output_key_map: dict[str, str] = {}
+        for t in terms:
+            for src, dst in getattr(t, "output_key_map", {}).items():
+                output_key_map.setdefault(src, dst)
+        self._output_key_map = output_key_map
         self.checkpoint_terms = checkpoint_terms
         self.vectorize_columns = vectorize_columns
         self.dt_seconds = float(dt_seconds)
@@ -143,6 +161,20 @@ class ComposablePhysics(nnx.Module, Physics):
                     )
                 seen[spec.name] = spec
         return tuple(seen.values())
+
+    def required_dycore_fields(self) -> tuple[str, ...]:
+        """Union of per-term ``requires_dycore_fields``, minus any field an
+        upstream term already ``provides`` (a physics-side provider term
+        satisfies the requirement just as well as the dycore).
+        """
+        available: set[str] = set()
+        needed: list[str] = []
+        for term in self.terms:
+            for field in term.requires_dycore_fields:
+                if field not in available and field not in needed:
+                    needed.append(field)
+            available.update(term.provides)
+        return tuple(needed)
 
     def stable_time_step_minutes(self, coords) -> float | None:
         """Most restrictive per-term stable time step (minutes), or ``None``.
@@ -201,6 +233,22 @@ class ComposablePhysics(nnx.Module, Physics):
             k: v for k, v in diagnostics.items()
             if k not in self._INTERNAL_DIAGNOSTIC_KEYS
         }
+        # Invariant: everything compute_tendencies returns is at the physics
+        # working dtype (the state's). Under jax_enable_x64 with a float32
+        # physics state (float64-dynamics dycores like pySES CAM-SE), float64
+        # table constants inside individual terms would otherwise promote a
+        # scattered subset of diagnostic leaves, and the cross-step lax.scan
+        # carry then fails to type-check against its uniform-dtype template.
+        # A no-op for the standard all-f32 (x64 disabled) and all-f64 runs.
+        working = state.temperature.dtype
+
+        def _pin(x):
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating):
+                return x.astype(working)
+            return x
+
+        tendencies = jax.tree.map(_pin, tendencies)
+        diagnostics = jax.tree.map(_pin, diagnostics)
         return tendencies, diagnostics
 
     def _compute_tendencies_3d(
@@ -218,8 +266,17 @@ class ComposablePhysics(nnx.Module, Physics):
 
         for term in self.terms:
             call_fn = jax.checkpoint(term) if self.checkpoint_terms else term
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(state, diagnostics, forcing, terrain)
             tendencies += tend
+
+        # Same cross-step handoff as the columns path (see there for why).
+        diagnostics["_prev_step"] = {
+            "specific_humidity": state.specific_humidity,
+            "q_tendency": tendencies.specific_humidity,
+        }
 
         return tendencies, diagnostics
 
@@ -250,6 +307,20 @@ class ComposablePhysics(nnx.Module, Physics):
         if prev_physics_data is not None:
             diagnostics = {**prev_physics_data}
 
+        # Dycore-supplied fields arrive grid-shaped (…, nlon, nlat) from
+        # Model; terms on this path see the flattened (…, ncols) layout, so
+        # reshape them the same lon-major way the state was reshaped —
+        # otherwise a term mixes a (nlon, nlat) trigger with (ncols,) winds
+        # (wrong rank or silent mis-broadcast).
+        if "_dycore_fields" in diagnostics:
+            def _to_cols(x):
+                if (hasattr(x, "ndim") and x.ndim >= 2
+                        and x.shape[-2:] == (nlon, nlat)):
+                    return x.reshape(x.shape[:-2] + (ncols,))
+                return x
+            diagnostics["_dycore_fields"] = jax.tree_util.tree_map(
+                _to_cols, diagnostics["_dycore_fields"])
+
         diagnostics["_dt_seconds"] = self.dt_seconds
         diagnostics["_band_config"] = self.band_config
 
@@ -266,15 +337,66 @@ class ComposablePhysics(nnx.Module, Physics):
         }
 
         for term in self.terms:
+            # Running tendency view, for DIAGNOSTIC terms that must report the
+            # state as it will be saved rather than as it was at step start.
+            #
+            # This is operator splitting: every term computes against the
+            # step-start ``state`` and returns a tendency; the driver sums them
+            # and the dycore applies that sum once. So ``state.tracers`` seen by
+            # a term is ALWAYS the step-start value, and a diagnostic reading it
+            # reports a step-stale field that disagrees with the tracers saved
+            # at the same timestamp. ``thermo_run`` already solves this for
+            # T/q/qc/qi; this is the same idea generalised to tracers and winds,
+            # without each term having to opt in.
+            #
+            # A term running at position i sees the sum over terms [0, i). For
+            # the diagnostics terms that consume it — which run last, after the
+            # physics — that is the whole physics tendency. Structure is fixed
+            # (the tracer key set comes from ``state.tracers``), so this is safe
+            # in the ``lax.scan`` carry.
+            diagnostics["_tendency_run"] = acc
             call_fn = (
                 jax.checkpoint(term)
                 if self.checkpoint_terms
                 else term
             )
+            # Tag the term's instructions so a profiler trace can be attributed
+            # back to it; see jcm.profiling.
+            call_fn = profiling.scoped(call_fn, term.name)
             tend, diagnostics = call_fn(
                 vectorized_state, diagnostics, forcing, terrain,
             )
             acc = _accumulate(acc, tend)
+
+        # Publish the step-start humidity and this step's total physics
+        # moisture tendency for the NEXT step (they ride the diagnostics
+        # carry). A consumer can then reconstruct the DYNAMICS moisture
+        # tendency of the just-completed dycore step as
+        #
+        #     dyn = (q_now - q_prev)/dt - q_tend_physics_prev
+        #
+        # which is everything the host applied between the two physics
+        # calls: advection, hyperdiffusion, filters. This is exactly the
+        # information ECHAM's ``pqte`` carries into ``cucall`` — and with
+        # the same one-step-lagged provenance, since ECHAM's leapfrog
+        # dynamics tendency is computed from the previous time level too.
+        # First consumer: the Tiedtke deep/shallow moisture-convergence
+        # test (``zdqcv``, #699). Excluded from xarray output; zeros on
+        # step 1 (the structural template), which reads as "no known
+        # dynamics tendency yet".
+        diagnostics["_prev_step"] = {
+            "specific_humidity": vectorized_state.specific_humidity,
+            "q_tendency": acc["specific_humidity"],
+        }
+
+        # Per-species aerosol mass-budget gauge (#713): entry mass, net
+        # physics tendency, and the lagged DYNAMICS residual — the
+        # in-step budget closure that makes a transport leak or an
+        # unledgered physics source visible in one save window instead
+        # of after months of compounding. No-op without aerosol tracers.
+        diagnostics = gauge_aerosol_budget(
+            diagnostics, vectorized_state, acc["tracers"], self.dt_seconds,
+        )
 
         # Keep the accumulated tendencies column-sharded before the lon-major
         # un-flatten, so the (nlev, ncols) -> (nlev, nlon, nlat) reshape lands
@@ -298,12 +420,15 @@ class ComposablePhysics(nnx.Module, Physics):
         cross-step slots, so we union it with this structural template
         (zero values, used only for shape).
 
-        Implementation: runs ``compute_tendencies`` once at Model
-        construction time with a non-zero isothermal probe state
-        (288 K, q=0, etc.) so radiation terms don't hit 0/0=NaN.
-        The result is *only ever used as a zero-filled template* —
-        never as live cross-step physics state. (Mis-using its
-        output as live state was the architectural bug `#470
+        Implementation: traces ``compute_tendencies`` once with
+        ``jax.eval_shape`` at Model construction time — only the output
+        pytree structure and shapes/dtypes are consumed, so nothing is
+        compiled or executed (eagerly running the full physics stack
+        un-jitted here cost tens of seconds per Model for the big ECHAM
+        compositions, twice per construction). The result is *only ever
+        used as a zero-filled template* — never as live cross-step
+        physics state. (Mis-using its output as live state was the
+        architectural bug `#470
         <https://github.com/climate-analytics-lab/jax-gcm/issues/470>`_
         tracks; the operator-split refactor in `#471` moved live
         state to ``initial_carry_state``.)
@@ -311,27 +436,38 @@ class ComposablePhysics(nnx.Module, Physics):
         """
         from jax.tree_util import tree_map
 
-        # Probe at a well-conditioned isothermal state. Using
-        # ``PhysicsState.zeros`` here produces 0/0 = NaN in radiation
-        # terms; the non-zero T=288 K probe walks the same code paths
-        # without the division-by-zero. We zero the output anyway
-        # so the probe values themselves don't matter — only the
-        # pytree structure / shapes do.
+        # The probe defines the input pytree STRUCTURE (which tracers
+        # exist, which forcing fields are present); its values are never
+        # computed with — eval_shape traces abstractly, so even 0/0
+        # paths in radiation cannot produce NaNs here.
         nodal_shape = coords.horizontal.nodal_shape
         nlev = coords.nodal_shape[0]
         shape_3d = (nlev,) + nodal_shape
 
+        # Seed the probe with every declared tracer (zeros) so the template's
+        # pytree structure matches real steps, where ``state.tracers`` holds
+        # the keys aggregated from ``required_tracers()``. Terms that echo
+        # ``state.tracers`` into the diagnostics dict (e.g. the StateSampler
+        # feeding the virtual-observation channel) would otherwise produce a
+        # carry whose structure differs from this template — a lax.scan
+        # pytree mismatch on the first step.
         probe_state = PhysicsState.zeros(shape_3d).copy(
             temperature=jnp.full(shape_3d, 288.0),
             normalized_surface_pressure=jnp.ones(nodal_shape),
+            tracers={
+                spec.name: jnp.zeros(shape_3d)
+                for spec in self.required_tracers()
+            },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
         probe_terrain = TerrainData.aquaplanet(coords)
 
-        _, diagnostics = self.compute_tendencies(
+        diagnostics = jax.eval_shape(
+            lambda s, f, t: self.compute_tendencies(s, f, t)[1],
             probe_state, probe_forcing, probe_terrain,
         )
-        return tree_map(jnp.zeros_like, diagnostics)
+        return tree_map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
+                        diagnostics)
 
     def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
         """Aggregate per-term cross-step carry-state slots.
@@ -378,10 +514,31 @@ class ComposablePhysics(nnx.Module, Physics):
     _INTERNAL_DIAGNOSTIC_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_dt_seconds",
         "_band_config",
+        "_dycore_fields",
         "_forcing_2d",
         "_echam_params",
         "_echam_coords",
         "_speedy_coords",
+        # Per-mode ARG activated fractions — inter-term plumbing for the
+        # cloud-borne exchange (#602), not an output field (the totals a
+        # user wants are ``activated_cdnc``/``activated_fraction``).
+        "_jam_activation",
+        # Running post-physics thermodynamic view (advance_thermo_run):
+        # an intermediate that duplicates the state fields; became
+        # exportable once plain dicts flatten, so exclude it by name.
+        "thermo_run",
+        # Running tendency view for diagnostics (see the term loop); an
+        # intermediate, not a field anyone wants in the netCDF.
+        "_tendency_run",
+    })
+
+    # Dict-valued diagnostics that must NOT flatten into user output.
+    # ``_sampler_state`` duplicates the whole state for the observer path
+    # and is stripped at the model level for the ordinary output routes;
+    # it cannot go into ``_INTERNAL_DIAGNOSTIC_KEYS`` because observers
+    # read it from the returned dict post-step.
+    _UNFLATTENED_DICTS: ClassVar[frozenset[str]] = frozenset({
+        "_sampler_state",
     })
 
     # Sub-struct fields that survive the flatten step but should be dropped
@@ -392,13 +549,77 @@ class ComposablePhysics(nnx.Module, Physics):
     # scientific value. Filter is applied to the full dotted key
     # (e.g. ``aerosol.aod_sw_per_band``).
     _EXCLUDED_OUTPUT_KEYS: ClassVar[frozenset[str]] = frozenset({
+        # Cross-step (q, dq/dt) handoff for the lagged dynamics-tendency
+        # reconstruction (#699) — carry plumbing, not an output field.
+        "_prev_step",
+        # Cross-step per-species mass expectation for the #713 budget
+        # gauge — carry plumbing, not an output field.
+        "_budget_expected",
         "aerosol.aod_sw_per_band",
         "aerosol.ssa_sw_per_band",
         "aerosol.asy_sw_per_band",
         "aerosol.aod_lw_per_band",
         "aerosol.ssa_lw_per_band",
         "aerosol.asy_lw_per_band",
+        # Internal carry state for the subsampled aerosol-free companion,
+        # not a diagnostic: the last companion's aerosol effect as a
+        # fraction of the all-sky flux. Never of interest in output.
+        "radiation.noa_frac_toa_sw_up",
+        "radiation.noa_frac_toa_lw_up",
+        "radiation.noa_frac_toa_sw_up_clear",
+        "radiation.noa_frac_toa_lw_up_clear",
     })
+
+    #: ``<struct>.<field>`` keys a TERM asks to withhold for this run —
+    #: fields its struct always carries but which this configuration never
+    #: populates. Publishing them would put a zero default in the output
+    #: that is indistinguishable from real data: an aerosol-free TOA flux
+    #: of 0 turns downstream ERFari (``rsut - rsutnoa``) into the whole
+    #: all-sky flux, ~240 W/m2 instead of ~-1 (jax-gcm#647).
+    _term_withheld_keys: frozenset[str] = frozenset()
+
+    #: Internal-dotted-key → output-key renames aggregated from the terms'
+    #: :attr:`PhysicsTerm.output_key_map` (see ``__init__``). Applied to every
+    #: flattened output key so a scheme can publish its diagnostics under an
+    #: explicit namespace (e.g. MACv2-SP's ``aerosol.*`` → ``macsp.*``, #640)
+    #: without renaming the internal struct radiation/microphysics read.
+    _output_key_map: Mapping[str, str] = {}
+
+    def units_table_paths(self) -> tuple:
+        """Units/description CSVs of every term in this package, deduplicated.
+
+        Terms of the same family share one table, so the same path is
+        usually contributed many times; the order terms were composed in is
+        preserved, which is what decides precedence when two tables name the
+        same variable.
+
+        ``__add__`` accepts any callable carrying a ``category``, not only a
+        ``PhysicsTerm``, so the attribute is read defensively — a term
+        without a table must not turn into an ``AttributeError`` at the very
+        end of a run, when the output is being written.
+        """
+        paths = list(super().units_table_paths())
+        paths += [table for table in
+                  (getattr(term, "UNITS_TABLE_CSV_PATH", None) for term in self.terms)
+                  if table is not None]
+        return tuple(dict.fromkeys(paths))
+
+    def output_attrs(self) -> dict[str, dict[str, str]]:
+        """Merge per-term ``output_attrs`` for the whole package (#740).
+
+        Each term declares CF/units metadata for the output variables it
+        produces, keyed by the dotted names they carry in the xarray Dataset
+        (see :attr:`PhysicsTerm.output_attrs`). This aggregates them in
+        composition order; the FIRST term to declare a given variable wins on
+        a duplicate, matching the units-table precedence rule
+        (``drop_duplicates(keep="first")``). Terms predating the attribute are
+        tolerated via ``getattr``.
+        """
+        merged: dict[str, dict[str, str]] = {}
+        for term in self.terms:
+            for var, attrs in getattr(term, "output_attrs", {}).items():
+                merged.setdefault(var, dict(attrs))
+        return merged
 
     def data_struct_to_dict(
         self, struct: Any, nodal_shape=None, sep: str = "."
@@ -422,14 +643,30 @@ class ComposablePhysics(nnx.Module, Physics):
             return super().data_struct_to_dict(struct, nodal_shape, sep)
 
         items: dict[str, Any] = {}
+        rename = self._output_key_map
         for k, v in struct.items():
-            if k in self._INTERNAL_DIAGNOSTIC_KEYS:
+            # The exclusion set holds dotted leaf names for sub-structs and
+            # bare names for whole top-level entries (e.g. the ``_prev_step``
+            # carry handoff, whose flattened children would otherwise pass).
+            if (k in self._INTERNAL_DIAGNOSTIC_KEYS
+                    or k in self._EXCLUDED_OUTPUT_KEYS):
                 continue
             out_key = k.lstrip("_") if k.startswith("_") else k
             if not out_key:
                 continue
             if isinstance(v, jax.Array):
-                items[out_key] = v
+                items[rename.get(out_key, out_key)] = v
+            elif isinstance(v, dict) and k not in self._UNFLATTENED_DICTS:
+                # Plain dict-of-arrays diagnostic (e.g. the carry-stored
+                # cloud-borne fields ``_jam_cloud_borne``, #602 item 3, or the
+                # JAM optics ``_jam_optics`` carry, #640): flatten one level
+                # with the same separator convention as typed sub-structs.
+                # Zero-size entries (empty band tables and the like) have no
+                # xarray shape and are skipped.
+                for sk, sv in v.items():
+                    if isinstance(sv, jax.Array) and sv.size:
+                        full_key = f"{out_key}{sep}{sk}"
+                        items[rename.get(full_key, full_key)] = sv
             elif hasattr(v, "__dict__") and v.__dict__:
                 # Typed sub-struct (e.g. PhysicsData.radiation). Flatten via
                 # the parent recursive helper; skip if it raises (sub-structs
@@ -440,9 +677,10 @@ class ComposablePhysics(nnx.Module, Physics):
                     continue
                 for sk, sv in sub.items():
                     full_key = f"{out_key}{sep}{sk}"
-                    if full_key in self._EXCLUDED_OUTPUT_KEYS:
+                    if (full_key in self._EXCLUDED_OUTPUT_KEYS
+                            or full_key in self._term_withheld_keys):
                         continue
-                    items[full_key] = sv
+                    items[rename.get(full_key, full_key)] = sv
 
         # Reshape column-vectorized diagnostics (a flattened ncols axis,
         # produced when ``vectorize_columns=True``) back to ``(lon, lat)``

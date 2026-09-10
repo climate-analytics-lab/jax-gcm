@@ -11,7 +11,19 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/operator_split_physics
    design/writing_a_physics_scheme
    design/parallelization
+   design/output_vertical_conventions
+   design/pyses_cam_se_dycore
+   design/dinosaur_sl_jam_configuration
+   design/jam_carbon_aging
    design/speedy_variable_levels
+   design/frontal_gravity_wave_drag
+   design/lohmann_2m_column_processes
+   design/aerosol_optics_diagnostics
+   design/radiation_nn_emulator
+   design/aerocom_erfari_sampling
+   design/data_mirror
+   design/packaged_config_tree
+   design/test_suite_memory
 
 Core Architecture
 -----------------
@@ -50,7 +62,12 @@ one-step integration, terrain preparation, conversion to gridpoint
 :py:class:`~jcm.physics_interface.PhysicsState`, simulation-time accounting,
 and xarray output. The shipped
 :py:class:`jcm.dycore.dinosaur.dycore.DinosaurDycore` backend wraps Dinosaur's
-spectral primitive-equation state, IMEX-RK step, and spectral filters.
+spectral primitive-equation state, IMEX-RK step, and spectral filters. The
+optional :py:class:`jcm.dycore.pyses.PysesCamSEDycore` backend
+(``pip install jcm[pyses]``, registry name ``"pyses_cam_se"``) wraps the
+pySES CAM-SE spectral-element core on the cubed sphere, coupling to the
+column physics through a pg2 finite-volume physics grid — see
+:doc:`design/pyses_cam_se_dycore`.
 
 The physics-dynamics boundary is gridpoint space on the dycore's native
 horizontal layout, so physics never sees spectral coefficients. The protocol

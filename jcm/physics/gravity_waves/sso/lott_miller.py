@@ -913,13 +913,31 @@ class LottMillerSso(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v/T tendencies from Lott-Miller SSO."""
-        nlev, ncols = state.temperature.shape
+        # The drag is a per-column scheme, vmapped over columns below, so it
+        # does not care how the host lays the horizontal out. Flatten whatever
+        # trailing axes it uses into a single column axis and restore the
+        # shape on the way out. Unpacking ``nlev, ncols`` instead restricted
+        # the term to a column-vectorized host, which a grid-based physics
+        # package cannot supply: SPEEDY's shortwave computes zonal averages
+        # and so needs a real longitude axis, and ``ComposablePhysics.__add__``
+        # inherits ``vectorize_columns`` from its left operand.
+        horiz = state.temperature.shape[1:]
+        nlev = state.temperature.shape[0]
+
+        def _cols(x):
+            """Flatten the horizontal of a level-major field to one axis."""
+            return x.reshape(x.shape[0], -1)
+
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
 
-        pressure_full = diagnostics["pressure_full"]
-        pressure_half = diagnostics["pressure_half"]
-        height_full = diagnostics["height_full"]
+        pressure_full = _cols(diagnostics["pressure_full"])
+        pressure_half = _cols(diagnostics["pressure_half"])
+        height_full = _cols(diagnostics["height_full"])
+        temperature = _cols(state.temperature)
+        u_wind = _cols(state.u_wind)
+        v_wind = _cols(state.v_wind)
+        ncols = temperature.shape[1]
 
         layer_mass = (
             (pressure_half[1:, :] - pressure_half[:-1, :])
@@ -954,7 +972,7 @@ class LottMillerSso(PhysicsTerm):
             out_axes=(0, 0),
         )(
             pressure_full, pressure_half, layer_mass,
-            state.temperature, state.u_wind, state.v_wind, height_full,
+            temperature, u_wind, v_wind, height_full,
             terrain.orog.reshape(-1), terrain.orog.reshape(-1),
             terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
             terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
@@ -964,10 +982,15 @@ class LottMillerSso(PhysicsTerm):
 
         dt_temperature = tend.dissip / _physical_constants.cpd
 
+        # vmap returns (ncols, nlev); transpose to level-major, then restore
+        # the host's horizontal shape.
+        def _grid(x):
+            return x.T.reshape((nlev,) + horiz)
+
         return PhysicsTendency(
-            u_wind=tend.dudt.T,
-            v_wind=tend.dvdt.T,
-            temperature=dt_temperature.T,
+            u_wind=_grid(tend.dudt),
+            v_wind=_grid(tend.dvdt),
+            temperature=_grid(dt_temperature),
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers={},
         ), diagnostics

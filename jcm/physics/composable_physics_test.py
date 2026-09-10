@@ -232,6 +232,54 @@ class TestComposablePhysics(unittest.TestCase):
             physics.replace("nonexistent", LinearHeating())
 
 
+class TestOutputAttrs(unittest.TestCase):
+    """``ComposablePhysics.output_attrs`` merges per-term declarations (#740)."""
+
+    def test_merges_declarations_first_wins(self):
+        """Both terms' vars appear; the first term wins a duplicated key."""
+
+        class DeclaringA(PhysicsTerm):
+            name: ClassVar[str] = "declaring_a"
+            category: ClassVar[str] = "radiation"
+            provides: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "radiation.lw_flux_up": {"units": "W m-2"},
+                "shared": {"units": "from_a"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics, "heating_rate": state.temperature}
+
+        class DeclaringB(PhysicsTerm):
+            name: ClassVar[str] = "declaring_b"
+            category: ClassVar[str] = "convection"
+            requires: ClassVar[tuple[str, ...]] = ("heating_rate",)
+            output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+                "convection.precip": {"units": "kg m-2 s-1"},
+                # Collides with DeclaringA — the FIRST term must win.
+                "shared": {"units": "from_b"},
+            }
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = ComposablePhysics(terms=[DeclaringA(), DeclaringB()])
+        merged = physics.output_attrs()
+        self.assertEqual(merged["radiation.lw_flux_up"]["units"], "W m-2")
+        self.assertEqual(merged["convection.precip"]["units"], "kg m-2 s-1")
+        # First term (DeclaringA) wins the duplicated "shared" key.
+        self.assertEqual(merged["shared"]["units"], "from_a")
+
+    def test_terms_without_output_attrs_are_tolerated(self):
+        """A term predating the attribute contributes nothing, no error."""
+        # ``LinearHeating`` declares no ``output_attrs``; the base default {}
+        # plus the ``getattr`` guard must keep it out of the merge cleanly.
+        physics = ComposablePhysics(
+            terms=[LinearHeating(), DiagnosticConsumer()])
+        self.assertEqual(physics.output_attrs(), {})
+
+
 class TestDifferentiabilityGate(unittest.TestCase):
     """Phase 2b gating tests: verify gradients flow through ComposablePhysics.
 
@@ -967,11 +1015,111 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
+        # Semi-Lagrangian transport (the only transport jcm has) splits the
+        # tracer representations, so equal shapes are NOT the invariant:
+        # ``specific_humidity`` stays MODAL because it participates in the
+        # implicit q<->Tv coupling, while every declared extra tracer is
+        # carried NODAL so it never round-trips through the spectral basis
+        # (that round-trip is what rang sharp emission sources negative and
+        # NaN'd the aerosol microphysics, #521). Pin both sides.
+        coords = model.dycore.coords
+        nodal = tuple(coords.horizontal.nodal_shape)
+        modal = tuple(coords.horizontal.modal_shape)
+        nlev = coords.vertical.layers
+        for name in ("qc", "qnc"):
+            with self.subTest(tracer=name):
+                self.assertEqual(state.tracers[name].shape, (nlev,) + nodal)
         self.assertEqual(
-            state.tracers["qc"].shape,
-            state.tracers["specific_humidity"].shape,
-        )
+            state.tracers["specific_humidity"].shape, (nlev,) + modal)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWithheldOutputKeys:
+    """A term can keep unpopulated struct fields out of the output.
+
+    Regression for jax-gcm#647: ``RadiationData`` carries the four
+    aerosol-free slots in every configuration, so with the diagnostic off
+    they were published as zeros — and a downstream ERFari of
+    ``rsut - rsutnoa`` then equals the whole all-sky flux, ~240 W/m2
+    instead of ~-1, in a file that looks valid.
+    """
+
+    def test_rrtmgp_withholds_noa_only_when_the_diagnostic_is_off(self):
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        # Both the fluxes and the persisted noa_frac_* ratios: a published
+        # zero fraction reads as "aerosol removes the entire flux" through
+        # the fraction-based ERFari path (PR #730 review).
+        expected = tuple(f"radiation.{k}_noa" for k in NOA_KEYS) + tuple(
+            f"radiation.noa_frac_{k}" for k in NOA_KEYS
+        )
+        assert RRTMGPRadiation(
+            aerosol_free_interval=None).withheld_output_keys() == expected
+        for on in (1, 2, 4):
+            assert RRTMGPRadiation(
+                aerosol_free_interval=on).withheld_output_keys() == ()
+
+    def test_rrtmgp_withholds_clear_sky_only_without_compute_cre(self):
+        """Clear-sky slots are the same trap as the ``*noa`` ones.
+
+        Without the second cloud-free solve they stay zero, which reads
+        as a CRE equal to the entire all-sky flux.
+        """
+        from jcm.physics.radiation.radiation_types import CLEAR_SKY_KEYS
+        from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
+
+        # The clouds sub-struct mirrors of the clear-sky TOA fluxes are the
+        # same zero placeholders without the companion solve (PR #730
+        # review); the *_all mirrors are real and stay.
+        clear = tuple(f"radiation.{k}" for k in CLEAR_SKY_KEYS) + (
+            "clouds.toa_sw_up_clear", "clouds.toa_lw_up_clear",
+        )
+        off = RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=False,
+        ).withheld_output_keys()
+        assert off == clear
+        assert RRTMGPRadiation(
+            aerosol_free_interval=1, compute_cre=True,
+        ).withheld_output_keys() == ()
+
+    def test_composable_physics_drops_the_declared_keys(self):
+        """The aggregated keys must actually be filtered from the output."""
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        class _Withholder(PhysicsTerm):
+            name = "withholder"
+            category = "diagnostic"
+
+            def withheld_output_keys(self):
+                return ("radiation.toa_sw_up_noa",)
+
+            def compute(self, state, diagnostics, forcing, dt):
+                raise NotImplementedError
+
+        diagnostics = {"radiation": RadiationData.zeros((4, 3), 5)}
+        kept = ComposablePhysics(terms=[]).data_struct_to_dict(diagnostics)
+        dropped = ComposablePhysics(
+            terms=[_Withholder()]).data_struct_to_dict(diagnostics)
+
+        assert "radiation.toa_sw_up_noa" in kept
+        assert "radiation.toa_sw_up_noa" not in dropped
+        # Only the declared key goes; its neighbours stay.
+        assert "radiation.toa_lw_up_noa" in dropped
+        assert "radiation.toa_sw_up" in dropped
+
+    def test_held_fraction_is_never_published(self):
+        """Internal carry state, not a diagnostic — hidden at every N."""
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation.aerosol_free import NOA_KEYS
+        from jcm.physics.radiation.radiation_types import RadiationData
+
+        out = ComposablePhysics(terms=[]).data_struct_to_dict(
+            {"radiation": RadiationData.zeros((4, 3), 5)})
+        for key in NOA_KEYS:
+            assert f"radiation.noa_frac_{key}" not in out, (
+                "internal held fraction published")

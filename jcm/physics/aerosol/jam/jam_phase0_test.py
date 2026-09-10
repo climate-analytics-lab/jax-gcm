@@ -57,8 +57,9 @@ class PopulationTest(unittest.TestCase):
 class TracerLayoutTest(unittest.TestCase):
     def test_spec_count_and_uniqueness(self):
         specs = tracer_specs(MAM4_SPEC)
-        # per mode: (1 number + nspec mass) * 2 (interstitial + cloud-borne)
-        expected = sum(2 * (1 + len(m.species)) for m in MAM4_SPEC.modes)
+        # per mode: 1 number + nspec mass — INTERSTITIAL only (the
+        # cloud-borne phase lives in the physics carry, #602).
+        expected = sum(1 + len(m.species) for m in MAM4_SPEC.modes)
         self.assertEqual(len(specs), expected)
         names = [s.name for s in specs]
         self.assertEqual(len(names), len(set(names)))
@@ -67,9 +68,9 @@ class TracerLayoutTest(unittest.TestCase):
         specs = {s.name: s for s in tracer_specs(MAM4_SPEC)}
         self.assertFalse(specs[number_name("acc")].nondimensionalize)
         self.assertTrue(specs[mass_name("so4", "acc")].nondimensionalize)
-        # cloud-borne mirror present
-        self.assertIn(mass_name("so4", "acc", cloud_borne=True), specs)
-        self.assertIn(number_name("acc", cloud_borne=True), specs)
+        # Cloud-borne names key the carry store, never dycore tracers.
+        self.assertNotIn(mass_name("so4", "acc", cloud_borne=True), specs)
+        self.assertNotIn(number_name("acc", cloud_borne=True), specs)
 
 
 def _uniform_population(nlev=3, ncols=2, mass=1.0e-9, number=1.0e8):

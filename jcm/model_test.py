@@ -1,7 +1,9 @@
+import logging
 import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
@@ -386,7 +388,8 @@ class TestModelUnit(unittest.TestCase):
             "unit parameter tangent produced an all-zero trajectory tangent",
         )
 
-    @pytest.mark.skip(reason="finite differencing produces nans")
+    # ~70 s: eight one-step T30 SPEEDY integrations (AD + central differences).
+    @pytest.mark.slow
     def test_speedy_model_state_gradient_check(self):
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -394,20 +397,42 @@ class TestModelUnit(unittest.TestCase):
         # Create model that goes through one timestep
         model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_dycore_state()
+        _ = model.run(total_time=0)  # to set up model fields
 
-        def f(state_f):
-            _ = model.run(total_time=0) # to set up model fields
-            predictions = model.run(initial_state=state_f, save_interval=(1/48.), total_time=(1/48.))
-            return model._final_dycore_state, predictions
-        
+        # check_vjp/check_jvp probe with unit-normal tangents, but the initial
+        # condition's spectral coefficients are O(1e-5): a unit perturbation
+        # drives the model into its humidity/temperature limiters, where the
+        # central difference is identically zero for any eps. Differentiating
+        # w.r.t. a small-amplitude perturbation is the same Jacobian at the
+        # same point, probed inside the model's linear regime.
+        perturbation_scale = 1e-5
+        zero_perturbation = jax.tree.map(jnp.zeros_like, state)
+
+        def f(delta):
+            perturbed = jax.tree.map(lambda x, d: x + perturbation_scale * d, state, delta)
+            predictions = model.run(initial_state=perturbed, save_interval=(1/48.), total_time=(1/48.))
+            # ModelPredictions also carries integer diagnostics (cloud-top
+            # level, step counters) and a bool flag, and finite differencing
+            # those is undefined ("numpy boolean subtract"), so the check
+            # covers the differentiable float leaves.
+            return [leaf for leaf in jax.tree.leaves(predictions)
+                    if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)]
+
         # Calculate gradient
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f) 
 
-        check_vjp(f, f_vjp, args = (state,), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (state,), 
-                                atol=None, rtol=1, eps=0.001)    
+        # One eps for both checks: f perturbs the state by
+        # perturbation_scale * eps, so anything below ~1e-4 lands under a
+        # float32 ulp of the state and the difference is rounding noise.
+        # At 1e-3 the AD/FD gap is ~0.14 (vjp) / ~0.16 (jvp) and systematic,
+        # not noisy — a physics step's humidity and temperature limiters are
+        # where-branches the central difference straddles — so rtol keeps ~3x
+        # margin for branch flips that move with the platform.
+        check_vjp(f, f_vjp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)
+        check_jvp(f, f_jvp, args = (zero_perturbation,), 
+                                atol=None, rtol=5e-1, eps=0.001)    
     
     @pytest.mark.slow
     def test_speedy_model_default_statistics(self):
@@ -500,16 +525,45 @@ class TestModelUnit(unittest.TestCase):
         pred_ds_mean = pred_ds.mean(dim={"time", "lon", "lat"})
 
         tol = 3  # tolerance in standard deviations
+        # Degenerate-band guard. At the top of the atmosphere several stored
+        # bands have a temporal std that underflows to *exactly* 0.0 in float32:
+        # the specific/relative-humidity tail is physically negligible
+        # (~1e-24…1e-37 kg kg⁻¹) and the upper ``pressure_full`` levels are the
+        # pure a-coefficient constants. A ±3σ band there collapses to a single
+        # point, which cannot absorb the few-percent cross-process
+        # nondeterminism XLA autotuning introduces at that underflow tail —
+        # runs are bit-identical *in-process* but drift across the
+        # generation↔test process boundary. Where std==0, fall back to a
+        # relative+absolute tolerance; every physically meaningful level has
+        # std>0 and keeps the strict ±3σ test unchanged. See #744.
+        rtol, atol = 0.25, 1e-8
         for var in default_echam_t63l47_stat_vars:
-            lower = default_stats[f"{var}.mean"] - tol * default_stats[f"{var}.std"]
-            upper = default_stats[f"{var}.mean"] + tol * default_stats[f"{var}.std"]
+            mean = default_stats[f"{var}.mean"]
+            std = default_stats[f"{var}.std"]
+            half_width = xr.where(std > 0, tol * std, rtol * abs(mean) + atol)
+            lower = mean - half_width
+            upper = mean + half_width
             assert ((lower <= pred_ds_mean[var]).all()) & (
                 (pred_ds_mean[var] <= upper).all()
             ), (
-                f"{var} fell outside the [-3σ, +3σ] climatology band; "
+                f"{var} fell outside the climatology band (±3σ, with a "
+                "relative+absolute floor where σ underflowed to 0); "
                 "regenerate jcm/data/test/echam_t63l47/default_statistics.nc "
                 "(and spinup_state.nc) if the deviation is intentional."
             )
+
+
+class TestModelRepr(unittest.TestCase):
+    def test_repr_summarizes_model(self):
+        # One line naming backend, grid, levels, dt and physics terms (#322).
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        model = Model(coords=get_speedy_coords())
+        r = repr(model)
+        self.assertIn("Model(dycore=DinosaurDycore", r)
+        self.assertIn("grid=", r)
+        self.assertIn("levels=8", r)
+        self.assertIn("physics=[", r)
 
 
 class TestCalendarDurations(unittest.TestCase):
@@ -812,6 +866,67 @@ class TestOperatorSplitPhysics(unittest.TestCase):
             "integration consumed",
         )
 
+    def test_run_threads_supplied_initial_physics_state(self):
+        """``run(initial_physics_state=...)`` seeds the integration with the
+        given carry instead of rebuilding a fresh one.
+
+        A warm start off a donor checkpoint wants the donor's radiation
+        sub-cycle cache / prior-step TKE preserved across the run seam rather
+        than reset. ``run`` replaces the freshly-built carry with the supplied
+        one after ``bootstrap_state`` and before the first ``resume``. We spy
+        on ``run_from_state_with_carry`` — the seam ``resume`` delegates to —
+        to capture the carry the integration actually receives, and check that
+        supplying a stamped carry threads it through while the default rebuilds
+        a fresh (unstamped) one.
+        """
+        import numpy as np
+
+        model = self._speedy_model()
+
+        captured = {}
+        original = model.run_from_state_with_carry
+
+        def spy(initial_state, forcing, **kwargs):
+            captured["carry"] = kwargs.get("initial_physics_state")
+            return original(initial_state, forcing, **kwargs)
+
+        model.run_from_state_with_carry = spy
+
+        # A carry structurally matching what the model builds, with a
+        # recognizable stamp added to every floating-point leaf (integer
+        # leaves are left alone so the pytree stays valid).
+        fresh = model._build_initial_physics_carry()
+        stamped = jax.tree_util.tree_map(
+            lambda x: x + 0.0123
+            if jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating) else x,
+            fresh,
+        )
+        model.run(
+            initial_physics_state=stamped,
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+        )
+        threaded = captured["carry"]
+        self.assertIsNotNone(threaded, "run did not thread a carry to the seam")
+        # The integration receives exactly the carry we supplied.
+        for got, want in zip(jax.tree_util.tree_leaves(threaded),
+                             jax.tree_util.tree_leaves(stamped)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+        # ... and it is genuinely the stamped carry, not the fresh rebuild.
+        differs = any(
+            not np.allclose(np.asarray(a), np.asarray(b))
+            for a, b in zip(jax.tree_util.tree_leaves(stamped),
+                            jax.tree_util.tree_leaves(fresh))
+        )
+        self.assertTrue(differs, "stamp was a no-op — test would be vacuous")
+
+        # Default: no initial_physics_state -> the freshly-built carry.
+        captured.clear()
+        model.run(save_interval=1 / 48.0, total_time=1 / 48.0)
+        default_carry = captured["carry"]
+        for got, want in zip(jax.tree_util.tree_leaves(default_carry),
+                             jax.tree_util.tree_leaves(fresh)):
+            np.testing.assert_allclose(np.asarray(got), np.asarray(want))
+
 
 class TestLegacyPathRemoved(unittest.TestCase):
     """Phase 4 of #471: legacy inside-RK physics path is gone.
@@ -882,3 +997,416 @@ class TestLegacyPathRemoved(unittest.TestCase):
             f"Legacy identifiers must be fully removed; found: {lines}",
         )
 
+
+
+class TestParameterBindingAndCompilation(unittest.TestCase):
+    """Physics parameters are bound into the executable at trace time.
+
+    ``Model._run_from_state`` takes ``self`` as a static jit argument, so
+    every physics term and its parameters are constants inside the
+    compiled executable, bound when the physics is first traced. Editing
+    a live model's parameters afterwards is not reliably picked up by a
+    later run (#735, and the warning ``ModelPredictions`` raises when it
+    sees it). The supported way to vary a parameter is therefore to build
+    a Model per parameter set — inside one jitted function, so the
+    rebuild is a trace-time cost paid once instead of a recompile per
+    iteration. These tests pin that pattern, which is what a sensitivity
+    sweep or a gradient-based calibration loop is made of.
+    """
+
+    def setUp(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+
+    def _mean_temperature(self, albsea, traces=None):
+        """Mean T of a 2-hour SPEEDY forecast at a given sea albedo.
+
+        Built the way a calibration loop must build it: the parameter is
+        an argument, the Model is constructed from it here rather than
+        mutated afterwards.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        if traces is not None:
+            traces.append(albsea)  # Python side effect: once per trace.
+        params = Parameters.default()
+        params = params.replace(
+            mod_radcon=params.mod_radcon.replace(albsea=albsea))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 12.0)
+        return jnp.mean(preds.dynamics.temperature)
+
+    def test_run_works_inside_an_outer_jit(self):
+        """``jax.jit`` around ``model.run`` compiles once and stays exact.
+
+        A regression test for #735: provenance briefly returned a trace
+        id from the jitted run and read it with ``int()``, which is a
+        concrete value only when ``run`` is called outside any enclosing
+        transformation. Wrapping a run in ``jax.jit`` — the whole point
+        of a calibration loop, since it turns a per-iteration recompile
+        into a per-iteration executable reuse — raised
+        ``ConcretizationTypeError``. Nothing on the ``run`` path may
+        require a concrete value from the jitted computation.
+        """
+        traces = []
+        jitted = jax.jit(
+            lambda albsea: self._mean_temperature(albsea, traces))
+
+        cold = float(jitted(jnp.float32(0.02)))
+        bright = float(jitted(jnp.float32(0.9)))
+
+        # One trace for both parameter values: the second call reuses the
+        # executable rather than rebuilding and recompiling the model.
+        self.assertEqual(len(traces), 1)
+        # ...and the parameter still reaches the computation, so the
+        # reuse is not the silent no-op an in-place edit would be. A
+        # brighter ocean reflects more shortwave; over two hours that is
+        # a small but unambiguous change in the global mean.
+        self.assertGreater(abs(cold - bright), 1e-4)
+
+    def test_predictions_record_the_parameters_that_ran(self):
+        """Provenance survives the loss of the trace id (#732 via #735)."""
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        key = "speedy_vertical_diffusion.params.trvdi"
+        params = Parameters.default()
+        params = params.replace(
+            vertical_diffusion=params.vertical_diffusion.replace(
+                trvdi=jnp.array(2.0)))
+        model = Model(coords=self.coords,
+                      physics=speedy_physics(parameters=params),
+                      time_step=30.0)
+
+        preds = model.run(save_interval=1 / 48.0, total_time=1 / 24.0)
+        self.assertAlmostEqual(preds.params[key], 2.0, places=6)
+
+    def test_a_traced_run_leaves_no_carry_on_the_model(self):
+        """Running an existing model under a jit must not poison it.
+
+        ``run``/``resume`` store the final dycore and physics states so a
+        later ``resume`` can continue from them. Under an enclosing
+        transformation those are tracers, and keeping them would let a
+        value escape its trace: the next ``resume`` threads it into a new
+        one and raises ``UnexpectedTracerError`` somewhere far from the
+        cause. The run itself is fine, since its results are returned
+        rather than read back off the model, so the carry is dropped and
+        the next ``resume`` says why.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        model.bootstrap_state(None)
+        state = model._final_dycore_state
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+
+        value = float(jax.jit(lambda s: jnp.mean(
+            model.run(s, **kw).dynamics.temperature))(state))
+        self.assertTrue(np.isfinite(value))
+        self.assertIsNone(model._final_dycore_state)
+
+        with self.assertRaises(ValueError) as caught:
+            model.resume(**kw)
+        self.assertIn("run_from_state_with_carry", str(caught.exception))
+
+        # ...and the model is not permanently broken: an explicit state
+        # gives it a concrete carry again.
+        model.run(state, **kw)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
+    def test_an_ordinary_run_still_carries_into_resume(self):
+        """The guard must not disturb the untransformed path."""
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        model.run(**kw)
+        self.assertIsNotNone(model._final_dycore_state)
+        self.assertTrue(np.isfinite(
+            float(jnp.mean(model.resume(**kw).dynamics.temperature))))
+
+    @pytest.mark.slow
+    def test_gradient_flows_through_a_model_built_inside_the_jit(self):
+        """The calibration loop's actual shape: ``jit(grad(loss))``.
+
+        Rebuilding the Model inside the traced function is what makes the
+        parameter a traced value rather than a baked-in constant, so the
+        gradient with respect to it is the gradient of the forecast, and
+        one compilation serves every optimizer iteration.
+        """
+        traces = []
+        target = float(self._mean_temperature(jnp.float32(0.5)))
+
+        def loss(albsea):
+            return (self._mean_temperature(albsea, traces) - target) ** 2
+
+        grad_loss = jax.jit(jax.grad(loss))
+        g1 = float(grad_loss(jnp.float32(0.2)))
+        g2 = float(grad_loss(jnp.float32(0.8)))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(jnp.isfinite(g1) and jnp.isfinite(g2))
+        # Either side of the target the pull is in opposite directions,
+        # so a flat response (the signature of a parameter that never
+        # reached the computation) fails here.
+        self.assertLess(g1 * g2, 0.0)
+
+
+class TestModelLogging(unittest.TestCase):
+    """Warnings jcm raises about a run have to reach the user.
+
+    The default was ``logging.CRITICAL`` applied to the ROOT logger, which
+    silenced every jcm warning — including the one saying an in-place
+    parameter change never reached the computation (#735) — and
+    reconfigured logging for the host application as a side effect. Both
+    halves of that are tested here: the default is audible, and it is
+    scoped to the ``jcm`` hierarchy.
+    """
+
+    def setUp(self):
+        self._jcm_level = logging.getLogger("jcm").level
+        self._root_level = logging.getLogger().level
+
+    def tearDown(self):
+        logging.getLogger("jcm").setLevel(self._jcm_level)
+        logging.getLogger().setLevel(self._root_level)
+
+    def _model(self, **kwargs):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        return Model(coords=get_speedy_coords(layers=8,
+                                              spectral_truncation=21),
+                     time_step=30.0, **kwargs)
+
+    def test_warnings_are_audible_even_from_a_quiet_application(self):
+        # An application that has silenced the root logger still hears
+        # jcm's warnings about its own results, because the level is set
+        # on the jcm logger: level lookup stops at the first logger with
+        # one set, and propagation to handlers does not consult the root
+        # logger's level.
+        logging.getLogger().setLevel(logging.CRITICAL)
+        self._model()
+        self.assertTrue(
+            logging.getLogger("jcm.predictions").isEnabledFor(
+                logging.WARNING))
+
+    def test_construction_leaves_the_root_logger_alone(self):
+        logging.getLogger().setLevel(logging.DEBUG)
+        self._model()
+        self.assertEqual(logging.getLogger().level, logging.DEBUG)
+        self.assertEqual(logging.getLogger("jcm").level, logging.WARNING)
+
+    def test_log_level_argument_still_quietens_jcm(self):
+        self._model(log_level=logging.CRITICAL)
+        self.assertFalse(
+            logging.getLogger("jcm.predictions").isEnabledFor(
+                logging.WARNING))
+
+
+class TestObserversUnderJit(unittest.TestCase):
+    """Observers under an enclosing ``jax.jit`` (#735).
+
+    The sampling itself is pure JAX and differentiates with respect to the
+    state; what is not traceable is *building* the sampling tables, which
+    happens on the host and needs the window's absolute start time as a
+    number. That is normally read from the initial state's ``sim_time``,
+    which is a tracer when a caller feeds a per-sample initial state
+    through their own jit — the calibration shape. The caller passes
+    ``observer_t0_days`` instead, and gets told to when they have not.
+    """
+
+    def setUp(self):
+        from jcm.observers import TrackObserver
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.observer = TrackObserver.stations(
+            latitudes=[0.0, 45.0], longitudes=[0.0, 180.0],
+            pressures=[85000.0, 85000.0], variables=("temperature",),
+            name="stations")
+
+    def _model(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        return Model(coords=self.coords, physics=speedy_physics(),
+                     time_step=30.0, observers=[self.observer])
+
+    def _seed_state(self):
+        model = self._model()
+        model.bootstrap_state(None)
+        return model, model._final_dycore_state
+
+    def test_traced_initial_state_asks_for_the_window_start(self):
+        """The error names the argument to pass, not the tracer it met."""
+        model, state = self._seed_state()
+
+        def sample(state):
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        with self.assertRaises(ValueError) as caught:
+            jax.jit(sample)(state)
+        self.assertIn("observer_t0_days", str(caught.exception))
+
+    def test_an_explicit_window_start_makes_the_run_jittable(self):
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        traces = []
+
+        def sample(state):
+            traces.append(state)
+            preds = model.run(state, save_interval=1 / 48.0,
+                              total_time=1 / 48.0, observer_t0_days=t0)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sample)
+        first = float(jitted(state))
+        second = float(jitted(state))
+
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(np.isfinite(first))
+        self.assertEqual(first, second)
+        # A plausible 850 hPa temperature, i.e. the observer really sampled
+        # the atmosphere rather than returning the NaN of a masked step.
+        self.assertGreater(first, 200.0)
+        self.assertLess(first, 320.0)
+
+    def test_run_from_state_also_takes_the_window_start(self):
+        """The stateless API must accept what the error tells callers to pass.
+
+        ``run_from_state`` reaches the same host-side table build, so an
+        error naming an argument it did not accept would send callers to
+        the lower-level carry API for no reason.
+        """
+        from jcm.forcing import default_forcing
+
+        model, state = self._seed_state()
+        _, preds = model.run_from_state(
+            state, default_forcing(self.coords.horizontal),
+            save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(state))
+        self.assertTrue(np.isfinite(
+            float(jnp.nanmean(preds.observations[0]["temperature"]))))
+
+    def test_a_traced_window_start_points_at_prepared_tables(self):
+        """A per-sample window start cannot be a traced value either.
+
+        Passing it as a traced argument is the natural next thing to try
+        after the traced-initial-state error, and the tables it feeds are
+        host numpy, so it cannot work. Marking it static in the caller's
+        jit would, but at one compilation per window — which is the cost
+        the caller was trying to avoid. So the error names the way out
+        that actually reuses a compilation.
+        """
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+
+        with self.assertRaises(ValueError) as caught:
+            jax.jit(lambda s, t: model.run(
+                s, save_interval=1 / 48.0, total_time=1 / 48.0,
+                observer_t0_days=t))(state, t0)
+        self.assertIn("observer_xs", str(caught.exception))
+        self.assertIn("prepare_observers", str(caught.exception))
+
+    def test_prepared_tables_reuse_one_compilation_across_windows(self):
+        """Different windows, one compilation — the point of the argument.
+
+        The tables are a dynamic argument of the compiled run, so windows
+        that differ only in sampling geometry share an executable. Building
+        them inside the run instead needs a concrete start time, which as a
+        static jit argument would compile once per window.
+        """
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        traces = []
+
+        def sampled(state, xs):
+            traces.append(xs)
+            preds = model.run(state, observer_xs=xs, **kw)
+            return jnp.nanmean(preds.observations[0]["temperature"])
+
+        jitted = jax.jit(sampled)
+        values = [float(jitted(state, model.prepare_observers(day, **kw)))
+                  for day in (t0, t0 + 30.0, t0 + 400.0)]
+
+        self.assertEqual(len(traces), 1)
+        for value in values:
+            self.assertTrue(np.isfinite(value))
+            self.assertGreater(value, 200.0)
+            self.assertLess(value, 320.0)
+
+    def test_tables_built_for_another_window_are_rejected(self):
+        """A length mismatch is caught here, not deep inside the scan."""
+        model, state = self._seed_state()
+        t0 = model._observer_window_start(state)
+        mismatched = model.prepare_observers(
+            t0, save_interval=1 / 48.0, total_time=1 / 12.0)
+
+        with self.assertRaises(ValueError) as caught:
+            model.run(state, save_interval=1 / 48.0, total_time=1 / 48.0,
+                      observer_xs=mismatched)
+        self.assertIn("steps", str(caught.exception))
+
+    def test_prepared_tables_still_produce_a_dated_dataset(self):
+        """Prepared tables must not cost the observation output its time axis.
+
+        ``observer_xs`` skips the host-side build, which is where the
+        window start used to be resolved, so a run given tables and no
+        ``observer_t0_days`` had nothing to date its samples by and
+        ``observation_datasets()`` failed on the missing value. The start
+        time is recovered from the state whenever that is possible, which
+        is every use outside a transformation.
+        """
+        model, state = self._seed_state()
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        t0 = model._observer_window_start(state)
+
+        preds = model.run(state, observer_xs=model.prepare_observers(t0, **kw),
+                          **kw)
+        self.assertEqual(preds._obs_t0_days, t0)
+        datasets = model.run(state, **kw).observation_datasets()
+        with_tables = preds.observation_datasets()
+        self.assertIn("stations", with_tables)
+        np.testing.assert_array_equal(
+            with_tables["stations"].time.values,
+            datasets["stations"].time.values)
+
+    def test_undatable_samples_say_so_rather_than_failing_on_none(self):
+        """Name the argument that records a start time, when none exists.
+
+        Under tracing there is nothing to recover it from.
+        """
+        from jcm.predictions import ModelPredictions
+
+        model, state = self._seed_state()
+        preds = ModelPredictions(
+            None, None, None, observations=({"temperature": jnp.zeros((2, 1))},),
+            observers=tuple(model.observers), obs_t0_days=None,
+            obs_dt_seconds=1800.0)
+
+        with self.assertRaises(ValueError) as caught:
+            preds.observation_datasets()
+        self.assertIn("observer_t0_days", str(caught.exception))
+
+    def test_the_recovered_window_start_is_unchanged_by_the_argument(self):
+        """Passing what the model would have read gives the same samples."""
+        model, state = self._seed_state()
+        implicit = model.run(state, save_interval=1 / 48.0,
+                             total_time=1 / 48.0)
+        explicit = model.run(
+            state, save_interval=1 / 48.0, total_time=1 / 48.0,
+            observer_t0_days=model._observer_window_start(state))
+        np.testing.assert_allclose(
+            np.asarray(implicit.observations[0]["temperature"]),
+            np.asarray(explicit.observations[0]["temperature"]))

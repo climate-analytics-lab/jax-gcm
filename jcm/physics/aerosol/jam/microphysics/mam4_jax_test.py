@@ -13,14 +13,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-# Importing mam4_jax flips jax_enable_x64 on globally (it needs float64).
-# Capture and restore the flag around the import so *collection* of this module
-# doesn't leave x64 on and corrupt sibling tests' float32 dtype assertions when
-# the optional dependency is installed. Each test below re-enables x64 (via the
-# term's lazy import) and restores it in tearDown.
+# Importing mam4_jax flips jax_enable_x64 on globally (it needs float64), so
+# restore the flag around the import to keep *collection* of this module from
+# corrupting sibling tests' float32 dtype assertions. The ``finally`` matters:
+# a missing/too-old mam4-jax leaves x64 on via the partial import before
+# ``importorskip`` raises ``Skipped`` (issue #729).
 _x64_at_import = jax.config.read("jax_enable_x64")
-pytest.importorskip("mam4_jax")
-jax.config.update("jax_enable_x64", _x64_at_import)
+try:
+    pytest.importorskip("mam4_jax.coupling")
+finally:
+    jax.config.update("jax_enable_x64", _x64_at_import)
 
 
 def _column_state(nlev=4, ncols=2):
@@ -123,7 +125,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(aer.r_dry) > 0.0))
 
     def _assert_backend_runs_finite(self, backend):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -164,7 +166,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self._assert_backend_runs_finite("astem")
 
     def test_default_backend_is_substep(self):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
@@ -179,7 +181,7 @@ class Mam4JaxAdapterTest(unittest.TestCase):
             _amicphys.configure_condensation(backend="substep")
 
     def test_enable_x64_control(self):
-        from mam4_jax.processes import amicphys as _amicphys
+        from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
@@ -204,6 +206,130 @@ class Mam4JaxAdapterTest(unittest.TestCase):
                 Mam4JaxMicrophysics(condensation_backend="not-a-backend")
         finally:
             _amicphys.configure_condensation(backend="substep")
+
+    def test_carbon_aging_moves_bc_from_pcm_to_accum(self):
+        """Ageing (jax-gcm#721): condensed H2SO4 coats the pcm mode and the
+        core transfers the coated fraction of BC (and pcm number) to accum.
+        Attribution is by monolayer-threshold sensitivity: an absurdly thick
+        required coating (1e9 monolayers) makes ageing inert, leaving only
+        the pcm→acc coagulation pathway, so the default-vs-inert difference
+        isolates the ageing transfer.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        state, diagnostics = _column_state()
+        # A healthy H2SO4 reservoir so within-step condensation builds a
+        # real shell on pcm.
+        state = state.copy(tracers={**state.tracers,
+                                    "g_h2so4": jnp.full((4, 2), 1.0e-9)})
+        # No try/finally needed: the constructor holds the threshold as
+        # an nnx.Param and passes it per call — it never mutates the
+        # core's process-global config, so instances cannot interfere.
+        aged, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        inert_term = Mam4JaxMicrophysics(n_so4_monolayers=1.0e9)
+        inert, _ = inert_term(state, diagnostics, None, None)
+
+        d_bc_pcm = np.asarray(aged.tracers["m_bc_pcm"]
+                              - inert.tracers["m_bc_pcm"], np.float64)
+        d_bc_acc = np.asarray(aged.tracers["m_bc_acc"]
+                              - inert.tracers["m_bc_acc"], np.float64)
+        d_n_pcm = np.asarray(aged.tracers["n_pcm"]
+                             - inert.tracers["n_pcm"], np.float64)
+        self.assertTrue(np.all(d_bc_pcm < 0.0),
+                        "ageing must remove BC from the pcm mode")
+        self.assertTrue(np.all(d_bc_acc > 0.0),
+                        "ageing must deliver BC to the accum mode")
+        self.assertTrue(np.all(d_n_pcm < 0.0),
+                        "ageing must move pcm number out")
+        # BC has no other source/sink in the core: the ageing difference
+        # must conserve BC between the two modes.
+        np.testing.assert_allclose(
+            d_bc_pcm + d_bc_acc, np.zeros_like(d_bc_pcm),
+            atol=1e-6 * float(np.abs(d_bc_pcm).max()),
+            err_msg="ageing must conserve BC across pcm+acc")
+
+    def test_aging_threshold_is_a_differentiable_param_leaf(self):
+        """The threshold must be an nnx.Param LEAF (visible to jax.grad /
+        optimizers per the repo's differentiable-parameters rule), and
+        the gradient of a tendency through the term w.r.t. it must be
+        finite and non-zero.
+        """
+        from flax import nnx
+
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        term = Mam4JaxMicrophysics()
+        leaves = nnx.state(term, nnx.Param)
+        flat = jax.tree.leaves(leaves)
+        assert any(
+            np.asarray(v).shape == () and float(np.asarray(v)) == 3.0
+            for v in flat
+        ), "n_so4_monolayers must appear as a Param leaf (default 3.0)"
+
+        # Moderate H2SO4 so the pcm shell stays SUB-saturated at n=3:
+        # in the saturated regime the criterion clamps and d/dn is
+        # (correctly) exactly zero, which would make this test vacuous.
+        state, diagnostics = _column_state()
+        state = state.copy(tracers={**state.tracers,
+                                    "g_h2so4": jnp.full((4, 2), 1.0e-11)})
+
+        def bc_acc_tendency(n):
+            t = Mam4JaxMicrophysics(n_so4_monolayers=1.0)
+            t.n_so4_monolayers.set_value(n)
+            tend, _ = t(state, diagnostics, None, None)
+            return jnp.sum(tend.tracers["m_bc_acc"])
+
+        g = jax.grad(bc_acc_tendency)(jnp.asarray(3.0))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertLess(float(g), 0.0,
+                        "thicker required coating must age less BC")
+
+    def test_negative_threshold_rejected_at_construction(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        with self.assertRaises(ValueError):
+            Mam4JaxMicrophysics(n_so4_monolayers=-1.0)
+
+    def test_core_dtype_scoped_float32(self):
+        # The float32 core runs under a SCOPED x64-off context: the global
+        # flag (float64 host, e.g. pySES dynamics) must stay untouched, and
+        # the float32-core forward tendencies must closely track the float64
+        # core (forward is float32-safe per MAM4-JAX #60; the DEFAULT stays
+        # float64 because the float32 REVERSE pass is non-finite — see the
+        # constructor docstring).
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        t64 = Mam4JaxMicrophysics()          # default: float64 core
+        self.assertFalse(t64._core_f32)
+        state, diagnostics = _column_state()
+        tend64, _ = t64(state, diagnostics, None, None)
+
+        t32 = Mam4JaxMicrophysics(core_dtype="float32")
+        self.assertTrue(t32._core_f32)
+        tend32, _ = t32(state, diagnostics, None, None)
+        self.assertTrue(jax.config.read("jax_enable_x64"),
+                        "scoped f32 core must not clear the global x64 flag")
+
+        for k in tend64.tracers:
+            a = np.asarray(tend32.tracers[k], np.float64)
+            b = np.asarray(tend64.tracers[k], np.float64)
+            scale = max(float(np.abs(b).max()), 1e-30)
+            # The 1e-16 floor absorbs tendencies that are numerically zero in
+            # float64 (O(1e-17) round-off) and flush to exact zero in float32.
+            np.testing.assert_allclose(
+                a, b, atol=1e-3 * scale + 1e-16, err_msg=f"tracer {k}",
+            )
+
+        with self.assertRaises(ValueError):
+            Mam4JaxMicrophysics(core_dtype="bf16")
 
     def test_grad_through_a_tracer_is_finite(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name

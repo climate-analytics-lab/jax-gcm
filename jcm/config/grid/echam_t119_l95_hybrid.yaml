@@ -1,0 +1,7 @@
+# T119 / 95 hybrid levels — the closest supported truncation to ECHAM's
+# high-res MA configurations (valid truncations jump 119 -> 170; T127 is
+# not constructible). 360 lon x 180 lat on the middle-atmosphere L95 grid.
+vertical: hybrid
+layers: 95
+spectral_truncation: 119
+spmd_mesh: null

@@ -451,7 +451,8 @@ class TestSurfaceEvapSmoothing:
             stl_am=jnp.full(xy, 288.0),
         )
         _, pd = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
-        return float(jnp.max(jnp.abs(pd.surface_flux.evap[:, :, 0])))
+        # fmask = 1 everywhere, so the published grid mean is the land value.
+        return float(jnp.max(jnp.abs(pd.surface_flux.evap)))
 
     def test_dry_column_energy_balance_uses_the_smoothed_gate(self):
         # The skin-temperature energy balance must weight d(Evap)/d(Tskin)

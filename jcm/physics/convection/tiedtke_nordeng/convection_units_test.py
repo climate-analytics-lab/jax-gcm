@@ -252,10 +252,22 @@ class TestCAPEDeepColumn:
         Rd = 287.05
         # Geopotential height referenced to surface (high at TOA, ~0 at surf)
         height = -Rd * 250.0 * jnp.log(pressure / pressure[-1]) / 9.81
+        # Well-mixed (dry-adiabatic) lowest 800 m, 6.5 K/km above. The mixed
+        # layer is not decoration: ECHAM's ``cubase`` walks a dry parcel up
+        # and drops the column as soon as it is not buoyant, so a column that
+        # runs 6.5 K/km right down to the surface loses ~0.4 K of parcel
+        # buoyancy per layer and cannot trigger at any physical ``zlift``.
+        # Real boundary layers — and the ones jcm's vdiff produces — are
+        # near-neutral near the surface, which is the condition the trigger
+        # is testing for.
+        bl_top_m = 800.0
         temperature = jnp.where(
-            pressure > 2.0e4,
-            surf_T - 6.5e-3 * height,
-            jnp.maximum(surf_T - 6.5e-3 * height, 200.0),
+            height < bl_top_m,
+            surf_T - (9.81 / 1004.64) * height,
+            surf_T - (9.81 / 1004.64) * bl_top_m - 6.5e-3 * (height - bl_top_m),
+        )
+        temperature = jnp.where(
+            pressure > 2.0e4, temperature, jnp.maximum(temperature, 200.0),
         )
         humidity_profile = surf_q_kgkg * jnp.exp(-height / 2000.0)
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)

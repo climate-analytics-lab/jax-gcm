@@ -12,6 +12,7 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
 from jcm.physics.convection.tiedtke_nordeng.updraft import saturation_adjustment
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import saturation_mixing_ratio
 
@@ -254,6 +255,254 @@ class TestDynamicCloudTop(unittest.TestCase):
             f"Updraft should terminate at capping inversion; got mfu[0:9]="
             f"{np.array(mfu[0:9]).round(4)}",
         )
+
+
+class TestCloudBaseInitialisation(unittest.TestCase):
+    """The cloud-base parcel must conserve total water (issue #661).
+
+    ``calculate_updraft`` seeds the plume at ``kbase`` from a surface parcel
+    lifted dry-adiabatically. ECHAM ``cubase`` (mo_cuinitialize.f90:296-314)
+    runs ``cuadjtq`` there and keeps the condensate in the plume
+    (``plu = plu + zqold - pqu``), so the seed satisfies
+    ``qu + lu == q_surface`` exactly. The previous hand-rolled version
+    condensed ``q - qs(T_dry)`` undamped and then re-saturated at the warmed
+    temperature, which *created* water (+10% to +50%) and over-warmed the
+    parcel; a subsaturated parcel was moistened to saturation for free.
+    """
+
+    NLEV = 24
+
+    def _column(self, surf_temp=300.0, surf_rh=0.9):
+        """Build a conditionally unstable TOA-first column (index 0 = TOA)."""
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+        pressure = jnp.linspace(10_000.0, 100_000.0, self.NLEV)
+        # ~6.5 K/km lapse rate expressed on this pressure grid, capped at a
+        # 200 K stratosphere so the plume terminates somewhere sensible.
+        temperature = jnp.maximum(
+            surf_temp * (pressure / pressure[-1]) ** 0.19, 200.0,
+        )
+        humidity = 0.5 * saturation_mixing_ratio(pressure, temperature)
+        humidity = humidity.at[-1].set(
+            surf_rh * saturation_mixing_ratio(pressure[-1], temperature[-1])
+        )
+        return pressure, temperature, humidity
+
+    def _run(self, kbase, surf_rh):
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
+
+        pressure, temperature, humidity = self._column(surf_rh=surf_rh)
+        layer_thickness = jnp.full(self.NLEV, 500.0)
+        rho = pressure / (287.0 * temperature)
+        state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            kbase=kbase, ktop=2, ktype=1, mass_flux_base=0.1,
+            config=ConvectionParameters.default(),
+        )
+        # Surface = highest pressure = last index in this TOA-first column.
+        return state, pressure, temperature, humidity[-1]
+
+    def test_total_water_conserved_at_cloud_base(self):
+        """qu[kbase] + lu[kbase] == q_surface to round-off, saturated case."""
+        kbase = self.NLEV - 4
+        state, pressure, _, q_surf = self._run(kbase, surf_rh=1.0)
+        total = float(state.qu[kbase] + state.lu[kbase])
+        self.assertAlmostEqual(
+            total / float(q_surf), 1.0, places=6,
+            msg=f"Cloud-base total water {total:.6e} != surface q "
+                f"{float(q_surf):.6e} — the seed is creating water.",
+        )
+        self.assertGreater(float(state.lu[kbase]), 0.0,
+                           "A saturated cloud-base parcel must condense")
+
+    def test_subsaturated_parcel_is_untouched(self):
+        """A subsaturated cloud-base parcel keeps its vapour and stays dry.
+
+        This is the second, independent half of #661: the old code assigned
+        ``qu = qs(T)`` unconditionally, moistening the plume up to saturation
+        with no latent-heat debit whatsoever. CAM's UW shallow scheme
+        (uwshcu.F90:4700-4716) sets ``qv = qt`` in exactly this case.
+        """
+        # A low kbase (close to the surface, high pressure) leaves the lifted
+        # parcel warm enough to stay subsaturated at a modest surface RH.
+        kbase = self.NLEV - 2
+        state, pressure, _, q_surf = self._run(kbase, surf_rh=0.6)
+        self.assertAlmostEqual(float(state.qu[kbase]), float(q_surf), places=7)
+        self.assertAlmostEqual(float(state.lu[kbase]), 0.0, places=9)
+
+    def test_cloud_base_warming_matches_condensate(self):
+        """ΔT at cloud base is exactly L/cp times the condensate formed."""
+        from jcm.constants import alhc, cpd, rd
+
+        kbase = self.NLEV - 4
+        state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
+        t_dry = float(temperature[-1]) * (
+            float(pressure[kbase]) / float(pressure[-1])
+        ) ** (rd / cpd)
+        dT = float(state.tu[kbase]) - t_dry
+        expected = alhc * float(state.lu[kbase]) / cpd
+        self.assertAlmostEqual(dT / expected, 1.0, delta=0.005)
+
+    def test_cloud_base_parcel_is_saturated_not_supersaturated(self):
+        """The seed vapour equals qs at the *warmed* temperature.
+
+        The undamped version condensed to qs(T_dry) and then set the vapour to
+        the larger qs(T_warm), so it was both over-warm and over-moist.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+        kbase = self.NLEV - 4
+        state, pressure, _, _ = self._run(kbase, surf_rh=1.0)
+        qs = float(saturation_mixing_ratio(pressure[kbase], state.tu[kbase]))
+        self.assertAlmostEqual(float(state.qu[kbase]) / qs, 1.0, delta=0.005)
+
+
+class TestCloudBaseBuoyancyGate(unittest.TestCase):
+    """ECHAM ``cubase`` accepts a cloud base only where the parcel is buoyant.
+
+    ``find_cloud_base`` previously returned the LCL unconditionally. Combined
+    with the conserving cloud-base adjustment (#661) that put the plume's
+    first level inside the LCL-to-LFC inhibition layer, where the buoyancy
+    test in ``calculate_updraft`` terminated it immediately — convection off.
+    The gate (plus the matching ``zlift`` term in the ascent test) is what
+    makes the two consistent.
+    """
+
+    def _sounding(self, nlev=47, sst=301.0, lapse=6.5e-3, rh_surf=0.85,
+                  bl_top_m=800.0):
+        """Build a tropical column with a well-mixed boundary layer, TOA-first.
+
+        The mixed layer matters: ECHAM's ``cubase`` walks a dry parcel up and
+        drops the column the moment it is not buoyant, so a sounding whose
+        lapse rate runs at 6.5 K/km right down to the surface loses ~0.43 K of
+        parcel buoyancy per layer and cannot trigger at any physical
+        ``zlift``. Real boundary layers — and the ones jcm's own vdiff
+        produces — are near-neutral in the lowest few hundred metres, which is
+        exactly the condition the trigger is testing for. Pass
+        ``bl_top_m=0.0`` to get the unmixed case.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+        sig = np.linspace(0.002, 0.995, nlev)
+        p = 101_000.0 * sig
+        T = np.empty(nlev)
+        z = np.empty(nlev)
+        T[-1], z[-1] = sst - 1.0, 0.0
+        for k in range(nlev - 2, -1, -1):
+            dz = c.rd * T[k + 1] / c.grav * np.log(p[k + 1] / p[k])
+            z[k] = z[k + 1] + dz
+            lam = c.grav / c.cpd if z[k] < bl_top_m else lapse
+            T[k] = max(T[k + 1] - lam * dz, 195.0)
+        p, T = jnp.asarray(p), jnp.asarray(T)
+        rh = jnp.asarray(np.clip(rh_surf - 0.5 * (1.0 - sig), 0.05, 0.9))
+        q = rh * saturation_mixing_ratio(p, T)
+        dz = jnp.abs(jnp.asarray(np.gradient(z)))
+        return p, T, q, dz, p / (c.rd * T)
+
+    def test_zlift_follows_the_echam_clip(self):
+        """Check zlift == min(clip(thvsig·cbfac, cminbuoy, cmaxbuoy), 1.0)."""
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, cloud_base_lift,
+        )
+        self.assertAlmostEqual(
+            float(cloud_base_lift(ConvectionParameters.default(cu_thvsig=0.0))),
+            0.2, places=6)
+        self.assertAlmostEqual(
+            float(cloud_base_lift(ConvectionParameters.default(cu_thvsig=5.0))),
+            1.0, places=6)
+        self.assertAlmostEqual(
+            float(cloud_base_lift(
+                ConvectionParameters.default(cu_thvsig=0.5, cu_cbfac=1.0))),
+            0.5, places=6)
+        self.assertAlmostEqual(
+            float(cloud_base_lift(ConvectionParameters.default(
+                cu_thvsig=5.0, cu_cmaxbuoy=3.0))),
+            1.0, places=6)
+        # It also takes sigma from vdiff rather than the config when given.
+        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        self.assertAlmostEqual(
+            float(cloud_base_lift(cfg, jnp.asarray(0.4))), 0.4, places=6)
+
+    def test_cloud_base_is_the_lcl_not_the_lfc(self):
+        """ECHAM's walk stops at the first condensing level, full stop.
+
+        An earlier version searched upward for the first level that was both
+        condensing AND buoyant, which let a plume start above a layer the
+        parcel could never have crossed.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base, saturation_mixing_ratio,
+        )
+        p, T, q, dz, _rho = self._sounding()
+        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertTrue(bool(found))
+        cb = int(cb)
+        # The returned level is the LOWEST one at which the lifted parcel
+        # condenses; every level below it must be subsaturated for the parcel.
+        theta_surf = float(T[-1])
+        for k in range(len(p) - 1, cb, -1):
+            t_dry = theta_surf * (float(p[k]) / float(p[-1])) ** (c.rd / c.cpd)
+            qs_k = float(saturation_mixing_ratio(p[k], jnp.asarray(t_dry)))
+            self.assertLess(float(q[-1]), qs_k,
+                            f"level {k} below the returned base already saturates")
+
+    def test_unmixed_boundary_layer_gets_no_convection(self):
+        """The sub-cloud dry-buoyancy gate — ECHAM's ``klab`` falling to 0.
+
+        With no mixed layer the dry parcel loses ~0.43 K per layer, more than
+        any physical zlift, so the walk stops below the LCL and the column is
+        dropped. This test is the reason the gate exists: before it, such a
+        column happily convected off a cloud base its parcel could not reach.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base,
+        )
+        p, T, q, dz, _rho = self._sounding(bl_top_m=0.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.3)
+        _cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertFalse(bool(found))
+
+    def test_well_mixed_layer_convects_at_the_echam_minimum_lift(self):
+        """The same column WITH a mixed layer triggers at cminbuoy = 0.2 K.
+
+        Together with the previous test this pins the discriminator: it is the
+        boundary layer's mixing, not the lift constant, that decides.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base, tiedtke_nordeng_convection,
+        )
+        p, T, q, dz, rho = self._sounding(bl_top_m=500.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.0)   # clips to cminbuoy
+        cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertTrue(bool(found))
+        z = jnp.zeros_like(T)
+        # Resolved convergence beyond 1.1*E so ECHAM's zdqcv test (#699)
+        # classifies the plume deep — the depth assertion below is about
+        # the TRIGGER admitting the plume, and needs entrpen, not the 30x
+        # stronger shallow entrainment a supply-only column now earns.
+        # (No vdiff profile is passed here, so the dynamics part must carry
+        # the whole integral by itself.)
+        nlev = T.shape[0]
+        sl = slice(nlev // 2, nlev - 4)
+        supply = 1.5e-4
+        conv = jnp.zeros(nlev).at[sl].set(
+            1.3 * supply / jnp.sum(rho[sl] * dz[sl]))
+        tend, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 600.0, cfg,
+            moisture_supply=jnp.asarray(supply),
+            qte_dynamics=conv,
+        )
+        kbase, ktop = int(state.kbase), int(state.ktop)
+        self.assertLess(ktop, kbase - 5,
+                        f"plume died at its base: kbase={kbase} ktop={ktop}")
+        self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0)
 
 
 if __name__ == "__main__":

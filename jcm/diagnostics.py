@@ -10,6 +10,75 @@ from __future__ import annotations
 
 import numpy as np
 
+from jcm.analysis import area_weights
+
+
+def aerosol_budget_report(ds, dt_seconds: float) -> list[str]:
+    """One greppable aerosol-budget line per species, plus an f32 caveat note.
+
+    #713: the gauge fields close ``d(mass)/dt = ptend + dyn`` in-step, so the
+    chunk means printed here attribute any drift on the spot — ``dyn`` is the
+    transport (SL/filters) creation and ``ptend-ledger`` the unledgered
+    physics. A drift that takes months to show in burdens is visible in one
+    chunk here. Species are discovered from ``budget_dyn_<sp>`` variables;
+    ``[]`` is returned when the run carried no budget gauges.
+
+    All global means are float64 (``dt_seconds`` in s), weighted with
+    :func:`jcm.analysis.area_weights` — Gauss-Legendre-exact on the dinosaur
+    output grid so a residual whose quadrature integral should cancel reads
+    zero, cos(lat) elsewhere.
+
+    Closure floor: the gauge's carried expectation quantizes at the model
+    dtype's epsilon of the column mass each step, so a ``|dyn|`` below
+    ``eps*mass/dt`` is rounding, not leak. At float64 (eps ~ 2e-16) the floor
+    is far below anything physical; at float32 (eps ~ 1.2e-7) it reaches
+    O(0.1-1) ng/m2/s at real burdens — those lines are flagged inconclusive
+    rather than letting a noise-level residual read as either "closed" or
+    "leaking".
+    """
+    lines: list[str] = []
+    budget_species = sorted(
+        k[len("budget_dyn_"):] for k in ds.data_vars
+        if k.startswith("budget_dyn_"))
+    if not budget_species:
+        return lines
+
+    # (time, lon, lat) -> weighted global+time mean, all float64.
+    w = np.asarray(area_weights(ds).values, dtype=np.float64)
+
+    def _gm(name):
+        v = np.asarray(ds[name], dtype=np.float64)
+        return float(
+            (v * w[None, None, :]).sum(axis=(-1, -2)).mean()
+            / (w.sum() * v.shape[-2]))
+
+    eps = float(np.finfo(ds[f"budget_dyn_{budget_species[0]}"].dtype).eps)
+    f32_noted = False
+    for sp in budget_species:
+        mass = _gm(f"budget_mass_{sp}")
+        ptend = _gm(f"budget_ptend_{sp}")
+        dyn = _gm(f"budget_dyn_{sp}")
+        ledger = 0.0
+        for fam, sgn in (("emi", 1.0), ("wet", -1.0), ("dry", -1.0)):
+            key = f"{fam}_{sp}"
+            if key in ds:
+                ledger += sgn * _gm(key)
+        floor = eps * abs(mass) / dt_seconds
+        caveat = ""
+        if eps > 1e-10 and abs(dyn) <= floor:
+            caveat = f"  [<f32 floor {floor*1e12:.2f} — inconclusive]"
+            f32_noted = True
+        lines.append(
+            f"  budget {sp:4s}: mass={mass*1e6:10.3f} mg/m2  "
+            f"ptend={ptend*1e12:+10.2f} dyn={dyn*1e12:+10.2f} "
+            f"unledgered={(ptend-ledger)*1e12:+10.2f} ng/m2/s" + caveat)
+    if f32_noted:
+        lines.append(
+            "  budget note: float32 run — dyn below the per-species floor is "
+            "precision noise; closure can only be claimed down to that floor "
+            "(run float64 to verify further).")
+    return lines
+
 
 def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     """Inspect ``ds`` for atmosphere-blowup signatures.

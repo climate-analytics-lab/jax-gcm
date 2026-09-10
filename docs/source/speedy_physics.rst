@@ -530,8 +530,6 @@ respective process directories:
      - ``jcm.physics.vertical_diffusion.speedy_vdiff``
    * - Forcing
      - ``jcm.physics.forcing.speedy_forcing``
-   * - Orographic Correction
-     - ``jcm.physics.orographic_correction.speedy_orographic``
 
 SPEEDY infrastructure (parameters, coordinates, physics data, orchestrators)
 remains at ``jcm.physics.speedy``.

@@ -16,12 +16,11 @@ from jcm.utils import (
     spectral_truncation,
     validate_ds,
     ones_like,
-    tree_index_3d,
     ones_like_tangent,
-    zeros_like_tangent,
     convert_to_float,
     convert_back,
     data_to_xarray,
+    load_states_from_xarray,
 )
 from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
 
@@ -288,43 +287,6 @@ class TestOnesLike(unittest.TestCase):
         self.assertTrue(jnp.allclose(result['value'], 1.0))
 
 
-class TestTreeIndex3d(unittest.TestCase):
-    """Tests for tree_index_3d function."""
-
-    def test_tree_index_3d_indexes_3d_array(self):
-        """tree_index_3d should index 3D arrays at the given key."""
-        arr_3d = jnp.arange(24).reshape((2, 3, 4))
-        pytree = {'data': arr_3d}
-
-        result = tree_index_3d(pytree, 2)
-
-        # Should get arr[:, :, 2]
-        expected = arr_3d[:, :, 2]
-        self.assertTrue(jnp.allclose(result['data'], expected))
-
-    def test_tree_index_3d_preserves_2d_array(self):
-        """tree_index_3d should return 2D arrays unchanged."""
-        arr_2d = jnp.arange(6).reshape((2, 3))
-        pytree = {'data': arr_2d}
-
-        result = tree_index_3d(pytree, 0)
-
-        # 2D array should be unchanged
-        self.assertTrue(jnp.allclose(result['data'], arr_2d))
-
-    def test_tree_index_3d_mixed_dimensions(self):
-        """tree_index_3d should handle mixed 2D and 3D arrays."""
-        pytree = {
-            '3d': jnp.ones((2, 3, 4)),
-            '2d': jnp.ones((2, 3)),
-        }
-
-        result = tree_index_3d(pytree, 1)
-
-        self.assertEqual(result['3d'].shape, (2, 3))
-        self.assertEqual(result['2d'].shape, (2, 3))
-
-
 class TestOnesLikeTangent(unittest.TestCase):
     """Tests for ones_like_tangent function."""
 
@@ -361,36 +323,6 @@ class TestOnesLikeTangent(unittest.TestCase):
 
         self.assertTrue(jnp.allclose(result['float'], 1.0))
         self.assertEqual(result['int'].dtype, jax.dtypes.float0)
-
-
-class TestZerosLikeTangent(unittest.TestCase):
-    """Tests for zeros_like_tangent function."""
-
-    def test_zeros_like_tangent_float_array(self):
-        """zeros_like_tangent should create zeros for float arrays."""
-        x = jnp.ones((3, 4), dtype=jnp.float32)
-        result = zeros_like_tangent(x)
-
-        self.assertTrue(jnp.allclose(result, 0.0))
-        self.assertEqual(result.shape, x.shape)
-
-    def test_zeros_like_tangent_int_array(self):
-        """zeros_like_tangent should create float0 for int arrays."""
-        x = jnp.ones((3, 4), dtype=jnp.int32)
-        result = zeros_like_tangent(x)
-
-        self.assertEqual(result.dtype, jax.dtypes.float0)
-
-    def test_zeros_like_tangent_pytree(self):
-        """zeros_like_tangent should work with pytrees."""
-        pytree = {
-            'float': jnp.ones((2, 3), dtype=jnp.float32),
-            'bool': jnp.ones((2,), dtype=jnp.bool_),
-        }
-        result = zeros_like_tangent(pytree)
-
-        self.assertTrue(jnp.allclose(result['float'], 0.0))
-        self.assertEqual(result['bool'].dtype, jax.dtypes.float0)
 
 
 class TestConvertToFloat(unittest.TestCase):
@@ -772,6 +704,246 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
                 serialize_coords_to_attrs=True
             )
         self.assertIn("not allowed", str(context.exception).lower())
+
+
+class TestLoadStatesFromXarray(unittest.TestCase):
+    """``load_states_from_xarray`` must always return a top-first state.
+
+    Output files are surface-first (``jcm.cf_metadata``, #710); the loader
+    detects that from the ``level`` coordinate values and flips back to the
+    top-first physics frame (#741).
+    """
+
+    @staticmethod
+    def _make_dataset(level_coord, nlev=4, nlon=3, nlat=2,
+                      tracers=(), pressure_full=None):
+        """Build a minimal state Dataset with a distinct value per level.
+
+        ``temperature[k] == 200 + 10*k`` so the vertical profile is
+        unambiguous and a flip is detectable. ``level_coord`` sets (or omits)
+        the ``level`` coordinate; the *data* is written in whatever order
+        matches ``level_coord``.
+
+        ``tracers`` names extra level-dimensioned variables to add (each with
+        its own distinct profile, so a mis-mapped tracer is detectable).
+        ``pressure_full``, when given, is the per-level pressure in the same
+        file order as the rest of the data — the loader cross-checks it
+        against the state's own surface pressure (#718). Omitting it models a
+        trimmed restart file, where that check cannot run.
+        """
+        prof = 200.0 + 10.0 * np.arange(nlev)  # increases with array index
+        col = np.broadcast_to(prof[:, None, None], (nlev, nlon, nlat))
+        surf = np.ones((nlon, nlat))
+        data_vars = {
+            "u_wind": (("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "v_wind": (("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "temperature": (("level", "lon", "lat"), col.copy()),
+            "specific_humidity": (
+                ("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "geopotential": (
+                ("level", "lon", "lat"), np.zeros((nlev, nlon, nlat))),
+            "normalized_surface_pressure": (("lon", "lat"), surf),
+        }
+        for i, name in enumerate(tracers):
+            tracer_prof = (i + 1) * 1e-4 * (1.0 + np.arange(nlev))
+            data_vars[name] = (
+                ("level", "lon", "lat"),
+                np.broadcast_to(
+                    tracer_prof[:, None, None], (nlev, nlon, nlat)).copy(),
+            )
+        if pressure_full is not None:
+            data_vars["pressure_full"] = (
+                ("level", "lon", "lat"),
+                np.broadcast_to(
+                    np.asarray(pressure_full, dtype=float)[:, None, None],
+                    (nlev, nlon, nlat)).copy(),
+            )
+        coords = {} if level_coord is None else {"level": level_coord}
+        return xr.Dataset(data_vars=data_vars, coords=coords)
+
+    @staticmethod
+    def _surface_first_level(nlev=4):
+        """Descending sigma: the on-disk convention every JCM file uses."""
+        return np.linspace(0.99, 0.01, nlev)
+
+    def test_surface_first_file_is_flipped_to_top_first(self):
+        # Descending sigma coordinate (index 0 ≈ surface) marks a
+        # surface-first file; the loaded state must be reversed relative to it.
+        nlev = 4
+        level = np.linspace(0.99, 0.01, nlev)  # descending → surface-first
+        ds = self._make_dataset(level, nlev=nlev)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile[::-1])
+        # Top-first contract: index 0 is now the model top (smallest value
+        # here, since the file put the largest at index 0).
+        self.assertEqual(loaded_profile[0], file_profile[-1])
+
+    def test_top_first_file_passes_through_unchanged(self):
+        # Ascending sigma coordinate is already top-first; no flip.
+        nlev = 4
+        level = np.linspace(0.01, 0.99, nlev)  # ascending → top-first
+        ds = self._make_dataset(level, nlev=nlev)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile)
+
+    def test_bare_index_level_passes_through_and_warns(self):
+        # No numeric sigma coordinate: orientation cannot be determined, so
+        # the data passes through unflipped and a warning is emitted.
+        ds = self._make_dataset(level_coord=None, nlev=4)
+        file_profile = ds["temperature"].values[:, 0, 0]
+
+        with self.assertLogs(level="WARNING") as cm:
+            state = load_states_from_xarray(ds)
+        loaded_profile = np.asarray(state.temperature)[:, 0, 0]
+
+        np.testing.assert_allclose(loaded_profile, file_profile)
+        self.assertTrue(
+            any("orientation" in msg.lower() for msg in cm.output))
+
+
+class TestLoadStatesTracerResolution(unittest.TestCase):
+    """Which file variables become ``state.tracers`` (#718).
+
+    A saved state carries its cloud condensate, but the loader used to drop
+    it unless the caller named every variable by hand — so radiation driven
+    on a saved state saw a clear sky and returned plausible, wrong fluxes.
+    The names now come from what the configured physics declares.
+    """
+
+    _make_dataset = staticmethod(TestLoadStatesFromXarray._make_dataset)
+    _surface_first_level = staticmethod(
+        TestLoadStatesFromXarray._surface_first_level)
+
+    def _dataset(self, nlev=4, tracers=("qc", "qi")):
+        return self._make_dataset(
+            self._surface_first_level(nlev), nlev=nlev, tracers=tracers)
+
+    def test_declared_tracers_are_loaded_and_logged(self):
+        # The default path: physics declares qc/qi, the file has them, so
+        # they are loaded without the caller naming a single variable.
+        from jcm.physics.physics_term import TracerSpec
+
+        ds = self._dataset()
+        with self.assertLogs(level="INFO") as cm:
+            state = load_states_from_xarray(
+                ds, required_tracers=(TracerSpec(name="qc"),
+                                      TracerSpec(name="qi")),
+            )
+
+        self.assertEqual(set(state.tracers), {"qc", "qi"})
+        # Tracers must be flipped with the rest of the state, not left in
+        # file order — a tracer paired with the wrong level is the same bug
+        # in a different variable.
+        np.testing.assert_allclose(
+            np.asarray(state.tracers["qc"])[:, 0, 0],
+            ds["qc"].values[::-1, 0, 0])
+        self.assertTrue(any("qc" in msg and "qi" in msg for msg in cm.output))
+
+    def test_bare_tracer_names_are_accepted(self):
+        # Callers without a physics object (a notebook, a test) may pass
+        # names instead of TracerSpecs.
+        state = load_states_from_xarray(
+            self._dataset(), required_tracers=["qc", "qi"])
+        self.assertEqual(set(state.tracers), {"qc", "qi"})
+
+    def test_declared_tracer_absent_from_file_warns(self):
+        # A dynamics-only state file is a legitimate starting point, so this
+        # is a warning rather than an error -- but it must not be silent:
+        # physics will run with that tracer at zero.
+        ds = self._dataset(tracers=("qc",))
+        with self.assertLogs(level="WARNING") as cm:
+            state = load_states_from_xarray(
+                ds, required_tracers=["qc", "qi"])
+
+        self.assertEqual(set(state.tracers), {"qc"})
+        self.assertTrue(any("qi" in msg for msg in cm.output))
+
+    def test_explicit_mapping_wins_and_warns_about_drops(self):
+        # An explicit mapping is honoured verbatim (it may rename), but
+        # dropping a declared tracer the file actually carries is exactly the
+        # silent failure #718 was about, so it is reported.
+        ds = self._dataset()
+        with self.assertLogs(level="WARNING") as cm:
+            state = load_states_from_xarray(
+                ds, tracer_vars={"qc": "qc"}, required_tracers=["qc", "qi"])
+
+        self.assertEqual(set(state.tracers), {"qc"})
+        self.assertTrue(any("qi" in msg for msg in cm.output))
+
+    def test_empty_mapping_opts_out_of_inference(self):
+        # ``{}`` is how a caller says "no tracers" and must not be treated as
+        # "unset"; only the explicit-drop warning fires.
+        with self.assertLogs(level="WARNING"):
+            state = load_states_from_xarray(
+                self._dataset(), tracer_vars={}, required_tracers=["qc", "qi"])
+        self.assertEqual(state.tracers, {})
+
+    def test_no_declaration_loads_no_tracers(self):
+        # The file cannot say which of its variables are prognostic tracers,
+        # so a caller that declares nothing gets nothing.
+        state = load_states_from_xarray(self._dataset())
+        self.assertEqual(state.tracers, {})
+
+
+class TestLoadStatesPressureGuard(unittest.TestCase):
+    """The loaded state must be top-first by its own pressures too (#718).
+
+    Orientation is inferred from the ``level`` coordinate, which a file may
+    not have; ``pressure_full`` is the independent check on that inference.
+    """
+
+    _make_dataset = staticmethod(TestLoadStatesFromXarray._make_dataset)
+    _surface_first_level = staticmethod(
+        TestLoadStatesFromXarray._surface_first_level)
+
+    # Surface-first pressures for a 4-level column, ~1e5 Pa at the surface,
+    # matching the factory's normalized_surface_pressure of 1.0 (p0 = 1e5).
+    _SURFACE_FIRST_PRESSURE = np.array([9.9e4, 7.0e4, 4.0e4, 1.0e4])
+
+    def test_consistent_surface_first_file_loads(self):
+        ds = self._make_dataset(
+            self._surface_first_level(), pressure_full=self._SURFACE_FIRST_PRESSURE)
+        state = load_states_from_xarray(ds)
+        # Flipped to top-first, so index 0 holds what the file's last index did.
+        self.assertEqual(
+            np.asarray(state.temperature)[0, 0, 0],
+            ds["temperature"].values[-1, 0, 0])
+
+    def test_inverted_column_is_rejected(self):
+        # No usable ``level`` coordinate, so the loader assumes top-first and
+        # does not flip -- but the pressures say the file is surface-first.
+        # This is the #718 failure, and it must now be loud.
+        ds = self._make_dataset(
+            level_coord=None, pressure_full=self._SURFACE_FIRST_PRESSURE)
+        with self.assertRaisesRegex(ValueError, "does not increase"):
+            load_states_from_xarray(ds)
+
+    def test_pressures_inconsistent_with_surface_pressure_are_rejected(self):
+        # Monotonic the right way, but on a scale that cannot belong to this
+        # state: the surface level is 1e-3 of the surface pressure carried in
+        # the file.
+        ds = self._make_dataset(
+            self._surface_first_level(),
+            pressure_full=np.array([100.0, 40.0, 10.0, 1.0]))
+        with self.assertRaisesRegex(ValueError, "factor of two"):
+            load_states_from_xarray(ds)
+
+    def test_file_without_pressures_falls_back_to_the_level_coordinate(self):
+        # A trimmed restart file (only the prognostic fields) has no
+        # ``pressure_full``; the level-coordinate inference still applies.
+        ds = self._make_dataset(self._surface_first_level())
+        state = load_states_from_xarray(ds)
+        np.testing.assert_allclose(
+            np.asarray(state.temperature)[:, 0, 0],
+            ds["temperature"].values[::-1, 0, 0])
 
 
 if __name__ == '__main__':

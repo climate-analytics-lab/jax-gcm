@@ -57,6 +57,61 @@ class ShapeCoefficientTest(unittest.TestCase):
             _shape_coefficients(jnp.asarray(0.0), jnp.asarray(0.5), 1.8, "x")
 
 
+class PerModeFractionTest(unittest.TestCase):
+    def test_per_mode_fractions_physical(self):
+        # Two modes, the second masked non-activatable. Number and mass
+        # fractions must be in [0, 1], the mass fraction at least the number
+        # fraction (large particles activate preferentially), and masked
+        # modes exactly zero in both.
+        two = lambda a, b: jnp.asarray([a, b]).reshape(2, 1, 1)
+        kw = dict(
+            r_dry=two(0.05e-6, 0.05e-6),
+            kappa=two(0.6, 0.6),
+            number_vol=two(1.0e8, 1.0e8),
+            sigma_g=two(1.8, 1.8),
+            can_activate=two(1.0, 0.0),
+        )
+        _, _, _, fn, fm = arg_activation(
+            updraft=jnp.full((1, 1), 0.5),
+            temperature=jnp.full((1, 1), 283.0),
+            pressure=jnp.full((1, 1), 9.0e4),
+            sigma_acc=1.8,
+            variant="arg2000",
+            **kw,
+        )
+        fn0, fm0 = float(fn[0, 0, 0]), float(fm[0, 0, 0])
+        self.assertGreater(fn0, 0.0)
+        self.assertLessEqual(fn0, 1.0)
+        self.assertGreaterEqual(fm0, fn0)
+        self.assertLessEqual(fm0, 1.0)
+        self.assertEqual(float(fn[1, 0, 0]), 0.0)
+        self.assertEqual(float(fm[1, 0, 0]), 0.0)
+
+    def test_mass_fraction_is_the_shifted_number_erf(self):
+        # Pin the exact ARG (2000) relation between the two fractions:
+        # recover u from the returned number fraction (fn = erfc(u)/2) and
+        # require fm == erfc(u − 3·lnσ/√2)/2. A plausible-wrong shift
+        # (3·lnσ/2, 3√2·lnσ, √2·lnσ) fails this; the inequality checks
+        # above would not catch it.
+        from scipy.special import erf, erfinv
+
+        sigma = 1.8
+        _, _, _, fn, fm = arg_activation(
+            updraft=jnp.full((1, 1), 0.5),
+            temperature=jnp.full((1, 1), 283.0),
+            pressure=jnp.full((1, 1), 9.0e4),
+            sigma_acc=sigma,
+            variant="arg2000",
+            **_single_mode(sigma=sigma),
+        )
+        fn0, fm0 = float(fn[0, 0, 0]), float(fm[0, 0, 0])
+        u = erfinv(1.0 - 2.0 * fn0)
+        expected = 0.5 * (
+            1.0 - erf(u - 3.0 * np.log(sigma) / np.sqrt(2.0))
+        )
+        self.assertAlmostEqual(fm0, float(expected), places=5)
+
+
 def _single_mode(r_dry=0.05e-6, kappa=0.6, n_percc=100.0, sigma=1.8):
     """One-mode (M=1, 1 level, 1 col) ARG input set."""
     one = lambda v: jnp.full((1, 1, 1), v)
@@ -76,7 +131,7 @@ def _scalar(x):
 class ArgActivationCoreTest(unittest.TestCase):
     def _run(self, w=0.5, T=283.0, p=9.0e4, variant="arg2000", **over):
         kw = _single_mode(**over)
-        n_act, frac, smax = arg_activation(
+        n_act, frac, smax, _, _ = arg_activation(
             updraft=jnp.full((1, 1), w),
             temperature=jnp.full((1, 1), T),
             pressure=jnp.full((1, 1), p),
@@ -129,7 +184,7 @@ class ArgActivationCoreTest(unittest.TestCase):
 
     def test_grad_through_updraft_finite(self):
         def loss(w):
-            n_act, _, _ = arg_activation(
+            n_act, *_ = arg_activation(
                 updraft=jnp.full((1, 1), w),
                 temperature=jnp.full((1, 1), 283.0),
                 pressure=jnp.full((1, 1), 9.0e4),

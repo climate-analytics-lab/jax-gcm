@@ -109,6 +109,18 @@ class CloudParams2M:
     fact_coll_eff: jnp.ndarray  # temp-dependent collection efficiency factor
     fact_tke: jnp.ndarray       # turbulence enhancement factor
 
+    # Local accretion geometry (ECHAM zauloc = cauloc·dz/5000, clipped to
+    # [clmin, clmax]): the fraction of the box in which NEWLY formed
+    # rain/snow participates in accretion, a resolution-(layer-depth-)
+    # dependent ramp (mo_cloud_micro_2m.f90:1618-1619). ECHAM zeroes it
+    # additionally at the two levels around a diagnosed low-level
+    # inversion when the large-scale vertical velocity is downward
+    # (knvb/lonacc gate) — that needs pvervel, which is not plumbed to
+    # this scheme yet (#705).
+    cauloc: jnp.ndarray      # [-] zauloc ramp factor (ECHAM 2M hardwires 3)
+    clmin: jnp.ndarray       # [-] lower zauloc clip (ECHAM 0.0)
+    clmax: jnp.ndarray       # [-] upper zauloc clip (ECHAM 0.5)
+
     # Pruppacher & Klett (1997) ice mass-size relation
     fact_PK: jnp.ndarray     # [-] (g, cm) parameter; see cloud_utils notes
     pow_PK: jnp.ndarray      # [-]
@@ -142,8 +154,10 @@ class CloudParams2M:
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
-        ccsaut: float = 95.0,
-        ccraut: float = 15.0,
+        # mo_activ.f90's prognostic-CDNC retune (T63, AR&G, cdnc_min=40);
+        # the SPA route pins the base 95.0/15.0 in its presets.
+        ccsaut: float = 900.0,
+        ccraut: float = 10.6,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,
@@ -175,6 +189,9 @@ class CloudParams2M:
         exp_1: float = -1.0 / (2.47 - 1.0),
         fact_coll_eff: float = 0.09,
         fact_tke: float = 0.7,
+        cauloc: float = 3.0,
+        clmin: float = 0.0,
+        clmax: float = 0.5,
         fact_PK: float = 8.253e-3,
         pow_PK: float = 2.475,
         cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
@@ -247,6 +264,9 @@ class CloudParams2M:
             exp_1=jnp.array(exp_1),
             fact_coll_eff=jnp.array(fact_coll_eff),
             fact_tke=jnp.array(fact_tke),
+            cauloc=jnp.array(cauloc),
+            clmin=jnp.array(clmin),
+            clmax=jnp.array(clmax),
             fact_PK=jnp.array(fact_PK),
             pow_PK=jnp.array(pow_PK),
             pirho_rcp=jnp.array(pirho_rcp_val),

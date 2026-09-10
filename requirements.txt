@@ -1,5 +1,23 @@
-dinosaur
-flax>=0.12.0
+# jcm's dinosaur backend transports tracers semi-Lagrangian ONLY — the
+# Eulerian spectral path was removed because it rang negative on sharp
+# emission sources and NaN'd the aerosol microphysics (#521). The SL core
+# lives in neuralgcm/dinosaur#135 and is not in a released dinosaur yet, so
+# until it ships we install the branch it was developed on.
+#
+# BEFORE RELEASE: replace with a pinned released version, e.g.
+# ``dinosaur>=X.Y`` — a VCS requirement cannot be published to PyPI and
+# makes the wheel uninstallable for downstream users (see #577).
+dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian
+# Floor is 0.12.1: that release ADDED `nnx.Variable.get_value()` and deprecated
+# the `.value` property in its favour. jcm reads every nnx.Param/nnx.Variable
+# through `.get_value()` (~94 sites under jcm/physics/**), so on exactly 0.12.0
+# the lookup misses the class and falls through `Variable.__getattr__` to the
+# *wrapped* object — `AttributeError: 'SpeedyCoords' object has no attribute
+# 'get_value'` as soon as a Model is built (#655). Do NOT "fix" that by moving
+# to `.value`: that is the deprecated direction, and no flax ever released has
+# both. (0.12.0 is unusable here anyway — it imports the long-gone private
+# `jax._src.core.mutable_array`.)
+flax>=0.12.1
 jax-datetime
 tree-math
 hydra-core
@@ -19,4 +37,5 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp>=0.2.1  # 0.2.1+ has the per-call sfc_alb/sfc_emis overrides the per-column surface coupling needs (0.2.0: gas-optics gather + shared-table fixes)
+jax-rrtmgp>=0.3.0  # 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
+huggingface_hub

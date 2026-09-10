@@ -28,6 +28,32 @@ jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Kö
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 
+# Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
+# the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
+# in-droplet wet removal, dry deposition, and the aqueous sulfate split. false
+# drops the 25 mirrors from the tracer set — they are ~43% of the tracer count
+# and tracers are ~94% of the dycore step at ne30 — and scavenges interstitial
+# aerosol by its activated fraction instead (the implicit M7/TOMAS-style
+# treatment). Flip this one flag for the A/B cost/fidelity comparison.
+# Flipping it changes the transported tracer set, so a restart across the
+# flip fails loudly (checkpoint pytree mismatch); false -> true cold-starts
+# the mirrors at zero (spin-up).
+#
+# The explicit phase lives in the physics CARRY (#602 item 3) — there is
+# no advected-tracer alternative. The 30-day T21 A/B measured the
+# dycore-advected mc_*/nc_* mirrors going ~90%-of-cells NEGATIVE from
+# spectral ringing at 2.2x the carry cost (and 2.1x even under
+# semi-Lagrangian transport, with 0.997 pattern agreement); the FV-dycore
+# re-check was parked because pySES is the CAM-SE dycore, CAM itself
+# keeps qqcw in pbuf, and pySES is the most tracer-cost-sensitive
+# configuration (#595). Evidence figures on #602.
+jam_cloud_borne: true
+
 # Prescribed-emission terms (driven by forcing.emissions_file):
 jam_anthropogenic: true        # bulk SO2/BC/OC → in-model speciation + injection
 jam_prescribed_speciated: true # already-speciated per-tracer fields (CAM-faithful)
+
+# Convective tracer transport + in-plume scavenging (#621/#622). false is
+# the reconciliation A/B: WetScavenging then reverts to its environment-
+# profile convective in-cloud pathway (the pre-#621 sink).
+jam_convective_transport: true

@@ -23,20 +23,31 @@ never by a bare positional index whose meaning you have assumed.
    ``ds.sel(level=..., method="nearest")`` or first read ``ds.pressure_full`` to
    identify which index is the surface. Do **not** write ``.isel(level=-1)`` (or
    ``[-1]``/``[0]``) to mean "surface" — that bakes in a vertical-ordering
-   assumption. The model's saved output is **surface-first** (level index 0 is
-   the surface: ``level`` coordinate ≈ 0.996, ``pressure_full`` ≈ surface
-   pressure at index 0; the top is the *last* index, ``level`` ≈ 1e-5, 1 Pa).
-   This differs from the physics-**internal** frame (top-first: the radiation
-   code's ``needs_reversal``) and from the HAMMOZ/ECHAM input **files**
-   (top-first: ``hybm[0]=0``). All three conventions coexist, so never carry a
-   "surface = index −1" habit between them — confirm from ``pressure_full``.
+   assumption. The model's saved output is **surface-first** on *both* vertical
+   axes — ``level`` (mid-levels, length ``nlev``) and ``level_i`` (interfaces,
+   length ``nlev+1``): index 0 is the surface (``level`` ≈ 0.996,
+   ``pressure_full`` ≈ surface pressure; ``level_i`` = 1.0, ``pressure_half`` ≈
+   surface pressure), the top is the *last* index (``level`` ≈ 1e-5, 1 Pa;
+   ``level_i`` = 0, 0 Pa). This differs from the physics-**internal** frame
+   (top-first: the radiation code's ``needs_reversal``) and from the
+   HAMMOZ/ECHAM input **files** (top-first: ``hybm[0]=0``). All three
+   conventions coexist, so never carry a "surface = index −1" habit between
+   them — confirm from ``pressure_full`` / ``pressure_half``, or from the
+   ``positive`` and ``long_name`` attributes both axes now carry.
  - Within a single output file every level-dimensioned variable shares the
    **same** ``level`` coordinate and ordering (verified: temperature, pressure,
-   tracers, oxidants all peak at index 0 = surface together). The Dataset is
-   self-consistent; the risk is not a mixed-ordering file but *your* blind
-   indexing of it. A 2026-07-05 "oxidant flip" investigation was a wasted effort
-   caused entirely by reading ``.isel(level=-1)`` as the surface when it was the
-   model top.
+   tracers, oxidants all peak at index 0 = surface together), and the interface
+   axis runs the same way, so ``level[k]`` sits between ``level_i[k]`` and
+   ``level_i[k+1]``. Pairing the two — ``-diff(pressure_half)`` as the Δp for a
+   ``level`` field — is correct as written and needs no orientation guard. The
+   Dataset is self-consistent; the risk is *your* blind indexing of it. A
+   2026-07-05 "oxidant flip" investigation was a wasted effort caused entirely
+   by reading ``.isel(level=-1)`` as the surface when it was the model top.
+ - **Files written before #710 are the exception**: their interface variables
+   are TOA-first while their ``level`` variables are surface-first, and
+   ``level_i`` is a bare integer index. Presence of ``ds.level_i.attrs`` (a
+   real sigma coordinate with ``positive``) tells the two apart. See
+   ``docs/source/design/output_vertical_conventions.md``.
 
 ## Finish the Job — No Half Implementations
 When asked to fix or implement something, deliver the **complete, faithful** solution by
@@ -54,6 +65,47 @@ tedious (implicit balances, conservation, edge cases) — not just the easy 80%.
  - The only time to stop short is a genuine blocking decision that is the user's to make
    (per "Think Before Coding" above) — surface it and ask. Effort or tedium is not such a
    reason.
+
+## Related findings get rolled into the PR; only unrelated ones become issues
+When a piece of work surfaces additional defects or gaps, the default is to **fix them in
+the same PR** whenever they are related to the work at hand — same subsystem, same
+convention, same failure class, or anything a reviewer would naturally want to see
+together. The maintainer would much rather review one comprehensive PR than a cluster of
+small follow-ups. (The 2026-08 output-convention PR #742 is the canonical example: four
+adjacent gaps were first filed as issues #739/#740/#741/#744 and every one had to be
+folded back into the PR anyway.) The test is: *would the reviewer be surprised to find
+this fix in the PR?* If not, roll it in.
+
+File a GitHub issue **only** for findings genuinely unrelated to the current work — a
+different subsystem, something needing its own validation campaign, or something blocked
+on resources or decisions the current PR cannot wait for. When an issue is warranted:
+
+ - Title it by the gap (not the PR that found it), with enough context to start cold:
+   what is missing, where the hooks already are, and what reference formulation applies.
+ - Cross-link it from the code comment or docstring that notes the gap, and from the PR.
+
+Either way, a docstring note or PR-body mention alone is never the resting place for a
+known defect — it is either fixed in the PR or tracked in an issue. Deliberately
+parked/rejected directions don't get an issue — record the decision and its evidence
+where the decision was made instead.
+
+## No bespoke run scripts — new configurations go through Hydra
+Every runnable configuration must be expressible as ``python -m jcm.main``
+with Hydra groups/overrides — never as a standalone driver script:
+
+ - New backends, physics packages, or run patterns get a config group entry
+   (``jcm/config/<group>/*.yaml``) and, if needed, wiring in
+   ``jcm/runners.py`` — which already provides the production run loop
+   (chunked integration, health gates, checkpoint/.prev rotation, periodic
+   checkpoint archives, resume).
+ - Canonical/validated configurations are enshrined as named config files
+   with comments explaining WHY each setting is what it is (see
+   ``dycore/pyses_ne30l47.yaml``), so a production run is one command.
+ - One-off experiment scripts (personal paths, GPU indices, ad-hoc drivers)
+   do not belong in the repo at all. The 2026-07 ne30 campaign's bespoke
+   driver drifted a parallel checkpoint/health implementation and
+   crash-prone defaults before being folded back into Hydra — that is the
+   failure mode this rule prevents.
 
 ## Documentation lives with the change — no doc debt
 Documentation updates are part of the change, not a follow-up. A PR that alters
@@ -108,7 +160,6 @@ jcm/                          # Main package
 │   │   └── physical_constants.py
 │   ├── echam/                   # ECHAM infrastructure (terms, coords)
 │   │   ├── echam_terms.py       # Composable terms + echam_physics() factory
-│   │   ├── echam_coords.py      # ECHAM-specific coordinate transforms
 │   │   └── echam_levels.py      # Hybrid vertical level definitions
 │   │   # (per-scheme Parameters live with each scheme; boundary
 │   │   # conditions live in jcm/physics/forcing/echam_boundary_conditions.py)
@@ -145,7 +196,6 @@ jcm/                          # Main package
 │   ├── dissipation/upper_sponge.py  # Upper-level sponge dissipation
 │   ├── surface/                 # Speedy bulk + ECHAM multi-tile (in surface/echam/)
 │   ├── forcing/                 # speedy_forcing.py, echam_boundary_conditions.py
-│   ├── orographic_correction/speedy_orographic.py
 │   └── held_suarez/             # Simplified Held-Suarez forcing
 │       ├── held_suarez_physics.py
 │       └── utils.py             # Coordinate helpers for Held-Suarez
@@ -165,51 +215,44 @@ pip install -e .
 
 Dependencies are in `requirements.txt`: dinosaur, flax, jax-datetime, tree-math, hydra-core, xarray.
 
-## Running Tests
+## Testing, linting and the PR workflow
+
+**See the `jcm-dev-workflow` skill** — it carries the full loop (atomic
+commits, the local gate, opening a PR linked to its issue, monitoring CI *and*
+the automatic Codex review, and handing back for human review only once
+everything is green), so the details live in one place rather than drifting
+between here and there.
+
+The repo skills live in `.claude/skills/` — before opening any PR, run the
+**`jcm-local-ci`** skill's gates locally; CI must confirm a result you have
+already seen, not discover it:
 
 ```bash
-# Default — run in parallel across ~12 workers (pytest-xdist).
-# Cuts a full sweep from ~15 min to a couple of minutes locally.
-JAX_PLATFORMS=cpu pytest -n 12
-
-# Single-process if you need ordered output or are debugging a flake
-pytest
-
-# Fast tests only (skip slow integration tests >1 min)
-JAX_PLATFORMS=cpu pytest -n 12 -m "not slow"
-
-# Specific test file
-pytest jcm/model_test.py
-
-# With coverage (xdist works with --cov)
-JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90
+ruff check .                     # MUST be clean before EVERY push
+JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
+    --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
-`-n auto` will pick the number of workers from the visible CPU count;
-`-n 12` is the recommended local default on the dev workstation. Use
-`-n 0` (or just omit `-n`) to fall back to a single process when you
-need deterministic ordering.
+Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
+hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
+`CUDA_ERROR_OUT_OF_MEMORY`). And coverage must be measured at **CI
+dependency parity**: CI installs `pip install -e .` with no extras, so code
+gated behind an optional extra (`jcm[cosp]`, ...) counts as UNCOVERED there
+even when its tests pass locally — uninstall the extra before measuring, or
+the gate you cleared locally fails in CI (PR #582 and #598 both hit
+coverage this way). Every Codex/bot inline comment gets an explicit
+threaded reply ("Confirmed and fixed in <sha>" / "Refuted: <evidence>")
+before handing back — see `jcm-local-ci` for the `gh api` one-liner.
 
-**``JAX_PLATFORMS=cpu`` is required for parallel runs on GPU hosts.**
-Without it, every xdist worker tries to grab the same GPU and you
-get ``CUDA_ERROR_OUT_OF_MEMORY`` / ``dnn_support != nullptr``
-``RET_CHECK`` failures from XLA. The unit tests don't need a GPU —
-they're small column-mode integrations that compile and run faster
-on CPU than they would round-trip through the device anyway.
+Run these on a compute node, not a Derecho login node: the suite is
+memory-bound and a 10 GiB cgroup turns `-n 12` into an OOM that reads as
+random failures (`docs/source/design/test_suite_memory.md`).
 
-Test files use the `*_test.py` naming convention and are co-located with their source modules. Tests use `unittest.TestCase` classes run via pytest. The `conftest.py` at root cleans `jcm` module imports between tests to prevent state leakage.
-
-**CI thresholds:**
-- Push: fast tests only, 90% coverage required
-- Pull request: includes slow tests, 80% coverage required
-
-## Linting
-
-```bash
-ruff check .
-```
-
-Ruff is the only linter. Configuration is in `pyproject.toml`. Docstring checks (D rules) are enabled but most missing-docstring rules are suppressed. No formatter (Black), no type checker (mypy), no pre-commit hooks.
+Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
+checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
+module. CI: push runs fast tests at 90% coverage, PRs also run slow tests at
+80%.
 
 ## Key Coding Conventions
 

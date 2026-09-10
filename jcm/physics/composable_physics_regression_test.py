@@ -31,6 +31,7 @@ import os
 import unittest
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 
@@ -155,7 +156,27 @@ def _check_or_regenerate(name: str, actual_arrays: dict) -> None:
             )
 
 
-class TestEchamReferenceTrajectory(unittest.TestCase):
+class _Float32ReferenceTest(unittest.TestCase):
+    """Base pinning ``jax_enable_x64`` False for the float32-generated refs.
+
+    The .npz snapshots are integrated at the jcm default (x64 off). A foreign
+    test sharing this xdist worker flips x64 True process-wide on
+    ``import mam4_jax`` (the JAM/aerosol tests do); these comparisons would then
+    run in float64 — diverging past the RMS tolerance or crashing the
+    mixed-precision SL dynamics. Pin x64 False for the test and restore the
+    prior value so the guard cannot itself contaminate later tests. Mirrors
+    jcm/dycore/pyses/conftest.py, which reorders the pyses x64-flippers last.
+    """
+
+    def setUp(self):
+        self._prev_x64 = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", False)
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._prev_x64)
+
+
+class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     """T21L16 aquaplanet 1-day ECHAM reference trajectory (stretched grid).
 
     Reference lineage: regenerated 2026-07-04 for (a) the ECHAM ``physc``
@@ -203,6 +224,9 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
         terrain = TerrainData.aquaplanet(coords)
         forcing = ForcingData.zeros((64, 32))
 
+        # No time_step: ECHAM reports no stability limit, so the Model resolves
+        # the 12-min no-limit default (matching run/default.yaml); the reference
+        # was regenerated at that step (#751).
         model = Model(
             coords=coords,
             terrain=terrain,
@@ -218,7 +242,7 @@ class TestEchamReferenceTrajectory(unittest.TestCase):
         )
 
 
-class TestSpeedyReferenceTrajectory(unittest.TestCase):
+class TestSpeedyReferenceTrajectory(_Float32ReferenceTest):
     """T21L8 aquaplanet 1-day SPEEDY reference trajectory."""
 
     @pytest.mark.slow

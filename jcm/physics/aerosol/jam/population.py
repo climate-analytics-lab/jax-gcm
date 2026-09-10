@@ -133,6 +133,18 @@ class ModalAerosolSpec:
     modes: tuple[AerosolMode, ...]
     species: tuple[AerosolSpecies, ...]
     family: str = "modal"
+    #: Whether the population prognoses an explicit cloud-borne phase per
+    #: class (MAM-style ``mc_*``/``nc_*`` fields alongside the interstitial
+    #: tracers). This is a property of the population *representation*, not
+    #: of the process harness: MAM keeps in-droplet aerosol as separate
+    #: constituents, while M7 (ECHAM-HAM) and sectional schemes like TOMAS
+    #: represent it implicitly, scavenging the interstitial tracers by
+    #: their activated fraction. The explicit phase lives in the cross-step
+    #: physics carry (CAM's ``qqcw``-in-pbuf pattern), never in dycore
+    #: tracers — the measured #602 decision, see ``cloud_borne_store``.
+    #: ``False`` falls back to the implicit treatment; both settings are
+    #: complete, comparable physics.
+    cloud_borne: bool = True
     #: Population policy for where freshly-emitted **primary** mass of a species
     #: goes: ``{species: ((mode_short, mass_fraction), ...)}`` with fractions
     #: summing to 1. This centralises the modal (or sectional) assumption with

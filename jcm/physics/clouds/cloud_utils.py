@@ -46,6 +46,40 @@ def eff_ice_crystal_radius(
         0.0,
     )
 
+def ice_volume_mean_radius(
+    ice_in_cloud_gm3: jnp.ndarray, icnc: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Volume-mean ice crystal radius (Fortran ``prid``/``zrice``/``zris``) in METRES.
+
+    Chains the Lohmann (2008) effective radius, the ``[ceffmin, ceffmax]`` clip,
+    and the Schumann (2011) effective -> volume-mean conversion
+    ``zrih = -2261 + sqrt(5113188 + 2809 r_eff^3)``, ``r_vol = 1e-6 zrih^(1/3)``.
+
+    Metres is load-bearing: callers invert this as
+    ``N = rho q_i / ((4/3) pi r_vol^3 rho_ice)``, so returning the microns that
+    ``eff_ice_crystal_radius`` produces understates crystal number by ~1e18 and
+    pins ICNC at ``icemin``, saturating the ice effective radius at ``ceffmax``
+    (#725).
+
+    Parameters
+    ----------
+    ice_in_cloud_gm3 : jnp.ndarray
+        IN-CLOUD ice mass concentration [g/m^3] — grid-mean divided by cover.
+    icnc : jnp.ndarray
+        Ice crystal number concentration [1/m^3].
+
+    """
+    r_eff_um = jnp.clip(
+        eff_ice_crystal_radius(ice_in_cloud_gm3, icnc, params),
+        params.ceffmin,
+        params.ceffmax,
+    )
+    zrih = -2261.0 + jnp.sqrt(5113188.0 + 2809.0 * r_eff_um**3)
+    # Floor guards the cube root, whose derivative is infinite at 0. The clip
+    # above keeps r_eff >= ceffmin, so zrih >= ~550 and the floor never binds
+    # in the forward pass.
+    return 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
+
 def minimum_CDNC(pxwat, params: CloudParams2M):
     """Set the minimum cloud droplet number concentration, either statically or dynamically.
 
@@ -174,6 +208,60 @@ def breadth_factor(pcdnc: jnp.ndarray) -> jnp.ndarray:
 
     """
     return 4.5e-10 * pcdnc + 1.18
+
+def eff_liquid_droplet_radius(
+    liquid_in_cloud: jnp.ndarray,
+    air_density: jnp.ndarray,
+    cdnc: jnp.ndarray,
+    eps: float | jnp.ndarray,
+    liquid_cloud_flag: jnp.ndarray | bool = True,
+) -> jnp.ndarray:
+    """Effective cloud droplet radius (ECHAM ``preffl``), shared by the 1M and 2M schemes.
+
+    ``r_eff = 1e6 * kappa * (3 * rho * q_l,in-cloud / (4 pi rho_w N))^(1/3)``
+    with the Peng & Lohmann (2003) breadth factor ``kappa(N)``.
+
+    Parameters
+    ----------
+    liquid_in_cloud : jnp.ndarray
+        In-cloud liquid water mixing ratio (Fortran: pxlb) [kg/kg].
+    air_density : jnp.ndarray
+        Air density (Fortran: prho) [kg/m^3].
+    cdnc : jnp.ndarray
+        Cloud droplet number concentration (Fortran: pcdnc) [1/m^3].
+    eps : float or jnp.ndarray
+        Floor on the CDNC denominator.
+    liquid_cloud_flag : jnp.ndarray or bool
+        Additional liquid-cloud mask (Fortran: ld_liqcl); ``True`` applies none.
+
+    Returns
+    -------
+    jnp.ndarray
+        Effective droplet radius [micron], EXACTLY 0 where there is no liquid —
+        radiation (``cloud_optics.resolve_effective_radii``) selects on
+        ``r_eff > 0``, so the zero is what routes a cell to the fallback radius.
+
+    """
+    breadth = breadth_factor(cdnc)
+    # Double-where guard on the cube root, whose derivative is infinite when the
+    # base is 0. The mask must be "there is liquid to speak of", NOT
+    # ``liquid_cloud_flag`` alone: in the 2M scheme that flag is
+    # ``temperature > tmelt``, so it is True in every warm cell, including the
+    # cloud-free majority where ``liquid_in_cloud == 0`` puts a 0 on the
+    # *differentiated* branch. The forward is unchanged either way (the radius is
+    # masked to 0 there), but the reverse pass multiplies that infinite local
+    # derivative by the incoming cotangent, and a zero cotangent gives
+    # 0 * inf = NaN. That NaN reaches the gradient only once radiation consumes
+    # these radii from the cloud carry, i.e. from the second step of a rollout
+    # onwards.
+    has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
+    radius_base = jnp.where(
+        has_liquid,
+        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density / jnp.maximum(cdnc, eps),
+        1.0,
+    )
+    liq_eff_radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
+    return jnp.where(has_liquid, liq_eff_radius, 0.0)
 
 def threshold_vert_vel(
     sat_vap_pres_water: jnp.ndarray,  # pesw [Pa]
