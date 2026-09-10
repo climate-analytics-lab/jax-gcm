@@ -9,8 +9,9 @@ The loop, in order. Each step exists because skipping it costs a CI cycle, a
 review round, or a wrong result.
 
 ```
-branch → atomic commits → test + lint locally → push → PR (linked to issue)
-   → monitor CI *and* Codex → fix/respond → re-review if substantial → ping human
+branch → atomic commits → test + lint locally → adversarial self-review → push
+   → PR (linked to issue) → monitor CI *and* Codex → fix/respond
+   → re-review if substantial → ping human
 ```
 
 ## 1. Work locally, committing atomically
@@ -65,7 +66,33 @@ run**, not just green tests. Verify conservation/physical correctness, and for
 anything performance-related use `jcm-benchmark` — never quote the cumulative
 `sim days/hr` line.
 
-## 3. Push and open the PR
+## 3. Adversarial self-review — before the first push, and before any re-push that changes code
+
+Codex reviews every push and its credits are finite. A finding Codex makes
+that a local reviewer would have made is a credit burnt and a review round
+lost (hours, with CI in the loop). So before `git push`, on the branch:
+
+```
+/code-review high        # multi-angle finders + one verifier per finding, diff vs upstream
+```
+
+Treat the output exactly like a Codex review (step 6): fix every CONFIRMED
+finding, sweep for the same mistake elsewhere, and for anything you decide
+not to change record *why* in the commit or PR body — a finding refuted once
+locally is not re-argued with Codex later. Every fix the review produces
+goes back through step 2 — `ruff check .` and the tests — before the push:
+a review-suggested change is untested code until it does. If the fixes
+were more than trivial, run the review again too. Only then push. If a
+diff must go up before the review is clean (to share it, to reach GPU CI),
+open the PR as a **draft** and say so in the body; the rule still applies
+to the next push.
+
+Scope: any change to executable code, wherever it lives — `jcm/`, `tools/`,
+`utils/`, `validation/`, `docs/generate_docs.py`, `.claude/skills/*/scripts`,
+workflows, root scripts such as `run_benchmarks.sh`; the list is
+illustrative, not a boundary. Docs-only and comment-only changes are exempt.
+
+## 4. Push and open the PR
 
 ```bash
 git push -u origin <branch>
@@ -82,7 +109,7 @@ anything performance-affecting, and what you verified. Implementation-specific
 detail and gotchas go here; general design goes in `docs/source/design/` per
 `CLAUDE.md`.
 
-## 4. Monitor CI *and* Codex — both, from one watcher
+## 5. Monitor CI *and* Codex — both, from one watcher
 
 A Codex review arrives **automatically** on push; it is not triggered by you.
 Watch for both, because green CI with unaddressed Codex findings is not done.
@@ -105,7 +132,7 @@ has landed. Make the filter cover **failure signatures too** — a watcher that
 matches only success is silent through a crash, which looks exactly like
 "still running".
 
-## 5. Fix CI, respond to Codex
+## 6. Fix CI, respond to Codex
 
 Fix every CI failure. Do not re-push hoping it was a flake; if you believe it
 is one, say why.
@@ -159,7 +186,7 @@ passed in, aliased, or defaulted. When the invariant is about *provenance*
 ("is this value the post-physics one?"), follow the values, not the
 spellings.
 
-## 6. Re-request review when the response is substantial
+## 7. Re-request review when the response is substantial
 
 If the fixes were more than trivial, ask for another pass with a comment
 containing exactly:
@@ -168,10 +195,10 @@ containing exactly:
 @codex review
 ```
 
-Then monitor again (step 4). Repeat until a review comes back with nothing
+Then monitor again (step 5). Repeat until a review comes back with nothing
 material.
 
-## 7. Hand back to the human only when green
+## 8. Hand back to the human only when green
 
 Ping the user for review once **all** of:
 

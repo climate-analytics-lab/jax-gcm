@@ -234,6 +234,11 @@ JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
+Then review your own diff adversarially **before pushing** — `/code-review
+high` on the branch, fix or refute every finding (`jcm-dev-workflow` step 3).
+Codex credits are finite and a CI review round takes hours; a finding caught
+locally costs neither.
+
 Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
 hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
 `CUDA_ERROR_OUT_OF_MEMORY`). And coverage must be measured at **CI

@@ -54,11 +54,15 @@ budget. GitHub's runners tolerate the serial run; Derecho's do not.
 (`docs/source/design/test_suite_memory.md` covers the related growth in
 retained XLA executables that the root `conftest.py` bounds.)
 
-## Local Claude review
+## Local Claude review — run it BEFORE pushing
 
 In a Claude Code session on the branch: `/code-review high` reviews the
 diff vs upstream with multi-agent finders + verification — no Actions
-minutes, billed to the Claude session. For the deep cloud variant use
+minutes, billed to the Claude session. This is the adversarial self-review
+`jcm-dev-workflow` step 3 requires before every push that changes code:
+Codex credits are finite, and a finding Codex makes that this review would
+have made is a credit burnt and a round lost. Fix or explicitly refute every
+finding before `git push`. For the deep cloud variant use
 `/code-review ultra` (user-triggered, separately billed).
 
 ## Codex review comments: always reply inline
