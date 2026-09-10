@@ -61,13 +61,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   (``lohmann_2m/deposition_freezing.py::demott2010_inp``, called from
   ``scheme.py``) — it appears in neither the ECHAM nor the CAM source tree. A
   faithful ECHAM-style ``het_mxphase_freezing`` transliteration is defined and
-  exported alongside it but is currently **unused** (#662).
+  exported alongside it but is currently **unused**.
 - The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
   radius (#717) — live on the release-validated ``t63-echam-1m`` /
   ``t106-echam-1m`` configurations; 2M paths use microphysical radii.
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
-  ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step
-  (#667).
+  ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,

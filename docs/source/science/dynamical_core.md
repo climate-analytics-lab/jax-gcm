@@ -42,7 +42,7 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
 **Why we differ.**
 - `compute` — semi-Lagrangian is the *only* tracer transport; the Eulerian
   spectral-transform tracer path was removed because it rang negative on sharp
-  emission sources and NaN'd the aerosol microphysics (#521). This is a
+  emission sources and NaN'd the aerosol microphysics. This is a
   positivity/compute-motivated choice with no fallback. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
 - `compute` — the dinosaur backend integrates with IMEX-RK SIL3 rather than
@@ -54,7 +54,7 @@ vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
 profiles exist only for L47/L95; other hybrid grids fall back to the uniform
-SPEEDY profile with a warning (#579). The pySES backend has open production gaps:
+SPEEDY profile with a warning. The pySES backend has open production gaps:
 per-column longitudes are collapsed to a reference longitude in the physics
 ``cache_coords``, and multi-GPU sharding of the element and physics-column axes
 is unreconciled (see {doc}`../design/pyses_cam_se_dycore`). Its precision seam
@@ -67,8 +67,8 @@ rely on.
 - ``jcm/dycore/base.py`` — ``DynamicalCore`` protocol (``initial_state``,
   ``step``, ``to_physics_state``, ``Predictions``).
 - ``jcm/dycore/dinosaur/dycore.py`` — ``DinosaurDycore``,
-  ``semi_lagrangian_available`` / ``_require_semi_lagrangian`` (the #521 removal
-  guard), transport build (nodal tracers), filter build.
+  ``semi_lagrangian_available`` / ``_require_semi_lagrangian`` (the
+  Eulerian-removal guard), transport build (nodal tracers), filter build.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
   / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.

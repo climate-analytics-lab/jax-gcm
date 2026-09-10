@@ -36,7 +36,7 @@ all constituents likewise.
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
   (u, v, T, q, qc, qi, TKE, TTE), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
-  (#602); its boundaries are zero-flux (surface exchange is dry deposition's job).
+  ; its boundaries are zero-flux (surface exchange is dry deposition's job).
 
 **Status & known limitations.** ``TracerVerticalDiffusion`` is a no-op on the
 first step (the ``kh`` diagnostic is absent until the TTE-TKE term has run once)

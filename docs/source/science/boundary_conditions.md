@@ -16,7 +16,7 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   boundary samples). Plain single-file paths use ``align: auto``, which chooses
   ``wrap_year`` (climatology, indexed by fraction-of-year) for ≤~1-year spans and
   ``by_date`` otherwise.
-- **Per-product coverage clamping (#633).** ``jcm/forcing.py::expand_yearly_files``
+- **Per-product coverage clamping.** ``jcm/forcing.py::expand_yearly_files``
   pads the requested range by one year each side, **clipped to the product's
   ``available_years``**, so ``by_date_interp`` has bracketing samples across the
   Jan-1/Dec-31 boundaries. Products with different coverage in one configuration
@@ -61,13 +61,15 @@ simplification for slowly-evolving species.
 **Code pointers.**
 - ``jcm/forcing.py`` — ``ForcingData``, ``make_time_series`` (end-clamp),
   ``expand_yearly_files`` (per-product coverage padding), the GHG series helpers.
-- ``jcm/forcing_assembly.py`` — the typed input-resolution engine.
-- ``jcm/runners.py`` — ``build_forcing`` and ``_attach_ozone`` /
-  ``_attach_emissions`` / ``_attach_dms`` / ``_attach_dust`` / ``_attach_oxidants``.
+- ``jcm/forcing_assembly.py`` — ``build_forcing`` and the ``_attach_ozone`` /
+  ``_attach_emissions`` / ``_attach_dms`` / ``_attach_dust`` / ``_attach_oxidants``
+  chain; ``jcm/runners.py::build_forcing`` delegates to it.
+- ``jcm/data/input_resolution.py`` — the typed input-resolution engine
+  (``resolve_input``, ``resolve_packaged``, ``expand_yearly_files``).
 - ``jcm/ozone_climatology.py`` — ``OzoneClimatology`` (grid-aware loader).
 - ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
 - Data provenance and the mirror: {doc}`../design/data_mirror`.
 
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date
-cases), ``jcm/physics/forcing/echam_boundary_conditions_test.py``; issues #633
-(per-product coverage) and the AMIP/ERA5 bundle work.
+cases), ``jcm/physics/forcing/echam_boundary_conditions_test.py``,
+``jcm/data/input_resolution_test.py`` (per-product coverage and auto resolution).

@@ -76,7 +76,7 @@ electroneutrality pH including NH₃/HNO₃/CO₂).
 
 **Status & known limitations.** Oxidants default to interim cos-zenith proxies
 until a climatology is supplied; H₂O₂ is not persisted across steps (a coupled
-prognostic budget is out of scope); the SOAG source is interim (#496).
+prognostic budget is out of scope); the SOAG source is interim.
 
 **Code pointers.** ``jcm/physics/aerosol/jam/chemistry/`` — ``oxidants.py``
 (``PrescribedOxidants``), ``sulfur_gas.py`` (``SulfurGasChemistry``),

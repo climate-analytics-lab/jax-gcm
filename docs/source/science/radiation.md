@@ -53,7 +53,7 @@ RRTMGP and the NN emulator so a feature and its label describe the same cloud):
 - **Liquid effective-radius fallback** — a column constant scaled by the Twomey
   factor (``effective_radius_liquid``). This constant is the land/ocean average of
   **CAM4's ``reltab``** (``cloud_optical_properties.F90``); both origins are
-  documented in-code (#670).
+  documented in-code.
 
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
 correlated-k scheme (``mo_psrad_interface.f90``; Pincus & Stevens 2013; RRTMG:
@@ -87,7 +87,7 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
   ``where`` safe-denominator guards so backward-mode cloud-parameter gradients do
-  not form ``0·inf`` on clear columns (#558).
+  not form ``0·inf`` on clear columns.
 
 **Status & known limitations.**
 - **No sub-grid cloud inhomogeneity scaling.** ECHAM's continuous

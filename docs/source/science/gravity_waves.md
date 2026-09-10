@@ -48,7 +48,7 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
   default on) caps ``Σ_l |gwut_l|`` rather than only the net, because ECHAM/CAM
   never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
   ~123 K/day heating there); every masked division/sqrt keeps its safe operand
-  inside ``jnp.where`` for finite reverse-mode gradients (#558).
+  inside ``jnp.where`` for finite reverse-mode gradients.
 - `compute` — the upper sponge damps the full (u, v) field rather than only
   ECHAM's m≠0 spectral modes; ``enspodi`` defaults to 2.0 (softening downward)
   rather than ECHAM's uniform 1.0.

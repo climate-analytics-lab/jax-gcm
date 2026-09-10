@@ -139,7 +139,7 @@ guard is a ``ValueError`` / ``RuntimeError`` in the file named:
   initializes from its resting USSA-1976 state (``init=isothermal``) or a saved
   state, and nudging is dinosaur-only.
 - **A SL-less dinosaur install** — ``jcm/dycore/dinosaur/dycore.py``
-  (``_require_semi_lagrangian``): the Eulerian tracer path was removed (#521), so
+  (``_require_semi_lagrangian``): the Eulerian tracer path was removed, so
   the backend requires the semi-Lagrangian dinosaur.
 - **Physics that needs a dycore field the backend cannot provide** —
   ``jcm/model.py``: e.g. Tiedtke's ``cu_lmfmid`` mid-level trigger needs ``omega``,

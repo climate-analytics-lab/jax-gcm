@@ -150,7 +150,7 @@ in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
   rather than ECHAM ``cudlfs``'s 50/50 updraft/wet-bulb-environment mix. Aerosol
   resuspension by evaporating convective precip (CAM ``dcondt_prevap``) is not
   modelled — the removed flux goes straight to the surface, matching the existing
-  wet-deposition treatment (#621/#622). When active, ``WetScavenging`` retires its
+  wet-deposition treatment. When active, ``WetScavenging`` retires its
   own environment-profile convective in-cloud pathway to avoid double-counting.
 
 ### Emissions, deposition, sedimentation, wet scavenging, ice nucleation
@@ -162,12 +162,12 @@ lowest-level wind and open-water fraction, so it needs no input file; DMS and
 dust read prescribed seawater-concentration / erodibility fields from
 ``ForcingData`` and are inert until those are supplied. Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
-already-speciated per-tracer fields (#498/#513). Dry deposition
+already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
 Slinn & Slinn (1980) sub-layer resistance; sedimentation
 (``sedimentation/``) is per-mode Stokes settling with Cunningham slip; wet
 scavenging (``wetdep/``) is in-cloud nucleation + below-cloud impaction + a
-**re-evaporation re-injection ledger** (#499) that returns carried aerosol to the
+**re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux. Ice nucleation
 (``ice_nucleation/``) writes an ``ice_nuclei`` field for the 2M cloud scheme, with
