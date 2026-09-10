@@ -12,6 +12,9 @@ on:
       - 'jcm/physics/speedy/units_table.csv'
       - 'docs/generate_docs.py'
       - 'docs/source/conf.py'
+      - 'docs/source/science/**'
+      - 'docs/source/science.rst'
+      - 'docs/science_pointers_test.py'
   workflow_dispatch:
 
 permissions:
@@ -33,3 +36,25 @@ jobs:
 
       - name: Fail if generation produced no output
         run: test -s docs/source/speedy_translation.rst
+
+  # The living model description's rot guard (docs/science_pointers_test.py)
+  # must run on exactly the changes run_test.yaml's docs/** paths-ignore
+  # skips — a doc-only PR is this guard's primary rot vector. Stdlib-only:
+  # the guard imports no jcm, so a bare pytest suffices.
+  science-register-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run the science-register rot guard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pytest -q docs/science_pointers_test.py

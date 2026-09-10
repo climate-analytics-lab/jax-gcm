@@ -5,10 +5,9 @@ name: Run Unit Tests via Pytest
 # ~35-minute jobs (push -> fast tests, pull_request -> slow tests), and over
 # half the commits on a docs-heavy branch touch no testable code at all.
 #
-# Nothing below holds tests: pytest collects `*_test.py` only, and there are
-# none under docs/ or .claude/. docs/ has its own targeted workflow
-# (run_docs.yaml, which watches the three files that actually drive doc
-# generation), and ruff still lints EVERYTHING on every push via
+# docs/ carries one stdlib-only suite (docs/science_pointers_test.py, the
+# model-description rot guard), which run_docs.yaml runs on the doc paths
+# this filter skips, and ruff still lints EVERYTHING on every push via
 # run_linter.yaml — including the Python under .claude/skills — so a syntax
 # error in a skill script is still caught in ~30 s.
 #

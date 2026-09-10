@@ -20,15 +20,18 @@ SCIENCE = REPO / "docs" / "source" / "science"
 _POINTER = re.compile(
     r"``([A-Za-z0-9_./-]+\.(?:py|yaml|json))(?:::([A-Za-z0-9_.]+))?``"
 )
-# ``some/package/`` — a directory pointer (trailing slash is the convention).
-_DIR_POINTER = re.compile(r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/)``")
+# ``some/package/`` — a directory pointer. The trailing slash is the
+# convention, but a slash-containing extensionless literal without one is
+# still a directory claim — requiring the slash would let a typo escape
+# validation entirely.
+_DIR_POINTER = re.compile(r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)+/?)``(?!``)")
 # ``dir/{a,b}.yaml`` — a brace-grouped pointer naming several sibling files.
 _BRACE_POINTER = re.compile(
     r"``([A-Za-z0-9_./-]*)\{([A-Za-z0-9_,-]+)\}([A-Za-z0-9_.-]*)``")
 # Tracked-gap references. The register's rule is that an issue number means an
 # OPEN gap; a closed one silently converts a documented limitation into a
 # claim the reader believes was fixed.
-_ISSUE_REF = re.compile(r"#(\d{3,4})\b")
+_ISSUE_REF = re.compile(r"#(\d{1,6})\b")
 # A bare ``Symbol`` / ``dotted.Symbol`` literal, as used in Code-pointer
 # bullets of the form ``file.py`` — ``ClassA``, ``func_b``.
 _BARE_SYMBOL = re.compile(r"``([A-Za-z_][A-Za-z0-9_.]*)``")
@@ -64,7 +67,12 @@ def _resolve(rel: str):
     direct = REPO / rel
     if direct.exists():
         return direct
-    matches = [m for m in REPO.glob(f"**/{rel}") if ".git" not in m.parts]
+    matches = [
+        m
+        for root in ("jcm", "docs", "tools")
+        for m in (REPO / root).glob(f"**/{rel}")
+        if "__pycache__" not in m.parts and "_build" not in m.parts
+    ]
     if len(matches) > 1:
         return Ambiguous(sorted(str(m.relative_to(REPO)) for m in matches))
     return matches[0] if matches else None
@@ -118,9 +126,16 @@ def _symbol_defined(path: Path, symbol: str) -> bool:
     names = _defined_names(path)
     if symbol in names:
         return True
+    if "." in symbol:
+        # A dotted pointer must resolve exactly — Class.method survives only
+        # while the method does.
+        return False
     # A bare literal may cite a class member (a protocol method, a classmethod
-    # constructor): accept it when it is a member of any class in the file.
-    return any(n.endswith("." + symbol) for n in names)
+    # constructor) — but only a UNIQUE, non-dunder one: ``__init__`` matches
+    # every class and would validate any deleted top-level symbol.
+    if symbol.startswith("__"):
+        return False
+    return sum(1 for n in names if n.endswith("." + symbol)) == 1
 
 
 def _bullet_claims(text: str):
@@ -189,6 +204,12 @@ class TestSciencePointersResolve(unittest.TestCase):
         missing = []
         for page in _pages():
             for rel in _DIR_POINTER.findall(page.read_text()):
+                if not rel.endswith("/") and \
+                        rel.split("/", 1)[0] not in ("jcm", "docs", "tools"):
+                    # A slash-less literal outside the repo roots is an
+                    # external reference (a GitHub org/repo slug), not a
+                    # directory claim.
+                    continue
                 hit = _resolve(rel.rstrip("/"))
                 if isinstance(hit, Ambiguous):
                     missing.append(
@@ -264,6 +285,7 @@ class TestTrackedGapsAreOpen(unittest.TestCase):
 
     def test_issue_refs_are_open(self):
         import json
+        import os
         import urllib.error
         import urllib.request
 
@@ -277,11 +299,23 @@ class TestTrackedGapsAreOpen(unittest.TestCase):
         for num, pages in sorted(refs.items()):
             url = ("https://api.github.com/repos/"
                    f"climate-analytics-lab/jax-gcm/issues/{num}")
-            req = urllib.request.Request(
-                url, headers={"Accept": "application/vnd.github+json"})
+            headers = {"Accept": "application/vnd.github+json"}
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+            if token:
+                # Unauthenticated is 60 req/hr per IP — dead on shared CI
+                # runners; the Actions-provided token is 5000 req/hr.
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(url, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    state = json.load(resp).get("state")
+                    payload = json.load(resp)
+                state = payload.get("state")
+                if "pull_request" in payload:
+                    # The issues API returns PRs too; a PR (even an open one)
+                    # is not a durable tracked gap.
+                    stale.append(f"#{num} is a pull request, not an issue "
+                                 f"(cited in {sorted(set(pages))})")
+                    continue
             except urllib.error.HTTPError as e:
                 # Only a permanent 404/410 means the citation itself is wrong.
                 # Rate limits and server-side 5xx are outages: skip, so an API
