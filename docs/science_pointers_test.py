@@ -22,6 +22,9 @@ _POINTER = re.compile(
 )
 # ``some/package/`` — a directory pointer (trailing slash is the convention).
 _DIR_POINTER = re.compile(r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*/)``")
+# ``dir/{a,b}.yaml`` — a brace-grouped pointer naming several sibling files.
+_BRACE_POINTER = re.compile(
+    r"``([A-Za-z0-9_./-]*)\{([A-Za-z0-9_,-]+)\}([A-Za-z0-9_.-]*)``")
 # Tracked-gap references. The register's rule is that an issue number means an
 # OPEN gap; a closed one silently converts a documented limitation into a
 # claim the reader believes was fixed.
@@ -33,6 +36,12 @@ _BARE_SYMBOL = re.compile(r"``([A-Za-z_][A-Za-z0-9_.]*)``")
 _NON_SYMBOLS = frozenset({
     "auto", "null", "true", "false", "none", "default", "hybrid", "sigma",
 })
+
+
+def _brace_expansions(text: str):
+    for head, group, tail in _BRACE_POINTER.findall(text):
+        for variant in group.split(","):
+            yield f"{head}{variant}{tail}"
 
 
 def _pages():
@@ -160,13 +169,28 @@ class TestSciencePointersResolve(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "science-doc pointers name missing files")
 
+    def test_brace_grouped_pointers_exist(self):
+        """``dir/{a,b}.yaml`` claims every named sibling."""
+        missing = [
+            f"{page.name}: {rel}"
+            for page in _pages()
+            for rel in _brace_expansions(page.read_text())
+            if _resolve(rel) is None
+        ]
+        self.assertEqual(
+            missing, [], "brace-grouped pointers name missing files",
+        )
+
     def test_directory_pointers_exist(self):
         missing = []
         for page in _pages():
             for rel in _DIR_POINTER.findall(page.read_text()):
                 hit = _resolve(rel.rstrip("/"))
-                if hit is None or (not isinstance(hit, Ambiguous)
-                                   and not hit.is_dir()):
+                if isinstance(hit, Ambiguous):
+                    missing.append(
+                        f"{page.name}: {rel} matches {list(hit)} — write it "
+                        "repo-relative")
+                elif hit is None or not hit.is_dir():
                     missing.append(f"{page.name}: {rel}")
         self.assertEqual(
             missing, [], "science-doc pointers name missing directories",
@@ -254,6 +278,15 @@ class TestTrackedGapsAreOpen(unittest.TestCase):
             try:
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     state = json.load(resp).get("state")
+            except urllib.error.HTTPError as e:
+                # 404/410 mean the citation itself is wrong — that is a
+                # finding, not an outage. Rate limiting is an outage.
+                if e.code in (403, 429):
+                    self.skipTest(f"GitHub API rate-limited ({e.code}); "
+                                  "issue-state check skipped")
+                stale.append(f"#{num} does not exist (HTTP {e.code}; cited "
+                             f"in {sorted(set(pages))})")
+                continue
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 self.skipTest(f"GitHub API unreachable ({e}); "
                               "issue-state check skipped")
