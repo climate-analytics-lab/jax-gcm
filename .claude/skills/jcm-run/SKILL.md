@@ -153,7 +153,7 @@ reintroduce the assumption in either direction.)
   check_health → to_netcdf → save_checkpoint`, so a crash here loses the whole
   chunk with no checkpoint. Fix by adding the dotted key to
   `ComposablePhysics._EXCLUDED_OUTPUT_KEYS` or registering a band coord.
-- **Editable installs**: `jcm`, `jax-rrtmgp`, `dinosaur` and `mam4-jax` are
+- **Editable installs**: `jcm`, `jax-rrtmgp` and `mam4-jax` are
   installed editable, so **the working tree is the running code**. Check
   `git -C <repo> rev-parse --abbrev-ref HEAD` before trusting any result. The
   site skills cover how to A/B a library version safely (worktree +

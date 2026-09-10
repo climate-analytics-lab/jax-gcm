@@ -67,10 +67,8 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 
-#: Semi-Lagrangian transport classes jcm requires from dinosaur. They live in
-#: neuralgcm/dinosaur#135 and are not in a released dinosaur yet, so until that
-#: lands the backend needs the fork (``shoyer/dinosaur`` @ ``semi-lagrangian``)
-#: on the path. Pin a minimum dinosaur here once it ships.
+#: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
+#: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
 _SL_CLASSES = (
     "SemiLagrangianPrimitiveEquations",
     "SemiLagrangianPrimitiveEquationsHybrid",
@@ -105,10 +103,9 @@ def _require_semi_lagrangian() -> None:
         f"({', '.join(missing)} missing), and jcm's dinosaur backend now "
         "requires it — the Eulerian path has been removed because it rang "
         "negative on sharp sources and NaN'd aerosol microphysics (#521). "
-        "Install the fork until neuralgcm/dinosaur#135 is released:\n"
-        "    pip install 'dinosaur @ git+https://github.com/shoyer/dinosaur"
-        "@semi-lagrangian'\n"
-        "or put a clone of that branch on PYTHONPATH."
+        "Install a current release:\n"
+        "    pip install 'dinosaur>=1.5.0'\n"
+        "and remove any older dinosaur checkout from PYTHONPATH."
     )
 
 
