@@ -142,6 +142,7 @@ def jam_aerosol_physics(
     arg_variant: str = "arg2000",
     optics: bool = True,
     optics_diagnostics: bool = False,
+    optics_backend: str = "mie_lut",
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
@@ -334,7 +335,8 @@ def jam_aerosol_physics(
     # spectral optics pass (jax-gcm#584) — a second Mie sweep at the
     # observation wavelengths, off unless a run asks for it.
     optics_terms = [
-        JamOpticsTerm(spec=spec, optics_diagnostics=optics_diagnostics)
+        JamOpticsTerm(spec=spec, optics_diagnostics=optics_diagnostics,
+                      optics_backend=optics_backend)
     ] if optics else []
     post_core = [
         ArgActivation(params=activation, spec=spec, variant=arg_variant),
