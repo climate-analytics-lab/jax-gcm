@@ -131,7 +131,11 @@ by activated fraction.
 **What we do.** ``jcm/physics/convection/tracer_transport.py::ConvectiveTracerTransport``
 is a bulk entraining/detraining plume with compensating subsidence plus a mirrored
 downdraft leg, driven by the mass-flux/entrainment profiles the Tiedtke term
-publishes (carrying the scheme's rescale+cap ledger). Detrainment from plume
+publishes (carrying the scheme's rescale+cap ledger) — **one step lagged**: the
+term sits before convection in the chain, so it reads the *previous* step's
+plume profiles (and is a no-op on the first step, before any exist). Transient
+aerosol–convection coupling therefore trails the driving convection by one
+``dt``; the same lag applies to the in-plume scavenging below. Detrainment from plume
 continuity; updraft concentration from an upward convex-mix scan; downdraft from
 the mirror continuity + downward scan. In-plume scavenging follows CAM
 ``aero_convproc`` (mirage2 form): a first-order removal from the plume's
