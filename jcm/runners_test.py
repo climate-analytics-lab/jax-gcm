@@ -1080,6 +1080,32 @@ class TestModeDispatch(unittest.TestCase):
             archives = sorted(p.name for p in Path(tmpdir).glob("chunk_day*.ckpt"))
             self.assertEqual(archives, ["chunk_day2.ckpt", "chunk_day3.ckpt"])
 
+    def test_archive_interval_is_float_tolerant(self):
+        """A fractional cadence must not slip a chunk on binary rounding.
+
+        Summing 0.3-day chunks reaches 0.8999999999999999, so an exact
+        floor-quotient comparison would defer the nominal day-0.9 archive to
+        day 1.2. Sub-day archives also need distinct names (``_day0p9``),
+        while whole-day ones keep the plain ``_day30`` form.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _compose([
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.total_time=1.2",
+                "run.save_interval=0.3",
+                "run.chunk_days=0.3",
+                "run.archive_ckpt_every=0.9",
+                f"run.output_prefix={tmpdir}/chunk",
+                f"run.checkpoint_path={tmpdir}/run.ckpt",
+            ])
+            run(cfg)
+            archives = sorted(p.name for p in Path(tmpdir).glob("chunk_day*.ckpt"))
+            self.assertEqual(archives, ["chunk_day0p9.ckpt"])
+
     def test_chunked_resume_with_balanced_isothermal_init(self):
         """Resume-from-checkpoint bootstraps a template for state-based inits.
 
