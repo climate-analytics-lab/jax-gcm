@@ -315,8 +315,18 @@ Because taking it silently would mean emitting 37-46 % too much sea salt, the
 emission terms publish a per-column flag `wind_10m_model_level` — 1 where the
 model level was used, 0 where the diagnosed wind was — zeroed every step with
 the other emission diagnostics. It is 1 on step 1 of a cold start and 0
-thereafter; a run in which it stays non-zero is a bug, and the JAM integration
-test asserts exactly that.
+thereafter, and the JAM integration test asserts exactly that per step.
+
+`check_health` **reports** the chunk's fraction rather than failing on it, and
+the distinction is the point. Under `output_averages` the saved field is an
+interval *mean*, so a cold start's one legitimate fallback step reads `1/N` —
+the identical value a single defective step mid-chunk would give. No per-chunk
+rule can separate them, and making the fraction fatal aborted a healthy 30-day
+validation run at day 5 on `1/480`, losing the chunk because the bail path
+skips the checkpoint. A wrong-but-finite emission wind is a bias, not a
+blowup, so it belongs in the report the chunk prints (`Emis wind: ...`), where
+a persistent fallback shows as ~100 % every chunk, and the per-step invariant
+stays where it can be checked exactly — in the unit tests.
 
 ### Dust source gating
 

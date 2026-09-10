@@ -12,11 +12,12 @@ import jax.numpy as jnp
 
 #: Per-column flag published by the emission terms: 1 where the emission wind
 #: fell back to the lowest model level, 0 where the diagnosed 10 m wind was
-#: used. Zeroed every step with the other emission diagnostics, so a run in
-#: which the fallback persists is visible instead of quietly emitting 37-46 %
-#: too much sea salt. Deliberately NOT an ``emis_``/``emi_`` name: those
-#: prefixes select emission *fluxes* in the forcing reader and the burden
-#: report.
+#: used. Zeroed every step with the other emission diagnostics, and reported
+#: per chunk by ``check_health`` (a bias indicator, not a blowup signature, so
+#: it is printed rather than fatal), so a run in which the fallback persists is
+#: visible instead of quietly emitting 37-46 % too much sea salt. Deliberately
+#: NOT an ``emis_``/``emi_`` name: those prefixes select emission *fluxes* in
+#: the forcing reader and the burden report.
 MODEL_LEVEL_WIND_KEY = "wind_10m_model_level"
 
 
