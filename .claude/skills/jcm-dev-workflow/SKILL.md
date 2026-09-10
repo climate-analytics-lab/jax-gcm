@@ -79,13 +79,18 @@ lost (hours, with CI in the loop). So before `git push`, on the branch:
 Treat the output exactly like a Codex review (step 6): fix every CONFIRMED
 finding, sweep for the same mistake elsewhere, and for anything you decide
 not to change record *why* in the commit or PR body — a finding refuted once
-locally is not re-argued with Codex later. If the fixes were more than
-trivial, run it again. Only then push. If a diff must go up before the
-review is clean (to share it, to reach GPU CI), open the PR as a **draft**
-and say so in the body; the rule still applies to the next push.
+locally is not re-argued with Codex later. Every fix the review produces
+goes back through step 2 — `ruff check .` and the tests — before the push:
+a review-suggested change is untested code until it does. If the fixes
+were more than trivial, run the review again too. Only then push. If a
+diff must go up before the review is clean (to share it, to reach GPU CI),
+open the PR as a **draft** and say so in the body; the rule still applies
+to the next push.
 
-Scope: any change to code — `jcm/`, `tools/`, `.claude/skills/*/scripts`,
-workflows. Docs-only and comment-only changes are exempt.
+Scope: any change to executable code, wherever it lives — `jcm/`, `tools/`,
+`utils/`, `validation/`, `docs/generate_docs.py`, `.claude/skills/*/scripts`,
+workflows, root scripts such as `run_benchmarks.sh`; the list is
+illustrative, not a boundary. Docs-only and comment-only changes are exempt.
 
 ## 4. Push and open the PR
 
