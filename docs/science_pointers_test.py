@@ -171,12 +171,16 @@ class TestSciencePointersResolve(unittest.TestCase):
 
     def test_brace_grouped_pointers_exist(self):
         """``dir/{a,b}.yaml`` claims every named sibling."""
-        missing = [
-            f"{page.name}: {rel}"
-            for page in _pages()
-            for rel in _brace_expansions(page.read_text())
-            if _resolve(rel) is None
-        ]
+        missing = []
+        for page in _pages():
+            for rel in _brace_expansions(page.read_text()):
+                hit = _resolve(rel)
+                if isinstance(hit, Ambiguous):
+                    missing.append(
+                        f"{page.name}: {rel} matches {list(hit)} — write it "
+                        "repo-relative")
+                elif hit is None:
+                    missing.append(f"{page.name}: {rel}")
         self.assertEqual(
             missing, [], "brace-grouped pointers name missing files",
         )
@@ -279,14 +283,15 @@ class TestTrackedGapsAreOpen(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     state = json.load(resp).get("state")
             except urllib.error.HTTPError as e:
-                # 404/410 mean the citation itself is wrong — that is a
-                # finding, not an outage. Rate limiting is an outage.
-                if e.code in (403, 429):
-                    self.skipTest(f"GitHub API rate-limited ({e.code}); "
-                                  "issue-state check skipped")
-                stale.append(f"#{num} does not exist (HTTP {e.code}; cited "
-                             f"in {sorted(set(pages))})")
-                continue
+                # Only a permanent 404/410 means the citation itself is wrong.
+                # Rate limits and server-side 5xx are outages: skip, so an API
+                # incident cannot fail otherwise-valid documentation CI.
+                if e.code in (404, 410):
+                    stale.append(f"#{num} does not exist (HTTP {e.code}; "
+                                 f"cited in {sorted(set(pages))})")
+                    continue
+                self.skipTest(f"GitHub API unavailable (HTTP {e.code}); "
+                              "issue-state check skipped")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
                 self.skipTest(f"GitHub API unreachable ({e}); "
                               "issue-state check skipped")
