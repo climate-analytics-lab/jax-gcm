@@ -6,8 +6,10 @@ native tendency conversion, hyperdiffusion, spectral/remap filters and vertical
 remapping. Two backends implement it. The shipped default is a spectral-transform
 core wrapping the external ``dinosaur`` package
 (``jcm/dycore/dinosaur/dycore.py::DinosaurDycore``): primitive equations on a
-Gaussian grid, IMEX-RK (SIL3) time integration, on hybrid σ–p or pure-σ vertical
-coordinates. The optional backend is the pySES CAM-SE spectral-element core on a
+Gaussian grid, integrated with the two-time-level **semi-Lagrangian
+semi-implicit Crank–Nicolson two-stage (RK2)** step
+(``semi_lagrangian_crank_nicolson_rk2``, off-centred 0.2), on hybrid σ–p or
+pure-σ vertical coordinates. The optional backend is the pySES CAM-SE spectral-element core on a
 cubed sphere (``jcm/dycore/pyses/dycore.py::PysesCamSEDycore``,
 ``pip install jcm[pyses]``, registry name ``pyses_cam_se``), coupled to the
 column physics through a pg2 finite-volume physics grid (see
@@ -26,8 +28,9 @@ for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects t
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
 ∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``); any other grid gets
 the uniform SPEEDY ∇²/∇⁴ profile (``DiffusionFilter.default``), with a warning for
-unrecognised hybrid grids. An optional upper sponge (Rayleigh drag) is enabled via
-the ``run`` group (``jcm/config/run/longrun.yaml``: ``levels: 10``,
+unrecognised hybrid grids. An optional upper sponge (Rayleigh drag on u/v plus temperature relaxation
+toward the zonal mean and, in production, an absolute ``target_T_K``) is
+enabled via the ``run`` group (``jcm/config/run/longrun.yaml``: ``levels: 10``,
 ``target_T_K: 250``, ``enspodi: 2``). Resolutions T21–T425 are supported.
 
 **What ECHAM/CAM does.** ECHAM6 (Stevens et al. 2013, *JAMES*) is a spectral-
@@ -45,9 +48,12 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   emission sources and NaN'd the aerosol microphysics. This is a
   positivity/compute-motivated choice with no fallback. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
-- `compute` — the dinosaur backend integrates with IMEX-RK SIL3 rather than
-  ECHAM's leapfrog + semi-implicit; the pySES backend runs float64 dynamics with
-  a float32 physics seam (the SE core needs x64).
+- `compute` — the dinosaur backend integrates with a two-time-level
+  semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
+  three-time-level leapfrog + semi-implicit (both are semi-implicit; the
+  time-level structure and SL transport are the real contrast); the pySES
+  backend runs float64 dynamics with a float32 physics seam (the SE core
+  needs x64).
 
 **Status & known limitations.** SPEEDY physics is generalised to arbitrary
 vertical level counts; high-``nlev`` / high-truncation configurations need a

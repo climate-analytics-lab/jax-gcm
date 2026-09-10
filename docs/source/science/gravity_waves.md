@@ -11,8 +11,9 @@ plus two upper-boundary dissipation terms:
   diagnostic** — no term consumes it.
 - **Lott-Miller SSO** (``jcm/physics/gravity_waves/sso/lott_miller.py::LottMillerSso``):
   sub-grid orographic drag with blocked-flow form drag below the blocking level
-  and a saturated gravity-wave stress profile above, from seven sub-grid
-  orography descriptors. Provenance matters here, because the descriptors set the
+  and a saturated gravity-wave stress profile above, from the grid-mean
+  orography plus six preprocessed sub-grid descriptors (``orostd``,
+  ``orosig``, ``orogam``, ``orothe``, ``oropic``, ``oroval``). Provenance matters here, because the descriptors set the
   drag: a terrain file carrying all six preprocessed fields is used as-is;
   source orography finer than the target grid yields Baines-Palmer statistics;
   and a native-grid file with only ``orog``/``lsm`` falls back to

@@ -39,7 +39,8 @@ all constituents likewise.
   ; its boundaries are zero-flux (surface exchange is dry deposition's job).
 
 **Status & known limitations.** ``TracerVerticalDiffusion`` is a no-op on the
-first step (the ``kh`` diagnostic is absent until the TTE-TKE term has run once)
+first step — it reads the previous step's ``kh`` carry, which is seeded to
+zero on step 0 (zero exchange coefficient, zero tendency)
 and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
 block in the ECHAM ordering.
 

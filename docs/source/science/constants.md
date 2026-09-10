@@ -40,8 +40,9 @@ singleton *object*, which ``set_constants`` rebinds rather than mutates, so
 the reference goes equally stale) and would silently keep Earth values after
 an override (#772). Consumers following the contract (``import jcm.constants
 as c``, read ``c.<name>`` when traced or at construction) are unaffected —
-the dinosaur dycore wrapper imports only the ``PhysicalConstants`` *class*
-and reads the live singleton at construction, so it honours overrides. Until
+the dinosaur dycore wrapper reads the live singleton at construction through
+the ``jcm.constants`` module alias (its only ``from``-import is the
+``PhysicalConstants`` class, used as a type), so it honours overrides. Until
 #772 lands, a ``set_constants`` run is consistent everywhere except a
 composition using those six.
 

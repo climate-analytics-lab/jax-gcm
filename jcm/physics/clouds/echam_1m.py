@@ -944,9 +944,10 @@ def cloud_microphysics_column_sweep(
         # depletion in ``[0, zxlb]`` by construction so neither qc nor
         # qi can be driven negative.
 
-        # Density correction: ECHAM ``zqrho = 1.3/ρ`` enters as ``sqrt(zqrho)``
-        # = sqrt(1.3/ρ) in BOTH the Marshall-Palmer concentrations and the
-        # Rotstayn rain evaporation (mo_cloud.f90; review finding 2.13).
+        # Density correction: ECHAM ``zqrho = 1.3/ρ``. The Marshall-Palmer
+        # concentrations use sqrt(zqrho) = sqrt(1.3/ρ); the Rotstayn rain
+        # evaporation uses sqrt(zqrho)/sqrt(1.3) = 1/sqrt(ρ), exactly as
+        # mo_cloud.f90:542 divides its zqrho_sqrt by SQRT(1.3).
         zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
         zqrho_sqrt = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
         zqrho_sqrt_inv = zqrho_sqrt
