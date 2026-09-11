@@ -133,12 +133,15 @@ Cloud-borne tracers live in the physics carry, which the removal terms
 already integrate sequentially through `cloud_borne_store.apply_updates`,
 so they need no reconstruction.
 
-Behind the splitting, `physics_interface.verify_tendencies` caps every
-sink at `-max(q, 0)/Δt` for the aerosol and gas name families
-(`has_non_negative_tendency`). It drains to zero and never fills to zero:
-aerosol tracers are deliberately left out of the `verify_state` entry clip
-so the #713 mass-budget gauge still sees the advection ringing, and a
-guard that lifted a ringing negative to zero would be a mass source.
+The splitting is the *only* bound on the removal sum, by design.
+`physics_interface.verify_tendencies` deliberately does **not** cap aerosol
+or gas tendencies: their tendency is a sum over conservative
+redistributions (tracer vertical diffusion, convective transport) and
+paired transfers (sulfur chemistry, the activation exchange), and a
+per-cell positivity cap clips one side of a conserved pair — clamping a
+donor cell while the receiving cells keep their gain creates column mass.
+Bounding the removal where it is produced is what makes the cap
+unnecessary.
 
 ## Deposition-flux ledger
 

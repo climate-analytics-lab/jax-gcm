@@ -243,9 +243,11 @@ holds.
 ``dry_<species>`` is the column-integrated settling **plus** turbulent/Brownian
 surface removal, ``wet_<species>`` the scavenging net of re-evaporation; each term
 integrates its own tendencies, so the ledger is the mass the terms actually took
-rather than a separately-derived flux. Behind the chain, the physics interface
-floors every aerosol and gas tendency at the rate that empties the tracer and no
-further, leaving sources untouched.
+rather than a separately-derived flux. The physics interface applies no
+positivity cap to aerosol or gas tendencies: those carry conservative
+redistributions and paired transfers, and a per-cell cap would clip one side of a
+conserved pair and create column mass. Bounding removal where it is produced is
+what makes a cap unnecessary.
 
 **What ECHAM/CAM does.** The coefficient and its tabulation are CAM
 ``aero_model.F90::calc_1_impact_rate`` (Slinn collection efficiency; Marshall-Palmer-like
@@ -277,8 +279,10 @@ left unset — the mode's mass-weighted hygroscopicity — is not ported; the sc
 namelist default is used, which is the path every supported CAM configuration
 takes. That fallback would give sea salt a solubility factor above one. The
 operator split is order-dependent by construction; the order is the composed one.
-The deposition ledger equals the chain's mass change up to the interface
-non-negativity guard, which each term records its contribution before. Ice
+Tracer vertical diffusion and convective transport still read the step-start
+state in parallel, so their summed redistribution can leave a donor cell
+negative; that is corrected by the dycore's positive-definite tracer filter, not
+at the physics interface. Ice
 sedimenting to the surface as snow carries no aerosol removal, matching CAM,
 which has no ice-phase aerosol scavenging.
 
@@ -299,8 +303,7 @@ which has no ice-phase aerosol scavenging.
   tendency).
 - ``jcm/physics/aerosol/jam/emissions/flux_diagnostic.py`` —
   ``accumulate_deposition_fluxes``.
-- ``jcm/physics_interface.py`` — ``verify_tendencies``,
-  ``has_non_negative_tendency``.
+- ``jcm/physics_interface.py`` — ``verify_tendencies``.
 
 **Validation evidence.** ``impaction_scavenging_rates`` reproduces CAM's own
 compiled ``calc_1_impact_rate`` to eight significant figures at eight

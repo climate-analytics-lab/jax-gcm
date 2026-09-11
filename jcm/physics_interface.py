@@ -16,7 +16,6 @@ import tree_math
 from jax import tree_util
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
-import re
 from typing import Tuple, Any, Dict, TypeAlias
 import logging
 
@@ -329,19 +328,20 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
-# JAM aerosol mass/number and gas tracers. Their names are built per
-# population (``tracer_layout``) so they cannot be listed; the pattern is
-# anchored rather than a bare prefix test so an unrelated tracer starting
-# with ``n_`` or ``g_`` is not silently capped. They are guarded on the
-# tendency side only — the ``verify_state`` entry clip would hide the
-# advection ringing from the #713 mass-budget gauge, which reads the same
-# verified state.
-_JAM_TRACER_RE = re.compile(r"^(?:mc?_[a-z0-9]+_[a-z0-9]+|nc?_[a-z0-9]+|g_[a-z0-9]+)$")
+# JAM aerosol and gas tracers are deliberately NOT capped here. Their
+# tendency is a sum over conservative redistributions (tracer vertical
+# diffusion, convective transport) and paired transfers (sulfur chemistry,
+# activation exchange), and a per-cell positivity cap clips one side of a
+# conserved pair: clamping a donor cell while the receiving cells keep
+# their gain CREATES column mass. Their removal is instead bounded where
+# it is produced, by the operator split in
+# ``aerosol/jam/removal_split.py`` — each sink sees what its predecessors
+# left, so the sum cannot exceed the tracer.
 
 
 def has_non_negative_tendency(name: str) -> bool:
     """Whether a tracer's tendency must not drive it below zero."""
-    return name in _NON_NEGATIVE_TRACERS or bool(_JAM_TRACER_RE.match(name))
+    return name in _NON_NEGATIVE_TRACERS
 
 
 def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
@@ -358,8 +358,8 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     Clips ``specific_humidity`` and every positive-definite tracer (cloud
     water, ice, rain, snow, droplet- and ice-number concentrations, GHG
     volume mixing ratios) to ``>= 0``. Aerosol and gas tracers are
-    deliberately left alone here (see :data:`_JAM_TRACER_RE`) and guarded
-    on the tendency side instead. We deliberately do NOT clip to an
+    deliberately left alone, here and on the tendency side (see
+    :func:`has_non_negative_tendency`). We deliberately do NOT clip to an
     upper bound — aggressive caps hide bugs in the physics (particularly
     convection) that should surface as unphysical values rather than be
     silently masked. Individual physics routines apply local NaN-avoidance
@@ -393,8 +393,10 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     tracer :func:`has_non_negative_tendency` accepts) we cap the negative
     part of the tendency at ``-state / dt``, i.e. just enough to drive the
     field to zero rather than below. This mirrors what an implicit step
-    on a linear sink would do for the same field, and is the last guard
-    on the SUM of several sinks acting on one tracer.
+    on a linear sink would do for the same field. It is only valid for a
+    field whose tendency is a pure sink plus sources — never for one
+    carrying a conservative redistribution, where clipping the donor
+    alone creates mass.
 
     Args:
         state: The current ``PhysicsState`` (already passed through
