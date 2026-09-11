@@ -333,16 +333,21 @@ quantity is, and is stated here rather than in three docstrings.
 
 `check_health` **reports** the chunk's fraction — averaged over every save
 interval in the chunk, so the bootstrap step cannot hide in an interval the
-report does not look at — rather than failing on it, and
-the distinction is the point. Under `output_averages` the saved field is an
-interval *mean*, so a cold start's one legitimate fallback step reads `1/N` —
-the identical value a single defective step mid-chunk would give. No per-chunk
-rule can separate them, and making the fraction fatal aborted a healthy 30-day
-validation run at day 5 on `1/480`, losing the chunk because the bail path
-skips the checkpoint. A wrong-but-finite emission wind is a bias, not a
-blowup, so it belongs in the report the chunk prints (`Emis wind: ...`), where
-a persistent fallback shows as ~100 % every chunk, and the per-step invariant
-stays where it can be checked exactly — in the unit tests.
+report does not look at — and fails the chunk only on a *persistent* fallback.
+The distinction matters. Under `output_averages` the saved field is an interval
+*mean*, so a cold start's one legitimate fallback step reads `1/N`, the
+identical value a single defective step mid-chunk would give: no rule can
+separate those, and treating `> 0` as fatal aborted a healthy 30-day validation
+run at day 5 on `1/480`, losing the chunk because the bail path skips the
+checkpoint. A fallback that never stops is separable, though — no vdiff term,
+or `wind_10m` never published, reads `1.0` in *every* chunk and costs +37-46 %
+sea salt for the whole run. So the gate is `chunk_idx > 0 and frac > 0.5`:
+after the first chunk the flag can only be zero, and the one legitimate way to
+read `1.0` (a first chunk that is itself a single step) can only be chunk 0.
+That needs no timestep and no cold-start flag — which is what the earlier
+one-step exemption needed, and crashed on for configs whose dycore owns the
+timestep. A single-chunk run degrades to report-only, and the per-step
+invariant stays where it can be checked exactly, in the unit tests.
 
 ### Dust source gating
 
