@@ -800,6 +800,75 @@ class TestEmissionsConfig(unittest.TestCase):
                 build_forcing(cfg, coords)
 
 
+class TestDustConfigTraps(unittest.TestCase):
+    """#768: the source map and the convention that reads it must agree."""
+
+    @staticmethod
+    def _cfg(kind="cam_erodibility", forcing_kind="from_file"):
+        from omegaconf import OmegaConf
+        # Minimal, like the other trap tests: a composed cfg would drag the
+        # coords-dependent emission-key warnings in with it.
+        return OmegaConf.create({
+            "terrain": {"kind": "from_file"},
+            "forcing": {"kind": forcing_kind},
+            "physics": {"jam_dust_source": kind},
+        })
+
+    @staticmethod
+    def _physics():
+        import types
+        # _has_jam only looks for a jam_-prefixed term name.
+        return types.SimpleNamespace(terms=[
+            types.SimpleNamespace(name="jam_dust_emissions",
+                                  category="aerosol_emissions")])
+
+    def _forcing(self, values, monthly=False):
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import WRAP_YEAR, TimeSeries
+        arr = jnp.asarray(values)
+        src = (TimeSeries(values=arr[jnp.newaxis], time_seconds=jnp.zeros(1),
+                          align_mode=WRAP_YEAR) if monthly else arr)
+        return types.SimpleNamespace(dust_source=src, aerosol_year_weight=1.0,
+                                     aerosol_ann_cycle=1.0)
+
+    def test_tegen_kind_on_the_cam_map_warns(self):
+        # The CAM basin factor exceeds 1; tegen_potential would clip it back.
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg("tegen_potential"), self._physics(),
+                                 self._forcing([[0.5, 4.4]]))
+        text = "\n".join(cm.output)
+        self.assertIn("tegen_potential", text)
+
+    def test_cam_kind_on_a_bounded_map_warns(self):
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(), self._physics(),
+                                 self._forcing([[0.2, 0.9]], monthly=True))
+        self.assertIn("cam_erodibility", "\n".join(cm.output))
+
+    def test_matching_kind_and_map_is_silent(self):
+        import logging
+        logger = logging.getLogger("jcm.runners")
+        with self.assertLogs(logger, level="WARNING") as cm:
+            logger.warning("sentinel")
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(), self._physics(),
+                                 self._forcing([[0.5, 4.4]]))
+        self.assertNotIn("jam_dust_source", "\n".join(cm.output))
+
+    def test_default_forcing_with_jam_warns_every_gate_is_open(self):
+        # ForcingData.zeros has no snow, soil moisture or land temperature.
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(forcing_kind="default"),
+                                 self._physics(), None)
+        self.assertIn("forcing=default", "\n".join(cm.output))
+
+
 class TestNaturalForcingFilesConfig(unittest.TestCase):
     """CLI/config plumbing for the DMS / dust / oxidant climatology hooks.
 

@@ -295,7 +295,10 @@ class ForcingData:
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
     # dust emission is simply inert until the field is supplied.
     dms_seawater: Any = None   # seawater DMS concentration kg/m³ (DmsEmissions)
-    dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+    # Dust source map for DustEmissions. NOT bounded by 1: CAM's basin factor
+    # is an unbounded weight (#768). physics.jam_dust_source says which
+    # convention the file follows.
+    dust_source: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -1160,6 +1163,21 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     )
 
 
+def is_clipped_erodibility(arr, tol: float = 1e-9) -> bool:
+    """Whether ``arr`` is a CAM erodibility map that was capped at 1 when built.
+
+    The single definition of the predicate: the maximum sits at 1 to within
+    round-off and more than one cell is on that plateau. Tolerant because
+    regridding a clipped map interpolates over the plateau and lands a hair
+    either side of 1 (the shipped t106 bundle peaks at 1.0000000000000002).
+    ``tools/prep_jam_aux_inputs.py`` imports this rather than restating it.
+    """
+    import numpy as _np
+
+    arr = _np.asarray(arr)
+    return bool(arr.max() <= 1.0 + tol and (arr >= 1.0 - tol).sum() > 1)
+
+
 def _reject_truncated_erodibility(da, arr) -> None:
     """Raise on a CAM erodibility map that was capped at 1 when it was built.
 
@@ -1174,11 +1192,7 @@ def _reject_truncated_erodibility(da, arr) -> None:
     text += " " + str(getattr(da, "name", ""))
     if "mbl_bsn_fct_geo" not in text and "/dst_" not in text:
         return
-    # Tolerant, not exact: regridding a clipped map interpolates over the
-    # plateau and lands a hair either side of 1 (the t106 bundle's maximum is
-    # 1.0000000000000002), which an == 1.0 test reads as "not clipped".
-    tol = 1e-9
-    if not (arr.max() <= 1.0 + tol and (arr >= 1.0 - tol).sum() > 1):
+    if not is_clipped_erodibility(arr):
         return
     raise ValueError(
         "This CAM dust-erodibility map was clipped to [0, 1] when it was "

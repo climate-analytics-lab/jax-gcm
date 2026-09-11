@@ -214,14 +214,30 @@ class DustTermTest(unittest.TestCase):
         self.assertGreater(float(dry.tracers[key][-1, 0]),
                            float(wet.tracers[key][-1, 0]))
 
-    def test_tegen_source_kind_clips_to_one(self):
-        args = _inputs(u_star=0.8, source=3.0)
-        cam, _ = DustEmissions()(*args)
-        tegen, _ = DustEmissions(source_kind="tegen_potential")(*args)
+    def test_tegen_source_kind_is_a_fraction_on_its_own_map(self):
+        """Each kind on the map it is for — not the CAM map read as a fraction.
+
+        A [0, 1] potential-source map is used as-is by ``tegen_potential`` and
+        thresholded by ``cam_erodibility``; that difference is the point of the
+        option. Feeding the CAM map (max 5.7) to ``tegen_potential`` would clip
+        the basins #768 exists to keep, which is a misconfiguration
+        ``warn_on_config_traps`` now catches rather than something to pin here.
+        """
+        args = _inputs(u_star=0.8, source=0.5)
         key = mass_name("du", "cor")
+        tegen, _ = DustEmissions(source_kind="tegen_potential")(*args)
+        cam, _ = DustEmissions()(*args)          # threshold 0.1 < 0.5: passes
         self.assertAlmostEqual(
             float(cam.tracers[key][-1, 0]) / float(tegen.tracers[key][-1, 0]),
-            3.0, places=4)
+            1.0, places=6)
+        # Below CAM's threshold the two genuinely differ: CAM zeroes, Tegen
+        # keeps the fraction.
+        sub_args = _inputs(u_star=0.8, source=0.05)
+        self.assertAlmostEqual(
+            float(DustEmissions()(*sub_args)[0].tracers[key][-1, 0]), 0.0)
+        self.assertGreater(
+            float(DustEmissions(source_kind="tegen_potential")(*sub_args)[0]
+                  .tracers[key][-1, 0]), 0.0)
 
     def test_grad_through_alpha(self):
         state, diagnostics, forcing, terrain = _inputs()

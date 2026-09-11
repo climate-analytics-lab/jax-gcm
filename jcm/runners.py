@@ -1470,6 +1470,52 @@ def warn_on_config_traps(cfg: DictConfig, physics, forcing,
                 "SPv2.1 file out of the box (no macv2_file needed)."
             )
 
+    # 6. The dust source map and the convention the physics reads it with must
+    #    agree (#768). Neither is checked against the other anywhere else:
+    #    tegen_potential on the CAM erodibility map re-clips the basins the
+    #    #768 fix exists to keep (-18 % of the gated source weight, up to 4.4x
+    #    in a single cell) while skipping CAM's 0.1 threshold (+24 %), and the
+    #    reverse reads a [0, 1] fraction as an unbounded weight. The two are
+    #    distinguishable: only the CAM map exceeds 1.
+    if has_jam and forcing is not None and not is_scm:
+        _src = getattr(forcing, "dust_source", None)
+        _kind = str(cfg.get("physics", {}).get("jam_dust_source",
+                                               "cam_erodibility"))
+        if _src is not None:
+            _vals = (_src.values if isinstance(_src, TimeSeries) else _src)
+            _max = float(np.nanmax(np.asarray(_vals))) if np.size(_vals) else 0.0
+            if _kind == "tegen_potential" and _max > 1.0:
+                logger.warning(
+                    "config trap: physics.jam_dust_source=tegen_potential with "
+                    "a dust map whose maximum is %.2f — only CAM's unbounded "
+                    "basin factor exceeds 1, and tegen_potential clips it back "
+                    "to 1 (undoing the #768 declipping) while skipping CAM's "
+                    "0.1 threshold. Use jam_dust_source=cam_erodibility for "
+                    "this file.", _max)
+            elif _kind == "cam_erodibility" and 0.0 < _max <= 1.0:
+                logger.warning(
+                    "config trap: physics.jam_dust_source=cam_erodibility with "
+                    "a dust map bounded by 1 (max %.3f) — CAM's basin factor "
+                    "runs to 5.7, so this is either a Tegen potential-source "
+                    "fraction (use jam_dust_source=tegen_potential) or a "
+                    "pre-#768 clipped build.", _max)
+
+    # 7. Every dust gate reads a boundary field, and forcing=default supplies
+    #    none of them: ForcingData.zeros is a uniform 288.15 K land with no
+    #    snow and no soil moisture, so the land/snow/frozen/moisture gates are
+    #    all wide open and the source map alone decides — Antarctica included.
+    #    config.yaml defaults to forcing=default, so this is the out-of-the-box
+    #    combination, not an exotic one.
+    if has_jam and forcing_kind == "default" and not is_scm:
+        logger.warning(
+            "config trap: JAM prognostic aerosol with forcing=default — the "
+            "aquaplanet default_forcing carries no snow cover, soil moisture "
+            "or land temperature (uniform 288.15 K), so every dust surface "
+            "gate is open and the source map emits wherever it is non-zero, "
+            "ice sheets included. Use forcing=from_file (or forcing=amip/era5) "
+            "for a gated dust source."
+        )
+
 
 def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     if model is None:
