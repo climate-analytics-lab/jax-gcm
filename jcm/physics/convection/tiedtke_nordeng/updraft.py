@@ -8,7 +8,6 @@ This module implements the updraft calculations including:
 
 Based on ICON mo_cuascent.f90
 
-Date: 2025-01-09
 """
 
 import jax
@@ -301,12 +300,12 @@ def calculate_updraft(
                 # from the level below) and entrained environmental air.
                 #
                 # Dry static energy (DSE = cp·T + g·z) is conserved during
-                # adiabatic ascent. Equivalently, a parcel rising by dz
-                # cools by g·dz/cp (~9.8 K/km). The previous implementation
-                # mixed T directly without this adiabatic cooling — the
-                # parcel arrived at each level ~10 K too warm, so the
-                # saturation adjustment never saw supersaturation, no liquid
-                # formed, and no precipitation was produced.
+                # adiabatic ascent. Equivalently, a parcel rising by dz cools
+                # by g·dz/cp (~9.8 K/km), so mixing is done in DSE, not T
+                # directly: mixing T without the adiabatic cooling leaves the
+                # parcel ~10 K too warm at each level, the saturation
+                # adjustment never sees supersaturation, and no liquid or
+                # precipitation forms.
                 #
                 # Detrainment removes mass at *updraft* properties, so the
                 # correct denominator for mixing is the pre-detrainment mass
@@ -415,13 +414,10 @@ def calculate_updraft(
             # the bonus here is gated on BOTH ``ktype == 3`` and the first
             # step above the base, and is otherwise identically zero.
             #
-            # This is the resolution of #691: an earlier version added the
-            # bonus at EVERY ascent level to keep a plume alive above a
-            # cloud base wrongly picked at the LFC, which relaxed the CLOUD
-            # TOP criterion by ~1 K against a 0.01 K sigmoid width. #684
-            # removed both halves of that (``find_cloud_base`` now does
-            # ECHAM's ``klab`` walk and returns the LCL); this restores the
-            # bonus at the one site the reference actually uses it.
+            # The bonus lives only at this one site the reference uses it
+            # (the mid-level ``cubasmc`` plume seed); ``find_cloud_base`` does
+            # ECHAM's ``klab`` walk and returns the LCL, so no level above the
+            # base needs it to stay alive (#684/#691).
             #
             # ``buoy_new`` is an acceleration (g·ΔTv/Tv), ``lift`` a
             # temperature, so the bonus converts with g/Tv_env.

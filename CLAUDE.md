@@ -121,6 +121,19 @@ user-facing behaviour is incomplete until the docs say so:
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
 
+## The model description is a living document
+``docs/source/science/`` is the by-process model description: every consequential
+scientific choice stated positively, with its reference provenance and its
+``science``/``compute``/``differentiability`` motivation. It is a *living*
+document, held to the same discipline as the issue-filing rule above: a PR that
+**makes or changes a science-relevant choice** — deferring to or deviating from
+ECHAM/CAM, a new scheme or default, a differentiability-driven reformulation, a
+new supported configuration — must add or update the corresponding process
+section (or configuration selection page) in the same PR. State what the code
+*is* and why, with a reference (Fortran ``file::routine``, paper, scheme name);
+never a fix narrative or a before/after. A reviewer should be able to read the
+science doc and the diff together and find them consistent.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
@@ -233,6 +246,18 @@ JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
 JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
+
+Then review your own diff adversarially **before pushing** and fix or refute
+every finding (`jcm-dev-workflow` step 3). Codex credits are finite and a CI
+review round takes hours; a finding caught locally costs neither. **Choose the
+reviewer by the session's model.** `/code-review` forks the invoking session:
+same model, full conversation context inherited, and at `high`/`max` its
+finders and verifiers fan out the same way. From a Fable session that spends
+Fable tokens at full context (it exhausted a session limit twice on
+2026-09-10). On a Fable session spawn an explicit `model: opus` reviewer agent
+with the same scope and have it post one `gh pr review --comment`; run
+`/code-review high` itself only from an Opus or Sonnet session, or when the
+maintainer asks for it knowing it forks on the parent model.
 
 Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
 hosts (every xdist worker otherwise grabs the same GPU and XLA fails with

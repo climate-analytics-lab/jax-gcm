@@ -3,7 +3,6 @@
 This module computes Planck functions and related quantities
 for thermal radiation calculations.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp

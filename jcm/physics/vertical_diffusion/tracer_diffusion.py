@@ -13,8 +13,8 @@ TTE-TKE term publishes in the ``vertical_diffusion`` diagnostic.
 Like the other consumers of that diagnostic (ARG's updraft, dry
 deposition's u*), the profile comes from the previous step's carry
 because the vdiff term runs after the aerosol block in the ECHAM
-ordering; on the very first step the diagnostic is absent and the term is
-a no-op. Boundaries are zero-flux: the surface exchange is dry
+ordering; on the very first step the carry is seeded with ``kh = 0``
+(zero exchange coefficient), so the term is a no-op. Boundaries are zero-flux: the surface exchange is dry
 deposition's job, and emission injection is the emission terms' job, so
 this term is pure interior mixing and conserves each tracer's column mass
 exactly.

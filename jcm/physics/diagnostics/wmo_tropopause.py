@@ -6,7 +6,6 @@ lowest level at which the lapse rate decreases to 2°C per kilometer or less,
 provided the average lapse rate between this level and all higher levels
 within 2 kilometers does not exceed 2°C per kilometer.
 
-Date: 2025-01-09
 """
 
 import jax

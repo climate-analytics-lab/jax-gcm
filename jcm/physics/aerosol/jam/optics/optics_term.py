@@ -633,9 +633,9 @@ class JamOpticsTerm(PhysicsTerm):
                if k not in ("aod_550", "_optics_diag")}
         )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
-        # The column AOD-550 no longer publishes a top-level
+        # The column AOD-550 is not published under a top-level
         # ``aerosol_optical_depth`` key (#640): that name collided with the
-        # unrelated per-band ``RadiationInput`` field, and the value now lives
+        # unrelated per-band ``RadiationInput`` field, so the value lives
         # under the JAM namespace as ``jam_optics.aod_550`` (from the
         # ``_jam_optics`` carry dict, which also carries the per-band optics
         # plumbing and the grey profile fields).

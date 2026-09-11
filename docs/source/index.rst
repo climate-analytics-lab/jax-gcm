@@ -6,9 +6,9 @@ in JAX. Its pluggable dynamical-core interface currently ships with the
 `Dinosaur <https://github.com/neuralgcm/dinosaur>`_ spectral backend and
 couples it to modular SPEEDY, Held-Suarez, and ECHAM-style physics packages.
 
-For the v2.0 release line, the main target configuration is ECHAM
-physics on the T63L47 hybrid grid with RRTMGP radiation
-(``physics=echam-rrtmgp grid=echam_t63_l47_hybrid``). The SPEEDY package
+The main target configuration is ECHAM physics on the T63L47 hybrid
+grid with RRTMGP radiation
+(``+configuration=t63-echam-rrtmgp``). The SPEEDY package
 remains the lightweight default for quick tests, tutorials, and
 optimization examples.
 
@@ -25,8 +25,10 @@ Contents
    :caption: Contents:
 
    getting_started
+   running_at_scale
    speedy_physics
    echam_physics
+   science
    release_notes
    v1_to_v2
    speedy_translation

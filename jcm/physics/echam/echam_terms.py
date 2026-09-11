@@ -395,9 +395,9 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
-    # MACv2-SP and JAM are mutually exclusive aerosol sources (#640): running
-    # both was confusing and redundant, so the JAM composition no longer
-    # includes MACv2-SP. JAM owns the ``aerosol`` slot through its own
+    # MACv2-SP and JAM are mutually exclusive aerosol sources (#640), so the
+    # JAM composition does not include MACv2-SP. JAM owns the ``aerosol`` slot
+    # through its own
     # ``AerosolCarrySeeder`` (radiatively passive when ``jam_optics=False``,
     # overwritten by ``JamOpticsTerm`` when on) and supplies the cloud
     # microphysics activation through ``ArgActivation``; the 2M scheme falls

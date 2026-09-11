@@ -1,5 +1,4 @@
-"""Date: 2/11/2024
-Parametrization of convection. Convection is modelled using a simplified 
+"""Parametrization of convection. Convection is modelled using a simplified
 version of the Tiedtke (1993) mass-flux convection scheme.
 """
 from jax import jit

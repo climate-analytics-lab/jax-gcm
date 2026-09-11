@@ -251,7 +251,7 @@ class ForcingData:
     ch4_vmr: jnp.ndarray
 
     # N2O volume mixing ratio (ppmv). Scalar for fixed-N2O runs; TimeSeries for
-    # historical / scenario forcing. Prescribed here so RRTMGP no longer falls
+    # historical / scenario forcing. Prescribed here so RRTMGP does not fall
     # back silently to its ``vmr_global_means.json`` value.
     n2o_vmr: jnp.ndarray
 

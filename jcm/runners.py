@@ -1817,10 +1817,24 @@ def run_chunked(
             save_checkpoint(model, ckpt_path, elapsed_days=elapsed_sim_days)
             print(f"  Saved checkpoint to {ckpt_path}")
             archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
-            if archive_every > 0 and abs(elapsed_sim_days % archive_every) < 1e-6:
+            # Archive at the first chunk boundary past each interval multiple,
+            # so the cadence need not divide chunk_days (30-day chunks with
+            # archive_ckpt_every=100 archive at days 120, 210, 300, ...). The
+            # relative tolerance keeps a fractional cadence on schedule:
+            # elapsed accumulates by summing chunks, so a nominal 0.9 arrives
+            # as 0.8999999999999999 and would otherwise slip a whole chunk.
+            tol = 1e-6 * archive_every
+            if archive_every > 0 and (
+                int((elapsed_sim_days + tol) // archive_every)
+                > int((elapsed_sim_days - cur_chunk + tol) // archive_every)
+            ):
                 import shutil
 
-                archive = f"{output_prefix}_day{int(elapsed_sim_days)}.ckpt"
+                # ``:g`` keeps whole-day archives named ``_day30`` while giving
+                # sub-day cadences a distinct name instead of colliding on the
+                # truncated integer day.
+                day = f"{elapsed_sim_days:g}".replace(".", "p")
+                archive = f"{output_prefix}_day{day}.ckpt"
                 shutil.copyfile(ckpt_path, archive)
                 print(f"  Archived checkpoint {archive}")
         elif ckpt_path:

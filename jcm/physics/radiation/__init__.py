@@ -29,7 +29,7 @@ def radiation_should_compute(
     ``round(interval / dt)`` steps; otherwise (the default) recompute
     every step. The step counter is the radiation term's own
     ``RadiationData.step`` carry slot — incremented each call by the
-    radiation term — so this gate no longer depends on the model-wide
+    radiation term — so this gate does not depend on the model-wide
     date/step plumbing.
     """
     step = diagnostics["radiation"].step

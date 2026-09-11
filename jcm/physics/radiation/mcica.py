@@ -65,10 +65,9 @@ def in_cloud_path(
     already evaporated condensate in clear cells (mirrored here for the 2M
     scheme by the clear-sky evaporation in ``lohmann_2m``); the zeroing is
     the radiation-side half of that contract and protects every scheme
-    (1M and 2M) against any residual decorrelated condensate. The upstream
-    Sundqvist diagnostic snaps ``cf < 0.01`` to 0, so this zeros exactly
-    the clear cells and leaves every resolved cloud (``cf >= 0.01``)
-    untouched.
+    (1M and 2M) against any residual decorrelated condensate. The
+    ``cloud_fraction > 2*eps`` guard below zeros exactly the (essentially)
+    clear cells and leaves every resolved cloud untouched.
     """
     in_cloud = grid_mean_path / jnp.maximum(cloud_fraction, eps)
     return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)

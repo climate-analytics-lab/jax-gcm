@@ -12,7 +12,6 @@ Features:
 - Wave breaking and momentum deposition
 - Critical level filtering
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
