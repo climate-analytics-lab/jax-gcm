@@ -101,6 +101,11 @@ def compute_surface_exchange_coefficients_echam_louis(
 
     ncol, nsfc_type = temperature_surface.shape
 
+    # Neutral drag for every tile, from the one helper the 10 m reduction also
+    # uses (so the reduction's stability factor is this scheme's own).
+    bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
+                                                 wind_speed_surface)
+
     # --- Atmospheric inputs at the lowest level (klev) -------------------
     p_air = state.pressure_full[:, -1]            # (ncol,)
     p_sfc = state.pressure_half[:, -1]            # (ncol,)
@@ -176,13 +181,15 @@ def compute_surface_exchange_coefficients_echam_louis(
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # Effective roughness lengths capped to ½·z_ref via
-        # ``MAX(2, z/z0)`` per ECHAM's lmix-bounded form.
-        log_zm = jnp.log(jnp.maximum(z_ref / z0,  jnp.exp(2.0)))
+        # ``MAX(2, z/z0)`` per ECHAM's lmix-bounded form. The momentum pair
+        # comes from ``echam_louis_neutral_drag`` so the 10 m reduction shares
+        # this scheme's own neutral reference rather than re-deriving it.
+        log_zm = bn_all[:, isfc]
         log_zh = jnp.log(jnp.maximum(z_ref / z0h, jnp.exp(2.0)))
         cdn = (karman * karman) / (log_zm * log_zm)             # neutral drag
         chn = (karman * karman) / (log_zm * log_zh)             # neutral CHN
 
-        cfn_m = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * cdn        # κ²·U/log²
+        cfn_m = cfn_m_all[:, isfc]                                # κ²·U/log²
         cfn_h = jnp.sqrt(jnp.maximum(zdu2, 1.0e-30)) * chn
 
         # Stable branch (Ri > 0): ECHAM Mauritsen-2007 stable form
@@ -217,3 +224,84 @@ def compute_surface_exchange_coefficients_echam_louis(
         surface_exchange_momentum = surface_exchange_momentum.at[:, isfc].set(cfm)
 
     return surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum
+
+
+@jax.jit
+def wind_10m_reduction(
+    exchange_momentum: jnp.ndarray,
+    neutral_exchange_momentum: jnp.ndarray,
+    log_z_over_z0: jnp.ndarray,
+    z_ref: jnp.ndarray,
+    reference_height: float = 10.0,
+) -> jnp.ndarray:
+    """Per-tile ``|U(10 m)| / |U(z_ref)|`` (ECHAM ``nsurf_diag`` 10 m wind).
+
+    ECHAM5 ``vdiff.f90`` / ICON ``mo_surface_diag::nsurf_diag`` interpolate the
+    lowest-level wind down to 10 m along the surface-layer profile actually used
+    for the drag, with ``zrat = 10/z_ref``::
+
+        bn   = ln(z_ref/z0m)                     neutral profile factor
+        bm   = bn·√(CM_n·|U| / CM·|U|)           stability-corrected profile
+        cbn  = ln(1 + (e^bn − 1)·zrat)
+        cbs  = −(bn − bm)·zrat                   stable
+        cbu  = −ln(1 + (e^(bn−bm) − 1)·zrat)     unstable
+        red  = (cbn + [cbs|cbu]) / bm
+
+    The neutral profile factor and the neutral exchange velocity are supplied
+    by the caller rather than rebuilt here, because they must be the surface
+    layer scheme's OWN: the two schemes differ in roughness (``z0m_min``-floored
+    ``state.roughness_length`` vs a hard-coded table), in the bound on
+    ``z/z0``, and in whether the wind is ``zepdu2``-floored. Deriving them here
+    would silently mix two drag formulations and read stability where there is
+    none.
+
+    The stable/unstable branch is selected by ``CM·|U| < CM_n·|U|``, which is
+    exactly ``Ri > 0`` for both surface-layer schemes here (their stability
+    factors are <1 for stable, ≥1 for unstable, and both equal 1 — with equal
+    ``cbs``/``cbu`` — at ``Ri = 0``), so the Richardson number need not be
+    plumbed out of the coefficient solve.
+
+    Args:
+        exchange_momentum: CM·|U| per tile [m/s] (ncol, nsfc_type).
+        neutral_exchange_momentum: the same scheme's NEUTRAL CM_n·|U| [m/s]
+            (ncol, nsfc_type).
+        log_z_over_z0: that scheme's neutral profile factor ``ln(z_ref/z0m)``
+            (ncol, nsfc_type).
+        z_ref: lowest full-level height above the surface [m] (ncol,).
+        reference_height: diagnostic height [m], 10 m by default.
+
+    Returns:
+        Reduction factor per tile (ncol, nsfc_type), in [0, 1].
+
+    """
+    bn = log_z_over_z0
+    f_m = (jnp.maximum(exchange_momentum, 1e-12)
+           / jnp.maximum(neutral_exchange_momentum, 1e-12))
+    bm = bn / jnp.sqrt(f_m)
+
+    # A lowest level below the diagnostic height leaves the wind unreduced
+    # (zrat ≤ 1). This subsumes the coefficients' 1 m floor on z_ref, since
+    # the diagnostic height is 10 m — flooring at 1 m first would be a no-op.
+    zrat = reference_height / jnp.maximum(z_ref, reference_height)[:, None]
+    cbn = jnp.log1p(jnp.expm1(jnp.clip(bn, 0.0, 30.0)) * zrat)
+    cbs = -(bn - bm) * zrat
+    cbu = -jnp.log1p(jnp.expm1(jnp.clip(bn - bm, -30.0, 30.0)) * zrat)
+    merge = jnp.where(f_m < 1.0, cbs, cbu)
+    # Math-safety clip only: the log profile cannot amplify the wind between
+    # 10 m and the lowest level, nor reverse it.
+    return jnp.clip((cbn + merge) / bm, 0.0, 1.0)
+
+
+def echam_louis_neutral_drag(state, params, wind_speed):
+    """``(ln(z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
+
+    THE definition, not a copy of one:
+    :func:`compute_surface_exchange_coefficients_echam_louis` calls this for
+    the ``log_zm``/``cfn_m`` its own drag is built on, so ``bn = κ/√CDN``
+    holds for the pair by construction and the two cannot drift.
+    """
+    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    z0 = jnp.maximum(state.roughness_length, params.z0m_min)
+    bn = jnp.log(jnp.maximum(z_ref[:, None] / z0, jnp.exp(2.0)))
+    floored = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[:, None]
+    return bn, floored * c.karman_const ** 2 / bn ** 2

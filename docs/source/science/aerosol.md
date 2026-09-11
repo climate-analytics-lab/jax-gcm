@@ -208,6 +208,60 @@ re-evaporation ledger); ice nucleation Lohmann & Diehl (2006), Niemand et al.
   prescribed); ``drydep/``; ``sedimentation/``; ``wetdep/``; ``ice_nucleation/``;
   ``optics/optics_term.py``.
 
+#### Sea-salt and DMS emission wind
+
+**What we do.** Both schemes read a diagnosed **10 m** wind, not the lowest
+model level: ``SeaSaltEmissions`` and ``DmsEmissions`` take
+``VerticalDiffusionData.wind_10m`` (see
+[vertical diffusion](vertical_diffusion.md)) through
+``jcm/physics/aerosol/jam/emissions/surface_wind.py::wind_10m``. Emission terms
+run before vertical diffusion in the ECHAM ordering, so the value is the
+previous step's — ``vertical_diffusion`` is a declared cross-step carry slot,
+the same one-step lag the dust term's ``u*`` takes.
+
+On the first step of a cold start no surface layer has been diagnosed yet (the
+carry slot is zero-filled), and both schemes fall back to the lowest level for
+that step, publishing a per-column flag ``wind_10m_model_level`` — 1 where the
+model level was used, 0 where the diagnosed wind was — which
+``ResetEmissionFluxes`` zeroes every step alongside the emission fluxes. A
+resumed run carries a real 10 m wind and never takes the fallback.
+
+**What ECHAM/CAM does.** HAMMOZ passes ``vphysc%velo10m`` to both schemes
+(``mo_vphysc.f90``); Gong (2003) is fitted to ``u10**3.41`` and Nightingale
+et al. (2000) to a piston velocity in ``u10``.
+
+**Why we differ.** We do not, for the wind. The fallback is a `compute`
+consequence of the operator-split ordering — the surface layer is diagnosed
+later in the step than the emissions that consume it — rather than a scheme
+choice, and it is reported rather than hidden.
+
+**Status & known limitations.** The three surface-flux terms behave
+differently on step 1 of a cold start, deliberately: dust emits nothing (its
+carried ``u*`` is zero and a saltation threshold has no defensible value
+without a surface layer), sea salt and DMS emit from the lowest level and flag
+it, and the surface term has no step-1 case because it runs after vertical
+diffusion. ``check_health`` reports the chunk-mean flag and fails a chunk only
+on a *persistent* fallback (``chunk_idx > 0 and frac > 0.5``), because under
+interval averaging the legitimate bootstrap step and a single defective step
+mid-chunk give the same value; the per-step invariant is asserted in the unit
+tests instead. A single-chunk run therefore degrades to report-only.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/surface_wind.py`` — ``wind_10m``,
+  ``MODEL_LEVEL_WIND_KEY``.
+- ``jcm/physics/aerosol/jam/emissions/seasalt.py`` — ``SeaSaltEmissions``.
+- ``jcm/physics/aerosol/jam/emissions/dms.py`` — ``DmsEmissions``.
+- ``jcm/physics/aerosol/jam/emissions/flux_diagnostic.py`` —
+  ``ResetEmissionFluxes``, ``all_flux_keys``.
+- ``jcm/diagnostics.py`` — ``check_health``.
+
+**Validation evidence.** ``seasalt_test.py`` and ``dms_test.py`` pin the
+reduction against the carry state per step and the flag per column;
+``jcm/diagnostics_test.py`` pins the chunk-level rule. A 30-day T63L47
+integration reduces sea-salt emission by 32 % and the DMS flux by 17 % against
+the lowest-level wind, with the flag reading 1/480 on the first chunk and
+exactly zero on every chunk thereafter.
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine

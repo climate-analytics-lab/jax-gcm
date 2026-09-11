@@ -661,10 +661,11 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         if tke.ndim == 3:
             tke = tke.reshape(nlev, ncols)
         # Carried from the previous step exactly like TKE (ECHAM keeps
-        # ``pthvvar`` in the restart file). Carrying it is what makes the
-        # variance prognostic: re-zeroing it each step would give its
-        # source/dissipation balance only one step to build up, pinning it at
-        # its floor and forcing the convective ``zlift`` to read a constant.
+        # ``pthvvar`` in the restart file). This used to be re-zeroed every
+        # step, which made the variance non-prognostic in practice: its
+        # source/dissipation balance never had more than one step to build
+        # up, so it sat at its floor and could not be used for anything —
+        # the reason the convective ``zlift`` had to read a constant.
         thv_variance = prev_vdiff.thv_variance
         if thv_variance.ndim == 3:
             thv_variance = thv_variance.reshape(nlev, ncols)
@@ -775,12 +776,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         kh = vdiff_diagnostics.exchange_coeff_heat.T
         pbl_height = vdiff_diagnostics.boundary_layer_height
         u_star = vdiff_diagnostics.friction_velocity
+        wind_10m = vdiff_diagnostics.wind_10m
 
         # Per-tile surface exchange velocities (CH·|U|, CE·|U|, CM·|U|, all
         # m/s) from the configured surface-layer scheme. The momentum
-        # coefficient is a real CM·|U| (Louis/Businger drag), not the interior
-        # diffusivity Km[lowest] (m²/s) — tiling the surface stress from that
-        # would make the surface-stress implicit-damping factor in the
+        # coefficient is now a real CM·|U| (Louis/Businger drag), not the
+        # interior diffusivity Km[lowest] (m²/s) it used to be tiled from —
+        # that mismatch made the surface-stress implicit-damping factor in the
         # ``echam_surface`` term dimensionally wrong.
         surface_exchange_heat = vdiff_diagnostics.surface_exchange_heat
         surface_exchange_moisture = vdiff_diagnostics.surface_exchange_moisture
@@ -830,6 +832,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_exchange_momentum=surface_exchange_momentum,
             pbl_height=pbl_height,
             surface_friction_velocity=u_star,
+            wind_10m=wind_10m,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
             surface_latent_heat=sfc_fluxes.latent_heat,

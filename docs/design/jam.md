@@ -234,6 +234,87 @@ See `.claude/aerosol_emissions_plan.md` for the full design, the data-source
 investigation (the raw 0.5° gridded CEDS is ESGF-only; a self-hosted compressed
 mirror is a tracked follow-up), and the CESM adapter's documented approximations.
 
+## Natural emissions: the 10 m wind (#723)
+
+### The emission wind is 10 m, not the lowest model level
+
+Gong sea salt (`u10**3.41`) and Nightingale DMS (`k_w ~ u10**2`) are fitted to
+the 10 m wind; HAMMOZ passes `vphysc%velo10m`. Reading the lowest full level
+instead — ~33 m at L47 — inflates sea salt by 37-46 % and DMS by 20-25 %.
+
+`TteTkeVerticalDiffusion` now publishes `VerticalDiffusionData.wind_10m`, the
+ECHAM/ICON `nsurf_diag` reduction of the lowest-level wind along the same
+surface-layer profile that produced the drag:
+
+```
+bn  = ln(z1/z0m)                              neutral profile factor
+bm  = bn * sqrt(CM_n|U| / CM|U|)              stability-corrected
+red = [ln(1 + (e^bn - 1)*10/z1) + merge] / bm
+merge = -(bn - bm)*10/z1                      stable   (CM|U| < CM_n|U|)
+      = -ln(1 + (e^(bn-bm) - 1)*10/z1)        unstable
+```
+
+Building it from the per-tile `CM·|U|` the surface stress already uses means the
+10 m wind cannot drift from the momentum exchange, and the stable/unstable
+branch needs no separate Richardson number (the two branches meet continuously
+at `Ri = 0`, where `CM|U| = CM_n|U|`). The profile factor is built from the
+`zepdu2`-floored speed the coefficients themselves used (`max(|U|, 1 m/s)`),
+or ECHAM's calm-wind floor would be misread as a stability signal; the
+reduction it yields then multiplies the true wind.
+
+Emission terms read the result through `emissions/surface_wind.py`. They run
+*before* vdiff in the ECHAM ordering, so the value is one step old. This is
+the **declared** cross-step carry — `vertical_diffusion` is one of the slots
+`Physics.initial_carry_state` seeds — i.e. the deliberate pattern #673
+distinguishes from an accidental stale `.get()`, and the same lag the dust
+term's `u*` already carries. When #673's `carry_slots` check lands this read
+is one to declare explicitly.
+
+**The fallback to the lowest model level is bootstrap-only, by construction.**
+The 10 m wind *cannot* exist on step 1 of a cold start: emissions run first,
+and the `vertical_diffusion` carry slot is seeded zero-filled
+(`initial_carry_state`; verified — `surface_friction_velocity` and `wind_10m`
+are both exactly 0 there), so no surface layer has been diagnosed yet.
+(A resumed run carries a real 10 m wind and never takes the fallback; nor does
+a composition with no vdiff term, where there is no surface layer at all.)
+Because taking it silently would mean emitting 37-46 % too much sea salt, the
+emission terms publish a per-column flag `wind_10m_model_level` — 1 where the
+model level was used, 0 where the diagnosed wind was — zeroed every step with
+the other emission diagnostics. It is 1 on step 1 of a cold start and 0
+thereafter; `seasalt_test.py` (`test_fallback_is_taken_on_step_one_and_never_again`
+and its companions) asserts exactly that per step, against the zero-filled carry
+a cold start begins with and a populated one thereafter. The JAM integration
+test adds the end-to-end check that no column is still flagged after six steps.
+
+**The three terms behave differently on step 1 of a cold start, deliberately.**
+Dust emits nothing (its carried `u*` is zero, and a saltation threshold has no
+defensible value without a surface layer); sea salt and DMS emit from the
+lowest model level and flag it
+(`|U|` at ~33 m is a defensible approximation of `u10` — it is what the model
+did on every step before #723); and `EchamSurface` has no step-1 case, because
+it runs after vdiff. Unifying them would make one of the three worse: dust
+would have to invent a wind, or sea salt would have to discard a step of a
+legitimate flux for symmetry's sake. The asymmetry follows from what each
+quantity is, and is stated here rather than in three docstrings.
+
+`check_health` **reports** the chunk's fraction — averaged over every save
+interval in the chunk, so the bootstrap step cannot hide in an interval the
+report does not look at — and fails the chunk only on a *persistent* fallback.
+The distinction matters. Under `output_averages` the saved field is an interval
+*mean*, so a cold start's one legitimate fallback step reads `1/N`, the
+identical value a single defective step mid-chunk would give: no rule can
+separate those, and treating `> 0` as fatal aborted a healthy 30-day validation
+run at day 5 on `1/480`, losing the chunk because the bail path skips the
+checkpoint. A fallback that never stops is separable, though — no vdiff term,
+or `wind_10m` never published, reads `1.0` in *every* chunk and costs +37-46 %
+sea salt for the whole run. So the gate is `chunk_idx > 0 and frac > 0.5`:
+after the first chunk the flag can only be zero, and the one legitimate way to
+read `1.0` (a first chunk that is itself a single step) can only be chunk 0.
+That needs no timestep and no cold-start flag — which is what the earlier
+one-step exemption needed, and crashed on for configs whose dycore owns the
+timestep. A single-chunk run degrades to report-only, and the per-step
+invariant stays where it can be checked exactly, in the unit tests.
+
 ### Two emission paths: differentiable bulk vs CAM6-faithful pre-speciated
 
 The above is the **bulk / differentiable** path (`jam_anthropogenic=True`). There
