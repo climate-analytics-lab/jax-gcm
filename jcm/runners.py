@@ -1004,6 +1004,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get("dms_file", None), "dms_file")),
         dust_file=_resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get("dust_file", None), "dust_file")),
+        **{key: _resolve_data_path(_reject_year_pattern(
+            _forcing_cfg.get(key, None), key))
+           for key in ("dust_preferential_file", "dust_soil_types_file",
+                       "dust_regions_file", "dust_roughness_file")},
         oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
         ozone_file=_resolve_data_path(ozone_file),
     )
@@ -1240,6 +1244,8 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
         )
     elif has_jam:
         emission_keys = ("emissions_file", "dms_file", "dust_file",
+                         "dust_preferential_file", "dust_soil_types_file",
+                         "dust_regions_file", "dust_roughness_file",
                          "oxidants_file")
         # The mirror manifest is the read-side single source for what is
         # published: Gaussian grids (top-level ``grids`` with a real nlat — the

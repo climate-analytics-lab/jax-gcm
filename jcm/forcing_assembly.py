@@ -36,7 +36,17 @@ logger = logging.getLogger(__name__)
 #: read-side single source of truth for whether a given key's bundle exists on a
 #: grid (:func:`mm.is_published`); this is only the set of keys to iterate.
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
+                       "dust_preferential_file", "dust_soil_types_file",
+                       "dust_regions_file", "dust_roughness_file",
                        "oxidants_file")
+
+#: The Tegen dust inputs that must arrive together: ``mo_ham_dust.f90`` aborts
+#: without any of them, and running with the soil textures, preferential sources
+#: or tuning regions missing would silently emit an all-coarse, untuned flux.
+#: The roughness map is NOT here — the Fortran reads it only when
+#: ``ndurough = 0``, so it is the one channel with a real opt-out.
+_DUST_REQUIRED_KEYS = ("dust_preferential_file", "dust_soil_types_file",
+                       "dust_regions_file")
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +615,8 @@ def _attach_emissions(forcing, forcing_cfg, coords):
 def _reject_year_pattern(value, key):
     """Fail loudly on a ``{year}`` pattern for a climatology-only forcing key.
 
-    ``dms_file`` and ``dust_file`` are single-file WRAP_YEAR climatologies: the
+    ``dms_file`` and the ``dust_*`` keys are single-file WRAP_YEAR climatologies
+    or static maps: the
     data mirror publishes NO transient (yearly) DMS or dust product, and their
     readers (:func:`jcm.forcing.read_dms_seawater` /
     :func:`jcm.forcing.read_dust_source`) do not expand ``{year}``. A pattern
@@ -620,8 +631,8 @@ def _reject_year_pattern(value, key):
             "is a climatology-only single file: the data mirror publishes no "
             "transient (yearly) DMS/dust product and its reader does not expand "
             "{year}. Only forcing.emissions_file and forcing.oxidants_file "
-            "accept yearly patterns; give dms_file/dust_file a single 12-month "
-            "climatology (or 'auto'/'null').")
+            "accept yearly patterns; give dms_file/dust_*_file a single "
+            "12-month climatology or static map (or 'auto'/'null').")
     return value
 
 
@@ -658,29 +669,64 @@ def _attach_dms(forcing, forcing_cfg, coords):
     return forcing.copy(dms_seawater=ts)
 
 
-def _attach_dust(forcing, forcing_cfg, coords):
-    """Attach the dust-source/erodibility map from ``cfg.forcing.dust_file``.
+def _dust_path(forcing_cfg, key):
+    """Resolve one dust forcing key, or ``None`` when unset/opted out."""
+    path = _resolve_data_path(
+        _reject_year_pattern(forcing_cfg.get(key, None), key))
+    return None if path in (None, "", "null") else str(path)
 
-    No-op when unset. Loads a HAMMOZ-style monthly ``pot_source
-    (time, lat, lon)`` climatology (clipped to the [0, 1] erodibility contract
-    of :class:`DustEmissions` — see :func:`jcm.forcing.read_dust_source`) as a
-    ``WRAP_YEAR`` ``TimeSeries`` on ``forcing.dust_source``. Grid handling as
-    in :func:`_attach_dms`.
+
+def _attach_dust(forcing, forcing_cfg, coords):
+    """Attach the five Tegen/HAMMOZ dust inputs (#802).
+
+    No-op when ``dust_file`` is unset. Otherwise loads the monthly effective-LAI
+    potential-source climatology as a ``WRAP_YEAR`` ``TimeSeries`` (the Fortran
+    steps it by month start, never interpolates) plus the static preferential
+    sources, nine soil-texture fractions and categorical tuning regions, all of
+    which ``mo_ham_dust.f90`` treats as mandatory — a missing one raises rather
+    than letting the scheme run on an all-coarse, untuned soil. The monthly
+    satellite roughness map is optional: it is consumed only on the
+    ``ndurough = 0`` sensitivity path. Grid handling as in :func:`_attach_dms`.
     """
     if forcing_cfg is None:
         return forcing
-    path = _resolve_data_path(
-        _reject_year_pattern(forcing_cfg.get("dust_file", None), "dust_file"))
-    if path in (None, "", "null"):
+    path = _dust_path(forcing_cfg, "dust_file")
+    if path is None:
         return forcing
     import xarray as xr
 
-    from jcm.forcing import read_dust_source
+    from jcm.forcing import (read_dust_preferential, read_dust_regions,
+                             read_dust_roughness, read_dust_soil_types,
+                             read_dust_source)
     lat_deg, lon_deg = _model_latlon_deg(coords)
-    with xr.open_dataset(str(path)) as ds:
-        ts = read_dust_source(ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    companions = {key: _dust_path(forcing_cfg, key)
+                  for key in _DUST_REQUIRED_KEYS}
+    missing = sorted(k for k, v in companions.items() if v is None)
+    if missing:
+        raise ValueError(
+            f"forcing.dust_file is set but {missing} resolved to nothing. The "
+            "Tegen scheme needs the preferential sources, the nine soil-texture "
+            "fractions and the tuning regions alongside the potential-source "
+            "map; without them it would emit an untuned, all-coarse-soil flux. "
+            "Set them (or 'auto'), or disable dust with forcing.dust_file=null.")
+    fields = {}
+    with xr.open_dataset(path) as ds:
+        fields["dust_source"] = read_dust_source(
+            ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    readers = {"dust_preferential_file": ("dust_preferential",
+                                          read_dust_preferential),
+               "dust_soil_types_file": ("dust_soil_types", read_dust_soil_types),
+               "dust_regions_file": ("dust_regions", read_dust_regions)}
+    for key, (field, reader) in readers.items():
+        with xr.open_dataset(companions[key]) as ds:
+            fields[field] = reader(ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    roughness = _dust_path(forcing_cfg, "dust_roughness_file")
+    if roughness is not None:
+        with xr.open_dataset(roughness) as ds:
+            fields["dust_roughness"] = read_dust_roughness(
+                ds, lat_deg=lat_deg, lon_deg=lon_deg)
     forcing = _ensure_parent_forcing(forcing, coords)
-    return forcing.copy(dust_source=ts)
+    return forcing.copy(**fields)
 
 
 # ---------------------------------------------------------------------------

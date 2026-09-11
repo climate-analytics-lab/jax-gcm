@@ -20,7 +20,8 @@ ozone_file: auto
 #   * an explicit path or ``hf://`` path (use ``auto`` — not a path template —
 #     to let a config follow the grid). Only ``emissions_file`` and
 #     ``oxidants_file`` accept a ``{year}`` pattern (expanded per year);
-#     ``dms_file`` / ``dust_file`` are climatology-only single files and reject
+#     ``dms_file`` / the ``dust_*`` keys are climatology-only single files
+#     or static maps and reject
 #     a ``{year}`` at build time;
 #   * ``null`` to opt out explicitly (the runner then warns it is emission-free).
 # Files must already be on the model horizontal grid; download once on a node
@@ -36,10 +37,17 @@ emissions_file: auto
 # nmol/L; ``bundles/<grid>/dms.nc``). Drives ``DmsEmissions``.
 dms_file: auto
 
-# Dust-source/erodibility monthly climatology (HAMMOZ ``pot_source
-# (time, lat, lon)`` in [0, 1]; ``bundles/<grid>/dust.nc``). Drives
-# ``DustEmissions``.
+# The five Tegen/HAMMOZ dust inputs (#802). ``dust_file`` is the monthly
+# effective-LAI potential-source climatology, which both gates the flux and
+# multiplies it; the three static companions are mandatory alongside it (the
+# scheme would otherwise run on an all-coarse, untuned soil, so a missing one
+# raises). ``dust_roughness_file`` is the satellite roughness map, read only
+# on the ``ndurough = 0`` sensitivity path. ``dust_file: null`` disables dust.
 dust_file: auto
+dust_preferential_file: auto
+dust_soil_types_file: auto
+dust_regions_file: auto
+dust_roughness_file: auto
 
 # Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC
 # ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole;

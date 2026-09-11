@@ -97,6 +97,26 @@ class AttachJamForcingTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(leaf.values), 10.0 * 1.0e-6 * 0.0621324, rtol=1e-6)
 
+    def _dust_companions(self, tmp):
+        """Write the three mandatory static Tegen inputs beside the source map."""
+        pref = xr.Dataset(
+            {"source": (("lat", "lon"), np.full((_LAT.size, _LON.size), 0.25))},
+            coords={"lat": _LAT, "lon": _LON})
+        soils = xr.Dataset(
+            {f"type{i}": (("lat", "lon"),
+                          np.full((_LAT.size, _LON.size),
+                                  0.2 if i in (2, 3, 4, 6) else 0.0))
+             for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)},
+            coords={"lat": _LAT, "lon": _LON})
+        regions = xr.Dataset(
+            {"regions": (("lat", "lon"),
+                         np.tile(np.arange(1, _LAT.size + 1)[:, None],
+                                 (1, _LON.size)).astype(float))},
+            coords={"lat": _LAT, "lon": _LON})
+        return {"dust_preferential_file": _write(tmp, "pref.nc", pref),
+                "dust_soil_types_file": _write(tmp, "soil.nc", soils),
+                "dust_regions_file": _write(tmp, "reg.nc", regions)}
+
     def test_static_dust_map_on_columns(self):
         ds = xr.Dataset(
             {"pot_source": (("lat", "lon"),
@@ -104,9 +124,29 @@ class AttachJamForcingTest(unittest.TestCase):
             coords={"lat": _LAT, "lon": _LON},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            forcing = _attach(dust_file=_write(tmp, "dust.nc", ds))
+            forcing = _attach(dust_file=_write(tmp, "dust.nc", ds),
+                              **self._dust_companions(tmp))
         self.assertEqual(forcing.dust_source.shape, (1, _NCOL))
         np.testing.assert_allclose(np.asarray(forcing.dust_source), 0.5)
+        self.assertEqual(forcing.dust_preferential.shape, (1, _NCOL))
+        np.testing.assert_allclose(np.asarray(forcing.dust_preferential), 0.25)
+        np.testing.assert_allclose(
+            np.asarray(forcing.dust_soil_types["type2"]), 0.2)
+        # The region mask is categorical: nearest-neighbour, so every column
+        # keeps an exact integer label.
+        regions = np.asarray(forcing.dust_regions)
+        self.assertEqual(regions.shape, (1, _NCOL))
+        np.testing.assert_array_equal(regions, np.round(regions))
+
+    def test_dust_without_its_companions_is_refused(self):
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"),
+                            np.full((_LAT.size, _LON.size), 0.5))},
+            coords={"lat": _LAT, "lon": _LON},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "dust_soil_types_file"):
+                _attach(dust_file=_write(tmp, "dust.nc", ds))
 
     def test_oxidants_per_level_on_columns(self):
         nlev = 4
