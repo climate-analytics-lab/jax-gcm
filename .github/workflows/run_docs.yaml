@@ -20,6 +20,10 @@ on:
 
 permissions:
   contents: read
+  # The rot guard's issue-state check reads the Issues API with the workflow
+  # token; unspecified permissions are none, and an underprivileged 403 is
+  # indistinguishable from rate limiting (which skips the check).
+  issues: read
 
 jobs:
   validate-docs:
