@@ -28,9 +28,9 @@ def particle_mean_mass(mode: AerosolMode, species_density: float,
     the emitted and equilibrium sizes differ.
 
     The mechanism only; no scheme in this module supplies a diameter yet.
-    Each emission scheme owns the size its own reference prescribes — HAM's
-    (Stier et al. 2005) for the HAMMOZ schemes this package ports — so the
-    values arrive with the scheme, not here.
+    Each emission scheme owns the size its own reference prescribes, and this
+    is a HAMMOZ package: the primary-carbon and primary-sulfate sizes come
+    from HAM (Stier et al. 2005) with the emissions port, not from CAM/CESM.
     """
     if emission_diameter is None:
         return species_density / mode.number_factor
