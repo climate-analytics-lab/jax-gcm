@@ -234,10 +234,17 @@ JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 ```
 
-Then review your own diff adversarially **before pushing** — `/code-review
-high` on the branch, fix or refute every finding (`jcm-dev-workflow` step 3).
-Codex credits are finite and a CI review round takes hours; a finding caught
-locally costs neither.
+Then review your own diff adversarially **before pushing** and fix or refute
+every finding (`jcm-dev-workflow` step 3). Codex credits are finite and a CI
+review round takes hours; a finding caught locally costs neither. **Choose the
+reviewer by the session's model.** `/code-review` forks the invoking session:
+same model, full conversation context inherited, and at `high`/`max` its
+finders and verifiers fan out the same way. From a Fable session that spends
+Fable tokens at full context (it exhausted a session limit twice on
+2026-09-10). On a Fable session spawn an explicit `model: opus` reviewer agent
+with the same scope and have it post one `gh pr review --comment`; run
+`/code-review high` itself only from an Opus or Sonnet session, or when the
+maintainer asks for it knowing it forks on the parent model.
 
 Two traps the gates exist to catch. `JAX_PLATFORMS=cpu` is REQUIRED on GPU
 hosts (every xdist worker otherwise grabs the same GPU and XLA fails with
