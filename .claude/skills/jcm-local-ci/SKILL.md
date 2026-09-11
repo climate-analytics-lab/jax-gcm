@@ -54,12 +54,32 @@ budget. GitHub's runners tolerate the serial run; Derecho's do not.
 (`docs/source/design/test_suite_memory.md` covers the related growth in
 retained XLA executables that the root `conftest.py` bounds.)
 
-## Local Claude review
+## Local Claude review — run it BEFORE pushing, on the right model
 
-In a Claude Code session on the branch: `/code-review high` reviews the
-diff vs upstream with multi-agent finders + verification — no Actions
-minutes, billed to the Claude session. For the deep cloud variant use
-`/code-review ultra` (user-triggered, separately billed).
+The adversarial self-review `jcm-dev-workflow` step 3 requires before every
+push that changes code: Codex credits are finite, and a finding Codex makes
+that this review would have made is a credit burnt and a round lost. Fix or
+explicitly refute every finding before `git push`.
+
+**Which reviewer depends on the session's model.** `/code-review high` forks
+the invoking session — same model, full conversation context inherited — and
+its finders and verifiers fan out the same way, so it is billed to *that*
+session at full context. It exhausted a Fable session limit twice on
+2026-09-10 (the failure notices name the model:
+`model sent to the API: claude-fable-5-1`).
+
+- **Opus or Sonnet session:** `/code-review high` on the branch, as before.
+- **Fable session:** do not invoke the skill. Spawn a general-purpose agent
+  with `model: opus`, give it the same scope (reference formulation, JAX
+  hygiene, tests, docs, comment style, diff vs upstream), and have it post one
+  review via `gh pr review <PR> --comment --body-file <file>`. Forward its
+  findings to the authoring agent for fix-and-reply. This is how #776's
+  blocker and #783's second-round findings were caught.
+- If the maintainer explicitly asks for `/code-review` from a Fable session,
+  say first that it will fork on Fable at full context, and confirm.
+
+For the deep cloud variant use `/code-review ultra` (user-triggered,
+separately billed).
 
 ## Codex review comments: always reply inline
 

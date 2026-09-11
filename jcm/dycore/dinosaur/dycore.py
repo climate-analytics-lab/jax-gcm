@@ -1,7 +1,7 @@
 """Dinosaur-backed implementation of the :class:`DynamicalCore` protocol.
 
 Wraps the spectral primitive-equations dycore from the external ``dinosaur``
-package. Owns the IMEX-RK SIL3 step, the three diffusion filter closures,
+package. Owns the semi-Lagrangian Crank-Nicolson RK2 step, the three diffusion filter closures,
 the global-mean ps-conservation filter, the modal-orography truncation,
 and the gridpoint↔modal conversions. Outside this subpackage the rest of
 jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
@@ -67,10 +67,8 @@ def physics_specs_from_constants(
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
 
-#: Semi-Lagrangian transport classes jcm requires from dinosaur. They live in
-#: neuralgcm/dinosaur#135 and are not in a released dinosaur yet, so until that
-#: lands the backend needs the fork (``shoyer/dinosaur`` @ ``semi-lagrangian``)
-#: on the path. Pin a minimum dinosaur here once it ships.
+#: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
+#: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
 _SL_CLASSES = (
     "SemiLagrangianPrimitiveEquations",
     "SemiLagrangianPrimitiveEquationsHybrid",
@@ -105,10 +103,9 @@ def _require_semi_lagrangian() -> None:
         f"({', '.join(missing)} missing), and jcm's dinosaur backend now "
         "requires it — the Eulerian path has been removed because it rang "
         "negative on sharp sources and NaN'd aerosol microphysics (#521). "
-        "Install the fork until neuralgcm/dinosaur#135 is released:\n"
-        "    pip install 'dinosaur @ git+https://github.com/shoyer/dinosaur"
-        "@semi-lagrangian'\n"
-        "or put a clone of that branch on PYTHONPATH."
+        "Install a current release:\n"
+        "    pip install 'dinosaur>=1.5.0'\n"
+        "and remove any older dinosaur checkout from PYTHONPATH."
     )
 
 
@@ -435,11 +432,11 @@ class DinosaurDycore(DynamicalCore):
         return filters
 
     # ------------------------------------------------------------------
-    # Dynamics step (IMEX-RK SIL3)
+    # Dynamics step (SL Crank-Nicolson RK2)
     # ------------------------------------------------------------------
 
     def _build_dynamics_step_fn(self):
-        """Build the dynamics step (IMEX-RK SIL3, or SL Crank–Nicolson RK2).
+        """Build the dynamics step (SL Crank–Nicolson RK2).
 
         The op-split caller adds the physics dynamics-tendency to the state
         forward-Euler-style before invoking this; the integrator advances
@@ -690,7 +687,7 @@ class DinosaurDycore(DynamicalCore):
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        IMEX-RK SIL3 dynamics step → spectral filters.
+        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters.
         """
         if physics_tendency is not None:
             # The tendency comes back from physics in the "physics" sharding;

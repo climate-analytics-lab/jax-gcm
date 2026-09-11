@@ -23,7 +23,6 @@ USER = os.environ.get("USER", "")
 SCRATCH = os.environ.get("SCRATCH", f"/glade/derecho/scratch/{USER}")
 DEFAULT_REPO = os.environ.get("JCM_REPO", f"{HOME}/jax-gcm-pyses")
 DEFAULT_VENV = os.environ.get("JCM_VENV", f"{HOME}/.venvs/jaxgcm")
-DEFAULT_DINOSAUR = os.environ.get("JCM_DINOSAUR", f"{HOME}/dinosaur-sl")
 DEFAULT_ACCOUNT = os.environ.get("PBS_ACCOUNT", "UCSD0085")
 JAM_INPUTS = os.environ.get("JAM_INPUTS", f"{SCRATCH}/jam_inputs")
 EMISSIONS = os.environ.get(
@@ -146,7 +145,7 @@ def check_compose(a, overrides) -> None:
              if not o.startswith(("run.output", "hydra.run.dir", "+run.checkpoint"))],
            "--cfg", "job"]
     env = {**os.environ, "JAX_PLATFORMS": "cpu",
-           "PYTHONPATH": f"{a.dinosaur}:{a.repo}"}
+           "PYTHONPATH": a.repo}
     r = subprocess.run(cmd, cwd=a.repo, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("COMPOSE FAILED:\n" + (r.stderr or r.stdout)[-2000:])
@@ -232,7 +231,6 @@ def main(argv=None) -> None:
     p.add_argument("--extra", default="", help="raw Hydra overrides")
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--venv", default=DEFAULT_VENV)
-    p.add_argument("--dinosaur", default=DEFAULT_DINOSAUR)
     p.add_argument("--check", action="store_true",
                    help="compose the config before emitting the script")
     a = p.parse_args(argv)
@@ -268,7 +266,7 @@ RUNDIR={rundir}
 mkdir -p "$RUNDIR"
 source {a.venv}/bin/activate
 cd "$REPO"
-export PYTHONPATH={a.dinosaur}:$REPO
+export PYTHONPATH=$REPO
 export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION={frac}

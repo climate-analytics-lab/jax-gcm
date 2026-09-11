@@ -8,7 +8,6 @@ This module implements:
 
 Based on ICON mo_cufluxdts.f90
 
-Date: 2025-01-09
 """
 
 import jax
@@ -36,13 +35,6 @@ def calculate_precipitation_rate(
     its liquid water content to precip, mirroring ECHAM
     ``mo_cuascent.f90`` lines 454-457. The column integral of those
     per-layer rates is the surface rain mass flux.
-
-    The previous implementation returned ``sum(mfu*lu) * cprcon`` —
-    i.e. it ignored the per-layer precip removal step entirely. As a
-    result the surface precip estimate was ~60x too small (typical
-    0.008 mm/day on a tropical RCE column vs. ECHAM's ~0.5 mm/day),
-    AND the liquid water built up unphysically inside the parcel as it
-    rose — distorting the buoyancy and terminating the updraft early.
 
     Args:
         updraft_state: Updraft calculation results (with per-layer
@@ -258,11 +250,9 @@ def calculate_tendencies(
     # where Δp = p_half(k+1) − p_half(k) (signed) and F is the deviation
     # flux M·(s_par − s̄). Both ``Δp`` and ``F(k+1) − F(k)`` flip sign
     # together with vertical ordering, so leaving them signed keeps the
-    # formula ordering-agnostic. The previous implementation used
-    # ``-diff(F)`` together with ``abs(Δp)`` — correct for surface-first
-    # inputs but inverted for the TOA-first columns the running ICON
-    # physics actually feeds in, leading to convective *cooling* of the
-    # cloud layer in production runs.
+    # formula ordering-agnostic — required because the running ICON physics
+    # feeds TOA-first columns (a signed Δp with ``-diff(F)`` would invert the
+    # tendency there and cool the cloud layer).
     dp_signed = jnp.diff(pressure, axis=0)
     dse_flux_div = jnp.diff(dse_flux_up + dse_flux_down, axis=0)
     # Moisture deviation flux: same logic — env q is what gets displaced
@@ -365,9 +355,9 @@ def calculate_tendencies(
         # prognostic plume wind (ECHAM builds puu/pvu in cubase/cuasc), so
         # the plume wind is approximated by the cloud-base environment wind
         # — the leading-order cududv behaviour (plume momentum is dominated
-        # by its sub-cloud source). The previous invented "PGF relaxation"
-        # term (0.3 efficiency toward cloud-base wind) had no ECHAM
-        # counterpart and is removed.
+        # by its sub-cloud source). There is no PGF-relaxation term: the
+        # momentum tendency is the cududv deviation-flux divergence alone,
+        # with no ECHAM-absent relaxation toward the cloud-base wind.
         u_cloud_base = u_wind[kbase]
         v_cloud_base = v_wind[kbase]
         u_up = jnp.roll(u_wind, 1)  # upstream (jk−1) environment wind

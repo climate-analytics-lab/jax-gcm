@@ -17,11 +17,10 @@ Per-variable, per-level relaxation timescales are configurable so the
 common case ("nudge winds above the PBL") is expressible without
 subclassing.
 
-The previous version composed the relaxation tendency directly into the
-dinosaur IMEX-RK substages by transforming everything to modal space at
-load time. That coupled the relaxation API to a single dycore. Moving to
-a :class:`PhysicsTerm` keeps it physics-agnostic — any dycore that
-satisfies the :class:`DynamicalCore` protocol gets nudging for free.
+Implemented as a :class:`PhysicsTerm`, it stays physics-agnostic — any
+dycore that satisfies the :class:`DynamicalCore` protocol gets nudging for
+free, without transforming the relaxation tendency into any one dycore's
+modal space.
 
 Reference: Krishnamurti et al. (1991), *Tellus 43AB*, 53–81.
 """

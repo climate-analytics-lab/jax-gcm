@@ -163,7 +163,7 @@ def surface_physics_step(
     # routines in this module (``compute_bulk_richardson_number`` /
     # ``compute_stability_functions`` / ``compute_exchange_coefficients``)
     # remain available and tested as a surface-side reference scheme, but are
-    # no longer in the default flux path. ``ri_bulk`` above is still used for
+    # not in the default flux path. ``ri_bulk`` above is still used for
     # the aerodynamic-resistance diagnostics below.
     exchange_coeff_momentum = atmospheric_state.exchange_coeff_momentum
     exchange_coeff_heat = atmospheric_state.exchange_coeff_heat
@@ -526,9 +526,9 @@ class EchamSurface(PhysicsTerm):
         # Publish the DELIVERED fluxes diagnosed from the vdiff implicit
         # solution. By the ECHAM ``pev_vdiff`` identity these equal the
         # column-integrated vdiff tendencies exactly, so ``evaporation ==
-        # effective_evaporation`` — the raw-vs-damped distinction (and the
-        # imp_moist factor) no longer exists. The field is kept for API
-        # stability (the Tiedtke moisture-budget closure reads it).
+        # effective_evaporation`` — there is no raw-vs-damped distinction and
+        # no imp_moist factor. The field is kept for API stability (the
+        # Tiedtke moisture-budget closure reads it).
         evaporation = vdiff.surface_evaporation.reshape(ncols)
         surface_out = prev_surface.copy(
             sensible_heat_flux=vdiff.surface_sensible_heat.reshape(ncols),

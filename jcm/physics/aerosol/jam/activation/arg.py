@@ -1,7 +1,12 @@
 """Abdul-Razzak & Ghan (2000) modal aerosol activation.
 
 Closed-form maximum-supersaturation activation for a log-normal modal
-population (mirrors HAMMOZ ``mo_ham_activ::ham_activ_abdulrazzak_ghan``).
+population — a faithful port of CAM's ``ndrop.F90`` (Abdul-Razzak & Ghan
+2000) fed MAM4 modal properties (volume-weighted κ mixing per mode; a single
+sqrt(2·TKE/3) characteristic updraft). This is deliberately the κ-Köhler CAM
+form, not HAMMOZ ``mo_ham_activ::ham_activ_abdulrazzak_ghan``, which builds a
+van't Hoff Köhler ``B`` coefficient and uses 0.7·sqrt(TKE); the CAM form is
+correct as written for MAM4 κ inputs.
 Two variants of the size-dependent shape coefficients are provided:
 
 * ``"arg2000"`` — the original Abdul-Razzak & Ghan (2000) coefficients.
