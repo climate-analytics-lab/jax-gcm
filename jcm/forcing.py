@@ -67,8 +67,11 @@ def _validate_bc_fields(ds) -> None:
         "sst":  (220.0, 320.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
-        "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
-        "snowc":    (0.0, 20000.0),  # mm snow depth (we clip > 20000 to 0 anyway, but reject negatives)
+        # SPEEDY's vegetation-weighted root-zone availability INDEX, 1 at
+        # field capacity (jcm.data.bc.compile) — not a water depth. The bound
+        # stays loose to admit legacy files carrying an unnormalised field.
+        "soilw_am": (0.0, 5.0),  # fraction [0, 1]
+        "snowc":    (0.0, 20000.0),  # snow-cover fraction [0, 1]; the loose bound admits legacy mm-depth files, which are clipped later
     }
     for name, (lo, hi) in HARD_RANGES.items():
         if name not in ds.data_vars:
@@ -235,7 +238,10 @@ class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
-    snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
+    # Snow-cover fraction, ZERO where snow never melts (ice-sheet albedo lives
+    # in ``alb0`` instead, so blending it here would double-count): not an
+    # ice-sheet mask.
+    snowc_am: jnp.ndarray # snow cover
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
@@ -289,7 +295,10 @@ class ForcingData:
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
     # dust emission is simply inert until the field is supplied.
     dms_seawater: Any = None   # seawater DMS concentration kg/m³ (DmsEmissions)
-    dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+    # Dust source map for DustEmissions. NOT bounded by 1: CAM's basin factor
+    # is an unbounded weight (#768). physics.jam_dust_source says which
+    # convention the file follows.
+    dust_source: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -1154,6 +1163,53 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
     )
 
 
+def is_clipped_erodibility(arr, tol: float = 1e-9) -> bool:
+    """Whether ``arr`` is a CAM erodibility map that was capped at 1 when built.
+
+    The single definition of the predicate: the maximum sits at 1 to within
+    round-off and more than one cell is on that plateau. Tolerant because
+    regridding a clipped map interpolates over the plateau and lands a hair
+    either side of 1 (the shipped t106 bundle peaks at 1.0000000000000002).
+    ``tools/prep_jam_aux_inputs.py`` imports this rather than restating it.
+    """
+    import numpy as _np
+
+    arr = _np.asarray(arr)
+    return bool(arr.max() <= 1.0 + tol and (arr >= 1.0 - tol).sum() > 1)
+
+
+def _reject_truncated_erodibility(da, arr) -> None:
+    """Raise on a CAM erodibility map that was capped at 1 when it was built.
+
+    CAM's ``mbl_bsn_fct_geo`` is an unbounded weight (0-5.7); builds before
+    #768 clipped it to [0, 1], which silently truncates 15 % of the global
+    source weight in exactly the basins that dominate dust emission. Such a
+    file is identifiable — it says it is the CAM product and its maximum sits
+    at exactly 1.0 across many cells — so it is refused rather than used, since
+    nothing downstream could tell the truncated map from a correct one.
+    """
+    text = " ".join(str(da.attrs.get(k, "")) for k in ("long_name", "source"))
+    text += " " + str(getattr(da, "name", ""))
+    if "mbl_bsn_fct_geo" not in text and "/dst_" not in text:
+        return
+    if not is_clipped_erodibility(arr):
+        return
+    raise ValueError(
+        "This CAM dust-erodibility map was clipped to [0, 1] when it was "
+        "built: mbl_bsn_fct_geo is an unbounded basin-factor WEIGHT (0-5.7) "
+        "and capping it truncates 15 % of the global source weight, "
+        "concentrated in the strongest source basins (#768). Rebuild it with "
+        "the fixed preparation tool:\n"
+        "  python tools/prep_jam_aux_inputs.py --target-truncation <T> "
+        "--outdir <dir>\n"
+        "and point forcing.dust_file at "
+        "<dir>/dust_erodibility_cam_f05_t<T>.nc (mirror maintainers: re-stage "
+        "bundles/<grid>/dust_erodibility.nc from it, so `auto` resolves the "
+        "fixed map). "
+        "forcing.dust_file=null runs dust-free in the meantime."
+    )
+
+
 def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
                      align_mode: str = "wrap_year"):
     """Read a dust-source/erodibility climatology for ``ForcingData.dust_source``.
@@ -1169,10 +1225,12 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
       ``ForcingData.select`` passes non-``TimeSeries`` leaves through
       untouched, so the same field reaches ``DustEmissions`` every step.
 
-    :class:`DustEmissions`' contract is a dimensionless erodibility in
-    **[0, 1]**, so values are clipped — the file encodes missing cells as
-    ``-1`` (its ``missing`` attribute), which the clip maps to zero (no
-    source), and interpolation overshoot above 1 is capped.
+    :class:`DustEmissions` gates the field per its ``source_kind``, so only
+    the lower bound is imposed here: the HAMMOZ file encodes missing cells as
+    ``-1`` (its ``missing`` attribute) and NaN decodes to no source. Values
+    above 1 are kept — CAM's basin factor is an unbounded weight (0-5.7), and
+    capping it truncated 15 % of the global source weight in the strongest
+    source basins (#768).
     """
     if var_name not in ds.data_vars:
         raise ValueError(
@@ -1182,7 +1240,8 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
     arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     # Missing cells (NaN after decode, or the raw ``-1`` marker) mean "no dust
     # source"; NaN would pass straight through ``clip``, so zero it first.
-    arr = np.clip(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    arr = np.maximum(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+    _reject_truncated_erodibility(ds[var_name], arr)
     if "time" not in ds[var_name].dims:
         # Static (lat, lon) map → bare (lon, lat) array. No time axis to
         # build a TimeSeries from, and DustEmissions reads a 2-D field

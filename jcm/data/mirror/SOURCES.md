@@ -11,7 +11,7 @@ Regridding always starts from the highest-resolution product available.
 | AMIP SST + sea ice | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10` (`tos`, `tosbcs`, `siconc`) | 1°, 1870–2022 |
 | Ozone (CMIP7) | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0` (`vmro3`) | 1.9×2.5°, 66 plev to ~1e-4 hPa |
 | ERA5 land climatology | `/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc` (`stl1`, `swvl1`, `sd`, `skt`, `fal`) | 0.25° monthly means |
-| Dust erodibility | `/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst/dst_0.23x0.31_c130710.nc` | 0.23×0.31° |
+| Dust erodibility (`mbl_bsn_fct_geo`, an UNBOUNDED 0–5.7 basin-factor weight — never capped at 1, #768) | `/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst/dst_0.23x0.31_c130710.nc` | 0.23×0.31° |
 | DMS seawater (Lana 2011) | `.../inputdata/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc` | 0.9×1.25° |
 | Oxidants OH/HO2/NO3/H2O2/O3, full lid (BUNDLED) | `/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone/oxid_ozone_WACCM_CCMI_REFC1_f.e11.FWTREFC1.<decade>.f19_f19.ccmi34.001_monthly.nc` (decades 1850s–2000s) | 1.9×2.5°, L66 to ~6e-6 hPa |
 | Oxidants, year-specific fallback | `.../inputdata/atm/cam/chem/trop_mozart_aero/oxid/oxid_1.9x2.5_L26_1850-2015_c20181106.nc` (`--oxid-source cam`) | 1.9×2.5°, L26 |

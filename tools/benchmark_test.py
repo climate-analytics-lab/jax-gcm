@@ -196,7 +196,7 @@ class KeepOutputTest(unittest.TestCase):
 _MIRROR_EMISSION_BUNDLES = frozenset(
     [f"hf://bundles/{g}/{p}"
      for g in ("t63", "t106")
-     for p in ("emissions_pd.nc", "dms.nc", "dust.nc")]
+     for p in ("emissions_pd.nc", "dms.nc", "dust_erodibility.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
 )
@@ -233,7 +233,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         self.assertEqual(sorted(_auto_emission_files(cfg)), sorted([
             "hf://bundles/t63/emissions_pd.nc",
             "hf://bundles/t63/dms.nc",
-            "hf://bundles/t63/dust.nc",
+            "hf://bundles/t63/dust_erodibility.nc",
             "hf://bundles/t63_l47/oxidants_pd.nc",
         ]))
         prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
@@ -259,7 +259,7 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                  "forcing.dust_file=null", "forcing.oxidants_file=null"]
         with_extra = _preset_data_files([*preset, *extra])
         for bundle in ("hf://bundles/t63/emissions_pd.nc",
-                       "hf://bundles/t63/dms.nc", "hf://bundles/t63/dust.nc",
+                       "hf://bundles/t63/dms.nc", "hf://bundles/t63/dust_erodibility.nc",
                        "hf://bundles/t63_l47/oxidants_pd.nc"):
             self.assertNotIn(bundle, with_extra)
 

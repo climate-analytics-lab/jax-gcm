@@ -28,6 +28,14 @@ jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Kö
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 
+# Which convention the prescribed dust source map (forcing.dust_file) follows.
+# cam_erodibility (default): CAM's geomorphic basin factor mbl_bsn_fct_geo, an
+# unbounded weight zeroed below 0.1 (dust_model.F90) — what the mirror bundle
+# carries. tegen_potential: a HAMMOZ-style potential-source FRACTION in [0, 1]
+# whose preprocessing already embeds the vegetation/land-cover mask, so no
+# threshold is applied. Set it to match the file, not the other way round.
+jam_dust_source: cam_erodibility
+
 # Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
 # the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
 # in-droplet wet removal, dry deposition, and the aqueous sulfate split. false

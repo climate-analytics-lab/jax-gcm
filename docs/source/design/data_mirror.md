@@ -21,7 +21,7 @@ climatology arrays alongside the transient series.
 
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
-`emissions_{pi,pd}.nc`, `dms.nc`, `dust.nc`, and per level count
+`emissions_{pi,pd}.nc`, `dms.nc`, `dust_erodibility.nc`, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -120,7 +120,7 @@ python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
     forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc \
     forcing.emissions_file=hf://bundles/t63/emissions_pd.nc \
     forcing.dms_file=hf://bundles/t63/dms.nc \
-    forcing.dust_file=hf://bundles/t63/dust.nc \
+    forcing.dust_file=hf://bundles/t63/dust_erodibility.nc \
     forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc \
     forcing.ozone_file=hf://bundles/t63_l47/ozone_pd.nc
 ```
@@ -190,9 +190,11 @@ inventory):
 - `soilw_am` is the SPEEDY soil-availability **fraction** in [0, 1],
   computed from ERA5 volumetric layers with the `jcm.data.bc.compile`
   formula (vegetation-gated deep layer, wilting/capacity thresholds);
-  `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`. Both
-  follow the packaged files' conventions exactly (see the `bundles.py`
-  docstring).
+  `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`, **zero
+  by construction where snow never melts** (ice sheets: their albedo is
+  already in the static `alb`, and blending toward fresh-snow albedo
+  would double-count it), so it is not an ice-sheet mask. Both follow the
+  packaged files' conventions exactly (see the `bundles.py` docstring).
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient

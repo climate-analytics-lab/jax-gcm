@@ -106,7 +106,7 @@
       "staged": true
     },
     "dust": {
-      "path": "bundles/{grid}/dust.nc",
+      "path": "bundles/{grid}/dust_erodibility.nc",
       "source": "mirror",
       "grids": [
         "t106",

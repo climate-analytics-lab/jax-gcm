@@ -953,11 +953,11 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "latitudes"):
             read_dms_seawater(ds, lat_deg=self.LAT_DESC + 5.0)
 
-    def test_dust_reader_clips_to_unit_interval(self):
+    def test_dust_reader_floors_at_zero_and_keeps_weights_above_one(self):
         from jcm.forcing import WRAP_YEAR, read_dust_source
         vals = np.zeros((12, self.NLAT, self.NLON))
         vals[:, 0, 0] = -1.0    # the file's missing marker
-        vals[:, 1, 1] = 1.5     # interpolation overshoot
+        vals[:, 1, 1] = 1.5     # CAM basin factor > 1 (runs to 5.7)
         vals[:, 2, 2] = 0.7
         vals[0, 3, 3] = np.nan
         ds = self._dataset("pot_source", vals, units="1.")
@@ -965,13 +965,86 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(int(ts.align_mode), WRAP_YEAR)
         arr = np.asarray(ts.values)
         self.assertEqual(arr.shape, (12, self.NLON, self.NLAT))
-        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
-        # -1 → 0; 1.5 → 1; 0.7 preserved (lat flipped: file lat idx i →
-        # ascending idx 3 - i).
+        self.assertTrue((arr >= 0.0).all())
+        # -1 → 0; 1.5 PRESERVED (an unbounded erodibility weight — capping it
+        # truncated the strongest source basins, #768); 0.7 preserved (lat
+        # flipped: file lat idx i → ascending idx 3 - i).
         self.assertEqual(arr[0, 0, 3], 0.0)
-        self.assertEqual(arr[0, 1, 2], 1.0)
+        self.assertEqual(arr[0, 1, 2], 1.5)
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
+
+    def test_dust_reader_rejects_a_clipped_cam_erodibility_build(self):
+        # The pre-#768 build of the CAM map capped an unbounded basin-factor
+        # weight at 1; nothing downstream can tell it from a correct map, so
+        # the reader refuses it with the rebuild command.
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        vals[2, 2] = 0.7
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        with self.assertRaisesRegex(ValueError, "prep_jam_aux_inputs"):
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+
+    def test_dust_reader_rejects_a_clipped_build_whose_max_rounds_above_one(self):
+        # Regridding a clipped map interpolates over the plateau: the shipped
+        # t106 bundle peaks at 1.0000000000000002, which an exact == 1.0 test
+        # read as "not clipped" and served silently.
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0 + 2e-16
+        vals[2, 2] = 0.7
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        with self.assertRaisesRegex(ValueError, "prep_jam_aux_inputs"):
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+
+    def test_dust_reader_accepts_an_unclipped_cam_erodibility_build(self):
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        vals[1, 1] = 4.4          # the basin maxima the clip used to remove
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "CAM geomorphic dust source "
+                                          "(mbl_bsn_fct_geo)"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        arr = np.asarray(
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON))
+        self.assertAlmostEqual(float(arr.max()), 4.4, places=5)
+
+    def test_dust_reader_accepts_a_unit_bounded_potential_source_map(self):
+        # A HAMMOZ potential-source FRACTION legitimately maxes at 1 — it must
+        # not trip the truncated-CAM-build check (different provenance).
+        import xarray as xr
+        from jcm.forcing import read_dust_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[0, :2] = 1.0
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"), vals,
+                            {"units": "1.",
+                             "long_name": "Tegen potential dust source"})},
+            coords={"lat": self.LAT_DESC, "lon": self.LON},
+        )
+        arr = np.asarray(
+            read_dust_source(ds, lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON))
+        self.assertAlmostEqual(float(arr.max()), 1.0)
 
     def test_dust_reader_accepts_static_lat_lon_map(self):
         # A time-invariant potential-source / erodibility map has no `time`
@@ -982,7 +1055,7 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         from jcm.forcing import TimeSeries, read_dust_source
         vals = np.zeros((self.NLAT, self.NLON))
         vals[0, 0] = -1.0    # missing marker → 0
-        vals[1, 1] = 1.5     # overshoot → 1
+        vals[1, 1] = 1.5     # erodibility weight > 1, preserved
         vals[2, 2] = 0.7
         ds = xr.Dataset(
             {"pot_source": (("lat", "lon"), vals, {"units": "1."})},
@@ -996,11 +1069,11 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertNotIsInstance(out, TimeSeries)
         arr = np.asarray(out)
         self.assertEqual(arr.shape, (self.NLON, self.NLAT))
-        self.assertTrue((arr >= 0.0).all() and (arr <= 1.0).all())
-        # Same clip semantics as the monthly path (lat flips: file idx i →
-        # ascending idx 3 - i).
+        self.assertTrue((arr >= 0.0).all())
+        # Same floor-only semantics as the monthly path (lat flips: file idx i
+        # → ascending idx 3 - i).
         self.assertEqual(arr[0, 3], 0.0)
-        self.assertEqual(arr[1, 2], 1.0)
+        self.assertEqual(arr[1, 2], 1.5)
         self.assertAlmostEqual(float(arr[2, 1]), 0.7)
 
     def _oxidant_ds(self, nlev=5, hybm=None, drop=None):

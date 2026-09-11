@@ -46,19 +46,32 @@ EMITTED_SPECIES: tuple[str, ...] = ("so2", "bc", "oc")
 
 @dataclass(frozen=True)
 class SectorDefaults:
-    """Default smooth-injection geometry for a super-sector [m]."""
+    """Default injection geometry [m] and emitted sizes [m] for a super-sector.
+
+    The emitted sizes are the volume-mean diameters CESM's emission-file
+    generator uses to turn a mass flux into a number flux (the per-file
+    ``mapping_equation`` attribute of the CMIP7 ``num_*`` products, e.g.
+    ``num_bc_a4 = 1.0*BC ... 0.134e-6 1700``): accumulation sulfate 0.134 µm
+    for surface/agricultural sources and 0.261 µm for energy/industrial and
+    shipping, Aitken sulfate 0.0504 µm, primary carbon 0.134 µm.
+    """
 
     injection_height: float     # Gaussian centre height
     injection_thickness: float  # Gaussian width
+    so4_accum_diameter: float = 0.134e-6
+    so4_aitken_diameter: float = 0.0504e-6
+    carbon_diameter: float = 0.134e-6
 
 
 SECTOR_DEFAULTS: dict[str, SectorDefaults] = {
     "surface_combustion": SectorDefaults(injection_height=0.0,
                                          injection_thickness=30.0),
     "elevated_industrial": SectorDefaults(injection_height=50.0,
-                                          injection_thickness=30.0),
+                                          injection_thickness=30.0,
+                                          so4_accum_diameter=0.261e-6),
     "shipping": SectorDefaults(injection_height=0.0,
-                               injection_thickness=30.0),
+                               injection_thickness=30.0,
+                               so4_accum_diameter=0.261e-6),
     # Open biomass burning (HAMMOZ ``EM_FIRE``): smoke is lofted through a deep
     # layer rather than emitted at the surface. Defaults centre the smooth
     # Gaussian ~1 km up with a ~1.5 km width — a clearly elevated, deep profile
@@ -87,8 +100,12 @@ SO2_TO_SO4_MASS = SPECIES["so4"].molar_mass / GAS_SPECIES["so2"].molar_mass
 # Aitken/accumulation sulfate and primary-carbon-mode BC/POA (see
 # ``mam4_data._MAM4_PRIMARY_EMISSION``).
 #
-# Note on emitted size: HAMMOZ/M7 distinguishes fossil-fuel (~0.03 µm) from
-# biomass (~0.075 µm) primary-carbon size. MAM4 carries a *single*
-# primary-carbon mode for both, so that distinction collapses here — biomass and
-# anthropogenic carbon differ only in their injection profile. A per-super-sector
-# emitted size (count-median radius) would be future work (see #498).
+# Note on emitted size: MAM4 carries a *single* primary-carbon mode, and CESM
+# emits both anthropogenic and open-burning carbon at the same 0.134 µm
+# volume-mean diameter, so biomass and anthropogenic carbon differ only in
+# their injection profile. jcm's "surface_combustion" super-sector aggregates
+# CEDS activities that CESM emits at different accumulation-sulfate sizes
+# (0.134 µm agricultural, 0.261 µm solvents/waste); the aggregate takes the
+# 0.134 µm value. CESM sends transport/residential sulfate to the Aitken mode
+# and agricultural/energy/shipping sulfate to accumulation, where the
+# population here splits every sector 50/50 (HAMMOZ ``cmr_sk``/``cmr_sa``).

@@ -775,6 +775,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         kh = vdiff_diagnostics.exchange_coeff_heat.T
         pbl_height = vdiff_diagnostics.boundary_layer_height
         u_star = vdiff_diagnostics.friction_velocity
+        wind_10m = vdiff_diagnostics.wind_10m
 
         # Per-tile surface exchange velocities (CH·|U|, CE·|U|, CM·|U|, all
         # m/s) from the configured surface-layer scheme. The momentum
@@ -830,6 +831,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_exchange_momentum=surface_exchange_momentum,
             pbl_height=pbl_height,
             surface_friction_velocity=u_star,
+            wind_10m=wind_10m,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
             surface_latent_heat=sfc_fluxes.latent_heat,

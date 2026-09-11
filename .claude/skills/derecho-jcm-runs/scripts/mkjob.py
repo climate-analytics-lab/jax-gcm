@@ -31,19 +31,43 @@ EMISSIONS = os.environ.get(
 # Prepared aux inputs (purge-eligible on scratch — see reference/data_paths.md).
 AUX_FILES = {
     "dms_file": f"{JAM_INPUTS}/dms_lana2011_climo_t63.nc",
+    # The corrected (unclipped) build — the reader REFUSES a pre-#768 file
+    # whose weights were capped at 1, so a stale one must fail at submission.
     "dust_file": f"{JAM_INPUTS}/dust_erodibility_cam_f05_t63.nc",
     "oxidants_file": f"{JAM_INPUTS}/oxidants_cam_echam_l47_2014_t63.nc",
 }
 
 
 def check_inputs(a) -> None:
-    """Fail before qsub if a required input file is missing (scratch purges)."""
+    """Fail before qsub if a required input file is missing or unusable.
+
+    Existence is not enough for the dust map: a pre-#768 build whose weights
+    were capped at 1 is refused by ``jcm.forcing.read_dust_source``, and the
+    run would then die at model build inside the job rather than here.
+    """
     needed = [("emissions", a.emissions), *AUX_FILES.items()]
     missing = [f"{k}: {v}" for k, v in needed if not os.path.exists(v)]
     if missing:
         sys.exit("MISSING INPUT FILES (scratch is purge-eligible; see "
                  "reference/data_paths.md to regenerate):\n  " +
                  "\n  ".join(missing))
+    dust = AUX_FILES["dust_file"]
+    try:
+        import xarray as xr
+
+        from jcm.forcing import is_clipped_erodibility
+        with xr.open_dataset(dust) as ds:
+            clipped = is_clipped_erodibility(ds["pot_source"].values)
+    except Exception:                     # noqa: BLE001 - advisory check only
+        clipped = False
+    if clipped:
+        sys.exit(
+            f"CLIPPED DUST MAP: {dust} was built before #768 (weights capped "
+            "at 1) and jcm.forcing.read_dust_source refuses it. Rebuild with\n"
+            "  python tools/prep_jam_aux_inputs.py --target-truncation 63 "
+            f"--outdir {JAM_INPUTS}\n"
+            "or use --data mirror, which resolves bundles/<grid>/"
+            "dust_erodibility.nc.")
 
 
 def grid_tags(grid: str) -> tuple[str, str]:
@@ -69,7 +93,7 @@ def fetch_bundles(a) -> dict[str, str]:
         "forcing": f"bundles/{gtag}/forcing_{era}.nc",
         "emissions_file": f"bundles/{gtag}/emissions_{era}.nc",
         "dms_file": f"bundles/{gtag}/dms.nc",
-        "dust_file": f"bundles/{gtag}/dust.nc",
+        "dust_file": f"bundles/{gtag}/dust_erodibility.nc",
         "oxidants_file": f"bundles/{gtag}_{ltag}/oxidants_{era}.nc",
         "ozone_file": f"bundles/{gtag}_{ltag}/ozone_{era}.nc",
     }

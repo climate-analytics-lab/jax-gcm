@@ -36,9 +36,9 @@ emissions_file: auto
 # nmol/L; ``bundles/<grid>/dms.nc``). Drives ``DmsEmissions``.
 dms_file: auto
 
-# Dust-source/erodibility monthly climatology (HAMMOZ ``pot_source
-# (time, lat, lon)`` in [0, 1]; ``bundles/<grid>/dust.nc``). Drives
-# ``DustEmissions``.
+# Dust source/erodibility map (``pot_source``;
+# ``bundles/<grid>/dust_erodibility.nc``). Drives ``DustEmissions``;
+# ``physics.jam_dust_source`` says which convention the file follows.
 dust_file: auto
 
 # Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC

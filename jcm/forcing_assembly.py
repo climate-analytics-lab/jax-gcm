@@ -661,11 +661,14 @@ def _attach_dms(forcing, forcing_cfg, coords):
 def _attach_dust(forcing, forcing_cfg, coords):
     """Attach the dust-source/erodibility map from ``cfg.forcing.dust_file``.
 
-    No-op when unset. Loads a HAMMOZ-style monthly ``pot_source
-    (time, lat, lon)`` climatology (clipped to the [0, 1] erodibility contract
-    of :class:`DustEmissions` — see :func:`jcm.forcing.read_dust_source`) as a
-    ``WRAP_YEAR`` ``TimeSeries`` on ``forcing.dust_source``. Grid handling as
-    in :func:`_attach_dms`.
+    No-op when unset. Loads either convention onto ``forcing.dust_source``
+    (see :func:`jcm.forcing.read_dust_source`): a static CAM erodibility map,
+    an unbounded weight, as a bare array; or a HAMMOZ-style monthly
+    ``pot_source (time, lat, lon)`` fraction as a ``WRAP_YEAR``
+    ``TimeSeries``. Only the lower bound is imposed at load —
+    ``physics.jam_dust_source`` decides how the physics gates it, and
+    ``warn_on_config_traps`` cross-checks the two. Grid handling as in
+    :func:`_attach_dms`.
     """
     if forcing_cfg is None:
         return forcing

@@ -77,8 +77,9 @@ emissions_file: auto
 # ``DmsEmissions``.
 dms_file: auto
 
-# Dust-source/erodibility monthly climatology (``bundles/<grid>/dust.nc``);
-# drives ``DustEmissions``.
+# Dust source/erodibility map (``bundles/<grid>/dust_erodibility.nc``);
+# drives ``DustEmissions``. Which convention it follows is
+# ``physics.jam_dust_source``.
 dust_file: auto
 
 # Oxidant monthly climatology on the model's hybrid levels

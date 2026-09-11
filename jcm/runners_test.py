@@ -800,6 +800,75 @@ class TestEmissionsConfig(unittest.TestCase):
                 build_forcing(cfg, coords)
 
 
+class TestDustConfigTraps(unittest.TestCase):
+    """#768: the source map and the convention that reads it must agree."""
+
+    @staticmethod
+    def _cfg(kind="cam_erodibility", forcing_kind="from_file"):
+        from omegaconf import OmegaConf
+        # Minimal, like the other trap tests: a composed cfg would drag the
+        # coords-dependent emission-key warnings in with it.
+        return OmegaConf.create({
+            "terrain": {"kind": "from_file"},
+            "forcing": {"kind": forcing_kind},
+            "physics": {"jam_dust_source": kind},
+        })
+
+    @staticmethod
+    def _physics():
+        import types
+        # _has_jam only looks for a jam_-prefixed term name.
+        return types.SimpleNamespace(terms=[
+            types.SimpleNamespace(name="jam_dust_emissions",
+                                  category="aerosol_emissions")])
+
+    def _forcing(self, values, monthly=False):
+        import types
+
+        import jax.numpy as jnp
+
+        from jcm.forcing import WRAP_YEAR, TimeSeries
+        arr = jnp.asarray(values)
+        src = (TimeSeries(values=arr[jnp.newaxis], time_seconds=jnp.zeros(1),
+                          align_mode=WRAP_YEAR) if monthly else arr)
+        return types.SimpleNamespace(dust_source=src, aerosol_year_weight=1.0,
+                                     aerosol_ann_cycle=1.0)
+
+    def test_tegen_kind_on_the_cam_map_warns(self):
+        # The CAM basin factor exceeds 1; tegen_potential would clip it back.
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg("tegen_potential"), self._physics(),
+                                 self._forcing([[0.5, 4.4]]))
+        text = "\n".join(cm.output)
+        self.assertIn("tegen_potential", text)
+
+    def test_cam_kind_on_a_bounded_map_warns(self):
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(), self._physics(),
+                                 self._forcing([[0.2, 0.9]], monthly=True))
+        self.assertIn("cam_erodibility", "\n".join(cm.output))
+
+    def test_matching_kind_and_map_is_silent(self):
+        import logging
+        logger = logging.getLogger("jcm.runners")
+        with self.assertLogs(logger, level="WARNING") as cm:
+            logger.warning("sentinel")
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(), self._physics(),
+                                 self._forcing([[0.5, 4.4]]))
+        self.assertNotIn("jam_dust_source", "\n".join(cm.output))
+
+    def test_default_forcing_with_jam_warns_every_gate_is_open(self):
+        # ForcingData.zeros has no snow, soil moisture or land temperature.
+        with self.assertLogs("jcm.runners", level="WARNING") as cm:
+            from jcm.runners import warn_on_config_traps
+            warn_on_config_traps(self._cfg(forcing_kind="default"),
+                                 self._physics(), None)
+        self.assertIn("forcing=default", "\n".join(cm.output))
+
+
 class TestNaturalForcingFilesConfig(unittest.TestCase):
     """CLI/config plumbing for the DMS / dust / oxidant climatology hooks.
 
@@ -890,10 +959,11 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             self.assertEqual(leaf.values.shape, shape)
             self.assertGreater(float(np.abs(np.asarray(leaf.values)).min()),
                                0.0)
-        # DMS converted nmol/L → kg/m³; dust clipped to 1.
+        # DMS converted nmol/L → kg/m³; the dust erodibility weight keeps its
+        # values above 1 (CAM's basin factor is unbounded, #768).
         self.assertAlmostEqual(float(f.dms_seawater.values[0, 0, 0]),
                                2.0 * 6.21324e-8, places=12)
-        self.assertEqual(float(f.dust_source.values.max()), 1.0)
+        self.assertEqual(float(f.dust_source.values.max()), 1.5)
         # kind=default parent keeps the aquaplanet cos²-lat SST profile.
         from jcm.forcing import default_forcing
         np.testing.assert_array_equal(
@@ -2489,7 +2559,7 @@ class TestWarnOnConfigTraps:
         cfg = self._cfg(terrain="from_file",
                         emissions_file="hf://bundles/t63/emissions_pd.nc",
                         dms_file="hf://bundles/t63/dms.nc",
-                        dust_file="hf://bundles/t63/dust.nc",
+                        dust_file="hf://bundles/t63/dust_erodibility.nc",
                         oxidants_file="hf://bundles/t63_l47/oxidants_pd.nc")
         with caplog.at_level("WARNING"):
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
@@ -3083,7 +3153,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_erodibility.nc")
         # The level-dependent oxidant bundle does not exist at l8 → auto→None.
         self.assertIsNone(out.get("oxidants_file"))
 
@@ -3147,7 +3218,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_erodibility.nc")
         # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
         self.assertIsNone(out.get("oxidants_file"))
 
