@@ -96,7 +96,8 @@ mirror is reachable, except where noted.
   on the pySES path, so only the file-independent online natural emissions
   (wind-driven Gong sea salt) are active; sulfur, dust and carbonaceous species
   stay at zero unless explicit on-grid ``forcing.emissions_file`` /
-  ``dms_file`` / ``dust_file`` / ``oxidants_file`` overrides are supplied. See
+  ``dms_file`` / the five ``dust_*`` keys / ``oxidants_file`` overrides are
+  supplied. See
   {doc}`../design/pyses_cam_se_dycore`.
 
 ## Tier 2 — composable but unvalidated

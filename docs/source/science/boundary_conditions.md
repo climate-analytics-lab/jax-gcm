@@ -52,6 +52,29 @@ alternative (all fields on one ERA5 land-sea mask).
   generally nonlinear — gas optics, reaction integration — so sensitivities are
   state-dependent).
 
+**Dust boundary conditions.** The Tegen scheme (see {doc}`aerosol`) needs five
+fields rather than one, all published per grid on the data mirror and picked up
+by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
+/ ``dust_regions_file`` / ``dust_roughness_file`` (all ``auto`` by default):
+
+| key | variable(s) | axis | role |
+|---|---|---|---|
+| ``dust_file`` | ``pot_source`` | 12 monthly records | effective-LAI erodible fraction — both the gate and a linear factor |
+| ``dust_preferential_file`` | ``source`` | static | paleolake area fraction, swapped to soil type 10 |
+| ``dust_soil_types_file`` | ``type2/3/4/6``, ``type13..17`` | static | nine texture area fractions (type 1 is the residual) |
+| ``dust_regions_file`` | ``regions`` | static, integer 1-8 | regional tuning index |
+| ``dust_roughness_file`` | ``surfrough`` [cm] | 12 monthly records | satellite roughness, read only when ``ndurough = 0`` |
+
+The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
+them, and running with the textures or regions missing would silently emit an
+untuned, all-coarse-soil flux, so ``_attach_dust`` raises instead. The monthly
+climatologies are stepped by **month start** (``WRAP_YEAR``), never interpolated
+— the Fortran reads one record per call and marks the region mask
+``EF_NOINTER``. The region mask is categorical and is refused at load if it is
+not integral in [1, 8], which is what a linear or conservative regrid would
+produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
+refinements of it, stamped as such in their file attributes (#802).
+
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
 *not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
@@ -70,6 +93,7 @@ simplification for slowly-evolving species.
   (``resolve_input``, ``resolve_packaged``, ``expand_yearly_files``).
 - ``jcm/ozone_climatology.py`` — ``OzoneClimatology`` (grid-aware loader).
 - ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
+- ``jcm/data/mirror/dust.py`` — ``build_dust_product`` (the five dust bundles).
 - Data provenance and the mirror: {doc}`../design/data_mirror`.
 
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date
