@@ -6,6 +6,8 @@ regridding helpers are tested in ``jcm/data/regridding_test.py``, the
 downloader in ``jcm/data/remote_test.py``.
 """
 
+import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -75,3 +77,103 @@ class RegistryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DustProductTest(unittest.TestCase):
+    """The dust bundle builder on a synthetic stand-in for the HAMMOZ files.
+
+    The real inputs are on Glade; what needs covering is the orientation flip,
+    the nearest-neighbour regrid and the two build-time guards.
+    """
+
+    NLAT, NLON = 96, 192
+
+    def _sources(self, tmp, regions=None, soils=None):
+        import xarray as xr
+
+        from jcm.data.regridding import gaussian_latlon
+        lats, lons = gaussian_latlon(self.NLAT)
+        # The HAMMOZ files store latitude DESCENDING; the builder flips it.
+        desc = lats[::-1]
+        shape = (1, self.NLAT, self.NLON)
+        month = (12, self.NLAT, self.NLON)
+        # pot_source varies with latitude so the flip is observable.
+        pot = np.broadcast_to(np.abs(desc)[None, :, None], month).copy()
+        if regions is None:
+            regions = np.tile(np.arange(1, 9).repeat(self.NLAT // 8)[:, None],
+                              (1, self.NLON))[None]
+        if soils is None:
+            soils = {f"type{i}": np.full(shape, 0.2 if i in (2, 3, 4, 6) else 0.0)
+                     for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)}
+        coords = {"lat": desc, "lon": lons}
+        files = {
+            "dust_potential_sources_T63.nc": xr.Dataset(
+                {"pot_source": (("time", "lat", "lon"), pot)},
+                coords={**coords, "time": np.arange(12.0)}),
+            "dust_preferential_sources_T63.nc": xr.Dataset(
+                {"source": (("time", "lat", "lon"), np.full(shape, 0.3))},
+                coords={**coords, "time": [0.0]}),
+            "soil_type_all_T63.nc": xr.Dataset(
+                {k: (("time", "lat", "lon"), v) for k, v in soils.items()},
+                coords={**coords, "time": [0.0]}),
+            "dust_regions_T63.nc": xr.Dataset(
+                {"regions": (("time", "lat", "lon"), regions.astype(float))},
+                coords={**coords, "time": [0.0]}),
+            "surface_rough_12m_T63.nc": xr.Dataset(
+                {"surfrough": (("time", "lat", "lon"), np.full(month, 0.02))},
+                coords={**coords, "time": np.arange(12.0)}),
+        }
+        for name, ds in files.items():
+            ds.to_netcdf(os.path.join(tmp, name))
+        return lats, lons
+
+    def test_native_grid_is_copied_with_ascending_latitude(self):
+        import xarray as xr
+
+        from jcm.data.mirror.dust import build_dust_product
+        with tempfile.TemporaryDirectory() as tmp:
+            lats, _ = self._sources(tmp)
+            out = os.path.join(tmp, "pot.nc")
+            build_dust_product("dust_potential_sources", self.NLAT, out,
+                               source_dir=tmp)
+            with xr.open_dataset(out, decode_times=False) as ds:
+                np.testing.assert_allclose(ds.lat.values, lats)
+                np.testing.assert_allclose(
+                    ds.pot_source.values[0, :, 0], np.abs(lats), atol=1e-9)
+                self.assertNotIn("regrid_approximation", ds.attrs)
+
+    def test_regrid_is_nearest_and_keeps_the_mask_categorical(self):
+        import xarray as xr
+
+        from jcm.data.mirror.dust import build_dust_product
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp)
+            out = os.path.join(tmp, "reg.nc")
+            build_dust_product("dust_regions", 32, out, source_dir=tmp)
+            with xr.open_dataset(out, decode_times=False) as ds:
+                values = ds.regions.values
+                self.assertEqual(values.shape, (32, 64))
+                np.testing.assert_array_equal(values, np.round(values))
+                self.assertTrue(set(np.unique(values)) <= set(range(1, 9)))
+                self.assertIn("regrid_approximation", ds.attrs)
+
+    def test_a_broken_global_partition_is_refused(self):
+        from jcm.data.mirror.dust import build_dust_product
+        soils = {f"type{i}": np.full((1, self.NLAT, self.NLON), 0.3)
+                 for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)}
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp, soils=soils)
+            with self.assertRaisesRegex(ValueError, "would go negative"):
+                build_dust_product("dust_soil_types", self.NLAT,
+                                   os.path.join(tmp, "soil.nc"),
+                                   source_dir=tmp)
+
+    def test_a_non_integer_region_mask_is_refused(self):
+        from jcm.data.mirror.dust import build_dust_product
+        regions = np.full((1, self.NLAT, self.NLON), 2.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp, regions=regions)
+            with self.assertRaisesRegex(ValueError, "lost integrality"):
+                build_dust_product("dust_regions", self.NLAT,
+                                   os.path.join(tmp, "reg.nc"),
+                                   source_dir=tmp)

@@ -35,6 +35,9 @@ omit =
     # covered by the fast co-located test suites; slow integration runs
     # use packaged/local files and never touch them.
     jcm/data/regridding.py
+    # The dust bundle builder: fast-tested on synthetic inputs
+    # (jcm/data/mirror/mirror_test.py), never touched by a slow integration run.
+    jcm/data/mirror/dust.py
     jcm/data/mirror/registry.py
     jcm/data/remote.py
     jcm/data/era5.py
