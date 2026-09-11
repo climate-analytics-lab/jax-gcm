@@ -94,3 +94,56 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 ``rce_integration_test.py``, ``convection_units_test.py``,
 ``smooth_gradients_test.py``, ``cloud_depth_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
+
+### Cloud-base trigger and the sub-cloud layer
+
+**What we do.** Tiedtke's cloud base is ECHAM's ``cubase`` ``klab`` walk
+(``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::find_cloud_base``):
+a parcel starts at the lowest level with the environment's temperature and
+humidity and is lifted upward conserving dry static energy. At each level a dry
+buoyancy test ``zbuo = Tv_u - Tv_e + zlift`` decides whether the walk continues;
+the first level at which the parcel condenses is the LCL, where a second test —
+the same buoyancy with condensate loading — decides whether a cloud base exists.
+``zlift`` is the sub-grid thermal excess of the warmest boundary-layer plumes,
+``min(clip(thvsig·cbfac, cminbuoy, cmaxbuoy), 1)`` K, taken from vdiff's
+prognostic θ_v variance where one is available and from
+``ConvectionParameters.cu_thvsig`` otherwise. A column whose parcel loses its
+buoyancy before reaching its own LCL gets **no surface-based convection at all**,
+whatever its CAPE: the walk stops, and CAPE never enters. The second,
+independent entry is the mid-level ``cubasmc`` trigger
+(``find_midlevel_cloud_base``), which starts a plume with no surface connection
+where the environment is nearly saturated and resolved ascent is lifting it.
+
+**What ECHAM does.** ``mo_cuinitialize.f90::cubase`` (the ``klab`` walk, ``zlift``
+from ``pthvsig``) and ``mo_cuascent.f90::cubasmc`` (the mid-level trigger).
+ECHAM evaluates the walk on half levels whose environment temperature is the
+**dry-static-energy upper envelope** of the two adjacent full levels
+(``mo_cuinitialize.f90::cuini``: ``ptenh = (MAX(s(jk-1), s(jk)) - geoh)/cpm``,
+then monotonized upward), which flattens any dry-neutral or dry-unstable layer
+before the parcel is compared against it.
+
+**Why we differ.**
+- `compute` — the walk runs on **full levels**, since jcm's convection path is
+  full-level throughout (the scheme-wide staggering approximation, #530). For a
+  stably stratified profile the DSE-envelope half level carries the full level
+  above it, so the dry test is equivalent up to one level index; the
+  condensation test is evaluated half a layer higher than the reference's.
+
+**Status & known limitations.**
+- The trigger is **strict by construction, and this is the reference's
+  behaviour, not an approximation of it**: because ``zlift`` is capped at 1 K, a
+  sounding whose lapse rate runs to the surface loses more parcel buoyancy per
+  level than the excess can cover and never reaches its LCL. Convection in such
+  a column is the job of ``cubasmc``, which needs resolved ascent and a nearly
+  saturated environment.
+- It follows that **any prescribed or idealised column handed to Tiedtke assumes
+  a well-mixed (dry-adiabatic) sub-cloud layer**, the state a prognostic run's
+  vertical diffusion maintains and real tropical soundings have. The
+  release-validation single-column state
+  (``jcm/rce.py::rce_initial_state``, ``jcm/rce.py::jam_scavenging_column``)
+  supplies one explicitly via ``mixed_layer_top_m``, since a prescribed column
+  re-imposed every step never lets vdiff build it. Failure of this assumption is
+  silent: the plume simply never exists, while turbulent mixing keeps the
+  profiles plausible. See {doc}`../design/convective_trigger_soundings`.
+- jcm fixes **one cloud base per column per step**; ECHAM can re-seed above a
+  ``cubase`` plume that dies partway up (#700).
