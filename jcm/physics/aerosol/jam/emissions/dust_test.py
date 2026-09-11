@@ -361,6 +361,37 @@ class RegionTuningTest(unittest.TestCase):
         np.testing.assert_allclose(
             float(DustParameters.preset(3, 106).nduscale_reg[0]), 0.86)
 
+    def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
+        # nduscale_reg's ndust=4 vector is defined only at T63; every other
+        # truncation takes 0.86. The term cannot know the grid at construction.
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        term = DustEmissions()
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().nduscale_reg)[1], 1.45)
+        term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
+                                     spectral_truncation=106))
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().nduscale_reg), 0.86)
+        term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
+                                     spectral_truncation=63))
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().nduscale_reg),
+            [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+    def test_explicit_parameters_are_never_rebuilt(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        pinned = DustParameters.preset(4).replace(
+            nduscale_reg=jnp.full((8,), 0.5))
+        term = DustEmissions(params=pinned)
+        term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
+                                     spectral_truncation=106))
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().nduscale_reg), 0.5)
+
     def test_regions_scale_independently(self):
         term = DustEmissions()
         state, diagnostics, forcing, terrain = _inputs(u10=9.0, regions=1)

@@ -28,6 +28,12 @@ jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Kö
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 
+# HAMMOZ ``ndust`` preset for the Tegen dust scheme: 4 = HAM2 (Stier 2005 +
+# Cheng's East-Asian soils, the regional tuning vector), 3 = Stier 2005, 2 =
+# Cheng 2008 (Fecan moisture and the satellite roughness map live). The
+# resolution-dependent tuning is rebuilt at the model's own truncation.
+jam_dust_preset: 4
+
 # Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
 # the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
 # in-droplet wet removal, dry deposition, and the aqueous sulfate split. false

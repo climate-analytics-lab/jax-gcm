@@ -145,6 +145,7 @@ def jam_aerosol_physics(
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
+    dust_preset: int = 4,
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
     prescribed_speciated: bool = False,
@@ -183,6 +184,9 @@ def jam_aerosol_physics(
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
+        dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
+            East-Asian soils = HAM2), 3 (Stier 2005) or 2 (Cheng 2008).
+            Ignored when an explicit ``dust`` parameter object is given.
         anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
             the *bulk* path (in-model differentiable speciation + smooth
             injection); ``anthropogenic_params`` overrides the defaults.
@@ -237,7 +241,7 @@ def jam_aerosol_physics(
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec),
         DmsEmissions(params=dms, spec=spec),
-        DustEmissions(params=dust, spec=spec),
+        DustEmissions(params=dust, ndust=dust_preset, spec=spec),
     ]
     if anthropogenic:
         # Prescribed CEDS anthropogenic SO2/BC/OC (#498); inert until forcing

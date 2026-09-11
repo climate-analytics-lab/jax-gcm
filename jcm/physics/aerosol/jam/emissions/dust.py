@@ -351,13 +351,39 @@ class DustEmissions(PhysicsTerm):
         self,
         params: DustParameters | None = None,
         *,
+        ndust: int = 4,
+        nudged: bool = False,
         spec: ModalAerosolSpec | None = None,
     ):
-        """Hold the parameters, the population and the static soil size grid."""
-        self.params = nnx.Param(params or DustParameters.default())
+        """Hold the parameters, the population and the static soil size grid.
+
+        ``ndust``/``nudged`` select the preset :meth:`cache_coords` rebuilds at
+        the model's own truncation; an explicit ``params`` overrides both and is
+        never rebuilt.
+        """
+        self._preset = None if params is not None else (ndust, nudged)
+        self.params = nnx.Param(
+            params if params is not None
+            else DustParameters.preset(ndust, nudged=nudged))
         self._spec = spec or MAM4_SPEC
         self._diameters = jnp.asarray(soil_diameters())
         (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
+
+    def cache_coords(self, coords) -> None:
+        """Rebuild the preset at the model's truncation.
+
+        ``nduscale_reg`` is resolution-dependent — the ``ndust = 4`` regional
+        vector is defined only at T63 and the ``ndust = 3`` polynomial only up
+        to it — so the preset cannot be fixed at construction, where the grid is
+        not yet known. An explicitly supplied ``DustParameters`` is left alone.
+        """
+        if self._preset is None:
+            return
+        ndust, nudged = self._preset
+        # truncation = total_wavenumbers - 2, the relation utils.get_coords uses.
+        truncation = int(coords.horizontal.total_wavenumbers) - 2
+        self.params = nnx.Param(
+            DustParameters.preset(ndust, truncation=truncation, nudged=nudged))
 
     def _soil_weights(self, forcing, ncols, params):
         """Per-cell area weights of :data:`MIXTURE_ROWS`, before the wind switch.
