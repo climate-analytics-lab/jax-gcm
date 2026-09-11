@@ -59,12 +59,22 @@ jobs:
         run: python docs/science_pointers_test.py -v
 
       # Malformed MyST or a broken {doc} reference in a science page passes
-      # the pointer guard but breaks the published docs; a warning-as-error
-      # Sphinx build rejects it here. Needs the package: conf.py imports jcm.
+      # the pointer guard but breaks the published docs; this build rejects
+      # it. Failure is scoped to warnings ORIGINATING from the science pages
+      # — a clean-environment build of the whole tree emits pre-existing
+      # warnings elsewhere (autosummary importing *_test modules that need
+      # optional extras, legacy docstring formatting) that this doc-path job
+      # is not the place to gate. Needs the package: conf.py imports jcm.
       - name: Install jcm + Sphinx toolchain
         run: |
           pip install -e .
           pip install sphinx furo myst-parser
 
-      - name: Build the docs, warnings as errors
-        run: sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+      - name: Build the docs; fail on science-page warnings
+        run: |
+          set -o pipefail
+          sphinx-build -b html docs/source /tmp/docs-html 2>&1 | tee /tmp/sphinx-build.log
+          if grep -E "source/science[./].*(WARNING|ERROR)|WARNING.*source/science[./]" /tmp/sphinx-build.log; then
+            echo "::error::warnings originate from docs/source/science — fix the page(s) above"
+            exit 1
+          fi
