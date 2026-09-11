@@ -99,13 +99,11 @@ def prep_dust(out: Path) -> None:
 
 def _dust_is_clipped(path: Path) -> bool:
     """Whether a cached dust intermediate is a pre-#768 build capped at 1."""
+    from jcm.forcing import is_clipped_erodibility
+
     with xr.open_dataset(path) as ds:
         arr = ds["pot_source"].values
-    # Same tolerant predicate as jcm.forcing._reject_truncated_erodibility: a
-    # regridded clipped map peaks a hair either side of 1, and the two checks
-    # must not diverge.
-    tol = 1e-9
-    stale = bool(arr.max() <= 1.0 + tol and (arr >= 1.0 - tol).sum() > 1)
+    stale = is_clipped_erodibility(arr)
     if stale:
         print(f"{path}: pre-#768 build (capped at 1) — regenerating")
     return stale

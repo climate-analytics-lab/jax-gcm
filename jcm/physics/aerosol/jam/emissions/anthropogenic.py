@@ -169,8 +169,19 @@ class AnthropogenicEmissions(PhysicsTerm):
         emi_bb: dict[str, jnp.ndarray] = {}
         for i, sector in enumerate(SUPER_SECTORS):
             def diameter(mode, i=i):
-                d = p.emission_diameter.get(mode.short)
-                return None if d is None else d[i]
+                # No silent fallback: without an emission size the number would
+                # come from the class's equilibrium geometry, which is what
+                # #768 measured as 75x wrong for dust. A population whose
+                # classes this table does not cover has to say so.
+                try:
+                    return p.emission_diameter[mode.short][i]
+                except KeyError:
+                    raise KeyError(
+                        f"No emission diameter for class {mode.short!r}. "
+                        "EmissionParameters.emission_diameter must cover every "
+                        "class the population's primary_emission table names "
+                        "(see SectorDefaults for the CESM values)."
+                    ) from None
 
             weights = gaussian_injection_weights(
                 height_full, dz,

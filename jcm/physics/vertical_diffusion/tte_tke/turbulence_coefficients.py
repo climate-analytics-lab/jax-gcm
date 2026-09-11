@@ -229,7 +229,11 @@ _BD_Z0_MOMENTUM = jnp.array([1e-4, 1e-3, 1e-1])
 def businger_dyer_neutral_drag(state, wind_speed):
     """``(ln(z/z0), CM_n·|U|)`` of the Businger-Dyer scheme, per tile.
 
-    Sliced to the state's tile count, as the scheme's own per-tile loop is.
+    THE definition: :func:`compute_surface_exchange_coefficients` builds its
+    momentum drag as ``cfnc · stability_momentum`` from this, so the 10 m
+    reduction's ``f_m = CM|U| / CM_n|U|`` is exactly that scheme's own
+    ``stability_momentum`` rather than a re-derivation of it. Sliced to the
+    state's tile count, as the scheme's per-tile loop is.
     """
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
     z0 = _BD_Z0_MOMENTUM[:state.roughness_length.shape[1]]
@@ -273,7 +277,8 @@ def compute_surface_exchange_coefficients(
 
     z0_heat = _BD_Z0_HEAT
     z0_moisture = _BD_Z0_HEAT
-    z0_momentum = _BD_Z0_MOMENTUM
+    # Momentum: one definition, shared with the 10 m reduction (below).
+    _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
     
     # Reference height (lowest model level)
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
@@ -330,15 +335,13 @@ def compute_surface_exchange_coefficients(
                                  / jnp.maximum(z0_heat[isfc], 1e-5))
         log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
                                      / jnp.maximum(z0_moisture[isfc], 1e-5))
-        log_ratio_momentum = jnp.log(jnp.maximum(z_ref, 1.0)
-                                     / jnp.maximum(z0_momentum[isfc], 1e-5))
-
         exchange_heat = (von_karman**2 * wind_speed_surface *
                         stability_heat / log_ratio_heat**2)
         exchange_moisture = (von_karman**2 * wind_speed_surface *
                            stability_heat / log_ratio_moisture**2)
-        exchange_momentum = (von_karman**2 * wind_speed_surface *
-                             stability_momentum / log_ratio_momentum**2)
+        # CM·|U| = CM_n·|U| · (1/Φm): the neutral factor is the shared one, so
+        # f_m in the 10 m reduction recovers stability_momentum exactly.
+        exchange_momentum = cfn_m_all[:, isfc] * stability_momentum
 
         surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(
             jnp.maximum(exchange_heat, 1e-6)

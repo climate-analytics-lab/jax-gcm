@@ -72,9 +72,10 @@ MAM4_SPECIES = tuple(SPECIES[t] for t in _USED) + (SPECIES["h2o"],)
 #: ``cmr_sa``); primary carbonaceous mass (BC, POA) goes wholly to the
 #: primary-carbon mode (MAM4 carries no BC/POA in the Aitken mode). Dust's
 #: accum/coarse split is CAM's ``dust_emis_sclfctr`` over the 0.1–1 µm and
-#: 1–10 µm emission bins (``dust_model.F90``); its third, 1.65e-5 Aitken
-#: share has no home in a population whose Aitken mode carries no dust. The
-#: dust term lets a tunable parameter override the fractions. Size-mapped
+#: 1–10 µm emission bins (``dust_model.F90``). The
+#: dust term lets a tunable parameter override the fractions. (CAM's 4/5-mode
+#: branch instead splits three bins from 0.01 µm, the extra one taking
+#: 1.65e-5; this population carries no Aitken dust.) Size-mapped
 #: source schemes (Gong sea salt) instead partition over ``classes_for`` and
 #: need no entry.
 _MAM4_PRIMARY_EMISSION = {
