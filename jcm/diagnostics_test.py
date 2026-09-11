@@ -167,14 +167,14 @@ def _budget_dataset(dtype, dyn=0.0, mass=1.0, ptend=5e-12,
 
 
 class TestEmissionWindProvenance(unittest.TestCase):
-    """#723's model-level fallback is REPORTED per chunk, never fatal.
+    """#723's model-level fallback: reported always, fatal only if persistent.
 
     Under ``output_averages`` the saved field is an interval mean, so a cold
     start's one legitimate fallback step reads 1/N — the same value a single
-    defective step mid-chunk would give. No fatal rule can separate those, and
-    treating the fraction as fatal aborted a healthy 30-day run at day 5 on
-    1/480. The per-step invariant is pinned in the emission-term tests; here
-    the number only has to reach the report.
+    defective step mid-chunk would give, which is why "> 0" cannot be the rule
+    (it aborted a healthy 30-day run at day 5 on 1/480). A fallback that never
+    stops is separable though: it reads 1.0 in every chunk, and after the first
+    chunk the flag can only be zero.
     """
 
     def _ds(self, flagged_fraction: float):
@@ -191,11 +191,26 @@ class TestEmissionWindProvenance(unittest.TestCase):
         self.assertAlmostEqual(
             report["emission_wind_model_level_frac"], 1.0 / 480.0, places=6)
 
-    def test_a_persistent_fallback_is_visible_but_still_not_fatal(self):
+    def test_a_persistent_fallback_after_the_first_chunk_fails(self):
+        # 1.0 in a later chunk can only mean the 10 m wind is never diagnosed
+        # (no vdiff term, or wind_10m unpublished) — +37-46 % sea salt for the
+        # whole run, which used to reach the end with only a stdout line.
         ok, report = check_health(self._ds(1.0), 7, 200.0)
+        self.assertFalse(ok)
+        self.assertIn("emission wind", "; ".join(report["reasons"]))
+
+    def test_a_one_step_first_chunk_reads_one_and_still_passes(self):
+        # The only legitimate way to read 1.0: a first chunk of a single step,
+        # where the interval mean IS the bootstrap step. Needs no timestep and
+        # no cold-start flag to tell apart — it can only be chunk 0.
+        self.assertTrue(check_health(self._ds(1.0), 0, 0.02)[0])
+
+    def test_a_single_defective_step_mid_chunk_is_reported_not_fatal(self):
+        # 1/N is the legitimate bootstrap value too, so no rule can separate
+        # them; it is reported and left to the per-step unit tests.
+        ok, report = check_health(self._ds(1.0 / 480.0), 3, 20.0)
         self.assertTrue(ok)
-        self.assertEqual(report["emission_wind_model_level_frac"], 1.0)
-        self.assertEqual(report["reasons"], [])
+        self.assertGreater(report["emission_wind_model_level_frac"], 0.0)
 
     def test_it_is_printed(self):
         import contextlib

@@ -146,13 +146,10 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report["precip_conv_mean_mmday"] = float(np.nanmean(precip)) * 86400
         report["precip_conv_max_mmday"] = float(np.nanmax(precip)) * 86400
 
-    # Emission-wind provenance (#723). REPORTED, never fatal: this is a bias
-    # indicator, not a blowup signature, and under ``output_averages`` the
-    # saved field is an interval MEAN, in which a cold start's legitimate
-    # single fallback step is 1/N — indistinguishable from a defective step
-    # mid-chunk, and enough to abort a healthy run. The per-step invariant is
-    # pinned by unit tests instead; here the number is printed so a run that
-    # keeps falling back (~1.0 every chunk) is visible.
+    # Emission-wind provenance (#723). Reported always; fatal only for a
+    # PERSISTENT fallback (see the failure block). Under ``output_averages``
+    # the saved field is an interval mean, so one legitimate bootstrap step is
+    # 1/N — which is why "> 0" cannot be the rule.
     if "wind_10m_model_level" in ds:
         # Over the whole chunk, not ``isel(time=-1)``: with more than one save
         # interval per chunk the last interval never contains step 1, so the
@@ -176,6 +173,23 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     if report.get("q_max_gkg", 0) > 100:
         ok = False
         reasons.append(f"q_max={report['q_max_gkg']:.1f} g/kg (> 100)")
+
+    # A fallback that never stops is a different thing from the bootstrap
+    # step: it reads 1.0 in EVERY chunk (no vdiff term, or wind_10m never
+    # published), and costs +37-46 % sea salt for the whole run. Caught by
+    # bounding the legitimate value rather than by exempting a case:
+    # after the first chunk the flag can only be zero, and a one-step chunk —
+    # the one legitimate way to read 1.0 — can only be the first. So this
+    # needs no timestep and no notion of a cold start, which is what the
+    # earlier exemption needed and crashed on (run.time_step: null).
+    if (chunk_idx > 0
+            and report.get("emission_wind_model_level_frac", 0.0) > 0.5):
+        ok = False
+        reasons.append(
+            "emission wind fell back to the lowest model level in "
+            f"{report['emission_wind_model_level_frac']:.0%} of this chunk — "
+            "the 10 m wind is not being diagnosed, so sea salt is ~40% high"
+        )
 
     report["ok"] = ok
     report["reasons"] = reasons
