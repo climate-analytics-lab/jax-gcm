@@ -90,9 +90,14 @@ else:
     check("in-plume condensate is diagnosed", cond > 0.0, f"max {cond:.3e}")
     check("convective precip flux is diagnosed", pflx > 0.0, f"max {pflx:.3e}")
 
+# An absent ledger is a FAILURE, not a skip: losing the key is exactly the
+# transport/output-wiring regression this check exists to catch, and the
+# profile and wet_so4 checks below cannot stand in for it — stratiform
+# scavenging and washout satisfy those on their own.
 scav = (pd_hist.get("_conv_scav_flux") or {}).get("m_so4_acc")
 if scav is None:
-    print("NOTE  _conv_scav_flux not in physics_data history; skipping")
+    check("in-plume scavenging removes soluble aerosol", False,
+          "_conv_scav_flux[m_so4_acc] absent from the physics_data history")
 else:
     total = float(np.nansum(np.asarray(scav)))
     check("in-plume scavenging removes soluble aerosol", total > 0.0,
@@ -115,12 +120,13 @@ check("soluble depleted aloft vs insoluble (equal seeds)",
       f"FT soluble {so4_ftN:.2e} vs insoluble {pom_ftN:.2e}")
 
 wet = pd_hist.get("wet_so4") if isinstance(pd_hist, dict) else None
-if wet is not None:
+if wet is None:
+    check("wet so4 deposition accumulates", False,
+          "wet_so4 absent from the physics_data history")
+else:
     wet = np.asarray(wet)
     check("wet so4 deposition accumulates", float(np.nansum(wet)) > 0,
           f"sum {float(np.nansum(wet)):.3e}")
-else:
-    print("NOTE  wet_so4 not in physics_data history; skipping flux check")
 
 np.savez(sys.argv[2] if len(sys.argv) > 2 else "scm_jam_result.npz",
          p=p, **{k: v for k, v in tr.items()
