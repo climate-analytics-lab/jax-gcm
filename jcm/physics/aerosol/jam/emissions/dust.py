@@ -421,8 +421,12 @@ class DustEmissions(PhysicsTerm):
         nlev, ncols = state.temperature.shape
         d = self._diameters
 
+        # The saltation threshold and the log law are both calibrated to a 10 m
+        # wind, so a column falling back to the lowest model level (~33 m at
+        # L47) emits nothing rather than over-driving u*³ with a sheared wind.
         u10, from_model_level = wind_10m(state, diagnostics)
-        u10 = jnp.maximum(jnp.ravel(u10), 0.0)
+        u10 = jnp.where(from_model_level > 0.0, 0.0,
+                        jnp.maximum(jnp.ravel(u10), 0.0))
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         snow = jnp.clip(_column_field(forcing, "snowc_am", ncols), 0.0, 1.0)
         wetness = jnp.clip(_column_field(forcing, "soilw_am", ncols), 0.0, 1.0)

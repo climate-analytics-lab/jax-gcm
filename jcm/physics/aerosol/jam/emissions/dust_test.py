@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.aerosol.jam import mass_name, number_name
+from jcm.physics.aerosol.jam.emissions.surface_wind import MODEL_LEVEL_WIND_KEY
 from jcm.physics.aerosol.jam.emissions.dust import (
     ACCUM_UM,
     CD,
@@ -481,6 +482,30 @@ class BroadcastTest(unittest.TestCase):
         tend = run(state, diagnostics)
         self.assertTrue(np.all(np.isfinite(
             np.asarray(tend.tracers[mass_name("du", "cor")]))))
+
+
+class EmissionWindTest(unittest.TestCase):
+    def test_no_diagnosed_ten_metre_wind_means_no_dust(self):
+        # wind_10m falls back to the lowest model level (~33 m at L47) on a cold
+        # start and without vdiff; feeding that to a 10 m-calibrated threshold
+        # and u*^3 would over-emit, so those columns stay off.
+        from jcm.physics_interface import PhysicsState
+        state = PhysicsState.zeros((3, 2)).copy(
+            temperature=jnp.full((3, 2), 295.0),
+            u_wind=jnp.full((3, 2), 20.0))
+        _, _, forcing, _ = _inputs()
+        diagnostics = {"air_density": jnp.full((3, 2), 1.2),
+                       "layer_thickness": jnp.full((3, 2), 100.0)}
+        tend, diag = DustEmissions()(state, diagnostics, forcing, None)
+        np.testing.assert_allclose(_total_mass(tend), 0.0)
+        np.testing.assert_allclose(
+            np.asarray(diag[MODEL_LEVEL_WIND_KEY]), 1.0)
+
+    def test_a_diagnosed_wind_emits(self):
+        tend, diag = DustEmissions()(*_inputs(u10=9.0))
+        self.assertTrue(np.all(_total_mass(tend) > 0.0))
+        np.testing.assert_allclose(
+            np.asarray(diag[MODEL_LEVEL_WIND_KEY]), 0.0)
 
 
 class InertTest(unittest.TestCase):

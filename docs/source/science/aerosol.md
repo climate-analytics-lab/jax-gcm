@@ -236,10 +236,11 @@ later in the step than the emissions that consume it — rather than a scheme
 choice, and it is reported rather than hidden.
 
 **Status & known limitations.** The three surface-flux terms behave
-differently on step 1 of a cold start, deliberately: dust emits nothing (its
-carried ``u*`` is zero and a saltation threshold has no defensible value
-without a surface layer), sea salt and DMS emit from the lowest level and flag
-it, and the surface term has no step-1 case because it runs after vertical
+differently on step 1 of a cold start, deliberately: dust emits nothing (a
+saltation threshold and a log law both calibrated to 10 m have no defensible
+value on a ~33 m model-level wind, so ``DustEmissions`` zeroes exactly the
+columns ``wind_10m`` flags), sea salt and DMS emit from the lowest level and
+flag it, and the surface term has no step-1 case because it runs after vertical
 diffusion. ``check_health`` reports the chunk-mean flag and fails a chunk only
 on a *persistent* fallback (``chunk_idx > 0 and frac > 0.5``), because under
 interval averaging the legitimate bootstrap step and a single defective step
