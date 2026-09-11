@@ -34,7 +34,13 @@ uses, so the surface gating below follows CLM/CAM directly:
 
 Emitted mass is split accum/coarse with CAM's ``dust_emis_sclfctr`` and
 converted to number at the emission bins' volume-mean diameters
-(``dust_common::dust_set_params``), not at the modes' equilibrium sizes.
+(``dust_common::dust_set_params``), not at the modes' equilibrium sizes. The
+density in that conversion is JAM's own 2600 kg/m³, not CAM ``dust_model``'s
+2500: it is the one ``SPECIES["du"].density`` the optics, the microphysics
+core and the ice-nucleation populations all use, so number and mass stay
+mutually consistent here. CAM is internally inconsistent about it
+(``mo_constants`` 2500 vs ``modal_aero_data`` 2.6e3) and the choice is ~4 % in
+emitted number.
 
 References: Tegen et al. (2002), JGR 107; Marticorena & Bergametti (1995);
 Zender et al. (2003); Fecan et al. (1999).
@@ -49,7 +55,6 @@ import tree_math
 from flax import nnx
 
 import jcm.constants as c
-from jcm.constants import grav as _G
 from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_flux
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
@@ -68,7 +73,6 @@ class DustParameters:
     alpha: jnp.ndarray             # sandblasting efficiency [1/m]
     u_threshold: jnp.ndarray       # dry threshold friction velocity [m/s]
     accum_fraction: jnp.ndarray    # fraction of emitted dust into accum (rest coarse)
-    u_star_default: jnp.ndarray    # fallback friction velocity [m/s]
     source_threshold: jnp.ndarray  # erodibility below this emits nothing [-]
     soil_moisture_threshold: jnp.ndarray  # Fecan gravimetric threshold [kg/kg]
     soil_water_gwc_scale: jnp.ndarray  # gravimetric water at soilw_am = 1 [kg/kg]
@@ -81,11 +85,11 @@ class DustParameters:
             scale=jnp.asarray(1.0),
             alpha=jnp.asarray(1.0e-5),
             u_threshold=jnp.asarray(0.2),
-            # CAM ``dust_emis_sclfctr`` for MAM4 over the (0.1–1, 1–10) µm
-            # emission bins; its 1.65e-5 Aitken share has no home in a
-            # population whose Aitken mode carries no dust.
+            # CAM ``dust_emis_sclfctr`` over the two-bin (0.1–1, 1–10) µm
+            # grid, which is the branch a dust-free Aitken mode corresponds to.
+            # (CAM's 4/5-mode branch adds a third, 1.65e-5 Aitken bin on a
+            # 0.01 µm grid; this population carries no Aitken dust.)
             accum_fraction=jnp.asarray(0.021),
-            u_star_default=jnp.asarray(0.3),
             source_threshold=jnp.asarray(0.1),
             # Fecan gwc_thr for ~20 % clay soil (CLM derives it per gridcell
             # from clay content, which no boundary field here carries).
@@ -107,7 +111,8 @@ def horizontal_flux(
     """Tegen saltation horizontal flux G [kg/m/s] (zero below threshold)."""
     u = jnp.maximum(u_star, 1.0e-3)
     ratio = u_threshold / u
-    g_flux = scale * (air_density / _G) * u ** 3 * (1.0 + ratio) * (1.0 - ratio ** 2)
+    g_flux = (scale * (air_density / c.grav) * u ** 3
+              * (1.0 + ratio) * (1.0 - ratio ** 2))
     return jnp.where(u_star > u_threshold, g_flux, 0.0)
 
 
@@ -199,10 +204,19 @@ class DustEmissions(PhysicsTerm):
         self._spec = spec or MAM4_SPEC
         self._source_kind = source_kind
 
-    def _u_star(self, diagnostics, ncols, params):
-        if "vertical_diffusion" in diagnostics:
-            return diagnostics["vertical_diffusion"].surface_friction_velocity
-        return jnp.full((ncols,), params.u_star_default)
+    def _u_star(self, diagnostics, ncols):
+        """Surface friction velocity, or zero where none has been diagnosed.
+
+        No default: a saltation threshold has no defensible value without a
+        surface layer, and a non-zero fallback would emit dust from every
+        source cell on a composition with no vertical-diffusion term. Zero is
+        also what the carry holds on step 1 of a cold start, so the two
+        no-u* cases behave alike (see the design doc on the step-1 asymmetry).
+        """
+        vdiff = diagnostics.get("vertical_diffusion")
+        if vdiff is None:
+            return jnp.zeros((ncols,))
+        return vdiff.surface_friction_velocity
 
     @staticmethod
     def _surface_field(obj, name, ncols, default):
@@ -233,7 +247,7 @@ class DustEmissions(PhysicsTerm):
             self._surface_field(forcing, "soilw_am", ncols, 0.0),
             p.soil_moisture_threshold, p.soil_water_gwc_scale)
 
-        u_star = self._u_star(diagnostics, ncols, p)
+        u_star = self._u_star(diagnostics, ncols)
         g_flux = horizontal_flux(u_star, u_threshold, air_density[-1], p.scale)
         flux = source * mobilization * p.alpha * g_flux        # kg/m²/s
 

@@ -129,8 +129,8 @@ def surface_physics_step(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     dt: float,
+    wind_speed_10m: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default(),
-    wind_speed_10m: jnp.ndarray = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
     
@@ -140,7 +140,8 @@ def surface_physics_step(
         dt: Time step [s]
         params: Surface parameters
         wind_speed_10m: diagnosed 10 m wind [m/s] (ncol,) for the reported
-            surface diagnostics; ``None`` falls back to the lowest level.
+            surface diagnostics (ECHAM ``nsurf_diag``; the vdiff carry always
+            holds one, so it is required rather than defaulted).
         
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
@@ -246,8 +247,8 @@ def surface_physics_step(
     
     # Compute diagnostics
     diagnostics = compute_surface_diagnostics(
-        atmospheric_state, surface_state, combined_fluxes, resistances, params,
-        wind_speed_10m,
+        atmospheric_state, surface_state, combined_fluxes, resistances,
+        wind_speed_10m, params,
     )
     
     return combined_fluxes, combined_tendencies, diagnostics
@@ -505,8 +506,7 @@ class EchamSurface(PhysicsTerm):
         # column actually receives are delivered by the vdiff implicit solve
         # and read back below.
         _fluxes, _tendencies, _surface_diag = surface_physics_step(
-            atm_forcing, surface_state, dt, params,
-            jnp.ravel(vdiff.wind_10m),
+            atm_forcing, surface_state, dt, jnp.ravel(vdiff.wind_10m), params,
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve

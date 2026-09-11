@@ -263,8 +263,8 @@ def compute_surface_diagnostics(
     surface_state: SurfaceState,
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
+    wind_speed_10m: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default(),
-    wind_speed_10m: jnp.ndarray = None,
 ) -> SurfaceDiagnostics:
     """Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
     
@@ -276,8 +276,9 @@ def compute_surface_diagnostics(
         params: Surface parameters
         wind_speed_10m: 10 m wind speed [m/s] (ncol,) from the surface-layer
             profile (ECHAM ``nsurf_diag``, diagnosed by the vertical-diffusion
-            term). ``None`` falls back to the lowest-level wind — the only
-            wind available when no surface-layer reduction is supplied.
+            term). Required: the vdiff carry always holds one, so a fallback
+            here would only ever hide a wiring mistake behind a wind that is
+            not the 10 m wind.
         
     Returns:
         Surface diagnostics
@@ -305,12 +306,10 @@ def compute_surface_diagnostics(
     # 2m dew point (simplified)
     dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
     
-    # 10m wind: the surface-layer reduction when supplied, else the lowest
-    # model level. Components keep the lowest level's direction.
+    # Components keep the lowest level's direction; the magnitude is the
+    # surface-layer reduction the caller diagnosed.
     wind_speed_atm = jnp.sqrt(jnp.maximum(
         atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
-    if wind_speed_10m is None:
-        wind_speed_10m = wind_speed_atm
     reduction = wind_speed_10m / wind_speed_atm
     u_wind_10m = reduction * atmospheric_state.u_wind
     v_wind_10m = reduction * atmospheric_state.v_wind
