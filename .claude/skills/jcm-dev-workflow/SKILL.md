@@ -76,6 +76,13 @@ lost (hours, with CI in the loop). So before `git push`, on the branch:
 /code-review high        # multi-angle finders + one verifier per finding, diff vs upstream
 ```
 
+**Only from an Opus or Sonnet session.** `/code-review` forks the invoking
+session on the same model with its full context, and fans out the same way;
+from a Fable session it spends Fable tokens at full context and has exhausted
+a session limit. On a Fable session run the same review as an explicit
+`model: opus` general-purpose agent that posts one `gh pr review --comment`
+(recipe in `jcm-local-ci`, "Local Claude review").
+
 Treat the output exactly like a Codex review (step 6): fix every CONFIRMED
 finding, sweep for the same mistake elsewhere, and for anything you decide
 not to change record *why* in the commit or PR body — a finding refuted once
