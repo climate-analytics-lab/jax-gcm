@@ -120,13 +120,12 @@ def compute_mixing_length(
     # Stability function: reduce mixing length for stable conditions.
     #
     # The natural form ``(1 - Ri/Ri_crit)²`` is only physically meaningful
-    # for ``0 ≤ Ri < Ri_crit``. The previous version applied it without
-    # capping ``Ri`` at zero, which let negative (unstable) Richardson
-    # numbers drive the squared factor unboundedly upward — Ri = -100
-    # gives ``(1 - (-400))² = 160 000``, scaling the mixing length to
-    # ~10¹⁴ m, propagating into Km/Kh and the implicit matrix solve, and
-    # NaN'ing the atmosphere within a couple of timesteps in averaged
-    # mode (the snapshot path happened to dodge the worst columns).
+    # for ``0 ≤ Ri < Ri_crit``, so ``Ri`` is capped at zero first. Without
+    # that cap, negative (unstable) Richardson numbers drive the squared
+    # factor unboundedly upward — Ri = -100 gives ``(1 - (-400))² = 160 000``,
+    # scaling the mixing length to ~10¹⁴ m, propagating into Km/Kh and the
+    # implicit matrix solve, and NaN'ing the atmosphere within a couple of
+    # timesteps.
     #
     # Bounded form: clip Ri to [0, Ri_crit] before squaring. Unstable
     # columns get neutral-strength mixing (factor = 1); stable columns

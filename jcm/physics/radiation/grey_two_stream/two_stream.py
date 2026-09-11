@@ -6,7 +6,6 @@ transfer through a multi-layer atmosphere.
 The implementation uses the Eddington approximation with the
 adding method for combining layers.
 
-Date: 2025-01-10
 """
 
 import functools

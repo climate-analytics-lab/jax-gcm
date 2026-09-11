@@ -1,6 +1,4 @@
-"""Date: 1/25/2024.
-For storing variables used by multiple physics schemes.
-"""
+"""For storing variables used by multiple physics schemes."""
 import dataclasses
 
 import tree_math

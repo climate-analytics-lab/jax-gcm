@@ -25,7 +25,6 @@ existing call sites (cubase / cuasc / cudlfs) can pick the right one:
 * ``kcall=1`` — condensation only (cubase, cuasc): ``Δq >= 0``.
 * ``kcall=2`` — evaporation only (cudlfs, cuddraf): ``Δq <= 0``.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp

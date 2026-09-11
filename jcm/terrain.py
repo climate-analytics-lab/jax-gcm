@@ -1,7 +1,4 @@
-"""TerrainData struct for boundary conditions that vary per simulation.
-
-Date: 2026-01-26
-"""
+"""TerrainData struct for boundary conditions that vary per simulation."""
 import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes

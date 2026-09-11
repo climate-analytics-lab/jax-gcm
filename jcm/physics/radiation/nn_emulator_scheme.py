@@ -7,7 +7,6 @@ fully differentiable for gradient-based optimization.
 
 Reference architecture: Ukkonen (2024), https://github.com/peterukk/rte-rrtmgp-nn
 
-Date: 2026-04-11
 """
 
 import dataclasses

@@ -7,7 +7,6 @@ list, replacing the physics-package-specific PhysicsData structs.
 
 See docs/design/composable_physics.md for the full design.
 
-Date: 2026-04-12
 """
 
 from __future__ import annotations

@@ -3,7 +3,6 @@
 This module implements basic chemistry parameterizations including
 fixed ozone distribution and basic methane oxidation.
 
-Date: 2025-01-15
 """
 
 import jax.numpy as jnp
