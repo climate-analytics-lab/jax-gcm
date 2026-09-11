@@ -14,6 +14,7 @@ on:
       - 'docs/source/conf.py'
       - 'docs/source/science/**'
       - 'docs/source/science.rst'
+      - 'docs/source/index.rst'
       - 'docs/science_pointers_test.py'
   workflow_dispatch:
 

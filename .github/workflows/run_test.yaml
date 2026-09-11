@@ -104,6 +104,15 @@ jobs:
       # Uses .coveragerc-pr which omits utility / orchestration modules
       # already well-covered by the push-mode fast-test suite, so the
       # 80% threshold reflects main-path integration coverage.
+      # The PR-side pytest is `-m slow`, which never collects the stdlib
+      # model-description rot guard; a code-only PR renaming a documented
+      # symbol must still fail it, so it runs explicitly here (~seconds).
+      - name: Science-register rot guard (PR)
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python docs/science_pointers_test.py
+
       - name: Test with pytest (include slow tests on PR)
         if: github.event_name == 'pull_request'
         run: |

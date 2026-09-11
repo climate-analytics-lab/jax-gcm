@@ -275,6 +275,15 @@ class TestSciencePagesAreWired(unittest.TestCase):
         orphans = [p.name for p in _pages() if f"science/{p.stem}" not in toctree]
         self.assertEqual(orphans, [], "science pages missing from science.rst")
 
+    def test_science_root_in_master_toctree(self):
+        """science.rst itself must stay reachable from index.rst."""
+        index = (REPO / "docs" / "source" / "index.rst").read_text()
+        self.assertRegex(
+            index, r"(?m)^\s+science\s*$",
+            "science.rst dropped from the master toctree — every register "
+            "page becomes unreachable",
+        )
+
 
 class TestTrackedGapsAreOpen(unittest.TestCase):
     """Every ``#NNN`` reference points at an OPEN issue.
