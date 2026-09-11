@@ -24,7 +24,8 @@ _POINTER = re.compile(
 # convention, but a slash-containing extensionless literal without one is
 # still a directory claim — requiring the slash would let a typo escape
 # validation entirely.
-_DIR_POINTER = re.compile(r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)+/?)``(?!``)")
+_DIR_POINTER = re.compile(
+    r"``([A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)+/?|[A-Za-z0-9_-]+/)``(?!``)")
 # ``dir/{a,b}.yaml`` — a brace-grouped pointer naming several sibling files.
 _BRACE_POINTER = re.compile(
     r"``([A-Za-z0-9_./-]*)\{([A-Za-z0-9_,-]+)\}([A-Za-z0-9_.-]*)``")

@@ -55,6 +55,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Invoked directly (unittest main), NOT via pytest: the repo-root
-        # conftest.py imports jax, which this dependency-free job does not
-        # install.
+        # conftest.py imports jax, which is not installed at this point.
         run: python docs/science_pointers_test.py -v
+
+      # Malformed MyST or a broken {doc} reference in a science page passes
+      # the pointer guard but breaks the published docs; a warning-as-error
+      # Sphinx build rejects it here. Needs the package: conf.py imports jcm.
+      - name: Install jcm + Sphinx toolchain
+        run: |
+          pip install -e .
+          pip install sphinx furo myst-parser
+
+      - name: Build the docs, warnings as errors
+        run: sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
