@@ -52,9 +52,9 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     apply_updates,
     carry_mode,
     mirror_names,
-    tracer_view,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.species import SPECIES
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
@@ -267,7 +267,10 @@ class AqueousSulfur(PhysicsTerm):
         lwc_incloud = jnp.maximum(clouds.qc, 0.0) / cf_safe
         active = (cloud_fraction > 0.0) & (lwc_incloud > _ZLWCMIN)
 
-        view = tracer_view(self._spec, state, diagnostics)
+        # Operator-split read: SO2 this step's gas-phase oxidation already
+        # consumed is gone, so the two sinks cannot oversubscribe the gas
+        # and leave their sulfate products unmatched.
+        view = split_view(self._spec, state, diagnostics)
         so2 = view.get("g_so2", zeros)
         so4_total = sum(
             view.get(mass_name("so4", m), zeros)
