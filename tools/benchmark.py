@@ -172,6 +172,8 @@ def _load_mirror_manifest():
 #: The four prescribed-emission keys honouring ``auto`` (their auto product is
 #: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
+                       "dust_preferential_file", "dust_soil_types_file",
+                       "dust_regions_file", "dust_roughness_file",
                        "oxidants_file")
 
 

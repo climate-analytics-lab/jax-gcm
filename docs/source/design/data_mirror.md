@@ -21,7 +21,7 @@ climatology arrays alongside the transient series.
 
 **Tier B — per-grid bundles** (`bundles/<grid>/`), the files the model
 reads directly: `terrain.nc`, `forcing_{pi,pd}.nc`,
-`emissions_{pi,pd}.nc`, `dms.nc`, `dust.nc`, and per level count
+`emissions_{pi,pd}.nc`, `dms.nc`, the five `dust_*.nc` Tegen inputs, and per level count
 (`<grid>_l{47,95}/`) `ozone_{pi,pd}.nc` and `oxidants_{pi,pd}.nc`.
 
 **Yearly transient AMIP bundles** (issue #610) sit alongside the era
@@ -120,7 +120,7 @@ python -m jcm.main physics=echam-jam grid=echam_t63_l47_hybrid \
     forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc \
     forcing.emissions_file=hf://bundles/t63/emissions_pd.nc \
     forcing.dms_file=hf://bundles/t63/dms.nc \
-    forcing.dust_file=hf://bundles/t63/dust.nc \
+    forcing.dust_file=hf://bundles/t63/dust_potential_sources.nc \
     forcing.oxidants_file=hf://bundles/t63_l47/oxidants_pd.nc \
     forcing.ozone_file=hf://bundles/t63_l47/ozone_pd.nc
 ```

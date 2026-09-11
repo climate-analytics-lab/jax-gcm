@@ -51,7 +51,13 @@ def jam_aux(grid: str, levels: str) -> list[str]:
     ov = [
         f"forcing.emissions_file={emis}",
         f"forcing.dms_file={inputs}/dms_lana2011_climo_{token}.nc",
-        f"forcing.dust_file={inputs}/dust_erodibility_cam_f05_{token}.nc",
+        # The Tegen scheme's five inputs are mirror products, so `auto` picks
+        # the right grid; the local-prep tool never produced them.
+        "forcing.dust_file=auto",
+        "forcing.dust_preferential_file=auto",
+        "forcing.dust_soil_types_file=auto",
+        "forcing.dust_regions_file=auto",
+        "forcing.dust_roughness_file=auto",
     ]
     if ox:
         ov.append(f"forcing.oxidants_file={ox[-1]}")
@@ -60,7 +66,7 @@ def jam_aux(grid: str, levels: str) -> list[str]:
             f"no oxidants_*_echam_{levels}_2014_{token}.nc under {inputs} — "
             "regenerate per jcm/data/mirror/SOURCES.md (scratch is "
             "purge-eligible)")
-    for o in ov[:3]:
+    for o in ov[:2]:
         path = o.split("=", 1)[1]
         if not Path(path).exists():
             raise SystemExit(

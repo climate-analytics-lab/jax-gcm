@@ -196,7 +196,9 @@ class KeepOutputTest(unittest.TestCase):
 _MIRROR_EMISSION_BUNDLES = frozenset(
     [f"hf://bundles/{g}/{p}"
      for g in ("t63", "t106")
-     for p in ("emissions_pd.nc", "dms.nc", "dust.nc")]
+     for p in ("emissions_pd.nc", "dms.nc", "dust_potential_sources.nc",
+               "dust_preferential_sources.nc", "dust_soil_types.nc",
+               "dust_regions.nc", "dust_surface_roughness.nc")]
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
 )
@@ -225,15 +227,19 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                     unknown, [],
                     f"{name} would prefetch non-mirror bundle(s): {unknown}")
 
-    def test_jam_spectral_preset_enumerates_its_four_bundles(self):
-        """A t63 JAM preset resolves all four keys to the t63 bundles, and they
+    def test_jam_spectral_preset_enumerates_its_bundles(self):
+        """A t63 JAM preset resolves every auto key to its t63 bundle, and they
         reach the prefetch list ``run`` iterates.
         """
         cfg = _compose_preset(PRESETS["t63-echam-jam"])
         self.assertEqual(sorted(_auto_emission_files(cfg)), sorted([
             "hf://bundles/t63/emissions_pd.nc",
             "hf://bundles/t63/dms.nc",
-            "hf://bundles/t63/dust.nc",
+            "hf://bundles/t63/dust_potential_sources.nc",
+            "hf://bundles/t63/dust_preferential_sources.nc",
+            "hf://bundles/t63/dust_soil_types.nc",
+            "hf://bundles/t63/dust_regions.nc",
+            "hf://bundles/t63/dust_surface_roughness.nc",
             "hf://bundles/t63_l47/oxidants_pd.nc",
         ]))
         prefetched = _preset_data_files(PRESETS["t63-echam-jam"])
@@ -256,10 +262,16 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         self.assertIn("hf://bundles/t63_l47/oxidants_pd.nc", base)
         # Same mechanism the real run uses: preset + extra nulling the inputs.
         extra = ["forcing.emissions_file=null", "forcing.dms_file=null",
-                 "forcing.dust_file=null", "forcing.oxidants_file=null"]
+                 "forcing.dust_file=null", "forcing.dust_preferential_file=null",
+                 "forcing.dust_soil_types_file=null",
+                 "forcing.dust_regions_file=null",
+                 "forcing.dust_roughness_file=null",
+                 "forcing.oxidants_file=null"]
         with_extra = _preset_data_files([*preset, *extra])
         for bundle in ("hf://bundles/t63/emissions_pd.nc",
-                       "hf://bundles/t63/dms.nc", "hf://bundles/t63/dust.nc",
+                       "hf://bundles/t63/dms.nc",
+                       "hf://bundles/t63/dust_potential_sources.nc",
+                       "hf://bundles/t63/dust_soil_types.nc",
                        "hf://bundles/t63_l47/oxidants_pd.nc"):
             self.assertNotIn(bundle, with_extra)
 
