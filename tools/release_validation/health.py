@@ -18,7 +18,6 @@ settled sim-days/hr (last chunk wall) for runtime-regression tracking.
 Exit code 0 = all checks pass.
 """
 import argparse
-import glob
 import re
 import sys
 from pathlib import Path
@@ -44,7 +43,7 @@ from jcm.analysis import area_weights, global_mean  # noqa: E402
 from jam_burden_report import _SPECIES  # noqa: E402
 from aerosol_stats import (  # noqa: E402
     _AOD_KEYS, collect, format_table, is_jam_run, missing_jam_diagnostics,
-    physics_gates, summarize, timestep_seconds, unscored_gates)
+    physics_gates, run_files, summarize, timestep_seconds, unscored_gates)
 
 #: Gate slack: the release gate is the climatological anchor range from
 #: the shared species table widened by this factor each way — a "did the
@@ -84,8 +83,10 @@ def main():
                     help="use only the last N chunks (default: all)")
     a = ap.parse_args()
 
-    files = sorted(glob.glob(f"{a.run_dir}/*_day*.nc"),
-                   key=lambda f: int(re.search(r"day(\d+)", f).group(1)))
+    # Same discovery as aerosol_stats.run_files, so the two cannot disagree
+    # about which files are chunks (``run.snapshot_interval`` writes a
+    # ``_day<N>_snapshots.nc`` stream that a ``*_day*.nc`` glob also matches).
+    files = run_files(a.run_dir)
     if not files:
         print(f"FAIL  no chunk files in {a.run_dir}")
         return 1

@@ -604,3 +604,100 @@ class TestJamDetection:
 
     def test_a_complete_run_reports_nothing_missing(self):
         assert A.missing_jam_diagnostics(synthetic_chunk()) == []
+
+
+class TestChunkDiscovery:
+    """``run.snapshot_interval`` writes a second stream beside the chunks."""
+
+    def _run_dir(self, tmp_path):
+        for name in ("mx_day5.nc", "mx_day10.nc", "mx_day100.nc",
+                     "mx_day5_snapshots.nc", "mx_day10_snapshots.nc",
+                     "mx.nc", "mx_day5.nc.provenance.json"):
+            (tmp_path / name).write_text("")
+        return tmp_path
+
+    def test_snapshot_streams_are_not_chunks(self, tmp_path):
+        found = [pathlib.Path(f).name
+                 for f in A.run_files(str(self._run_dir(tmp_path)))]
+        assert found == ["mx_day5.nc", "mx_day10.nc", "mx_day100.nc"]
+
+    def test_ordering_is_numeric_not_lexical(self, tmp_path):
+        found = A.run_files(str(self._run_dir(tmp_path)))
+        assert [int(A.CHUNK_FILE.search(f).group(1)) for f in found] == [
+            5, 10, 100]
+
+
+class TestIncompleteLedgerIsUnscored:
+    """A species absent from ``budget_residual_max`` was never checked."""
+
+    def _days(self, n=40):
+        return np.arange(5.0, 5.0 * n + 5.0, 5.0)
+
+    def test_a_species_with_no_ledger_is_reported(self):
+        days = self._days()
+        n = days.size
+        emi = np.full(n, 1.0 / 86400e6)
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": emi,
+                  # du carries a burden but no emission diagnostic at all.
+                  "burden_du": np.full(n, 20.0)}
+        reasons = dict(A.unscored_gates(days, series))
+        assert "budget_residual_du" in reasons
+        assert "ledger is incomplete" in reasons["budget_residual_du"]
+        assert "budget_residual_bc" not in reasons
+
+    def test_no_closable_species_reports_the_aggregate_gate(self):
+        """Otherwise a run passes its drift gates with no closure at all."""
+        days = self._days()
+        series = {"burden_bc": np.full(days.size, 5.0)}   # no ledger anywhere
+        stats = A.summarize(days, series)
+        assert "budget_residual_max" not in stats
+        reasons = dict(A.unscored_gates(days, series))
+        assert "no species had a complete mass ledger" in reasons[
+            "budget_residual_max"]
+
+    def test_a_complete_ledger_is_not_reported_unscored(self):
+        days = self._days()
+        n = days.size
+        emi = np.full(n, 1.0 / 86400e6)
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": emi}
+        reasons = dict(A.unscored_gates(days, series))
+        assert not any(k.startswith("budget_residual") for k in reasons)
+
+
+class TestSeriesRoundTrip:
+    """The reduction must carry everything a re-score needs."""
+
+    def _write(self, tmp_path, dt_minutes):
+        run = tmp_path / "run"
+        run.mkdir()
+        (run / ".hydra").mkdir()
+        (run / ".hydra" / "config.yaml").write_text(
+            f"run:\n  time_step: {dt_minutes}\n")
+        return run
+
+    def test_timestep_travels_with_the_series(self, tmp_path):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        out = tmp_path / "reduced.npz"
+        np.savez(out, _days=days, _timestep_seconds=np.array(720.0),
+                 burden_bc=np.full(n, 3.0),
+                 budget_mass_bc=np.full(n, 4.0e-6),
+                 budget_dyn_bc=np.zeros(n))
+        loaded = np.load(out)
+        series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        dt = float(loaded["_timestep_seconds"])
+        # With the timestep the dynamics gate is scored; without it, it is not.
+        assert "dyn_frac_per_step_bc" in A.summarize(days, series, dt)
+        assert "dyn_frac_per_step_bc" not in A.summarize(days, series, None)
+        assert "dyn_frac_per_step" not in dict(
+            A.unscored_gates(days, series, dt))
+
+    def test_metadata_keys_never_become_statistics(self, tmp_path):
+        out = tmp_path / "reduced.npz"
+        np.savez(out, _days=np.arange(3.0), _timestep_seconds=np.array(720.0),
+                 burden_bc=np.zeros(3))
+        loaded = np.load(out)
+        series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        assert set(series) == {"burden_bc"}

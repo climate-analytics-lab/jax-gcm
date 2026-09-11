@@ -624,6 +624,26 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
+    else:
+        # A species missing from ``budget_residual_max`` is a species whose
+        # mass was never checked, and the maximum over an incomplete subset
+        # cannot see a leak confined to the species it omits. Report each
+        # omission, and the aggregate when nothing at all could be closed.
+        closed = []
+        for species in ("so4",) + PRIMARY_BUDGET_SPECIES:
+            if f"burden_{species}" not in series:
+                continue        # the run does not carry it; nothing to close
+            if _budget_residual(days, series, species) is None:
+                rows.append((
+                    f"budget_residual_{species}",
+                    "the mass ledger is incomplete — a missing emi_*/dry_*/"
+                    "wet_* diagnostic, or a non-finite burden endpoint"))
+            else:
+                closed.append(species)
+        if not closed:
+            rows.append(("budget_residual_max",
+                         "no species had a complete mass ledger to close "
+                         "against; no closure was checked"))
 
     # The dynamics gate needs BOTH the #713 in-step gauge and a timestep to
     # express it per step; say which is missing rather than omitting the row.
@@ -689,10 +709,20 @@ def format_table(stats: dict[str, float],
     return "\n".join(lines)
 
 
+#: A saved chunk is ``<prefix>_day<N>.nc``. ``run.snapshot_interval`` writes
+#: ``<prefix>_day<N>_snapshots.nc`` beside it, which a ``*_day*.nc`` glob also
+#: matches — those are 2-D snapshot streams with no ``pressure_half``, so they
+#: would break the column integral, and any that did parse would double-count
+#: the day. Anchored on the extension, they are excluded.
+CHUNK_FILE = re.compile(r"_day(\d+)\.nc$")
+
+
 def run_files(run_dir: str) -> list[str]:
-    """Chunk files of a run directory, in day order."""
-    return sorted(glob.glob(f"{run_dir}/*_day*.nc"),
-                  key=lambda f: int(re.search(r"day(\d+)", f).group(1)))
+    """Chunk files of a run directory, in day order (snapshots excluded)."""
+    matched = ((m, f) for f, m in
+               ((f, CHUNK_FILE.search(f)) for f in glob.glob(f"{run_dir}/*.nc"))
+               if m)
+    return [f for _m, f in sorted(matched, key=lambda mf: int(mf[0].group(1)))]
 
 
 def main() -> int:
@@ -708,12 +738,25 @@ def main() -> int:
     ap.add_argument("--reference", default=None,
                     help="a .npz of a reference run's series; adds the "
                          "regression comparison (max(3 sigma, 15 %%))")
+    ap.add_argument("--timestep-minutes", type=float, default=None,
+                    help="override the run timestep the dynamics gate needs "
+                         "(default: the run's Hydra config, or the one saved "
+                         "with --series-out)")
     args = ap.parse_args()
 
+    dt = None
     if args.series_in:
         loaded = np.load(args.series_in)
         days = loaded["_days"]
-        series = {k: loaded[k] for k in loaded.files if k != "_days"}
+        # Underscore keys are the reduction's own metadata, not statistics.
+        series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        # The timestep travels WITH the reduction: re-scoring a saved series
+        # has no run directory to read it from, and without it every
+        # dynamics-conservation gate would silently drop out of a re-score
+        # that the original scored.
+        if "_timestep_seconds" in loaded.files:
+            stored = float(loaded["_timestep_seconds"])
+            dt = stored if np.isfinite(stored) and stored > 0 else None
         if args.last_n:
             # Applied here too: silently ignoring it would score a different
             # window than the one asked for.
@@ -727,9 +770,12 @@ def main() -> int:
         if args.last_n:
             files = files[-args.last_n:]
         days, series = collect(files)
+        dt = timestep_seconds(args.run_dir)
+    if args.timestep_minutes:
+        dt = args.timestep_minutes * 60.0
     if args.series_out:
-        np.savez(args.series_out, _days=days, **series)
-    dt = timestep_seconds(args.run_dir) if args.run_dir else None
+        np.savez(args.series_out, _days=days,
+                 _timestep_seconds=np.array(dt if dt else np.nan), **series)
     stats = summarize(days, series, dt)
     gates = physics_gates(stats)
     print(format_table(stats, gates))
