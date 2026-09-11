@@ -95,7 +95,7 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 ``smooth_gradients_test.py``, ``cloud_depth_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
 
-### Cloud-base trigger and the sub-cloud layer
+## Cloud-base trigger and the sub-cloud layer
 
 **What we do.** Tiedtke's cloud base is ECHAM's ``cubase`` ``klab`` walk
 (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::find_cloud_base``):
