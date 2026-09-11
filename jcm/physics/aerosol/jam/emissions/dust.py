@@ -435,7 +435,18 @@ class DustEmissions(PhysicsTerm):
     def _roughness(self, forcing, ncols, params):
         """``Z01``/``Z02`` [cm], floored and scaled as ``bgc_read_fpar_field`` does."""
         if params.use_roughness_map:
-            z0 = _column_field(forcing, "dust_roughness", ncols)
+            # ndust=2 is the only preset with a live roughness map, and the
+            # Fortran aborts without the file; silently flooring z0 to z0min
+            # would give feff = 1 and quietly emit the wrong flux.
+            supplied = (getattr(forcing, "dust_roughness", None)
+                        if forcing is not None else None)
+            if supplied is None or jnp.size(supplied) != ncols:
+                raise ValueError(
+                    "DustParameters.use_roughness_map is set (ndust=2) but "
+                    "forcing.dust_roughness is missing or the wrong shape. Set "
+                    "forcing.dust_roughness_file (or 'auto'), or use the "
+                    "default constant roughness.")
+            z0 = jnp.ravel(supplied)
         else:
             z0 = jnp.full((ncols,), 1.0) * params.ndurough
         return jnp.maximum(z0, params.r_dust_z0min) * params.r_dust_scz0

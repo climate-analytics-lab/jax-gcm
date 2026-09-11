@@ -252,7 +252,10 @@ class SnowAndMoistureTest(unittest.TestCase):
     def test_saturated_soil_emits_nothing_in_every_preset(self):
         for ndust in (2, 3, 4):
             term = DustEmissions(params=DustParameters.preset(ndust))
-            wet, _ = term(*_inputs(wetness=1.0))
+            state, diagnostics, forcing, terrain = _inputs(wetness=1.0)
+            # ndust=2 runs the satellite roughness map, which is mandatory there.
+            forcing.dust_roughness = jnp.full((2,), 0.001)
+            wet, _ = term(state, diagnostics, forcing, terrain)
             np.testing.assert_allclose(_total_mass(wet), 0.0,
                                        err_msg=f"ndust={ndust}")
 
@@ -548,6 +551,20 @@ class InertTest(unittest.TestCase):
                        "layer_thickness": jnp.full((3, 2), 100.0)}
         tend, _ = DustEmissions()(state, diagnostics, None, None)
         np.testing.assert_allclose(_total_mass(tend), 0.0)
+
+    def test_live_roughness_map_without_the_field_raises(self):
+        params = DustParameters.preset(2)
+        self.assertTrue(params.use_roughness_map)
+        with self.assertRaisesRegex(ValueError, "dust_roughness"):
+            DustEmissions(params=params)(*_inputs())
+
+    def test_live_roughness_map_uses_the_supplied_field(self):
+        params = DustParameters.preset(2)
+        state, diagnostics, forcing, terrain = _inputs(u10=12.0)
+        forcing.dust_roughness = jnp.full((2,), 0.001)   # = z0s, so feff = 1
+        tend, _ = DustEmissions(params=params)(
+            state, diagnostics, forcing, terrain)
+        self.assertTrue(np.all(_total_mass(tend) > 0.0))
 
     def test_unsupported_preset_raises(self):
         with self.assertRaisesRegex(ValueError, "ndust=5"):
