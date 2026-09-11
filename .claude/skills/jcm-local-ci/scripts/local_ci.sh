@@ -22,19 +22,30 @@ export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-${SCRATCH:-$HOME/.
 # PR #135); without it on the path every model-construction test raises and
 # ~100 unrelated failures bury the ones that matter. The worktree comes first
 # so it wins over any editable install in the venv.
-export JCM_DINOSAUR=${JCM_DINOSAUR:-$HOME/dinosaur-sl}
-if [ ! -d "$JCM_DINOSAUR/dinosaur" ]; then
-    echo "JCM_DINOSAUR=$JCM_DINOSAUR has no dinosaur package — set it to a"
-    echo "checkout of the semi-Lagrangian fork, or the gate reports ~100"
-    echo "model-construction failures with no useful diagnostic."
+# jcm's dinosaur backend is semi-Lagrangian-only, and requirements.txt pins
+# `dinosaur>=1.5.0`, which ships it — so the installed package is the normal
+# source and JCM_DINOSAUR is only an override for an environment predating
+# that release. Prepend it when it exists; never require it.
+export PYTHONPATH=$REPO${PYTHONPATH:+:$PYTHONPATH}
+if [ -n "${JCM_DINOSAUR:-}" ] && [ -d "$JCM_DINOSAUR/dinosaur" ]; then
+    export PYTHONPATH=$JCM_DINOSAUR:$PYTHONPATH
+elif [ -z "${JCM_DINOSAUR:-}" ] && [ -d "$HOME/dinosaur-sl/dinosaur" ]; then
+    export JCM_DINOSAUR=$HOME/dinosaur-sl
+    export PYTHONPATH=$JCM_DINOSAUR:$PYTHONPATH
+fi
+# Gate on the invariant that actually matters, not on a directory: without
+# semi-Lagrangian transport every model-construction test raises and ~100
+# unrelated failures bury the ones that matter.
+if ! python -c "
+from dinosaur import primitive_equations as pe
+import sys
+sys.exit(0 if hasattr(pe, 'SemiLagrangianPrimitiveEquations') else 1)" 2>/dev/null; then
+    echo "the dinosaur on this PYTHONPATH has no semi-Lagrangian transport."
+    echo "Install the pinned dependency (dinosaur>=1.5.0, requirements.txt)"
+    echo "or point JCM_DINOSAUR at a checkout that carries it."
     exit 1
 fi
-# Echo the revision: CI installs the pinned
-# `dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian`
-# (requirements.txt), so a drifted worktree measures a different dependency
-# — and a different coverage number — than CI will.
-echo "dinosaur: $JCM_DINOSAUR @ $(git -C "$JCM_DINOSAUR" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
-export PYTHONPATH=$JCM_DINOSAUR:$REPO${PYTHONPATH:+:$PYTHONPATH}
+echo "dinosaur: $(python -c 'import dinosaur; print(dinosaur.__file__)')${JCM_DINOSAUR:+ (JCM_DINOSAUR=$JCM_DINOSAUR @ $(git -C "$JCM_DINOSAUR" rev-parse --short HEAD 2>/dev/null || echo non-git))}"
 
 echo "=== lint (here) ==="
 ruff check . || { echo "LINT FAILED"; exit 1; }
@@ -71,7 +82,7 @@ source $VENV/bin/activate
 cd $REPO
 export JAX_PLATFORMS=cpu
 export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
-export PYTHONPATH=$JCM_DINOSAUR:$REPO
+export PYTHONPATH=$PYTHONPATH
 
 # Sequential, not concurrent: the two gates share this worktree's .coverage.*.
 # Each status is kept rather than left in \$? (the next echo would replace it),
