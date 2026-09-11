@@ -504,6 +504,42 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
                         f"plume died at its base: kbase={kbase} ktop={ktop}")
         self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0)
 
+    def test_precip_flux_floors_each_phase_leg_separately(self):
+        """A negative rain leg must not cancel surviving snow.
+
+        cuflx floors rain and snow independently at the surface, so a warm
+        downdraft sink that drives the rain leg negative while snow is still
+        falling leaves the surface precip set by the snow alone. The carrier
+        profile ``WetScavenging`` reads has to agree with that, or it
+        understates the flux wherever the two phases coexist.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+            convective_precip_fluxes,
+        )
+        nlev = 6
+        # Cold aloft so generation goes to snow; warm below (but under the
+        # tmelt+2 melting threshold) so the downdraft sink is charged to rain.
+        T = jnp.asarray([250.0, 250.0, 250.0, 274.0, 274.0, 274.0])
+        q = jnp.full(nlev, 1.0e-3)
+        p = jnp.asarray([2.0e4, 4.0e4, 6.0e4, 7.5e4, 9.0e4, 1.0e5])
+        dp = jnp.full(nlev, 1.5e4)
+        pdmfup = jnp.zeros(nlev).at[1].set(2.0e-4)
+        pdmfdp = jnp.zeros(nlev).at[3].set(-1.0e-4)
+        # ``kbase = nlev`` puts cloud base below the column, so no layer runs
+        # the sub-cloud evaporation: the flux entering the bottom layer is
+        # then exactly the surface precipitation, and any discrepancy is the
+        # phase bookkeeping alone.
+        rain_sfc, snow_sfc, _prain, _melt, _up, flux = convective_precip_fluxes(
+            T, q, p, dp, nlev, pdmfup, pdmfdp, 900.0,
+        )
+        surface_precip = float(rain_sfc) + float(snow_sfc)
+        # The rain leg is driven negative and floored; the snow survives.
+        np.testing.assert_allclose(surface_precip, 2.0e-4, rtol=1e-6)
+        np.testing.assert_allclose(
+            float(flux[-1]), surface_precip, rtol=1e-6,
+            err_msg="a negative rain leg cancelled the surviving snow",
+        )
+
     def test_active_convection_publishes_condensate_and_precip_flux(self):
         """The diagnostics aerosol scavenging consumes must not be empty.
 

@@ -132,10 +132,10 @@ def convective_precip_fluxes(
         )
         zsfl = zsfl - zsnmlt
         zrfl = zrfl + zsnmlt
-        return (zrfl, zsfl), zsnmlt
+        return (zrfl, zsfl), (zsnmlt, zrfl, zsfl)
 
     gen = pdmfup + pdmfdp
-    (prfl, psfl), pdpmel = lax.scan(
+    (prfl, psfl), (pdpmel, rain_lev, snow_lev) = lax.scan(
         partition_step, (jnp.zeros(()), jnp.zeros(())),
         (gen, temperature, humidity, dp_lev),
     )
@@ -176,15 +176,20 @@ def convective_precip_fluxes(
     rain_sfc = jnp.maximum(prfl + zdpevap_tot * prfl * inv, 0.0)
     snow_sfc = jnp.maximum(psfl + zdpevap_tot * psfl * inv, 0.0)
 
-    # Total precip flux crossing each layer's TOP interface: generation
-    # above, less the sub-cloud evaporation already charged above (melting
-    # only moves mass between the rain and snow legs). Bottom-interface
-    # value is ``cumsum(gen + zdrfl)``, matching ``rain_sfc + snow_sfc`` at
-    # the surface; shift by one layer for the top interface (zero at the
-    # model top). The two differ only when a rain or snow leg goes negative
-    # mid-column and is clamped individually above, which the same floor
-    # here bounds.
-    flux_bottom = jnp.maximum(jnp.cumsum(gen + zdrfl_per_level), 0.0)
+    # Total precip flux crossing each layer's TOP interface. Built from the
+    # PHASE-RESOLVED legs with the same per-leg floor cuflx applies at the
+    # surface (lines above): a downdraft sink can drive one leg negative
+    # while the other is still falling, and a floored total would let that
+    # negative cancel the surviving phase and understate the carrier. Each
+    # leg is floored, then the sub-cloud evaporation already charged above
+    # is applied to their sum, which reproduces ``rain_sfc + snow_sfc``
+    # exactly at the surface. Shift by one layer for the top interface
+    # (zero at the model top).
+    flux_bottom = jnp.maximum(
+        jnp.maximum(rain_lev, 0.0) + jnp.maximum(snow_lev, 0.0)
+        + jnp.cumsum(zdrfl_per_level),
+        0.0,
+    )
     precip_flux = jnp.concatenate(
         [jnp.zeros_like(flux_bottom[:1]), flux_bottom[:-1]]
     )
