@@ -701,3 +701,142 @@ class TestSeriesRoundTrip:
         loaded = np.load(out)
         series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
         assert set(series) == {"burden_bc"}
+
+
+class TestEveryClosureComponentRequired:
+    """A missing ledger field is not a zero contribution."""
+
+    def _closed(self, n=40):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        return days, {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                      "dry_bc": np.zeros(n), "wet_bc": emi}
+
+    def test_baseline_closes(self):
+        days, series = self._closed()
+        assert abs(A._budget_residual(days, series, "bc")) < 1e-9
+
+    def test_a_missing_removal_ledger_is_unscored_not_fabricated(self):
+        for dropped in ("dry_bc", "wet_bc"):
+            days, series = self._closed()
+            del series[dropped]
+            assert A._budget_residual(days, series, "bc") is None, dropped
+
+    def test_dropping_wet_would_otherwise_fabricate_a_full_leak(self):
+        """Guards the specific wrong answer: wet carries the whole sink."""
+        days, series = self._closed()
+        del series["wet_bc"]
+        # Treating the absence as zero deposition gives residual == 1.0.
+        deposited_as_zero = 1.0
+        assert A._budget_residual(days, series, "bc") is None
+        stats = A.summarize(days, series)
+        assert stats.get("budget_residual_bc") != deposited_as_zero
+        assert "budget_residual_bc" not in stats
+
+    def test_a_missing_gas_reservoir_is_unscored(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        base = {"burden_so4": np.full(n, 4.0),
+                "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
+                "gas_h2so4": np.zeros(n),
+                "emi_so2": emi, "emi_dms": np.zeros(n), "emi_so4": np.zeros(n),
+                "dry_so4": np.zeros(n), "wet_so4": np.zeros(n)}
+        assert A._budget_residual(days, dict(base), "so4") is not None
+        for gas in ("gas_so2", "gas_dms", "gas_h2so4"):
+            series = dict(base)
+            del series[gas]
+            assert A._budget_residual(days, series, "so4") is None, gas
+
+
+class TestFluxIntegration:
+    """The flux integral must span the same interval as the storage term."""
+
+    def test_a_linearly_varying_flux_integrates_exactly(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        # Emission ramps 1 -> 3 mg/m2/day; trapezoid is exact for a ramp.
+        emi_mg = np.linspace(1.0, 3.0, n)
+        emi = emi_mg / 86400e6
+        span = days[-1] - days[0]
+        expected = 0.5 * (emi_mg[0] + emi_mg[-1]) * span       # mg/m2
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": emi}
+        # A closed budget: deposition equals emission, burden steady.
+        assert abs(A._budget_residual(days, series, "bc")) < 1e-9
+        # And the integral itself is the trapezoidal one, not a right-endpoint
+        # rectangle rule (which would be high by half a chunk x the change).
+        rect = float(np.mean(emi_mg[1:])) * span
+        assert not np.isclose(rect, expected)
+        assert np.isclose(float(np.trapezoid(emi, days)) * 86400e6, expected)
+
+    def test_a_seasonal_sink_swing_does_not_fabricate_a_leak(self):
+        """The failure mode: a varying sink tripping the 5 % closure gate."""
+        n = 19                                   # the 90-day minimum window
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        # Sink doubles across the window; emission matches it exactly, so the
+        # budget is closed by construction and the burden is steady.
+        flux = np.linspace(1.0, 3.0, n) / 86400e6
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": flux,
+                  "dry_bc": np.zeros(n), "wet_bc": flux}
+        residual = A._budget_residual(days, series, "bc")
+        assert abs(residual) < A.BUDGET_RESIDUAL_LIMIT
+        assert abs(residual) < 1e-9
+
+    def test_a_nan_flux_sample_is_unscored(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        emi[5] = np.nan
+        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": np.full(n, 1.0 / 86400e6)}
+        assert A._budget_residual(days, series, "bc") is None
+
+
+class TestReferenceCompleteness:
+    def test_a_statistic_the_run_lost_fails(self):
+        """A regression that deletes a diagnostic must not report PASS."""
+        reference = {"burden_so4_mg_m2": 3.0, "aod_550": 0.12}
+        stats = {"burden_so4_mg_m2": 3.0}          # aod_550 no longer emitted
+        rows = A.compare_to_reference(stats, reference)
+        failed = {name: limit for name, _v, limit, ok in rows if not ok}
+        assert "aod_550" in failed
+        assert "absent" in failed["aod_550"]
+
+    def test_a_matching_run_still_passes(self):
+        reference = {"burden_so4_mg_m2": 3.0, "aod_550": 0.12}
+        rows = A.compare_to_reference(dict(reference), reference)
+        assert rows and all(ok for *_r, ok in rows)
+
+
+class TestAnchorGates:
+    """Tier 2 must apply wherever the statistics are scored."""
+
+    def test_an_excessive_burden_fails_the_anchor(self):
+        stats = {"burden_so4_mg_m2": 500.0}
+        (name, _v, _l, ok), = A.anchor_gates(stats)
+        assert name == "burden_so4_mg_m2" and not ok
+
+    def test_a_plausible_burden_passes(self):
+        assert all(ok for *_r, ok in A.anchor_gates({"burden_so4_mg_m2": 3.0}))
+
+    def test_a_species_the_run_lacks_is_not_anchor_scored(self):
+        assert A.anchor_gates({"burden_soa_mg_m2": 0.0}) == []
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        reasons = dict(A.unscored_gates(days, {"burden_soa": np.zeros(n)}))
+        assert "burden_soa_mg_m2" in reasons
+
+    def test_a_stationary_excessive_run_is_not_a_clean_pass(self):
+        """Zero drift and a closed ledger must not excuse a huge burden."""
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 1.0 / 86400e6)
+        series = {"burden_so4": np.full(n, 500.0), "emi_so4": emi,
+                  "emi_so2": np.zeros(n), "emi_dms": np.zeros(n),
+                  "gas_so2": np.zeros(n), "gas_dms": np.zeros(n),
+                  "gas_h2so4": np.zeros(n),
+                  "dry_so4": np.zeros(n), "wet_so4": emi}
+        stats = A.summarize(days, series)
+        assert all(ok for *_r, ok in A.physics_gates(stats))    # drift/closure fine
+        assert not all(ok for *_r, ok in A.anchor_gates(stats))  # anchor is not

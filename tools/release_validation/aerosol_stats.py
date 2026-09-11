@@ -398,9 +398,11 @@ def regression_tolerance(reference: float, sigma: float,
 def _budget_residual(days, series, species) -> float | None:
     """Compute ``(emitted - deposited - dB) / emitted`` over the record.
 
-    The fluxes are chunk means of ``kg/m2/s``, so their record mean times the
-    record length is the time integral; ``dB`` is the change in the chunk-mean
-    burden between the first and last chunk. For sulfate the ledger is the
+    The fluxes are chunk means of ``kg/m2/s``, integrated trapezoidally over
+    ``days`` between the first and last chunk means; ``dB`` differences the
+    chunk-mean burden at those same two endpoints. Every component must be
+    present: a missing one returns ``None`` (reported unscored) rather than
+    counting as zero. For sulfate the ledger is the
     whole sulfur family in SO4-equivalent mass (SO2 and DMS emissions are the
     real sulfate source; ``emi_so4`` alone is a few per cent of it), and the
     stored mass includes the gas-phase reservoirs.
@@ -410,13 +412,22 @@ def _budget_residual(days, series, species) -> float | None:
         return None
 
     def integral(key):
-        # The storage term differences the first and last chunk MEANS, i.e.
-        # chunk centres, so the flux integral spans the same interval: the
-        # chunks after the first, times the centre-to-centre span. Averaging
-        # all N chunks over an (N-1)-chunk span understates it by 1/N.
+        # Trapezoidal against ``days``, between the first and last chunk
+        # MEANS — the same two endpoints the storage term differences. The
+        # samples are chunk means attributable to their own window, so a
+        # right-endpoint rectangle rule (dropping the first sample) is short
+        # by half a chunk times the endpoint change: on a 90-day window a
+        # seasonal swing in the sink can exceed the closure threshold on that
+        # alone. Trapezoid also handles a non-uniform chunk cadence.
         v = series.get(key)
-        return None if v is None else float(np.nanmean(v[1:])) * span * 86400e6
+        if v is None or not np.all(np.isfinite(v)):
+            return None
+        return float(np.trapezoid(v, days)) * 86400e6
 
+    # EVERY component is required. A missing ledger field is not a zero
+    # contribution: treating it as one fabricates a residual and then gates
+    # it, which is a false pass or a false failure rather than the "unscored"
+    # the caller would get from None.
     if species == "so4":
         # Every carrier converted to sulfate-AEROSOL mass, the unit the
         # burden and the deposition ledger are already in.
@@ -430,8 +441,9 @@ def _budget_residual(days, series, species) -> float | None:
             return None
         for gas in _S_FAMILY_GASES:
             reservoir = series.get(f"gas_{gas}")
-            if reservoir is not None:
-                stored = stored + reservoir * _SULFUR_CARRIERS[gas]
+            if reservoir is None:
+                return None     # a gas reservoir omitted, not empty
+            stored = stored + reservoir * _SULFUR_CARRIERS[gas]
     else:
         emitted = integral(f"emi_{species}")
         stored = series.get(f"burden_{species}")
@@ -441,8 +453,9 @@ def _budget_residual(days, series, species) -> float | None:
     deposited = 0.0
     for prefix in ("dry", "wet"):
         contribution = integral(f"{prefix}_{species}")
-        if contribution is not None:
-            deposited += contribution
+        if contribution is None:
+            return None         # a removal ledger omitted, not zero
+        deposited += contribution
     if not np.isfinite(emitted) or emitted <= 0:
         return None
     residual = float((emitted - deposited - (stored[-1] - stored[0])) / emitted)
@@ -574,7 +587,14 @@ def compare_to_reference(stats: dict[str, float],
     """
     rows = []
     for key in sorted(reference):
-        if key not in stats or key == "record_days":
+        if key == "record_days":
+            continue
+        if key not in stats:
+            # The reference has it and this run does not: the diagnostic was
+            # removed. Skipping would report PASS for the regression that
+            # deleted the very statistic being compared.
+            rows.append((key, float("nan"),
+                         f"{reference[key]:.5g} (absent from this run)", False))
             continue
         # Statistics with an absolute physics gate are not scored here too:
         # their references are ~1e-3, so a relative tolerance would be tighter
@@ -618,7 +638,11 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
             continue
         name = f"dlnB_dt_{species}_per_day"
         if not np.any(np.isfinite(b) & (b > 0)):
-            rows.append((name, "the run carries no burden of this species"))
+            reason = "the run carries no burden of this species"
+            rows.append((name, reason))
+            # The anchor gate skips it on the same grounds, so say so rather
+            # than leaving a silently missing tier-2 row.
+            rows.append((f"burden_{species}_mg_m2", reason))
         elif span < MIN_WINDOW_DAYS:
             rows.append((name, short_slope))
 
@@ -655,6 +679,33 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
         rows.append(("dyn_frac_per_step", "no run timestep is available "
                      "(.hydra/config.yaml absent, or run.time_step is null as "
                      "on the pySES backend), and the gate is per step"))
+    return rows
+
+
+#: Climatological anchor gate (tier 2): the shared ``_SPECIES`` ranges widened
+#: each way by this factor. A "did the model produce a plausible planetary
+#: loading" check, not a tuning target.
+BURDEN_SLACK = 3.0
+
+BURDEN_RANGES = {sp: (lo / BURDEN_SLACK, hi * BURDEN_SLACK)
+                 for sp, (_modes, (lo, hi)) in _SPECIES.items()}
+
+
+def anchor_gates(stats: dict[str, float]) -> list[tuple[str, float, str, bool]]:
+    """Score the annual burdens against the climatological anchor ranges.
+
+    Shared so the standalone scorer and ``health.py`` apply the same tier-2
+    check: a stationary run with a wildly excessive burden has zero drift and
+    can close its ledger, so the physics gates alone would pass it. A species
+    the run does not carry is left to :func:`unscored_gates`.
+    """
+    rows = []
+    for species, (lo, hi) in BURDEN_RANGES.items():
+        key = f"burden_{species}_mg_m2"
+        value = stats.get(key)
+        if value is None or value == 0.0:
+            continue
+        rows.append((key, value, f"[{lo:g}, {hi:g}]", bool(lo <= value <= hi)))
     return rows
 
 
@@ -777,7 +828,7 @@ def main() -> int:
         np.savez(args.series_out, _days=days,
                  _timestep_seconds=np.array(dt if dt else np.nan), **series)
     stats = summarize(days, series, dt)
-    gates = physics_gates(stats)
+    gates = anchor_gates(stats) + physics_gates(stats)
     print(format_table(stats, gates))
     unscored = unscored_gates(days, series, dt)
     for name, reason in unscored:

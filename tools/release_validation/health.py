@@ -40,15 +40,10 @@ for _p in (str(_REPO), str(_TOOLS)):
 # tools/jam_burden_report.py (it includes cloud-borne tracers and the
 # pressure_half level-orientation handling).
 from jcm.analysis import area_weights, global_mean  # noqa: E402
-from jam_burden_report import _SPECIES  # noqa: E402
 from aerosol_stats import (  # noqa: E402
-    _AOD_KEYS, collect, format_table, is_jam_run, missing_jam_diagnostics,
-    physics_gates, run_files, summarize, timestep_seconds, unscored_gates)
-
-#: Gate slack: the release gate is the climatological anchor range from
-#: the shared species table widened by this factor each way — a "did the
-#: model produce a plausible planetary loading" gate, not a tuning target.
-_BURDEN_SLACK = 3.0
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect, format_table, is_jam_run,
+    missing_jam_diagnostics, physics_gates, run_files, summarize,
+    timestep_seconds, unscored_gates)
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -60,13 +55,6 @@ RANGES = {
     # so use --last-n to score the settled months.
     "aod_550": (0.02, 0.35),
 }
-
-# Burden gates derive from the shared anchor table (see _BURDEN_SLACK).
-BURDEN_RANGES = {
-    sp: (lo / _BURDEN_SLACK, hi * _BURDEN_SLACK)
-    for sp, (_modes, (lo, hi)) in _SPECIES.items()
-}
-
 
 def wmean(da, weights):
     """Time-mean, area-weighted global mean (over the horizontal dims)."""
@@ -179,20 +167,13 @@ def main():
         # timestep; ``unscored_gates`` reports it when either is missing.
         dt = timestep_seconds(a.run_dir)
         stats = summarize(days, series, dt)
-        for sp, (lo, hi) in BURDEN_RANGES.items():
-            key = f"burden_{sp}_mg_m2"
-            if key not in stats:
+        for sp in BURDEN_RANGES:
+            if f"burden_{sp}_mg_m2" not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
-                continue
-            if stats[key] == 0.0:
-                # A species the run does not carry is exempted from the drift
-                # gate; the anchor gate must agree, or the two tiers contradict
-                # each other on the same line of the report.
-                print(f"NOTE  {sp} burden is identically zero — the run "
-                      "carries no such aerosol; anchor gate not scored")
-                continue
-            check(key, stats[key], lo, hi)
-        for name, value, limit, good in physics_gates(stats):
+        # Anchors and physics gates share one implementation with the
+        # standalone scorer, so the two commands cannot disagree about a run.
+        for name, value, limit, good in (anchor_gates(stats)
+                                         + physics_gates(stats)):
             print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
                   f"(expected {limit})")
             ok = ok and good
