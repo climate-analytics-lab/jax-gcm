@@ -43,6 +43,46 @@ class PysesHydraConfigTest(unittest.TestCase):
         names = [t.name for t in model.physics.terms]
         self.assertIn("upper_temperature_relaxation", names)
 
+    def test_delegated_timestep_survives_a_fresh_chunk_on_dinosaur(self):
+        """The fast-lane half of the delegated-timestep guard.
+
+        The pySES version below is the end-to-end one, but it is slow AND
+        importorskip'd, so CI never runs it. This drives the same per-chunk
+        path — integrate, health-check, budget report, netCDF, checkpoint —
+        with ``run.time_step=null`` on a tiny dinosaur model, which
+        ``run_chunked`` accepts because a pre-built model makes the run config's
+        timestep unused. Anything in that path that reads it as a number fails
+        here, in the fast lane.
+        """
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.runners import run_chunked
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+        model = Model(coords=coords, time_step=60,
+                      terrain=TerrainData.aquaplanet(coords),
+                      physics=held_suarez_physics())
+        cfg = _cfg(["physics=held_suarez", "grid=held_suarez_t31_l8",
+                    "run.time_step=null", "run.total_time=0.5",
+                    "run.save_interval=0.25"])
+        self.assertIsNone(cfg.run.time_step)   # the case under test
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reports = run_chunked(cfg, chunk_days=0.25,
+                                  output_prefix=f"{tmpdir}/deleg",
+                                  model=model)
+            self.assertGreaterEqual(len(reports), 1)
+            self.assertTrue(list(Path(tmpdir).glob("deleg_day*.nc")))
+
     @pytest.mark.slow
     def test_delegating_config_completes_a_fresh_first_chunk(self):
         """A config whose timestep the dycore owns must survive chunk 1.
@@ -74,10 +114,13 @@ class PysesHydraConfigTest(unittest.TestCase):
             self.assertIsNone(cfg.run.time_step)   # the point of the config
             reports = run(cfg)
 
-        self.assertIsInstance(reports, list)
-        self.assertGreaterEqual(len(reports), 1)
-        self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
-        self.assertTrue(Path(tmpdir).exists() or True)
+            # Everything the crash happened BETWEEN: the integration finished,
+            # so the chunk must have reached disk and the checkpoint written.
+            self.assertIsInstance(reports, list)
+            self.assertGreaterEqual(len(reports), 1)
+            self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
+            self.assertTrue(list(Path(tmpdir).glob("deleg_day*.nc")))
+            self.assertTrue(Path(f"{tmpdir}/deleg.ckpt").exists())
 
     def test_dinosaur_default_unchanged(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore

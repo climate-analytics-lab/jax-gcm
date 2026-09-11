@@ -315,9 +315,25 @@ Because taking it silently would mean emitting 37-46 % too much sea salt, the
 emission terms publish a per-column flag `wind_10m_model_level` — 1 where the
 model level was used, 0 where the diagnosed wind was — zeroed every step with
 the other emission diagnostics. It is 1 on step 1 of a cold start and 0
-thereafter, and the JAM integration test asserts exactly that per step.
+thereafter; `seasalt_test.py` (`test_fallback_is_taken_on_step_one_and_never_again`
+and its companions) asserts exactly that per step, against the zero-filled carry
+a cold start begins with and a populated one thereafter. The JAM integration
+test adds the end-to-end check that no column is still flagged after six steps.
 
-`check_health` **reports** the chunk's fraction rather than failing on it, and
+**The three terms behave differently on step 1 of a cold start, deliberately.**
+Dust emits nothing (its carried `u*` is zero, and a saltation threshold has no
+defensible value without a surface layer, so `DustEmissions` has no `u*`
+default at all); sea salt and DMS emit from the lowest model level and flag it
+(`|U|` at ~33 m is a defensible approximation of `u10` — it is what the model
+did on every step before #723); and `EchamSurface` has no step-1 case, because
+it runs after vdiff. Unifying them would make one of the three worse: dust
+would have to invent a wind, or sea salt would have to discard a step of a
+legitimate flux for symmetry's sake. The asymmetry follows from what each
+quantity is, and is stated here rather than in three docstrings.
+
+`check_health` **reports** the chunk's fraction — averaged over every save
+interval in the chunk, so the bootstrap step cannot hide in an interval the
+report does not look at — rather than failing on it, and
 the distinction is the point. Under `output_averages` the saved field is an
 interval *mean*, so a cold start's one legitimate fallback step reads `1/N` —
 the identical value a single defective step mid-chunk would give. No per-chunk

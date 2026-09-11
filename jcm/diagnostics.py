@@ -154,7 +154,10 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
     # pinned by unit tests instead; here the number is printed so a run that
     # keeps falling back (~1.0 every chunk) is visible.
     if "wind_10m_model_level" in ds:
-        flag = ds["wind_10m_model_level"].isel(time=-1).values
+        # Over the whole chunk, not ``isel(time=-1)``: with more than one save
+        # interval per chunk the last interval never contains step 1, so the
+        # bootstrap step would vanish from the report (run=pyses_year).
+        flag = ds["wind_10m_model_level"].values
         report["emission_wind_model_level_frac"] = float(np.nanmean(flag))
 
     ok = True
