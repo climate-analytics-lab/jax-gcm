@@ -8,7 +8,8 @@ Reproduces every artifact in the Hugging Face dataset from the sources in
 
 Stages: ``sso``, ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/dust/oxidants via
-``tools/prep_jam_aux_inputs.py``), ``bundles``, ``amip`` (yearly
+``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
+dust inputs), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry``, ``upload``
@@ -88,9 +89,32 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dms_file", "auto": True,
      "staged": True},
-    {"name": "dust", "path": "bundles/{grid}/dust.nc",
+    # The five Tegen/HAMMOZ dust inputs (#802). They replace the CAM
+    # erodibility product that used to sit at ``bundles/{grid}/dust.nc``; that
+    # name is retired rather than reused so no warm cache can resolve a CAM
+    # geomorphic map into a scheme that expects an effective-LAI fraction.
+    {"name": "dust_potential_sources",
+     "path": "bundles/{grid}/dust_potential_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dust_file", "auto": True,
+     "staged": True},
+    {"name": "dust_preferential_sources",
+     "path": "bundles/{grid}/dust_preferential_sources.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "static", "key": "dust_preferential_file", "auto": True,
+     "staged": True},
+    {"name": "dust_soil_types", "path": "bundles/{grid}/dust_soil_types.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "static", "key": "dust_soil_types_file", "auto": True,
+     "staged": True},
+    {"name": "dust_regions", "path": "bundles/{grid}/dust_regions.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "static", "key": "dust_regions_file", "auto": True,
+     "staged": True},
+    {"name": "dust_surface_roughness",
+     "path": "bundles/{grid}/dust_surface_roughness.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "dust_roughness_file", "auto": True,
      "staged": True},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
@@ -156,6 +180,13 @@ NE30_TOPO = ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/topo/se/"
              "ne30np4_gmted2010_modis_bedmachine_nc3000_Laplace0100_"
              "noleak_greenlndantarcsgh30fac2.50_20250825.nc")
 GRAV = 9.80665
+
+def _hammoz_dust_dir() -> Path:
+    """Source directory for the HAMMOZ dust input set (see mirror/dust.py)."""
+    from jcm.data.mirror.dust import SOURCE_DIR
+
+    return SOURCE_DIR
+
 
 ROOT = Path(os.environ.get(
     "JCM_MIRROR_ROOT",
@@ -325,6 +356,21 @@ def stage_aux() -> None:
                     check=True)
 
 
+def stage_dust() -> None:
+    """Build the five Tegen/HAMMOZ dust bundles (#802): t63 native, t106 refined."""
+    from jcm.data.mirror.dust import DUST_PRODUCTS, build_dust_product
+
+    for grid, nlat in GRIDS.items():
+        d = UPLOAD / "bundles" / grid
+        d.mkdir(parents=True, exist_ok=True)
+        for name in DUST_PRODUCTS:
+            build_dust_product(name, nlat, d / f"{name}.nc")
+            print("dust:", grid, name, flush=True)
+        # The retired CAM erodibility product: drop it from any upload tree
+        # built before #802 so a re-upload cannot re-register the old name.
+        (d / "dust.nc").unlink(missing_ok=True)
+
+
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
@@ -361,9 +407,6 @@ def stage_bundles() -> None:
         g = UPLOAD / "bundles" / grid
         shutil.copy(BUILD / "aux" / f"dms_lana2011_climo_t{trunc[grid]}.nc",
                     g / "dms.nc")
-        shutil.copy(BUILD / "aux" /
-                    f"dust_erodibility_cam_f05_t{trunc[grid]}.nc",
-                    g / "dust.nc")
 
     d = UPLOAD / "bundles" / "ne30pg3"
     d.mkdir(parents=True, exist_ok=True)
@@ -743,8 +786,8 @@ _STAGE_SOURCES: dict[str, tuple[str, ...]] = {
                   "CMIP7/CMIP/PNNL-JGCRI/CEDS-CMIP-2025-04-18",
                   "/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
                   "CMIP7/CMIP/DRES/DRES-CMIP-BB4CMIP7-2-0"),
-    "aux": ("/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst",
-            "/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone"),
+    "aux": ("/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone",),
+    "dust": (str(_hammoz_dust_dir()),),
     "bundles": (str(BUILD),),
     "amip": ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
              "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10",
@@ -818,7 +861,7 @@ def stage_upload() -> None:
 
 
 STAGES = {"sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
-          "emissions": stage_emissions, "aux": stage_aux,
+          "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
           "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
