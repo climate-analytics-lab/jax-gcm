@@ -1214,6 +1214,10 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
         # build a TimeSeries from, and DustEmissions reads a 2-D field
         # directly.
         return jnp.asarray(arr)
+    # WRAP_YEAR steps the record by month, never interpolating, as
+    # ``bgc_dust_read_monthly`` does — but it bins the year into twelve equal
+    # 30.42-day slices, so records 2-11 switch 1-2 days after the calendar
+    # month start (#805, shared by every monthly climatology).
     if ds.sizes["time"] != _DUST_MONTHS:
         raise ValueError(
             f"{var_name}: the HAMMOZ potential-source climatology has "

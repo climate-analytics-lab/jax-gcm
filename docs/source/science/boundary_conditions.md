@@ -68,9 +68,11 @@ by ``forcing.dust_file`` / ``dust_preferential_file`` / ``dust_soil_types_file``
 The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
 them, and running with the textures or regions missing would silently emit an
 untuned, all-coarse-soil flux, so ``_attach_dust`` raises instead. The monthly
-climatologies are stepped by **month start** (``WRAP_YEAR``), never interpolated
-— the Fortran reads one record per call and marks the region mask
-``EF_NOINTER``. The region mask is categorical and is refused at load if it is
+climatologies are stepped by month, never interpolated — the Fortran reads one
+record per call and marks the region mask ``EF_NOINTER``. ``WRAP_YEAR`` bins the
+year into twelve equal slices rather than calendar months, so records 2-11
+switch 1-2 days late; that is shared by every monthly climatology in the model
+and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
 produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
 refinements of it, stamped as such in their file attributes (#802).
