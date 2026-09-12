@@ -90,9 +90,9 @@ class NudgingTarget:
                 ``time_var``). Loaded verbatim onto the model grid;
                 regridding is the user's responsibility before loading.
             u_var, v_var, T_var, q_var: netCDF variable names. ``q_var``
-                may be absent, in which case ``specific_humidity`` is
-                filled with zeros and only matters when paired with a
-                non-zero ``inv_tau_humidity``.
+                may be absent, in which case ``specific_humidity`` stays
+                ``None``, the "no humidity reference" sentinel, and the
+                relaxation leaves humidity alone.
             time_var: Time coord name. ``None`` for static (climatology)
                 reference data.
 
@@ -112,9 +112,13 @@ class NudgingTarget:
         u = to_jax(u_var)
         v = to_jax(v_var)
         T = to_jax(T_var)
-        # Humidity is optional: a wind/temperature-only target (the original
-        # use case) carries no q field, so fall back to zeros.
-        q = to_jax(q_var) if q_var in ds else jnp.zeros_like(T)
+        # Humidity is optional, and its absence has to survive as ``None``:
+        # that is the sentinel the tendency reads as "no humidity reference".
+        # Substituting zeros turns "leave humidity alone" into "relax toward a
+        # bone-dry atmosphere" the moment the target meets a non-zero
+        # ``inv_tau_humidity``, which is exactly what
+        # ``NudgingConfig.temp_humidity`` sets on every level.
+        q = to_jax(q_var) if q_var in ds else None
 
         if is_time_varying:
             time_seconds = _time_axis_seconds_from_ds(ds.rename({time_var: "time"}))
@@ -122,8 +126,8 @@ class NudgingTarget:
             def ts(a):
                 return make_time_series(a, time_seconds, align_mode=BY_DATE)
 
-            return cls(u_wind=ts(u), v_wind=ts(v),
-                       temperature=ts(T), specific_humidity=ts(q))
+            return cls(u_wind=ts(u), v_wind=ts(v), temperature=ts(T),
+                       specific_humidity=None if q is None else ts(q))
         return cls(u_wind=u, v_wind=v, temperature=T, specific_humidity=q)
 
 

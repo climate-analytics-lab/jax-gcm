@@ -256,10 +256,21 @@ def dataset_on_model_grid(coords, start: str, end: str, *,
 
 
 def nudging_target(coords, start: str, end: str, *, freq: str = "6h",
-                   cache: bool = True):
-    """Build a time-varying :class:`~jcm.nudging.NudgingTarget` for the window."""
+                   humidity: bool = True, cache: bool = True):
+    """Build a time-varying :class:`~jcm.nudging.NudgingTarget` for the window.
+
+    ``humidity`` controls whether ``q`` is fetched alongside the winds and
+    temperature. It defaults to True because a target built without ``q``
+    carries no humidity reference at all, and pairing one with a non-zero
+    ``inv_tau_humidity`` (:meth:`~jcm.nudging.NudgingConfig.temp_humidity`
+    sets one on every level) is a configuration error rather than a
+    humidity-free run. Pass ``humidity=False`` for a winds-only target to
+    skip downloading and caching the extra variable.
+    """
     from jcm.nudging import NudgingTarget
-    ds = dataset_on_model_grid(coords, start, end, freq=freq, cache=cache)
+    variables = ("u", "v", "T", "q") if humidity else ("u", "v", "T")
+    ds = dataset_on_model_grid(coords, start, end, freq=freq,
+                               variables=variables, cache=cache)
     return NudgingTarget.from_dataset(ds)
 
 
