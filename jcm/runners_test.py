@@ -860,7 +860,27 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         xr.Dataset(
             ox_vars, coords={**base, "mlev": np.arange(nlev)},
         ).to_netcdf(ox)
-        return str(dms), str(dust), str(ox)
+
+        # The Tegen scheme's three mandatory static companions (#802).
+        static = {"lat": lat, "lon": lon}
+        pref = Path(tmp) / "dust_pref.nc"
+        xr.Dataset({"source": (("lat", "lon"), np.full((nlat, nlon), 0.2))},
+                   coords=static).to_netcdf(pref)
+        soils = Path(tmp) / "dust_soils.nc"
+        xr.Dataset(
+            {f"type{i}": (("lat", "lon"),
+                          np.full((nlat, nlon), 0.2 if i in (2, 3, 4, 6) else 0.0))
+             for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)},
+            coords=static).to_netcdf(soils)
+        regions = Path(tmp) / "dust_regions.nc"
+        xr.Dataset(
+            {"regions": (("lat", "lon"), np.full((nlat, nlon), 4.0))},
+            coords=static).to_netcdf(regions)
+        return (str(dms), str(dust), str(ox),
+                [f"forcing.dust_preferential_file={pref}",
+                 f"forcing.dust_soil_types_file={soils}",
+                 f"forcing.dust_regions_file={regions}",
+                 "forcing.dust_roughness_file=null"])
 
     def test_cfg_populates_all_three_fields_nonzero(self):
         import tempfile
@@ -868,12 +888,13 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            dms, dust, ox = self._write_files(tmp, coords)
+            dms, dust, ox, companions = self._write_files(tmp, coords)
             cfg = _compose([
                 *_NULL_EMISSIONS,
                 "physics=echam-jam", "grid=echam_t42_l8_sigma",
                 f"forcing.dms_file={dms}",
                 f"forcing.dust_file={dust}",
+                *companions,
                 f"forcing.oxidants_file={ox}",
             ])
             f = build_forcing(cfg, coords)
@@ -915,7 +936,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            dms, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
+            dms, _, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.dms_file={dms}"])
             with self.assertRaisesRegex(ValueError, "latitudes"):
@@ -945,7 +966,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            _, _, ox = self._write_files(tmp, coords,
+            _, _, ox, _ = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.oxidants_file={ox}"])

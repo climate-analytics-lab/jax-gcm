@@ -34,6 +34,11 @@ jam_aqueous_scheme: full
 # resolution-dependent tuning is rebuilt at the model's own truncation.
 jam_dust_preset: 4
 
+# HAM tunes the ndust=4 regional threshold vector differently for nudged runs
+# (0.95/1.25 at T63) than for free-running ones (1.05/1.45). ``null`` follows
+# ``nudging.enabled``; set true/false to pin it.
+jam_dust_nudged: null
+
 # Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
 # the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
 # in-droplet wet removal, dry deposition, and the aqueous sulfate split. false

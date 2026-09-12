@@ -348,6 +348,12 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             forcing_cfg.get(key, None), key, coords, jam, is_pyses)
         for key in _EMISSION_AUTO_KEYS
     }
+    # `dust_file: null` disables dust, so its companions are dead weight: an
+    # eager `auto` would fetch four bundles the run never opens, and fail an
+    # offline cold cache on a product the user explicitly turned off.
+    if updates["dust_file"] is None:
+        for key in (*_DUST_REQUIRED_KEYS, "dust_roughness_file"):
+            updates[key] = None
     return OmegaConf.merge(forcing_cfg, updates)
 
 

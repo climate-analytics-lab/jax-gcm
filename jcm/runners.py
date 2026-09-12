@@ -295,7 +295,8 @@ def build_physics(cfg: DictConfig):
     # (notably the JAM aerosol chain, which is split around the cloud term) are
     # configured without re-expressing that ordering as flat YAML.
     if physics_cfg.get("builder", None) is not None:
-        return _build_physics_from_factory(physics_cfg)
+        return _build_physics_from_factory(
+            _resolve_nudging_dependent_physics(cfg, physics_cfg))
 
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
@@ -337,6 +338,23 @@ def _physics_factories():
 _CONFIG_ONLY_PHYSICS_KEYS = frozenset({
     "builder", "radiation_chunk_size", "defaults",
 })
+
+def _resolve_nudging_dependent_physics(cfg, physics_cfg):
+    """Fill ``jam_dust_nudged: null`` from ``cfg.nudging.enabled``.
+
+    HAM's ``ndust = 4`` regional threshold vector differs between free-running
+    (1.05/1.45) and nudged (0.95/1.25) T63, and the runner appends the nudging
+    term *after* physics is composed, so the dust term cannot see it. ``null``
+    means "follow the run"; an explicit true/false wins.
+    """
+    from omegaconf import OmegaConf
+
+    if physics_cfg.get("jam_dust_nudged", False) is not None:
+        return physics_cfg
+    nudging = cfg.get("nudging", None)
+    enabled = bool(nudging is not None and nudging.get("enabled", False))
+    return OmegaConf.merge(physics_cfg, {"jam_dust_nudged": enabled})
+
 
 def _build_physics_from_factory(physics_cfg):
     """Build physics by delegating to a factory named by ``physics.builder``.

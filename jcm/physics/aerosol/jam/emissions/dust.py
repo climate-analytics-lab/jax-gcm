@@ -23,8 +23,9 @@ Five prescribed fields drive it, all on the model grid (see
 :mod:`jcm.forcing`): ``dust_source`` (monthly effective-LAI erodible fraction,
 the gate *and* a linear factor), ``dust_preferential`` (paleolake area fraction,
 a texture swap), ``dust_soil_types`` (nine texture area fractions),
-``dust_regions`` (the 1-8 tuning index) and ``dust_roughness`` (read but
-overwritten by the constant ``ndurough``, exactly as the Fortran does).
+``dust_regions`` (the 1-8 tuning index) and ``dust_roughness`` (the satellite
+map, live only on the ``ndurough = 0`` sensitivity path — the Fortran reads it
+every month and then overwrites it with the constant).
 
 Documented in ``docs/source/science/aerosol.md``; the ``U10 = 10 m/s`` texture
 switch is a hard step with zero gradient (#664).
@@ -261,9 +262,15 @@ class DustParameters:
     use_roughness_map: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
-    def preset(cls, ndust: int = 4, truncation: int = 63, nudged: bool = False
-               ) -> "DustParameters":
-        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-4."""
+    def preset(cls, ndust: int = 4, truncation: int | None = 63,
+               nudged: bool = False) -> "DustParameters":
+        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-4.
+
+        ``truncation = None`` means a non-spectral grid (the pySES CAM-SE
+        backend). HAM tunes ``nduscale_reg`` only at T63 and its ``ndust = 3``
+        polynomial only up to T63, so such a grid takes the same 0.86 the
+        Fortran's ``CASE DEFAULT`` gives every other resolution.
+        """
         table = np.array(SOIL_TABLE, dtype=float)
         scale = np.ones(N_REGIONS)
         thresh = np.ones(_N_EAST_ASIA_ROWS)
@@ -274,8 +281,9 @@ class DustParameters:
             rough, lai, smst, easo = 0.001, 1.0e-10, False, 1
             # Resolution fit tuned at T21/T42 to reproduce the T63 total; the
             # source warns it must be re-tuned above T63.
-            poly = (-7.9365e-5 * truncation ** 2 + 0.0095238 * truncation + 0.575)
-            scale[:] = 0.86 if truncation > 63 else poly
+            poly = (0.86 if truncation is None else
+                    -7.9365e-5 * truncation ** 2 + 0.0095238 * truncation + 0.575)
+            scale[:] = 0.86 if truncation is None or truncation > 63 else poly
         elif ndust == 4:                     # Stier (2005) + East-Asia soils (HAM2)
             rough, lai, smst, easo = 0.001, 0.1, False, 2
             table[13, ALPHA_COL] = 1.0e-6    # r_dust_af14: loess
@@ -338,6 +346,34 @@ def _soil_fractions(forcing, ncols):
             for name in SOIL_TYPE_VARS}
 
 
+def _require_companions(forcing, ncols):
+    """Fail rather than emit an untuned, all-coarse flux on missing companions.
+
+    Unlike a missing ``dust_source`` (which disables the term), a missing
+    texture / preferential / region field still emits: the residual becomes pure
+    soil type 1 and every cell takes region 1. Both assembly doors already
+    refuse this, so reaching it means the forcing was hand-assembled.
+    """
+    missing = [name for name in
+               ("dust_preferential", "dust_soil_types", "dust_regions")
+               if getattr(forcing, name, None) is None]
+    types = getattr(forcing, "dust_soil_types", None)
+    if types is not None and any(
+            name not in types or jnp.size(types[name]) != ncols
+            for name in SOIL_TYPE_VARS):
+        missing.append("dust_soil_types (all nine fields, on the model grid)")
+    for name in ("dust_preferential", "dust_regions"):
+        field = getattr(forcing, name, None)
+        if field is not None and jnp.size(field) != ncols:
+            missing.append(f"{name} (wrong shape for {ncols} columns)")
+    if missing:
+        raise ValueError(
+            f"DustEmissions has a dust_source but {sorted(set(missing))} are "
+            "missing or mis-shaped. Without them the scheme emits an untuned, "
+            "all-coarse-soil flux rather than nothing, so it refuses instead. "
+            "Supply the whole Tegen input set, or clear forcing.dust_source.")
+
+
 class DustEmissions(PhysicsTerm):
     """Tegen/HAMMOZ dust emission into MAM4's accumulation and coarse modes."""
 
@@ -380,8 +416,10 @@ class DustEmissions(PhysicsTerm):
         if self._preset is None:
             return
         ndust, nudged = self._preset
-        # truncation = total_wavenumbers - 2, the relation utils.get_coords uses.
-        truncation = int(coords.horizontal.total_wavenumbers) - 2
+        # truncation = total_wavenumbers - 2, the relation utils.get_coords uses;
+        # a non-spectral grid (pySES CAM-SE) has none and takes HAM's default.
+        wavenumbers = getattr(coords.horizontal, "total_wavenumbers", None)
+        truncation = None if wavenumbers is None else int(wavenumbers) - 2
         self.params = nnx.Param(
             DustParameters.preset(ndust, truncation=truncation, nudged=nudged))
 
@@ -390,7 +428,7 @@ class DustEmissions(PhysicsTerm):
 
         Reproduces the two guarded East-Asia branches of the Fortran. The nine
         file fields are two *overlapping* partitions (global Zobler textures and
-        Cheng's Chinese textures, summing to 2.18 at Gobi), so a naive nine-way
+        Cheng's Chinese textures, which overlap over China), so a naive nine-way
         sum drives the type-1 residual negative.
         """
         frac = _soil_fractions(forcing, ncols)
@@ -434,6 +472,9 @@ class DustEmissions(PhysicsTerm):
 
     def _roughness(self, forcing, ncols, params):
         """``Z01``/``Z02`` [cm], floored and scaled as ``bgc_read_fpar_field`` does."""
+        # bgc_read_fpar_field floors and scales the map, then
+        # bgc_set_constant_surf_rough OVERWRITES both with the raw ndurough, so
+        # the constant takes neither the floor nor r_dust_scz0.
         if params.use_roughness_map:
             # ndust=2 is the only preset with a live roughness map, and the
             # Fortran aborts without the file; silently flooring z0 to z0min
@@ -447,9 +488,8 @@ class DustEmissions(PhysicsTerm):
                     "forcing.dust_roughness_file (or 'auto'), or use the "
                     "default constant roughness.")
             z0 = jnp.ravel(supplied)
-        else:
-            z0 = jnp.full((ncols,), 1.0) * params.ndurough
-        return jnp.maximum(z0, params.r_dust_z0min) * params.r_dust_scz0
+            return jnp.maximum(z0, params.r_dust_z0min) * params.r_dust_scz0
+        return jnp.full((ncols,), 1.0) * params.ndurough
 
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()
@@ -464,6 +504,9 @@ class DustEmissions(PhysicsTerm):
         u10, from_model_level = wind_10m(state, diagnostics)
         u10 = jnp.where(from_model_level > 0.0, 0.0,
                         jnp.maximum(jnp.ravel(u10), 0.0))
+        if (forcing is not None
+                and getattr(forcing, "dust_source", None) is not None):
+            _require_companions(forcing, ncols)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         snow = jnp.clip(_column_field(forcing, "snowc_am", ncols), 0.0, 1.0)
         wetness = jnp.clip(_column_field(forcing, "soilw_am", ncols), 0.0, 1.0)
@@ -499,9 +542,16 @@ class DustEmissions(PhysicsTerm):
             # — a declared approximation on an off-by-default path (#787).
             w_res = p.soil_table[:, WRES_COL] * 100.0                    # (17,)
             w = wetness * 100.0
-            excess = jnp.maximum(w[None, :] - w_res[:, None], 0.0)       # (17, ncols)
-            wet = jnp.sqrt(1.0 + 1.21 * excess ** 0.68)
-            wet = jnp.stack([wet[js - 1] for _, js in MIXTURE_ROWS])     # (nrow, ncols)
+            excess = w[None, :] - w_res[:, None]                         # (17, ncols)
+            wet_soil = excess > 0.0
+            # d(x^0.68)/dx is infinite at x = 0, and jnp.maximum's zero
+            # cotangent turns that into NaN, so the dry branch never sees 0**p.
+            safe = jnp.where(wet_soil, excess, 1.0)
+            wet = jnp.where(wet_soil,
+                            jnp.sqrt(1.0 + 1.21 * safe ** 0.68), 1.0)
+            # fdp1/fdp2 carry solspe(j, nspe) for j = the FLUX texture, so the
+            # two preferential rows both take type 10's residual moisture.
+            wet = jnp.stack([wet[jf - 1] for jf, _ in MIXTURE_ROWS])     # (nrow, ncols)
             ratio = (uth[None, :, None] * wet[:, None, :]
                      * (nduscale * utsc / safe_feff / safe_u)[None, None, :])
             base = _saltation(ratio, safe_u)

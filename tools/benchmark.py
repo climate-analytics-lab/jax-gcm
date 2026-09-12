@@ -225,7 +225,8 @@ def _auto_emission_files(cfg) -> list[str]:
     published-grid set has no bundle; a published-horizontal / unpublished-level
     combo (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
     (token, nlev) — has no level-resolved oxidant bundle while its level-free
-    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those keys
+    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those
+    keys
     here too. A key explicitly set to a path/``null`` is honoured (the literal
     path is already picked up by ``_preset_data_files``; ``null`` opts out).
     """

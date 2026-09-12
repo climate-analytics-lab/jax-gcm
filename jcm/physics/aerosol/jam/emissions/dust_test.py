@@ -141,10 +141,23 @@ class SoilGridTest(unittest.TestCase):
         # allocated class stays empty.
         self.assertGreater(d[-1] * np.exp(DSTEP), 0.130)
 
-    def test_relative_surface_and_mass_close(self):
-        for row in (1, 2, 3, 4, 6, 10, 11, 13, 14, 15, 16, 17):
-            self.assertAlmostEqual(float(jnp.sum(_SREL[row - 1])), 1.0, places=5)
-            self.assertAlmostEqual(float(jnp.sum(_SRELV[row - 1])), 1.0, places=5)
+    def test_relative_surface_and_mass_have_the_right_shape(self):
+        # Normalisation is by construction; what is worth pinning is that the
+        # basal-surface conversion xn = rho_p*(2/3)*(D/2) is applied to srel and
+        # NOT to srelV, which shifts srel's mass toward the fine classes.
+        d = np.asarray(_D)
+        for row in (1, 2, 4, 13, 15):
+            srel, srel_v = np.asarray(_SREL[row - 1]), np.asarray(_SRELV[row - 1])
+            self.assertAlmostEqual(float(srel.sum()), 1.0, places=5)
+            self.assertAlmostEqual(float(srel_v.sum()), 1.0, places=5)
+            np.testing.assert_allclose(srel / srel_v * d / (srel / srel_v * d)[0],
+                                       1.0, rtol=1e-4,
+                                       err_msg=f"srel/srelV must scale as 1/D "
+                                               f"(soil type {row})")
+        # Type 10 is 100 % silt and type 11 100 % clay, so 11 is much finer.
+        median = lambda v: d[np.searchsorted(np.cumsum(v), 0.5)]  # noqa: E731
+        self.assertLess(median(np.asarray(_SRELV[10])),
+                        median(np.asarray(_SRELV[9])))
         cumulative = np.asarray(_CUM[9])
         self.assertTrue(np.all(np.diff(cumulative) >= 0.0))
 
@@ -266,6 +279,51 @@ class SnowAndMoistureTest(unittest.TestCase):
             self.assertTrue(np.all(_total_mass(damp) > 0.0),
                             msg=f"ndust={ndust}")
 
+    def test_fecan_gradients_stay_finite_at_and_below_the_residual(self):
+        # d(x^0.68)/dx is infinite at x = 0 and jnp.maximum's zero cotangent
+        # turns that into NaN, so the dry branch must not evaluate 0**p.
+        params = DustParameters.preset(4).replace(fecan_moisture=True)
+
+        def loss(wetness):
+            state, diagnostics, forcing, terrain = _inputs(u10=9.0)
+            forcing.soilw_am = jnp.full((2,), wetness)
+            tend, _ = DustEmissions(params=params)(
+                state, diagnostics, forcing, terrain)
+            return jnp.sum(tend.tracers[mass_name("du", "cor")])
+
+        for wetness in (0.0, 0.25, 0.3):     # type 2's w_res is 0.25
+            g = float(jax.grad(loss)(jnp.asarray(wetness)))
+            self.assertTrue(np.isfinite(g), msg=f"wetness={wetness}")
+
+        def by_table(table):
+            state, diagnostics, forcing, terrain = _inputs(u10=9.0)
+            forcing.soilw_am = jnp.full((2,), 0.1)
+            term = DustEmissions(params=params.replace(soil_table=table))
+            tend, _ = term(state, diagnostics, forcing, terrain)
+            return jnp.sum(tend.tracers[mass_name("du", "cor")])
+
+        g = jax.grad(by_table)(jnp.asarray(params.soil_table))
+        self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+
+    def test_fecan_uses_the_flux_textures_residual_moisture(self):
+        # fdp1/fdp2 carry solspe(j, nspe) for j = the FLUX type, so both
+        # preferential rows take type 10's w_res even above the wind switch.
+        base = DustParameters.preset(4).replace(fecan_moisture=True)
+
+        def flux(table):
+            state, diagnostics, forcing, terrain = _inputs(psrc=1.0, u10=25.0)
+            forcing.soilw_am = jnp.full((2,), 0.30)
+            tend, _ = DustEmissions(params=base.replace(soil_table=table))(
+                state, diagnostics, forcing, terrain)
+            return float(_total_mass(tend)[0])
+
+        from jcm.physics.aerosol.jam.emissions.dust import WRES_COL
+        ref = flux(base.soil_table)
+        bump10 = flux(base.soil_table.at[9, WRES_COL].set(0.29))
+        bump11 = flux(base.soil_table.at[10, WRES_COL].set(0.29))
+        self.assertNotAlmostEqual(bump10 / ref, 1.0, places=4)
+        self.assertAlmostEqual(bump11 / ref, 1.0, places=9)
+
     def test_fecan_raises_the_threshold_when_switched_on(self):
         # k_dust_smst = 0: uth -> uth·sqrt(1 + 1.21·(w − w_res)^0.68). Off in
         # every preset but ndust=2, and jcm has no ECHAM ws/wsmx (#787).
@@ -358,11 +416,13 @@ class RegionTuningTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63, nudged=True).nduscale_reg),
             [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
-        # The ndust=3 polynomial equals 0.86 at T63 and is clamped above it.
+        # The ndust=3 resolution polynomial, clamped to 0.86 above T63.
+        for nn, expected in ((21, 0.740), (42, 0.8360), (63, 0.86), (106, 0.86)):
+            np.testing.assert_allclose(
+                float(DustParameters.preset(3, nn).nduscale_reg[0]), expected,
+                rtol=2e-3, err_msg=f"T{nn}")
         np.testing.assert_allclose(
-            float(DustParameters.preset(3, 63).nduscale_reg[0]), 0.86, rtol=1e-4)
-        np.testing.assert_allclose(
-            float(DustParameters.preset(3, 106).nduscale_reg[0]), 0.86)
+            float(DustParameters.preset(2).nduscale_reg[0]), 0.68)
 
     def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
         # nduscale_reg's ndust=4 vector is defined only at T63; every other
@@ -382,6 +442,37 @@ class RegionTuningTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(term.params.get_value().nduscale_reg),
             [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+    def test_a_non_spectral_grid_takes_hams_default(self):
+        # The pySES CAM-SE grid has no total_wavenumbers; HAM tunes
+        # nduscale_reg only at T63, so an unstructured grid takes 0.86.
+        import types
+        term = DustEmissions()
+        term.cache_coords(types.SimpleNamespace(
+            horizontal=types.SimpleNamespace()))
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().nduscale_reg), 0.86)
+        np.testing.assert_allclose(
+            float(DustParameters.preset(3, truncation=None).nduscale_reg[0]), 0.86)
+
+    def test_nudged_runs_take_hams_nudged_vector(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        coords = get_coords(vertical_coords=get_echam_levels(47),
+                            spectral_truncation=63)
+        free = DustEmissions()
+        free.cache_coords(coords)
+        nudged = DustEmissions(nudged=True)
+        nudged.cache_coords(coords)
+        np.testing.assert_allclose(
+            np.asarray(nudged.params.get_value().nduscale_reg),
+            [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+        # A lower threshold multiplier means MORE emission, so the nudged
+        # preset is not a no-op.
+        self.assertTrue(np.all(
+            np.asarray(nudged.params.get_value().nduscale_reg)
+            < np.asarray(free.params.get_value().nduscale_reg)))
 
     def test_explicit_parameters_are_never_rebuilt(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
@@ -426,14 +517,29 @@ class EmittedSizeTest(unittest.TestCase):
             got = (mass / number / (density * np.pi / 6.0)) ** (1.0 / 3.0)
             np.testing.assert_allclose(got, diameter, rtol=2e-3)
 
-    def test_effective_diameter_is_not_the_mode_equilibrium_size(self):
+    def test_emitted_number_is_not_what_the_mode_geometry_would_give(self):
+        from jcm.physics.aerosol.jam.emissions.distributors import (
+            particle_mean_mass,
+        )
         from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-        # MAM4's own volume-median diameters are 0.310 / 5.64 µm; using them
+        # The term must pass its own emission diameter: MAM4's class geometry
         # would misstate emitted number by 6-20x.
-        accum = MAM4_SPEC.mode("acc")
-        implied = accum.dgnum * np.exp(3.0 * np.log(accum.geom_std_dev) ** 2)
-        self.assertGreater(abs(implied - 0.5698e-6) / 0.5698e-6, 0.3)
+        term = DustEmissions()
+        tend, _ = term(*_inputs(soil={"type2": 1.0}, u10=13.8))
+        rho_dz = 1.2 * 100.0
+        density = MAM4_SPEC.species_props("du").density
+        for short in ("acc", "cor"):
+            mass = float(np.asarray(
+                tend.tracers[mass_name("du", short)][-1, 0])) * rho_dz
+            number = float(np.asarray(
+                tend.tracers[number_name(short)][-1, 0])) * rho_dz
+            geometry = mass / particle_mean_mass(MAM4_SPEC.mode(short), density)
+            ratio = max(number / geometry, geometry / number)
+            self.assertGreater(ratio, 3.0,
+                               msg=f"{short}: emitted number is within {ratio:.1f}x "
+                                   "of the mode geometry, so the emission "
+                                   "diameter is not being used")
 
     def test_supercoarse_mass_is_reported_and_discarded(self):
         term = DustEmissions()

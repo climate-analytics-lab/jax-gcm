@@ -83,6 +83,7 @@ def echam_physics(
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
     jam_dust_preset: int = 4,
+    jam_dust_nudged: bool = False,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
     jam_convective_transport: bool = True,
@@ -187,6 +188,10 @@ def echam_physics(
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
             or 2 (Cheng 2008). The resolution-dependent regional tuning vector
             is rebuilt at the model's own truncation.
+        jam_dust_nudged: take HAM's *nudged* regional tuning vector
+            (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
+            The shipped config leaves this ``null``, which the runner fills
+            from ``cfg.nudging.enabled``.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
@@ -450,6 +455,7 @@ def echam_physics(
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,
             dust_preset=jam_dust_preset,
+            dust_nudged=jam_dust_nudged,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
             convective_transport=jam_convective_transport,

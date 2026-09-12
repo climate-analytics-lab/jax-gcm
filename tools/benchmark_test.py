@@ -271,7 +271,10 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
         for bundle in ("hf://bundles/t63/emissions_pd.nc",
                        "hf://bundles/t63/dms.nc",
                        "hf://bundles/t63/dust_potential_sources.nc",
+                       "hf://bundles/t63/dust_preferential_sources.nc",
                        "hf://bundles/t63/dust_soil_types.nc",
+                       "hf://bundles/t63/dust_regions.nc",
+                       "hf://bundles/t63/dust_surface_roughness.nc",
                        "hf://bundles/t63_l47/oxidants_pd.nc"):
             self.assertNotIn(bundle, with_extra)
 

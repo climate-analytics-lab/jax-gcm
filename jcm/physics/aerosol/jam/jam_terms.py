@@ -146,6 +146,7 @@ def jam_aerosol_physics(
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
     dust_preset: int = 4,
+    dust_nudged: bool = False,
     anthropogenic: bool = False,
     anthropogenic_params: EmissionParameters | None = None,
     prescribed_speciated: bool = False,
@@ -187,6 +188,8 @@ def jam_aerosol_physics(
         dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
             East-Asian soils = HAM2), 3 (Stier 2005) or 2 (Cheng 2008).
             Ignored when an explicit ``dust`` parameter object is given.
+        dust_nudged: use HAM's nudged regional tuning vector (0.95/1.25 at
+            T63) rather than the free-running one (1.05/1.45).
         anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
             the *bulk* path (in-model differentiable speciation + smooth
             injection); ``anthropogenic_params`` overrides the defaults.
@@ -241,7 +244,8 @@ def jam_aerosol_physics(
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec),
         DmsEmissions(params=dms, spec=spec),
-        DustEmissions(params=dust, ndust=dust_preset, spec=spec),
+        DustEmissions(params=dust, ndust=dust_preset, nudged=dust_nudged,
+                      spec=spec),
     ]
     if anthropogenic:
         # Prescribed CEDS anthropogenic SO2/BC/OC (#498); inert until forcing

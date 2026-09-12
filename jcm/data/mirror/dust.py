@@ -113,7 +113,10 @@ def build_dust_product(name: str, nlat: int, out_path, source_dir=None) -> None:
                                        out_name, f"soil texture fraction {out_name}")})
         coords = {"lat": lats, "lon": lons}
         if name in MONTHLY:
-            coords["time"] = ds["time"].values
+            # Carry the source's CF units/calendar: without them the axis reads
+            # as bare nanoseconds and no tool (jcm's own reader included) can
+            # interpret the month starts.
+            coords["time"] = ("time", ds["time"].values, dict(ds["time"].attrs))
             attrs["time_note"] = (
                 "month starts; the scheme steps this climatology by month "
                 "(WRAP_YEAR), it is never interpolated")

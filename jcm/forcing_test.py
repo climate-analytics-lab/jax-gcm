@@ -973,6 +973,24 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
+    def test_disabling_dust_also_drops_its_companion_keys(self):
+        # `dust_file: null` must not leave four `auto` companions fetching
+        # bundles the run never opens (Codex P2).
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        cfg = OmegaConf.create({"physics": {"aerosol_module": "jam"}})
+        forcing_cfg = OmegaConf.create(
+            {"dust_file": None, "dust_preferential_file": "auto",
+             "dust_soil_types_file": "auto", "dust_regions_file": "auto",
+             "dust_roughness_file": "auto", "emissions_file": None,
+             "dms_file": None, "oxidants_file": None})
+        out = fa._resolve_emission_inputs(forcing_cfg, cfg, coords=None,
+                                          is_pyses=True)
+        for key in ("dust_preferential_file", "dust_soil_types_file",
+                    "dust_regions_file", "dust_roughness_file"):
+            self.assertIsNone(out.get(key), key)
+
     def test_dust_reader_rejects_a_non_monthly_time_axis(self):
         from jcm.forcing import read_dust_source
         ds = self._dataset("pot_source",

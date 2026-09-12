@@ -1359,6 +1359,10 @@ def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
     arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     if "time" not in ds[var_name].dims:
         return jnp.asarray(arr)
+    if ds.sizes["time"] != _DUST_MONTHS:
+        raise ValueError(
+            f"{var_name}: expected {_DUST_MONTHS} monthly records, found "
+            f"{ds.sizes['time']}.")
     return make_time_series(
         arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )
