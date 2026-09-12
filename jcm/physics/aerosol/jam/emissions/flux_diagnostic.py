@@ -40,10 +40,10 @@ EMITTED_SPECIES: tuple[str, ...] = (
 BB_SPECIES: tuple[str, ...] = ("so2", "bc", "oc")
 
 # Deposition fluxes (AeroCom ``dry_*`` / ``wet_*``): column-integrated
-# REMOVAL by the sedimentation and wet-scavenging terms, positive
-# downward. Turbulent surface dry deposition is not a separate term in
-# JAM yet; ``dry_*`` is therefore the sedimentation sink alone —
-# documented so the budget check reads correctly.
+# REMOVAL by the removal terms, positive downward. ``dry_*`` is
+# gravitational settling (``StokesSedimentation``) plus turbulent/Brownian
+# surface deposition (``SlinnDryDeposition``); ``wet_*`` is scavenging net
+# of re-evaporation, plus in-plume convective scavenging.
 DEPOSITED_SPECIES: tuple[str, ...] = (
     "so4", "bc", "oc", "poa", "soa", "ss", "du", "moa",
 )
@@ -140,8 +140,8 @@ def accumulate_deposition_fluxes(
     Mirrors :func:`accumulate_emission_fluxes` with the sign flipped:
     deposition tendencies are negative, the reported flux is the
     column-integrated mass REMOVED per unit area and time (positive
-    down). ``kind`` selects the ``dry_`` (sedimentation) or ``wet_``
-    (scavenging) family. Same additive/reset semantics as the emission
+    down). ``kind`` selects the ``dry_`` (settling + surface deposition)
+    or ``wet_`` (scavenging) family. Same additive/reset semantics as the emission
     keys — several terms may remove the same species.
     """
     if kind not in ("dry", "wet"):

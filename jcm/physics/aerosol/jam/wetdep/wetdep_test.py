@@ -6,6 +6,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jcm.physics.aerosol.jam.wetdep.impaction import (
+    bcscavcoef,
+    build_impaction_table,
+)
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
@@ -62,19 +66,23 @@ class ScavengingFunctionTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(surface[0, 0]), 1.0)
 
     def test_below_cloud_size_dependence(self):
+        # Λ = sol_factb·Λ₁·R: coarse-mode aerosol sits above the
+        # Greenfield gap and is collected far more efficiently.
         precip = jnp.full((1, 1), 1.0e-4)
-        cf = jnp.zeros((1, 1))
         params = WetDepParameters.default()
-        accum = below_cloud_rate(precip, cf, jnp.full((1, 1), 0.1e-6), params)
-        coarse = below_cloud_rate(precip, cf, jnp.full((1, 1), 2.0e-6), params)
+        table = build_impaction_table(0.11e-6, 1.8, 1770.0)
+        coarse_table = build_impaction_table(2.0e-6, 1.8, 2600.0)
+        _, accum_coef = bcscavcoef(jnp.full((1, 1), 0.055e-6), table)
+        _, coarse_coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), coarse_table)
+        accum = below_cloud_rate(precip, accum_coef, params)
+        coarse = below_cloud_rate(precip, coarse_coef, params)
         self.assertGreater(float(coarse[0, 0]), float(accum[0, 0]))
 
     def test_no_precip_no_below_cloud(self):
         params = WetDepParameters.default()
-        rate = below_cloud_rate(
-            jnp.zeros((1, 1)), jnp.zeros((1, 1)), jnp.full((1, 1), 1e-6),
-            params,
-        )
+        table = build_impaction_table(2.0e-6, 1.8, 2600.0)
+        _, coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), table)
+        rate = below_cloud_rate(jnp.zeros((1, 1)), coef, params)
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
 
     def test_conv_in_cloud_hammoz_form(self):
@@ -437,8 +445,7 @@ class WetDepTermTest(unittest.TestCase):
         # Isolate the in-cloud pathway: no impaction.
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
-            below_coeff=jnp.asarray(0.0),
-            below_radius_ref=jnp.asarray(1.0e-7),
+            sol_factb=jnp.asarray(0.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
         term = WetScavenging(params=params)
@@ -585,8 +592,7 @@ class WetDepTermTest(unittest.TestCase):
         diagnostics["_jam_activation"] = act
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
-            below_coeff=jnp.asarray(0.0),
-            below_radius_ref=jnp.asarray(1.0e-7),
+            sol_factb=jnp.asarray(0.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
 
@@ -643,21 +649,20 @@ class WetDepTermTest(unittest.TestCase):
                 err_msg=key_int,
             )
 
-    def test_grad_through_below_coeff(self):
+    def test_grad_through_sol_factb(self):
         state, diagnostics, spec, mass_name = self._setup()
 
         def loss(coeff):
             params = WetDepParameters(
                 incloud_scale=jnp.asarray(1.0),
-                below_coeff=coeff,
-                below_radius_ref=jnp.asarray(1.0e-7),
+                sol_factb=coeff,
                 conv_scav_ratio=jnp.asarray(0.99),
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
             return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
 
-        g = jax.grad(loss)(jnp.asarray(1.0e-4))
+        g = jax.grad(loss)(jnp.asarray(0.1))
         self.assertTrue(np.isfinite(float(g)))
 
     def test_grad_through_conv_scav_ratio(self):
@@ -669,8 +674,7 @@ class WetDepTermTest(unittest.TestCase):
         def loss(ratio):
             params = WetDepParameters(
                 incloud_scale=jnp.asarray(1.0),
-                below_coeff=jnp.asarray(1.0e-4),
-                below_radius_ref=jnp.asarray(1.0e-7),
+                sol_factb=jnp.asarray(0.1),
                 conv_scav_ratio=ratio,
             )
             term = WetScavenging(params=params)
@@ -763,8 +767,7 @@ class FormationLedgerTest(unittest.TestCase):
         state, diagnostics, spec = self._emptied_cell()
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
-            below_coeff=jnp.asarray(0.0),        # isolate in-cloud
-            below_radius_ref=jnp.asarray(1.0e-7),
+            sol_factb=jnp.asarray(0.0),          # isolate in-cloud
             conv_scav_ratio=jnp.asarray(0.99),
         )
         cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
@@ -791,8 +794,7 @@ class FormationLedgerTest(unittest.TestCase):
         state, diagnostics, spec = self._emptied_cell()
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
-            below_coeff=jnp.asarray(0.0),
-            below_radius_ref=jnp.asarray(1.0e-7),
+            sol_factb=jnp.asarray(0.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
         implicit = WetScavenging(

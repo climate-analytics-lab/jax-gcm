@@ -12,6 +12,7 @@ from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 from flax import nnx
 
@@ -480,6 +481,47 @@ class TestDifferentiabilityGate(unittest.TestCase):
         scale_grad = grads.terms[0].scale[...]
         self.assertFalse(jnp.isnan(scale_grad))
         self.assertNotEqual(float(scale_grad), 0.0)
+
+
+class TestTendencyRunHostParity(unittest.TestCase):
+    """``_tendency_run`` must carry the same contract on both hosts.
+
+    A term that reconstructs the operator-split state from it (JAM's
+    removal chain) would otherwise silently revert to step-start reads on
+    whichever host does not publish it.
+    """
+
+    class _Recorder(PhysicsTerm):
+        name = "recorder"
+        category = "diagnostics"
+        requires = ()
+        provides = ()
+
+        def __call__(self, state, diagnostics, forcing, terrain):
+            run = diagnostics.get("_tendency_run")
+            seen = (jnp.zeros_like(state.temperature) if run is None
+                    else run["temperature"])
+            return (PhysicsTendency.zeros(state.temperature.shape),
+                    {**diagnostics, "seen_temperature_tendency": seen})
+
+    def _run(self, vectorize):
+        physics = ComposablePhysics(
+            terms=[LinearHeating(alpha=2.0), self._Recorder()],
+            checkpoint_terms=False,
+            vectorize_columns=vectorize,
+        )
+        shape = (2, 4, 8)
+        state = _make_test_state(shape)
+        tend, diag = physics.compute_tendencies(
+            state, _make_test_forcing(shape[1:]), _make_test_terrain(shape[1:]),
+        )
+        return np.asarray(diag["seen_temperature_tendency"]).reshape(-1)
+
+    def test_both_hosts_publish_the_running_tendency(self):
+        grid = self._run(vectorize=False)
+        columns = self._run(vectorize=True)
+        self.assertNotEqual(float(np.abs(grid).max()), 0.0)
+        np.testing.assert_allclose(np.sort(grid), np.sort(columns), rtol=1e-6)
 
 
 class TestColumnVectorization(unittest.TestCase):

@@ -265,6 +265,18 @@ class ComposablePhysics(nnx.Module, Physics):
         tendencies = PhysicsTendency.zeros(state.temperature.shape)
 
         for term in self.terms:
+            # Running tendency view, same contract as the columns path: a
+            # term at position i sees the sum over terms [0, i). Both hosts
+            # must publish it or a term that reconstructs the operator-split
+            # state (JAM's removal chain) silently reverts to step-start
+            # reads on one of them.
+            diagnostics["_tendency_run"] = {
+                "u_wind": tendencies.u_wind,
+                "v_wind": tendencies.v_wind,
+                "temperature": tendencies.temperature,
+                "specific_humidity": tendencies.specific_humidity,
+                "tracers": dict(tendencies.tracers),
+            }
             call_fn = jax.checkpoint(term) if self.checkpoint_terms else term
             # Tag the term's instructions so a profiler trace can be attributed
             # back to it; see jcm.profiling.

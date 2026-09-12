@@ -67,12 +67,12 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
     apply_updates,
     carry_mode,
-    tracer_view,
 )
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     incloud_scavenged_fractions,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTerm
@@ -175,7 +175,10 @@ class CloudBorneExchange(PhysicsTerm):
         # small negative mass/number on near-zero fields (Gibbs ringing),
         # and a negative donor would flip the transfer's sign.
         zeros = jnp.zeros_like(state.temperature)
-        view = tracer_view(self._spec, state, diagnostics)
+        # Operator-split read: transfer from the interstitial mass that
+        # survived this step's removal, so the credit to the carry is
+        # matched by a debit that exists.
+        view = split_view(self._spec, state, diagnostics)
         int_names: list[str] = []
         cb_names: list[str] = []
         q_int: list[jnp.ndarray] = []

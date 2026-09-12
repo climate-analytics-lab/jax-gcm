@@ -18,8 +18,9 @@ treatment):
   (``incloud_scavenged_fractions`` — HAMMOZ's ``peffwat``/``peffice``, #708),
   which stays alive in cells the microphysics emptied.
 * **Below-cloud impaction scavenging** — precipitation falling through a
-  layer collects aerosol in its clear-air part, with a size-dependent
-  (∝ r²) collection efficiency. The stratiform contribution uses the
+  layer collects interstitial aerosol at CAM's Slinn impaction coefficient
+  (``wetdep.impaction``), separately for the number and mass moments. The
+  stratiform contribution uses the
   per-level flux entering each layer, so washout is automatically confined
   below where precip actually forms; the convective contribution uses the
   surface convective precip masked to levels at/below the convective cloud
@@ -68,11 +69,15 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     apply_updates,
     carry_mode,
     mirror_names,
-    tracer_view,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.aerosol.jam.wetdep.impaction import (
+    bcscavcoef,
+    build_impaction_table,
+)
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _EPS = 1.0e-30
@@ -90,18 +95,21 @@ class WetDepParameters:
     """Tunable scavenging knobs (differentiable)."""
 
     incloud_scale: jnp.ndarray     # multiplies in-cloud removal
-    below_coeff: jnp.ndarray       # below-cloud Λ per mm/h of rain [1/s]
-    below_radius_ref: jnp.ndarray  # reference radius for ∝r² impaction [m]
+    sol_factb: jnp.ndarray         # below-cloud solubility factor [-]
     conv_scav_ratio: jnp.ndarray   # convective in-cloud scavenging ratio [-]
 
     @classmethod
     def default(cls) -> "WetDepParameters":
+        # sol_factb: CAM's ``sol_factb_interstitial`` namelist default —
+        # only the soluble part of interstitial aerosol is collected by
+        # falling precip. CAM's un-set fallback is the mass-weighted
+        # hygroscopicity of the mode, which every supported CAM
+        # configuration overrides with this scalar.
         # conv_scav_ratio: fraction of soluble aerosol removed with the
         # condensate-to-precip conversion (HAMMOZ soluble-mode value).
         return cls(
             incloud_scale=jnp.asarray(1.0),
-            below_coeff=jnp.asarray(1.0e-4),
-            below_radius_ref=jnp.asarray(1.0e-7),
+            sol_factb=jnp.asarray(0.1),
             conv_scav_ratio=jnp.asarray(0.99),
         )
 
@@ -192,27 +200,27 @@ def fraction_to_rate(fraction: jnp.ndarray, dt: jnp.ndarray) -> jnp.ndarray:
 
 
 def below_cloud_rate(
-    precip_flux: jnp.ndarray,     # (nlev, ncols) precip falling through [kg/m²/s]
-    cloud_fraction: jnp.ndarray,  # (nlev, ncols)
-    r_wet: jnp.ndarray,
+    precip_flux: jnp.ndarray,  # (nlev, ncols) precip falling through [kg/m²/s]
+    scav_coef: jnp.ndarray,    # Slinn impaction coefficient [1/mm]
     params: WetDepParameters,
 ) -> jnp.ndarray:
-    """Below-cloud impaction scavenging rate [1/s], size-dependent (∝ r²).
+    """Below-cloud impaction scavenging rate [1/s].
+
+    CAM ``wetdepa_v2``'s below-cloud term reduces to
+    ``Λ = sol_factb · Λ₁(D_wet) · R``: the swept volume ``cldv`` cancels
+    against the in-precip-area rain rate inside ``odds``, so it acts on the
+    whole grid-mean interstitial tracer with no cloud weighting. ``Λ₁`` is
+    the Slinn collection-efficiency integral over the raindrop and aerosol
+    size distributions (``impaction.bcscavcoef``, per moment) in 1/mm, and
+    ``R`` the precipitation flux in kg/m²/s ≡ mm/s. Slinn's efficiency is
+    capped at 1, so ``Λ₁`` saturates at the rain's geometric sweep-out rate
+    rather than growing without bound with particle size.
 
     ``precip_flux`` is the local flux falling through each layer (per-level
     profile for stratiform precip; a broadcast surface value is the interim
     convective treatment).
     """
-    rain_mmph = precip_flux * 3600.0  # kg/m²/s -> mm/h
-    efficiency = (r_wet / params.below_radius_ref) ** 2
-    # Clear-sky (below-cloud) fraction, clipped to [0, 1]. The cloud scheme can
-    # return cloud_fraction > 1 (e.g. where RH > 1), which would make this
-    # fraction — and hence the scavenging rate — NEGATIVE. A negative rate makes
-    # the implicit ``1 - exp(-rate·dt)`` removed fraction overflow to +inf,
-    # NaN-ing every aerosol tracer. Scavenging rates are non-negative by
-    # construction, so clip the clear fraction here.
-    clear_fraction = jnp.clip(1.0 - cloud_fraction, 0.0, 1.0)
-    return params.below_coeff * rain_mmph * clear_fraction * efficiency
+    return params.sol_factb * scav_coef * jnp.maximum(precip_flux, 0.0)
 
 
 def conv_in_cloud_rate(
@@ -317,6 +325,17 @@ class WetScavenging(PhysicsTerm):
         self.params = nnx.Param(params or WetDepParameters.default())
         self._in_plume_convective = in_plume_convective
         self._spec = spec or MAM4_SPEC
+        # Per-mode Slinn impaction tables, built once here exactly as CAM
+        # builds them in ``modal_aero_bcscavcoef_init`` (the 50x51 double
+        # integral is far too costly to evaluate per cell per step). CAM
+        # tabulates against the mode's first-species material density.
+        self._impaction_tables = tuple(
+            build_impaction_table(
+                mode.dgnum, mode.geom_std_dev,
+                self._spec.species_props(mode.species[0]).density,
+            )
+            for mode in self._spec.modes
+        )
         if carry_mode(self._spec):
             # In carry mode the store term must run upstream each step
             # (name-set fixing + vertical mixing); requiring its key makes
@@ -335,7 +354,6 @@ class WetScavenging(PhysicsTerm):
         dt = diagnostics.get("_dt_seconds", 1800.0)
 
         clouds = diagnostics["clouds"]
-        cloud_fraction = clouds.cloud_fraction
         # Per-level stratiform process rates from the cloud scheme (#499):
         # the true local condensate→precip conversion and the falling-precip
         # evaporation. The carrier flux for impaction and the re-evap ledger
@@ -434,7 +452,9 @@ class WetScavenging(PhysicsTerm):
         # ``Model.get_empty_data``'s structural probe, so fall back to zeros
         # there (real runs have every declared tracer seeded).
         zeros = jnp.zeros_like(state.temperature)
-        view = tracer_view(self._spec, state, diagnostics)
+        # Operator splitting: scavenge what sedimentation and dry deposition
+        # left, not the step-start state (see ``removal_split``).
+        view = split_view(self._spec, state, diagnostics)
         # Removal reads are floored at 0: spectral ringing leaves negative
         # lobes on near-zero tracers, and a removal rate applied to a
         # negative value INJECTS mass — the 30-day storage A/B measured
@@ -463,12 +483,18 @@ class WetScavenging(PhysicsTerm):
         # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
         for i, mode in enumerate(self._spec.modes):
-            below_strat = below_cloud_rate(
-                flux_in, cloud_fraction, aer.r_wet[i], params,
+            # Number and mass ride different moments of the same lognormal,
+            # so CAM tabulates and applies a separate impaction coefficient
+            # for each (``scavcoefnv`` jnv=1 number / jnv=2 volume).
+            coef_num, coef_mass = bcscavcoef(
+                aer.r_wet[i], self._impaction_tables[i])
+            below_strat_num = below_cloud_rate(flux_in, coef_num, params)
+            below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
+            below_conv_num = conv_below * below_cloud_rate(
+                conv_precip[jnp.newaxis, :], coef_num, params,
             )
-            below_conv = conv_below * below_cloud_rate(
-                conv_precip[jnp.newaxis, :], cloud_fraction,
-                aer.r_wet[i], params,
+            below_conv_mass = conv_below * below_cloud_rate(
+                conv_precip[jnp.newaxis, :], coef_mass, params,
             )
             # In-cloud only removes from activatable (soluble) modes — and
             # only implicitly (via the activated fraction) when there is no
@@ -482,28 +508,31 @@ class WetScavenging(PhysicsTerm):
                     frac_num = frac_mass = activated_fraction
                 form_num = frac_num * rate_ic_unit
                 form_mass = frac_mass * rate_ic_unit
-                conv_rate = below_conv + rate_conv_incloud
+                conv_num = below_conv_num + rate_conv_incloud
+                conv_mass = below_conv_mass + rate_conv_incloud
             elif mode.can_activate:
                 form_num = form_mass = zeros
-                conv_rate = below_conv + rate_conv_incloud
+                conv_num = below_conv_num + rate_conv_incloud
+                conv_mass = below_conv_mass + rate_conv_incloud
             else:
                 form_num = form_mass = zeros
-                conv_rate = below_conv
+                conv_num = below_conv_num
+                conv_mass = below_conv_mass
             n_nm = number_name(mode.short)
             names.append(n_nm)
             reinject_to.append(n_nm)
             q_list.append(jnp.maximum(view.get(n_nm, zeros), 0.0))
-            rate_below_strat.append(below_strat)
+            rate_below_strat.append(below_strat_num)
             rate_form_strat.append(form_num)
-            rate_conv.append(conv_rate)
+            rate_conv.append(conv_num)
             for sp in mode.species:
                 nm = mass_name(sp, mode.short)
                 names.append(nm)
                 reinject_to.append(nm)
                 q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
-                rate_below_strat.append(below_strat)
+                rate_below_strat.append(below_strat_mass)
                 rate_form_strat.append(form_mass)
-                rate_conv.append(conv_rate)
+                rate_conv.append(conv_mass)
             if explicit_cb:
                 # Cloud-borne aerosol is entirely in-droplet: no below-cloud
                 # impaction, no activated-fraction weighting, and its
@@ -524,11 +553,9 @@ class WetScavenging(PhysicsTerm):
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).
         # The first-order-decay rate is unbounded — the in-cloud rate ∝ 1/qc
-        # diverges in near-clear cells and the below-cloud rate ∝ (r_wet/r_ref)²
-        # is large for the coarse mode — so an explicit ``dq = -rate·q`` step
-        # removes far more than the available mass when ``rate·dt ≫ 1`` (observed
-        # ``rate·dt ~ 1e4`` for coarse sea salt over the high-wind Southern
-        # Ocean), overshooting into a sign-flipped runaway that NaNs the model
+        # diverges in near-clear cells — so an explicit ``dq = -rate·q`` step
+        # removes far more than the available mass when ``rate·dt ≫ 1``,
+        # overshooting into a sign-flipped runaway that NaNs the model
         # in a few steps. The analytic exponential of the decay is unconditionally
         # stable and positivity-preserving for any ``rate ≥ 0`` (HAMMOZ
         # ``mo_ham_wetdep`` applies the same ``1 - exp(-Λ·Δt)`` removed fraction).
