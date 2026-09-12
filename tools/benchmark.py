@@ -169,10 +169,16 @@ def _load_mirror_manifest():
     return mod
 
 
-#: The four prescribed-emission keys honouring ``auto`` (their auto product is
+#: The prescribed-emission keys honouring ``auto`` (their auto product is
 #: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
+#: This harness deliberately does NOT import ``jcm`` (that would initialise a
+#: JAX backend and preallocate the GPU before the free-card gate), so the key
+#: list and the dust gate below are a second copy of
+#: ``jcm.forcing_assembly``'s — keep them in step.
+_DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
+                        "dust_regions_file", "dust_roughness_file")
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
-                       "oxidants_file")
+                       *_DUST_COMPANION_KEYS, "oxidants_file")
 
 
 def _load_expand_yearly_files():
@@ -208,7 +214,7 @@ def _auto_emission_files(cfg) -> list[str]:
     """``hf://`` bundles the JAM ``auto`` emission default resolves to.
 
     :func:`_preset_data_files` collects only the LITERAL paths in the composed
-    config, but the four prescribed-emission keys default to ``auto`` and are
+    config, but the prescribed-emission keys default to ``auto`` and are
     resolved lazily by ``jcm.runners`` during model construction — i.e. AFTER
     the GPU is claimed and the telemetry sampler is running. Enumerate them here
     (from the same mirror manifest the runner's resolver consults) so they
@@ -223,7 +229,8 @@ def _auto_emission_files(cfg) -> list[str]:
     published-grid set has no bundle; a published-horizontal / unpublished-level
     combo (e.g. ``t63_l8``) — or a sigma grid that merely shares a published
     (token, nlev) — has no level-resolved oxidant bundle while its level-free
-    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those keys
+    emissions/dms/dust bundles still exist, so ``auto`` nulls exactly those
+    keys
     here too. A key explicitly set to a path/``null`` is honoured (the literal
     path is already picked up by ``_preset_data_files``; ``null`` opts out).
     """
@@ -247,8 +254,16 @@ def _auto_emission_files(cfg) -> list[str]:
     # ``auto`` resolver from disagreeing on which keys to fetch (F2).
     vertical = str(grid.get("vertical", "hybrid"))
     out = []
+    # The dust companions only support ``dust_file``; when it is off the runner
+    # never resolves them, so prefetching them would download four maps the run
+    # never opens — and fail a cold/offline node before the resolver can skip
+    # them. Mirrors ``jcm.forcing_assembly._resolve_emission_inputs``.
+    dust_off = str(forcing.get("dust_file", "auto")) in (
+        "null", "None", "none", "")
     for key in _EMISSION_AUTO_KEYS:
         if str(forcing.get(key, "auto")) != "auto":
+            continue
+        if key in _DUST_COMPANION_KEYS and dust_off:
             continue
         product = mm.product_for_key(manifest, key)
         if mm.is_published(manifest, product, token, int(nlev), vertical):

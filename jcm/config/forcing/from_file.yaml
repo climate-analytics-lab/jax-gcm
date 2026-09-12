@@ -18,7 +18,7 @@ file: ???
 # pattern, expanded over the inclusive range below and concatenated along
 # time — set it in a forcing yaml as
 # ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with ``years: [1979, 1983]``.
-# ``dms_file`` / ``dust_file`` are climatology-only single files (no transient
+# ``dms_file`` / the ``dust_*`` keys are climatology-only single files (no transient
 # product is mirrored and their readers do not expand) — a {year} there is
 # rejected at build time.
 # A bare ``{`` is Hydra override syntax, so a CLI override must quote the value
@@ -65,8 +65,8 @@ ozone_file: auto
 # takes an explicit/``hf://`` path or ``null`` to opt out (the runner then warns
 # it is emission-free); use ``auto`` — not a path template — to let a config
 # follow the grid. Only ``emissions_file`` and ``oxidants_file`` accept a
-# ``{year}`` pattern (expanded per year); ``dms_file`` / ``dust_file`` are
-# climatology-only single files and reject a ``{year}`` at build time.
+# ``{year}`` pattern (expanded per year); ``dms_file`` and the ``dust_*`` keys
+# are climatology-only single files or static maps and reject a ``{year}``.
 
 # Prescribed aerosol emissions (``bundles/<grid>/emissions_pd.nc``); auto-routes
 # by content (``emis_<sector>_<species>`` bulk / ``aero_emis_<tracer>``
@@ -77,9 +77,17 @@ emissions_file: auto
 # ``DmsEmissions``.
 dms_file: auto
 
-# Dust-source/erodibility monthly climatology (``bundles/<grid>/dust.nc``);
-# drives ``DustEmissions``.
+# The five Tegen/HAMMOZ dust inputs (#802). ``dust_file`` is the monthly
+# effective-LAI potential-source climatology, which both gates the flux and
+# multiplies it; the three static companions are mandatory alongside it (the
+# scheme would otherwise run on an all-coarse, untuned soil, so a missing one
+# raises). ``dust_roughness_file`` is the satellite roughness map, read only
+# on the ``ndurough = 0`` sensitivity path. ``dust_file: null`` disables dust.
 dust_file: auto
+dust_preferential_file: auto
+dust_soil_types_file: auto
+dust_regions_file: auto
+dust_roughness_file: auto
 
 # Oxidant monthly climatology on the model's hybrid levels
 # (``bundles/<grid>_l<nlev>/oxidants_pd.nc``); feeds ``PrescribedOxidants``.

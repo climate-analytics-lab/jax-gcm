@@ -295,7 +295,8 @@ def build_physics(cfg: DictConfig):
     # (notably the JAM aerosol chain, which is split around the cloud term) are
     # configured without re-expressing that ordering as flat YAML.
     if physics_cfg.get("builder", None) is not None:
-        return _build_physics_from_factory(physics_cfg)
+        return _build_physics_from_factory(
+            _resolve_nudging_dependent_physics(cfg, physics_cfg))
 
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
@@ -337,6 +338,23 @@ def _physics_factories():
 _CONFIG_ONLY_PHYSICS_KEYS = frozenset({
     "builder", "radiation_chunk_size", "defaults",
 })
+
+def _resolve_nudging_dependent_physics(cfg, physics_cfg):
+    """Fill ``jam_dust_nudged: null`` from ``cfg.nudging.enabled``.
+
+    HAM's ``ndust = 4`` regional threshold vector differs between free-running
+    (1.05/1.45) and nudged (0.95/1.25) T63, and the runner appends the nudging
+    term *after* physics is composed, so the dust term cannot see it. ``null``
+    means "follow the run"; an explicit true/false wins.
+    """
+    from omegaconf import OmegaConf
+
+    if physics_cfg.get("jam_dust_nudged", False) is not None:
+        return physics_cfg
+    nudging = cfg.get("nudging", None)
+    enabled = bool(nudging is not None and nudging.get("enabled", False))
+    return OmegaConf.merge(physics_cfg, {"jam_dust_nudged": enabled})
+
 
 def _build_physics_from_factory(physics_cfg):
     """Build physics by delegating to a factory named by ``physics.builder``.
@@ -860,6 +878,7 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 # patch :mod:`jcm.forcing_assembly` so the stub reaches both doors.
 from jcm import forcing_assembly  # noqa: E402
 from jcm.forcing_assembly import (  # noqa: E402
+    DUST_COMPANION_KEYS as _DUST_COMPANION_KEYS,
     _assert_uniform_time_axis as _assert_uniform_time_axis,
     _attach_dms as _attach_dms,
     _attach_dust as _attach_dust,
@@ -1004,6 +1023,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get("dms_file", None), "dms_file")),
         dust_file=_resolve_data_path(_reject_year_pattern(
             _forcing_cfg.get("dust_file", None), "dust_file")),
+        **{key: _resolve_data_path(_reject_year_pattern(
+            _forcing_cfg.get(key, None), key))
+           for key in ("dust_preferential_file", "dust_soil_types_file",
+                       "dust_regions_file", "dust_roughness_file")},
         oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
         ozone_file=_resolve_data_path(ozone_file),
     )
@@ -1240,6 +1263,8 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
         )
     elif has_jam:
         emission_keys = ("emissions_file", "dms_file", "dust_file",
+                         "dust_preferential_file", "dust_soil_types_file",
+                         "dust_regions_file", "dust_roughness_file",
                          "oxidants_file")
         # The mirror manifest is the read-side single source for what is
         # published: Gaussian grids (top-level ``grids`` with a real nlat — the
@@ -1250,14 +1275,20 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
         resolved = {k: _resolved_emission_value(
                         forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
                     for k in emission_keys}
-        unset = [k for k in emission_keys if resolved[k] is None]
+        # The four dust companions are not independent sources — they support
+        # ``dust_file`` and ``_resolve_emission_inputs`` discards them when it is
+        # null. Counting them would leave ``len(unset) != len(source_keys)`` and
+        # suppress the zero-emission warning for a genuinely emission-free run.
+        source_keys = tuple(k for k in emission_keys
+                            if k not in _DUST_COMPANION_KEYS)
+        unset = [k for k in source_keys if resolved[k] is None]
         # Keys the user left at ``auto`` that nonetheless resolved to None —
         # i.e. the silent-degrade case (pySES / non-mirrored grid), distinct
         # from an explicit opt-out null.
-        auto_nulled = [k for k in emission_keys
+        auto_nulled = [k for k in source_keys
                        if str(forcing_cfg.get(k, None)) == "auto"
                        and resolved[k] is None]
-        if len(unset) == len(emission_keys):
+        if len(unset) == len(source_keys):
             if auto_nulled:
                 reason = (
                     "the pySES backend publishes no per-grid emission bundles"

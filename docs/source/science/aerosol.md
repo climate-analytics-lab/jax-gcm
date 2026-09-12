@@ -163,10 +163,10 @@ in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
 
 **What we do.** Natural emissions are faithful ports of the HAMMOZ schemes — Gong
 (2003) sea-salt, Nightingale (2000) DMS, Tegen et al. (2002) dust — collapsed to
-differentiable jittable forms. Gong sea salt is computed **online** from the
-lowest-level wind and open-water fraction, so it needs no input file; DMS and
-dust read prescribed seawater-concentration / erodibility fields from
-``ForcingData`` and are inert until those are supplied. Anthropogenic emissions are either bulk
+differentiable jittable forms. Gong sea salt is computed **online** from the 10 m
+wind and open-water fraction, so it needs no input file; DMS reads a prescribed
+seawater-concentration field and dust the five prescribed soil/source fields
+below, and both are inert until those are supplied. Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
@@ -236,10 +236,11 @@ later in the step than the emissions that consume it — rather than a scheme
 choice, and it is reported rather than hidden.
 
 **Status & known limitations.** The three surface-flux terms behave
-differently on step 1 of a cold start, deliberately: dust emits nothing (its
-carried ``u*`` is zero and a saltation threshold has no defensible value
-without a surface layer), sea salt and DMS emit from the lowest level and flag
-it, and the surface term has no step-1 case because it runs after vertical
+differently on step 1 of a cold start, deliberately: dust emits nothing (a
+saltation threshold and a log law both calibrated to 10 m have no defensible
+value on a ~33 m model-level wind, so ``DustEmissions`` zeroes exactly the
+columns ``wind_10m`` flags), sea salt and DMS emit from the lowest level and
+flag it, and the surface term has no step-1 case because it runs after vertical
 diffusion. ``check_health`` reports the chunk-mean flag and fails a chunk only
 on a *persistent* fallback (``chunk_idx > 0 and frac > 0.5``), because under
 interval averaging the legitimate bootstrap step and a single defective step
@@ -261,6 +262,119 @@ reduction against the carry state per step and the flag per column;
 integration reduces sea-salt emission by 32 % and the DMS flux by 17 % against
 the lowest-level wind, with the flag reading 1/480 on the first chunk and
 exactly zero on every chunk thereafter.
+
+#### Dust emission (Tegen / HAMMOZ)
+
+**What we do.** A port of the MPI-BGC dust scheme as HAM2 configures it
+(``ndust = 4``). A 191-class soil size grid spanning 0.2-1262 µm carries a
+Marticorena & Bergametti (1995) threshold friction velocity ``u*t(D)``; ``u*``
+comes from the diagnosed **10 m wind** through the fixed log law
+``u* = vk·U10/ln(1000 cm/z0)`` with ``z0 = ndurough = 0.001 cm``, not from the
+vertical-diffusion scheme. Per soil texture, four lognormal populations give the
+relative surface ``srel`` (which drives the flux) and the relative mass
+``srelV`` (which drives the emitted spectrum); the saltation flux is
+``srel·(1+R)²·(1−R)·cd·u*³·α`` with ``R = u*t·nduscale·utsc/(feff·u*)``, and every
+class ``k > 1`` sandblasts over classes ``1…k`` weighted by ``srelV``. A cell is a
+mixture: ``1 − psrc`` of it keeps its mapped Zobler/East-Asian textures with the
+unmapped remainder as type 1 (coarse), and ``psrc`` becomes soil type 10
+(100 % silt, α = 1e-5). Emission needs ``u* ≥ 21·nduscale/feff`` cm/s and
+``pot_source > r_dust_lai``; the surviving flux is multiplied by ``pot_source``
+again, by ``1 − snow_cover``, and zeroed where the relative soil wetness exceeds
+0.99.
+
+The emitted spectrum is integrated onto MAM4's emission windows — accumulation
+``0.1 ≤ D < 1 µm``, coarse ``1 ≤ D < 10 µm``, everything coarser discarded — with
+the **number** taken from the flux-weighted effective diameter *within* each
+window, ``D_eff = (Σ F / Σ F/D³)^(1/3)``, not from the mode's equilibrium
+``dgnum``.
+
+**What ECHAM/HAM does.** ``mo_ham_dust.f90`` (``set_dust_data``,
+``bgc_dust_initialize``, ``bgc_dust_calc_emis``, ``bgc_read_annual_fields``,
+``comp_nduscale_reg``) — Tegen et al. (2002), Marticorena & Bergametti (1995)
+eqs. (5)-(7), (15), (17), (28)-(33), with Cheng et al. (2008)'s East-Asian
+textures and the HAM2 selection of Zhang et al. (2012) §4.1.5. The module hands
+out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
+
+**Why we differ.**
+- `science` (mode mapping) — HAM emits into M7's insoluble accumulation and
+  coarse modes via an offline three-lognormal fit to the *global multi-annual
+  mean* spectrum (Stier et al. 2005 §2.3.4). MAM4's modes are different
+  (σ 1.80 vs 1.59/2.00), and the fit throws away the soil and wind dependence the
+  scheme actually produces — the sub-micron mass fraction spans 0.00004 to 0.151
+  across textures. We integrate the **online** spectrum over MAM4's windows
+  instead. The window edges (0.1 / 1 / 10 µm) are MAM4's convention, so HAM's
+  8-bin structure is deliberately *not* reproduced — only the underlying
+  191-class spectrum is. The ≥ 10 µm remainder is discarded, as HAM discards its
+  super-coarse mode, and nothing is renormalised; it is published per column as
+  ``dust_supercoarse_flux`` because it is large (0.11-0.75 of the total).
+- `data` (snow) — HAM multiplies by ``1 − cvs`` with ECHAM's ``physc`` snow-cover
+  formula (a ``tanh`` in snow depth with orographic-σ damping, a canopy-snow
+  substitute and ``cvs = 1`` on glaciers). jcm has no prognostic snow depth
+  (``land.py`` still zeroes its tendency), so ``1 − snowc_am`` stands in.
+  ``snowc_am`` is zero on permanent ice where ECHAM sets ``cvs = 1``, which is
+  harmless because ``pot_source`` is zero there.
+- `data` (soil moisture) — the ``ws/wsmx > 0.99`` cut-off is unconditional in
+  every HAM preset, but jcm carries SPEEDY's vegetation-weighted availability
+  index ``soilw_am``, not ECHAM's ``ws/wsmx``. It is wired so the term is
+  structurally complete, and is close to inert because ``soilw_am`` is capped at
+  field capacity by construction (#787).
+- `data` (resolution) — the HAMMOZ inputs exist only at T63. The T106 products
+  are derived from them by nearest neighbour (conservative regridding cannot
+  refine a grid, and the region mask is categorical), and the ``ndust = 3``
+  resolution polynomial carries an explicit source warning that
+  ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
+  ne30 configurations too (#802).
+
+**Status & known limitations.**
+- The **``U10 = 10 m/s`` texture switch is a hard step**: above it the
+  preferential source keeps type 10's flux magnitude but emits type 11's clay
+  spectrum, a ~3400x jump in sub-micron mass. It is ported as the step it is, so
+  ``jax.grad`` sees zero through it and it will show up in any optimisation
+  (#664). ``dust_test.py`` asserts the zero gradient deliberately.
+- The `u*` pre-gate (`u* ≥ 21·nduscale/feff`) omits the East-Asian threshold
+  multiplier `utsc`, exactly as the Fortran does, so a preset-4 Taklamakan cell
+  (`r_dust_sf13 = 0.6`) is withheld until `U10 ≈ 7.6 m/s` even though its
+  per-class threshold is cleared near 4.6 m/s. The gate is meant to be a cheap
+  *necessary* condition and `utsc < 1` is where it stops being one — a latent
+  inconsistency in HAM, reproduced rather than silently corrected.
+- The sandblasting weights sum to slightly more than 1 (the Fortran's numerator
+  includes class 1 while its denominator excludes it, ~3e-5): reproduced, not
+  fixed.
+- The soil-type file holds two **overlapping** partitions — global Zobler
+  ``type2/3/4/6`` and Cheng's Chinese ``type13..17``, summing to 1.85 over the
+  Gobi. Summing all nine drives the type-1 residual to −0.85 and the flux
+  negative; ``k_dust_easo = 2`` (the default) replaces such cells with the
+  East-Asian textures outright, ``= 1`` zeroes them, and ``= 0`` is the branch
+  the source itself labels buggy.
+- The Fécan et al. (1999) moisture correction and the satellite roughness map
+  are both implemented but **off by default**, matching HAM2. With
+  ``ndurough = 0.001 cm = z0s`` the drag partition ``feff`` is identically 1, so
+  the roughness map is read and immediately overwritten exactly as the Fortran
+  does. Fécan additionally needs a gravimetric water content jcm does not carry.
+- ``nduscale_reg`` is HAM's only global tuning knob and it scales the
+  *threshold*, so a larger value emits **less**. The default is the T63
+  free-running vector ``(1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05)``;
+  ``DustParameters.preset(3)`` selects Stier et al. (2005) instead.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/dust.py`` — ``DustEmissions``,
+  ``DustParameters``, ``threshold_friction_velocity``,
+  ``soil_size_distributions``, ``emission_weight_matrix``, ``SOIL_TABLE``,
+  ``MIXTURE_ROWS``, ``DUST_SUPERCOARSE_KEY``.
+- ``jcm/forcing.py`` — ``read_dust_source``, ``read_dust_preferential``,
+  ``read_dust_soil_types``, ``read_dust_regions``, ``read_dust_roughness``.
+- ``jcm/forcing_assembly.py`` — ``_attach_dust``.
+- ``jcm/data/mirror/dust.py`` — ``build_dust_product``.
+
+**Validation evidence.** ``dust_test.py`` pins ``u*t`` at eight diameters
+against MB95 (1091.08 cm/s at 0.2 µm to 66.30 at 1262 µm, minimum 20.4502 at
+76.04 µm), the emission onset at ``U10 = 6.2377 m/s``, the single-class flux
+chain (soil type 2, ``u* = 40 cm/s``, ``D = 20 µm`` → 4.4758e-10 g cm⁻² s⁻¹),
+the matrix form of the sandblasting redistribution against a direct
+transcription of the Fortran loops for all twelve mixture rows, the East-Asia
+overlap guards, the region vector, the snow and saturation cut-offs, the
+emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
+0.310 / 5.64 µm) and the gradients through α and ``nduscale_reg``.
 
 ## MACv2-SP simple plumes
 
