@@ -47,6 +47,7 @@ from jcm.physics.aerosol.jam.emissions.surface_wind import (
     MODEL_LEVEL_WIND_KEY, wind_10m)
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
+from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 # --- structural constants (mo_ham_dust.f90 declaration block), CGS ----------
@@ -491,6 +492,32 @@ class DustEmissions(PhysicsTerm):
             return jnp.maximum(z0, params.r_dust_z0min) * params.r_dust_scz0
         return jnp.full((ncols,), 1.0) * params.ndurough
 
+    def _inert(self, state, diagnostics, from_model_level, ncols):
+        """Zero tendencies and zeroed diagnostics for a run with no dust source."""
+        zero = jnp.zeros((state.temperature.shape[0], ncols))
+        tracer_tends = {
+            mass_name("du", self._accum.short): zero,
+            mass_name("du", self._coarse.short): zero,
+            number_name(self._accum.short): zero,
+            number_name(self._coarse.short): zero,
+        }
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=jnp.zeros_like(state.temperature),
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers=tracer_tends,
+        )
+        diagnostics = accumulate_emission_fluxes(
+            diagnostics, tracer_tends, diagnostics["air_density"],
+            diagnostics["layer_thickness"])
+        diagnostics = {**diagnostics,
+                       MODEL_LEVEL_WIND_KEY: jnp.maximum(
+                           diagnostics.get(MODEL_LEVEL_WIND_KEY, 0.0),
+                           from_model_level),
+                       DUST_SUPERCOARSE_KEY: jnp.zeros((ncols,))}
+        return tendency, diagnostics
+
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()
         air_density = diagnostics["air_density"]
@@ -504,9 +531,15 @@ class DustEmissions(PhysicsTerm):
         u10, from_model_level = wind_10m(state, diagnostics)
         u10 = jnp.where(from_model_level > 0.0, 0.0,
                         jnp.maximum(jnp.ravel(u10), 0.0))
-        if (forcing is not None
-                and getattr(forcing, "dust_source", None) is not None):
-            _require_companions(forcing, ncols)
+        # No source map means the term is switched off (an aquaplanet, SCM, or
+        # forcing.dust_file=null): emit nothing WITHOUT validating the inputs a
+        # disabled scheme never reads, so an emission-free run cannot fail on
+        # preset-specific companion data.
+        has_source = (forcing is not None
+                      and getattr(forcing, "dust_source", None) is not None)
+        if not has_source:
+            return self._inert(state, diagnostics, from_model_level, ncols)
+        _require_companions(forcing, ncols)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         snow = jnp.clip(_column_field(forcing, "snowc_am", ncols), 0.0, 1.0)
         wetness = jnp.clip(_column_field(forcing, "soilw_am", ncols), 0.0, 1.0)

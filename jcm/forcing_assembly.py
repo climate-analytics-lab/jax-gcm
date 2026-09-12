@@ -21,6 +21,7 @@ module, which reaches both doors.
 
 from __future__ import annotations
 
+import functools
 import logging
 
 from jcm import provenance
@@ -343,17 +344,20 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     from omegaconf import OmegaConf
 
     jam = str((cfg.get("physics", {}) or {}).get("aerosol_module", "")) == "jam"
-    updates = {
-        key: _resolve_one_emission_input(
-            forcing_cfg.get(key, None), key, coords, jam, is_pyses)
-        for key in _EMISSION_AUTO_KEYS
-    }
-    # `dust_file: null` disables dust, so its companions are dead weight: an
-    # eager `auto` would fetch four bundles the run never opens, and fail an
-    # offline cold cache on a product the user explicitly turned off.
-    if updates["dust_file"] is None:
-        for key in (*_DUST_REQUIRED_KEYS, "dust_roughness_file"):
-            updates[key] = None
+    resolve = functools.partial(_resolve_one_emission_input, coords=coords,
+                                jam=jam, is_pyses=is_pyses)
+    # `dust_file` is resolved FIRST and its companions are skipped entirely when
+    # it is off. Nulling them afterwards would be too late: resolving an `auto`
+    # key eager-fetches its bundle, so a dust-free offline run would still have
+    # downloaded (or failed on) four maps it never opens.
+    dust = resolve(forcing_cfg.get("dust_file", None), "dust_file")
+    companions = (*_DUST_REQUIRED_KEYS, "dust_roughness_file")
+    updates = {"dust_file": dust}
+    for key in _EMISSION_AUTO_KEYS:
+        if key == "dust_file":
+            continue
+        updates[key] = (None if key in companions and dust is None
+                        else resolve(forcing_cfg.get(key, None), key))
     return OmegaConf.merge(forcing_cfg, updates)
 
 

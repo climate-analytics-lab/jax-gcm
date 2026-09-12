@@ -672,6 +672,30 @@ class InertTest(unittest.TestCase):
             state, diagnostics, forcing, terrain)
         self.assertTrue(np.all(_total_mass(tend) > 0.0))
 
+    def test_a_disabled_scheme_never_validates_its_companions(self):
+        # forcing.dust_file=null (or an aquaplanet/SCM) must stay inert even on
+        # preset 2, whose roughness map the resolver also leaves unset.
+        from jcm.physics_interface import PhysicsState
+        state = PhysicsState.zeros((3, 2)).copy(
+            temperature=jnp.full((3, 2), 295.0))
+        diagnostics = {"air_density": jnp.full((3, 2), 1.2),
+                       "layer_thickness": jnp.full((3, 2), 100.0)}
+        for ndust in (2, 3, 4):
+            term = DustEmissions(params=DustParameters.preset(ndust))
+            for forcing in (None, types.SimpleNamespace()):
+                tend, diag = term(state, diagnostics, forcing, None)
+                np.testing.assert_allclose(_total_mass(tend), 0.0,
+                                           err_msg=f"ndust={ndust}")
+                np.testing.assert_allclose(
+                    np.asarray(diag[DUST_SUPERCOARSE_KEY]), 0.0)
+                np.testing.assert_allclose(np.asarray(diag["emi_du"]), 0.0)
+
+    def test_a_source_without_companions_still_raises(self):
+        state, diagnostics, forcing, _ = _inputs()
+        forcing.dust_soil_types = {}
+        with self.assertRaisesRegex(ValueError, "dust_soil_types"):
+            DustEmissions()(state, diagnostics, forcing, None)
+
     def test_unsupported_preset_raises(self):
         with self.assertRaisesRegex(ValueError, "ndust=5"):
             DustParameters.preset(5)
