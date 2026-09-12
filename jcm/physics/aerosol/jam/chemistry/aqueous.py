@@ -279,7 +279,8 @@ class AqueousSulfur(PhysicsTerm):
 
         if self._scheme == "simple":
             dso4 = params.rate_scale * _simple_aqueous_so4(
-                so2=so2, h2o2=jnp.maximum(ox.h2o2, 0.0), rho=rho,
+                so2=jnp.maximum(so2, 0.0),
+                h2o2=jnp.maximum(ox.h2o2, 0.0), rho=rho,
             )
         else:
             dso4 = params.rate_scale * _aqueous_so4(

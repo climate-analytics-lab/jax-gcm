@@ -226,8 +226,14 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
                 msg=f"{name}: the interface broke column conservation")
             np.testing.assert_allclose(np.asarray(out), np.asarray(moved))
 
-    def test_water_tracers_are_still_capped(self):
-        """The cap still applies to the pure-sink fields it was written for."""
+    def test_water_tracers_are_capped_despite_the_redistribution(self):
+        """Pins today's behaviour for the retained water fields.
+
+        Not a claim that it is right: vdiff redistributes q/qc/qi, so the
+        cap can clamp an overdrawn donor layer and create water mass — the
+        same defect removed here for aerosol. Kept because the moist
+        physics requires q >= 0; tracked in #806.
+        """
         from jcm.physics_interface import PhysicsTendency, verify_tendencies
         shape = (4, 8, 8)
         state = PhysicsState.zeros(shape, tracers={"qc": jnp.full(shape, 1e-5)})

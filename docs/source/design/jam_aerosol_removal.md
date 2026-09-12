@@ -141,7 +141,19 @@ paired transfers (sulfur chemistry, the activation exchange), and a
 per-cell positivity cap clips one side of a conserved pair — clamping a
 donor cell while the receiving cells keep their gain creates column mass.
 Bounding the removal where it is produced is what makes the cap
-unnecessary.
+unnecessary, and removing it is also what makes the split *exact*: with a
+cap in place `split_view` reconstructed the working copy from tendencies
+the interface would later clamp, so the reconstruction disagreed with the
+state the dycore actually received wherever the cap fired.
+
+What happens to a cell the parallel transport terms leave negative: nothing,
+within physics. It persists through the dynamics step and is cleaned on the
+way back in by the dycore-side `filters.MassConservingPositivity`, a
+column-mass-conserving hole-filler enabled by default for JAM runs
+(`diffusion.tracer_positivity: auto`) and wired into the dinosaur backend
+only — under pySES, or with it switched off, the negative persists and stays
+visible to the mass-budget gauge. It is a boundary guard, not
+positivity-preserving transport.
 
 ## Deposition-flux ledger
 

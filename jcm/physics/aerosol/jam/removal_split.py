@@ -10,12 +10,14 @@ working copy the previous ones left. ``split_view`` reconstructs that copy
 from the running tendency the driver publishes as ``_tendency_run``, so
 removing a fraction of what remains can never exceed the whole.
 
-The reconstruction folds in EVERY term already run this step, not only the
-removal chain — emissions, convective transport, chemistry, the
-microphysics core and activation all precede sedimentation in
-``jam_aerosol_physics``. That is the full sequential split the reference
-models use: aerosol emitted or formed this step is present to be removed,
-and aerosol convection has already exported is not.
+The reconstruction folds in every term already run this step that returns
+tracer TENDENCIES, not only the removal chain: emissions, tracer vertical
+diffusion, convective transport and the sulfur chemistry all precede
+sedimentation in ``jam_aerosol_physics``. Aerosol emitted or formed this
+step is therefore present to be removed, and aerosol convection has
+already exported is not. Terms that transform tracers in place rather
+than through the tendency dict — the MAM4 core and ice nucleation read
+``tracer_view`` — are outside it.
 
 Cloud-borne tracers live in the physics carry, which the removal terms
 already integrate sequentially through ``cloud_borne_store.apply_updates``,

@@ -281,8 +281,14 @@ takes. That fallback would give sea salt a solubility factor above one. The
 operator split is order-dependent by construction; the order is the composed one.
 Tracer vertical diffusion and convective transport still read the step-start
 state in parallel, so their summed redistribution can leave a donor cell
-negative; that is corrected by the dycore's positive-definite tracer filter, not
-at the physics interface. Ice
+negative. Nothing in physics removes that: the negative persists through the
+dynamics step and is cleaned on the way back INTO physics by the dycore-side
+``filters.MassConservingPositivity`` — a column-mass-conserving hole-filler, on
+by default for JAM runs (``diffusion.tracer_positivity: auto``) and wired into
+the dinosaur backend only. Under pySES, which floors water vapour alone, and
+with the filter switched off, the negative simply persists and stays visible to
+the mass-budget gauge. The filter is a guard at the boundary, not
+positivity-preserving tracer transport. Ice
 sedimenting to the surface as snow carries no aerosol removal, matching CAM,
 which has no ice-phase aerosol scavenging.
 

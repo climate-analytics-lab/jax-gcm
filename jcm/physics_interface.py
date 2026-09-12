@@ -328,15 +328,14 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
-# JAM aerosol and gas tracers are deliberately NOT capped here. Their
-# tendency is a sum over conservative redistributions (tracer vertical
-# diffusion, convective transport) and paired transfers (sulfur chemistry,
-# activation exchange), and a per-cell positivity cap clips one side of a
-# conserved pair: clamping a donor cell while the receiving cells keep
-# their gain CREATES column mass. Their removal is instead bounded where
-# it is produced, by the operator split in
-# ``aerosol/jam/removal_split.py`` — each sink sees what its predecessors
-# left, so the sum cannot exceed the tracer.
+# Deliberately just the membership test above: JAM aerosol and gas tracers
+# are NOT capped. Their tendency sums conservative redistributions (tracer
+# vertical diffusion, convective transport) with paired transfers (sulfur
+# chemistry, activation exchange), and clipping one side of a conserved
+# pair creates mass. Their removal is bounded where it is produced, by the
+# operator split in ``aerosol/jam/removal_split.py``. Do not re-add a name
+# family here without re-reading that argument (and #806, the same defect
+# in the retained water fields).
 
 
 def has_non_negative_tendency(name: str) -> bool:
@@ -393,10 +392,17 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     tracer :func:`has_non_negative_tendency` accepts) we cap the negative
     part of the tendency at ``-state / dt``, i.e. just enough to drive the
     field to zero rather than below. This mirrors what an implicit step
-    on a linear sink would do for the same field. It is only valid for a
-    field whose tendency is a pure sink plus sources — never for one
-    carrying a conservative redistribution, where clipping the donor
-    alone creates mass.
+    on a linear sink would do for the same field.
+
+    The cap is only sound for a field whose tendency is a pure sink plus
+    sources: clipping the donor half of a conservative redistribution
+    while its receivers keep their gain CREATES mass. Aerosol and gas
+    tracers are excluded for that reason. The retained water fields do
+    not strictly satisfy it either — vdiff redistributes q/qc/qi — so the
+    cap can create water mass in an overdrawn donor layer; it is kept
+    because the moist physics downstream requires q >= 0, and reshaping
+    it is a moist-physics change with its own validation. Tracked in
+    #806.
 
     Args:
         state: The current ``PhysicsState`` (already passed through
