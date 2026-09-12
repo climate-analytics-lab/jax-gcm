@@ -472,7 +472,12 @@ class TestAutoOzoneDefault(unittest.TestCase):
         self.assertLess(float(o3.max()), 20.0)
         self.assertGreater(float(o3.min()), 0.0)
 
-    def test_auto_miss_warns_and_falls_back(self):
+    def test_auto_miss_warns_and_falls_back_on_a_sigma_grid(self):
+        """A sigma grid is the one case ``auto`` may still degrade.
+
+        Every ozone product is on hybrid-level pressures, so there is no
+        product a sigma run could have been expected to configure.
+        """
         from jcm.runners import build_forcing
 
         cfg = _compose(["physics=echam", "grid=echam_t42_l8_sigma"])
@@ -484,6 +489,63 @@ class TestAutoOzoneDefault(unittest.TestCase):
         self.assertTrue(any("ANALYTIC ozone" in m for m in logs.output))
         # ``kind: default`` with no attachments returns None (aquaplanet
         # built later); either way no ozone climatology must be loaded.
+        if forcing is not None:
+            self.assertFalse(bool(forcing.ozone_climatology.is_loaded()))
+
+    def test_auto_raises_when_no_product_exists_for_the_grid(self):
+        """A hybrid grid with no ozone product must refuse, not degrade.
+
+        ``terrain.kind=auto`` already raises for the same reason: a silently
+        substituted climatology (~7.6x the tropospheric ozone column) produces
+        a run that completes and reports healthy with invalid radiation (#774).
+        """
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone
+
+        # T85 hybrid: no packaged bc/*/ozone.nc matches and the mirror
+        # publishes ozone for t63/t106 only. The fetch is still attempted
+        # (the manifest's grid list can lag what is staged) and fails.
+        cfg = _compose(["physics=echam", "grid=echam_t85_l47_hybrid"])
+        coords = build_coords(cfg)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=FileNotFoundError("no such bundle")):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                _resolve_auto_ozone(coords)
+        message = str(ctx.exception)
+        self.assertIn("interpolate_ozone", message)
+        self.assertIn("analytic", message)
+
+    def test_auto_distinguishes_a_transport_failure(self):
+        """A published bundle that will not fetch is a cache problem.
+
+        The remedy differs from a missing product, so the two must not share
+        one message — a cold cache on an offline compute node is entirely
+        recoverable and used to degrade silently.
+        """
+        from unittest import mock
+
+        from jcm.runners import _resolve_auto_ozone
+
+        cfg = _compose(["physics=echam", "grid=echam_t106_l47_hybrid"])
+        coords = build_coords(cfg)
+        with mock.patch("jcm.data.remote.fetch",
+                        side_effect=FileNotFoundError("not in the cache")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _resolve_auto_ozone(coords)
+        message = str(ctx.exception)
+        self.assertIn("transport failure", message)
+        self.assertIn("cache", message)
+
+    def test_analytic_is_an_explicit_opt_in(self):
+        """``ozone_file=analytic`` takes the analytic profile deliberately."""
+        from jcm.runners import build_forcing
+
+        cfg = _compose(["physics=echam", "grid=echam_t63_l47_hybrid"])
+        coords = build_coords(cfg)
+        cfg.forcing.kind = "default"
+        cfg.forcing.ozone_file = "analytic"
+        forcing = build_forcing(cfg, coords)
         if forcing is not None:
             self.assertFalse(bool(forcing.ozone_climatology.is_loaded()))
 

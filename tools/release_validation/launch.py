@@ -7,7 +7,9 @@ Each member of ``matrix.yaml`` references a validated preset in
 ``tools/benchmark.py``'s ``PRESETS`` (the single home of known-good
 override sets) and becomes a PBS job running a full-output year on one
 A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
-``forcing.ozone_file=auto``); JAM members additionally need the aux
+``forcing.ozone_file=auto``) and are PREFETCHED here, on the submitting
+(networked) node, so a member whose inputs are unavailable refuses at submit
+time instead of after hours of GPU; JAM members additionally need the aux
 inputs staged per
 ``jcm/data/mirror/SOURCES.md`` (dms/dust/oxidants + emissions on the
 model grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment.
@@ -30,7 +32,8 @@ import yaml
 HERE = Path(__file__).parent
 HOME = os.environ["HOME"]
 sys.path.insert(0, str(HERE.parent))
-from benchmark import PRESETS  # noqa: E402
+from benchmark import (  # noqa: E402
+    PRESETS, _hf_fetch, _preset_data_files)
 
 
 def jam_aux(grid: str, levels: str) -> list[str]:
@@ -148,6 +151,35 @@ def check_fresh(rundir: str, resume: bool) -> None:
             "default is the repo HEAD short SHA).")
 
 
+def prefetch(ovs: list[str]) -> list[str]:
+    """Download every input a member resolves to; return the unavailable ones.
+
+    Mirrors ``tools/benchmark.py``'s pre-GPU preflight, including the
+    lazily-resolved ``auto`` bundles (emissions, ozone) the literal-path walk
+    cannot see. A matrix member is a ten-hour GPU job, so an input that cannot
+    be resolved must fail here rather than inside model construction on a
+    compute node with no network (#774).
+    """
+    missing = []
+    try:
+        paths = _preset_data_files(ovs)
+    except Exception as e:                  # noqa: BLE001 — reported, not raised
+        # Enumeration itself reaches the mirror manifest (the ``auto`` ozone and
+        # emission bundles), so it can fail for the same reasons a fetch can.
+        # Report it as this member's problem rather than aborting the whole
+        # plan with a traceback.
+        return [f"could not enumerate inputs ({type(e).__name__}: {e})"]
+    for path in paths:
+        if path.startswith("hf://"):
+            try:
+                _hf_fetch(path[len("hf://"):])
+            except Exception as e:              # unreachable or absent
+                missing.append(f"{path}  ({type(e).__name__}: {e})")
+        elif not Path(path).exists():
+            missing.append(path)
+    return missing
+
+
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     # Presets may carry their own output plumbing (the pyses ones set
     # run.checkpoint_path); ours must win, so strip conflicting keys
@@ -169,7 +201,12 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            f"run.output_prefix={rundir}/{name}",
            # checkpoint_path is now a universal run key (the run schema is one
            # base -- #640), so a plain override sets it on every run group.
-           f"run.checkpoint_path={rundir}/checkpoint.msgpack"]
+           f"run.checkpoint_path={rundir}/checkpoint.msgpack",
+           # Permanent archives alongside the rotating checkpoint, so a
+           # member whose failure develops slowly still has a state from
+           # before the onset to restart from.
+           "run.archive_ckpt_every="
+           f"{m.get('archive_ckpt_every', d.get('archive_ckpt_every', 0))}"]
     if m.get("jam_inputs"):
         ovs += jam_aux(grid, m["jam_inputs"])
     return ovs
@@ -212,6 +249,8 @@ def main(argv=None):
                     help="continue an existing run rather than refusing to "
                          "start on top of its checkpoint")
     ap.add_argument("--submit", action="store_true")
+    ap.add_argument("--no-prefetch", action="store_true",
+                    help="skip the input preflight (offline job generation)")
     ap.add_argument("--account",
                     default=os.environ.get("PBS_ACCOUNT", "UCSD0085"))
     a = ap.parse_args(argv)
@@ -235,6 +274,26 @@ def main(argv=None):
     plan = [(name, f"mx_{name.replace('-', '_')}_{run_tag}") for name in wanted]
     for _, tag in plan:
         check_fresh(f"{scratch}/jam_runs/{tag}", a.resume)
+
+    # Preflight every member's inputs before writing any job: a matrix launch
+    # that cannot resolve an input should fail whole, on the node that still
+    # has network, not member by member inside a queued job.
+    if not a.no_prefetch:
+        missing = {}
+        for name, tag in plan:
+            unavailable = prefetch(
+                overrides(tag, cfg["members"][name], d,
+                          f"{scratch}/jam_runs/{tag}"))
+            if unavailable:
+                missing[name] = unavailable
+        if missing:
+            report = "\n".join(f"  {name}:\n    " + "\n    ".join(paths)
+                                for name, paths in missing.items())
+            raise SystemExit(
+                "these members reference inputs that are not available "
+                f"here:\n{report}\nStage them per "
+                "jcm/data/mirror/SOURCES.md, or pass --no-prefetch to "
+                "generate the jobs anyway.")
 
     for name, tag in plan:
         m = cfg["members"][name]

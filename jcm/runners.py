@@ -928,16 +928,24 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
 
         cand = (Path(str(resources.files("jcm")))
                 / "data" / "bc" / "t63" / "ozone.nc")
-        if cand.exists():
-            ozone_file = str(cand)
-        else:
-            logging.warning(
-                "forcing.ozone_file=auto: packaged t63/ozone.nc missing "
-                "— pySES run falls back to the ANALYTIC ozone profile "
-                "(~12 W/m2 clear-sky OLR low bias)."
+        if not cand.exists():
+            # Same rule as the spectral path (#774): a silently substituted
+            # ozone climatology corrupts the run, so ``auto`` that resolves to
+            # nothing raises. The packaged file ships in the wheel, so this
+            # only fires on a damaged install.
+            raise FileNotFoundError(
+                "forcing.ozone_file=auto: the packaged jcm/data/bc/t63/"
+                "ozone.nc the pySES path interpolates from is missing, so no "
+                "ozone climatology can be resolved. Reinstall jcm, point "
+                "forcing.ozone_file at a 12-month climatology, or set "
+                "forcing.ozone_file=analytic to accept the analytic profile "
+                "(~7.6x the tropospheric ozone column; clear-sky OLR ~12 "
+                "W/m2 low)."
             )
-            ozone_file = None
-    elif ozone_file in ("", "null", "none"):
+        ozone_file = str(cand)
+    elif ozone_file in ("", "null", "none", "analytic"):
+        # ``analytic`` is the explicit opt-in to the analytic profile (#774);
+        # it must never reach _resolve_data_path as a filename.
         ozone_file = None
     if isinstance(ozone_file, str) and "{year}" in ozone_file:
         # Transient ozone is genuinely unsupported on the pySES path (unlike

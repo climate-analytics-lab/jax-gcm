@@ -18,7 +18,6 @@ settled sim-days/hr (last chunk wall) for runtime-regression tracking.
 Exit code 0 = all checks pass.
 """
 import argparse
-import glob
 import re
 import sys
 from pathlib import Path
@@ -41,12 +40,10 @@ for _p in (str(_REPO), str(_TOOLS)):
 # tools/jam_burden_report.py (it includes cloud-borne tracers and the
 # pressure_half level-orientation handling).
 from jcm.analysis import area_weights, global_mean  # noqa: E402
-from jam_burden_report import _SPECIES, burden  # noqa: E402
-
-#: Gate slack: the release gate is the climatological anchor range from
-#: the shared species table widened by this factor each way — a "did the
-#: model produce a plausible planetary loading" gate, not a tuning target.
-_BURDEN_SLACK = 3.0
+from aerosol_stats import (  # noqa: E402
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect, format_table, is_jam_run,
+    missing_jam_diagnostics, physics_gates, run_files, summarize,
+    timestep_seconds, unscored_gates)
 
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
@@ -58,13 +55,6 @@ RANGES = {
     # so use --last-n to score the settled months.
     "aod_550": (0.02, 0.35),
 }
-
-# Burden gates derive from the shared anchor table (see _BURDEN_SLACK).
-BURDEN_RANGES = {
-    sp: (lo / _BURDEN_SLACK, hi * _BURDEN_SLACK)
-    for sp, (_modes, (lo, hi)) in _SPECIES.items()
-}
-
 
 def wmean(da, weights):
     """Time-mean, area-weighted global mean (over the horizontal dims)."""
@@ -81,8 +71,10 @@ def main():
                     help="use only the last N chunks (default: all)")
     a = ap.parse_args()
 
-    files = sorted(glob.glob(f"{a.run_dir}/*_day*.nc"),
-                   key=lambda f: int(re.search(r"day(\d+)", f).group(1)))
+    # Same discovery as aerosol_stats.run_files, so the two cannot disagree
+    # about which files are chunks (``run.snapshot_interval`` writes a
+    # ``_day<N>_snapshots.nc`` stream that a ``*_day*.nc`` glob also matches).
+    files = run_files(a.run_dir)
     if not files:
         print(f"FAIL  no chunk files in {a.run_dir}")
         return 1
@@ -144,30 +136,58 @@ def main():
     t_low = ds["temperature"].isel(level=0)
     check("near_surface_T", wmean(t_low, weights), *RANGES["near_surface_T"])
 
-    # 550 nm AOD — JAM publishes jam_optics.aod_550, MACv2-SP runs
-    # publish macsp.od550aer; whichever is present is the scheme's AOD.
+    # 550 nm AOD — JAM publishes jam_optics.aod_550 (jam_band_optics.aod_550
+    # before #640), MACv2-SP runs publish macsp.od550aer; whichever is present
+    # is the scheme's AOD. The JAM keys are shared with aerosol_stats so a run
+    # the aerosol block can score is never skipped here.
+    _aod_names = "/".join(_AOD_KEYS + ("macsp.od550aer",))
     aod = None
-    for key in ("jam_optics.aod_550", "macsp.od550aer"):
+    for key in _AOD_KEYS + ("macsp.od550aer",):
         if key in ds:
             aod = ds[key]
             break
     if aod is not None:
         check("aod_550", wmean(aod, weights), *RANGES["aod_550"])
     else:
-        print("NOTE  no AOD field found "
-              "(jam_optics.aod_550/macsp.od550aer); skipping")
+        print(f"NOTE  no AOD field found ({_aod_names}); skipping")
 
-    # Per-species global burdens (JAM runs): the shared ``burden`` sums
-    # interstitial + cloud-borne mass over the species' modes and
-    # integrates q·Δp/g from the file's own pressure_half.
-    if any(re.fullmatch(r"m_\w+_\w+", v) for v in ds.data_vars):
-        for sp, (lo, hi) in BURDEN_RANGES.items():
-            col = burden(ds, sp, _SPECIES[sp][0])
-            if col is None:
+    # JAM aerosol block (#762). The statistics are built chunk by chunk
+    # (a year of JAM output does not fit in memory), so this takes the file
+    # list rather than the opened Dataset. Two tiers, per
+    # ``docs/source/design/jam_regression.md``: the climatological anchor
+    # ranges, and the absolute physics gates on burden drift and mass-budget
+    # closure — the latter are what catch a slow runaway that stays inside a
+    # x3-slack range gate until its final fortnight.
+    if is_jam_run(ds):
+        for namespace in missing_jam_diagnostics(ds):
+            print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
+                  "statistics that read them are absent from the report")
+        days, series = collect(files)
+        # The dynamics-conservation gate is per STEP, so it needs the run's
+        # timestep; ``unscored_gates`` reports it when either is missing.
+        dt = timestep_seconds(a.run_dir)
+        stats = summarize(days, series, dt)
+        for sp in BURDEN_RANGES:
+            if f"burden_{sp}_mg_m2" not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
-                continue
-            check(f"burden_{sp}_mg_m2",
-                  float(global_mean(col.compute(), weights)), lo, hi)
+        # Anchors and physics gates share one implementation with the
+        # standalone scorer, so the two commands cannot disagree about a run.
+        for name, value, limit, good in (anchor_gates(stats)
+                                         + physics_gates(stats)):
+            print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
+                  f"(expected {limit})")
+            ok = ok and good
+        unscored = unscored_gates(days, series, dt)
+        for name, reason in unscored:
+            print(f"UNSCORED  {name}: {reason}")
+        if unscored:
+            print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
+                  "evaluated; they have passed nothing")
+        print()
+        print(format_table(stats, []))
+    else:
+        print("NOTE  no m_<species>_<mode> aerosol tracers in the output — "
+              "not a JAM run; skipping the aerosol statistics")
 
     if a.log:
         walls = re.findall(r"Wall: ([0-9.]+)s this chunk", open(a.log).read())

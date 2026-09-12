@@ -430,7 +430,8 @@ class ForcingData:
         ``forcing.macv2_file`` so the real plume weights are attached — the file
         is resolution-invariant and shipped in the wheel, so it needs no mirror
         fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
-        the CLI for the other products. ``fetch``
+        the CLI for the other products; ``auto`` ozone likewise mirrors the CLI
+        in RAISING on a hybrid grid it cannot resolve (#774). ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
         engine; the ``auto`` products use the cache.
 

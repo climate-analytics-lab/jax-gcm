@@ -103,10 +103,10 @@ files, and a grid/level mismatch fails at generation, not in the queue.
 `--data local` keeps the legacy prepared-file behaviour (`JAM_INPUTS` /
 `JCM_EMISSIONS`, existence-checked before qsub). Its inputs are all
 grid-specific — level-resolved (ozone, oxidants) or horizontally
-validated (emissions, DMS, dust) — and **ozone is the dangerous one**:
-`forcing.ozone_file: auto` resolves only a *packaged* climatology
-(T63L47) and silently falls back to an ANALYTIC profile with ~7.6x the
-tropospheric ozone column on any other grid. Prefer the mirror.
+validated (emissions, DMS, dust). `forcing.ozone_file: auto` resolves the
+packaged climatology (T63L47) and then the mirror's per-grid bundle, and on
+a hybrid grid **raises** if neither resolves rather than substituting the
+analytic profile (~7.6x the tropospheric ozone column). Prefer the mirror.
 
 ## 5. PBS facts specific to this machine
 
@@ -127,7 +127,7 @@ tropospheric ozone column on any other grid. Prefer the mirror.
 scripts/watch_job.sh <jobid> <logfile> "<completion marker>"
 ```
 
-Use it as the command of a persistent `Monitor`. It encodes four lessons:
+Use it as the command of a persistent `Monitor`. It encodes five lessons:
 
 1. **Read the log once per check.** Grep the log into a variable, then both
    decide *and* report from those same bytes. Live NFS logs give stale re-reads,
@@ -137,8 +137,14 @@ Use it as the command of a persistent `Monitor`. It encodes four lessons:
    like a vanished job.
 4. **File existence is not success**: the driver writes chunk netCDFs *before*
    the NaN check. Verify the `NaN vars: 0/N` health line instead.
+5. **Match verdicts, not keywords**: `jcm.main` echoes the whole composed
+   config on stdout, so every log contains `bail_on_unhealthy: true`. A bare
+   `unhealthy` in `FAIL_RE` therefore failed every clean run.
 
 Filter Lmod's "unknown module" noise — it is harmless on these nodes.
+`scripts/watch_job_test.py` (standalone, like `mkjob_test.py` — pytest does
+not collect dotted directories) checks both halves: a clean log passes and a
+real verdict still fails.
 
 ## 7. Reading throughput correctly
 
@@ -148,8 +154,14 @@ must not be quoted. Use `Wall: X s this chunk`, discard chunk 1, and quote a
 rate only once the last two chunks agree.
 
 ```bash
-scripts/settled_rate.py <log> [--dt 15]   # per-chunk walls + convergence-checked rate
+scripts/settled_rate.py <PBS stdout log> [--dt 15]   # per-chunk walls + convergence-checked rate
 ```
+
+Give it the job's **stdout** log (`runs/<tag>.log`) — the `Wall: X s this
+chunk` lines are prints, so Hydra's `main.log` in the rundir has none of them.
+No PYTHONPATH is needed from either the in-repo or the installed
+`~/.claude/skills` copy: the script finds the repo's `tools/` by searching
+upward from itself and the working directory (`JCM_REPO` overrides).
 
 That script and `tools/benchmark.py` share `tools/chunk_timing.py`, so the
 same run cannot yield two different answers. `settled_rate.py` reads a log

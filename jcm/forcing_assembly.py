@@ -84,18 +84,27 @@ def _resolve_auto_ozone(coords):
     resolve_packaged`); (2) the data mirror's per-grid ``bundles/<grid>_l<nlev>/
     ozone_pd.nc`` (cache-first fetch — works offline once cached; the loader
     rejects any grid mismatch). Grid identity is then fully validated by
-    ``OzoneClimatology.from_file``. Returns ``None`` when neither stage finds a
-    file — the caller warns and falls back to the analytic profile, whose ~7.6×
-    tropospheric ozone column biases clear-sky OLR ~12 W/m² low.
+    ``OzoneClimatology.from_file``.
 
-    Auto resolves to ``None`` on a **sigma** grid: every ozone product (packaged
-    and mirror alike) is written by ``jcm.data.bc.interpolate_ozone`` onto the
-    model's *hybrid*-level centre pressures and mapped level-for-level, so a
-    sigma grid that merely shares a published (token, nlev) would wire
-    stratospheric-pressure ozone onto unrelated sigma levels — the same silent
-    corruption the oxidant gate rejects (the manifest's hybrid-only verticals).
-    ``OzoneClimatology.from_file`` only cross-checks shape and lat/lon, not the
-    vertical coordinate, so nothing downstream would catch it.
+    **Raises** when neither stage resolves on a hybrid grid, the same rule
+    ``terrain.kind=auto`` follows: a silently substituted ozone climatology
+    corrupts the run just as a substituted terrain does — the analytic profile
+    carries ~7.6× the tropospheric ozone column and biases clear-sky OLR ~12
+    W/m² low. The mirror fetch is attempted for *any* grid, as before (the
+    manifest's grid list can lag what is staged); the manifest is consulted
+    only to classify the failure, because the remedies differ — an unpublished
+    combination is a missing *product* (build one), a published one that will
+    not fetch is a *transport* failure (warm the cache). Take the analytic
+    profile deliberately with ``forcing.ozone_file=analytic``.
+
+    Returns ``None`` on a **sigma** grid, the one non-error case: every ozone
+    product (packaged and mirror alike) is written by
+    ``jcm.data.bc.interpolate_ozone`` onto the model's *hybrid*-level centre
+    pressures and mapped level-for-level, so a sigma grid that merely shares a
+    published (token, nlev) would wire stratospheric-pressure ozone onto
+    unrelated sigma levels — the same silent corruption the oxidant gate rejects.
+    No hybrid-free product exists for the caller to have configured, so this
+    warns and falls back rather than demanding an opt-out from every sigma run.
     """
     if _vertical_kind(coords) != "hybrid":
         logger.warning(
@@ -110,24 +119,49 @@ def _resolve_auto_ozone(coords):
         return None
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     nlev = int(coords.nodal_shape[0])
-    packaged = ir.resolve_packaged(mm.load_manifest(), "ozone_packaged",
+    manifest = mm.load_manifest()
+    packaged = ir.resolve_packaged(manifest, "ozone_packaged",
                                    nlev=nlev, nlat=nlat, nlon=nlon)
     if packaged is not None:
         return packaged
     token = _grid_token(coords)
-    from jcm.data.remote import bundle_file
-    try:
-        return str(bundle_file(f"{token}_l{nlev}", "ozone_pd.nc"))
-    except Exception as e:  # noqa: BLE001 — degrade, but LOUDLY
-        # Warning, not info: the analytic-profile fallback biases
-        # clear-sky OLR ~12 W/m² and the generic no-packaged-file
-        # warning downstream does not mention the failed mirror fetch.
-        logger.warning(
-            "auto-ozone: mirror fetch bundles/%s_l%d/ozone_pd.nc failed "
-            "(%s); falling back to the analytic ozone profile.",
-            token, nlev, e,
+    product = mm.product_for_key(manifest, "ozone_file")
+    if product is None:
+        # Same guard tools/benchmark.py applies: the manifest declares no auto
+        # ozone product, so there is nothing to fetch and no path to name.
+        raise FileNotFoundError(
+            "forcing.ozone_file=auto: no packaged ozone matches this grid "
+            f"({nlon}x{nlat}, {nlev} levels) and the mirror manifest declares "
+            "no automatic ozone product at all. Point forcing.ozone_file at a "
+            "climatology, or set forcing.ozone_file=analytic."
         )
-    return None
+    rel = mm.bundle_path(manifest, product, token, nlev)
+    from jcm.data.remote import fetch
+    try:
+        return str(fetch(rel))
+    except Exception as e:  # noqa: BLE001 — re-raised with the remedy
+        # The fetch is attempted for ANY grid — the manifest's grid list can
+        # lag what is actually staged, and a user may have staged their own
+        # bundle — so publication is consulted only to say WHICH failure this
+        # was, and therefore which remedy applies.
+        if mm.is_published(manifest, product, token, nlev, "hybrid"):
+            raise RuntimeError(
+                f"forcing.ozone_file=auto: {rel} is published but could not "
+                f"be fetched ({type(e).__name__}: {e}). That is a transport "
+                "failure, not a missing product: warm the Hugging Face cache "
+                "on a networked node (or point HF_HOME at one that already "
+                "holds it) and retry. forcing.ozone_file=analytic opts out of "
+                "the climatology instead."
+            ) from e
+        raise FileNotFoundError(
+            f"forcing.ozone_file=auto: no packaged ozone matches this grid "
+            f"({nlon}x{nlat}, {nlev} levels) and the data mirror carries no "
+            f"{rel} ({type(e).__name__}: {e}). Build one with "
+            "jcm.data.bc.interpolate_ozone and point forcing.ozone_file at "
+            "it, or set forcing.ozone_file=analytic to accept the analytic "
+            "profile (~7.6x the tropospheric ozone column; clear-sky OLR "
+            "~12 W/m2 low)."
+        ) from e
 
 
 def _resolve_auto_terrain(coords):
@@ -407,11 +441,14 @@ def assemble_spectral_forcing(forcing_cfg, coords):
 def _attach_ozone(forcing, forcing_cfg, coords):
     """Load the ozone climatology and attach to ``forcing``.
 
-    ``ozone_file: auto`` (the shipped default) resolves a packaged
-    climatology matching the grid via ``_resolve_auto_ozone``; no match
-    degrades to the analytic ozone profile with a warning. An explicit
-    path is loaded strictly (errors on any mismatch). ``null`` disables
-    the climatology silently (analytic profile, no warning).
+    ``ozone_file: auto`` (the shipped default) resolves a packaged or
+    mirrored climatology matching the grid via ``_resolve_auto_ozone``, and
+    RAISES when it cannot — a silently substituted ozone climatology corrupts
+    the run, so ``auto`` behaves like ``terrain.kind=auto``. An explicit path
+    is loaded strictly (errors on any mismatch). ``analytic`` (or ``null``)
+    selects the analytic profile deliberately, which is the only way to get
+    it. A sigma grid is the one case ``auto`` still degrades: no ozone product
+    exists for that vertical family (see ``_resolve_auto_ozone``).
 
     When ``forcing`` is ``None`` (``kind: default``) and an ozone file IS
     given, build the parent struct via ``default_forcing(...)`` so the
@@ -431,18 +468,17 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     if ozone_file in (None, "", "null"):
         provenance.record_fact("ozone_source", "analytic (no ozone_file)")
         return forcing
+    if ozone_file == "analytic":
+        # The explicit opt-in. Named rather than ``null`` so a config that
+        # wants the analytic profile says so, and so the run's provenance
+        # records a choice rather than an omission.
+        provenance.record_fact("ozone_source", "analytic (explicit)")
+        return forcing
     if ozone_file == "auto":
         ozone_file = _resolve_auto_ozone(coords)
-        if ozone_file is None:
+        if ozone_file is None:      # sigma grid; _resolve_auto_ozone warned
             provenance.record_fact(
-                "ozone_source", "analytic (auto found no packaged match)")
-            logging.warning(
-                "forcing.ozone_file=auto: no packaged jcm/data/bc/*/ozone.nc "
-                "matches this grid — falling back to the ANALYTIC ozone "
-                "profile, whose ~7.6x tropospheric ozone column biases "
-                "clear-sky OLR low by ~12 W/m2. Prepare a climatology with "
-                "jcm.data.bc.interpolate_ozone for production radiation."
-            )
+                "ozone_source", "analytic (auto: no product for a sigma grid)")
             return forcing
         logging.info("forcing.ozone_file=auto resolved to %s", ozone_file)
     import numpy as np

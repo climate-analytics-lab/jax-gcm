@@ -167,7 +167,15 @@ by hand.
 Unpublished grids / verticals degrade exactly as the CLI does (``auto`` inputs
 that the mirror does not carry resolve to nothing, with a warning), and
 ``aerosol="macv2sp"`` wires the repo-packaged MACv2-SP plume file into the
-forcing.
+forcing. Ozone is the exception, in both doors: ``ozone_file: auto``
+**raises** on a hybrid grid when neither the packaged climatology nor the
+mirror bundle resolves — the analytic profile carries ~7.6× the tropospheric
+ozone column and biases clear-sky OLR ~12 W/m² low, so it is never substituted
+silently. Ask for it with ``forcing.ozone_file=analytic``. The error
+distinguishes a missing product (build one with
+``jcm.data.bc.interpolate_ozone``) from a cold Hugging Face cache (warm it on
+a networked node). A sigma grid, for which no ozone product exists at all,
+still falls back with a warning.
 
 .. _configurations-from-python:
 
