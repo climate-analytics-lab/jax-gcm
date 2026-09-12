@@ -27,8 +27,10 @@ from typing import ClassVar
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+from jcm.physics.aerosol.jam.optics import neuralmie
 from jcm.physics.aerosol.jam.optics.mie_lut import default_mie_lut, interp_mie
 from jcm.physics.aerosol.jam.optics.refractive_index import refractive_index_at
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
@@ -72,6 +74,20 @@ _AER_RAD_PMIN = 200.0
 #: ``_MAX_IN_CLOUD_CONDENSATE`` in the RRTMGP wrapper: genuine plumes are
 #: untouched, only the runaway tail is clipped.
 _MAX_LAYER_TAU = 1.0
+
+#: Selectable Mie backends. ``"mie_lut"`` integrates Bohren-Huffman
+#: efficiencies from a trilinear lookup table over an 8-node Gauss-Hermite
+#: quadrature; ``"neuralmie"`` predicts the same mode-integrated quantity in
+#: one network forward pass (Geiss & Ma, GMD 2024, doi:10.5194/gmd-2024-30).
+#: The two compute the SAME quantity -- with the number-weighted lognormal
+#: moment <.> and column number per area n_A, both reduce to
+#: pi*n_A*<Qe r^2> -- so they are directly comparable rather than merely
+#: similar, which is what makes the A/B test in ``optics_term_test`` a
+#: correctness test.
+OPTICS_BACKENDS: tuple[str, ...] = ("mie_lut", "neuralmie")
+
+#: Species treated as the absorbing core by the NeuralMie core-shell network.
+_CORE_SPECIES = "bc"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,8 +149,13 @@ class JamOpticsTerm(PhysicsTerm):
     }
 
     def __init__(self, *, spec: ModalAerosolSpec | None = None,
-                 optics_diagnostics: bool = False):
+                 optics_diagnostics: bool = False,
+                 optics_backend: str = "mie_lut"):
         """Build the Mie lookup table and hold the population.
+
+        ``optics_backend`` selects the Mie pathway -- see
+        :data:`OPTICS_BACKENDS`. It defaults to ``"mie_lut"``, so enabling
+        NeuralMie is opt-in and the default answers are unchanged.
 
         ``optics_diagnostics`` enables the AeroCom per-species / per-mode /
         spectral optics diagnostics (jax-gcm#584). It is off by default
@@ -144,8 +165,22 @@ class JamOpticsTerm(PhysicsTerm):
         ``len(_DIAG_WAVELENGTHS_NM) / n_sw_band`` of the (already gated)
         aerosol optics rather than a per-step cost.
         """
+        if optics_backend not in OPTICS_BACKENDS:
+            raise ValueError(
+                f"optics_backend={optics_backend!r} is not one of {OPTICS_BACKENDS}"
+            )
         self._spec = spec or MAM4_SPEC
-        self._lut = default_mie_lut()
+        self._optics_backend = optics_backend
+        # Only the LUT backend pays the ~4 s table build; NeuralMie loads two
+        # small weight files instead. Both are memoised process-wide.
+        self._lut = default_mie_lut() if optics_backend == "mie_lut" else None
+        # nnx.Param, not a plain attribute: these are numeric parameters, so
+        # they stay pytree leaves reachable by jax.grad rather than static aux
+        # data. That also makes fine-tuning the emulator online possible later.
+        self._nm_weights = (
+            nnx.Param(neuralmie.default_weights())
+            if optics_backend == "neuralmie" else None
+        )
         self._cache = None   # set by cache_band_config
         self._radiation_interval_s: float | None = None
         self._optics_diagnostics = bool(optics_diagnostics)
@@ -229,7 +264,70 @@ class JamOpticsTerm(PhysicsTerm):
         self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm,
                                    ang_idx, ang_nm, ri_diag)
 
-    def _band_optics(self, state, aer, num_per_area, centers_nm, ri,
+    def _neuralmie_mode_optics(self, mode, lam_m, r_wet, m_n, m_k,
+                               vol_n, vol_k, vol_tot, vol_sp, ri_band):
+        """Mode-integrated ``(ke_rho, ssa, g)`` from the NeuralMie emulator.
+
+        One network forward pass replaces the Gauss-Hermite quadrature: the
+        emulator was trained on the 1024-point integral of the same lognormal,
+        so it returns the mode-integrated answer directly. ``ke_rho`` is the
+        extinction cross-section per unit particle VOLUME [1/m], hence the
+        caller multiplies by a volume per area rather than ``n*pi*r^2``.
+
+        Modes carrying black carbon use the core-shell network, with BC as the
+        core and every other species plus aerosol water as the coating. That
+        is a modelling CHOICE, not a derivation: MAM4/E3SM and ECHAM-HAM both
+        volume-mix instead. Note the direction: averaging the refractive index
+        smears BC's large imaginary part over the whole particle, which
+        OVER-absorbs relative to confining it to a core, so core-shell makes
+        BC-bearing modes *less* absorbing here (verified against exact Mie:
+        ssa 0.700 vs 0.671 at V_bc/V = 0.125, reversing only near V_bc/V ~
+        0.5). The familiar "coating enhances absorption 1.2-2x" compares
+        coated BC to BARE BC, which is not the comparison being made. Either
+        way, enabling this backend moves ERFari. It is
+        applied to every BC-carrying mode including primary carbon, which is
+        the weakest case -- ``_PCARBON_SPECIES`` is ``soluble=False``
+        ("hydrophobic until it ages"), where a concentric coated sphere is
+        least physical. Restricting it to soluble modes is the alternative;
+        see jax-gcm#791.
+
+        Mode membership is static Python config, so the sphere/core-shell
+        choice is made at trace time and costs no ``lax.cond``.
+        """
+        weights = self._nm_weights.get_value()
+        sigma_g = mode.geom_std_dev
+
+        if _CORE_SPECIES not in mode.species:
+            out = neuralmie.sphere_bulk_optics(
+                lam_m, r_wet, sigma_g, m_n, m_k, weights=weights.sphere)
+            return out.ke_rho, out.ssa, out.g
+
+        safe_tot = jnp.maximum(vol_tot, _TINY)
+        v_core = vol_sp[_CORE_SPECIES]
+        n_core, k_core = ri_band[_CORE_SPECIES]
+
+        # Coating index: the volume mixture with the core's contribution
+        # removed. Where the coating vanishes (a near-pure-BC mode, which also
+        # sits at the core-fraction cap) fall back to the core index: that is
+        # the exact homogeneous limit and keeps both indices in-domain instead
+        # of forming 0/0.
+        vol_shell = vol_tot - v_core
+        shell_ok = vol_shell > _TINY
+        safe_shell = jnp.maximum(vol_shell, _TINY)
+        shell_n = jnp.where(shell_ok, (vol_n - v_core * n_core) / safe_shell, n_core)
+        shell_k = jnp.where(shell_ok, (vol_k - v_core * k_core) / safe_shell, k_core)
+
+        # The network's core fraction is a RADIUS ratio, so invert the volume
+        # fraction through a cube root. Capped at the emulator's trained 0.98.
+        f_core = jnp.cbrt(jnp.clip(v_core / safe_tot, 0.0, 1.0))
+        out = neuralmie.coreshell_bulk_optics(
+            lam_m, r_wet, sigma_g, shell_n, shell_k,
+            jnp.broadcast_to(n_core, shell_n.shape),
+            jnp.broadcast_to(k_core, shell_k.shape),
+            f_core, weights=weights.coreshell)
+        return out.ke_rho, out.ssa, out.g
+
+    def _band_optics(self, state, aer, num_per_area, col_factor, centers_nm, ri,
                      want_decomposition: bool = False):
         """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``.
 
@@ -280,9 +378,25 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_tot = vol_tot + v
                     vol_sp[sp] = v
                 vol_dry = vol_tot
-                v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
-                    r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
-                )
+                if self._optics_backend == "neuralmie":
+                    # Number-free water volume: n*(4/3)pi*r_dry^3 is NOT the
+                    # mode's dry volume. ``PlaceholderMicrophysics`` defines
+                    # r_dry from V = N (pi/6) Dg^3 exp(4.5 ln^2 sigma), so that
+                    # product is V/exp(4.5 ln^2 sigma) -- low by 2.70x (Aitken)
+                    # to 4.73x (accumulation). Scaling vol_dry by the growth
+                    # factor instead is exactly consistent with the third
+                    # moment already accumulated above, and removes the
+                    # aer.number dependence from the optics entirely. The LUT
+                    # path keeps the old form so this PR does not move default
+                    # answers; tracked for the default path in jax-gcm#790.
+                    growth_cubed = (
+                        r_wet / jnp.maximum(aer.r_dry[i], _TINY)
+                    ) ** 3
+                    v_water = vol_dry * jnp.maximum(growth_cubed - 1.0, 0.0)
+                else:
+                    v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
+                        r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
+                    )
                 n_w, k_w = ri_band["h2o"]
                 vol_n = vol_n + v_water * n_w
                 vol_k = vol_k + v_water * k_w
@@ -291,36 +405,52 @@ class JamOpticsTerm(PhysicsTerm):
                 safe = jnp.maximum(vol_tot, _TINY)
                 m_n = jnp.where(vol_tot > _TINY, vol_n / safe, 1.5)
                 m_k = jnp.where(vol_tot > _TINY, vol_k / safe, 1.0e-8)
-                # Integrate Mie efficiencies over the mode's lognormal in
-                # ln r — ``r_wet`` is the NUMBER-MEDIAN radius, so a single
-                # Qext(r_wet)·π·r_wet² misses the r² moment (×e^{2ln²σ})
-                # and Qext at the extinction-carrying sizes. Gauss–Hermite:
-                # r_k = r_g·e^{√2 lnσ t_k}, weight (w_k/√π)·e^{2√2 lnσ t_k};
-                # σ preserved under hygroscopic growth, refractive index
-                # size-independent (only x varies per node).
-                # ``lax.scan`` so only one node's Mie intermediates are
-                # live at a time (unrolling multiplies the working set by
-                # n_nodes × n_bands and exceeds GPU memory).
-                def _gh_node(carry, t_w):
-                    t_k, w_k = t_w
-                    growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)
-                    x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
-                    q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
-                    wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
-                    c_sec, c_scat, c_gscat = carry
-                    return (
-                        c_sec + wgt * q_k,
-                        c_scat + wgt * q_k * ssa_k,
-                        c_gscat + wgt * q_k * ssa_k * g_k,
-                    ), None
+                if self._optics_backend == "neuralmie":
+                    # One forward pass returns the mode-integrated result the
+                    # quadrature below approximates. ke_rho is per unit
+                    # particle VOLUME, so the geometric factor is a volume per
+                    # area (vol_tot * air_density * dz), not n*pi*r^2. Both
+                    # forms equal pi*n_A*<Qe r^2>, so the two backends are
+                    # directly comparable.
+                    ke_rho, ssa_i, g_i = self._neuralmie_mode_optics(
+                        mode, lam_m, r_wet, m_n, m_k,
+                        vol_n, vol_k, vol_tot, vol_sp, ri_band)
+                    aod_i = ke_rho * vol_tot * col_factor
+                    scat_i = aod_i * ssa_i
+                    gscat_i = scat_i * g_i
+                else:
+                    # Integrate Mie efficiencies over the mode's lognormal in
+                    # ln r — ``r_wet`` is the NUMBER-MEDIAN radius, so a single
+                    # Qext(r_wet)·π·r_wet² misses the r² moment (×e^{2ln²σ})
+                    # and Qext at the extinction-carrying sizes. Gauss–Hermite:
+                    # r_k = r_g·e^{√2 lnσ t_k}, weight (w_k/√π)·e^{2√2 lnσ t_k};
+                    # σ preserved under hygroscopic growth, refractive index
+                    # size-independent (only x varies per node).
+                    # ``lax.scan`` so only one node's Mie intermediates are
+                    # live at a time (unrolling multiplies the working set by
+                    # n_nodes × n_bands and exceeds GPU memory).
+                    def _gh_node(carry, t_w):
+                        t_k, w_k = t_w
+                        growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)
+                        x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
+                        q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
+                        wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
+                        c_sec, c_scat, c_gscat = carry
+                        return (
+                            c_sec + wgt * q_k,
+                            c_scat + wgt * q_k * ssa_k,
+                            c_gscat + wgt * q_k * ssa_k * g_k,
+                        ), None
 
-                (sec, sec_scat, sec_gscat), _ = jax.lax.scan(
-                    _gh_node,
-                    (jnp.zeros_like(r_wet),) * 3,
-                    (jnp.asarray(_GH_NODES, r_wet.dtype),
-                     jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
-                )
-                aod_i = num_per_area[i] * sec * math.pi * r_wet ** 2
+                    (sec, sec_scat, sec_gscat), _ = jax.lax.scan(
+                        _gh_node,
+                        (jnp.zeros_like(r_wet),) * 3,
+                        (jnp.asarray(_GH_NODES, r_wet.dtype),
+                         jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
+                    )
+                    aod_i = num_per_area[i] * sec * math.pi * r_wet ** 2
+                    scat_i = num_per_area[i] * math.pi * r_wet ** 2 * sec_scat
+                    gscat_i = num_per_area[i] * math.pi * r_wet ** 2 * sec_gscat
                 # Physical mass gate: tau is EXACTLY zero where the mode
                 # carries no material. The number floor above handles the
                 # NEGATIVE side of the cold-start Gibbs ringing, but the
@@ -337,12 +467,11 @@ class JamOpticsTerm(PhysicsTerm):
                 # there is no dry aerosol to condense on, and it passes a
                 # total-volume gate on its own.
                 gate = (vol_dry > 1.0e-24)
-                area = num_per_area[i] * math.pi * r_wet ** 2
                 aod_gated = jnp.where(gate, aod_i, 0.0)
-                scat_gated = jnp.where(gate, area * sec_scat, 0.0)
+                scat_gated = jnp.where(gate, scat_i, 0.0)
                 aod = aod + aod_gated
                 scat = scat + scat_gated
-                gscat = gscat + jnp.where(gate, area * sec_gscat, 0.0)
+                gscat = gscat + jnp.where(gate, gscat_i, 0.0)
 
                 # Diagnostic decomposition (jax-gcm#584). The mode's species
                 # are volume-mixed into ONE effective refractive index before
@@ -399,9 +528,21 @@ class JamOpticsTerm(PhysicsTerm):
                     jnp.stack(per_mode_aod), jnp.stack(per_mode_abs),
                     sp_aod, sp_abs)
 
+        if self._optics_backend == "neuralmie":
+            # Bands SEQUENTIALLY, not vmapped. The MLP adds a hidden-width
+            # axis on top of (band, level, column), so vmapping 30 bands
+            # materialises (30, n_mode, nlev*ncols, 69) activations per layer
+            # -- measured 13.7 GiB of scratch at 150k cells against the LUT
+            # path's 936 MiB, which extrapolates past an 80 GB device at
+            # T63L47. jax.checkpoint does not help: this is the FORWARD peak,
+            # not rematerialisation for the backward pass. lax.map keeps one
+            # band's activations live at a time for the same result, and is
+            # the same reasoning that already puts the Gauss-Hermite nodes in
+            # a lax.scan above.
+            return jax.lax.map(lambda xs: one_band(xs[0], xs[1]), (lam_all, ri_j))
         return jax.vmap(one_band)(lam_all, ri_j)
 
-    def _optics_diagnostics_fields(self, state, aer, num_per_area, dz) -> dict:
+    def _optics_diagnostics_fields(self, state, aer, num_per_area, col_factor, dz) -> dict:
         """AeroCom per-species / per-mode / spectral optics (jax-gcm#584).
 
         A second Mie pass at ``_DIAG_WAVELENGTHS_NM``, independent of the
@@ -425,7 +566,7 @@ class JamOpticsTerm(PhysicsTerm):
         """
         c = self._cache
         tau, ssa, _asy, mode_tau, mode_abs, sp_tau, sp_abs = self._band_optics(
-            state, aer, num_per_area,
+            state, aer, num_per_area, col_factor,
             np.asarray(_DIAG_WAVELENGTHS_NM, np.float64), c.ri_diag,
             want_decomposition=True,
         )
@@ -505,13 +646,17 @@ class JamOpticsTerm(PhysicsTerm):
         # so this is a hard stability requirement, not a cosmetic floor. With
         # number ≥ 0 every derived optic is physical (AOD ≥ 0 ⇒ SSA, g ∈
         # [0, 1]); consistent with the AOD-550 diagnostic floor below.
-        num_per_area = jnp.maximum(aer.number, 0.0) * (air_density * dz)[jnp.newaxis]
+        # Column factor shared by both backends: the LUT path folds it into
+        # num_per_area (a number per area), the NeuralMie path applies it to a
+        # particle VOLUME per area, since ke_rho is per unit particle volume.
+        col_factor = air_density * dz
+        num_per_area = jnp.maximum(aer.number, 0.0) * col_factor[jnp.newaxis]
 
         aod_sw, ssa_sw, asy_sw = self._band_optics(
-            state, aer, num_per_area, c.sw_nm, c.ri_sw
+            state, aer, num_per_area, col_factor, c.sw_nm, c.ri_sw
         )
         aod_lw, ssa_lw, asy_lw = self._band_optics(
-            state, aer, num_per_area, c.lw_nm, c.ri_lw
+            state, aer, num_per_area, col_factor, c.lw_nm, c.ri_lw
         )
 
         # No aerosol radiative effect above _AER_RAD_PMIN. In the thin lid
@@ -599,7 +744,7 @@ class JamOpticsTerm(PhysicsTerm):
             # ``fields``) does not see these as struct fields; they are
             # plain diagnostics keys.
             fields["_optics_diag"] = self._optics_diagnostics_fields(
-                state, aer, num_per_area, dz)
+                state, aer, num_per_area, col_factor, dz)
         return fields
 
     def __call__(self, state, diagnostics, forcing, terrain):
