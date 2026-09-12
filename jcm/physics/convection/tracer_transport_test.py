@@ -5,6 +5,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.convection.tracer_transport import (
     ConvTransportParameters,
@@ -514,6 +515,67 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ConvectiveTracerTransport(("a", "b"), scav_weights=(1.0,))
 
+
+class ComposedColumnScavengingTest(unittest.TestCase):
+    """The convective aerosol sink through the FULL composed ECHAM column.
+
+    Every unit test above hands the transport term a synthetic
+    ``ConvectionData``, so all of them stayed green while the composed
+    column produced no plume at all and ``_conv_scav_flux`` was exactly
+    zero for every tracer (#773). This runs the same stack the release
+    validation does — Tiedtke + convective tracer transport + JAM wet
+    deposition — and asserts the STATE it is supposed to produce.
+
+    One prescribed day at 47 levels. ~34 s against a warm JAX compilation
+    cache but ~203 s cold, and CI's cache is job-local (run_test.yaml), so
+    by the cost CI actually pays this is a slow test.
+    """
+
+    @pytest.mark.slow
+    def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.rce import JAM_COLUMN_FT_WINDOW, jam_scavenging_column
+        from jcm.single_column_model import SingleColumnModel
+
+        nlev, dt, nsteps = 47, 900.0, 96          # one day
+        vertical = get_echam_levels(nlev)
+        physics = echam_physics(cloud_scheme="2m", aerosol_module="jam",
+                                radiation_scheme="grey")
+        scm = SingleColumnModel(physics=physics, vertical=vertical,
+                                lat_deg=0.0, lon_deg=150.0, dt_seconds=dt)
+        # The SAME prescribed column and seeds the release-validation check
+        # runs, so the guard cannot drift away from what it guards.
+        state, seed, p = jam_scavenging_column(vertical, physics)
+        states = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (nsteps,) + jnp.shape(x)), state,
+        )
+
+        preds = scm.run(states, initial_tracers=seed,
+                        times=jnp.arange(nsteps) * dt / 86400.0)
+
+        conv = preds.physics_data["convection"]
+        self.assertGreater(float(jnp.max(conv.mass_flux_up)), 0.0,
+                           "no convection in the composed column")
+        self.assertGreater(
+            float(jnp.max(conv.qc_conv + conv.qi_conv)), 0.0,
+            "convection ran but published no in-plume condensate",
+        )
+        self.assertGreater(float(jnp.max(conv.precip_flux)), 0.0)
+
+        scav = preds.physics_data["_conv_scav_flux"]["m_so4_acc"]
+        self.assertGreater(float(jnp.sum(scav)), 0.0,
+                           "in-plume scavenging removed nothing")
+
+        # State assertion, not a ledger check: with equal seeds the soluble
+        # tracer must end up far less abundant aloft than the insoluble one.
+        ft_lo, ft_hi = JAM_COLUMN_FT_WINDOW
+        ft = (p > ft_lo) & (p < ft_hi)
+        so4 = np.asarray(preds.tracer_states["m_so4_acc"])[-1][ft].mean()
+        pom = np.asarray(preds.tracer_states["m_poa_pcm"])[-1][ft].mean()
+        self.assertGreater(pom, 1e-20, "nothing was lofted at all")
+        self.assertLess(so4, 0.5 * pom,
+                        f"soluble {so4:.2e} not depleted vs insoluble {pom:.2e}")
 
 if __name__ == "__main__":
     unittest.main()

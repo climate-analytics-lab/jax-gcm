@@ -144,10 +144,33 @@ scavenged low never detrains aloft. Only interstitial + gas tracers are
 transported. **This module's header is the gold-standard provenance-comment
 example** the rest of the tree is measured against.
 
+The in-plume removal rate is keyed to the plume's own condensate,
+``ConvectionData.qc_conv + qi_conv``, which the Tiedtke ledger publishes as the
+updraft liquid water where the mass flux is active. Its liquid/ice split is
+taken at the **updraft** temperature, not the environment's.
+
+Convective **below-cloud** (impaction) scavenging in
+``jcm/physics/aerosol/jam/wetdep/wetdep_term.py::WetScavenging`` is driven by the
+level-wise convective precipitation flux ``ConvectionData.precip_flux`` — the
+total rain + snow entering each layer from above, i.e. generation above less the
+sub-cloud evaporation already charged above, from the same ``cuflx`` budget that
+produces the surface precipitation, and carrying the convective ledger's
+per-column cap scaling. Because that profile is zero above the level where
+convective precip first forms, it is itself the cloud-top confinement of the
+convective washout; no separately diagnosed convective cloud top is needed.
+
 **What ECHAM/CAM does.** ECHAM transports every tracer through Tiedtke
 (``cuxtte`` / ``mo_cuascn`` xt budgeting); CAM's ``convtran`` does the same;
 in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
-``cudlfs`` / ``cuddraf`` / CAM ``convtran``'s ``cond`` loop.
+``cudlfs`` / ``cuddraf`` / CAM ``convtran``'s ``cond`` loop. The in-cloud and
+below-cloud pathways are distinct sinks driven by different quantities in both
+references — ECHAM ``xtwetdep`` and CAM ``wetdepa`` take the in-cloud rate from
+the local condensate-to-precip conversion and the below-cloud rate from the
+precipitation flux falling through the layer, never from the surface value. The
+convective precipitation profile is ECHAM ``mo_cufluxdts.f90::cuflx``. The
+liquid/ice phase of an in-plume quantity follows the plume: ``mo_cuascent.f90``
+keys the updraft's own latent heat to ``ptu`` (``zalvs = MERGE(alv, als, ptu >
+tmelt)``) and reserves the environment ``ptenh`` for environment quantities.
 
 **Why we differ.**
 - `science` (documented deviation) — the downdraft **seeds the level of free
@@ -158,6 +181,23 @@ in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
   modelled — the removed flux goes straight to the surface, matching the existing
   wet-deposition treatment. When active, ``WetScavenging`` retires its
   own environment-profile convective in-cloud pathway to avoid double-counting.
+- Faithful otherwise — the convective carrier flux, the in-cloud/below-cloud
+  separation and the updraft-temperature phase split all follow the references
+  above. Detrained condensate keeps the **environment** split instead, which is
+  what ECHAM ``cudtdq`` uses for it.
+
+**Status & known limitations.**
+- ``WetScavenging`` has only the **stratiform** cloud fraction to partition the
+  grid box with, and applies it to the convective carrier as well
+  (``clear_fraction = clip(1 - cloud_fraction)`` in ``below_cloud_rate``). In a
+  deep convective column with little stratiform cloud that fraction is near one,
+  so nearly all the grid-mean interstitial aerosol is exposed to convective
+  impaction through the depth of the convective cloud as well as below its base,
+  on top of the in-plume sink. The references partition by the cover belonging to
+  the carrier. Tracked in #781.
+- The in-plume and transport pathways read the previous step's plume profiles
+  (the one-``dt`` lag above); the below-cloud pathway reads the convective
+  precipitation flux from the same carry.
 
 ### Emissions, deposition, sedimentation, wet scavenging, ice nucleation
 

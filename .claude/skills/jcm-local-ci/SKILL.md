@@ -29,6 +29,28 @@ the current node anyway, for a quick read before the job lands; it runs
 *before* the submission, never alongside it, because both would fight over
 the same worktree's `.coverage.*`.
 
+## Which dinosaur the gate tests against
+
+The gate exists to reproduce CI, so it must run the dinosaur that
+`pip install -e .` resolves — `requirements.txt` pins `dinosaur>=1.5.0`,
+which carries the semi-Lagrangian transport jcm's backend requires
+(neuralgcm/dinosaur#135). The script therefore **auto-detects nothing**: a
+stale fork checkout sitting in `$HOME` would silently displace the pinned
+package and the gate would measure a dependency CI never sees, which is the
+one thing it is for.
+
+A fork is used only when you pass `JCM_DINOSAUR` explicitly, and the run
+then says so and warns that it is *not* at CI parity. With no override and
+an installed dinosaur that lacks the SL class, the script fails before lint
+and names both remedies — `pip install -e .`, or `JCM_DINOSAUR=<checkout>`.
+(Failing is the point: without SL every model-construction test raises, and
+~100 unrelated failures bury the ones that matter.)
+
+**`~/.venvs/jaxgcm` is still on dinosaur 1.3.6**, which predates the pin, so
+gate jobs launched from it must pass `JCM_DINOSAUR=$HOME/dinosaur-sl`
+explicitly until that venv is upgraded — at which point the override should
+be dropped, since it is the upgrade that restores parity.
+
 ## The gates, individually
 
 ```bash

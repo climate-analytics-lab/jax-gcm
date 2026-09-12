@@ -18,6 +18,40 @@ cd "$REPO"
 # location as jcm.runners.maybe_enable_compilation_cache uses for runs.
 export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-${SCRATCH:-$HOME/.cache/jcm}/jcm-jax-cache}
 
+# The gate's purpose is dependency PARITY with CI, so the dinosaur it tests
+# against must be the one `pip install -e .` resolves — requirements.txt pins
+# `dinosaur>=1.5.0`, which carries the semi-Lagrangian transport
+# (neuralgcm/dinosaur#135) jcm's backend requires. A fork checkout is used
+# ONLY when JCM_DINOSAUR is set explicitly; nothing is auto-detected, or a
+# stale checkout sitting in $HOME would silently displace the pinned package
+# and the gate would measure a dependency CI never sees.
+export PYTHONPATH=$REPO${PYTHONPATH:+:$PYTHONPATH}
+if [ -n "${JCM_DINOSAUR:-}" ]; then
+    [ -d "$JCM_DINOSAUR/dinosaur" ] || {
+        echo "JCM_DINOSAUR=$JCM_DINOSAUR has no dinosaur package in it."
+        exit 1
+    }
+    export PYTHONPATH=$JCM_DINOSAUR:$PYTHONPATH
+fi
+# Gate on the invariant, not on a path: without semi-Lagrangian transport
+# every model-construction test raises and ~100 unrelated failures bury the
+# ones that matter.
+if ! python -c "
+from dinosaur import primitive_equations as pe
+import sys
+sys.exit(0 if hasattr(pe, 'SemiLagrangianPrimitiveEquations') else 1)" 2>/dev/null; then
+    echo "the dinosaur on this PYTHONPATH has no semi-Lagrangian transport."
+    echo "Either install the pinned dependency:   pip install -e ."
+    echo "  (requirements.txt pins dinosaur>=1.5.0, which carries it)"
+    echo "or point at a checkout that has it:     JCM_DINOSAUR=<checkout>"
+    exit 1
+fi
+if [ -n "${JCM_DINOSAUR:-}" ]; then
+    echo "dinosaur: JCM_DINOSAUR override $JCM_DINOSAUR @ $(git -C "$JCM_DINOSAUR" rev-parse --short HEAD 2>/dev/null || echo non-git) — NOT the installed package, so this run is not at CI dependency parity"
+else
+    echo "dinosaur: installed package $(python -c 'import dinosaur,importlib.metadata as m;print(m.version("dinosaur"))' 2>/dev/null || echo '?') at $(python -c 'import dinosaur;print(dinosaur.__file__)')"
+fi
+
 echo "=== lint (here) ==="
 ruff check . || { echo "LINT FAILED"; exit 1; }
 
@@ -53,6 +87,7 @@ source $VENV/bin/activate
 cd $REPO
 export JAX_PLATFORMS=cpu
 export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
+export PYTHONPATH=$PYTHONPATH
 
 # Sequential, not concurrent: the two gates share this worktree's .coverage.*.
 # Each status is kept rather than left in \$? (the next echo would replace it),

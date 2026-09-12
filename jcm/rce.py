@@ -272,14 +272,28 @@ def rce_initial_state(
     lapse_rate: float = 6.5e-3,
     stratosphere_temperature: float = 200.0,
     surface_pressure: float | None = None,
+    mixed_layer_top_m: float = 800.0,
 ) -> PhysicsState:
     """Build a 1-D column ``PhysicsState`` initial condition for an RCE run.
 
-    A ``lapse_rate`` (K/m) profile from ``sst`` capped at
+    A dry-adiabatic (well-mixed) sub-cloud layer below ``mixed_layer_top_m``
+    under a ``lapse_rate`` (K/m) free troposphere from ``sst``, capped at
     ``stratosphere_temperature``, with humidity at fixed ``relative_humidity``
     (the same closure the run uses, so step 0 starts consistent). Winds are
     zero; ``qc``/``qi`` tracers are zero. Surface pressure defaults to the
     thermodynamic reference ``c.p0``.
+
+    The mixed layer is physics, not cosmetics: ECHAM's ``cubase`` trigger
+    lifts a dry parcel from the lowest level and drops the column the moment
+    it is not buoyant, so a sounding running at ``lapse_rate`` down to the
+    surface loses ~3.3 K/km of parcel buoyancy and cannot trigger Tiedtke at
+    any physical ``zlift`` (≤ 1 K). Real tropical sub-cloud layers — and the
+    ones jcm's own vdiff produces — are near-neutral. Pass
+    ``mixed_layer_top_m=0.0`` for the unmixed profile.
+
+    Args:
+        mixed_layer_top_m: Depth (m) of the dry-adiabatic sub-cloud layer.
+
     """
     ps = c.p0 if surface_pressure is None else float(surface_pressure)
     pfull = _pressure_centers(vertical, jnp.asarray(ps))
@@ -287,7 +301,18 @@ def rce_initial_state(
     # Hydrostatic height with a 7.6 km scale height (matches #523's prototype),
     # purely to seed a plausible lapse-rate profile.
     z = -7.6e3 * jnp.log(pfull / ps)
-    temperature = jnp.maximum(sst - lapse_rate * z, stratosphere_temperature)
+    # Continuous at the mixed-layer top: dry adiabat below, ``lapse_rate``
+    # above, so the free troposphere keeps its conditional instability.
+    z_ml = float(mixed_layer_top_m)
+    dry_lapse = c.grav / c.cpd
+    temperature = jnp.maximum(
+        jnp.where(
+            z <= z_ml,
+            sst - dry_lapse * z,
+            sst - dry_lapse * z_ml - lapse_rate * (z - z_ml),
+        ),
+        stratosphere_temperature,
+    )
     q = _fixed_rh_specific_humidity(
         pfull, jnp.asarray(ps), temperature, float(relative_humidity),
     )
@@ -302,6 +327,58 @@ def rce_initial_state(
         normalized_surface_pressure=jnp.asarray(ps / c.p0),
         tracers=create_initial_tracers(nlev),
     )
+
+
+#: Free-troposphere pressure window [Pa] the JAM aerosol-pathway checks
+#: compare soluble against insoluble loading in.
+JAM_COLUMN_FT_WINDOW = (150.0e2, 600.0e2)
+
+
+def jam_scavenging_column(vertical, physics, *, sst: float = 302.0,
+                          relative_humidity: float = 0.8,
+                          u_wind: float = 3.0):
+    """Prescribed tropical column + JAM tracer seeds for the aerosol pathway.
+
+    The release-validation SCM check and its unit-test regression guard run
+    the same column, so they share one builder rather than two copies that
+    drift apart. Seeds equal boundary-layer mass (and number) into a
+    soluble/activatable accumulation mode and an insoluble primary-carbon
+    mode: scavenging is then the only thing separating the two aloft.
+
+    Args:
+        vertical: Vertical coordinate (``get_echam_levels(nlev)``).
+        physics: The composed package, queried for the tracers to seed.
+        sst: Sea-surface temperature (K) anchoring the sounding.
+        relative_humidity: Uniform tropospheric RH.
+        u_wind: Background zonal wind (m/s) for the momentum path.
+
+    Returns:
+        ``(state, seed, pressure_full)`` — the column state, the initial
+        tracer dict, and the full-level pressures (Pa) for level masks.
+
+    """
+    state = rce_initial_state(vertical, sst=sst,
+                              relative_humidity=relative_humidity)
+    nlev = state.temperature.shape[0]
+    state = state.copy(u_wind=jnp.full(nlev, u_wind))
+
+    ps = float(c.p0)
+    pfull = np.asarray(_pressure_centers(vertical, jnp.asarray(ps)))
+
+    names: list[str] = []
+    for term in physics.terms:
+        for spec in term.required_tracers():
+            if spec.name not in names:
+                names.append(spec.name)
+    seed = {nm: jnp.full(nlev, 1e-30) for nm in names}
+    bl = jnp.zeros(nlev).at[-5:].set(1.0)      # lowest 5 levels (surface-last)
+    for nm, val in (("m_so4_acc", 2.0e-9), ("m_poa_pcm", 2.0e-9),
+                    ("n_acc", 2.0e8), ("n_pcm", 2.0e8)):
+        if nm in seed:
+            seed[nm] = jnp.asarray(bl * val + 1e-30, dtype=jnp.float32)
+    seed["qc"] = jnp.zeros(nlev)
+    seed["qi"] = jnp.zeros(nlev)
+    return state, seed, pfull
 
 
 def rce_column(
