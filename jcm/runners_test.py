@@ -2505,6 +2505,28 @@ class TestWarnOnConfigTraps:
                     "oxidants_file"):
             assert key in caplog.text
 
+    def test_nulling_the_real_sources_still_warns_with_dust_companions_auto(
+            self, caplog):
+        """The dust companions must not vote on whether a run has emissions.
+
+        Adding them to ``emission_keys`` silently broke ``len(unset) ==
+        len(emission_keys)`` and suppressed the warning for exactly the
+        aerosol-dark JAM run it exists to catch (Codex P2). Any non-None
+        companion reproduces it; ``_resolve_emission_inputs`` discards them
+        anyway once ``dust_file`` is null.
+        """
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file",
+                        emissions_file=None, dms_file=None, dust_file=None,
+                        oxidants_file=None,
+                        dust_preferential_file="/tmp/pref.nc",
+                        dust_soil_types_file="/tmp/soil.nc",
+                        dust_regions_file="/tmp/reg.nc",
+                        dust_roughness_file="/tmp/rough.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" in caplog.text
+
     def test_jam_with_emissions_silent(self, caplog):
         from jcm.runners import warn_on_config_traps
         cfg = self._cfg(terrain="from_file",

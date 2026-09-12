@@ -49,6 +49,11 @@ _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
 _DUST_REQUIRED_KEYS = ("dust_preferential_file", "dust_soil_types_file",
                        "dust_regions_file")
 
+#: Every key that only supports ``dust_file``. They follow it: resolving them
+#: when dust is off would fetch maps the run never opens, and counting them as
+#: sources would hide the zero-emission warning.
+DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file")
+
 
 # ---------------------------------------------------------------------------
 # small config/path helpers (shared by the attach chain)
@@ -351,7 +356,7 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
     # key eager-fetches its bundle, so a dust-free offline run would still have
     # downloaded (or failed on) four maps it never opens.
     dust = resolve(forcing_cfg.get("dust_file", None), "dust_file")
-    companions = (*_DUST_REQUIRED_KEYS, "dust_roughness_file")
+    companions = DUST_COMPANION_KEYS
     updates = {"dust_file": dust}
     for key in _EMISSION_AUTO_KEYS:
         if key == "dust_file":

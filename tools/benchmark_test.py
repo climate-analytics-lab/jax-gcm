@@ -278,6 +278,22 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
                        "hf://bundles/t63_l47/oxidants_pd.nc"):
             self.assertNotIn(bundle, with_extra)
 
+    def test_nulling_dust_alone_drops_its_companions_from_prefetch(self):
+        """``forcing.dust_file=null`` must not leave four companions on ``auto``
+        prefetching bundles the run never opens (Codex P2).
+        """
+        preset = PRESETS["t63-echam-jam"]
+        with_extra = _preset_data_files([*preset, "forcing.dust_file=null"])
+        for bundle in ("hf://bundles/t63/dust_potential_sources.nc",
+                       "hf://bundles/t63/dust_preferential_sources.nc",
+                       "hf://bundles/t63/dust_soil_types.nc",
+                       "hf://bundles/t63/dust_regions.nc",
+                       "hf://bundles/t63/dust_surface_roughness.nc"):
+            self.assertNotIn(bundle, with_extra)
+        # The other sources are untouched.
+        self.assertIn("hf://bundles/t63/emissions_pd.nc", with_extra)
+        self.assertIn("hf://bundles/t63/dms.nc", with_extra)
+
     def test_t119_jam_preset_is_emission_free(self):
         """T119 has no mirror bundle; the preset nulls the four keys so nothing
         is prefetched (and build_forcing does not abort on a t119 fetch).

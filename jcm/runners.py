@@ -878,6 +878,7 @@ def _pyses_lid_sponge_term(dycore, sponge_cfg):
 # patch :mod:`jcm.forcing_assembly` so the stub reaches both doors.
 from jcm import forcing_assembly  # noqa: E402
 from jcm.forcing_assembly import (  # noqa: E402
+    DUST_COMPANION_KEYS as _DUST_COMPANION_KEYS,
     _assert_uniform_time_axis as _assert_uniform_time_axis,
     _attach_dms as _attach_dms,
     _attach_dust as _attach_dust,
@@ -1274,14 +1275,20 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
         resolved = {k: _resolved_emission_value(
                         forcing_cfg.get(k, None), k, coords, has_jam, is_pyses)
                     for k in emission_keys}
-        unset = [k for k in emission_keys if resolved[k] is None]
+        # The four dust companions are not independent sources — they support
+        # ``dust_file`` and ``_resolve_emission_inputs`` discards them when it is
+        # null. Counting them would leave ``len(unset) != len(source_keys)`` and
+        # suppress the zero-emission warning for a genuinely emission-free run.
+        source_keys = tuple(k for k in emission_keys
+                            if k not in _DUST_COMPANION_KEYS)
+        unset = [k for k in source_keys if resolved[k] is None]
         # Keys the user left at ``auto`` that nonetheless resolved to None —
         # i.e. the silent-degrade case (pySES / non-mirrored grid), distinct
         # from an explicit opt-out null.
-        auto_nulled = [k for k in emission_keys
+        auto_nulled = [k for k in source_keys
                        if str(forcing_cfg.get(k, None)) == "auto"
                        and resolved[k] is None]
-        if len(unset) == len(emission_keys):
+        if len(unset) == len(source_keys):
             if auto_nulled:
                 reason = (
                     "the pySES backend publishes no per-grid emission bundles"
