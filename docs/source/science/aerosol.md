@@ -331,6 +331,12 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   spectrum, a ~3400x jump in sub-micron mass. It is ported as the step it is, so
   ``jax.grad`` sees zero through it and it will show up in any optimisation
   (#664). ``dust_test.py`` asserts the zero gradient deliberately.
+- The `u*` pre-gate (`u* ≥ 21·nduscale/feff`) omits the East-Asian threshold
+  multiplier `utsc`, exactly as the Fortran does, so a preset-4 Taklamakan cell
+  (`r_dust_sf13 = 0.6`) is withheld until `U10 ≈ 7.6 m/s` even though its
+  per-class threshold is cleared near 4.6 m/s. The gate is meant to be a cheap
+  *necessary* condition and `utsc < 1` is where it stops being one — a latent
+  inconsistency in HAM, reproduced rather than silently corrected.
 - The sandblasting weights sum to slightly more than 1 (the Fortran's numerator
   includes class 1 while its denominator excludes it, ~3e-5): reproduced, not
   fixed.

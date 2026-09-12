@@ -555,6 +555,9 @@ class DustEmissions(PhysicsTerm):
         nduscale = self._region_scale(forcing, ncols, p)
         utsc = self._threshold_scale(forcing, ncols, p)
         safe_feff = jnp.where(feff > 0.0, feff, 1.0)
+        # The cheap pre-gate uses umin = 21 cm/s (min_k u*t rounded up) and,
+        # faithfully to the Fortran, omits utsc — so where utsc < 1 it withholds
+        # a cell whose per-class threshold is already cleared (#804 discussion).
         mask = ((feff > 0.0)
                 & (u_star > 0.0)
                 & (u_star >= p.r_dust_umin * nduscale / safe_feff)
