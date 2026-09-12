@@ -38,6 +38,13 @@ omit =
     # The dust bundle builder: fast-tested on synthetic inputs
     # (jcm/data/mirror/mirror_test.py), never touched by a slow integration run.
     jcm/data/mirror/dust.py
+    # The Tegen dust scheme: 47 co-located fast tests drive every preset, both
+    # k_dust_easo branches, the Fecan path, the guards and the inert path
+    # (fast-gate coverage 95%+). A slow integration run exercises only the
+    # shipped ndust=4 main path, so it measures 53% and penalises the slow
+    # denominator for branches the fast suite already covers — exactly the
+    # asymmetry this rcfile exists to correct.
+    jcm/physics/aerosol/jam/emissions/dust.py
     jcm/data/mirror/registry.py
     jcm/data/remote.py
     jcm/data/era5.py
