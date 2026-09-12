@@ -129,6 +129,20 @@ a species the run does not carry, a window too short, a run with no
 is printed as `UNSCORED` with its reason. A missing row is otherwise
 indistinguishable from a row that passed.
 
+An UNSCORED gate is reported but does **not** fail the exit code, deliberately:
+its commonest causes are the operator's own `--last-n` and a species the
+configuration does not carry, and failing those would make the tool unusable
+for the windows it is documented to support. Scoring *nothing at all* is the
+exception and does exit non-zero. Statistics that carry an absolute gate are
+also exempt from the tier-3 reference comparison for the same reason — being
+correctly unscored there must not become a hard failure against a reference
+that happens to have the number.
+
+The flux integral runs on **chunk centres**, not the end-of-chunk day the
+filenames carry: a chunk holds a time average, which belongs at the middle of
+its window. Under the uniform cadence of a real run the offset cancels, but
+naming it keeps the quadrature honest if the cadence ever varies.
+
 ## The closure gate, and its sign
 
 The residual is `(Σ emitted − Σ deposited − ΔB) / Σ emitted` over the record.

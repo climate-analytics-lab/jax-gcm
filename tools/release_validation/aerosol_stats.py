@@ -162,6 +162,25 @@ _ANGSTROM_KEYS = ("jam_optics.angstrom", "jam_band_optics.angstrom",
                   "ang4487aer")
 
 
+#: ``np.trapezoid`` is numpy >= 2.0; ``np.trapz`` is its pre-2.0 spelling.
+#: numpy is unpinned in requirements.txt, so accept either.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
+
+def chunk_centres(days: np.ndarray) -> np.ndarray:
+    """Mid-times of the averaging windows whose labels are ``days``.
+
+    Output chunks are labelled by their END day and hold time *averages*, so a
+    chunk mean belongs at the window's centre. The first window is taken to
+    start at day 0, each later one at its predecessor's label. Under a uniform
+    cadence this is a constant offset that cancels in both the trapezoid and
+    the storage difference; under a varying one it does not.
+    """
+    days = np.asarray(days, dtype=float)
+    starts = np.concatenate([[0.0], days[:-1]])
+    return 0.5 * (starts + days)
+
+
 def is_jam_run(ds: xr.Dataset) -> bool:
     """Report whether ``ds`` carries JAM's prognostic modal aerosol tracers.
 
@@ -411,18 +430,22 @@ def _budget_residual(days, series, species) -> float | None:
     if span <= 0 or days.size < 2:
         return None
 
+    nodes = chunk_centres(days)
+
     def integral(key):
-        # Trapezoidal against ``days``, between the first and last chunk
-        # MEANS — the same two endpoints the storage term differences. The
-        # samples are chunk means attributable to their own window, so a
-        # right-endpoint rectangle rule (dropping the first sample) is short
-        # by half a chunk times the endpoint change: on a 90-day window a
-        # seasonal swing in the sink can exceed the closure threshold on that
-        # alone. Trapezoid also handles a non-uniform chunk cadence.
+        # Trapezoidal between the first and last chunk MEANS — the same two
+        # endpoints the storage term differences. A right-endpoint rectangle
+        # rule (dropping the first sample) integrates a half-chunk-shifted
+        # window instead, short by half a chunk times the endpoint change: on
+        # a 90-day window a seasonal swing in the sink can exceed the closure
+        # threshold on that alone. The abscissa is chunk CENTRES, which is
+        # where a chunk mean belongs; under a uniform cadence the offset from
+        # the filename's end-of-chunk day cancels, but under a varying one it
+        # does not, and only the centres put the nodes in the right places.
         v = series.get(key)
         if v is None or not np.all(np.isfinite(v)):
             return None
-        return float(np.trapezoid(v, days)) * 86400e6
+        return float(_trapezoid(v, nodes)) * 86400e6
 
     # EVERY component is required. A missing ledger field is not a zero
     # contribution: treating it as one fabricates a residual and then gates
@@ -589,17 +612,18 @@ def compare_to_reference(stats: dict[str, float],
     for key in sorted(reference):
         if key == "record_days":
             continue
+        # The exemption comes FIRST. These carry their own absolute gates, and
+        # ``summarize`` omits them precisely when they could not be measured —
+        # so scoring their absence here would hard-fail a run for a gate it has
+        # already, correctly, reported as UNSCORED.
+        if key.startswith(_GATED_PREFIXES):
+            continue
         if key not in stats:
             # The reference has it and this run does not: the diagnostic was
             # removed. Skipping would report PASS for the regression that
             # deleted the very statistic being compared.
             rows.append((key, float("nan"),
                          f"{reference[key]:.5g} (absent from this run)", False))
-            continue
-        # Statistics with an absolute physics gate are not scored here too:
-        # their references are ~1e-3, so a relative tolerance would be tighter
-        # than their own gate.
-        if key.startswith(_GATED_PREFIXES):
             continue
         value, ref = stats[key], reference[key]
         sigma = 0.0
@@ -635,6 +659,10 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
     for species in _SPECIES:
         b = series.get(f"burden_{species}")
         if b is None:
+            # No tracers for it at all. Reported here so the standalone
+            # scorer says what health.py says.
+            rows.append((f"burden_{species}_mg_m2",
+                         "the output carries no mass tracers for this species"))
             continue
         name = f"dlnB_dt_{species}_per_day"
         if not np.any(np.isfinite(b) & (b > 0)):
@@ -703,7 +731,10 @@ def anchor_gates(stats: dict[str, float]) -> list[tuple[str, float, str, bool]]:
     for species, (lo, hi) in BURDEN_RANGES.items():
         key = f"burden_{species}_mg_m2"
         value = stats.get(key)
-        if value is None or value == 0.0:
+        # A NaN burden would score FAIL through ``lo <= nan <= hi`` being
+        # False — a gate failure for something never measured, the mirror of
+        # the case the closure residual already guards.
+        if value is None or value == 0.0 or not np.isfinite(value):
             continue
         rows.append((key, value, f"[{lo:g}, {hi:g}]", bool(lo <= value <= hi)))
     return rows
@@ -833,12 +864,26 @@ def main() -> int:
     unscored = unscored_gates(days, series, dt)
     for name, reason in unscored:
         print(f"UNSCORED  {name}: {reason}")
-    ok = all(row[3] for row in gates)
+    # An individual UNSCORED gate is deliberately NOT a failure: the commonest
+    # cause is the user's own ``--last-n``, or a species the configuration does
+    # not carry, and failing those would make the tool unusable for the windows
+    # it is documented to support. Scoring NOTHING is different — a report that
+    # measured nothing has not passed anything, and a harness reading only the
+    # exit code would otherwise see success.
+    ok = bool(gates) and all(row[3] for row in gates)
 
     if args.reference:
         loaded = np.load(args.reference)
-        ref_series = {k: loaded[k] for k in loaded.files if k != "_days"}
-        ref = summarize(loaded["_days"], ref_series)
+        # Same metadata filter as the --series-in path: underscore keys belong
+        # to the reduction, not to the statistics. The reference's own
+        # timestep is used so its dynamics gates are built the same way.
+        ref_series = {k: loaded[k] for k in loaded.files
+                      if not k.startswith("_")}
+        ref_dt = None
+        if "_timestep_seconds" in loaded.files:
+            stored = float(loaded["_timestep_seconds"])
+            ref_dt = stored if np.isfinite(stored) and stored > 0 else None
+        ref = summarize(loaded["_days"], ref_series, ref_dt)
         rows = compare_to_reference(stats, ref, series)
         print(f"\n{'regression vs reference':<34}{'value':>14}  "
               f"{'expected':<24}result")

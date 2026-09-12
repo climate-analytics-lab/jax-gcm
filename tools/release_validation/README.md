@@ -96,6 +96,15 @@ reason and counted in the summary line, because a missing row would otherwise
 be indistinguishable from one that passed. Use `--last-n` to pick the settled
 months, not to shrink the window below the floor.
 
+**An UNSCORED gate does not fail the exit code, by design.** The commonest
+causes are the user's own `--last-n` and a species the configuration does not
+carry, and failing those would make the tool unusable for the windows it is
+documented to support — so the report names them and the exit status ignores
+them. The one exception: scoring *nothing at all* exits non-zero, because a
+report that measured nothing has not passed anything and a harness reading only
+the return code would otherwise see success. A release gate that wants a
+stricter rule should read the `UNSCORED` lines, which is what they are for.
+
 Non-JAM members skip the block. Rationale and the regression tolerance tiers:
 `docs/source/design/jam_regression.md`.
 

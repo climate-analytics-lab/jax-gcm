@@ -191,8 +191,12 @@ class TestUncertainty:
 
 class TestBudget:
     def _closed(self, leak_fraction=0.0):
-        """Emission 1 mg/m²/day of bc, all deposited, burden steady."""
-        days = np.arange(0.0, 366.0, 5.0)
+        """Emission 1 mg/m²/day of bc, all deposited, burden steady.
+
+        Chunk labels start at the first chunk's END day, as the output files
+        do; a day-0 label would name a zero-length averaging window.
+        """
+        days = np.arange(5.0, 371.0, 5.0)
         n = days.size
         emi = np.full(n, 1.0 / 86400e6)
         dep = emi * (1.0 - leak_fraction)
@@ -726,12 +730,10 @@ class TestEveryClosureComponentRequired:
         """Guards the specific wrong answer: wet carries the whole sink."""
         days, series = self._closed()
         del series["wet_bc"]
-        # Treating the absence as zero deposition gives residual == 1.0.
-        deposited_as_zero = 1.0
+        # Treating the absence as zero deposition would give residual == 1.0;
+        # the point is that no residual is produced at all.
         assert A._budget_residual(days, series, "bc") is None
-        stats = A.summarize(days, series)
-        assert stats.get("budget_residual_bc") != deposited_as_zero
-        assert "budget_residual_bc" not in stats
+        assert "budget_residual_bc" not in A.summarize(days, series)
 
     def test_a_missing_gas_reservoir_is_unscored(self):
         n = 40
@@ -750,38 +752,87 @@ class TestEveryClosureComponentRequired:
 
 
 class TestFluxIntegration:
-    """The flux integral must span the same interval as the storage term."""
+    """The flux integral must span the same interval as the storage term.
 
-    def test_a_linearly_varying_flux_integrates_exactly(self):
-        n = 40
+    Every assertion here has to DISCRIMINATE the quadrature. Setting the sink
+    equal to the source makes the residual identically zero for any linear
+    functional, so such a test passes under the rectangle rule too and pins
+    nothing; these use a source and sink with different shapes.
+    """
+
+    @staticmethod
+    def _rectangle_residual(days, series, species):
+        """Compute the superseded right-endpoint rule, for tests to reject."""
+        span = float(days[-1] - days[0])
+
+        def integral(key):
+            return float(np.mean(series[key][1:])) * span * 86400e6
+
+        emitted = integral(f"emi_{species}")
+        deposited = integral(f"dry_{species}") + integral(f"wet_{species}")
+        stored = series[f"burden_{species}"]
+        return (emitted - deposited - (stored[-1] - stored[0])) / emitted
+
+    def _ramped_sink(self, n=19):
+        """Constant source, sink ramping 1->3 over a 90-day window.
+
+        Emission and deposition integrate to the same total and the burden is
+        steady, so the budget closes exactly — under the correct quadrature.
+        """
         days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
-        # Emission ramps 1 -> 3 mg/m2/day; trapezoid is exact for a ramp.
-        emi_mg = np.linspace(1.0, 3.0, n)
-        emi = emi_mg / 86400e6
-        span = days[-1] - days[0]
-        expected = 0.5 * (emi_mg[0] + emi_mg[-1]) * span       # mg/m2
-        series = {"burden_bc": np.full(n, 5.0), "emi_bc": emi,
-                  "dry_bc": np.zeros(n), "wet_bc": emi}
-        # A closed budget: deposition equals emission, burden steady.
+        return days, {"burden_bc": np.full(n, 5.0),
+                      "emi_bc": np.full(n, 2.0 / 86400e6),
+                      "dry_bc": np.zeros(n),
+                      "wet_bc": np.linspace(1.0, 3.0, n) / 86400e6}
+
+    def test_a_ramped_sink_closes(self):
+        days, series = self._ramped_sink()
+        assert abs(A._budget_residual(days, series, "bc")) < 1e-12
+
+    def test_the_superseded_rule_would_not_close(self):
+        """Guards the fix: reverting `integral()` must break this suite.
+
+        The rectangle rule reads a 2.8 % leak on a budget that closes — the
+        half-chunk-times-endpoint-change error, at a size comparable to the
+        5 % gate it feeds.
+        """
+        days, series = self._ramped_sink()
+        rect = self._rectangle_residual(days, series, "bc")
+        assert abs(rect) > 0.02
+        # ... and large enough to matter against the gate it feeds.
+        assert abs(rect) > 0.5 * A.BUDGET_RESIDUAL_LIMIT
+
+    def test_a_ramped_source_closes_too(self):
+        """The same, with the shapes swapped, so neither side is privileged."""
+        n = 19
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 5.0),
+                  "emi_bc": np.linspace(1.0, 3.0, n) / 86400e6,
+                  "dry_bc": np.zeros(n),
+                  "wet_bc": np.full(n, 2.0 / 86400e6)}
+        assert abs(A._budget_residual(days, series, "bc")) < 1e-12
+        assert abs(self._rectangle_residual(days, series, "bc")) > 0.02
+
+    def test_real_storage_growth_is_accounted(self):
+        """A burden that genuinely grows must show up, not cancel."""
+        n = 19
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        emi = np.full(n, 2.0 / 86400e6)
+        span = A.chunk_centres(days)[-1] - A.chunk_centres(days)[0]
+        growth = 0.10 * 2.0 * span          # 10 % of the emitted mass retained
+        series = {"burden_bc": 5.0 + growth * np.linspace(0.0, 1.0, n),
+                  "emi_bc": emi, "dry_bc": np.zeros(n),
+                  "wet_bc": emi * 0.9}
         assert abs(A._budget_residual(days, series, "bc")) < 1e-9
-        # And the integral itself is the trapezoidal one, not a right-endpoint
-        # rectangle rule (which would be high by half a chunk x the change).
-        rect = float(np.mean(emi_mg[1:])) * span
-        assert not np.isclose(rect, expected)
-        assert np.isclose(float(np.trapezoid(emi, days)) * 86400e6, expected)
 
-    def test_a_seasonal_sink_swing_does_not_fabricate_a_leak(self):
-        """The failure mode: a varying sink tripping the 5 % closure gate."""
-        n = 19                                   # the 90-day minimum window
-        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
-        # Sink doubles across the window; emission matches it exactly, so the
-        # budget is closed by construction and the burden is steady.
-        flux = np.linspace(1.0, 3.0, n) / 86400e6
-        series = {"burden_bc": np.full(n, 5.0), "emi_bc": flux,
-                  "dry_bc": np.zeros(n), "wet_bc": flux}
-        residual = A._budget_residual(days, series, "bc")
-        assert abs(residual) < A.BUDGET_RESIDUAL_LIMIT
-        assert abs(residual) < 1e-9
+    def test_chunk_centres_are_the_window_midpoints(self):
+        """The abscissa: filenames give the END day, a mean sits at the middle."""
+        np.testing.assert_allclose(A.chunk_centres(np.array([5.0, 10.0, 15.0])),
+                                   [2.5, 7.5, 12.5])
+        # Non-uniform cadence: the centres track the varying window lengths,
+        # which is the case a fixed end-day abscissa gets wrong.
+        np.testing.assert_allclose(A.chunk_centres(np.array([10.0, 15.0, 35.0])),
+                                   [5.0, 12.5, 25.0])
 
     def test_a_nan_flux_sample_is_unscored(self):
         n = 40
