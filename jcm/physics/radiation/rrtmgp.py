@@ -387,7 +387,7 @@ def prepare_rrtmgp_data(
         # — the same layout effect RRTMGP.jl measured on GPUs. The unrolled
         # HLO is larger (one slice per level per sweep), which only shows up
         # as a modest one-off compile-time cost.
-        "use_scan": False,
+        "use_scan": True,
     }
 
 
