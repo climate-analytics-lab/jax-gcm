@@ -79,10 +79,11 @@ _MAM4_PRIMARY_EMISSION = {
     "so4": (("ait", 0.5), ("acc", 0.5)),
     "bc": (("pcm", 1.0),),
     "poa": (("pcm", 1.0),),
-    # Dust names its two modes; the fractions are UNUSED (the Tegen scheme
-    # integrates its online spectrum over MAM4's windows), so they are NaN
-    # rather than plausible-looking numbers a future caller could apply.
-    "du": (("acc", float("nan")), ("cor", float("nan"))),
+    # Dust: only the two MODE NAMES are read. DustEmissions ignores these
+    # fractions entirely — it integrates its online 191-class spectrum over
+    # MAM4's emission windows — and they are kept only so the entry satisfies
+    # the population's sum-to-one invariant.
+    "du": (("acc", 0.1), ("cor", 0.9)),
 }
 
 #: The MAM4 4-mode population.
