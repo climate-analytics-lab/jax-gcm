@@ -75,7 +75,7 @@ switch 1-2 days late; that is shared by every monthly climatology in the model
 and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
 produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
-refinements of it, stamped as such in their file attributes (#802).
+refinements of it, stamped as such in their file attributes (#810).
 
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is

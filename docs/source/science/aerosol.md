@@ -363,7 +363,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#802).
+  ne30 configurations too (#810 for the native fields, #808 for the tuning).
 
 **Status & known limitations.**
 - The **``U10 = 10 m/s`` texture switch is a hard step**: above it the
