@@ -19,11 +19,14 @@ treatment):
   which stays alive in cells the microphysics emptied.
 * **Below-cloud impaction scavenging** — precipitation falling through a
   layer collects aerosol in its clear-air part, with a size-dependent
-  (∝ r²) collection efficiency. The stratiform contribution uses the
-  per-level flux entering each layer, so washout is automatically confined
-  below where precip actually forms; the convective contribution uses the
-  surface convective precip masked to levels at/below the convective cloud
-  top (diagnosed by pressure from the heating footprint).
+  (∝ r²) collection efficiency. Both contributions use the per-level flux
+  ENTERING each layer — stratiform from the microphysics ledger, convective
+  from ``ConvectionData.precip_flux`` (the cuflx rain + snow budget) — so
+  the collection rate follows the carrier that is actually falling there.
+  Both also partition the box by the STRATIFORM ``clear_fraction``, which is
+  the only cover the term has; a convective column with little stratiform
+  cloud therefore exposes nearly all its interstitial aerosol to convective
+  impaction through the cloud depth as well as below it (jax-gcm#781).
 * **Convective in-cloud scavenging** — the convective mirror of the
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
@@ -199,9 +202,8 @@ def below_cloud_rate(
 ) -> jnp.ndarray:
     """Below-cloud impaction scavenging rate [1/s], size-dependent (∝ r²).
 
-    ``precip_flux`` is the local flux falling through each layer (per-level
-    profile for stratiform precip; a broadcast surface value is the interim
-    convective treatment).
+    ``precip_flux`` is the local flux entering each layer from above —
+    a per-level profile for both the stratiform and convective carriers.
     """
     rain_mmph = precip_flux * 3600.0  # kg/m²/s -> mm/h
     efficiency = (r_wet / params.below_radius_ref) ** 2
@@ -372,11 +374,14 @@ class WetScavenging(PhysicsTerm):
         # term composable without a convection scheme (see module docstring).
         conv = diagnostics.get("convection")
         if conv is None:
-            conv_precip = jnp.zeros_like(state.temperature[0])
+            conv_flux_in = jnp.zeros_like(state.temperature)
             rate_conv_incloud = jnp.zeros_like(state.temperature)
-            conv_below = jnp.zeros_like(state.temperature)
         else:
-            conv_precip = conv.precip_conv
+            # Local carrier flux for impaction — the convective precip
+            # falling into this layer, as in ECHAM xtwetdep / CAM. It is
+            # zero above the first precip-forming level, which is itself
+            # the cloud-top confinement.
+            conv_flux_in = conv.precip_flux
             conv_condensate = conv.qc_conv + conv.qi_conv
             if self._in_plume_convective:
                 # Retired here: the transport term removes inside the
@@ -387,21 +392,6 @@ class WetScavenging(PhysicsTerm):
                     conv.precip_formation, conv_condensate,
                     air_density, dz, params,
                 )
-            # Convective washout acts only at/below the convective cloud
-            # top — rain cannot collect aerosol above where it forms. The
-            # top is the lowest-pressure level with in-updraft condensate
-            # (orientation-agnostic); no convective cloud -> all-zero mask
-            # (min over empty set = +inf).
-            p_full = diagnostics.get("pressure_full")
-            if p_full is not None:
-                active = conv_condensate > 1.0e-12
-                p_conv_top = jnp.min(
-                    jnp.where(active, p_full, jnp.inf), axis=0, keepdims=True,
-                )
-                conv_below = (p_full >= p_conv_top).astype(p_full.dtype)
-            else:
-                # No pressure diagnostic: column-wide washout, not none.
-                conv_below = jnp.ones_like(state.temperature)
 
         # Stratiform in-cloud (nucleation) scavenging rates from the
         # process-time ledger (#708): the per-step scavenged fraction of an
@@ -466,9 +456,8 @@ class WetScavenging(PhysicsTerm):
             below_strat = below_cloud_rate(
                 flux_in, cloud_fraction, aer.r_wet[i], params,
             )
-            below_conv = conv_below * below_cloud_rate(
-                conv_precip[jnp.newaxis, :], cloud_fraction,
-                aer.r_wet[i], params,
+            below_conv = below_cloud_rate(
+                conv_flux_in, cloud_fraction, aer.r_wet[i], params,
             )
             # In-cloud only removes from activatable (soluble) modes — and
             # only implicitly (via the activated fraction) when there is no

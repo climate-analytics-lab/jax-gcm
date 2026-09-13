@@ -504,6 +504,105 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
                         f"plume died at its base: kbase={kbase} ktop={ktop}")
         self.assertGreater(float(tend.precip_conv) * 86400.0, 1.0)
 
+    def test_precip_flux_floors_each_phase_leg_separately(self):
+        """A negative rain leg must not cancel surviving snow.
+
+        cuflx floors rain and snow independently at the surface, so a warm
+        downdraft sink that drives the rain leg negative while snow is still
+        falling leaves the surface precip set by the snow alone. The carrier
+        profile ``WetScavenging`` reads has to agree with that, or it
+        understates the flux wherever the two phases coexist.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+            convective_precip_fluxes,
+        )
+        nlev = 6
+        # Cold aloft so generation goes to snow; warm below (but under the
+        # tmelt+2 melting threshold) so the downdraft sink is charged to rain.
+        T = jnp.asarray([250.0, 250.0, 250.0, 274.0, 274.0, 274.0])
+        q = jnp.full(nlev, 1.0e-3)
+        p = jnp.asarray([2.0e4, 4.0e4, 6.0e4, 7.5e4, 9.0e4, 1.0e5])
+        dp = jnp.full(nlev, 1.5e4)
+        pdmfup = jnp.zeros(nlev).at[1].set(2.0e-4)
+        pdmfdp = jnp.zeros(nlev).at[3].set(-1.0e-4)
+        # ``kbase = nlev`` puts cloud base below the column, so no layer runs
+        # the sub-cloud evaporation: the flux entering the bottom layer is
+        # then exactly the surface precipitation, and any discrepancy is the
+        # phase bookkeeping alone.
+        rain_sfc, snow_sfc, _prain, _melt, _up, flux = convective_precip_fluxes(
+            T, q, p, dp, nlev, pdmfup, pdmfdp, 900.0,
+        )
+        surface_precip = float(rain_sfc) + float(snow_sfc)
+        # The rain leg is driven negative and floored; the snow survives.
+        np.testing.assert_allclose(surface_precip, 2.0e-4, rtol=1e-6)
+        np.testing.assert_allclose(
+            float(flux[-1]), surface_precip, rtol=1e-6,
+            err_msg="a negative rain leg cancelled the surviving snow",
+        )
+
+    def test_active_convection_publishes_condensate_and_precip_flux(self):
+        """The diagnostics aerosol scavenging consumes must not be empty.
+
+        ``qc_conv + qi_conv`` (in-plume condensate) and ``precip_flux`` (the
+        local carrier flux) drive convective in-plume and below-cloud
+        scavenging; either identically zero while the plume is running
+        silently removes the whole convective aerosol sink, which no unit
+        test of the scavenging routines can see because they are fed those
+        fields by hand.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, tiedtke_nordeng_convection,
+        )
+        p, T, q, dz, rho = self._sounding(bl_top_m=500.0)
+        cfg = ConvectionParameters.default(cu_thvsig=0.0)
+        z = jnp.zeros_like(T)
+        nlev = T.shape[0]
+        sl = slice(nlev // 2, nlev - 4)
+        supply = 1.5e-4
+        conv = jnp.zeros(nlev).at[sl].set(
+            1.3 * supply / jnp.sum(rho[sl] * dz[sl]))
+        tend, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 600.0, cfg,
+            moisture_supply=jnp.asarray(supply),
+            qte_dynamics=conv,
+        )
+        mfu = np.asarray(state.mfu)
+        self.assertTrue(np.any(mfu > 0.0), "no updraft to diagnose")
+        cond = np.asarray(tend.qc_conv) + np.asarray(tend.qi_conv)
+        self.assertTrue(np.any(cond > 0.0), "in-plume condensate is all zero")
+        # Condensate lives where the plume does, and nowhere else.
+        self.assertTrue(np.all(cond[mfu <= 0.0] == 0.0))
+        # Phase split by the PLUME's temperature (ECHAM keys in-plume latent
+        # heat to ptu), not the environment's: the plume is warmer, so its
+        # freezing level sits above the environment's.
+        tu = np.asarray(state.tu)
+        qc, qi = np.asarray(tend.qc_conv), np.asarray(tend.qi_conv)
+        self.assertTrue(np.all(qi[tu > 273.15] == 0.0))
+        self.assertTrue(np.all(qc[tu <= 273.15] == 0.0))
+        env_warm_plume_cold = (np.asarray(T) > 273.15) & (tu <= 273.15)
+        self.assertTrue(
+            np.all(qc[env_warm_plume_cold] == 0.0),
+            "split follows the environment, not the plume",
+        )
+        flux = np.asarray(tend.precip_flux)
+        self.assertTrue(np.any(flux > 0.0), "convective precip flux is zero")
+        # The carrier flux must close against an INDEPENDENTLY computed
+        # quantity, not just be nonzero: the cuflx ledger telescopes, so the
+        # flux entering the bottom layer plus whatever that layer itself adds
+        # is the surface precipitation the scheme reports.
+        surf = int(np.argmax(np.asarray(p)))
+        self.assertGreater(flux[surf], 0.0)
+        gen_sfc = float(np.asarray(tend.precip_formation)[surf])
+        np.testing.assert_allclose(
+            flux[surf] + gen_sfc, float(tend.precip_conv), rtol=2e-3,
+            err_msg="precip_flux does not telescope to precip_conv",
+        )
+        # ...and it only accumulates downward (generation adds, sub-cloud
+        # evaporation removes, melting only moves mass between the legs).
+        top_first = np.asarray(p)[0] < np.asarray(p)[-1]
+        prof = flux if top_first else flux[::-1]
+        self.assertGreaterEqual(float(np.min(np.diff(prof))), -1e-12)
+
 
 if __name__ == "__main__":
     unittest.main()
