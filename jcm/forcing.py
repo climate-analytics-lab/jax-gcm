@@ -8,6 +8,13 @@ from jax import tree_util
 from dinosaur.coordinate_systems import HorizontalGridTypes, CoordinateSystem
 from jcm.utils import VALID_TRUNCATIONS, VALID_NODAL_SHAPES, validate_ds
 from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
+# ``{year}`` pattern expansion lives in the import-free engine
+# :mod:`jcm.data.input_resolution` so ``tools/benchmark.py`` can load it by file
+# path (jcm-free, before its GPU gate) and share this single source of truth;
+# forcing.py imports JAX/dinosaur/``jcm`` at module top and so cannot itself be
+# that shared leaf. Re-exported here — its historical home — for the runner and
+# tests (``from jcm.forcing import expand_yearly_files``).
+from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
     DEFAULT_CALENDAR,
@@ -193,6 +200,32 @@ class SolarGeometry:
 
 
 # ---------------------------------------------------------------------------
+# Canonical mirror-bundle composition (ForcingData.from_bundles)
+# ---------------------------------------------------------------------------
+
+# Surface epoch -> its mirror surface-bundle product.
+_SURFACE_PRODUCTS = {
+    "pd": "forcing_pd", "pi": "forcing_pi",
+    "amip": "forcing_amip", "era5": "forcing_era5",
+}
+
+# Era consistency (F1): the surface epoch selects the ancillary epoch, so a PI
+# surface is never paired with present-day ozone/emissions/oxidants (and vice
+# versa). Only ozone/emissions/oxidants carry a PI variant; dms/dust are
+# epoch-free (one product each, always "auto"). amip/era5 pair with the
+# present-day *climatology* ancillaries — a transient ozone_amip/emissions_amip
+# pairing is a documented deferral (the mirror stages those products, but wiring
+# them per-year is future work), recorded here so every surface's choice is
+# explicit rather than implicit in "auto".
+_SURFACE_ANCILLARY_EPOCH = {
+    None: "pd", "pd": "pd", "pi": "pi", "amip": "pd", "era5": "pd",
+}
+
+# The ancillary keys whose product carries an epoch (dms/dust do not).
+_EPOCH_ANCILLARY_KEYS = ("ozone_file", "emissions_file", "oxidants_file")
+
+
+# ---------------------------------------------------------------------------
 # ForcingData
 # ---------------------------------------------------------------------------
 
@@ -218,7 +251,7 @@ class ForcingData:
     ch4_vmr: jnp.ndarray
 
     # N2O volume mixing ratio (ppmv). Scalar for fixed-N2O runs; TimeSeries for
-    # historical / scenario forcing. Prescribed here so RRTMGP no longer falls
+    # historical / scenario forcing. Prescribed here so RRTMGP does not fall
     # back silently to its ``vmr_global_means.json`` value.
     n2o_vmr: jnp.ndarray
 
@@ -256,7 +289,18 @@ class ForcingData:
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
     # dust emission is simply inert until the field is supplied.
     dms_seawater: Any = None   # seawater DMS concentration kg/m³ (DmsEmissions)
-    dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+    # The five Tegen/HAMMOZ dust inputs (#802). ``dust_source`` is the monthly
+    # effective-LAI erodible fraction (the gate AND a linear factor on the flux);
+    # ``dust_preferential`` the paleolake area fraction that swaps in soil type
+    # 10; ``dust_soil_types`` a mapping of the nine prescribed texture area
+    # fractions; ``dust_regions`` the integer 1–8 tuning index; and
+    # ``dust_roughness`` the monthly satellite roughness [cm], read only on the
+    # ``ndurough = 0`` sensitivity path. All but the first are static.
+    dust_source: Any = None
+    dust_preferential: Any = None
+    dust_soil_types: Any = None
+    dust_regions: Any = None
+    dust_roughness: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -377,6 +421,141 @@ class ForcingData:
             ds = xr.open_dataset(filename)
         return cls.from_dataset(ds, coords=coords,
                                 align_mode=align_mode, validate=validate)
+
+    @classmethod
+    def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
+                     fetch=None):
+        """Build the canonical mirror-bundle forcing set for a composition.
+
+        The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
+        it composes the surface bundle (``surface`` ∈
+        ``"pd"``/``"pi"``/``"amip"``/``"era5"``/``None``), ozone, and — for
+        ``aerosol="jam"`` — the emission/dms/dust/oxidant set, then routes the
+        composed config through the SAME engine
+        (:func:`jcm.forcing_assembly.build_forcing`, which the CLI door
+        ``jcm.runners.build_forcing`` also delegates to), so the CLI and Python
+        doors provably agree (#751; see the
+        equivalence test in ``forcing_test``). The emission-family config-trap
+        warnings fire here from the shared home too. ``aerosol="macv2sp"`` wires
+        the repo-packaged MACv2-SP file (:func:`packaged_macv2_path`) into
+        ``forcing.macv2_file`` so the real plume weights are attached — the file
+        is resolution-invariant and shipped in the wheel, so it needs no mirror
+        fetch. Unpublished-grid / sigma degradations (``auto`` → nothing) mirror
+        the CLI for the other products. ``fetch``
+        (default: the HF cache) pre-resolves the composed surface bundle via the
+        engine; the ``auto`` products use the cache.
+
+        Era consistency (F1): the surface epoch selects the ancillary epoch, so
+        an 1870s PI surface is not silently paired with present-day ancillaries.
+        The pairing is explicit for every surface (dms/dust are epoch-free):
+
+        =========  ====================================================
+        surface    ozone / emissions / oxidants
+        =========  ====================================================
+        ``pd``     present-day (``*_pd``, via ``auto``)
+        ``pi``     pre-industrial (``ozone_pi``/``emissions_pi``/``oxidants_pi``)
+        ``amip``   present-day climatology (transient pairing deferred)
+        ``era5``   present-day climatology (transient pairing deferred)
+        ``None``   present-day (aquaplanet surface, ``*_pd`` ancillaries)
+        =========  ====================================================
+        """
+        from omegaconf import OmegaConf
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        from jcm import forcing_assembly as fa
+        from jcm import runners
+        from jcm.data import input_resolution as ir
+        from jcm.data import mirror_manifest as mm
+
+        manifest = mm.load_manifest()
+        grid_token = fa._grid_token(coords)
+        nlev = int(coords.nodal_shape[0])
+        vertical = ("hybrid" if isinstance(coords.vertical, HybridCoordinates)
+                    else "sigma")
+
+        if aerosol not in (None, "jam", "macv2sp"):
+            raise ValueError(
+                f"aerosol={aerosol!r}; expected None, 'jam' or 'macv2sp'.")
+        if surface is not None and surface not in _SURFACE_PRODUCTS:
+            raise ValueError(
+                f"surface={surface!r}; expected 'pd'/'pi'/'amip'/'era5'/None.")
+
+        macv2_file = None
+        if aerosol == "macv2sp":
+            # The MACv2-SP file is repo-packaged (resolution-invariant single
+            # file), so wire its packaged path straight into forcing.macv2_file;
+            # build_forcing then attaches the real weights instead of the all-ones
+            # default (F2). No mirror fetch or staging gate.
+            macv2_file = packaged_macv2_path()
+
+        forcing_dict = {
+            "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
+            "dust_file": "auto", "dust_preferential_file": "auto",
+            "dust_soil_types_file": "auto", "dust_regions_file": "auto",
+            "dust_roughness_file": "auto",
+            "oxidants_file": "auto", "align": "auto",
+            "macv2_file": macv2_file,
+            "years": years, "available_years": None,
+            "ozone_available_years": None, "emissions_available_years": None,
+            "oxidants_available_years": None,
+        }
+
+        # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
+        # auto=True product, so it stays "auto" (keeping the silent-degrade on an
+        # unpublished grid + the JAM-gating that "auto" gives). A non-pd epoch
+        # pins the explicit ``*_<epoch>`` bundle, except on a grid where that
+        # product is unpublished — there it falls back to "auto" so it degrades
+        # to None exactly as the pd product would, not a 404. Emissions/oxidants
+        # are JAM-only (a non-JAM package consumes neither), so their epoch is
+        # pinned only for aerosol="jam"; ozone feeds radiation on every config,
+        # so its epoch is always pinned.
+        epoch = _SURFACE_ANCILLARY_EPOCH[surface]
+        if epoch != "pd":
+            keys = (_EPOCH_ANCILLARY_KEYS if aerosol == "jam"
+                    else ("ozone_file",))
+            for key in keys:
+                product = f"{key[:-len('_file')]}_{epoch}"
+                if mm.is_published(manifest, product, grid_token, nlev,
+                                   vertical):
+                    forcing_dict[key] = "hf://" + mm.bundle_path(
+                        manifest, product, grid_token, nlev)
+
+        if surface is None:
+            forcing_dict["kind"] = "default"
+        else:
+            product = _SURFACE_PRODUCTS[surface]
+            forcing_dict["kind"] = "from_file"
+            if mm.product(manifest, product)["alignment"] == "transient":
+                if years is None:
+                    raise ValueError(
+                        f"surface={surface!r} is a transient (per-year) bundle "
+                        "— pass years=[first, last].")
+                forcing_dict["align"] = "by_date_interp"
+                forcing_dict["available_years"] = mm.coverage(manifest, product)
+            file_spec = "hf://" + mm.bundle_path(manifest, product,
+                                                 grid_token, nlev)
+            if fetch is not None:
+                sr = ir.resolve_input(
+                    "file", file_spec, grid_token=grid_token, nlev=nlev,
+                    vertical=vertical, years=years,
+                    available=forcing_dict["available_years"],
+                    manifest=manifest, fetch=fetch)
+                file_spec = (list(sr.paths) if len(sr.paths) > 1
+                             else sr.paths[0])
+            forcing_dict["file"] = file_spec
+
+        physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
+        cfg = OmegaConf.create(
+            {"forcing": forcing_dict, "physics": physics_dict})
+        # Drive the forcing-side engine directly — the SAME engine the CLI door
+        # (``runners.build_forcing``) delegates to — so the two doors provably
+        # agree without this module depending on the runner's build (#751).
+        forcing = fa.build_forcing(cfg, coords)
+        # Same emission-family traps the CLI door fires (from the shared home).
+        runners.warn_emission_config_traps(
+            has_jam=(aerosol == "jam"), is_pyses=False, is_scm=False,
+            forcing_cfg=cfg.forcing, coords=coords, forcing=forcing)
+        return forcing
 
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
@@ -528,6 +707,10 @@ class ForcingData:
              nudging_target=_UNSET,
              dms_seawater=None,
              dust_source=None,
+             dust_preferential=None,
+             dust_soil_types=None,
+             dust_regions=None,
+             dust_roughness=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
              prescribed_aerosol_emissions=None):
@@ -558,6 +741,14 @@ class ForcingData:
             ),
             dms_seawater=dms_seawater if dms_seawater is not None else self.dms_seawater,
             dust_source=dust_source if dust_source is not None else self.dust_source,
+            dust_preferential=(dust_preferential if dust_preferential is not None
+                               else self.dust_preferential),
+            dust_soil_types=(dust_soil_types if dust_soil_types is not None
+                             else self.dust_soil_types),
+            dust_regions=(dust_regions if dust_regions is not None
+                          else self.dust_regions),
+            dust_roughness=(dust_roughness if dust_roughness is not None
+                            else self.dust_roughness),
             oxidant_vmr=oxidant_vmr if oxidant_vmr is not None else self.oxidant_vmr,
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
@@ -1023,6 +1214,155 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
         # build a TimeSeries from, and DustEmissions reads a 2-D field
         # directly.
         return jnp.asarray(arr)
+    # WRAP_YEAR steps the record by month, never interpolating, as
+    # ``bgc_dust_read_monthly`` does — but it bins the year into twelve equal
+    # 30.42-day slices, so records 2-11 switch 1-2 days after the calendar
+    # month start (#805, shared by every monthly climatology).
+    if ds.sizes["time"] != _DUST_MONTHS:
+        raise ValueError(
+            f"{var_name}: the HAMMOZ potential-source climatology has "
+            f"{_DUST_MONTHS} monthly records, found {ds.sizes['time']}. The "
+            "Tegen scheme steps it by month start (WRAP_YEAR); a different "
+            "record count means a different product.")
+    return make_time_series(
+        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+    )
+
+
+def _drop_degenerate_time(arr, ds, var_name):
+    """Collapse the length-1 ``time`` axis the static HAMMOZ dust files carry."""
+    if "time" not in ds[var_name].dims:
+        return arr
+    if ds.sizes["time"] != 1:
+        raise ValueError(
+            f"{var_name}: expected a static field (no time axis, or a "
+            f"degenerate one), found {ds.sizes['time']} records.")
+    return arr[0]
+
+
+def read_dust_preferential(ds, lat_deg=None, lon_deg=None, var_name="source"):
+    """Read the preferential-source area fraction for ``ForcingData.dust_preferential``.
+
+    The HAMMOZ ``dust_preferential_sources.nc`` paleolake / topographic-depression
+    field, ``source (time, lat, lon)`` with a degenerate time axis
+    (``mo_ham_dust.f90::bgc_read_annual_fields`` reads record 1 only). Returned as
+    a static ``(lon, lat)`` array in [0, 1]: this fraction of each cell is given
+    soil type 10 (100 % silt), the rest keeps its mapped texture.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Preferential-source file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = _drop_degenerate_time(arr, ds, var_name)
+    return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
+
+
+#: Soil-type file variables. Type 1 (coarse) is deliberately absent — the scheme
+#: takes it as the residual ``1 − Σ``.
+_DUST_SOIL_TYPE_VARS = ("type2", "type3", "type4", "type6",
+                        "type13", "type14", "type15", "type16", "type17")
+#: The globally-complete Zobler partition; the type13-17 group is a separate,
+#: OVERLAPPING China-only partition and the two must never be summed together.
+_DUST_GLOBAL_SOIL_VARS = ("type2", "type3", "type4", "type6")
+_DUST_MONTHS = 12
+
+
+def read_dust_soil_types(ds, lat_deg=None, lon_deg=None):
+    """Read the nine soil-texture area fractions for ``ForcingData.dust_soil_types``.
+
+    The HAMMOZ ``soil_type_all.nc``: ``type2/3/4/6`` (Tegen's global Zobler
+    textures) and ``type13..17`` (Cheng's East-Asian textures). Returned as
+    ``{var_name: (lon, lat) array}``.
+
+    The two groups are *overlapping* partitions — their nine-way sum reaches 2.18
+    over the Gobi — so only the global group is checked to be a partition here;
+    reconciling the overlap is the scheme's ``k_dust_easo`` branch.
+    """
+    missing = [v for v in _DUST_SOIL_TYPE_VARS if v not in ds.data_vars]
+    if missing:
+        raise ValueError(
+            f"Soil-type file is missing {missing}; the Tegen scheme needs all "
+            f"of {list(_DUST_SOIL_TYPE_VARS)} (type1 is the residual).")
+    out = {}
+    for var in _DUST_SOIL_TYPE_VARS:
+        arr = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        arr = _drop_degenerate_time(arr, ds, var)
+        out[var] = np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0)
+    total = sum(out[v] for v in _DUST_GLOBAL_SOIL_VARS)
+    if np.max(total) > 1.0 + 1e-5:
+        raise ValueError(
+            f"Soil-type file: the global textures {list(_DUST_GLOBAL_SOIL_VARS)} "
+            f"sum to {np.max(total):.4f} > 1 — they must be a partition, or the "
+            "type-1 residual the scheme derives from them goes negative.")
+    return {k: jnp.asarray(v) for k, v in out.items()}
+
+
+def read_dust_regions(ds, lat_deg=None, lon_deg=None, var_name="regions"):
+    """Read the regional-tuning index for ``ForcingData.dust_regions``.
+
+    The HAMMOZ ``dust_regions.nc`` (Huneeus et al. 2011 boxes: 1 everywhere else,
+    2 N America, 3 S America, 4 N Africa, 5 S Africa, 6 Middle East, 7 Asia,
+    8 Australia). Purely categorical — the Fortran reads it with ``EF_NOINTER``
+    — so a non-integer or out-of-range value means the file was interpolated and
+    is refused rather than silently rounded.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Dust-regions file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = _drop_degenerate_time(arr, ds, var_name)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{var_name}: contains non-finite values.")
+    if not np.allclose(arr, np.round(arr), atol=1e-6):
+        raise ValueError(
+            f"{var_name}: contains non-integer values (e.g. "
+            f"{arr[~np.isclose(arr, np.round(arr), atol=1e-6)][0]}). The dust "
+            "region mask is categorical and must be regridded "
+            "nearest-neighbour, never linearly or conservatively.")
+    ints = np.round(arr).astype(np.int32)
+    if ints.min() < 1 or ints.max() > _DUST_N_REGIONS:
+        raise ValueError(
+            f"{var_name}: values span [{ints.min()}, {ints.max()}], outside the "
+            f"1-{_DUST_N_REGIONS} tuning-region range.")
+    return jnp.asarray(ints, dtype=jnp.int32)
+
+
+_DUST_N_REGIONS = 8
+#: ``surfrough`` values span 0.001-0.08 and the file's ``units`` attribute says
+#: ``"1."``; the Fortran compares them against ``r_dust_z0s = 0.001 cm``, so they
+#: are centimetres. Read as metres every land cell would clip ``feff`` to zero
+#: and the scheme would emit nothing anywhere.
+_DUST_ROUGHNESS_CM_UNITS = {"cm", "centimetre", "centimeter", "1.", "1", ""}
+
+
+def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
+                        align_mode: str = "wrap_year"):
+    """Read the monthly surface-roughness map for ``ForcingData.dust_roughness``.
+
+    The Prigent et al. (2005) satellite roughness length in **centimetres**
+    (``surface_rough_12m.nc``), as a monthly ``WRAP_YEAR`` :class:`TimeSeries`.
+    Consumed only on the ``ndurough = 0`` sensitivity path — with the default
+    constant roughness ``bgc_dust_read_monthly`` overwrites it immediately.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Dust-roughness file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    units = str(ds[var_name].attrs.get("units", "")).strip().lower()
+    if units not in _DUST_ROUGHNESS_CM_UNITS:
+        raise ValueError(
+            f"{var_name}: units {units!r} are not the centimetres the Tegen "
+            "drag partition expects (the HAMMOZ file carries '1.').")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    if "time" not in ds[var_name].dims:
+        return jnp.asarray(arr)
+    if ds.sizes["time"] != _DUST_MONTHS:
+        raise ValueError(
+            f"{var_name}: expected {_DUST_MONTHS} monthly records, found "
+            f"{ds.sizes['time']}.")
     return make_time_series(
         arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )
@@ -1150,45 +1490,92 @@ def validate_oxidant_levels(ds, coords, path):
         )
 
 
-def expand_yearly_files(file_spec, years, available=None):
-    """Expand a ``{year}`` file pattern into the yearly-bundle file list.
+def packaged_macv2_path() -> str:
+    """Filesystem path to the repo-packaged MACv2-SP file (``macv2_file=auto``).
 
-    The transient AMIP bundles are one file per year (issue #610:
-    download only what you run, append new years without rewriting
-    history), so config points at a pattern plus an inclusive range:
-    ``file: hf://bundles/t63/forcing_amip/{year}.nc`` with
-    ``years: [1979, 1983]``. A pattern without ``years`` raises rather
-    than silently running with a literal ``{year}`` path. Non-pattern
-    specs (plain paths, lists, ``None``) pass through untouched even when
-    ``years`` is set — a run may mix yearly SST files with a static dust
-    climatology, all sharing one ``forcing.years`` range.
-
-    ``available`` (``forcing.available_years``, the product's inclusive
-    source coverage) widens the expansion by one year on each side,
-    clipped to that coverage: the yearly files hold *mid-month* samples,
-    so a run starting Jan 1 needs the previous December's sample (and a
-    run ending Dec 31 the next January's) for ``by_date_interp`` to
-    bracket the boundary instead of clamping to the nearest mid-month
-    value for ~half a month.
+    The MACv2-SP simple-plume file — SPv2.1 (CMIP7; Fiedler & Azoulay, University
+    Heidelberg, 2025), the CEDS-scaled successor to Stevens et al. (2017) v1 — is
+    resolution-invariant (~19 KB), so it ships in the wheel under ``jcm/data/bc``
+    rather than on the HF mirror (SOURCES.md carries provenance + sha256). It is
+    the ``macv2_sp`` packaged product in the mirror manifest, resolved through
+    the one packaged-product mechanism (:func:`jcm.data.input_resolution.
+    resolve_packaged`); ``forcing.macv2_file=auto`` and
+    ``from_bundles(aerosol="macv2sp")`` both use this shim, an explicit path
+    overrides.
     """
-    has_pattern = isinstance(file_spec, str) and "{year}" in file_spec
-    if not has_pattern:
-        return file_spec
-    if years is None:
-        raise ValueError(
-            f"forcing file pattern {file_spec!r} contains {{year}} but "
-            "no year range is set — add e.g. forcing.years=[1979,1983]")
-    first, last = int(years[0]), int(years[-1])
-    if last < first:
-        raise ValueError(f"forcing.years range is reversed: {years!r}")
-    if available is not None:
-        lo, hi = int(available[0]), int(available[-1])
-        first, last = max(first - 1, lo), min(last + 1, hi)
-        # A requested range entirely outside coverage would invert here
-        # and expand to nothing; clamp to the nearest edge file instead
-        # (the time lookup then clamps to its first/last sample).
-        first, last = min(first, hi), max(last, lo)
-    return [file_spec.format(year=y) for y in range(first, last + 1)]
+    from jcm.data import input_resolution as ir
+    from jcm.data import mirror_manifest as mm
+    return ir.resolve_packaged(mm.load_manifest(), "macv2_sp")
+
+
+def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+    """Read MACv2-SP time-varying plume weights into two ``TimeSeries`` leaves.
+
+    The MACv2-SP file (the packaged SPv2.1 CMIP7 build, or the older v1) carries
+    the static plume geometry (consumed separately by
+    :meth:`AerosolParameters.from_dataset`) alongside two time-varying scaling
+    arrays:
+
+    * ``year_weight(plume, year)`` over 1850..2100 — the per-year anthropogenic
+      amplitude. Returned as ``forcing.aerosol_year_weight``: a ``BY_DATE``
+      ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
+      calendar year. Only part of the axis carries real data (SPv2.1: 1850-2023;
+      v1: 1850-2016); the trailing years are ``_FillValue`` (delivered as NaN),
+      which would inject NaN AOD, so the last valid year is forward-filled (a
+      documented jcm convention — the reference STOPs out of range). The
+      forward-fill finds the last all-valid year dynamically, so it adapts to
+      either file's real span with no version-specific constant.
+    * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
+      ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
+      ``(week, feature, plume)`` so a ``select(date)`` slice yields the
+      ``(feature, plume)`` the term consumes at the current week.
+
+    ``select(date)`` collapses each leaf to its current-step slice, so nothing
+    extra is needed at run time. Attach both to a :class:`ForcingData` via
+    ``base.copy(aerosol_year_weight=..., aerosol_ann_cycle=...)``.
+    """
+    import jax_datetime as jdt
+    import xarray as xr
+
+    ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
+    try:
+        # year_weight: (plume, year) -> (year, plume). Forward-fill past the
+        # last all-valid year so out-of-range years reuse the last real
+        # amplitude instead of the file's NaN fill.
+        yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
+        valid = ~np.isnan(yw_np).any(axis=1)
+        last_valid = np.where(valid)[0].max()
+        yw_np[last_valid + 1:] = yw_np[last_valid]
+        yw = jnp.asarray(yw_np)
+
+        # Time axis in seconds-since-MODEL_EPOCH (1970-01-01), one sample per
+        # year-start. The file labels year Y with the integer Y; treat it as
+        # Y-01-01 00:00 UTC.
+        years = ds["years"].values.astype(int)
+        epoch_seconds = [
+            float(absolute_seconds_since_epoch(
+                jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))))
+            for y in years
+        ]
+        year_weight = make_time_series(
+            yw, jnp.asarray(epoch_seconds), align_mode=BY_DATE)
+
+        # ann_cycle: (plume, week, feature) -> (week, feature, plume). WRAP_YEAR
+        # repeats every year; time_seconds is unused by that indexing but must
+        # be a 1-D coord of matching length, so pass the week index.
+        ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
+        ann_cycle = make_time_series(
+            ac, jnp.arange(ac.shape[0]), align_mode=WRAP_YEAR)
+    finally:
+        if not isinstance(path, xr.Dataset):
+            ds.close()
+    return year_weight, ann_cycle
+
+
+# ``expand_yearly_files`` is re-exported from the top-of-module import of the
+# import-free engine :mod:`jcm.data.input_resolution` (see the imports block);
+# its historical home is this module, so the runner and tests still reach it as
+# ``jcm.forcing.expand_yearly_files``.
 
 
 def default_forcing(

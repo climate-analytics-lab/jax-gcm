@@ -24,4 +24,9 @@
 defaults:
   - echam-jam-aerocom
 
+# Now an ALIAS: ``echam-jam-aerocom`` already defaults ``aerocom_optics: true``
+# (the measured cost is below single-run noise, and the AeroCom AOD names it
+# adds are wanted by default). This preset is kept as an explicitly-named
+# entry point because benchmark PRESETS references both names; it re-asserts the
+# same value so selecting it stays a no-op relative to the base preset.
 aerocom_optics: true

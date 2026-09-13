@@ -3,7 +3,6 @@
 This module defines the data structures and configuration parameters
 used throughout the radiation scheme.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
@@ -11,7 +10,7 @@ from typing import NamedTuple, Optional
 import tree_math
 
 from .constants import (
-    N_SW_BANDS, N_LW_BANDS, SW_BAND_LIMITS, LW_BAND_LIMITS,
+    SW_BAND_LIMITS, LW_BAND_LIMITS,
 )
 
 
@@ -33,11 +32,11 @@ class RadiationParameters:
     # Solar parameters
     solar_constant: float    # Solar constant (W/m²)
 
-    # Spectral bands
-    n_sw_bands: int          # Number of shortwave bands
-    n_lw_bands: int          # Number of longwave bands
-
-    # Band limits (wavenumber in cm⁻¹)
+    # Band limits (wavenumber in cm⁻¹). The band COUNTS are not stored: a
+    # scheme's spectral resolution is a static shape set by its module
+    # constants (grey ``N_SW_BANDS``/``N_LW_BANDS``, RRTMGP its k-table), not
+    # a runtime tunable, so a stored count could only drift from the truth
+    # (#674).
     lw_band_limits: tuple    # LW bands
     sw_band_limits: tuple    # SW bands
 
@@ -48,11 +47,12 @@ class RadiationParameters:
 
     # Numerical parameters
     min_cos_zenith: float    # Minimum cosine solar zenith angle (~88 deg)
-    flux_epsilon: float      # Small value for flux calculations
 
     # Cloud optics parameters
-    cld_tau_min: float       # Minimum cloud optical depth
-    cld_frac_min: float      # Minimum cloud fraction
+    # Minimum cloud fraction: the ``eps`` floor in ``mcica.in_cloud_path``
+    # (grid-mean / max(cf, eps), with the in-cloud path zeroed where
+    # cf <= 2*eps). Read by the RRTMGP and grey two-stream schemes.
+    cld_frac_min: float
 
     # Cloud overlap selector for partial-cloud radiation. 0 = random,
     # 1 = maximum_random (Geleyn-Hollingsworth), 2 = exponential
@@ -77,11 +77,9 @@ class RadiationParameters:
     @classmethod
     def default(cls, radiation_interval=7200.0,
                  solar_constant=1361.0,
-                 n_sw_bands=N_SW_BANDS, n_lw_bands=N_LW_BANDS,
                  lw_band_limits=LW_BAND_LIMITS,
                  sw_band_limits=SW_BAND_LIMITS,
-                 min_cos_zenith=0.035, flux_epsilon=1e-6,
-                 cld_tau_min=1e-6, cld_frac_min=1e-3,
+                 min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
                  emulator_weights=None, sw_scaling=None,
@@ -90,13 +88,9 @@ class RadiationParameters:
         return cls(
             radiation_interval=jnp.array(radiation_interval),
             solar_constant=jnp.array(solar_constant),
-            n_sw_bands=jnp.asarray(n_sw_bands),
-            n_lw_bands=jnp.asarray(n_lw_bands),
             lw_band_limits=jnp.asarray(lw_band_limits),
             sw_band_limits=jnp.asarray(sw_band_limits),
             min_cos_zenith=jnp.array(min_cos_zenith),
-            flux_epsilon=jnp.array(flux_epsilon),
-            cld_tau_min=jnp.array(cld_tau_min),
             cld_frac_min=jnp.array(cld_frac_min),
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
@@ -221,8 +215,8 @@ class RadiationData:
     #
     # Stored EXPLICITLY rather than re-derived from the flux slots each
     # step: the ratio is unrecoverable once the all-sky flux is zero, so a
-    # companion landing on a dark column used to erase the fraction and
-    # report a zero aerosol effect for the rest of the interval —
+    # companion landing on a dark column would otherwise erase the fraction
+    # and report a zero aerosol effect for the rest of the interval —
     # including after sunrise.
     #
     # Four separate nodal-shaped fields rather than one stacked (4, ...)
@@ -244,7 +238,7 @@ class RadiationData:
     # call (both compute and cached paths). Drives the sub-stepping gate
     # (see ``radiation_should_compute``) and seeds the McICA RNG so its
     # samples remain reproducible per (step, column). Lives on the carry
-    # so radiation no longer needs the model-wide step counter — the
+    # so radiation does not need the model-wide step counter — the
     # operator-split cross-step pass-through already threads this struct
     # from one ``dt`` to the next.
     step: jnp.ndarray                # Radiation step counter [int32] scalar
@@ -437,9 +431,9 @@ class RadiationState(NamedTuple):
     h2o_vmr: jnp.ndarray            # Water vapor volume mixing ratio [nlev]
     o3_vmr: jnp.ndarray             # Ozone volume mixing ratio [nlev]
     # Specific humidity is carried alongside ``h2o_vmr`` so the RRTMGP path
-    # never has to invert the grey scheme's vmr convention. Recovering q from
-    # h2o_vmr used to give back the MIXING RATIO q/(1-q), which the library
-    # then divided by (1-q) a second time (#678).
+    # never has to invert the grey scheme's vmr convention: recovering q from
+    # h2o_vmr would give back the MIXING RATIO q/(1-q), which the library
+    # would then divide by (1-q) a second time (#678).
     specific_humidity: jnp.ndarray  # Specific humidity (kg/kg) [nlev]
     
     # Cloud properties

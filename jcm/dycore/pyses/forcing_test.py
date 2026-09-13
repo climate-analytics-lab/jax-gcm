@@ -97,6 +97,26 @@ class AttachJamForcingTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(leaf.values), 10.0 * 1.0e-6 * 0.0621324, rtol=1e-6)
 
+    def _dust_companions(self, tmp):
+        """Write the three mandatory static Tegen inputs beside the source map."""
+        pref = xr.Dataset(
+            {"source": (("lat", "lon"), np.full((_LAT.size, _LON.size), 0.25))},
+            coords={"lat": _LAT, "lon": _LON})
+        soils = xr.Dataset(
+            {f"type{i}": (("lat", "lon"),
+                          np.full((_LAT.size, _LON.size),
+                                  0.2 if i in (2, 3, 4, 6) else 0.0))
+             for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)},
+            coords={"lat": _LAT, "lon": _LON})
+        regions = xr.Dataset(
+            {"regions": (("lat", "lon"),
+                         np.tile(np.arange(1, _LAT.size + 1)[:, None],
+                                 (1, _LON.size)).astype(float))},
+            coords={"lat": _LAT, "lon": _LON})
+        return {"dust_preferential_file": _write(tmp, "pref.nc", pref),
+                "dust_soil_types_file": _write(tmp, "soil.nc", soils),
+                "dust_regions_file": _write(tmp, "reg.nc", regions)}
+
     def test_static_dust_map_on_columns(self):
         ds = xr.Dataset(
             {"pot_source": (("lat", "lon"),
@@ -104,9 +124,29 @@ class AttachJamForcingTest(unittest.TestCase):
             coords={"lat": _LAT, "lon": _LON},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            forcing = _attach(dust_file=_write(tmp, "dust.nc", ds))
+            forcing = _attach(dust_file=_write(tmp, "dust.nc", ds),
+                              **self._dust_companions(tmp))
         self.assertEqual(forcing.dust_source.shape, (1, _NCOL))
         np.testing.assert_allclose(np.asarray(forcing.dust_source), 0.5)
+        self.assertEqual(forcing.dust_preferential.shape, (1, _NCOL))
+        np.testing.assert_allclose(np.asarray(forcing.dust_preferential), 0.25)
+        np.testing.assert_allclose(
+            np.asarray(forcing.dust_soil_types["type2"]), 0.2)
+        # The region mask is categorical: nearest-neighbour, so every column
+        # keeps an exact integer label.
+        regions = np.asarray(forcing.dust_regions)
+        self.assertEqual(regions.shape, (1, _NCOL))
+        np.testing.assert_array_equal(regions, np.round(regions))
+
+    def test_dust_without_its_companions_is_refused(self):
+        ds = xr.Dataset(
+            {"pot_source": (("lat", "lon"),
+                            np.full((_LAT.size, _LON.size), 0.5))},
+            coords={"lat": _LAT, "lon": _LON},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "dust_soil_types_file"):
+                _attach(dust_file=_write(tmp, "dust.nc", ds))
 
     def test_oxidants_per_level_on_columns(self):
         nlev = 4
@@ -131,6 +171,39 @@ class AttachJamForcingTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(oh.values[0, :, 0, 0]),
             np.arange(1, nlev + 1) * 1.0e-9, rtol=1e-6)
+
+    def test_oxidants_year_list_concatenated_on_columns(self):
+        # A ``{year}`` expansion hands attach_jam_forcing the yearly files of ONE
+        # transient product as a list; they must open together (open_mfdataset,
+        # by-coords) into a single concatenated time axis and read BY_DATE
+        # (align_mode="auto"), mirroring the spectral _attach_oxidants — not a
+        # 24-month wrap-year climatology. Two 12-month yearly files -> 24 steps.
+        from jcm.forcing import BY_DATE
+        nlev = 4
+        base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
+
+        def _year_ds(year):
+            time = np.array([np.datetime64(f"{year}-{m:02d}-15")
+                             for m in range(1, 13)])
+            data = np.broadcast_to(base * 1.0e-9,
+                                   (12, nlev, _LAT.size, _LON.size)).copy()
+            ds = xr.Dataset(
+                {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                                   {"units": "mole/mole"})
+                 for n in ("OH", "NO3", "O3", "H2O2")},
+                coords={"time": time, "mlev": np.arange(1, nlev + 1),
+                        "lat": _LAT, "lon": _LON},
+            )
+            ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+            return ds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [_write(tmp, f"oxid_{y}.nc", _year_ds(y))
+                     for y in (2000, 2001)]
+            forcing = _attach(oxidants_file=paths)
+        oh = forcing.oxidant_vmr["oh"]
+        self.assertEqual(oh.values.shape, (24, nlev, 1, _NCOL))
+        self.assertEqual(int(oh.align_mode), BY_DATE)
 
     def test_ozone_climatology_on_columns(self):
         # jcm/data/bc ozone contract: O3 (time, level, lat, lon) mole/mole

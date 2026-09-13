@@ -3,7 +3,6 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 import functools
-import pytest
 from jax.test_util import check_vjp, check_jvp
 
 def initialize_arrays(ix, il, kx):
@@ -199,12 +198,13 @@ class TestLongwave(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # radset is smooth in temperature, so float32 central differences track
+        # AD to ~2e-3 (vjp) and to the noise floor (jvp).
         check_vjp(f, f_vjp, args = (temp, epslw), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=1e-2, eps=0.00001)
         check_jvp(f, f_jvp, args = (temp, epslw), 
-                                atol=None, rtol=1, eps=0.000001)
+                                atol=None, rtol=1e-2, eps=0.000001)
         
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_downward_longwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         # FIXME: This array doesn't need to be this big once we fix the interfaces
@@ -237,13 +237,17 @@ class TestLongwave(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # eps is wedged: below ~1e-5 it is under an ulp of the O(400) st4a/dfabs
+        # fields, and at 1e-4 it steps across a where-branch in them. The
+        # quantisation that leaves puts the inner product ~7e-2 from AD.
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=1e-1, eps=0.00001)
+        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
+        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=2e-2, eps=0.001)
 
 
-    @pytest.mark.skip(reason="finite differencing produces nans - pre-existing issue unrelated to exchange coefficients")
     def test_upward_longwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
         ta = jnp.ones((kx, ix, il)) * 300
@@ -284,10 +288,14 @@ class TestLongwave(unittest.TestCase):
         f_jvp = functools.partial(jax.jvp, f)
         f_vjp = functools.partial(jax.vjp, f)  
 
+        # Same float32 wedge as the downward check, but on a smaller output
+        # tree: the inner product lands ~3e-2 from AD.
         check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+                                atol=None, rtol=5e-2, eps=0.00001)
+        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
+        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
         check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.0001)
+                                atol=None, rtol=2e-2, eps=0.001)
 
 
 

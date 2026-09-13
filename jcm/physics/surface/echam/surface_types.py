@@ -244,8 +244,8 @@ class SurfaceData:
     # implicit solve, the published evaporation IS the moisture the column
     # received (the ECHAM ``pev_vdiff`` identity), so this field now always
     # equals ``evaporation``. Kept for API stability — the Tiedtke
-    # moisture-budget closure anchors to it (the raw-vs-damped distinction
-    # and the old ``imp_moist`` factor no longer exist).
+    # moisture-budget closure anchors to it (there is no raw-vs-damped
+    # distinction and no ``imp_moist`` factor).
     effective_evaporation: jnp.ndarray  # == evaporation [kg/m²/s] (ncols,)
 
     # Exchange coefficients

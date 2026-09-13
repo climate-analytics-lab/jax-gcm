@@ -692,6 +692,78 @@ def subcycle_steps(model, time_step_min: float) -> tuple[int, frozenset[str]]:
     return per_cycle, frozenset(gated)
 
 
+def probe_labels() -> set[str]:
+    """Return the scopes whose execution count must equal the step count.
+
+    The dynamics and bridge scopes sit directly in ``Model``'s step function,
+    outside every loop and conditional, so each of their instructions runs
+    exactly once per step BY CONSTRUCTION. (A physics term is no good for
+    this: internal scans and vmaps put its per-instruction counts all over
+    the place.)
+    """
+    from jcm import profiling
+
+    return {profiling.DYNAMICS, profiling.BRIDGE_TO_PHYSICS,
+            profiling.BRIDGE_TO_DYNAMICS}
+
+
+def check_trace_completeness(steps_seen: dict[str, int], steps: int,
+                             n_kernels: int, cycle: int = 1) -> None:
+    """Raise unless every probe scope was captured for all ``steps`` steps.
+
+    The profiler's event buffer holds ~1e6 events and a JAM step emits ~19,000
+    kernels, so a long enough window silently stops recording partway instead
+    of erroring -- a 120-step window captured only 20 steps and reported a 4x
+    undercount that looked entirely plausible.
+
+    Two ways the trace can be untrustworthy, each its own hard error:
+
+    * a probe label is missing entirely, which means the HLO-metadata join
+      failed rather than that the scope was cheap -- every number in the
+      report would then be misattributed;
+    * every probe is present but one is short, so the buffer overflowed.
+      EVERY probe must be complete, not just the best of them: the probes are
+      ordered within a step (bridge_to_physics runs before dynamics), so a
+      buffer that fills partway through the final step leaves the earlier
+      probe at the full count while a later one is short.
+
+    Parameters
+    ----------
+    steps_seen
+        :attr:`Attribution.steps_seen` -- minimum per-instruction execution
+        count per component.
+    steps
+        Number of steps the profiled window actually ran.
+    n_kernels
+        Kernels recovered from the trace, reported to size the overflow.
+    cycle
+        Radiation sub-cycle length, used to suggest a shorter window that
+        still contains a whole number of cycles.
+
+    """
+    probes = probe_labels()
+    seen = {label: n for label, n in steps_seen.items() if label in probes}
+    missing = sorted(probes - seen.keys())
+    if missing:
+        raise SystemExit(
+            f"attribution recovered no {', '.join(missing)} probe(s) from the "
+            f"trace ({n_kernels} kernels captured; recovered probes {seen}) -- "
+            "the HLO metadata join is broken, so every number in the report "
+            "would be misattributed. Check that the XLA dump and the trace "
+            "come from the same run and that the op_name metadata still "
+            "carries the jcm: scopes."
+        )
+    worst = min(seen.values())
+    if worst < steps:
+        fits = max(cycle, worst // cycle * cycle)
+        raise SystemExit(
+            f"the trace covers only {worst} of the {steps} steps run "
+            f"({n_kernels} kernels captured; per-probe {seen}), so the "
+            "profiler's event buffer overflowed and every number would be an "
+            f"undercount. Profile a shorter window: --steps {fits} or fewer."
+        )
+
+
 def _config_summary(cfg, overrides: list[str]) -> str:
     """One-line description of what was profiled, for the report header."""
     groups = [o for o in overrides
@@ -785,37 +857,10 @@ def main(argv=None) -> int:
 
     kernels = load_trace_kernels(trace_dir)
     att = attribute(kernels, hlo_index, members)
-
-    # The profiler's event buffer holds ~1e6 events and a JAM step emits
-    # ~19,000 kernels, so a long enough window silently stops recording partway
-    # instead of erroring -- a 120-step window captured only 20 steps and
-    # reported a 4x undercount that looked entirely plausible.
-    #
-    # The dynamics and bridge scopes sit directly in Model's step function,
-    # outside every loop and conditional, so each of their instructions runs
-    # exactly once per step BY CONSTRUCTION. That makes them the trace's
-    # completeness check. (A physics term is no good for this: internal scans
-    # and vmaps put its per-instruction counts all over the place.)
-    from jcm import profiling
-
-    probes = {profiling.DYNAMICS, profiling.BRIDGE_TO_PHYSICS,
-              profiling.BRIDGE_TO_DYNAMICS}
-    # EVERY probe must be complete, not just the best of them. The probes are
-    # ordered within a step (bridge_to_physics runs before dynamics), so a
-    # buffer that fills partway through the final step leaves the earlier probe
-    # at the full count while a later one is short; taking the max would accept
-    # that trace and then divide short totals by the full step count.
-    cycle = result.get("radiation_subcycle_steps", 1)
-    seen = {label: n for label, n in att.steps_seen.items() if label in probes}
-    if seen and min(seen.values()) < result["steps"]:
-        worst = min(seen.values())
-        fits = max(cycle, worst // cycle * cycle)
-        raise SystemExit(
-            f"the trace covers only {worst} of the {result['steps']} steps run "
-            f"({len(kernels)} kernels captured; per-probe {seen}), so the "
-            "profiler's event buffer overflowed and every number would be an "
-            f"undercount. Profile a shorter window: --steps {fits} or fewer."
-        )
+    check_trace_completeness(
+        att.steps_seen, result["steps"], len(kernels),
+        cycle=result.get("radiation_subcycle_steps", 1),
+    )
 
     result.update({
         "preset": args.preset,

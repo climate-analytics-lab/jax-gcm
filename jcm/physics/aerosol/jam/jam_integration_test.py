@@ -32,8 +32,10 @@ class JamIntegrationTest(unittest.TestCase):
                 aerosol_module="jam", cloud_scheme="2m", **physics_kwargs
             ),
         )
-        # ~1.5 h (3 steps) — enough to exercise tracer transport + coupling.
-        return model, model.run(save_interval=0.0625, total_time=0.0625)
+        # ~3 h (6 steps): on a cold start with no seeded aerosol the
+        # emission -> transport -> core -> activation chain needs that long to
+        # produce anything, so 3 steps would assert on the spin-up rate.
+        return model, model.run(save_interval=0.125, total_time=0.125)
 
     def test_runs_finite_with_ham_aerosol(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
@@ -62,20 +64,33 @@ class JamIntegrationTest(unittest.TestCase):
 
         # The docstring's actual claim — activation feeds the 2M scheme —
         # must hold: the activated-CDNC diagnostic the 2M term consumes is
-        # present and positive somewhere (ARG or its SPA floor), and the
-        # 2M droplet-number tracer has been populated in response. A run
-        # where the coupling silently no-ops passes every finiteness check
-        # above but fails here (measured on a healthy cold-start run:
-        # activated_cdnc max ~66, qnc max ~3e-5 after 3 steps).
+        # present and positive somewhere (ARG, or the ECHAM-HAM cdnc_min floor
+        # the JAM path falls back to where ARG is empty, #640), and the 2M
+        # droplet-number tracer has been populated in response. A run where the
+        # coupling silently no-ops passes every finiteness check above but
+        # fails here (measured on a healthy cold-start run: activated_cdnc max
+        # ~66, qnc max ~3e-5 after 3 steps).
         physics = predictions.physics
+        # The emission wind fell back to the model level on step 1 only (#723):
+        # by the end of a multi-step run no column is still flagged.
+        from jcm.physics.aerosol.jam.emissions.surface_wind import (
+            MODEL_LEVEL_WIND_KEY,
+        )
+        self.assertEqual(
+            float(np.max(np.asarray(physics[MODEL_LEVEL_WIND_KEY]))), 0.0,
+            "emission wind still falling back to the lowest model level",
+        )
         self.assertIn("activated_cdnc", physics)
         self.assertGreater(
             float(np.max(np.asarray(physics["activated_cdnc"]))), 0.0,
-            "activation never produced droplets (ARG + SPA floor both zero)",
+            "activation never produced droplets (ARG + cdnc_min floor zero)",
         )
-        self.assertGreater(
-            float(np.max(np.asarray(physics["aerosol"].Nccn))), 0.0,
-            "aerosol term produced no CCN",
+        # The shared aerosol slot is present and finite. MACv2-SP was removed
+        # from the JAM path (#640), so JAM carries no prescribed-plume Nccn —
+        # it stays zero (the cdnc_min fallback, not Nccn, drives activation).
+        self.assertIn("aerosol", physics)
+        self.assertTrue(
+            bool(np.all(np.isfinite(np.asarray(physics["aerosol"].Nccn))))
         )
         self.assertGreater(
             float(np.max(np.asarray(tracers["qnc"]))), 0.0,

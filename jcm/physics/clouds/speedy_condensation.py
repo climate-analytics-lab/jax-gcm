@@ -1,6 +1,4 @@
-"""Date: 2/11/2024
-Parametrization of large-scale condensation.
-"""
+"""Parametrization of large-scale condensation."""
 from jax import jit
 import jax.numpy as jnp
 from jcm.terrain import TerrainData

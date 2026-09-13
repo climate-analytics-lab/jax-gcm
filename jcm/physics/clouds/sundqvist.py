@@ -41,10 +41,6 @@ class CloudParameters:
     inversion_z_max: float   # Highest altitude for inversion search (m)
     inversion_z_min: float   # Lowest altitude for inversion search (m)
 
-    # Cloud droplet parameters
-    ceffmin: float       # Minimum cloud droplet radius (microns)
-    ceffmax: float       # Maximum cloud droplet radius (microns)
-
     # Numerical parameters
     epsilon: float       # Small number for numerical stability
 
@@ -74,8 +70,7 @@ class CloudParameters:
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
                  csatsc=0.7, cinv=0.25,
                  inversion_z_max=2000.0, inversion_z_min=500.0,
-                 ceffmin=10.0,
-                 ceffmax=150.0, epsilon=1.0e-12,
+                 epsilon=1.0e-12,
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
                  cloud_top_pressure_pa=1000.0,
                  smooth_b0=0.02, smooth_inv_score=5.0e-4,
@@ -99,8 +94,6 @@ class CloudParameters:
             cinv=jnp.array(cinv),
             inversion_z_max=jnp.array(inversion_z_max),
             inversion_z_min=jnp.array(inversion_z_min),
-            ceffmin=jnp.array(ceffmin),
-            ceffmax=jnp.array(ceffmax),
             epsilon=jnp.array(epsilon),
             t_ice=jnp.array(t_ice),
             t_mix_min=jnp.array(t_mix_min),
@@ -422,10 +415,8 @@ def calculate_cloud_fraction(
         1.0,                     # b0 >= 1 → cc = 1
     )
 
-    # Apply minimum cloud fraction threshold (matches ECHAM convention).
-    # (The former cf < 0.01 -> 0 truncation claimed an "ECHAM convention"
-    # that does not exist in mo_cover and added a gradient discontinuity;
-    # removed - review finding 2.28.)
+    # No minimum cloud-fraction truncation: a cf < 0.01 → 0 cutoff is not an
+    # ECHAM mo_cover convention and would add a gradient discontinuity.
 
     # Stratospheric cutoff (ECHAM ``jks``, mo_cover.f90:142-144): no cloud
     # above ``cloud_top_pressure_pa``. The RH-closure otherwise fills the
@@ -514,8 +505,7 @@ def condensation_evaporation(
     We act on the WHOLE grid (no cloud-fraction weighting). ECHAM
     weights pass 1 by ``zclcaux`` then runs a grid-box-wide pass-2
     cleanup; the net effect for our microphysics chain is closer to
-    the unweighted single-pass form (verified by the harness in
-    ``/tmp/sundqvist_audit/``). One pass is sufficient because the
+    the unweighted single-pass form. One pass is sufficient because the
     moist-static-energy budget converges at the per-step scale we use
     (verified by ``test_no_oversat_after_step``).
 

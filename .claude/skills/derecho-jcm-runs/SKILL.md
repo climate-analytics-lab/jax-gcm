@@ -41,7 +41,8 @@ Common flags (see `python scripts/mkjob.py --help` for all):
 | `--physics` | `echam-jam` | `echam-rrtmgp-2m` for no aerosol |
 | `--radiation` | (config default) | `grey` for a cheap-radiation A/B |
 | `--aquaplanet` | off | skips terrain/forcing files |
-| `--resume` | off | reuse the run dir's checkpoint |
+| `--resume` | off | reuse the run dir's checkpoint (without it the job deletes it) |
+| `--fresh` | off | refuse to generate if the run dir already has a checkpoint |
 | `--data` | `mirror` | HF bundles, prefetched at generation; `local` = legacy prepared files |
 | `--era` | `pd` | `pd` (2005–2014) or `pi` (1850s) mirror climatologies |
 | `--emissions` | (local mode) | legacy emissions file for `--data local` |
@@ -74,19 +75,18 @@ not under the default run config.
 
 ```bash
 source ~/.venvs/jaxgcm/bin/activate
-export PYTHONPATH=~/dinosaur-sl:$REPO     # SL dinosaur; jcm worktree wins over the venv's editable install
+export PYTHONPATH=$REPO                   # jcm worktree wins over the venv's editable install
 export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0              # f32 MAM4 core (forward-only); f64 default is much slower
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93   # 0.85 when ngpus>1 — 0.93 starves CUDA command buffers
 ```
 
-Overridable site paths: `JCM_REPO`, `JCM_VENV`, `JCM_DINOSAUR`, `JAM_INPUTS`,
+Overridable site paths: `JCM_REPO`, `JCM_VENV`, `JAM_INPUTS`,
 `JCM_EMISSIONS`, `PBS_ACCOUNT`, `SCRATCH`.
 
-Transport is always semi-Lagrangian (the Eulerian path was removed) and
-requires a dinosaur carrying PR #135 (`JCM_DINOSAUR`, `~/dinosaur-sl` by
-default). Without it the dycore raises a clear install-instruction error;
-there is no fallback.
+Transport is always semi-Lagrangian (the Eulerian path was removed); the
+venv's dinosaur must be `>= 1.5.0` (`requirements.txt`). Without it the dycore
+raises a clear install-instruction error; there is no fallback.
 
 ## 4. Input data
 

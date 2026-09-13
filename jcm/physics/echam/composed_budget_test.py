@@ -26,17 +26,33 @@ import jcm.constants as c
 @pytest.mark.slow
 class TestComposedColumnWaterClosure(unittest.TestCase):
     def test_full_echam_step_water_budget(self):
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.rce import rce_column, rce_initial_state, run_rce
 
+        # UNIFORM sigma grid, deliberately: the Tiedtke cudtdq ledger closes
+        # against its own dual-grid (centre-to-centre) layer masses, not the
+        # model's interface masses — the documented staggering deviation
+        # tracked in #530 (see flux_tendencies.py "NOTE on staggering"). On a
+        # stretched hybrid grid that deviation projects onto this budget as a
+        # spurious residual (measured 25 % of E on the full L47 grid in a
+        # weakly-precipitating regime, closing to 1e-12 under the scheme's own
+        # mass), swamping the genuine leaks this test exists to catch (water
+        # created at the precip rate, clips destroying mass, an unscaled cap
+        # ledger). On an equidistant grid the two mass measures coincide, so
+        # the closure below measures the composed ledger and nothing else.
+        # This test previously ran on the truncated L40 hybrid table, whose
+        # removal (#680) surfaced the projection.
         nlev = 40
+        vertical = SigmaCoordinates.equidistant(nlev)
         physics = echam_physics(
             radiation_scheme="grey",
             radiation=RadiationParameters.default(solar_constant=420.0),
         )
         scm = rce_column(
-            sst=300.0, relative_humidity=0.7, lat_deg=0.0, nlev=nlev,
+            sst=300.0, relative_humidity=0.7, lat_deg=0.0, vertical=vertical,
             dt_seconds=900.0, physics=physics, interactive_humidity=True,
         )
         ic = rce_initial_state(
@@ -56,9 +72,7 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         # before a per-term ledger showed every term closing to round-off
         # and the composed residual collapsing 55x under the correct mass.
         ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
-        a = np.asarray(scm.vertical.a_boundaries)
-        b = np.asarray(scm.vertical.b_boundaries)
-        mass = np.diff(a + b * ps) / c.grav
+        mass = np.diff(np.asarray(scm.vertical.boundaries) * ps) / c.grav
 
         t = preds.tendencies
         nsteps = np.asarray(t.specific_humidity).shape[0]

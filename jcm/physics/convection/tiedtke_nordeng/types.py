@@ -15,10 +15,7 @@ import tree_math
 @tree_math.struct
 class ConvectionParameters:
     """Configuration parameters for Tiedtke-Nordeng convection scheme"""
-    
-    # Time stepping
-    dt_conv: float           # Convection timestep (s)
-    
+
     # Entrainment/detrainment parameters
     entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
     entrscv: float           # Entrainment rate for shallow convection (m⁻¹) 
@@ -46,16 +43,6 @@ class ConvectionParameters:
 
     # Evaporation parameters
     cevapcu: float           # Coefficient for rain evaporation
-    
-    # Numerical parameters
-    epsilon: float           # Small number for numerical stability
-    
-    # Convection type thresholds
-    rlcrit: float            # Critical relative humidity for shallow convection
-    rhcrit: float            # Critical relative humidity threshold
-    
-    # Momentum transport
-    cmfctop: float           # Mass flux fraction at cloud top
 
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
@@ -125,11 +112,10 @@ class ConvectionParameters:
                              # cannot supply omega — see ``TiedtkeConvection``.
 
     @classmethod
-    def default(cls, dt_conv=3600.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4, # FIXME: validate dt_conv
+    def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
-                 cevapcu=2.0e-5, epsilon=1.0e-12, rlcrit=8.0e-4, rhcrit=0.9,
-                 cmfctop=0.2, cmfdeps=0.3, entrdd=2.0e-4,
+                 cevapcu=2.0e-5, cmfdeps=0.3, entrdd=2.0e-4,
                  trigger_cape=100.0, smooth_trigger_j=25.0,
                  cu_dqcv_width=2.0e-7, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
@@ -141,7 +127,6 @@ class ConvectionParameters:
                  lmfdudv=True, cu_lmfmid=True) -> 'ConvectionParameters':
         """Return default convection parameters"""
         return cls(
-            dt_conv=jnp.array(dt_conv),
             entrpen=jnp.array(entrpen),
             entrscv=jnp.array(entrscv),
             entrmid=jnp.array(entrmid),
@@ -152,10 +137,6 @@ class ConvectionParameters:
             cu_dnoprc_ocean=jnp.array(cu_dnoprc_ocean),
             cu_dnoprc_land=jnp.array(cu_dnoprc_land),
             cevapcu=jnp.array(cevapcu),
-            epsilon=jnp.array(epsilon),
-            rlcrit=jnp.array(rlcrit),
-            rhcrit=jnp.array(rhcrit),
-            cmfctop=jnp.array(cmfctop),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
             trigger_cape=jnp.array(trigger_cape),
@@ -223,6 +204,10 @@ class ConvectionTendencies(NamedTuple):
     
     # Surface fluxes
     precip_conv: jnp.ndarray # Convective precipitation (kg/m²/s)
+    # Total convective precip flux entering each layer from above
+    # [kg/m²/s] (nlev,) — the local carrier flux for below-cloud
+    # (impaction) aerosol washout.
+    precip_flux: jnp.ndarray
     
     # Fixed tracer tendencies (qc, qi only)
     dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
@@ -261,6 +246,8 @@ class ConvectionData:
                                      # by the Sundqvist stratocumulus guard
                                      # (ECHAM gates on ktype==0) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
+    precip_flux: jnp.ndarray         # Convective precip flux entering each
+                                     # layer from above [kg/m²/s] (nlev, ncols)
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     precip_formation: jnp.ndarray    # Per-layer updraft precip generation
                                      # [kg/m²/s] (nlev, ncols)
@@ -289,6 +276,7 @@ class ConvectionData:
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
+            precip_flux=jnp.zeros((nlev,) + nodal_shape),
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
@@ -327,6 +315,9 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.precip_conv": {
         "standard_name": "convective_precipitation_flux",
         "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},
+    "convection.precip_flux": {
+        "units": "kg m-2 s-1",
+        "long_name": "convective precipitation flux entering each layer"},
     "convection.qc_conv": {
         "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
     "convection.precip_formation": {

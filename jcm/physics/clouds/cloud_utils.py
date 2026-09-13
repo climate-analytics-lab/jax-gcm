@@ -1,7 +1,4 @@
-"""Contains utility routines and constants related to the 2-m cloud microphysics scheme. Based on mo_cloud_utils from ECHAM6/ICON.
-
-Date: 2025-12-15
-"""
+"""Utility routines and constants for the 2-m cloud microphysics scheme (based on mo_cloud_utils from ECHAM6/ICON)."""
 
 import jax.numpy as jnp
 from math import pi

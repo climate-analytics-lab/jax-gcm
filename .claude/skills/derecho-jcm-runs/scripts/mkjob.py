@@ -23,7 +23,6 @@ USER = os.environ.get("USER", "")
 SCRATCH = os.environ.get("SCRATCH", f"/glade/derecho/scratch/{USER}")
 DEFAULT_REPO = os.environ.get("JCM_REPO", f"{HOME}/jax-gcm-pyses")
 DEFAULT_VENV = os.environ.get("JCM_VENV", f"{HOME}/.venvs/jaxgcm")
-DEFAULT_DINOSAUR = os.environ.get("JCM_DINOSAUR", f"{HOME}/dinosaur-sl")
 DEFAULT_ACCOUNT = os.environ.get("PBS_ACCOUNT", "UCSD0085")
 JAM_INPUTS = os.environ.get("JAM_INPUTS", f"{SCRATCH}/jam_inputs")
 EMISSIONS = os.environ.get(
@@ -146,7 +145,7 @@ def check_compose(a, overrides) -> None:
              if not o.startswith(("run.output", "hydra.run.dir", "+run.checkpoint"))],
            "--cfg", "job"]
     env = {**os.environ, "JAX_PLATFORMS": "cpu",
-           "PYTHONPATH": f"{a.dinosaur}:{a.repo}"}
+           "PYTHONPATH": a.repo}
     r = subprocess.run(cmd, cwd=a.repo, env=env, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("COMPOSE FAILED:\n" + (r.stderr or r.stdout)[-2000:])
@@ -159,7 +158,35 @@ def check_compose(a, overrides) -> None:
           f" spectral_truncation={trunc})\"", file=sys.stderr)
 
 
-def main() -> None:
+def check_rundir(rundir: str, resume: bool, fresh: bool) -> None:
+    """Say out loud what an existing checkpoint in ``rundir`` will cause.
+
+    A run dir is named only by ``--name``, so reusing a name silently picks up
+    the previous run: with --resume the job continues that integration, and
+    without it the script deletes the checkpoint and starts over. Both are
+    intended, neither is obvious at generation time (cf. #701).
+    """
+    ckpt = os.path.join(rundir, "checkpoint.msgpack")
+    if not os.path.exists(ckpt):
+        return
+    if fresh:
+        sys.exit(f"{ckpt} already exists and --fresh was passed: refusing to "
+                 "generate a job that would resume or delete it. Pick a new "
+                 "--name, or drop --fresh (with --resume to continue that "
+                 "run, without it to overwrite it).")
+    what = ("RESUME FROM it -- this job continues that integration, not a new "
+            "one" if resume else
+            "DELETE it at startup and integrate from scratch")
+    print("\n".join([
+        "!" * 72,
+        f"!! {ckpt}",
+        f"!! already exists. The generated job will {what}.",
+        "!! Pass a new --name for an independent run, or --fresh to refuse.",
+        "!" * 72,
+    ]), file=sys.stderr)
+
+
+def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--name", required=True)
@@ -192,7 +219,11 @@ def main() -> None:
     p.add_argument("--emissions", default=EMISSIONS,
                    help="anthropogenic emissions netCDF")
     p.add_argument("--resume", action="store_true",
-                   help="keep an existing checkpoint in the run dir")
+                   help="keep an existing checkpoint in the run dir, so the "
+                        "job continues that integration")
+    p.add_argument("--fresh", action="store_true",
+                   help="refuse to generate a job when the run dir already "
+                        "holds a checkpoint (nothing resumed, nothing deleted)")
     p.add_argument("--bench", action="store_true",
                    help="variant matrix (reference + grey) with settled rates")
     p.add_argument("--bench-variant", action="append", default=[],
@@ -200,14 +231,14 @@ def main() -> None:
     p.add_argument("--extra", default="", help="raw Hydra overrides")
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--venv", default=DEFAULT_VENV)
-    p.add_argument("--dinosaur", default=DEFAULT_DINOSAUR)
     p.add_argument("--check", action="store_true",
                    help="compose the config before emitting the script")
-    a = p.parse_args()
+    a = p.parse_args(argv)
 
     a.mem = a.mem or ("200GB" if a.gpus > 1 else "160GB")
     frac = 0.85 if a.gpus > 1 else 0.93
     rundir = f"{SCRATCH}/jam_runs/{a.name}"
+    check_rundir(rundir, a.resume, a.fresh)
     if not a.aquaplanet and a.data == "mirror":
         a.bundle_paths = fetch_bundles(a)
     elif a.physics.endswith("jam") and not a.no_emissions:
@@ -235,7 +266,7 @@ RUNDIR={rundir}
 mkdir -p "$RUNDIR"
 source {a.venv}/bin/activate
 cd "$REPO"
-export PYTHONPATH={a.dinosaur}:$REPO
+export PYTHONPATH=$REPO
 export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION={frac}

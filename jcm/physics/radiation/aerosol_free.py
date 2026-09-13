@@ -111,9 +111,8 @@ def update_effect_fraction(allsky, noa, prev_frac):
 
     Pure arithmetic, kept out of the RRTMGP compute path so it can be
     tested against dark and near-terminator inputs directly — driving those
-    conditions through a full solve requires controlling solar geometry,
-    which is exactly how an earlier version of this logic shipped with
-    three latent bugs.
+    conditions through a full solve would require controlling solar geometry,
+    which is where the dark/near-terminator edge cases are easy to get wrong.
 
     Returns ``prev_frac`` wherever ``allsky`` is too small for the ratio to
     mean anything, so a companion that lands on a dark column leaves the

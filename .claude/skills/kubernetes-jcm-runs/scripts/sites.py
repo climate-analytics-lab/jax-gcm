@@ -58,8 +58,9 @@ NAUTILUS = {
     # the pod rather than on a workstation: gcsfs pulls a newer fsspec, and
     # upgrading fsspec in a shared conda env risks the ``hf://`` mirror path
     # huggingface_hub resolves. A pod env is disposable; a shared one is not.
-    "extra_pip": ["diffrax>=0.7", "matplotlib", "huggingface_hub",
-                  "gcsfs", "zarr"],
+    # dinosaur: the image may carry a release older than jcm's >= 1.5.0 pin.
+    "extra_pip": ["dinosaur>=1.5.0", "diffrax>=0.7", "matplotlib",
+                  "huggingface_hub", "gcsfs", "zarr"],
 }
 
 # A new site must supply every key above. The ones most likely to differ:

@@ -88,7 +88,13 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "clouds.precip_snow": ("prls", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "convection.precip_conv": ("prc", "kg m-2 s-1", "Surface", 1.0, 0.0),
     # --- aerosol optics ---
-    "aerosol.aod_total": ("od550aer", "1", "Column", 1.0, 0.0),
+    # Column AOD at ~550 nm: MACv2-SP publishes it as ``macsp.od550aer``; JAM
+    # (without the aerocom_optics Mie pass) as the band-centre-approx
+    # ``jam_optics.aod_550`` (#640). Either maps to od550aer; the exact-
+    # wavelength ``od550aer`` diagnostic below supersedes both when present
+    # (later entries win in ``convert``).
+    "macsp.od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
+    "jam_optics.aod_550": ("od550aer", "1", "Column", 1.0, 0.0),
     # --- CFMIP satellite simulators (jax-gcm#581) ---
     # CALIPSO and MODIS cloud products. jcm already emits these under their
     # CMOR names, so the mapping is mostly identity — but without an entry
@@ -121,7 +127,7 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # --- spectral aerosol optics (jax-gcm#584) ---
     # These come from the diagnostic Mie pass at the OBSERVATION
     # wavelengths, so ``od550aer`` here is at exactly 550 nm. It is listed
-    # after ``aerosol.aod_total`` (the nearest radiation band centre)
+    # after ``macsp.od550aer`` / ``jam_optics.aod_550`` (band-centre AODs)
     # deliberately: later entries win, so the exact-wavelength field
     # supersedes the band-centre one when a run has both.
     "od550aer": ("od550aer", "1", "Column", 1.0, 0.0),
@@ -134,7 +140,11 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "ang4487aer": ("ang4487aer", "1", "Column", 1.0, 0.0),
     "aerindex": ("aerindex", "1", "Column", 1.0, 0.0),
     "ec355aer": ("ec355aer", "m-1", "ModelLevel", 1.0, 0.0),
-    "aerosol.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
+    # Column Angstrom exponent: MACv2-SP's plume value or JAM's 550/865 band
+    # ratio (#640). ``ang550865aer`` from the aerocom_optics Mie pass, when
+    # present, is the higher-fidelity field.
+    "macsp.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
+    "jam_optics.angstrom": ("angstrm", "1", "Column", 1.0, 0.0),
     # --- microphysical process rates (jax-gcm#585), column-integrated ---
     "autoconv": ("autoconv", "kg m-2 s-1", "Column", 1.0, 0.0),
     "accretn": ("accretn", "kg m-2 s-1", "Column", 1.0, 0.0),

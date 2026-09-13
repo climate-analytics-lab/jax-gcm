@@ -3,7 +3,6 @@
 This module provides the main entry point for radiation calculations,
 coordinating shortwave and longwave radiation computations.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
@@ -24,7 +23,11 @@ from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
 from ..cloud_optics import cloud_optics
-from ..mcica import column_total_cover, in_cloud_path
+from ..mcica import (
+    column_total_cover,
+    effective_cloud_fraction,
+    in_cloud_path,
+)
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
 
@@ -235,8 +238,8 @@ def radiation_scheme(
         surface_albedo_nir: Surface near-infrared albedo
         surface_emissivity: Surface emissivity
         solar: Precomputed solar/orbital geometry — see jcm.forcing.SolarGeometry.
-            Replaces the legacy `date` argument; the radiation scheme no longer
-            needs to know what calendar date it is.
+            Carries all the geometry the scheme needs, so it never has to know
+            the calendar date.
         latitude: Latitude (degrees)
         longitude: Longitude (degrees)
         parameters: Radiation parameters
@@ -385,9 +388,11 @@ def radiation_scheme(
     # gpoint count makes per-gpoint sub-columns effectively free.
     in_cloud_lwp = in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
     in_cloud_ipath = in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
+        eps=parameters.cld_frac_min,
     )
 
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
@@ -494,9 +499,15 @@ def radiation_scheme(
     )
 
     # Column-total cloud cover under the configured overlap rule, used
-    # only as the scalar weight between the clear and cloudy beams.
+    # only as the scalar weight between the clear and cloudy beams. Threshold
+    # the fraction on the SAME clear-cell criterion ``in_cloud_path`` used to
+    # zero the in-cloud condensate above (cf <= 2*cld_frac_min): a cell whose
+    # condensate was zeroed is optically empty and must not weight the cloudy
+    # beam (see ``effective_cloud_fraction``).
     c_col = column_total_cover(
-        rad_state.cloud_fraction, parameters.cloud_overlap,
+        effective_cloud_fraction(
+            rad_state.cloud_fraction, eps=parameters.cld_frac_min),
+        parameters.cloud_overlap,
     )
     flux_up_lw = (1.0 - c_col) * flux_up_lw_clear + c_col * flux_up_lw_cloudy
     flux_down_lw = (

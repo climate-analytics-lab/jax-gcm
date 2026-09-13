@@ -90,6 +90,51 @@ class JamOpticsTermTest(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(a.aod_lw_per_band[:, 0]), 0.0)
         self.assertGreater(float(jnp.sum(a.aod_sw_per_band[:, 1:])), 0.0)
 
+    def test_writes_grey_profile_fields(self):
+        """The 550 nm profile fields grey radiation reads are populated (#640).
+
+        With MACv2-SP gone from the JAM path, ``JamOpticsTerm`` is the only
+        writer of ``aod_profile``/``ssa_profile``/``asy_profile``/``angstrom``
+        — the fields the grey two-stream scheme band-scales for its direct
+        effect. They must equal the SW band nearest 550 nm (band-centre
+        approximation) and carry a finite Angstrom exponent.
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        term = self._term(band)
+        _, out = term(state, diagnostics, None, None)
+        a = out["aerosol"]
+        idx = term._cache.aod_band_idx
+        np.testing.assert_allclose(
+            np.asarray(a.aod_profile), np.asarray(a.aod_sw_per_band[idx]),
+            rtol=0, atol=0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(a.ssa_profile), np.asarray(a.ssa_sw_per_band[idx]))
+        np.testing.assert_allclose(
+            np.asarray(a.asy_profile), np.asarray(a.asy_sw_per_band[idx]))
+        # A real burden was set up, so the profile carries optical depth.
+        self.assertGreater(float(jnp.sum(a.aod_profile)), 0.0)
+        # Angstrom is finite everywhere (band-ratio where AOD exists, the 1.5
+        # fine-mode default elsewhere); ang_band differs from the 550 band so
+        # the ratio path is exercised.
+        self.assertNotEqual(term._cache.ang_band_idx, term._cache.aod_band_idx)
+        self.assertTrue(bool(np.all(np.isfinite(np.asarray(a.angstrom)))))
+
+    def test_single_broadband_sw_uses_default_angstrom(self):
+        """With a single broadband SW band (grey's own config) there is no
+        550/865 ratio, so Angstrom falls back to the fine-mode 1.5 default
+        while the profile still comes from the sole SW band (#640).
+        """
+        state, diagnostics, band, n_sw, n_lw = _setup(n_sw=1)
+        term = self._term(band)
+        self.assertEqual(term._cache.ang_band_idx, term._cache.aod_band_idx)
+        _, out = term(state, diagnostics, None, None)
+        a = out["aerosol"]
+        np.testing.assert_array_equal(
+            np.asarray(a.angstrom), np.full_like(np.asarray(a.angstrom), 1.5))
+        np.testing.assert_allclose(
+            np.asarray(a.aod_profile), np.asarray(a.aod_sw_per_band[0]))
+
     def test_radiation_gate_replays_cache_between_compute_steps(self):
         """With the gate configured, non-radiation steps must reuse the
         cached per-band fields (the radiation term can't see fresh optics
@@ -108,17 +153,17 @@ class JamOpticsTermTest(unittest.TestCase):
 
         base = {**diagnostics, "_dt_seconds": jnp.asarray(900.0)}
         # Step 0 (compute): no cache in the carry yet -> unconditional
-        # compute that seeds the ``_jam_band_optics`` slot.
+        # compute that seeds the ``_jam_optics`` slot.
         _, d0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))},
                      None, None)
-        self.assertIn("_jam_band_optics", d0)
+        self.assertIn("_jam_optics", d0)
 
         # Step 1 (cached): perturb the aerosol state; output must equal the
         # step-0 fields, not fresh ones.
         aer2 = d0["_jam_state"].copy(number=d0["_jam_state"].number * 3.0)
         d1_in = {**base, "radiation": _Rad(jnp.int32(1)),
                  "_jam_state": aer2,
-                 "_jam_band_optics": d0["_jam_band_optics"]}
+                 "_jam_optics": d0["_jam_optics"]}
         _, d1 = term(state, d1_in, None, None)
         np.testing.assert_array_equal(
             np.asarray(d1["aerosol"].aod_sw_per_band),
@@ -184,7 +229,7 @@ class JamOpticsTermTest(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
             # Asymmetry is physically [-1, 1] (negative g = back-scattering).
             self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
-        self.assertTrue(np.all(np.isfinite(np.asarray(diag["aerosol_optical_depth"]))))
+        self.assertTrue(np.all(np.isfinite(np.asarray(diag["_jam_optics"]["aod_550"]))))
 
     def test_empty_levels_carry_exactly_zero_tau(self):
         """POSITIVE-side ringing: tiny +ve number with a garbage wet radius
@@ -262,7 +307,7 @@ class JamOpticsTermTest(unittest.TestCase):
         }
         _, diag = term(state, diagnostics, None, None)
 
-        aod = diag["aerosol_optical_depth"]
+        aod = diag["_jam_optics"]["aod_550"]
         # Column field, one value per column; finite and physical.
         self.assertEqual(aod.shape, (ncols,))
         self.assertTrue(np.all(np.isfinite(np.asarray(aod))))
@@ -287,7 +332,7 @@ class JamOpticsTermTest(unittest.TestCase):
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
         _, diag = term(state, diagnostics, None, None)
-        aod_lognormal = float(jnp.max(diag["aerosol_optical_depth"]))
+        aod_lognormal = float(jnp.max(diag["_jam_optics"]["aod_550"]))
 
         # Monodisperse expectation: same LUT, same geometry, single radius.
         lut = default_mie_lut()
@@ -483,7 +528,7 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         _, out0 = term(state, {**base, "radiation": _Rad(jnp.int32(0))}, None, None)
         # A replay step must go through lax.cond with the diagnostics present.
         _, out1 = term(state, {**base, "radiation": _Rad(jnp.int32(3)),
-                               "_jam_band_optics": out0["_jam_band_optics"]},
+                               "_jam_optics": out0["_jam_optics"]},
                        None, None)
         for k in term.optics_diagnostic_keys():
             np.testing.assert_allclose(np.asarray(out1[k]), np.asarray(out0[k]),

@@ -53,6 +53,49 @@ class VDiffParameters:
 
     SCHEME_BUSINGER_DYER = 0
     SCHEME_ECHAM_LOUIS = 1
+    # Documented string aliases → canonical int flag. Kept as a class
+    # attribute (no annotation, so not a dataclass field) so both the
+    # ``default()`` door and the Hydra-override door (``runners._build_term``,
+    # which reconstructs the class directly) map through the SAME table.
+    _SCHEME_ALIASES = {
+        "businger_dyer": SCHEME_BUSINGER_DYER,
+        "echam_louis": SCHEME_ECHAM_LOUIS,
+    }
+
+    @classmethod
+    def _normalize_scheme(cls, scheme):
+        """Map a string alias to the canonical int flag; pass ints through.
+
+        A traced leaf (under a jit trace, when the struct is unflattened) is
+        not a ``str`` and passes through unchanged.
+        """
+        if isinstance(scheme, str):
+            try:
+                return cls._SCHEME_ALIASES[scheme]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown surface_layer_scheme {scheme!r}; expected one of "
+                    f"{sorted(cls._SCHEME_ALIASES)} or the int constants "
+                    f"{cls.SCHEME_BUSINGER_DYER} (Businger-Dyer) / "
+                    f"{cls.SCHEME_ECHAM_LOUIS} (ECHAM-Louis)."
+                )
+        return scheme
+
+    def __post_init__(self):
+        """Normalize the scheme selector to its canonical int at construction.
+
+        The STORED field is canonical regardless of which door built the
+        instance — ``default()`` OR ``_build_term``'s direct
+        ``__class__(**...)`` reconstruction of a Hydra override. The
+        ``lax.cond`` dispatch in ``turbulence_coefficients`` then only ever
+        compares an int, so the documented ``"businger_dyer"`` /
+        ``"echam_louis"`` string aliases select the same branch as the int
+        constants (companion fix to echam_1m's autoconversion_scheme, #674).
+        """
+        object.__setattr__(
+            self, "surface_layer_scheme",
+            self._normalize_scheme(self.surface_layer_scheme),
+        )
 
     @classmethod
     def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
@@ -65,15 +108,10 @@ class VDiffParameters:
 
         ``surface_layer_scheme`` accepts either the int constant
         (``SCHEME_BUSINGER_DYER`` / ``SCHEME_ECHAM_LOUIS``) or the
-        string aliases ``"businger_dyer"`` / ``"echam_louis"``.
+        string aliases ``"businger_dyer"`` / ``"echam_louis"`` —
+        ``__post_init__`` normalizes either form to the canonical int on
+        the constructed instance.
         """
-        if isinstance(surface_layer_scheme, str):
-            scheme_map = {
-                "businger_dyer": cls.SCHEME_BUSINGER_DYER,
-                "echam_louis":   cls.SCHEME_ECHAM_LOUIS,
-            }
-            surface_layer_scheme = scheme_map[surface_layer_scheme]
-
         return cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
@@ -86,7 +124,7 @@ class VDiffParameters:
             iice=iice,
             ilnd=ilnd,
             itop=itop,
-            surface_layer_scheme=int(surface_layer_scheme),
+            surface_layer_scheme=surface_layer_scheme,
             surface_layer_fsl=jnp.array(surface_layer_fsl),
             louis_cb=jnp.array(louis_cb),
             louis_cc=jnp.array(louis_cc),
@@ -209,6 +247,10 @@ class VDiffDiagnostics(NamedTuple):
     friction_velocity: jnp.ndarray        # u* [m/s] (ncol,)
     convective_velocity: jnp.ndarray      # w* [m/s] (ncol,)
 
+    # Grid-mean 10 m wind speed, the reference height every surface-flux
+    # parameterization (sea salt, DMS) is calibrated to.
+    wind_10m: jnp.ndarray                 # |U(10 m)| [m/s] (ncol,)
+
     # Richardson number
     richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
 
@@ -313,6 +355,10 @@ class VerticalDiffusionData:
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
 
+    # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
+    # height the surface-flux emission schemes are calibrated to.
+    wind_10m: jnp.ndarray            # |U(10 m)| [m/s] (ncols,)
+
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
     # column solve this step (diagnosed from the implicit solution, so they
     # equal the column-integrated vdiff tendencies exactly — the ECHAM
@@ -340,6 +386,7 @@ class VerticalDiffusionData:
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
+            wind_10m=jnp.zeros(nodal_shape),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
@@ -361,6 +408,7 @@ class VerticalDiffusionData:
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
+            'wind_10m': self.wind_10m,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
             'surface_latent_heat': self.surface_latent_heat,

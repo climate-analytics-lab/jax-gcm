@@ -421,6 +421,63 @@ class Macv2SpAerosol(PhysicsTerm):
     category: ClassVar[str] = "aerosol"
     requires: ClassVar[tuple[str, ...]] = ("height_full", "layer_thickness")
     provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+    # Publish the MACv2-SP diagnostics under an explicit ``macsp.*`` namespace
+    # (#640) with the CF/AeroCom name where one exists (``od550aer`` for the
+    # total column AOD). The shared ``aerosol`` struct that radiation and the
+    # microphysics read by attribute is untouched — only the OUTPUT keys move.
+    # The per-SW/LW-band optics are dropped by ``_EXCLUDED_OUTPUT_KEYS``.
+    output_key_map: ClassVar[dict[str, str]] = {
+        "aerosol.aod_total": "macsp.od550aer",
+        "aerosol.aod_anthropogenic": "macsp.aod_anthropogenic",
+        "aerosol.aod_background": "macsp.aod_background",
+        "aerosol.aod_profile": "macsp.aod_profile",
+        "aerosol.ssa_profile": "macsp.ssa_profile",
+        "aerosol.asy_profile": "macsp.asy_profile",
+        "aerosol.cdnc_factor": "macsp.cdnc_factor",
+        "aerosol.Nccn": "macsp.nccn",
+        "aerosol.angstrom": "macsp.angstrom",
+    }
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "macsp.od550aer": {
+            "units": "1",
+            "standard_name": (
+                "atmosphere_optical_thickness_due_to_ambient_aerosol_particles"
+            ),
+            "long_name": "MACv2-SP total-column aerosol optical depth at 550 nm",
+        },
+        "macsp.aod_anthropogenic": {
+            "units": "1",
+            "long_name": "MACv2-SP anthropogenic-plume AOD at 550 nm",
+        },
+        "macsp.aod_background": {
+            "units": "1",
+            "long_name": "MACv2-SP natural-background AOD at 550 nm",
+        },
+        "macsp.aod_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm aerosol optical depth per layer",
+        },
+        "macsp.ssa_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm single-scattering albedo per layer",
+        },
+        "macsp.asy_profile": {
+            "units": "1",
+            "long_name": "MACv2-SP 550 nm asymmetry parameter per layer",
+        },
+        "macsp.cdnc_factor": {
+            "units": "1",
+            "long_name": "MACv2-SP Twomey CDNC enhancement factor",
+        },
+        "macsp.nccn": {
+            "units": "cm-3",
+            "long_name": "MACv2-SP cloud condensation nuclei concentration",
+        },
+        "macsp.angstrom": {
+            "units": "1",
+            "long_name": "MACv2-SP column Angstrom exponent",
+        },
+    }
     # Carry seeded as zeros; ``get_simple_aerosol`` rebuilds
     # AOD/SSA/asymmetry from the plume parameterisation every step
     # using the slot only as a shape source.

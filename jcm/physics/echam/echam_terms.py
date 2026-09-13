@@ -72,6 +72,7 @@ def echam_physics(
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
+    emulator_weights_file: str | None = "auto",
     radiation_compute_cre: bool = True,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
@@ -81,6 +82,8 @@ def echam_physics(
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
+    jam_dust_preset: int = 4,
+    jam_dust_nudged: bool = False,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
     jam_convective_transport: bool = True,
@@ -95,6 +98,7 @@ def echam_physics(
     aerocom_overlap: str = "maximum-random",
     aerocom_optics: bool = False,
     diagnose_omega: bool = False,
+    cu_lmfmid: bool | None = None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -132,6 +136,19 @@ def echam_physics(
             (memory-saving for long backward passes).
         radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
             ``"emulated"``, or a custom radiation ``PhysicsTerm``.
+        emulator_weights_file: ``radiation_scheme="emulated"`` only — the NN
+            checkpoint. Case-sensitive value set: ``"auto"`` (default, and what
+            an omitted or ``null`` config key resolves to) loads the packaged
+            trained weights (``jcm/data/emulator_weights_per_band_u64.nc``), so
+            the emulated scheme runs out of the box; the literal string
+            ``"random"`` builds RANDOM untrained weights (training-from-scratch
+            / zero_tendency cost benchmarks only — they NaN within a step, so
+            this must be asked for by name); any other value is a checkpoint
+            path. ``None`` is treated as the ``"auto"`` default — the Hydra
+            builder drops ``null`` kwargs, so ``physics.emulator_weights_file=
+            null`` could not otherwise reach a random init and would silently
+            mean ``auto``; use ``"random"`` to train from scratch. Rejected
+            (not silently ignored) with any non-emulated scheme.
         radiation_compute_cre: RRTMGP only — run the extra clear-sky solve
             for the cloud-radiative-effect diagnostic (default True).
             ``False`` halves the RRTMGP cost on radiation-compute steps;
@@ -167,6 +184,14 @@ def echam_physics(
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
+        jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
+            4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
+            or 2 (Cheng 2008). The resolution-dependent regional tuning vector
+            is rebuilt at the model's own truncation.
+        jam_dust_nudged: take HAM's *nudged* regional tuning vector
+            (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
+            The shipped config leaves this ``null``, which the runner fills
+            from ``cfg.nudging.enabled``.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
@@ -193,6 +218,15 @@ def echam_physics(
             ``DinosaurDycore(compute_omega=True)``; the CLI enables the
             provider automatically). Model-agnostic, independent of the
             AeroCom wap/w500/w700 fields.
+        cu_lmfmid: Enable ECHAM's mid-level convection trigger
+            (``lmfmid``, default on). ``None`` leaves the trigger as the
+            ``convection`` Parameters set it (on by default); ``False``
+            disables it. The trigger needs the dycore's ``omega``; a
+            backend that cannot supply it (pySES, #698) must set this
+            ``False`` or Model construction raises — hence the ne30
+            experiments turn it off (#715). Mutually exclusive with an
+            explicit ``convection`` override (set the field on that object
+            instead).
         enable_aerocom: Attach the AeroCom phase-4 derived
             diagnostics term (cloud-top sampling, column
             integrals, pressure-level fields, aerosol number
@@ -259,7 +293,46 @@ def echam_physics(
             f"so radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
 
-    convection_p = convection or ConvectionParameters.default()
+    # ``None`` is normalised to the "auto" default: the Hydra builder strips
+    # ``null`` kwargs (so ``physics.emulator_weights_file=null`` never reaches
+    # here and would fall back to the default anyway), and a direct Python
+    # ``None`` must mean the same "unset → packaged weights" as an omitted key.
+    # Train-from-scratch (random init) is reached only via the explicit
+    # ``"random"`` sentinel below, never by an absent/null value.
+    if emulator_weights_file is None:
+        emulator_weights_file = "auto"
+
+    # ``emulator_weights_file`` only means anything for the emulator; a value
+    # other than the "auto" default paired with another scheme is a silently-
+    # ignored argument (the class of bug this factory abolishes — same
+    # precedent as aerosol_free_interval above).
+    if emulator_weights_file != "auto" and radiation_scheme != "emulated":
+        raise ValueError(
+            f"emulator_weights_file={emulator_weights_file!r} needs "
+            "radiation_scheme='emulated' — the grey and rrtmgp schemes load no "
+            f"NN checkpoint, so radiation_scheme={radiation_scheme!r} would "
+            "ignore it.")
+
+    # ``cu_lmfmid`` is the scalar escape hatch for the ECHAM mid-level
+    # convection trigger (ECHAM ``lmfmid``, default on). With it on,
+    # TiedtkeConvection declares an ``omega`` dycore requirement; a backend
+    # that cannot supply omega — today pySES (#698) — then fails at Model
+    # construction, so the ne30 experiments turn it off. It is deliberately a
+    # scalar flag (not buried in the ``convection`` Parameters block) so it
+    # forwards through the Hydra ``echam_physics`` builder, which only relays
+    # scalar kwargs. Passing both is a silently-ignored-argument bug — the
+    # class this factory abolishes — so it is rejected; set cu_lmfmid on the
+    # ConvectionParameters you pass instead.
+    if cu_lmfmid is not None:
+        if convection is not None:
+            raise ValueError(
+                "cu_lmfmid and an explicit convection override are mutually "
+                "exclusive — set cu_lmfmid on the ConvectionParameters you "
+                "pass as convection=."
+            )
+        convection_p = ConvectionParameters.default(cu_lmfmid=cu_lmfmid)
+    else:
+        convection_p = convection or ConvectionParameters.default()
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
     microphysics_2m_p = microphysics_2m or CloudParams2M.default()
@@ -288,7 +361,18 @@ def echam_physics(
     elif radiation_scheme == "grey":
         rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":
-        rad_term = NNEmulatorRadiation(params=radiation_p)
+        # "auto" (default) resolves the packaged trained checkpoint
+        # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
+        # sentinel maps to weights_file=None, which builds RANDOM untrained
+        # weights — the term's own docs note these drive the model to NaN
+        # within a step, so this is training-from-scratch / a zero_tendency
+        # cost benchmark only, never a valid simulation, and must be requested
+        # by name (an absent/null config value means "auto", see above). Any
+        # other value is a checkpoint path validated by the term at load.
+        weights_file = (None if emulator_weights_file == "random"
+                        else emulator_weights_file)
+        rad_term = NNEmulatorRadiation(
+            params=radiation_p, weights_file=weights_file)
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
@@ -321,11 +405,14 @@ def echam_physics(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
         )
 
-    # For now MACv2-SP is kept alongside JAM to provide the ``aerosol``
-    # optics/Twomey diagnostic that radiation and the cloud schemes read — a
-    # temporary fudge in lieu of proper JAM aerosol↔radiation and
-    # aerosol↔microphysics coupling (#495). Once JAM supplies those, MACv2-SP
-    # need not be included in the JAM path.
+    # MACv2-SP and JAM are mutually exclusive aerosol sources (#640), so the
+    # JAM composition does not include MACv2-SP. JAM owns the ``aerosol`` slot
+    # through its own
+    # ``AerosolCarrySeeder`` (radiatively passive when ``jam_optics=False``,
+    # overwritten by ``JamOpticsTerm`` when on) and supplies the cloud
+    # microphysics activation through ``ArgActivation``; the 2M scheme falls
+    # back to its ECHAM-HAM ``cdnc_min`` floor where ARG is empty rather than to
+    # the (now absent) MACv2-SP SPA floor.
     #
     # Wet deposition is split out and placed *after* the cloud microphysics
     # term so it scavenges against the current step's precip/condensate (the
@@ -367,6 +454,8 @@ def echam_physics(
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,
+            dust_preset=jam_dust_preset,
+            dust_nudged=jam_dust_nudged,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
             convective_transport=jam_convective_transport,
@@ -396,7 +485,9 @@ def echam_physics(
         jam_pre_cloud_terms = [
             t for t in jam_terms if t.category not in _post_cloud
         ]
-        aerosol_terms = [Macv2SpAerosol(params=aerosol_p), *jam_pre_cloud_terms]
+        # No MACv2-SP in the JAM path (#640): ``jam_pre_cloud_terms`` already
+        # begins with the ``AerosolCarrySeeder`` that owns the ``aerosol`` slot.
+        aerosol_terms = [*jam_pre_cloud_terms]
     else:
         raise ValueError(
             f"Unknown aerosol_module={aerosol_module!r}. Choose 'macv2sp' "

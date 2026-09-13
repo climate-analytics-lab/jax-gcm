@@ -1,13 +1,11 @@
 # jcm's dinosaur backend transports tracers semi-Lagrangian ONLY — the
 # Eulerian spectral path was removed because it rang negative on sharp
 # emission sources and NaN'd the aerosol microphysics (#521). The SL core
-# lives in neuralgcm/dinosaur#135 and is not in a released dinosaur yet, so
-# until it ships we install the branch it was developed on.
-#
-# BEFORE RELEASE: replace with a pinned released version, e.g.
-# ``dinosaur>=X.Y`` — a VCS requirement cannot be published to PyPI and
-# makes the wheel uninstallable for downstream users (see #577).
-dinosaur @ git+https://github.com/shoyer/dinosaur@semi-lagrangian
+# (neuralgcm/dinosaur#135) is in dinosaur >= 1.4.0; 1.5.0 also fixes the
+# hybrid-coordinate temperature equation (neuralgcm/dinosaur#144), which
+# ECHAM's hybrid levels depend on, so results on those levels differ from
+# runs made with earlier builds.
+dinosaur>=1.5.0
 # Floor is 0.12.1: that release ADDED `nnx.Variable.get_value()` and deprecated
 # the `.value` property in its favour. jcm reads every nnx.Param/nnx.Variable
 # through `.get_value()` (~94 sites under jcm/physics/**), so on exactly 0.12.0

@@ -116,9 +116,9 @@ class DateData:
 
     @classmethod
     def set_date(cls, model_time, model_step=None, dt_seconds=None, calendar=DEFAULT_CALENDAR):
-        # `calendar` is accepted for backward compatibility but is no longer
-        # used at construction time — `tyear`/`model_year` are derived from
-        # `dt` on demand and take their own calendar argument.
+        # `calendar` is accepted for backward compatibility but is not used at
+        # construction time — `tyear`/`model_year` are derived from `dt` on
+        # demand and take their own calendar argument.
         del calendar  # unused
         return cls(
             dt=model_time,

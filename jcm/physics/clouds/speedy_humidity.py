@@ -1,5 +1,4 @@
-"""Date: 2/11/2024
-For converting between specific and relative humidity, and computing the 
+"""For converting between specific and relative humidity, and computing the
 saturation specific humidity.
 """
 

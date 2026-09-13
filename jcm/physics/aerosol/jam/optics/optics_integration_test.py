@@ -47,7 +47,10 @@ class OpticsIntegrationTest(unittest.TestCase):
                 radiation=RadiationParameters.default(radiation_interval=0),
             ),
         )
-        predictions = model.run(save_interval=0.0625, total_time=0.0625)
+        # 6 steps, not 3: the emission -> transport -> core -> optics chain
+        # needs the aerosol to reach the core before AOD can be non-zero (see
+        # jam_integration_test).
+        predictions = model.run(save_interval=0.125, total_time=0.125)
         dyn = predictions.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         self.assertTrue(bool(jnp.all(dyn.temperature > 150.0)))
@@ -61,7 +64,7 @@ class OpticsIntegrationTest(unittest.TestCase):
         # the old ``aod >= 0`` bound could not distinguish from healthy).
         # A stronger on/off flux-difference test needs a seeded aerosol
         # burden (cold-start AOD is radiatively invisible) — deferred.
-        aod = predictions.physics["aerosol_optical_depth"]
+        aod = predictions.physics["_jam_optics"]["aod_550"]
         aod = np.asarray(aod)
         self.assertTrue(np.all(np.isfinite(aod)))
         self.assertTrue(np.all(aod >= 0.0))

@@ -6,6 +6,7 @@ Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 import unittest
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jcm.forcing import (
     ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
 )
@@ -972,6 +973,109 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
+    def test_disabling_dust_also_drops_its_companion_keys(self):
+        # `dust_file: null` must not leave four `auto` companions fetching
+        # bundles the run never opens (Codex P2).
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        cfg = OmegaConf.create({"physics": {"aerosol_module": "jam"}})
+        forcing_cfg = OmegaConf.create(
+            {"dust_file": None, "dust_preferential_file": "auto",
+             "dust_soil_types_file": "auto", "dust_regions_file": "auto",
+             "dust_roughness_file": "auto", "emissions_file": None,
+             "dms_file": None, "oxidants_file": None})
+        out = fa._resolve_emission_inputs(forcing_cfg, cfg, coords=None,
+                                          is_pyses=True)
+        for key in ("dust_preferential_file", "dust_soil_types_file",
+                    "dust_regions_file", "dust_roughness_file"):
+            self.assertIsNone(out.get(key), key)
+
+    def test_dust_reader_rejects_a_non_monthly_time_axis(self):
+        from jcm.forcing import read_dust_source
+        ds = self._dataset("pot_source",
+                           np.zeros((12, self.NLAT, self.NLON)))
+        with self.assertRaisesRegex(ValueError, "12 monthly records"):
+            read_dust_source(ds.isel(time=slice(0, 6)))
+
+    def _static(self, variables):
+        import xarray as xr
+        return xr.Dataset(
+            {name: (("time", "lat", "lon"), values[None])
+             for name, values in variables.items()},
+            coords={"time": self.TIME[:1], "lat": self.LAT_DESC, "lon": self.LON},
+        )
+
+    def test_preferential_reader_drops_the_degenerate_time_axis(self):
+        from jcm.forcing import TimeSeries, read_dust_preferential
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[2, 2] = 0.8
+        out = read_dust_preferential(
+            self._static({"source": vals}),
+            lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        self.assertNotIsInstance(out, TimeSeries)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        self.assertAlmostEqual(float(arr[2, 1]), 0.8)
+
+    def test_soil_type_reader_returns_all_nine_fractions(self):
+        from jcm.forcing import read_dust_soil_types
+        names = ("type2", "type3", "type4", "type6", "type13", "type14",
+                 "type15", "type16", "type17")
+        out = read_dust_soil_types(
+            self._static({n: np.full((self.NLAT, self.NLON), 0.1)
+                          for n in names}),
+            lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        self.assertEqual(sorted(out), sorted(names))
+        for arr in out.values():
+            self.assertEqual(np.asarray(arr).shape, (self.NLON, self.NLAT))
+
+    def test_soil_type_reader_rejects_a_broken_global_partition(self):
+        from jcm.forcing import read_dust_soil_types
+        names = ("type2", "type3", "type4", "type6", "type13", "type14",
+                 "type15", "type16", "type17")
+        values = {n: np.full((self.NLAT, self.NLON), 0.3) for n in names}
+        with self.assertRaisesRegex(ValueError, "must be a partition"):
+            read_dust_soil_types(self._static(values))
+
+    def test_regions_reader_accepts_integers_and_refuses_the_rest(self):
+        from jcm.forcing import read_dust_regions
+        good = np.tile(np.arange(1, self.NLAT + 1)[:, None],
+                       (1, self.NLON)).astype(float)
+        out = read_dust_regions(self._static({"regions": good}),
+                                lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        np.testing.assert_array_equal(arr[0], [4, 3, 2, 1])
+        # An interpolated mask: the failure this guard exists for.
+        smeared = good.copy()
+        smeared[1, 1] = 2.5
+        with self.assertRaisesRegex(ValueError, "non-integer"):
+            read_dust_regions(self._static({"regions": smeared}))
+        out_of_range = good.copy()
+        out_of_range[0, 0] = 9.0
+        with self.assertRaisesRegex(ValueError, "tuning-region range"):
+            read_dust_regions(self._static({"regions": out_of_range}))
+
+    def test_roughness_reader_is_a_monthly_wrap_year_series(self):
+        from jcm.forcing import WRAP_YEAR, read_dust_roughness
+        ds = self._dataset("surfrough",
+                           np.full((12, self.NLAT, self.NLON), 0.02),
+                           units="1.")
+        ts = read_dust_roughness(ds, lat_deg=self.LAT_DESC[::-1],
+                                 lon_deg=self.LON)
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        self.assertEqual(np.asarray(ts.values).shape,
+                         (12, self.NLON, self.NLAT))
+
+    def test_roughness_reader_rejects_metres(self):
+        from jcm.forcing import read_dust_roughness
+        ds = self._dataset("surfrough",
+                           np.full((12, self.NLAT, self.NLON), 0.02),
+                           units="m")
+        with self.assertRaisesRegex(ValueError, "centimetres"):
+            read_dust_roughness(ds)
+
     def test_dust_reader_accepts_static_lat_lon_map(self):
         # A time-invariant potential-source / erodibility map has no `time`
         # axis. DustEmissions reads a bare 2-D field, so the reader must
@@ -1314,6 +1418,280 @@ class TestValidateOxidantLevels(unittest.TestCase):
         ds["hybm"] = (("mlev",), b_full + 0.1)                # shift midpoints
         with self.assertRaisesRegex(ValueError, "hyam/hybm"):
             validate_oxidant_levels(ds, coords, "ox.nc")
+
+
+class TestReadMacv2Weights(unittest.TestCase):
+    """The reusable MACv2.0-SP time-weight loader (issue #680 item 2)."""
+
+    @staticmethod
+    def _synthetic_macv2(nplume=9, years=(2013, 2014, 2015, 2016, 2017),
+                         nweek=52, nfeat=2, fill_last=True):
+        import xarray as xr
+
+        nyear = len(years)
+        yw = np.arange(nplume * nyear, dtype=float).reshape(nplume, nyear)
+        if fill_last:
+            # Mirror the v1 file: the final year(s) are NaN _FillValue.
+            yw[:, -1] = np.nan
+        ac = np.arange(nplume * nweek * nfeat,
+                       dtype=float).reshape(nplume, nweek, nfeat)
+        return xr.Dataset(
+            {"year_weight": (("plume", "years"), yw),
+             "ann_cycle": (("plume", "week", "feature"), ac)},
+            coords={"years": np.asarray(years)},
+        ), yw, ac
+
+    def test_shapes_orientation_and_align_modes(self):
+        from jcm.forcing import BY_DATE, WRAP_YEAR, read_macv2_weights
+        ds, _, ac = self._synthetic_macv2()
+        yw_ts, ac_ts = read_macv2_weights(ds)
+        # year_weight -> (year, plume), BY_DATE so the model tracks the year.
+        self.assertEqual(yw_ts.values.shape, (5, 9))
+        self.assertEqual(int(yw_ts.align_mode), BY_DATE)
+        # ann_cycle -> (week, feature, plume), WRAP_YEAR (repeats yearly).
+        self.assertEqual(ac_ts.values.shape, (52, 2, 9))
+        self.assertEqual(int(ac_ts.align_mode), WRAP_YEAR)
+        # The (plume, week, feature) -> (week, feature, plume) transpose holds.
+        np.testing.assert_allclose(np.asarray(ac_ts.values)[0, 0, :],
+                                   ac[:, 0, 0])
+
+    def test_forward_fills_nan_fill_years(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2()
+        yw_ts, _ = read_macv2_weights(ds)
+        vals = np.asarray(yw_ts.values)
+        self.assertFalse(np.isnan(vals).any())
+        # The 2017 fill row reuses the last valid year (2016).
+        np.testing.assert_allclose(vals[-1], vals[-2])
+
+    def test_time_axis_is_year_starts_since_epoch(self):
+        from jcm.forcing import read_macv2_weights
+        ds, _, _ = self._synthetic_macv2(years=(1970, 1971))
+        yw_ts, _ = read_macv2_weights(ds)
+        # 1970-01-01 is MODEL_EPOCH -> 0 s; 1971-01-01 is 365 days later.
+        np.testing.assert_allclose(np.asarray(yw_ts.time_seconds),
+                                   [0.0, 365 * 86400.0])
+
+
+def _t63l47_coords():
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=get_echam_levels(47),
+                      spectral_truncation=63)
+
+
+def _t42l8_sigma_coords():
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+    from jcm.utils import get_coords
+    return get_coords(vertical_coords=SigmaCoordinates.equidistant(8),
+                      spectral_truncation=42)
+
+
+class TestForcingFromBundles(unittest.TestCase):
+    """The Python door ``ForcingData.from_bundles`` (#751 Part 4).
+
+    It composes the canonical mirror-bundle config and routes it through the
+    SAME ``jcm.runners.build_forcing`` engine the CLI uses, so the flagship
+    proves the two doors agree pytree-for-pytree on a JAM T63L47 configuration.
+    """
+
+    @staticmethod
+    def _patch_readers(shape):
+        # Deterministic, network-free stand-ins so BOTH doors traverse the same
+        # patched engine and any difference is a config-composition defect. The
+        # readers return FIXED objects (identity-stable across both builds).
+        from unittest import mock
+
+        import xarray as xr
+        from jcm import forcing_assembly as fa
+        from jcm.forcing import ForcingData
+
+        base = ForcingData.zeros(shape)
+        anthro = {"emis_so2_ant": jnp.ones(shape)}
+        dms = jnp.ones(shape)
+        dust = jnp.ones(shape)
+        oxi = {"oh": jnp.ones((1, *shape))}
+        # The resolvers live in the forcing-side engine, which BOTH doors run
+        # through — one patch there reaches each build identically.
+        return [
+            mock.patch.object(fa, "_resolve_data_path",
+                              side_effect=lambda p: p),
+            mock.patch.object(fa, "_resolve_auto_ozone",
+                              return_value=None),
+            mock.patch.object(ForcingData, "from_file", return_value=base),
+            mock.patch("xarray.open_dataset", return_value=xr.Dataset()),
+            mock.patch("jcm.forcing.read_anthropogenic_emissions",
+                       return_value=anthro),
+            mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",
+                       return_value=None),
+            mock.patch("jcm.forcing.validate_emissions_grid"),
+            mock.patch("jcm.forcing.read_dms_seawater", return_value=dms),
+            mock.patch("jcm.forcing.read_dust_source", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_preferential", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_soil_types",
+                       return_value={"type2": dust}),
+            mock.patch("jcm.forcing.read_dust_regions", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_roughness", return_value=dust),
+            mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
+            mock.patch("jcm.forcing.validate_oxidant_levels"),
+        ]
+
+    def test_jam_pd_equivalent_to_build_forcing(self):
+        import contextlib
+
+        import jax
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        # The equivalent composed cfg: forcing=from_file + the present-day
+        # surface bundle + the auto defaults, JAM active.
+        ref_cfg = OmegaConf.create({
+            "forcing": {"kind": "from_file",
+                        "file": "hf://bundles/t63/forcing_pd.nc",
+                        "ozone_file": "auto", "emissions_file": "auto",
+                        "dms_file": "auto", "dust_file": "auto",
+                        "dust_preferential_file": "auto",
+                        "dust_soil_types_file": "auto",
+                        "dust_regions_file": "auto",
+                        "dust_roughness_file": "auto",
+                        "oxidants_file": "auto"},
+            "physics": {"aerosol_module": "jam"}})
+
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_readers(shape):
+                stack.enter_context(p)
+            door = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+            ref = runners.build_forcing(ref_cfg, coords)
+
+        la = jax.tree_util.tree_leaves(door)
+        lb = jax.tree_util.tree_leaves(ref)
+        self.assertEqual(len(la), len(lb))
+        for x, y in zip(la, lb):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    @staticmethod
+    def _capture_forcing_cfg(shape):
+        # Intercept the composed cfg reaching the shared engine so a test can
+        # assert what ancillary epoch from_bundles pinned, without needing the
+        # bundle files. Returns (patches, captured) where captured["forcing"] is
+        # the resolved forcing dict once from_bundles has run.
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm import runners
+        from jcm.forcing import ForcingData
+
+        captured: dict = {}
+
+        def _capture(cfg, coords, **kw):
+            captured["forcing"] = OmegaConf.to_container(
+                cfg.forcing, resolve=True)
+            return ForcingData.zeros(shape)
+
+        # from_bundles drives the forcing-side engine directly (#751):
+        # intercept it there, on the PRE-resolution composed cfg, so the
+        # ancillary-epoch pinning is observable.
+        return [
+            mock.patch.object(fa, "build_forcing", side_effect=_capture),
+            mock.patch.object(runners, "warn_emission_config_traps"),
+        ], captured
+
+    def test_pi_surface_composes_pi_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pi")
+        fc = captured["forcing"]
+        # A PI surface pins the PI ozone/emissions/oxidants bundles...
+        self.assertIn("ozone_pi", fc["ozone_file"])
+        self.assertIn("emissions_pi", fc["emissions_file"])
+        self.assertIn("oxidants_pi", fc["oxidants_file"])
+        # ...while the epoch-free dms/dust stay on "auto".
+        self.assertEqual(fc["dms_file"], "auto")
+        self.assertEqual(fc["dust_file"], "auto")
+
+    def test_pd_surface_keeps_auto_ancillaries(self):
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+        patches, captured = self._capture_forcing_cfg(shape)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
+        fc = captured["forcing"]
+        for key in ("ozone_file", "emissions_file", "oxidants_file",
+                    "dms_file", "dust_file"):
+            self.assertEqual(fc[key], "auto")
+
+    def test_ancillary_epoch_table_covers_every_surface(self):
+        # The pairing table must name a choice for every valid surface (the four
+        # named surfaces + None), so nothing is left implicit.
+        from jcm import forcing as F
+        self.assertEqual(set(F._SURFACE_ANCILLARY_EPOCH),
+                         {None, *F._SURFACE_PRODUCTS})
+
+    def test_macv2sp_attaches_packaged_weights(self):
+        # F2: from_bundles(aerosol="macv2sp") wires the repo-packaged SPv2.1 file
+        # into forcing.macv2_file, so build_forcing attaches the real (non-all-
+        # ones) weights spanning the file's 1850-2023 valid range instead of the
+        # all-ones default. No mirror fetch, no staging gate.
+        coords = _t42l8_sigma_coords()  # weights are grid-independent
+        forcing = ForcingData.from_bundles(coords, aerosol="macv2sp",
+                                           surface=None)
+        yw = np.asarray(forcing.aerosol_year_weight.values)
+        self.assertFalse(np.allclose(yw, 1.0))
+        # The packaged file carries 251 annual samples (1850..2100).
+        self.assertEqual(yw.shape[0], 251)
+
+    def test_invalid_arguments_raise(self):
+        coords = _t42l8_sigma_coords()
+        with self.assertRaisesRegex(ValueError, "aerosol="):
+            ForcingData.from_bundles(coords, aerosol="bogus")
+        with self.assertRaisesRegex(ValueError, "surface="):
+            ForcingData.from_bundles(coords, surface="bogus")
+        with self.assertRaisesRegex(ValueError, "transient"):
+            ForcingData.from_bundles(coords, surface="amip")  # years missing
+
+
+class TestForcingFromBundlesWarnings:
+    """The emission-family config traps fire on the Python door too (#751)."""
+
+    @pytest.fixture(autouse=True)
+    def _audible_jcm_logger(self):
+        import logging
+        jcm_logger = logging.getLogger("jcm")
+        prev = jcm_logger.level
+        jcm_logger.setLevel(logging.WARNING)
+        try:
+            yield
+        finally:
+            jcm_logger.setLevel(prev)
+
+    def test_zero_emission_warns_on_unpublished_grid(self, caplog):
+        import logging
+
+        from jcm.forcing import ForcingData
+        coords = _t42l8_sigma_coords()
+        # An unpublished grid nulls every auto emission key with no fetch, so the
+        # JAM baseline is sea-salt-only — the same degradation + warning the CLI
+        # door fires (surface=None keeps the build offline).
+        with caplog.at_level(logging.WARNING, logger="jcm.runners"):
+            ForcingData.from_bundles(coords, aerosol="jam", surface=None)
+        assert "zero-emission JAM baseline" in caplog.text
+        assert "t42" in caplog.text
 
 
 if __name__ == '__main__':

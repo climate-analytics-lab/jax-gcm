@@ -164,6 +164,16 @@ class TracerMassFixerTest(unittest.TestCase):
     step.
     """
 
+    def setUp(self):
+        # The fixer closes integral(q dp) to roundoff, so the closure
+        # assertions below only hold in float64: in float32 the residual is
+        # ~1e-6, the precision of the sum itself rather than a transport leak.
+        import jax
+
+        prior = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", True)
+        self.addCleanup(jax.config.update, "jax_enable_x64", prior)
+
     def _dycore_with_tracer(self):
         from jcm.physics.physics_term import TracerSpec
 

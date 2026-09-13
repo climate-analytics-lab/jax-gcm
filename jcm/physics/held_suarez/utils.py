@@ -1,7 +1,4 @@
-"""Held-Suarez physics utilities for coordinate system creation.
-
-Date: 2026-01-26
-"""
+"""Held-Suarez physics utilities for coordinate system creation."""
 import jax.numpy as jnp
 from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.utils import get_coords as _get_coords

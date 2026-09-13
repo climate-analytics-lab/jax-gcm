@@ -266,7 +266,10 @@ class CarryModeFactoryTest(unittest.TestCase):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
         terms = jam_aerosol_physics()
-        self.assertEqual(terms[0].name, "jam_cloud_borne_store")
+        # The aerosol-carry seeder runs first (#640); the cloud-borne store is
+        # next, still ahead of the emitters/core that consume it.
+        self.assertEqual(terms[0].name, "aerosol_carry_seeder")
+        self.assertEqual(terms[1].name, "jam_cloud_borne_store")
         names = set()
         for t in terms:
             names |= {s.name for s in t.required_tracers()}
@@ -288,7 +291,14 @@ class CarryModeFactoryTest(unittest.TestCase):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
         terms = jam_aerosol_physics()
-        self.assertEqual(terms[0].name, "jam_cloud_borne_store")
+        # Store is composed right after the aerosol-carry seeder (#640), before
+        # every term that consumes the cloud-borne carry.
+        self.assertEqual(terms[1].name, "jam_cloud_borne_store")
+        store_i = next(i for i, t in enumerate(terms)
+                       if t.name == "jam_cloud_borne_store")
+        core_i = next(i for i, t in enumerate(terms)
+                      if t.category == "aerosol_microphysics")
+        self.assertLess(store_i, core_i)
 
 
 if __name__ == "__main__":

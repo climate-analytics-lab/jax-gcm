@@ -29,6 +29,8 @@ jcm/outputs
 
 # Analysis / data files
 *.json
+# Packaged mirror manifest (the resolver's data-driven availability table)
+!jcm/data/mirror_manifest.json
 *.png
 outputs/
 runs/

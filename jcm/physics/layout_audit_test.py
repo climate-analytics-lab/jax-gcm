@@ -108,6 +108,10 @@ LAYOUT_AGNOSTIC = frozenset({
 #: environment's own nonzero seed fields instead of what the term changed.
 #: Move one here to LAYOUT_AGNOSTIC by giving it an ENV_HOOKS entry.
 INERT_IN_HARNESS = frozenset({
+    # Resets the shared ``aerosol`` slot to an all-zero base each step (#640);
+    # broadcasting-native but produces the same zeros in either host, so a
+    # host-vs-host comparison proves nothing — like ``ResetEmissionFluxes``.
+    "AerosolCarrySeeder",
     "BettsMillerConvection",
     "FrontalGravityWaveDrag",
     "IceNucleation",

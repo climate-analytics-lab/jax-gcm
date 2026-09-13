@@ -1,0 +1,3 @@
+# Text files are LF in the repository; three clouds/speedy_* files had
+# drifted to CRLF, which broke line-oriented tooling over the tree.
+*.py text eol=lf

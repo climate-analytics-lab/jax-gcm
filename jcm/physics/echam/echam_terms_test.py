@@ -133,6 +133,35 @@ class TestEchamComposablePhysics(unittest.TestCase):
             categories.index("clouds"),
         )
 
+    def test_cu_lmfmid_flag_toggles_the_omega_requirement(self):
+        """The scalar cu_lmfmid knob controls the dycore omega contract.
+
+        With the mid-level trigger on (the default) TiedtkeConvection
+        declares an ``omega`` dycore requirement, which fails Model
+        construction on a backend that cannot supply omega (pySES, #698).
+        Setting cu_lmfmid=False drops that requirement so the ne30
+        experiments compose (#715).
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        on = echam_physics(checkpoint_terms=False)
+        self.assertIn("omega", on.required_dycore_fields())
+
+        off = echam_physics(checkpoint_terms=False, cu_lmfmid=False)
+        self.assertNotIn("omega", off.required_dycore_fields())
+
+    def test_cu_lmfmid_rejects_a_simultaneous_convection_override(self):
+        """cu_lmfmid and an explicit convection Parameters are exclusive."""
+        from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            echam_physics(
+                checkpoint_terms=False,
+                cu_lmfmid=False,
+                convection=ConvectionParameters.default(),
+            )
+
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
         from jcm.physics.echam.echam_terms import echam_physics
@@ -264,3 +293,62 @@ class TestAerosolFreeValidation(unittest.TestCase):
             self.echam_physics(radiation_scheme="grey",
                                aerosol_free_interval=0)
         self.assertIn("must be >= 1", str(cm.exception))
+
+
+class TestEmulatorWeightsFile(unittest.TestCase):
+    """The factory must load TRAINED emulator weights by default (#640 trap).
+
+    ``echam_physics(radiation_scheme="emulated")`` used to build the term with
+    random untrained weights, which the scheme's own docs say NaN within a step;
+    it now defaults to the packaged trained checkpoint.
+    """
+
+    def setUp(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        self.echam_physics = echam_physics
+
+    def _rad_term(self, physics):
+        return next(t for t in physics.terms
+                    if getattr(t, "name", "") == "nn_emulator_radiation")
+
+    def test_default_loads_packaged_trained_weights(self):
+        term = self._rad_term(self.echam_physics(radiation_scheme="emulated"))
+        # ``_weights_file`` is set only on the load-from-file path (the random
+        # init leaves it None), and the packaged default is the u64 checkpoint.
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(
+            str(term._weights_file).endswith(
+                "emulator_weights_per_band_u64.nc"))
+
+    def test_random_reaches_the_random_init_path(self):
+        # The explicit "random" sentinel is the train-from-scratch value:
+        # weights_file=None on the term (``_weights_file`` stays None).
+        term = self._rad_term(
+            self.echam_physics(radiation_scheme="emulated",
+                               emulator_weights_file="random"))
+        self.assertIsNone(term._weights_file)
+
+    def test_none_falls_back_to_auto(self):
+        # None is treated as the "auto" default (an omitted/null config key,
+        # which the Hydra builder strips, must NOT reach random init) — it
+        # loads the packaged trained checkpoint, exactly like the default.
+        term = self._rad_term(
+            self.echam_physics(radiation_scheme="emulated",
+                               emulator_weights_file=None))
+        self.assertIsNotNone(term._weights_file)
+        self.assertTrue(
+            str(term._weights_file).endswith(
+                "emulator_weights_per_band_u64.nc"))
+
+    def test_rejected_on_non_emulated_scheme(self):
+        # An explicit value with grey/rrtmgp is a silently-ignored argument —
+        # the factory rejects it (same contract as aerosol_free_interval).
+        with self.assertRaises(ValueError) as cm:
+            self.echam_physics(radiation_scheme="grey",
+                               emulator_weights_file="some_ckpt.nc")
+        self.assertIn("radiation_scheme='emulated'", str(cm.exception))
+
+    def test_auto_default_does_not_trip_non_emulated_schemes(self):
+        # The "auto" default must stay silent for other schemes (it is the
+        # unset state, not a user choice).
+        self.echam_physics(radiation_scheme="grey")  # no raise

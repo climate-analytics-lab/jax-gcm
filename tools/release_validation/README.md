@@ -24,9 +24,19 @@ python tools/release_validation/launch.py --repo . --submit
 python tools/release_validation/scm_check.py 10
 
 # 3. Health-check each finished run (exit 0 = all gates pass)
-python tools/release_validation/health.py $SCRATCH/jam_runs/mx_<member> \
-    --last-n 40 --log runs/mx_<member>.log
+python tools/release_validation/health.py $SCRATCH/jam_runs/mx_<member>_<tag> \
+    --last-n 40 --log runs/mx_<member>_<tag>.log
 ```
+
+Every artefact of a launch — rundir, PBS job name, outputs, log — is
+namespaced by a run tag, which defaults to the launched repo's HEAD short
+SHA (`--tag` overrides it; outside a git checkout it falls back to the UTC
+date). A member is a *fresh* year, so `launch.py` refuses to write a job
+whose rundir already holds a `checkpoint.msgpack`: continue that
+integration with `--resume`, or launch under a new `--tag`. The tag is what
+keeps two branches' validation runs of the same member apart: sharing a
+rundir lets `run_chunked` silently resume the other branch's checkpoint
+(#701).
 
 A FAIL is a recorded verdict, not necessarily a blocker: members with
 known characteristics (the 1m bright-cloud TOA, SPEEDY's wet bias, the

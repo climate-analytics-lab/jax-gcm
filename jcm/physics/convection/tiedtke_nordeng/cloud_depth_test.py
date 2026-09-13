@@ -221,9 +221,9 @@ class TestCloudDepthIntegration(unittest.TestCase):
         dz = rd * Tv / grav * dlnp
 
         cfg = ConvectionParameters.default(
-            dt_conv=1800.0, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+            entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
             entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
-            cprcon=2.5e-4, cevapcu=2.0e-5, cmfctop=0.20, cmfdeps=0.30,
+            cprcon=2.5e-4, cevapcu=2.0e-5, cmfdeps=0.30,
         )
         # Deep via ECHAM's zdqcv moisture-convergence route (#699): the
         # scan-ceiling regression this test guards is a property of the

@@ -8,7 +8,6 @@ This module implements the downdraft calculations including:
 
 Based on ICON mo_cudescent.f90
 
-Date: 2025-01-09
 """
 
 import jax.numpy as jnp
@@ -280,11 +279,11 @@ def downdraft_step(
         # saturation (evaporation-only Newton step), and the vapour taken
         # up is debited from the rain flux as ``pdmfdp = −pmfd·zcond`` (a
         # NEGATIVE per-layer precip increment: the environment gets the
-        # cooling + moistening back through the cudtdq ledger). The
-        # previous cevapcu-scaled pseudo-evaporation warmed the parcel
-        # nearly dry-adiabatically, so it lost negative buoyancy within a
-        # level or two and the downdraft died at its LFS value; cevapcu
-        # itself belongs to the sub-cloud Kessler chain in cuflx, not here.
+        # cooling + moistening back through the cudtdq ledger). A
+        # cevapcu-scaled pseudo-evaporation would instead warm the parcel
+        # nearly dry-adiabatically, killing its negative buoyancy within a
+        # level or two; cevapcu belongs to the sub-cloud Kessler chain in
+        # cuflx, not here.
         from .adjustment import cuadjtq
         td_clipped = jnp.clip(td_mix, 100.0, 400.0)
         td_new, qd_new, zcond = cuadjtq(
@@ -378,10 +377,10 @@ def calculate_downdraft(
 
         # Initial downdraft mass flux: ECHAM cudlfs uses
         #   zmftop = -cmfdeps * pmfub
-        # where pmfub = mfu(kcbot) is the cloud-base mass flux. The
-        # previous code used ``cmfctop`` (a different parameter that
-        # controls cloud-top mass flux fraction in the updraft) which is
-        # numerically similar (~0.2-0.3) but conceptually wrong.
+        # where pmfub = mfu(kcbot) is the cloud-base mass flux. Do NOT use
+        # an updraft cloud-top mass-flux fraction (~0.2) here: it is
+        # numerically similar to ``cmfdeps`` but conceptually a different,
+        # updraft-side quantity.
         mfd_new = mfd_init.at[lfs].set(
             -config.cmfdeps * updraft_state.mfu[kbase]
         )

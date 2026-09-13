@@ -34,7 +34,6 @@ downstream scheme-named terms can read them by name and so they flow
 through to the user-facing xarray output without a ``diagnostics.``
 prefix.
 
-Date: 2026-05-07
 """
 
 from __future__ import annotations

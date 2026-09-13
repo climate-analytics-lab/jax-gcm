@@ -1,6 +1,78 @@
 Release Notes
 =============
 
+Unreleased — RCE initial state seeds a mixed sub-cloud layer
+------------------------------------------------------------
+
+- ``jcm.rce.rce_initial_state`` now seeds a dry-adiabatic, well-mixed
+  sub-cloud layer below ``mixed_layer_top_m`` (default 800 m). This changes
+  results for any RCE case composing ``TiedtkeConvection``: ECHAM's ``cubase``
+  trigger finds no cloud base at all in a sounding running at ``lapse_rate``
+  to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
+  profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
+
+Unreleased — dinosaur pinned to a release
+-----------------------------------------
+
+- ``requirements.txt`` requires ``dinosaur>=1.5.0`` instead of the
+  semi-Lagrangian development branch, so jcm can be published to PyPI again.
+  1.5.0 also fixes the hybrid-coordinate temperature equation
+  (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
+  runs made with earlier dinosaur builds; sigma-level runs are unchanged.
+
+Unreleased — packaged config tree contract; ``experiment`` group renamed
+------------------------------------------------------------------------
+
+- **``jcm/config`` is now a documented public, packaged Hydra config tree**
+  (#757). A downstream Hydra app reaches every jcm group through
+  ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole validated
+  configuration under one of its own nodes with ``+configuration@<node>=<name>``.
+  ``jcm/config/__init__.py`` was added so Hydra's ``pkg://`` provider reports the
+  tree as available (a namespace-package ``jcm.config`` was read but flagged
+  "not available"). The public group names, the load-bearing
+  ``# @package _global_`` header plus absolute-override recipe style, and the
+  rename policy are documented in :doc:`design/packaged_config_tree`. There is
+  deliberately
+  **no** back-compatibility alias group — the contract plus a release note plus
+  a lockstep downstream update is the policy.
+- **Breaking for searchpath users:** the ``experiment`` config group was
+  renamed to ``configuration`` (the word "experiment" already means a *realized
+  simulation* elsewhere in the project). The CLI is now ``+configuration=<name>``
+  and the Python door is ``jcm.configurations`` (was ``jcm.experiments``). A
+  downstream app composing jcm through ``pkg://jcm.config`` must change
+  ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM in
+  particular composes ``+experiment@atmosphere=<name>`` and must update in the
+  same release cycle.
+
+Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
+-----------------------------------------------------------------
+
+- **MACv2-SP and JAM are now mutually exclusive aerosol sources** (#640).
+  ``echam_physics(aerosol_module="jam")`` no longer also composes MACv2-SP
+  (which was a stopgap for the shared ``aerosol`` optics/Twomey diagnostic
+  before JAM had its own coupling). JAM now owns the ``aerosol`` slot through a
+  minimal ``AerosolCarrySeeder`` and supplies the direct effect via
+  ``JamOpticsTerm`` — including the grey two-stream scheme's broadband 550 nm
+  profile fields, so grey+JAM keeps a direct effect. With ``jam_optics=False``
+  the aerosol is radiatively passive (all-zero optics), a clean A/B control.
+  MACv2-SP is unchanged for ``aerosol_module="macv2sp"``.
+- **Activation fallback.** In the JAM path the 2M scheme falls back, where
+  ARG's ``activated_cdnc`` is empty, to its own ECHAM-HAM minimum-CDNC floor
+  (``cdnc_min_fixed`` = 40 cm⁻³, or the dynamic max-radius floor; #674) rather
+  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp``+2M path's
+  Twomey link.
+- **Breaking: aerosol output variables are renamed into explicit namespaces.**
+  MACv2-SP's ``aerosol.*`` output moves to ``macsp.*`` with CF/AeroCom names
+  where they exist (``aerosol.aod_total`` → ``macsp.od550aer``); JAM's column
+  optics publish under ``jam_optics.*`` (``jam_optics.aod_550`` is the
+  band-centre-approx column AOD, distinct from the Mie-based ``od550aer`` of the
+  ``aerocom_optics`` pass). The top-level ``aerosol_optical_depth`` key — which
+  collided with the unrelated per-band ``RadiationInput`` field — is **removed**;
+  its value lives on as ``jam_optics.aod_550``. The internal ``aerosol`` struct
+  that radiation and the microphysics read by attribute is unchanged; only the
+  output keys move. ``tools/aerocom_cmor.py`` and
+  ``tools/release_validation/health.py`` are updated for the new names.
+
 Unreleased — one vertical direction in the output, and CF metadata
 ------------------------------------------------------------------
 

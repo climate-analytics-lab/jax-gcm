@@ -4,7 +4,6 @@ This module defines the aerosol parameters following the SpeedyPhysics pattern
 using tree_math.struct for JAX compatibility. Based on the ICON implementation
 in mo_bc_aeropt_splumes.f90.
 
-Date: 2025-01-11
 """
 
 import jax.numpy as jnp
@@ -20,10 +19,6 @@ class AerosolParameters:
     Kinne et al. climatology with 9 anthropogenic plumes and natural
     background aerosol.
     """
-    
-    # Number of plumes and features
-    nplumes: int
-    nfeatures: int
     
     # Plume center locations [degrees]
     plume_lat: jnp.ndarray        # (nplumes,) latitude of plume centers
@@ -87,9 +82,6 @@ class AerosolParameters:
         Longitudes use the file's 0-360 convention, matching the
         dinosaur-derived column longitudes cached by the term.
         """
-        nplumes = 9
-        nfeatures = 2
-
         # Plume centers [degrees N / degrees E, 0-360].
         plume_lat = jnp.array(
             [49.4, 40.1, 30.0, 23.3, 3.5, -10.3, -1.0, -3.5, -20.0])
@@ -154,8 +146,6 @@ class AerosolParameters:
         ]).T
 
         return cls(
-            nplumes=nplumes,
-            nfeatures=nfeatures,
             plume_lat=plume_lat,
             plume_lon=plume_lon,
             beta_a=beta_a,
@@ -193,8 +183,6 @@ class AerosolParameters:
         as_arr = lambda name: jnp.asarray(ds[name].values)
         as_arr_T = lambda name: jnp.asarray(ds[name].values.T)
         return cls(
-            nplumes=int(ds.sizes["plume_number"]),
-            nfeatures=int(ds.sizes["plume_feature"]),
             plume_lat=as_arr("plume_lat"),
             plume_lon=as_arr("plume_lon"),
             beta_a=as_arr("beta_a"),

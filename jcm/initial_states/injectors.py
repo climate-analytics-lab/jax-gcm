@@ -13,9 +13,8 @@ natural call pattern from Python is to hand the returned state straight to
     )
 
 ``Model.run(initial_state=...)`` accepts ``None``, a ``PhysicsState``, or a
-dycore-native state (``model.py`` ``bootstrap_state``), so there is no longer
-a resume-not-run trap: ``run`` bootstraps from the supplied state and
-integrates it.
+dycore-native state (``model.py`` ``bootstrap_state``): ``run`` bootstraps
+from the supplied state and integrates it.
 
 These are the library homes of the initial conditions the Hydra CLI exposes
 as ``init.kind={jw,balanced_isothermal,era5,from_state}``; ``jcm.runners``
@@ -198,11 +197,10 @@ def jw_state(model: Model, rh: float = 0.6):
     ).astype(q_dtype)
     # Preserve the other prognostic tracers (qc, qi, qnc, qni, qr, qs, GHG VMRs,
     # aerosol modes, ...) that ``bootstrap_state`` seeded — only the JW analytic
-    # humidity profile is injected here. Overwriting the whole dict used to drop
-    # the cloud tracers, so radiation saw zero cloud water for the entire run
-    # (CRE ≡ 0). Cloud water now persists and accumulates; the RRTMGP in-cloud
-    # inflation that previously made this unstable is handled by the mo_psrad
-    # in-cloud zeroing (mcica.in_cloud_path).
+    # humidity profile is injected here. Overwriting the whole dict would drop
+    # the cloud tracers, leaving radiation with zero cloud water (CRE ≡ 0). The
+    # in-cloud RRTMGP inflation this persisting cloud water could otherwise
+    # cause is bounded by the mo_psrad in-cloud zeroing (mcica.in_cloud_path).
     state.tracers = {
         **state.tracers,
         "specific_humidity": model.coords.horizontal.to_modal(q_nodal),

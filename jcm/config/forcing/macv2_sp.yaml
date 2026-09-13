@@ -1,0 +1,23 @@
+# Realistic surface forcing PLUS real time-varying MACv2-SP anthropogenic
+# aerosol amplitudes (Simple Plumes; SPv2.1 CMIP7 build), issue #680 item 2.
+#
+# Extends ``from_file`` (so it still needs a boundary file for SST/land, e.g.
+# ``forcing.file=hf://bundles/t63/forcing_pd.nc``) and additionally loads the
+# per-year ``year_weight`` and seasonal ``ann_cycle`` scalings from the MACv2
+# file into ``ForcingData.aerosol_year_weight`` / ``aerosol_ann_cycle`` via
+# ``jcm.forcing.read_macv2_weights``. Without this, those two fields default to
+# all-ones — perpetual year-2005 amplitude with no seasonal cycle, which the
+# runner's config-trap check warns about.
+#
+#     python -m jcm.main physics=echam grid=echam_t63_l47_hybrid \
+#         terrain=from_file terrain.file=/path/to/terrain.nc \
+#         forcing=macv2_sp forcing.file=/path/to/forcing.nc
+
+defaults:
+  - from_file
+
+# The MACv2-SP netCDF (static plume geometry + ``year_weight`` + ``ann_cycle``).
+# ``auto`` loads the repo-packaged SPv2.1 CMIP7 file (resolution-invariant,
+# shipped in the wheel — no download, no mirror fetch). Override with a local
+# path (``forcing.macv2_file=/path/to/file.nc``) to use a different build.
+macv2_file: auto

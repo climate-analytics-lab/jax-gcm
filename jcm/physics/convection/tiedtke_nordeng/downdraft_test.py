@@ -86,11 +86,11 @@ def _rce_column(klev=47):
     return T, q, p, layer_thickness, rho
 
 
-def _default_config(dt=1800.0):
+def _default_config():
     return ConvectionParameters.default(
-        dt_conv=dt, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+        entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
         entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
-        cprcon=2.5e-4, cevapcu=2.0e-5, cmfctop=0.20, cmfdeps=0.30,
+        cprcon=2.5e-4, cevapcu=2.0e-5, cmfdeps=0.30,
     )
 
 

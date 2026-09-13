@@ -63,7 +63,7 @@ class TestAerosolParameters:
     def test_reference_values(self):
         """Spot-check hard values transcribed from the v1 parameter file."""
         p = AerosolParameters.default()
-        assert p.nplumes == 9 and p.nfeatures == 2
+        assert p.plume_lat.shape[0] == 9 and p.ftr_weight.shape[0] == 2
         # Plume 1 is Europe (the 260-degree wrap case), plume 3 East Asia.
         np.testing.assert_allclose(p.plume_lat[0], 49.4)
         np.testing.assert_allclose(p.plume_lon[0], 20.6)
@@ -377,7 +377,7 @@ class TestJAXCompatibility:
         def total_aod(aod_spmx):
             p = AerosolParameters.default()
             p = type(p)(**{**{k: getattr(p, k) for k in (
-                'nplumes', 'nfeatures', 'plume_lat', 'plume_lon', 'beta_a',
+                'plume_lat', 'plume_lon', 'beta_a',
                 'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
                 'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
                 'ftr_weight', 'background_aod', 'spa_prefactor',
@@ -409,7 +409,7 @@ class TestJAXCompatibility:
         def loss(aod_spmx):
             p = AerosolParameters.default()
             p = type(p)(**{**{k: getattr(p, k) for k in (
-                'nplumes', 'nfeatures', 'plume_lat', 'plume_lon', 'beta_a',
+                'plume_lat', 'plume_lon', 'beta_a',
                 'beta_b', 'aod_fmbg', 'asy550', 'ssa550', 'angstrom',
                 'sig_lon_E', 'sig_lon_W', 'sig_lat_E', 'sig_lat_W', 'theta',
                 'ftr_weight', 'background_aod', 'spa_prefactor',

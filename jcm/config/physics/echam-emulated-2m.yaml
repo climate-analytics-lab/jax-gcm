@@ -12,6 +12,12 @@
 # drive the model to NaN inside a step — pair it with
 # ``zero_tendency: true`` on the term to measure cost only.
 #
+# This is the direct term (``_target_``) path, where Hydra passes ``null``
+# straight through to random init. Via the ``echam_physics(...)`` builder
+# instead (``physics.builder``), ``emulator_weights_file: null`` is DROPPED
+# and falls back to ``auto`` — there the train-from-scratch value is the
+# explicit string ``"random"`` (``emulator_weights_file: random``).
+#
 # Use it as::
 #
 #     python -m jcm.main physics=echam-emulated-2m
@@ -57,6 +63,15 @@ terms:
     _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
   lohmann_2m_microphysics:
     _target_: jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics
+    params:
+      # This preset activates CDNC through MACv2-SP simple plumes (SPA), not
+      # AR&G, so it keeps ECHAM's generic ``mo_echam_cloud_params`` ccsaut /
+      # ccraut. The scheme DEFAULT is the ECHAM-HAM prognostic-CDNC / AR&G
+      # retune (ccsaut=900, ccraut=10.6, mo_activ.f90 under ncd_activ==2 +
+      # cdnc_min_fixed==40) — that branch is the JAM+ARG route this preset
+      # does not run, so restore the base values here.
+      ccsaut: 95.0
+      ccraut: 15.0
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:
