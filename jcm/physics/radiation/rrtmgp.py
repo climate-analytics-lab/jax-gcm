@@ -15,6 +15,7 @@ replacement for the grey ``radiation_scheme``.
 Date: 2025-08-01
 """
 
+import os
 from pathlib import Path
 from typing import Tuple, Optional
 import warnings
@@ -388,6 +389,11 @@ def prepare_rrtmgp_data(
         # HLO is larger (one slice per level per sweep), which only shows up
         # as a modest one-off compile-time cost.
         "use_scan": False,
+        # BENCHMARK-ONLY knob (jax-rrtmgp #27): how many g-points are batched
+        # per radiative-transfer loop iteration. Read from the environment so a
+        # single branch serves a whole sweep without one commit per value.
+        # Not for merge.
+        "gpt_chunk": int(os.environ.get("JCM_GPT_CHUNK", "1")),
     }
 
 
