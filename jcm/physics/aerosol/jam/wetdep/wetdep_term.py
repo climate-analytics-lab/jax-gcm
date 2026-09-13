@@ -19,14 +19,16 @@ treatment):
   which stays alive in cells the microphysics emptied.
 * **Below-cloud impaction scavenging** — precipitation falling through a
   layer collects interstitial aerosol at CAM's Slinn impaction coefficient
-  (``wetdep.impaction``), evaluated separately for the number and mass
-  moments. Both contributions use the per-level flux ENTERING each layer —
-  stratiform from the microphysics ledger, convective from
+  (``wetdep.impaction``), separately for the number and mass moments. Both
+  contributions use the per-level flux ENTERING each layer — stratiform
+  from the microphysics ledger, convective from
   ``ConvectionData.precip_flux`` (the cuflx rain + snow budget) — so the
-  collection rate follows the carrier actually falling there, and each is
-  self-confining below where its precip forms. Neither is weighted by
-  cloud cover: CAM's swept volume cancels against the in-precip-area rain
-  rate, so the rate acts on the grid-mean interstitial mixing ratio.
+  collection rate follows the carrier that is actually falling there and
+  washout is confined below where precip actually forms. Neither carrier
+  is weighted by a cloud fraction: CAM's swept precipitating volume
+  cancels against the in-precip-area rain rate (see ``below_cloud_rate``),
+  which also retires the stratiform-cover partition of the convective
+  carrier that jax-gcm#781 describes.
 * **Convective in-cloud scavenging** — the convective mirror of the
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
@@ -112,12 +114,12 @@ class WetDepParameters:
         # falling precip. CAM's un-set fallback is the mass-weighted
         # hygroscopicity of the mode, which every supported CAM
         # configuration overrides with this scalar.
-        # conv_scav_ratio: fraction of soluble aerosol removed with the
-        # condensate-to-precip conversion (HAMMOZ soluble-mode value).
         # mu_water_air / impact_scale: the two knobs on the Slinn collection
         # integral itself (interception viscosity ratio; inertial-impaction
         # efficiency). Defaults are CAM as written, so they are inert until
-        # tuned; the table is rebuilt from them inside the traced step.
+        # tuned; the knob-dependent part of the table is rebuilt per step.
+        # conv_scav_ratio: fraction of soluble aerosol removed with the
+        # condensate-to-precip conversion (HAMMOZ soluble-mode value).
         return cls(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.1),
