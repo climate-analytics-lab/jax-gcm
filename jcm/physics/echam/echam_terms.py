@@ -79,6 +79,7 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_optics_backend: str = "mie_lut",
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_ice_scheme: str = "niemand",
@@ -179,6 +180,12 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_optics_backend: Mie pathway for the JAM optics —
+            ``"mie_lut"`` (default) integrates Bohren-Huffman efficiencies
+            from a lookup table over an 8-node Gauss-Hermite quadrature;
+            ``"neuralmie"`` predicts the same mode-integrated quantity in one
+            network forward pass and adds a BC core-shell treatment
+            (Geiss & Ma, GMD 2024). Opt-in, so the default is unchanged.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
             (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
@@ -414,6 +421,23 @@ def echam_physics(
     # plumes, no species) or with the aerosol module off would otherwise
     # produce an output file silently missing the very fields the run was
     # configured to get.
+    # Same reasoning as aerocom_optics below: a backend that silently does
+    # nothing is worse than an error, because the run would report LUT optics
+    # while its config asked for NeuralMie.
+    if jam_optics_backend != "mie_lut":
+        if aerosol_module != "jam":
+            raise ValueError(
+                f"jam_optics_backend={jam_optics_backend!r} needs "
+                "aerosol_module='jam' — the backend selects the Mie pathway "
+                "inside the JAM optics term, which "
+                f"aerosol_module={aerosol_module!r} does not build."
+            )
+        if not jam_optics:
+            raise ValueError(
+                f"jam_optics_backend={jam_optics_backend!r} needs "
+                "jam_optics=True — with the optics term switched off there is "
+                "no Mie pathway to select."
+            )
     if aerocom_optics and aerosol_module != "jam":
         raise ValueError(
             "aerocom_optics=True needs aerosol_module='jam' — the per-species "
@@ -441,6 +465,7 @@ def echam_physics(
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
             optics=jam_optics,
+            optics_backend=jam_optics_backend,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             ice_scheme=jam_ice_scheme,

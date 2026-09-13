@@ -1,5 +1,6 @@
 """Tests for refractive indices and the JamOpticsTerm."""
 
+import math
 import unittest
 
 import jax
@@ -8,6 +9,7 @@ import numpy as np
 
 from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+from jcm.physics.aerosol.jam.optics import optics_term
 from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
 from jcm.physics.aerosol.jam.optics.refractive_index import refractive_index_at
 from jcm.physics.radiation.band_config import RadiationBandConfig
@@ -584,3 +586,239 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         self.assertGreater(fine, 1.5, f"fine-mode Angstrom too low: {fine}")
         self.assertLess(coarse, 0.5, f"coarse-mode Angstrom too high: {coarse}")
         self.assertGreater(fine, coarse)
+
+def _consistent_state(nlev=4, ncols=3, number=1.0e8, growth=1.0, mass=1e-9):
+    """Build a JAM state whose r_dry actually matches its masses and number.
+
+    ``_setup`` sets ``mass``, ``number`` and ``r_dry`` independently, so its
+    masses imply ~2.3x more particle volume than its ``(number, r_dry)`` do.
+    That is harmless for the LUT backend, which takes mode geometry from
+    ``(number, r_wet)`` and never uses the species volume for it -- but the
+    NeuralMie backend takes geometry from the species volume, so the two
+    legitimately disagree on an inconsistent state.
+
+    ``PlaceholderMicrophysics`` never produces one: it derives ``r_dry`` from
+    the masses and number exactly so the lognormal third-moment relation
+    ``V = N (pi/6) Dg^3 exp(4.5 ln^2 sigma)`` holds. This helper does the same,
+    so a backend comparison measures optics rather than an inconsistent input.
+    """
+    r_dry, r_wet = [], []
+    for mode in MAM4_SPEC.modes:
+        vol = sum(mass / MAM4_SPEC.species_props(sp).density for sp in mode.species)
+        k = (math.pi / 6.0) * math.exp(4.5 * math.log(mode.geom_std_dev) ** 2)
+        dg = (vol / (number * k)) ** (1.0 / 3.0)
+        r_dry.append(0.5 * dg)
+        r_wet.append(0.5 * dg * growth)
+    shape = (MAM4_SPEC.n_modes(), nlev, ncols)
+    stack = lambda xs: jnp.stack([jnp.full((nlev, ncols), x) for x in xs])
+    return JamAerosolState(
+        r_dry=stack(r_dry), r_wet=stack(r_wet),
+        rho=jnp.full(shape, 1800.0), kappa=jnp.full(shape, 0.5),
+        mass=jnp.full(shape, mass), number=jnp.full(shape, number),
+    )
+
+
+class OpticsBackendTest(unittest.TestCase):
+    """The NeuralMie backend against the default Mie-LUT backend."""
+
+    def _aerosol(self, backend, aer=None, **kw):
+        """Per-band optics via the term's __call__, as the other tests do."""
+        state, diagnostics, band, _n_sw, _n_lw = _setup()
+        if aer is not None:
+            diagnostics = dict(diagnostics)
+            diagnostics["_jam_state"] = aer
+        term = JamOpticsTerm(optics_backend=backend, **kw)
+        term.cache_band_config(band)
+        _tend, diag = term(state, diagnostics, None, None)
+        return diag["aerosol"]
+
+    def _fields(self, backend, aer=None, **kw):
+        state, diagnostics, band, _n_sw, _n_lw = _setup()
+        if aer is not None:
+            diagnostics = dict(diagnostics)
+            diagnostics["_jam_state"] = aer
+        term = JamOpticsTerm(optics_backend=backend, **kw)
+        term.cache_band_config(band)
+        return term._compute_fields(state, diagnostics)
+
+    def test_default_backend_is_the_lut(self):
+        """NeuralMie must be opt-in so default answers are untouched."""
+        self.assertEqual(JamOpticsTerm()._optics_backend, "mie_lut")
+
+    def test_rejects_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            JamOpticsTerm(optics_backend="not_a_backend")
+
+    def test_lut_backend_skips_the_table_build(self):
+        """NeuralMie should not pay the ~4 s Mie-LUT construction."""
+        self.assertIsNone(JamOpticsTerm(optics_backend="neuralmie")._lut)
+        self.assertIsNotNone(JamOpticsTerm(optics_backend="mie_lut")._lut)
+
+    def test_weights_are_differentiable_params(self):
+        """Weights live in nnx.Param, so they stay reachable by jax.grad."""
+        term = JamOpticsTerm(optics_backend="neuralmie")
+        weights = term._nm_weights.get_value()
+        self.assertEqual(weights.sphere.layers[0].kernel.shape, (4, 69))
+        self.assertEqual(weights.coreshell.layers[0].kernel.shape, (7, 112))
+
+    def test_publishes_the_same_keys(self):
+        self.assertEqual(set(self._fields("mie_lut")), set(self._fields("neuralmie")))
+
+    def test_optics_are_finite_and_bounded(self):
+        a = self._aerosol("neuralmie", aer=_consistent_state(growth=1.26))
+        for arr in (a.aod_sw_per_band, a.aod_lw_per_band):
+            self.assertTrue(np.all(np.isfinite(np.asarray(arr))))
+            self.assertTrue(bool(jnp.all(arr >= 0.0)))
+        for arr in (a.ssa_sw_per_band, a.ssa_lw_per_band):
+            self.assertTrue(bool(jnp.all((arr >= 0.0) & (arr <= 1.0 + 1e-5))))
+        for arr in (a.asy_sw_per_band, a.asy_lw_per_band):
+            self.assertTrue(bool(jnp.all((arr >= -1.0 - 1e-5) & (arr <= 1.0 + 1e-5))))
+
+    def test_agrees_with_the_lut_for_homogeneous_spheres(self):
+        """The two backends compute the SAME quantity, so they must agree.
+
+        With <.> the number-weighted lognormal moment and n_A the column
+        number per area, the LUT path forms n_A*sec*pi*r_g^2 with
+        sec = <Qe (r/r_g)^2> while NeuralMie forms ke_rho*V_A with
+        ke_rho = 0.75*<Qe r^2>/<r^3>; both equal pi*n_A*<Qe r^2>. So this is a
+        correctness test, not a characterisation test.
+
+        Compared with the core species disabled, which forces the homogeneous
+        sphere network everywhere: with core-shell active three of MAM4's four
+        modes switch mixing rule, which is a deliberate physics change (BC
+        lensing) and would confound a mechanism check.
+
+        Tolerances reflect the LUT path's OWN error, which dominates: its
+        table is 64x24x24 trilinear and its quadrature is 8-node
+        Gauss-Hermite over a sigma=1.8 lognormal. ``mie_test`` allows that
+        interpolation 15% on q_ext and 0.05 on ssa off-grid. NeuralMie sits
+        within 0.18% of the exact quadrature, so where they differ the LUT is
+        the less accurate of the two.
+        """
+        aer = _consistent_state(growth=1.0)
+        lut = self._fields("mie_lut", aer=aer)
+        original = optics_term._CORE_SPECIES
+        optics_term._CORE_SPECIES = "__disabled__"
+        try:
+            nm_out = self._fields("neuralmie", aer=aer)
+        finally:
+            optics_term._CORE_SPECIES = original
+
+        for key, tol in (("aod_profile", 0.10), ("ssa_profile", 0.02),
+                         ("asy_profile", 0.02)):
+            a = np.asarray(lut[key])
+            b = np.asarray(nm_out[key])
+            mask = a > 0.0
+            self.assertTrue(mask.any(), msg=f"{key} all zero")
+            ratio = b[mask].mean() / a[mask].mean()
+            self.assertAlmostEqual(ratio, 1.0, delta=tol, msg=f"{key} ratio {ratio:.4f}")
+
+    def test_core_shell_brightens_relative_to_volume_mixing(self):
+        """Core-shell RAISES ssa relative to the volume-average index rule.
+
+        The direction is easy to get backwards. "Coating enhances BC
+        absorption 1.2-2x" compares coated BC to *bare* BC. Against the
+        volume-average-of-refractive-index rule ``optics_term`` uses today the
+        comparison runs the other way: averaging the index smears BC's large
+        imaginary part over the whole particle, which over-absorbs relative to
+        confining it to a concentric core.
+
+        Verified against exact TAMie + 1024-point quadrature at 550 nm
+        (r_g = 100 nm, sigma_g = 1.8, BC core in a sulfate shell), ssa
+        core-shell vs volume-mixed: 0.968/0.966 at V_bc/V = 0.008,
+        0.818/0.789 at 0.064, 0.700/0.671 at 0.125, 0.574/0.570 at 0.216. The
+        sign reverses only at V_bc/V ~ 0.5, far above realistic loadings.
+
+        So this backend makes BC-bearing modes LESS absorbing, which is the
+        direction that matters for ERFari (jax-gcm#791).
+        """
+        aer = _consistent_state(growth=1.0)
+        with_core = self._fields("neuralmie", aer=aer)
+        original = optics_term._CORE_SPECIES
+        optics_term._CORE_SPECIES = "__disabled__"
+        try:
+            without = self._fields("neuralmie", aer=aer)
+        finally:
+            optics_term._CORE_SPECIES = original
+        ssa_core = float(np.asarray(with_core["ssa_profile"]).mean())
+        ssa_plain = float(np.asarray(without["ssa_profile"]).mean())
+        self.assertGreater(ssa_core, ssa_plain)
+
+    def test_empty_levels_carry_exactly_zero_tau(self):
+        """The mass gate must hold on the NeuralMie path too."""
+        state, diagnostics, band, _n_sw, _n_lw = _setup()
+        empty = {k: jnp.zeros_like(v) for k, v in state.tracers.items()}
+        state = state.copy(tracers=empty)
+        term = JamOpticsTerm(optics_backend="neuralmie")
+        term.cache_band_config(band)
+        _tend, diag = term(state, diagnostics, None, None)
+        self.assertEqual(
+            float(np.abs(np.asarray(diag["aerosol"].aod_sw_per_band)).max()), 0.0)
+
+    def test_grad_through_mass(self):
+        """The backend must stay differentiable w.r.t. aerosol mass."""
+        state, diagnostics, band, _n_sw, _n_lw = _setup()
+        diagnostics = dict(diagnostics)
+        diagnostics["_jam_state"] = _consistent_state(growth=1.26)
+        term = JamOpticsTerm(optics_backend="neuralmie")
+        term.cache_band_config(band)
+        key = mass_name("so4", "acc")
+
+        def loss(scale):
+            tracers = dict(state.tracers)
+            tracers[key] = tracers[key] * scale
+            _tend, diag = term(state.copy(tracers=tracers), diagnostics, None, None)
+            return jnp.sum(diag["aerosol"].aod_sw_per_band)
+
+        grad = jax.grad(loss)(1.0)
+        self.assertTrue(bool(jnp.isfinite(grad)))
+
+    def test_pure_core_mode_falls_back_to_the_core_index(self):
+        """A mode whose coating vanishes must not form 0/0.
+
+        Near-pure-BC modes are the ``shell_ok=False`` arm of
+        ``_neuralmie_mode_optics``: with no coating volume the shell index is
+        0/0, so it falls back to the core index -- the exact homogeneous limit,
+        and in-domain. MAM4's populated fixture never reaches it, so drive it
+        directly by zeroing every non-BC tracer.
+        """
+        state, diagnostics, band, _n_sw, _n_lw = _setup()
+        tracers = dict(state.tracers)
+        for mode in MAM4_SPEC.modes:
+            for sp in mode.species:
+                if sp != "bc":
+                    tracers[mass_name(sp, mode.short)] = jnp.zeros_like(
+                        tracers[mass_name(sp, mode.short)])
+        diagnostics = dict(diagnostics)
+        # r_wet == r_dry so no water is added back as a coating either.
+        aer = diagnostics["_jam_state"]
+        diagnostics["_jam_state"] = aer.copy(r_wet=aer.r_dry)
+        term = JamOpticsTerm(optics_backend="neuralmie")
+        term.cache_band_config(band)
+        _tend, diag = term(state.copy(tracers=tracers), diagnostics, None, None)
+        aod = np.asarray(diag["aerosol"].aod_sw_per_band)
+        ssa = np.asarray(diag["aerosol"].ssa_sw_per_band)
+        self.assertTrue(np.all(np.isfinite(aod)))
+        self.assertTrue(np.all(np.isfinite(ssa)))
+        self.assertGreater(float(aod.max()), 0.0)
+        # Pure BC is strongly absorbing, so the mode must be dark.
+        self.assertLess(float(ssa.max()), 0.8)
+
+    def test_diagnostics_pass_uses_the_same_backend(self):
+        """od550aer must describe the optical model radiation actually saw.
+
+        The backend branch sits inside the per-mode block of ``one_band``, so
+        ``_optics_diagnostics_fields`` -- which re-enters ``_band_optics`` at
+        the AeroCom wavelengths -- switches with it. Were it branched at
+        ``_band_optics`` instead, the published AOD could silently come from
+        the LUT while radiation used NeuralMie, and the existing closure tests
+        would still pass because both sides would stay internally consistent.
+        """
+        lut = self._fields("mie_lut", aer=_consistent_state(), optics_diagnostics=True)
+        nm_out = self._fields("neuralmie", aer=_consistent_state(), optics_diagnostics=True)
+        a = float(np.asarray(lut["_optics_diag"]["od550aer"]).mean())
+        b = float(np.asarray(nm_out["_optics_diag"]["od550aer"]).mean())
+        self.assertGreater(a, 0.0)
+        self.assertGreater(b, 0.0)
+        self.assertNotAlmostEqual(a, b, delta=1e-12)
+

@@ -352,3 +352,33 @@ class TestEmulatorWeightsFile(unittest.TestCase):
         # The "auto" default must stay silent for other schemes (it is the
         # unset state, not a user choice).
         self.echam_physics(radiation_scheme="grey")  # no raise
+
+class JamOpticsBackendConfigTest(unittest.TestCase):
+    """``jam_optics_backend`` wiring through ``echam_physics``."""
+
+    def test_backend_reaches_the_optics_term(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                                jam_optics_backend="neuralmie")
+        term = next(t for t in physics.terms if t.name == "jam_optics")
+        self.assertEqual(term._optics_backend, "neuralmie")
+
+    def test_default_backend_is_the_lut(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        term = next(t for t in physics.terms if t.name == "jam_optics")
+        self.assertEqual(term._optics_backend, "mie_lut")
+
+    def test_requires_the_jam_aerosol_module(self):
+        """A backend that silently did nothing would be worse than an error."""
+        from jcm.physics.echam.echam_terms import echam_physics
+        with self.assertRaises(ValueError):
+            echam_physics(aerosol_module="macv2sp", cloud_scheme="2m",
+                          jam_optics_backend="neuralmie")
+
+    def test_requires_the_optics_term(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        with self.assertRaises(ValueError):
+            echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                          jam_optics=False, jam_optics_backend="neuralmie")
+

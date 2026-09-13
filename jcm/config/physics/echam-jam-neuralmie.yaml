@@ -1,0 +1,49 @@
+# JAM aerosol with the NeuralMie neural-network optics backend
+# (jax-gcm#791; Geiss & Ma, GMD 2024, doi:10.5194/gmd-2024-30).
+#
+#     python -m jcm.main physics=echam-jam-neuralmie \
+#         grid=echam_t63_l47_hybrid
+#
+# Replaces the default Mie pathway -- an 8-node Gauss-Hermite quadrature over a
+# 64x24x24 trilinear Bohren-Huffman lookup table -- with a single forward pass
+# through a pretrained emulator that predicts the mode-integrated bulk optics
+# directly. The two compute the SAME quantity: with <.> the number-weighted
+# lognormal moment and n_A the column number per area, both reduce to
+# pi*n_A*<Qe r^2>, so this is a change of numerical method, not of definition.
+#
+# ACCURACY: the emulator sits within 0.18 % (max; 0.023 % median) of an exact
+# 1024-point quadrature over the range modal schemes occupy, measured against a
+# Bohren-Huffman kernel independent of the one it was trained on. That is
+# tighter than the LUT path it replaces, whose own interpolation tolerance in
+# ``mie_test`` is 15 % on q_ext and 0.05 on ssa off-grid.
+#
+# TWO PHYSICS CHANGES COME WITH IT, so this is not a drop-in numerical swap:
+#
+#   1. BC-bearing modes (accumulation, coarse and primary carbon in MAM4) use
+#      a concentric core-shell treatment -- BC core, everything else including
+#      aerosol water as the coating -- instead of one volume-averaged
+#      refractive index. Averaging the index smears BC's large imaginary part
+#      over the whole particle and OVER-absorbs relative to a core, so these
+#      modes become *less* absorbing (verified against exact Mie: ssa 0.700 vs
+#      0.671 at V_bc/V = 0.125). This moves ERFari and is NOT retuned for here.
+#      Applying it to primary carbon is the weakest part: that mode is
+#      soluble=False, "hydrophobic until it ages", where a coated sphere is
+#      least physical.
+#
+#   2. The hygroscopic water volume uses the number-free, third-moment
+#      consistent form ``vol_dry * ((r_wet/r_dry)^3 - 1)``. The default path's
+#      ``N*(4/3)pi*(r_wet^3 - r_dry^3)`` understates it by exp(4.5 ln^2 sigma)
+#      -- 2.70x for Aitken, 4.73x for the sigma=1.8 modes -- because
+#      ``PlaceholderMicrophysics`` defines r_dry so that N*(4/3)pi*r_dry^3 is
+#      the dry volume DIVIDED by that factor. Fixed here only; the default path
+#      is tracked separately in jax-gcm#790 because correcting it there moves
+#      default answers.
+#
+# COST is unmeasured at the time of writing: one dense MLP against 8
+# gather-bound table lookups is ~100x the FLOPs but a better memory pattern.
+# See the PR for the jcm-benchmark numbers.
+
+defaults:
+  - echam-jam
+
+jam_optics_backend: neuralmie
