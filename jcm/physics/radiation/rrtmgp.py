@@ -392,8 +392,16 @@ def prepare_rrtmgp_data(
         # BENCHMARK-ONLY knob (jax-rrtmgp #27): how many g-points are batched
         # per radiative-transfer loop iteration. Read from the environment so a
         # single branch serves a whole sweep without one commit per value.
-        # Not for merge.
-        "gpt_chunk": int(os.environ.get("JCM_GPT_CHUNK", "1")),
+        #
+        # The key is omitted entirely when the variable is unset, so this same
+        # branch also drives the comparison arms, whose jax-rrtmgp versions
+        # predate `gpt_chunk` and would raise TypeError on an unexpected
+        # keyword. Not for merge.
+        **(
+            {"gpt_chunk": int(os.environ["JCM_GPT_CHUNK"])}
+            if "JCM_GPT_CHUNK" in os.environ
+            else {}
+        ),
     }
 
 
