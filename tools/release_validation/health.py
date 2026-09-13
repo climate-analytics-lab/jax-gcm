@@ -41,7 +41,8 @@ for _p in (str(_REPO), str(_TOOLS)):
 # pressure_half level-orientation handling).
 from jcm.analysis import area_weights, global_mean  # noqa: E402
 from aerosol_stats import (  # noqa: E402
-    _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect, format_table, is_jam_run,
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, chunk_day, collect, format_table,
+    is_jam_run, positive_int,
     missing_jam_diagnostics, physics_gates, run_files, summarize,
     timestep_seconds, unscored_gates)
 
@@ -67,7 +68,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir")
     ap.add_argument("--log")
-    ap.add_argument("--last-n", type=int, default=None,
+    ap.add_argument("--last-n", type=positive_int, default=None,
                     help="use only the last N chunks (default: all)")
     a = ap.parse_args()
 
@@ -78,7 +79,12 @@ def main():
     if not files:
         print(f"FAIL  no chunk files in {a.run_dir}")
         return 1
+    # The label of the chunk before a ``--last-n`` slice is the retained
+    # window's start; ``chunk_centres`` needs it to place the first node.
+    window_start = None
     if a.last_n:
+        if a.last_n < len(files):
+            window_start = chunk_day(files[-a.last_n - 1])
         files = files[-a.last_n:]
     ds = xr.open_mfdataset(files, combine="by_coords")
     weights = area_weights(ds)
@@ -166,7 +172,7 @@ def main():
         # The dynamics-conservation gate is per STEP, so it needs the run's
         # timestep; ``unscored_gates`` reports it when either is missing.
         dt = timestep_seconds(a.run_dir)
-        stats = summarize(days, series, dt)
+        stats = summarize(days, series, dt, window_start)
         for sp in BURDEN_RANGES:
             if f"burden_{sp}_mg_m2" not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
@@ -177,7 +183,7 @@ def main():
             print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
                   f"(expected {limit})")
             ok = ok and good
-        unscored = unscored_gates(days, series, dt)
+        unscored = unscored_gates(days, series, dt, window_start)
         for name, reason in unscored:
             print(f"UNSCORED  {name}: {reason}")
         if unscored:

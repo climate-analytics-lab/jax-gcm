@@ -13,6 +13,7 @@ import pathlib
 import sys
 
 import numpy as np
+import pytest
 import xarray as xr
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -407,6 +408,37 @@ class TestGates:
         stats = A.summarize(days, series)
         assert np.isclose(stats["lifetime_so4_days"], 4.0)
 
+    def test_lifetime_needs_both_removal_ledgers(self):
+        """An absent ledger is an omission, not a zero sink.
+
+        Trimmed output that keeps ``wet_so4`` but not ``dry_so4`` must not
+        yield a lifetime from the wet sink alone — a reference comparison would
+        score that number — and the omission is named in the report.
+        """
+        n = 73
+        days = np.arange(5, 370, 5, dtype=float)[:n]
+        series = {"burden_so4": np.full(n, 4.0),
+                  "wet_so4": np.full(n, 1.0 / 86400e6)}      # no dry_so4
+        stats = A.summarize(days, series)
+        assert "lifetime_so4_days" not in stats
+        reason = dict(A.unscored_gates(days, series))["lifetime_so4_days"]
+        assert "dry_so4" in reason
+
+    def test_lifetime_needs_usable_ledgers(self):
+        """Present but holed (a chunk without the diagnostic) or zero: named, not scored."""
+        n = 73
+        days = np.arange(5, 370, 5, dtype=float)[:n]
+        holed = np.full(n, 1.0 / 86400e6)
+        holed[7] = np.nan
+        series = {"burden_so4": np.full(n, 4.0), "dry_so4": np.zeros(n),
+                  "wet_so4": holed}
+        assert "lifetime_so4_days" not in A.summarize(days, series)
+        assert "non-finite" in dict(A.unscored_gates(days, series))["lifetime_so4_days"]
+        series = {"burden_so4": np.full(n, 4.0), "dry_so4": np.zeros(n),
+                  "wet_so4": np.zeros(n)}
+        assert "lifetime_so4_days" not in A.summarize(days, series)
+        assert "no removal" in dict(A.unscored_gates(days, series))["lifetime_so4_days"]
+
     def test_hemispheric_ratio_and_upper_fraction(self):
         n = 20
         days = np.arange(5, 5 * n + 5, 5, dtype=float)
@@ -546,6 +578,47 @@ class TestNothingPassesByAbsence:
                   "budget_dyn_bc": np.zeros(n)}
         assert "dyn_frac_per_step" not in dict(
             A.unscored_gates(days, series, 720.0))
+
+    def test_a_carried_species_without_its_own_gauge_is_reported(self):
+        """One species gauged, another carried without one: per species, not run-wide.
+
+        A run-wide "some gauge exists" test let a transport leak confined to
+        the ungauged species pass unseen, since ``summarize`` emits no gate
+        for it.
+        """
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0),
+                  "budget_mass_bc": np.full(n, 4.0e-6),
+                  "budget_dyn_bc": np.zeros(n),
+                  "burden_so4": np.full(n, 4.0)}             # carried, ungauged
+        stats = A.summarize(days, series, timestep_seconds=720.0)
+        assert "dyn_frac_per_step_bc" in stats
+        assert "dyn_frac_per_step_so4" not in stats
+        reasons = dict(A.unscored_gates(days, series, 720.0))
+        assert "budget_dyn_so4" in reasons["dyn_frac_per_step_so4"]
+        assert "dyn_frac_per_step_bc" not in reasons
+        assert "dyn_frac_per_step" not in reasons
+
+    def test_a_gauge_without_its_mass_denominator_is_reported(self):
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        series = {"burden_bc": np.full(n, 3.0), "budget_dyn_bc": np.zeros(n)}
+        stats = A.summarize(days, series, timestep_seconds=720.0)
+        assert "dyn_frac_per_step_bc" not in stats
+        reason = dict(A.unscored_gates(days, series, 720.0))["dyn_frac_per_step_bc"]
+        assert "budget_mass_bc" in reason
+
+    def test_an_unusable_mass_denominator_is_reported(self):
+        """All-NaN or zero mass: ``summarize`` emits no gate, so the row must say why."""
+        n = 40
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        for mass in (np.full(n, np.nan), np.zeros(n)):
+            series = {"burden_bc": np.full(n, 3.0), "budget_dyn_bc": np.zeros(n),
+                      "budget_mass_bc": mass}
+            assert "dyn_frac_per_step_bc" not in A.summarize(days, series, 720.0)
+            reason = dict(A.unscored_gates(days, series, 720.0))["dyn_frac_per_step_bc"]
+            assert "finite positive" in reason
 
     def test_species_the_run_does_not_carry_is_reported(self):
         n = 40
@@ -698,6 +771,54 @@ class TestSeriesRoundTrip:
         assert "dyn_frac_per_step" not in dict(
             A.unscored_gates(days, series, dt))
 
+    @staticmethod
+    def _closed_record(n=73):
+        """Fluxes and a burden consistent with them at the true chunk centres."""
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        centres = A.chunk_centres(days)
+        emi = np.full(n, 2.0 / 86400e6)
+        wet = np.linspace(1.0, 3.0, n) / 86400e6
+        net = (emi - wet) * 86400e6
+        stored = 5.0 + np.concatenate(
+            [[0.0], np.cumsum(0.5 * (net[1:] + net[:-1]) * np.diff(centres))])
+        return days, {"burden_bc": stored, "emi_bc": emi,
+                      "dry_bc": np.zeros(n), "wet_bc": wet}
+
+    def test_window_start_travels_with_a_sliced_series(self, tmp_path,
+                                                        monkeypatch, capsys):
+        """``--series-in X --last-n 19 --series-out Y``: Y knows where its window began."""
+        days, series = self._closed_record()
+        src, dst = tmp_path / "full.npz", tmp_path / "sliced.npz"
+        np.savez(src, _days=days, _timestep_seconds=np.array(720.0), **series)
+        monkeypatch.setattr(sys, "argv", ["aerosol_stats", "--series-in", str(src),
+                                          "--last-n", "19", "--series-out", str(dst)])
+        A.main()
+        capsys.readouterr()
+        out = np.load(dst)
+        assert float(out["_window_start"]) == days[-20]
+        assert out["_days"][0] == days[-19]
+        sliced = {k: out[k] for k in out.files if not k.startswith("_")}
+        # Re-scoring the saved slice reproduces the closed budget exactly.
+        monkeypatch.setattr(sys, "argv", ["aerosol_stats", "--series-in", str(dst)])
+        A.main()
+        assert "budget_residual_bc" in capsys.readouterr().out
+        assert abs(A._budget_residual(out["_days"], sliced, "bc",
+                                      window_start=float(out["_window_start"]))) < 1e-9
+
+    def test_a_negative_last_n_is_rejected(self, tmp_path, monkeypatch):
+        days, series = self._closed_record()
+        src = tmp_path / "full.npz"
+        np.savez(src, _days=days, **series)
+        monkeypatch.setattr(sys, "argv", ["aerosol_stats", "--series-in", str(src),
+                                          "--last-n", "-5"])
+        with pytest.raises(SystemExit):
+            A.main()
+
+    def test_chunk_day_reads_the_file_name_only(self):
+        assert A.chunk_day("/scratch/spinup_day0/out_day365.nc") == 365.0
+        assert A.chunk_day("/runs/x/unlabelled.nc") is None
+        assert A.chunk_day("/runs/x/unlabelled.nc", 7) == 7.0
+
     def test_metadata_keys_never_become_statistics(self, tmp_path):
         out = tmp_path / "reduced.npz"
         np.savez(out, _days=np.arange(3.0), _timestep_seconds=np.array(720.0),
@@ -833,6 +954,64 @@ class TestFluxIntegration:
         # which is the case a fixed end-day abscissa gets wrong.
         np.testing.assert_allclose(A.chunk_centres(np.array([10.0, 15.0, 35.0])),
                                    [5.0, 12.5, 25.0])
+        # A slice of a longer record: the first window starts at the label of
+        # the chunk before it, not at day 0.
+        np.testing.assert_allclose(
+            A.chunk_centres(np.array([335.0, 345.0, 355.0, 365.0]), start=325.0),
+            [330.0, 340.0, 350.0, 360.0])
+
+    def test_a_sliced_record_keeps_its_window_start(self):
+        """``--last-n`` hands the preceding chunk's label to the quadrature.
+
+        The burden is built to be exactly consistent with the fluxes at the
+        true chunk centres, so the budget closes over ANY window — provided
+        the window's first node is where the retained chunk really sits. With
+        the start guessed as day 0 the first node lands at ``days[0] / 2`` and
+        the first trapezoid spans most of the run: a closed budget reads as a
+        large leak.
+        """
+        n = 73
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        centres = A.chunk_centres(days)
+        emi = np.full(n, 2.0 / 86400e6)
+        wet = np.linspace(1.0, 3.0, n) / 86400e6
+        net = (emi - wet) * 86400e6                     # mg/m2/day at the centres
+        stored = 5.0 + np.concatenate(
+            [[0.0], np.cumsum(0.5 * (net[1:] + net[:-1]) * np.diff(centres))])
+        series = {"burden_bc": stored, "emi_bc": emi,
+                  "dry_bc": np.zeros(n), "wet_bc": wet}
+        assert abs(A._budget_residual(days, series, "bc")) < 1e-9
+
+        keep = 19
+        sliced = {k: v[-keep:] for k, v in series.items()}
+        start = float(days[-keep - 1])
+        assert abs(A._budget_residual(days[-keep:], sliced, "bc",
+                                      window_start=start)) < 1e-9
+        # The defect this guards against: a day-0 start for the slice puts the
+        # first node at days[0]/2 and reads a large leak on a closed budget.
+        assert abs(A._budget_residual(days[-keep:], sliced, "bc",
+                                      window_start=0.0)) > 0.05
+        # A uniformly spaced slice with no start given infers it (see
+        # test_a_record_that_starts_mid_run_infers_its_start), so the
+        # unannotated call closes too.
+        assert abs(A._budget_residual(days[-keep:], sliced, "bc")) < 1e-9
+
+    def test_a_record_that_starts_mid_run_infers_its_start(self):
+        """A resumed run in a fresh directory: uniform chunks, first label 190.
+
+        Nothing sliced it, so no caller can pass the start; the cadence says
+        the first window began one chunk earlier. A record whose first label
+        IS the cadence starts at day 0, and an irregular one keeps day 0 too.
+        """
+        resumed = np.arange(190.0, 370.0, 5.0)
+        np.testing.assert_allclose(A.chunk_centres(resumed)[0], 187.5)
+        np.testing.assert_allclose(A.chunk_centres(np.arange(5.0, 100.0, 5.0))[0],
+                                   2.5)
+        # Short final chunk: still recognised as uniform.
+        np.testing.assert_allclose(
+            A.chunk_centres(np.array([190.0, 195.0, 200.0, 205.0, 207.0]))[0], 187.5)
+        # An explicit start always wins over the inference.
+        np.testing.assert_allclose(A.chunk_centres(resumed, start=0.0)[0], 95.0)
 
     def test_a_nan_flux_sample_is_unscored(self):
         n = 40

@@ -117,16 +117,23 @@ The window itself has a floor. A least-squares slope carries noise
 `σ_resid / (Δt·√(N(N²−1)/12))`; at the 5-day output cadence and the ~0.07
 log-burden scatter of a settled species, three of those falls below the
 0.002/day limit only past **90 days**. `health.py --last-n` is the documented
-way to score the settled months, and on a shorter window the fitted slope is
+way to score the settled months (the slice carries the label of the chunk
+before it, so the first retained window is centred where it really sits; a
+record whose uniformly spaced chunks evidently start mid-run, such as a resumed
+run in a fresh output directory, infers its start from the cadence), and on a
+shorter window the fitted slope is
 noise — so below that span the statistic is reported **UNSCORED**, with the
 number of days it needs, rather than gated. The closure residual takes the same
 floor: its storage term is a single endpoint difference, which over a few
 chunks swamps the flux integral it is compared against.
 
 **No gate ever passes by absence.** Anything that could not be evaluated —
-a species the run does not carry, a window too short, a run with no
-`budget_dyn_*` gauge or no timestep to express the dynamics gate per step —
-is printed as `UNSCORED` with its reason. A missing row is otherwise
+a species the run does not carry, a window too short, a carried species with
+no usable `budget_dyn_<sp>` gauge or `budget_mass_<sp>` denominator (checked
+per species, since trimmed or mixed-version output can gauge one and not
+another), no timestep to express the dynamics gate per step, a lifetime species
+whose deposition ledgers are absent or holed — is printed as `UNSCORED` with
+its reason. A missing row is otherwise
 indistinguishable from a row that passed.
 
 An UNSCORED gate is reported but does **not** fail the exit code, deliberately:

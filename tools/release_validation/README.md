@@ -90,7 +90,8 @@ semi-Lagrangian non-conservation, not aerosol physics — see the design doc.
 
 **Nothing passes by absence.** The drift and closure statistics need a window
 of at least 90 days (below that a fitted slope is its own noise), the dynamics
-gate needs both the gauge and a timestep, and a species the run does not carry
+gate needs, per species, the gauge, its mass denominator and a timestep, a
+lifetime needs both deposition ledgers, and a species the run does not carry
 has no burden to score. Every one of those is printed as `UNSCORED` with its
 reason and counted in the summary line, because a missing row would otherwise
 be indistinguishable from one that passed. Use `--last-n` to pick the settled

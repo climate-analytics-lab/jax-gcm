@@ -167,18 +167,64 @@ _ANGSTROM_KEYS = ("jam_optics.angstrom", "jam_band_optics.angstrom",
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 
-def chunk_centres(days: np.ndarray) -> np.ndarray:
+def chunk_centres(days: np.ndarray, start: float | None = None) -> np.ndarray:
     """Mid-times of the averaging windows whose labels are ``days``.
 
     Output chunks are labelled by their END day and hold time *averages*, so a
-    chunk mean belongs at the window's centre. The first window is taken to
-    start at day 0, each later one at its predecessor's label. Under a uniform
-    cadence this is a constant offset that cancels in both the trapezoid and
-    the storage difference; under a varying one it does not.
+    chunk mean belongs at the window's centre. Each window starts at its
+    predecessor's label; the first starts at ``start`` — the label of the chunk
+    just before the record, which a ``--last-n`` slice must pass along, or day
+    0 for a record that begins at the run start. Guessing 0 for a sliced
+    record puts the first node at ``days[0] / 2`` and stretches the first
+    trapezoid over most of the run, which mis-weights the first flux sample by
+    an order of magnitude and fabricates a closure error.
     """
     days = np.asarray(days, dtype=float)
-    starts = np.concatenate([[0.0], days[:-1]])
+    if start is None:
+        start = 0.0
+        # A record whose chunks are uniformly spaced but whose first label
+        # exceeds that spacing evidently does not begin at day 0 — a resumed
+        # run writing into a fresh output directory, or early chunks deleted
+        # to save disk — so its first window starts one cadence before its
+        # first label. The last chunk may legitimately be short, so it is
+        # left out of the uniformity test; a record too short or too
+        # irregular to judge keeps day 0, which is exact for a run start and
+        # only ever an approximation where no caller knows better.
+        gaps = np.diff(days)
+        if gaps.size >= 3 and np.allclose(gaps[:-1], gaps[0]) \
+                and days[0] > gaps[0] * (1 + 1e-9):
+            start = days[0] - gaps[0]
+    starts = np.concatenate([[float(start)], days[:-1]])
     return 0.5 * (starts + days)
+
+
+def chunk_day(path, index: int | None = None) -> float | None:
+    """Return the END day a chunk file is labelled with (``*_day<N>*.nc``).
+
+    Read from the file NAME only: a run directory such as ``spinup_day0/``
+    would otherwise label every chunk 0. Names without a day fall back to
+    ``index`` (the file's position, so a record of unlabelled chunks keeps a
+    monotone abscissa) or to ``None`` when no position is given.
+    """
+    match = re.search(r"day(\d+)", Path(str(path)).name)
+    if match:
+        return float(match.group(1))
+    return None if index is None else float(index)
+
+
+def _finite_mean(values) -> float:
+    """Mean of the finite samples, NaN when there are none (no empty-slice warning)."""
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
+def positive_int(text: str) -> int:
+    """Parse ``--last-n``; a negative count would silently invert the slice."""
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("--last-n must be a positive chunk count")
+    return value
 
 
 def is_jam_run(ds: xr.Dataset) -> bool:
@@ -347,10 +393,9 @@ def collect(files) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     days: list[float] = []
     rows: list[dict[str, float]] = []
     for path in files:
-        match = re.search(r"day(\d+)", str(path))
         with xr.open_dataset(path) as ds:
             rows.append(chunk_reduction(ds))
-        days.append(float(match.group(1)) if match else float(len(days)))
+        days.append(chunk_day(path, len(days)))
     keys = sorted({k for row in rows for k in row})
     series = {k: np.array([row.get(k, np.nan) for row in rows], dtype=float)
               for k in keys}
@@ -414,7 +459,8 @@ def regression_tolerance(reference: float, sigma: float,
     return max(_N_SIGMA * sigma, _REL_TOLERANCE * abs(reference), floor)
 
 
-def _budget_residual(days, series, species) -> float | None:
+def _budget_residual(days, series, species,
+                     window_start: float | None = None) -> float | None:
     """Compute ``(emitted - deposited - dB) / emitted`` over the record.
 
     The fluxes are chunk means of ``kg/m2/s``, integrated trapezoidally over
@@ -430,7 +476,7 @@ def _budget_residual(days, series, species) -> float | None:
     if span <= 0 or days.size < 2:
         return None
 
-    nodes = chunk_centres(days)
+    nodes = chunk_centres(days, window_start)
 
     def integral(key):
         # Trapezoidal between the first and last chunk MEANS — the same two
@@ -491,11 +537,14 @@ def _budget_residual(days, series, species) -> float | None:
 
 
 def summarize(days: np.ndarray, series: dict[str, np.ndarray],
-              timestep_seconds: float | None = None) -> dict[str, float]:
+              timestep_seconds: float | None = None,
+              window_start: float | None = None) -> dict[str, float]:
     """Build the statistic set from the series returned by :func:`collect`.
 
     Every entry is a single number a gate or a stored reference can be
     compared against; the rationale for each is in the design doc.
+    ``window_start`` is the label of the chunk preceding ``days[0]`` when the
+    record is a slice of a longer run (see :func:`chunk_centres`).
     """
     stats: dict[str, float] = {}
     span_days = float(days[-1] - days[0]) if days.size > 1 else 0.0
@@ -521,17 +570,24 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # ``wet_*`` already includes in-plume convective scavenging (the
         # transport term's flux is folded into it in wetdep_term.py), so
         # adding ``conv_scav_flux.*`` here would double-count that sink.
-        sink = 0.0
-        for prefix in ("dry", "wet"):
-            v = series.get(f"{prefix}_{species}")
-            if v is not None:
-                sink += float(np.nanmean(v)) * 86400e6   # kg/m2/s -> mg/m2/day
-        if sink > 0:
+        # BOTH ledgers are required: a removal series absent from trimmed or
+        # mixed-version output is an omission, not a zero sink, and a lifetime
+        # formed from the other alone is a wrong number that a reference
+        # comparison would then score (see :func:`unscored_gates`).
+        # As strict as ``_budget_residual``: a ledger that is present but has
+        # a non-finite sample (a diagnostic missing from some chunks) would
+        # average a different set of chunks than the burden does.
+        dry, wet = series.get(f"dry_{species}"), series.get(f"wet_{species}")
+        if dry is None or wet is None or not (
+                np.all(np.isfinite(dry)) and np.all(np.isfinite(wet))):
+            continue
+        sink = (float(np.mean(dry)) + float(np.mean(wet))) * 86400e6
+        if sink > 0:                                # kg/m2/s -> mg/m2/day
             stats[f"lifetime_{species}_days"] = float(np.nanmean(b)) / sink
 
     residuals = {}
     for species in ("so4",) + PRIMARY_BUDGET_SPECIES:
-        r = (_budget_residual(days, series, species)
+        r = (_budget_residual(days, series, species, window_start)
              if span_days >= MIN_WINDOW_DAYS else None)
         if r is not None:
             residuals[species] = r
@@ -570,7 +626,7 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
             mass = series.get(f"budget_mass_{species}")
             if mass is None:
                 continue
-            mean_mass = float(np.nanmean(mass))
+            mean_mass = _finite_mean(mass)
             if mean_mass > 0:
                 stats[f"dyn_frac_per_step_{species}"] = abs(
                     float(np.nanmean(series[key])) * timestep_seconds
@@ -640,7 +696,8 @@ def compare_to_reference(stats: dict[str, float],
 
 
 def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
-                   timestep_seconds: float | None = None
+                   timestep_seconds: float | None = None,
+                   window_start: float | None = None
                    ) -> list[tuple[str, str]]:
     """Gates that could NOT be evaluated, each with the reason.
 
@@ -685,7 +742,7 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
         for species in ("so4",) + PRIMARY_BUDGET_SPECIES:
             if f"burden_{species}" not in series:
                 continue        # the run does not carry it; nothing to close
-            if _budget_residual(days, series, species) is None:
+            if _budget_residual(days, series, species, window_start) is None:
                 rows.append((
                     f"budget_residual_{species}",
                     "the mass ledger is incomplete — a missing emi_*/dry_*/"
@@ -697,13 +754,67 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                          "no species had a complete mass ledger to close "
                          "against; no closure was checked"))
 
-    # The dynamics gate needs BOTH the #713 in-step gauge and a timestep to
-    # express it per step; say which is missing rather than omitting the row.
-    has_gauge = any(k.startswith("budget_dyn_") for k in series)
-    if not has_gauge:
+    # A lifetime is formed only from a complete deposition ledger (see
+    # :func:`summarize`); name the species whose ledger is not.
+    for species in LIFETIME_SPECIES:
+        if f"burden_{species}" not in series:
+            continue
+        ledgers = {f"{p}_{species}": series.get(f"{p}_{species}")
+                   for p in ("dry", "wet")}
+        missing = [k for k, v in ledgers.items() if v is None]
+        if missing:
+            rows.append((f"lifetime_{species}_days",
+                         f"the deposition ledger is incomplete ({', '.join(missing)} "
+                         "absent); a lifetime from the remaining sink alone would "
+                         "be wrong, not approximate"))
+            continue
+        holed = [k for k, v in ledgers.items() if not np.all(np.isfinite(v))]
+        if holed:
+            rows.append((f"lifetime_{species}_days",
+                         f"{', '.join(holed)} has a non-finite sample (a "
+                         "diagnostic missing from some chunks); the sink would "
+                         "average a different set of chunks than the burden"))
+        elif (float(np.mean(ledgers[f"dry_{species}"]))
+              + float(np.mean(ledgers[f"wet_{species}"]))) <= 0:
+            rows.append((f"lifetime_{species}_days",
+                         "the deposition ledger records no removal, so the "
+                         "lifetime is undefined"))
+
+    # The dynamics gate needs, PER CARRIED SPECIES, the #713 in-step gauge and
+    # its advected-mass denominator, and a timestep to express it per step.
+    # :func:`summarize` emits no gate for a species missing either, so a
+    # run-wide "some gauge exists" test would let a transport leak confined to
+    # the species without one pass unseen — trimmed or mixed-version output
+    # can carry the gauge for one species and not another.
+    gauged = {k[len("budget_dyn_"):] for k in series if k.startswith("budget_dyn_")}
+    if not gauged:
         rows.append(("dyn_frac_per_step", "the run publishes no budget_dyn_* "
                                           "gauge (output predates #713)"))
-    elif not timestep_seconds:
+        return rows
+    for species in _SPECIES:
+        if f"burden_{species}" not in series:
+            continue
+        if species not in gauged:
+            rows.append((f"dyn_frac_per_step_{species}",
+                         f"no budget_dyn_{species} gauge in the output (trimmed "
+                         "or mixed-version chunks); the transport residual of "
+                         "this species was not measured"))
+        elif f"budget_mass_{species}" not in series:
+            rows.append((f"dyn_frac_per_step_{species}",
+                         f"budget_dyn_{species} has no budget_mass_{species} "
+                         "denominator; the residual cannot be expressed as a "
+                         "fraction"))
+        else:
+            # Mirror the condition ``summarize`` emits the gate under, so a
+            # denominator that is present but all-NaN or zero is named rather
+            # than silently producing no gate.
+            mean_mass = _finite_mean(series[f"budget_mass_{species}"])
+            if not (np.isfinite(mean_mass) and mean_mass > 0):
+                rows.append((f"dyn_frac_per_step_{species}",
+                             f"budget_mass_{species} has no finite positive "
+                             "mean; the residual cannot be expressed as a "
+                             "fraction"))
+    if not timestep_seconds:
         rows.append(("dyn_frac_per_step", "no run timestep is available "
                      "(.hydra/config.yaml absent, or run.time_step is null as "
                      "on the pySES backend), and the gate is per step"))
@@ -810,7 +921,7 @@ def run_files(run_dir: str) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_dir", nargs="?", default=None)
-    ap.add_argument("--last-n", type=int, default=None,
+    ap.add_argument("--last-n", type=positive_int, default=None,
                     help="use only the last N chunks (default: all)")
     ap.add_argument("--series-out", default=None,
                     help="save the per-chunk reductions to this .npz")
@@ -827,11 +938,18 @@ def main() -> int:
     args = ap.parse_args()
 
     dt = None
+    # The label of the chunk before ``days[0]``: None for a record that starts
+    # at the run start, the preceding chunk's day for a ``--last-n`` slice.
+    # ``chunk_centres`` needs it to place the first window (see there).
+    window_start = None
     if args.series_in:
         loaded = np.load(args.series_in)
         days = loaded["_days"]
         # Underscore keys are the reduction's own metadata, not statistics.
         series = {k: loaded[k] for k in loaded.files if not k.startswith("_")}
+        if "_window_start" in loaded.files:
+            stored = float(loaded["_window_start"])
+            window_start = stored if np.isfinite(stored) else None
         # The timestep travels WITH the reduction: re-scoring a saved series
         # has no run directory to read it from, and without it every
         # dynamics-conservation gate would silently drop out of a re-score
@@ -841,7 +959,10 @@ def main() -> int:
             dt = stored if np.isfinite(stored) and stored > 0 else None
         if args.last_n:
             # Applied here too: silently ignoring it would score a different
-            # window than the one asked for.
+            # window than the one asked for. The chunk before the slice is the
+            # retained window's start.
+            if args.last_n < days.size:
+                window_start = float(days[-args.last_n - 1])
             days = days[-args.last_n:]
             series = {k: v[-args.last_n:] for k, v in series.items()}
     else:
@@ -850,6 +971,8 @@ def main() -> int:
             print(f"FAIL  no chunk files in {args.run_dir}")
             return 1
         if args.last_n:
+            if args.last_n < len(files):
+                window_start = chunk_day(files[-args.last_n - 1])
             files = files[-args.last_n:]
         days, series = collect(files)
         dt = timestep_seconds(args.run_dir)
@@ -857,11 +980,14 @@ def main() -> int:
         dt = args.timestep_minutes * 60.0
     if args.series_out:
         np.savez(args.series_out, _days=days,
-                 _timestep_seconds=np.array(dt if dt else np.nan), **series)
-    stats = summarize(days, series, dt)
+                 _timestep_seconds=np.array(dt if dt else np.nan),
+                 _window_start=np.array(np.nan if window_start is None
+                                        else window_start),
+                 **series)
+    stats = summarize(days, series, dt, window_start)
     gates = anchor_gates(stats) + physics_gates(stats)
     print(format_table(stats, gates))
-    unscored = unscored_gates(days, series, dt)
+    unscored = unscored_gates(days, series, dt, window_start)
     for name, reason in unscored:
         print(f"UNSCORED  {name}: {reason}")
     # An individual UNSCORED gate is deliberately NOT a failure: the commonest
