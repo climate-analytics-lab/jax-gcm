@@ -41,6 +41,8 @@ _TIME_FIELDS = {
 
 def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   emissions_file=None, dms_file=None, dust_file=None,
+                  dust_preferential_file=None, dust_soil_types_file=None,
+                  dust_regions_file=None, dust_roughness_file=None,
                   oxidants_file=None, ozone_file=None) -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
@@ -60,8 +62,13 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             columns; grids need not match the met forcing file's.
         dms_file: Optional seawater-DMS climatology
             (``DMS_sea (time, lat, lon)``; :func:`jcm.forcing.read_dms_seawater`).
-        dust_file: Optional dust-source/erodibility map (``pot_source``;
-            :func:`jcm.forcing.read_dust_source`, static or monthly).
+        dust_file: Optional monthly potential-dust-source climatology
+            (``pot_source``; :func:`jcm.forcing.read_dust_source`).
+        dust_preferential_file, dust_soil_types_file, dust_regions_file:
+            The static companions the Tegen scheme needs alongside it
+            (paleolake fraction, nine soil textures, 1-8 tuning regions).
+        dust_roughness_file: Optional monthly satellite roughness map [cm],
+            read only on the ``ndurough = 0`` sensitivity path.
         oxidants_file: Optional oxidant climatology — a single path or the
             yearly file list of ONE transient product (a ``{year}`` expansion,
             opened together along a shared time axis)
@@ -141,7 +148,12 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     return attach_jam_forcing(
         forcing, col_lon, col_lat, nlev=dycore.nlev,
         emissions_file=emissions_file, dms_file=dms_file,
-        dust_file=dust_file, oxidants_file=oxidants_file,
+        dust_file=dust_file,
+        dust_preferential_file=dust_preferential_file,
+        dust_soil_types_file=dust_soil_types_file,
+        dust_regions_file=dust_regions_file,
+        dust_roughness_file=dust_roughness_file,
+        oxidants_file=oxidants_file,
         ozone_file=ozone_file,
     )
 
@@ -175,6 +187,16 @@ def _leaf_to_columns(leaf, lon, lat, col_lon, col_lat):
     return jnp.asarray(cols)
 
 
+def _mask_to_columns(leaf, lon, lat, col_lon, col_lat):
+    """Sample a categorical ``(lon, lat)`` mask onto the columns, nearest-neighbour."""
+    from jcm.data.regridding import nearest_index
+
+    arr = np.asarray(leaf)
+    mesh_lon, mesh_lat = np.meshgrid(lon, lat, indexing="ij")
+    idx = nearest_index(mesh_lat.ravel(), mesh_lon.ravel(), col_lat, col_lon)
+    return jnp.asarray(arr.reshape(-1)[idx].reshape(1, col_lon.size))
+
+
 def _reader_grid(ds):
     """Return the ``(lon, lat)`` axes matching the readers' output orientation.
 
@@ -190,6 +212,8 @@ def _reader_grid(ds):
 
 def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        emissions_file=None, dms_file=None, dust_file=None,
+                       dust_preferential_file=None, dust_soil_types_file=None,
+                       dust_regions_file=None, dust_roughness_file=None,
                        oxidants_file=None, ozone_file=None) -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
@@ -208,6 +232,10 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     from jcm.forcing import (
         read_anthropogenic_emissions,
         read_dms_seawater,
+        read_dust_preferential,
+        read_dust_regions,
+        read_dust_roughness,
+        read_dust_soil_types,
         read_dust_source,
         read_oxidant_vmr,
         read_prescribed_aerosol_emissions,
@@ -261,10 +289,42 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                 dms_seawater=to_cols(read_dms_seawater(ds), lon, lat))
 
     if dust_file is not None:
+        missing = [name for name, path in
+                   (("dust_preferential_file", dust_preferential_file),
+                    ("dust_soil_types_file", dust_soil_types_file),
+                    ("dust_regions_file", dust_regions_file)) if path is None]
+        if missing:
+            raise ValueError(
+                f"dust_file is set but {missing} are not. The Tegen scheme "
+                "needs the preferential sources, soil textures and tuning "
+                "regions alongside the potential-source map; without them it "
+                "would emit an untuned, all-coarse-soil flux.")
         with xr.open_dataset(str(dust_file)) as ds:
             lon, lat = _reader_grid(ds)
             forcing = forcing.copy(
                 dust_source=to_cols(read_dust_source(ds), lon, lat))
+        with xr.open_dataset(str(dust_preferential_file)) as ds:
+            lon, lat = _reader_grid(ds)
+            forcing = forcing.copy(
+                dust_preferential=to_cols(read_dust_preferential(ds), lon, lat))
+        with xr.open_dataset(str(dust_soil_types_file)) as ds:
+            lon, lat = _reader_grid(ds)
+            types = read_dust_soil_types(ds)
+            forcing = forcing.copy(
+                dust_soil_types={k: to_cols(v, lon, lat)
+                                 for k, v in types.items()})
+        with xr.open_dataset(str(dust_regions_file)) as ds:
+            lon, lat = _reader_grid(ds)
+            # Categorical: bilinear sampling would invent "region 3.7", so the
+            # column takes the value of the nearest source cell.
+            forcing = forcing.copy(
+                dust_regions=_mask_to_columns(read_dust_regions(ds), lon, lat,
+                                              col_lon, col_lat))
+        if dust_roughness_file is not None:
+            with xr.open_dataset(str(dust_roughness_file)) as ds:
+                lon, lat = _reader_grid(ds)
+                forcing = forcing.copy(
+                    dust_roughness=to_cols(read_dust_roughness(ds), lon, lat))
 
     if oxidants_file is not None:
         # ``oxidants_file`` may be a single climatology path or the yearly file

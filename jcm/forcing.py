@@ -289,7 +289,18 @@ class ForcingData:
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
     # dust emission is simply inert until the field is supplied.
     dms_seawater: Any = None   # seawater DMS concentration kg/m³ (DmsEmissions)
-    dust_source: Any = None    # dust source / erodibility 0–1 (DustEmissions)
+    # The five Tegen/HAMMOZ dust inputs (#802). ``dust_source`` is the monthly
+    # effective-LAI erodible fraction (the gate AND a linear factor on the flux);
+    # ``dust_preferential`` the paleolake area fraction that swaps in soil type
+    # 10; ``dust_soil_types`` a mapping of the nine prescribed texture area
+    # fractions; ``dust_regions`` the integer 1–8 tuning index; and
+    # ``dust_roughness`` the monthly satellite roughness [cm], read only on the
+    # ``ndurough = 0`` sensitivity path. All but the first are static.
+    dust_source: Any = None
+    dust_preferential: Any = None
+    dust_soil_types: Any = None
+    dust_regions: Any = None
+    dust_roughness: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -479,7 +490,10 @@ class ForcingData:
 
         forcing_dict = {
             "ozone_file": "auto", "emissions_file": "auto", "dms_file": "auto",
-            "dust_file": "auto", "oxidants_file": "auto", "align": "auto",
+            "dust_file": "auto", "dust_preferential_file": "auto",
+            "dust_soil_types_file": "auto", "dust_regions_file": "auto",
+            "dust_roughness_file": "auto",
+            "oxidants_file": "auto", "align": "auto",
             "macv2_file": macv2_file,
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
@@ -693,6 +707,10 @@ class ForcingData:
              nudging_target=_UNSET,
              dms_seawater=None,
              dust_source=None,
+             dust_preferential=None,
+             dust_soil_types=None,
+             dust_regions=None,
+             dust_roughness=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
              prescribed_aerosol_emissions=None):
@@ -723,6 +741,14 @@ class ForcingData:
             ),
             dms_seawater=dms_seawater if dms_seawater is not None else self.dms_seawater,
             dust_source=dust_source if dust_source is not None else self.dust_source,
+            dust_preferential=(dust_preferential if dust_preferential is not None
+                               else self.dust_preferential),
+            dust_soil_types=(dust_soil_types if dust_soil_types is not None
+                             else self.dust_soil_types),
+            dust_regions=(dust_regions if dust_regions is not None
+                          else self.dust_regions),
+            dust_roughness=(dust_roughness if dust_roughness is not None
+                            else self.dust_roughness),
             oxidant_vmr=oxidant_vmr if oxidant_vmr is not None else self.oxidant_vmr,
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
@@ -1188,6 +1214,155 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
         # build a TimeSeries from, and DustEmissions reads a 2-D field
         # directly.
         return jnp.asarray(arr)
+    # WRAP_YEAR steps the record by month, never interpolating, as
+    # ``bgc_dust_read_monthly`` does — but it bins the year into twelve equal
+    # 30.42-day slices, so records 2-11 switch 1-2 days after the calendar
+    # month start (#805, shared by every monthly climatology).
+    if ds.sizes["time"] != _DUST_MONTHS:
+        raise ValueError(
+            f"{var_name}: the HAMMOZ potential-source climatology has "
+            f"{_DUST_MONTHS} monthly records, found {ds.sizes['time']}. The "
+            "Tegen scheme steps it by month start (WRAP_YEAR); a different "
+            "record count means a different product.")
+    return make_time_series(
+        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+    )
+
+
+def _drop_degenerate_time(arr, ds, var_name):
+    """Collapse the length-1 ``time`` axis the static HAMMOZ dust files carry."""
+    if "time" not in ds[var_name].dims:
+        return arr
+    if ds.sizes["time"] != 1:
+        raise ValueError(
+            f"{var_name}: expected a static field (no time axis, or a "
+            f"degenerate one), found {ds.sizes['time']} records.")
+    return arr[0]
+
+
+def read_dust_preferential(ds, lat_deg=None, lon_deg=None, var_name="source"):
+    """Read the preferential-source area fraction for ``ForcingData.dust_preferential``.
+
+    The HAMMOZ ``dust_preferential_sources.nc`` paleolake / topographic-depression
+    field, ``source (time, lat, lon)`` with a degenerate time axis
+    (``mo_ham_dust.f90::bgc_read_annual_fields`` reads record 1 only). Returned as
+    a static ``(lon, lat)`` array in [0, 1]: this fraction of each cell is given
+    soil type 10 (100 % silt), the rest keeps its mapped texture.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Preferential-source file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = _drop_degenerate_time(arr, ds, var_name)
+    return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
+
+
+#: Soil-type file variables. Type 1 (coarse) is deliberately absent — the scheme
+#: takes it as the residual ``1 − Σ``.
+_DUST_SOIL_TYPE_VARS = ("type2", "type3", "type4", "type6",
+                        "type13", "type14", "type15", "type16", "type17")
+#: The globally-complete Zobler partition; the type13-17 group is a separate,
+#: OVERLAPPING China-only partition and the two must never be summed together.
+_DUST_GLOBAL_SOIL_VARS = ("type2", "type3", "type4", "type6")
+_DUST_MONTHS = 12
+
+
+def read_dust_soil_types(ds, lat_deg=None, lon_deg=None):
+    """Read the nine soil-texture area fractions for ``ForcingData.dust_soil_types``.
+
+    The HAMMOZ ``soil_type_all.nc``: ``type2/3/4/6`` (Tegen's global Zobler
+    textures) and ``type13..17`` (Cheng's East-Asian textures). Returned as
+    ``{var_name: (lon, lat) array}``.
+
+    The two groups are *overlapping* partitions — their nine-way sum reaches 2.18
+    over the Gobi — so only the global group is checked to be a partition here;
+    reconciling the overlap is the scheme's ``k_dust_easo`` branch.
+    """
+    missing = [v for v in _DUST_SOIL_TYPE_VARS if v not in ds.data_vars]
+    if missing:
+        raise ValueError(
+            f"Soil-type file is missing {missing}; the Tegen scheme needs all "
+            f"of {list(_DUST_SOIL_TYPE_VARS)} (type1 is the residual).")
+    out = {}
+    for var in _DUST_SOIL_TYPE_VARS:
+        arr = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        arr = _drop_degenerate_time(arr, ds, var)
+        out[var] = np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0)
+    total = sum(out[v] for v in _DUST_GLOBAL_SOIL_VARS)
+    if np.max(total) > 1.0 + 1e-5:
+        raise ValueError(
+            f"Soil-type file: the global textures {list(_DUST_GLOBAL_SOIL_VARS)} "
+            f"sum to {np.max(total):.4f} > 1 — they must be a partition, or the "
+            "type-1 residual the scheme derives from them goes negative.")
+    return {k: jnp.asarray(v) for k, v in out.items()}
+
+
+def read_dust_regions(ds, lat_deg=None, lon_deg=None, var_name="regions"):
+    """Read the regional-tuning index for ``ForcingData.dust_regions``.
+
+    The HAMMOZ ``dust_regions.nc`` (Huneeus et al. 2011 boxes: 1 everywhere else,
+    2 N America, 3 S America, 4 N Africa, 5 S Africa, 6 Middle East, 7 Asia,
+    8 Australia). Purely categorical — the Fortran reads it with ``EF_NOINTER``
+    — so a non-integer or out-of-range value means the file was interpolated and
+    is refused rather than silently rounded.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Dust-regions file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = _drop_degenerate_time(arr, ds, var_name)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{var_name}: contains non-finite values.")
+    if not np.allclose(arr, np.round(arr), atol=1e-6):
+        raise ValueError(
+            f"{var_name}: contains non-integer values (e.g. "
+            f"{arr[~np.isclose(arr, np.round(arr), atol=1e-6)][0]}). The dust "
+            "region mask is categorical and must be regridded "
+            "nearest-neighbour, never linearly or conservatively.")
+    ints = np.round(arr).astype(np.int32)
+    if ints.min() < 1 or ints.max() > _DUST_N_REGIONS:
+        raise ValueError(
+            f"{var_name}: values span [{ints.min()}, {ints.max()}], outside the "
+            f"1-{_DUST_N_REGIONS} tuning-region range.")
+    return jnp.asarray(ints, dtype=jnp.int32)
+
+
+_DUST_N_REGIONS = 8
+#: ``surfrough`` values span 0.001-0.08 and the file's ``units`` attribute says
+#: ``"1."``; the Fortran compares them against ``r_dust_z0s = 0.001 cm``, so they
+#: are centimetres. Read as metres every land cell would clip ``feff`` to zero
+#: and the scheme would emit nothing anywhere.
+_DUST_ROUGHNESS_CM_UNITS = {"cm", "centimetre", "centimeter", "1.", "1", ""}
+
+
+def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
+                        align_mode: str = "wrap_year"):
+    """Read the monthly surface-roughness map for ``ForcingData.dust_roughness``.
+
+    The Prigent et al. (2005) satellite roughness length in **centimetres**
+    (``surface_rough_12m.nc``), as a monthly ``WRAP_YEAR`` :class:`TimeSeries`.
+    Consumed only on the ``ndurough = 0`` sensitivity path — with the default
+    constant roughness ``bgc_dust_read_monthly`` overwrites it immediately.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"Dust-roughness file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    units = str(ds[var_name].attrs.get("units", "")).strip().lower()
+    if units not in _DUST_ROUGHNESS_CM_UNITS:
+        raise ValueError(
+            f"{var_name}: units {units!r} are not the centimetres the Tegen "
+            "drag partition expects (the HAMMOZ file carries '1.').")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    if "time" not in ds[var_name].dims:
+        return jnp.asarray(arr)
+    if ds.sizes["time"] != _DUST_MONTHS:
+        raise ValueError(
+            f"{var_name}: expected {_DUST_MONTHS} monthly records, found "
+            f"{ds.sizes['time']}.")
     return make_time_series(
         arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )

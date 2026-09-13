@@ -11,7 +11,11 @@ Regridding always starts from the highest-resolution product available.
 | AMIP SST + sea ice | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10` (`tos`, `tosbcs`, `siconc`) | 1°, 1870–2022 |
 | Ozone (CMIP7) | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0` (`vmro3`) | 1.9×2.5°, 66 plev to ~1e-4 hPa |
 | ERA5 land climatology | `/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc` (`stl1`, `swvl1`, `sd`, `skt`, `fal`) | 0.25° monthly means |
-| Dust erodibility | `/glade/campaign/cesm/cesmdata/inputdata/atm/cam/dst/dst_0.23x0.31_c130710.nc` | 0.23×0.31° |
+| Dust potential sources (HAMMOZ/Tegen) | `/glade/u/home/duncanwp/dust_potential_sources_T63.nc` (`pot_source`, 12 monthly records) | T63 Gaussian |
+| Dust preferential sources (paleolakes) | `/glade/u/home/duncanwp/dust_preferential_sources_T63.nc` (`source`) | T63 Gaussian |
+| Dust soil textures | `/glade/u/home/duncanwp/soil_type_all_T63.nc` (`type2/3/4/6` global Zobler + `type13..17` East-Asian) | T63 Gaussian |
+| Dust tuning regions | `/glade/u/home/duncanwp/dust_regions_T63.nc` (`regions`, integers 1-8) | T63 Gaussian |
+| Dust surface roughness | `/glade/u/home/duncanwp/surface_rough_12m_T63.nc` (`surfrough`, **centimetres**, 12 monthly records) | T63 Gaussian |
 | DMS seawater (Lana 2011) | `.../inputdata/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc` | 0.9×1.25° |
 | Oxidants OH/HO2/NO3/H2O2/O3, full lid (BUNDLED) | `/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone/oxid_ozone_WACCM_CCMI_REFC1_f.e11.FWTREFC1.<decade>.f19_f19.ccmi34.001_monthly.nc` (decades 1850s–2000s) | 1.9×2.5°, L66 to ~6e-6 hPa |
 | Oxidants, year-specific fallback | `.../inputdata/atm/cam/chem/trop_mozart_aero/oxid/oxid_1.9x2.5_L26_1850-2015_c20181106.nc` (`--oxid-source cam`) | 1.9×2.5°, L26 |
@@ -44,3 +48,17 @@ monthly-mean product), the d633001 monthly means above (1979–2022), and
 the CR-CMIP GHGs (trend-extrapolated past 2022, stamped in file attrs).
 ERA5 is Copernicus-licensed; derived redistributions carry attribution
 in the file attributes.
+
+The five dust files (`--stage dust`, issue #802) are the HAMMOZ input set for
+the MPI-BGC/Tegen emission scheme, supplied by the maintainer from the ECHAM-HAM
+input archive and confirmed to carry no licence restriction (unlike the
+`mo_ham_dust.f90` source they drive, which is reference-only and never enters
+this repository). Override the source directory with `JCM_HAMMOZ_DUST_DIR`.
+T63 is native and is copied through with a latitude flip; T106 is derived from
+T63 by **nearest neighbour** — the conservative path cannot refine a grid, and
+the region mask is categorical — with the approximation stamped into each T106
+file's attributes. The same set also ships `soilpHfrac_T63.nc` and
+`xtsurf_v2_T63.nc`, which the emission scheme never reads and which are
+therefore not mirrored. They replace the CAM geomorphic erodibility map
+(`dst_0.23x0.31_c130710.nc`) that used to be published as
+`bundles/<grid>/dust.nc`; that product and that path are retired.
