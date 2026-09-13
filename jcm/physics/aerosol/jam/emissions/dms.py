@@ -29,6 +29,8 @@ from jcm.physics.aerosol.jam.tracer_layout import gas_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
+from jcm.physics.aerosol.jam.emissions.surface_wind import (
+    MODEL_LEVEL_WIND_KEY, wind_10m)
 
 _CMH_TO_MS = 0.01 / 3600.0   # cm/h → m/s
 
@@ -66,7 +68,8 @@ class DmsEmissions(PhysicsTerm):
     name: ClassVar[str] = "jam_dms_emissions"
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
-    provides: ClassVar[tuple[str, ...]] = emission_flux_keys()
+    provides: ClassVar[tuple[str, ...]] = (
+        emission_flux_keys() + (MODEL_LEVEL_WIND_KEY,))
 
     def __init__(
         self,
@@ -91,7 +94,7 @@ class DmsEmissions(PhysicsTerm):
         dz = diagnostics["layer_thickness"]
         nlev, ncols = state.temperature.shape
 
-        u10 = jnp.sqrt(jnp.maximum(state.u_wind[-1] ** 2 + state.v_wind[-1] ** 2, 1.0e-30))
+        u10, from_model_level = wind_10m(state, diagnostics)
         sst = self._forcing_field(
             forcing, "sea_surface_temperature", ncols, 288.0
         )
@@ -127,5 +130,7 @@ class DmsEmissions(PhysicsTerm):
             diagnostics, tracer_tends,
             diagnostics["air_density"],
             diagnostics["layer_thickness"])
+        diagnostics = {**diagnostics, MODEL_LEVEL_WIND_KEY: jnp.maximum(
+            diagnostics.get(MODEL_LEVEL_WIND_KEY, 0.0), from_model_level)}
 
         return tendency, diagnostics

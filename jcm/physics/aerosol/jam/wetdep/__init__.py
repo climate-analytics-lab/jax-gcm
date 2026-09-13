@@ -4,6 +4,7 @@ from jcm.physics.aerosol.jam.wetdep.impaction import (
     bcscavcoef,
     build_impaction_table,
     impaction_scavenging_rates,
+    table_log_coefficients,
 )
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
@@ -20,4 +21,5 @@ __all__ = [
     "bcscavcoef",
     "build_impaction_table",
     "impaction_scavenging_rates",
+    "table_log_coefficients",
 ]

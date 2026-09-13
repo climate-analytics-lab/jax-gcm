@@ -163,10 +163,17 @@ class TestSurfacePhysicsStep:
         
         self.dt = 3600.0  # 1 hour
     
+    def _wind_10m(self):
+        """Build a diagnosed 10 m wind, as the vdiff carry supplies in a real run."""
+        u = self.atmospheric_state.u_wind
+        v = self.atmospheric_state.v_wind
+        return 0.9 * jnp.sqrt(jnp.maximum(u ** 2 + v ** 2, 1.0e-30))
+
     def test_surface_physics_step_basic(self):
         """Test basic surface physics step."""
         fluxes, tendencies, diagnostics = surface_physics_step(
-            self.atmospheric_state, self.surface_state, self.dt
+            self.atmospheric_state, self.surface_state, self.dt,
+            self._wind_10m(),
         )
         
         assert isinstance(fluxes, SurfaceFluxes)
@@ -190,7 +197,8 @@ class TestSurfacePhysicsStep:
     def test_surface_physics_step_energy_conservation(self):
         """Test energy conservation in surface physics step."""
         fluxes, tendencies, diagnostics = surface_physics_step(
-            self.atmospheric_state, self.surface_state, self.dt
+            self.atmospheric_state, self.surface_state, self.dt,
+            self._wind_10m(),
         )
         
         # Net surface energy flux should be finite
@@ -206,7 +214,8 @@ class TestSurfacePhysicsStep:
     def test_surface_physics_step_flux_consistency(self):
         """Test flux consistency between tiles and means."""
         fluxes, tendencies, diagnostics = surface_physics_step(
-            self.atmospheric_state, self.surface_state, self.dt
+            self.atmospheric_state, self.surface_state, self.dt,
+            self._wind_10m(),
         )
         
         # Check that mean fluxes are consistent with tile fluxes
@@ -232,12 +241,14 @@ class TestSurfacePhysicsStep:
         momentum stress exactly.
         """
         base, _, _ = surface_physics_step(
-            self.atmospheric_state, self.surface_state, self.dt
+            self.atmospheric_state, self.surface_state, self.dt,
+            self._wind_10m(),
         )
         doubled = self.atmospheric_state._replace(
             exchange_coeff_momentum=self.atmospheric_state.exchange_coeff_momentum * 2.0
         )
-        scaled, _, _ = surface_physics_step(doubled, self.surface_state, self.dt)
+        scaled, _, _ = surface_physics_step(doubled, self.surface_state, self.dt,
+                                       self._wind_10m())
 
         assert jnp.allclose(scaled.momentum_u_mean, 2.0 * base.momentum_u_mean, rtol=1e-5)
         assert jnp.allclose(scaled.momentum_v_mean, 2.0 * base.momentum_v_mean, rtol=1e-5)

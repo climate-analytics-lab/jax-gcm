@@ -19,12 +19,14 @@ treatment):
   which stays alive in cells the microphysics emptied.
 * **Below-cloud impaction scavenging** — precipitation falling through a
   layer collects interstitial aerosol at CAM's Slinn impaction coefficient
-  (``wetdep.impaction``), separately for the number and mass moments. The
-  stratiform contribution uses the
-  per-level flux entering each layer, so washout is automatically confined
-  below where precip actually forms; the convective contribution uses the
-  surface convective precip masked to levels at/below the convective cloud
-  top (diagnosed by pressure from the heating footprint).
+  (``wetdep.impaction``), evaluated separately for the number and mass
+  moments. Both contributions use the per-level flux ENTERING each layer —
+  stratiform from the microphysics ledger, convective from
+  ``ConvectionData.precip_flux`` (the cuflx rain + snow budget) — so the
+  collection rate follows the carrier actually falling there, and each is
+  self-confining below where its precip forms. Neither is weighted by
+  cloud cover: CAM's swept volume cancels against the in-precip-area rain
+  rate, so the rate acts on the grid-mean interstitial mixing ratio.
 * **Convective in-cloud scavenging** — the convective mirror of the
   stratiform pathway: scavenging ratio × (per-layer updraft precip
   formation / in-updraft condensate), from ``ConvectionData``'s
@@ -75,8 +77,11 @@ from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.aerosol.jam.wetdep.impaction import (
+    IMPACT_SCALE_DEFAULT,
+    MU_WATER_AIR_DEFAULT,
     bcscavcoef,
     build_impaction_table,
+    table_log_coefficients,
 )
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
@@ -96,6 +101,8 @@ class WetDepParameters:
 
     incloud_scale: jnp.ndarray     # multiplies in-cloud removal
     sol_factb: jnp.ndarray         # below-cloud solubility factor [-]
+    mu_water_air: jnp.ndarray      # water/air viscosity ratio, interception
+    impact_scale: jnp.ndarray      # multiplies inertial-impaction efficiency
     conv_scav_ratio: jnp.ndarray   # convective in-cloud scavenging ratio [-]
 
     @classmethod
@@ -107,9 +114,15 @@ class WetDepParameters:
         # configuration overrides with this scalar.
         # conv_scav_ratio: fraction of soluble aerosol removed with the
         # condensate-to-precip conversion (HAMMOZ soluble-mode value).
+        # mu_water_air / impact_scale: the two knobs on the Slinn collection
+        # integral itself (interception viscosity ratio; inertial-impaction
+        # efficiency). Defaults are CAM as written, so they are inert until
+        # tuned; the table is rebuilt from them inside the traced step.
         return cls(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.1),
+            mu_water_air=jnp.asarray(MU_WATER_AIR_DEFAULT),
+            impact_scale=jnp.asarray(IMPACT_SCALE_DEFAULT),
             conv_scav_ratio=jnp.asarray(0.99),
         )
 
@@ -216,9 +229,8 @@ def below_cloud_rate(
     capped at 1, so ``Λ₁`` saturates at the rain's geometric sweep-out rate
     rather than growing without bound with particle size.
 
-    ``precip_flux`` is the local flux falling through each layer (per-level
-    profile for stratiform precip; a broadcast surface value is the interim
-    convective treatment).
+    ``precip_flux`` is the local flux entering each layer from above —
+    a per-level profile for both the stratiform and convective carriers.
     """
     return params.sol_factb * scav_coef * jnp.maximum(precip_flux, 0.0)
 
@@ -390,11 +402,14 @@ class WetScavenging(PhysicsTerm):
         # term composable without a convection scheme (see module docstring).
         conv = diagnostics.get("convection")
         if conv is None:
-            conv_precip = jnp.zeros_like(state.temperature[0])
+            conv_flux_in = jnp.zeros_like(state.temperature)
             rate_conv_incloud = jnp.zeros_like(state.temperature)
-            conv_below = jnp.zeros_like(state.temperature)
         else:
-            conv_precip = conv.precip_conv
+            # Local carrier flux for impaction — the convective precip
+            # falling into this layer, as in ECHAM xtwetdep / CAM. It is
+            # zero above the first precip-forming level, which is itself
+            # the cloud-top confinement.
+            conv_flux_in = conv.precip_flux
             conv_condensate = conv.qc_conv + conv.qi_conv
             if self._in_plume_convective:
                 # Retired here: the transport term removes inside the
@@ -405,21 +420,6 @@ class WetScavenging(PhysicsTerm):
                     conv.precip_formation, conv_condensate,
                     air_density, dz, params,
                 )
-            # Convective washout acts only at/below the convective cloud
-            # top — rain cannot collect aerosol above where it forms. The
-            # top is the lowest-pressure level with in-updraft condensate
-            # (orientation-agnostic); no convective cloud -> all-zero mask
-            # (min over empty set = +inf).
-            p_full = diagnostics.get("pressure_full")
-            if p_full is not None:
-                active = conv_condensate > 1.0e-12
-                p_conv_top = jnp.min(
-                    jnp.where(active, p_full, jnp.inf), axis=0, keepdims=True,
-                )
-                conv_below = (p_full >= p_conv_top).astype(p_full.dtype)
-            else:
-                # No pressure diagnostic: column-wide washout, not none.
-                conv_below = jnp.ones_like(state.temperature)
 
         # Stratiform in-cloud (nucleation) scavenging rates from the
         # process-time ledger (#708): the per-step scavenged fraction of an
@@ -486,15 +486,16 @@ class WetScavenging(PhysicsTerm):
             # Number and mass ride different moments of the same lognormal,
             # so CAM tabulates and applies a separate impaction coefficient
             # for each (``scavcoefnv`` jnv=1 number / jnv=2 volume).
+            table = self._impaction_tables[i]
+            ln_num, ln_vol = table_log_coefficients(
+                table, params.mu_water_air, params.impact_scale)
             coef_num, coef_mass = bcscavcoef(
-                aer.r_wet[i], self._impaction_tables[i])
+                aer.r_wet[i], table.dgnum, ln_num, ln_vol)
             below_strat_num = below_cloud_rate(flux_in, coef_num, params)
             below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
-            below_conv_num = conv_below * below_cloud_rate(
-                conv_precip[jnp.newaxis, :], coef_num, params,
-            )
-            below_conv_mass = conv_below * below_cloud_rate(
-                conv_precip[jnp.newaxis, :], coef_mass, params,
+            below_conv_num = below_cloud_rate(conv_flux_in, coef_num, params)
+            below_conv_mass = below_cloud_rate(
+                conv_flux_in, coef_mass, params,
             )
             # In-cloud only removes from activatable (soluble) modes — and
             # only implicitly (via the activated fraction) when there is no

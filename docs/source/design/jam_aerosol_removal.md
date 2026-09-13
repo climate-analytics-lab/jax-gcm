@@ -57,16 +57,37 @@ Two properties matter and neither survives an `r²` parameterisation:
 - **saturation** — `E ≤ 1` bounds `Λ₁` by the rain's geometric sweep-out
   rate, so it flattens above a few micron instead of growing as `r²`.
 
-`Λ₁` is tabulated at construction time (`impaction.build_impaction_table`)
-over CAM's growth-ratio grid — 20 nodes spaced `ln(1.25)` apart in
-`D_wet/D_dry`, at CAM's reference state (273.16 K, 750 hPa, the mode's
-first-species material density) — and looked up at runtime by
-differentiable log-linear interpolation, clamped below the grid and
-linearly extrapolated above, exactly as `modal_aero_bcscavcoef_get` does.
-The integral is 50×51 terms per evaluation; tabulating is what makes the
-scheme affordable, and it is why CAM tabulates too. The port reproduces
-CAM's own compiled `calc_1_impact_rate` to eight significant figures
-(`impaction_test.CAM_REFERENCE`).
+`Λ₁` is tabulated over CAM's growth-ratio grid — 20 nodes spaced `ln(1.25)`
+apart in `D_wet/D_dry`, at CAM's reference state (273.16 K, 750 hPa, the
+mode's first-species material density) — and looked up at runtime by
+differentiable log-linear interpolation, clamped below the grid and linearly
+extrapolated above, exactly as `modal_aero_bcscavcoef_get` does. The integral
+is 50×51 terms per evaluation; tabulating is what makes the scheme
+affordable, and it is why CAM tabulates too.
+
+The table is split so the knobs stay differentiable. Everything independent
+of them — the drop and aerosol geometry, the Brownian efficiency, the
+inertial efficiency at unit scale — is built once per mode in float64 NumPy
+(`build_impaction_table`); the knob-dependent completion, Slinn's
+interception term and the impaction scale, is evaluated in JAX inside the
+step (`table_log_coefficients`) on 20 nodes rather than one per cell.
+
+Two knobs on the integral are exposed as differentiable leaves on
+`WetDepParameters`, at CAM's values by default: `mu_water_air` (the
+water/air viscosity ratio in interception, 60) and `impact_scale` (a
+multiplier on the inertial-impaction efficiency, 1), alongside `sol_factb`.
+Impaction is the most uncertain part of the scheme and these are where that
+uncertainty lives. `impact_scale` raises collection monotonically;
+`mu_water_air` does not — the sign of ∂/∂μ in `(1 + 2μχ)/(1 + μ/√Re)` is
+that of `2χ − 1/√Re`, so it *lowers* collection for particles small enough
+that `χ < 1/(2√Re)`.
+
+The port reproduces CAM's own compiled `calc_1_impact_rate` to eight
+significant figures when given CAM's constants (`impaction_test.CAM_REFERENCE`).
+Production uses `jcm.constants` per CLAUDE.md, whose `ak`, `r_universal` and
+`m_air` differ from CAM `mo_constants` by ≤7.4e-6 relative; that shifts the
+coefficient by <1e-4 and is bounded by its own test rather than folded into
+the parity tolerance.
 
 `sol_factb` is CAM's `sol_factb_interstitial`, whose namelist default is
 **0.1** for interstitial aerosol; cloud-borne aerosol gets 0 (it is

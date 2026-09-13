@@ -120,12 +120,13 @@ def compute_mixing_length(
     # Stability function: reduce mixing length for stable conditions.
     #
     # The natural form ``(1 - Ri/Ri_crit)²`` is only physically meaningful
-    # for ``0 ≤ Ri < Ri_crit``, so ``Ri`` is capped at zero first. Without
-    # that cap, negative (unstable) Richardson numbers drive the squared
-    # factor unboundedly upward — Ri = -100 gives ``(1 - (-400))² = 160 000``,
-    # scaling the mixing length to ~10¹⁴ m, propagating into Km/Kh and the
-    # implicit matrix solve, and NaN'ing the atmosphere within a couple of
-    # timesteps.
+    # for ``0 ≤ Ri < Ri_crit``. The previous version applied it without
+    # capping ``Ri`` at zero, which let negative (unstable) Richardson
+    # numbers drive the squared factor unboundedly upward — Ri = -100
+    # gives ``(1 - (-400))² = 160 000``, scaling the mixing length to
+    # ~10¹⁴ m, propagating into Km/Kh and the implicit matrix solve, and
+    # NaN'ing the atmosphere within a couple of timesteps in averaged
+    # mode (the snapshot path happened to dodge the worst columns).
     #
     # Bounded form: clip Ri to [0, Ri_crit] before squaring. Unstable
     # columns get neutral-strength mixing (factor = 1); stable columns
@@ -219,6 +220,30 @@ def compute_exchange_coefficients(
     return exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture
 
 
+#: Businger-Dyer roughness tables [water, ice, land] — this scheme ignores
+#: ``state.roughness_length``, so its neutral drag must be built from these.
+_BD_Z0_HEAT = jnp.array([1e-4, 1e-4, 1e-2])
+_BD_Z0_MOMENTUM = jnp.array([1e-4, 1e-3, 1e-1])
+
+
+def businger_dyer_neutral_drag(state, wind_speed):
+    """``(ln(z/z0), CM_n·|U|)`` of the Businger-Dyer scheme, per tile.
+
+    THE definition: :func:`compute_surface_exchange_coefficients` builds its
+    momentum drag as ``cfnc · stability_momentum`` from this, so the 10 m
+    reduction's ``f_m = CM|U| / CM_n|U|`` is exactly that scheme's own
+    ``stability_momentum`` rather than a re-derivation of it. Sliced to the
+    state's tile count, as the scheme's per-tile loop is.
+    """
+    z_ref = state.height_full[:, -1] - state.height_half[:, -1]
+    z0 = _BD_Z0_MOMENTUM[:state.roughness_length.shape[1]]
+    bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
+                 / jnp.maximum(z0, 1e-5)[None, :])
+    # 0.4, not c.karman_const: it must match the von_karman this scheme
+    # hard-codes, or a set_constants override desyncs the pair.
+    return bn, wind_speed[:, None] * 0.4 ** 2 / bn ** 2
+
+
 @jax.jit
 def compute_surface_exchange_coefficients(
     state: VDiffState,
@@ -250,11 +275,10 @@ def compute_surface_exchange_coefficients(
     """
     ncol, nsfc_type = temperature_surface.shape
 
-    # Roughness lengths for different surface types
-    # [water, ice, land]
-    z0_heat = jnp.array([1e-4, 1e-4, 1e-2])  # Thermal roughness
-    z0_moisture = jnp.array([1e-4, 1e-4, 1e-2])  # Moisture roughness
-    z0_momentum = jnp.array([1e-4, 1e-3, 1e-1])  # Momentum roughness (rougher)
+    z0_heat = _BD_Z0_HEAT
+    z0_moisture = _BD_Z0_HEAT
+    # Momentum: one definition, shared with the 10 m reduction (below).
+    _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
     
     # Reference height (lowest model level)
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
@@ -311,15 +335,13 @@ def compute_surface_exchange_coefficients(
                                  / jnp.maximum(z0_heat[isfc], 1e-5))
         log_ratio_moisture = jnp.log(jnp.maximum(z_ref, 1.0)
                                      / jnp.maximum(z0_moisture[isfc], 1e-5))
-        log_ratio_momentum = jnp.log(jnp.maximum(z_ref, 1.0)
-                                     / jnp.maximum(z0_momentum[isfc], 1e-5))
-
         exchange_heat = (von_karman**2 * wind_speed_surface *
                         stability_heat / log_ratio_heat**2)
         exchange_moisture = (von_karman**2 * wind_speed_surface *
                            stability_heat / log_ratio_moisture**2)
-        exchange_momentum = (von_karman**2 * wind_speed_surface *
-                             stability_momentum / log_ratio_momentum**2)
+        # CM·|U| = CM_n·|U| · (1/Φm): the neutral factor is the shared one, so
+        # f_m in the 10 m reduction recovers stability_momentum exactly.
+        exchange_momentum = cfn_m_all[:, isfc] * stability_momentum
 
         surface_exchange_heat = surface_exchange_heat.at[:, isfc].set(
             jnp.maximum(exchange_heat, 1e-6)
@@ -449,22 +471,40 @@ def compute_turbulence_diagnostics(
     # shaped (ncol, nsfc_type) tensors, so the false-branch tracing
     # is cheap. The scheme field on ``params`` is a tracer under
     # JIT, hence cond rather than a Python ``if``.
-    from .surface_layer import compute_surface_exchange_coefficients_echam_louis
+    from .surface_layer import (
+        compute_surface_exchange_coefficients_echam_louis,
+        echam_louis_neutral_drag,
+        wind_10m_reduction,
+    )
 
     wind_speed_surface = jnp.sqrt(
         jnp.maximum(state.u[:, -1]**2 + state.v[:, -1]**2, 1.0e-30))
-    surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum = (
-        jax.lax.cond(
-            params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
-            lambda: compute_surface_exchange_coefficients_echam_louis(
-                state, params, wind_speed_surface,
-                state.surface_temperature, state.temperature[:, -1],
-            ),
-            lambda: compute_surface_exchange_coefficients(
-                state, params, wind_speed_surface,
-                state.surface_temperature, state.temperature[:, -1],
-            ),
+    z_ref_sfc = state.height_full[:, -1] - state.height_half[:, -1]
+
+    # The 10 m reduction is computed INSIDE each branch, from that scheme's own
+    # neutral drag: the two schemes differ in roughness, in the bound on z/z0
+    # and in whether the wind is zepdu2-floored, so a shared reference would
+    # read stability where there is none (~13 % on the sea-salt wind term).
+    def _louis():
+        cfh, cfe, cfm = compute_surface_exchange_coefficients_echam_louis(
+            state, params, wind_speed_surface,
+            state.surface_temperature, state.temperature[:, -1],
         )
+        bn, cfnc = echam_louis_neutral_drag(state, params, wind_speed_surface)
+        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+
+    def _businger_dyer():
+        cfh, cfe, cfm = compute_surface_exchange_coefficients(
+            state, params, wind_speed_surface,
+            state.surface_temperature, state.temperature[:, -1],
+        )
+        bn, cfnc = businger_dyer_neutral_drag(state, wind_speed_surface)
+        return cfh, cfe, cfm, wind_10m_reduction(cfm, cfnc, bn, z_ref_sfc)
+
+    (surface_exchange_heat, surface_exchange_moisture,
+     surface_exchange_momentum, wind_10m_tile) = jax.lax.cond(
+        params.surface_layer_scheme == VDiffParameters.SCHEME_ECHAM_LOUIS,
+        _louis, _businger_dyer,
     )
     
     # Air density at surface
@@ -493,6 +533,12 @@ def compute_turbulence_diagnostics(
     friction_velocity = compute_friction_velocity(
         surface_momentum_flux_u, surface_momentum_flux_v, air_density
     )
+
+    # 10 m wind (ECHAM ``nsurf_diag``), area-weighted over the tiles from the
+    # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
+    # calibrated to u10, not to the lowest model level — ~33 m at L47.
+    wind_10m = wind_speed_surface * jnp.sum(
+        state.surface_fraction * wind_10m_tile, axis=1)
     
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
@@ -507,6 +553,7 @@ def compute_turbulence_diagnostics(
         boundary_layer_height=pbl_height,
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
+        wind_10m=wind_10m,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

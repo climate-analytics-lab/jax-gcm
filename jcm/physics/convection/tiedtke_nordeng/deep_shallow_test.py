@@ -195,6 +195,7 @@ class TestLaggedDynamicsReconstruction(unittest.TestCase):
                 qc_conv=zeros, qi_conv=zeros,
                 precip_formation=zeros,
                 precip_conv=jnp.zeros((), temperature.dtype),
+                precip_flux=zeros,
                 dqc_dt=zeros, dqi_dt=zeros,
             ), tn.initialize_convection(
                 temperature, humidity, pressure, u_wind, v_wind, params)

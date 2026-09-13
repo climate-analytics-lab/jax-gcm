@@ -1253,6 +1253,7 @@ def _tiedtke_convection_toa_first(
             qi_conv=qi_conv,
             precip_formation=tendencies.precip_formation,
             precip_conv=tendencies.precip_conv,
+            precip_flux=tendencies.precip_flux,
             dqc_dt=dqc_dt,
             dqi_dt=dqi_dt,
         )
@@ -1305,6 +1306,7 @@ def _tiedtke_convection_toa_first(
             qc_conv=qc_conv, qi_conv=qi_conv,
             precip_formation=jnp.zeros_like(qc),
             precip_conv=precip_conv,
+            precip_flux=jnp.zeros_like(qc),
             dqc_dt=dqc_dt, dqi_dt=dqi_dt
         )
         return tendencies, state
@@ -1772,6 +1774,9 @@ class TiedtkeConvection(PhysicsTerm):
                 else jnp.zeros(ncols, dtype=jnp.int32)
             ),
             precip_conv=tendencies_all.precip_conv * cap_scale_col,
+            precip_flux=(
+                tendencies_all.precip_flux.T * cap_scale_col[jnp.newaxis]
+            ),
             precip_formation=(
                 tendencies_all.precip_formation.T * cap_scale_col[jnp.newaxis]
             ),

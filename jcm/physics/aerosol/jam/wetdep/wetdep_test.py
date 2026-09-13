@@ -9,6 +9,7 @@ import numpy as np
 from jcm.physics.aerosol.jam.wetdep.impaction import (
     bcscavcoef,
     build_impaction_table,
+    table_log_coefficients,
 )
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
@@ -72,8 +73,12 @@ class ScavengingFunctionTest(unittest.TestCase):
         params = WetDepParameters.default()
         table = build_impaction_table(0.11e-6, 1.8, 1770.0)
         coarse_table = build_impaction_table(2.0e-6, 1.8, 2600.0)
-        _, accum_coef = bcscavcoef(jnp.full((1, 1), 0.055e-6), table)
-        _, coarse_coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), coarse_table)
+        _, accum_coef = bcscavcoef(
+            jnp.full((1, 1), 0.055e-6), table.dgnum,
+            *table_log_coefficients(table, 60.0, 1.0))
+        _, coarse_coef = bcscavcoef(
+            jnp.full((1, 1), 1.0e-6), coarse_table.dgnum,
+            *table_log_coefficients(coarse_table, 60.0, 1.0))
         accum = below_cloud_rate(precip, accum_coef, params)
         coarse = below_cloud_rate(precip, coarse_coef, params)
         self.assertGreater(float(coarse[0, 0]), float(accum[0, 0]))
@@ -81,7 +86,9 @@ class ScavengingFunctionTest(unittest.TestCase):
     def test_no_precip_no_below_cloud(self):
         params = WetDepParameters.default()
         table = build_impaction_table(2.0e-6, 1.8, 2600.0)
-        _, coef = bcscavcoef(jnp.full((1, 1), 1.0e-6), table)
+        _, coef = bcscavcoef(
+            jnp.full((1, 1), 1.0e-6), table.dgnum,
+            *table_log_coefficients(table, 60.0, 1.0))
         rate = below_cloud_rate(jnp.zeros((1, 1)), coef, params)
         self.assertAlmostEqual(float(rate[0, 0]), 0.0)
 
@@ -245,17 +252,26 @@ class WetDepTermTest(unittest.TestCase):
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         self.assertTrue(bool(jnp.allclose(tend.tracers[key], 0.0)))
 
-    def _attach_convection(self, diagnostics, nlev, ncols, conv_precip=1.0e-4):
+    def _attach_convection(self, diagnostics, nlev, ncols, conv_precip=1.0e-4,
+                           precip_flux=None):
         from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
 
         import dataclasses
         # Convective cloud on levels 1..nlev-2: condensate + formation
         # there, none at the top level or the sub-cloud bottom level.
         prof = jnp.ones((nlev, ncols)).at[0].set(0.0).at[-1].set(0.0)
+        form = prof * 1.0e-4
+        if precip_flux is None:
+            # Flux ENTERING each layer = everything formed above it, which
+            # is what the scheme's cuflx budget publishes.
+            precip_flux = jnp.concatenate(
+                [jnp.zeros((1, ncols)), jnp.cumsum(form, axis=0)[:-1]], axis=0,
+            )
         conv = dataclasses.replace(
             ConvectionData.zeros((ncols,), nlev),
             precip_conv=jnp.full((ncols,), conv_precip),
-            precip_formation=prof * 1.0e-4,
+            precip_formation=form,
+            precip_flux=precip_flux,
             qc_conv=prof * 1.0e-3,
         )
         diagnostics = dict(diagnostics)
@@ -265,7 +281,7 @@ class WetDepTermTest(unittest.TestCase):
     def test_convective_precip_scavenges(self):
         # The convective pathway must strengthen removal vs the same state
         # without it: soluble modes via in-cloud + washout, the insoluble
-        # pcm mode via washout only (below-cloud sees total precip).
+        # pcm mode via impaction only (which sees the local flux).
         state, diagnostics, spec, mass_name = self._setup()
         term = WetScavenging()
         tend_ref, _ = term(state, diagnostics, None, None)
@@ -286,24 +302,46 @@ class WetDepTermTest(unittest.TestCase):
         # the total increment is meaningful.)
 
     def test_conv_washout_confined_below_cloud_top(self):
-        # With ONLY convective precip and a pressure diagnostic, levels
-        # above the convective cloud top (no heating, lower pressure than
-        # any active level) must see EXACTLY zero removal — rain
-        # cannot collect aerosol above where it forms.
+        # With ONLY convective precip, levels above where convective precip
+        # first forms carry zero flux and must see EXACTLY zero removal —
+        # rain cannot collect aerosol above where it forms. The confinement
+        # is the flux profile itself, not a separately diagnosed cloud top.
         state, diagnostics, spec, mass_name = self._setup(precip=0.0)
         diagnostics = self._attach_convection(diagnostics, 4, 2)
-        # Level 0 is the model top (200 hPa); heating is active on levels
-        # 1..2, so the convective cloud top is at 500 hPa.
-        diagnostics["pressure_full"] = (
-            jnp.array([200.0, 500.0, 800.0, 1000.0])[:, None]
-            * jnp.ones((1, 2)) * 100.0
-        )
         term = WetScavenging()
         tend, _ = term(state, diagnostics, None, None)
         key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
         dq = np.asarray(tend.tracers[key])
-        np.testing.assert_array_equal(dq[0], 0.0)      # above conv top
+        np.testing.assert_array_equal(dq[0], 0.0)      # nothing formed above
         self.assertTrue(np.all(dq[3] < 0.0))           # below cloud
+
+    def test_conv_washout_scales_with_the_local_flux(self):
+        # Impaction scales with the precipitation flux falling into THAT
+        # level. The surface flux applied from the convective cloud top
+        # down over-stated the carrier through the depth of the cloud,
+        # where the flux is still accumulating.
+        nlev, ncols = 4, 2
+        # Small enough that 1 - exp(-rate*dt) is linear in the rate to
+        # well under the tolerance below.
+        flux = jnp.array([0.0, 1.0e-6, 2.0e-6, 4.0e-6])[:, None] * jnp.ones(
+            (1, ncols))
+        state, diagnostics, spec, mass_name = self._setup(
+            nlev=nlev, ncols=ncols, precip=0.0)
+        diagnostics = self._attach_convection(
+            diagnostics, nlev, ncols, precip_flux=flux)
+        # in_plume_convective retires the environment-profile convective
+        # in-cloud rate, so washout is the only convective sink left.
+        tend, _ = WetScavenging(in_plume_convective=True)(
+            state, diagnostics, None, None,
+        )
+        # An insoluble (non-activatable) mode sees washout only.
+        mode = next(m for m in spec.modes if not m.can_activate)
+        dq = np.asarray(tend.tracers[mass_name(mode.species[0], mode.short)])
+        np.testing.assert_array_equal(dq[0], 0.0)
+        # Removal is ~linear in the rate at these magnitudes, so the
+        # per-level removal follows the flux ratios 1 : 2 : 4.
+        np.testing.assert_allclose(dq[2] / dq[1], 2.0, rtol=2e-3)
+        np.testing.assert_allclose(dq[3] / dq[1], 4.0, rtol=2e-3)
 
     def test_conv_scavenging_no_convection_key_is_noop(self):
         # Without a "convection" diagnostic the term must fall back to the
@@ -446,6 +484,8 @@ class WetDepTermTest(unittest.TestCase):
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0),
+            impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
         term = WetScavenging(params=params)
@@ -593,6 +633,8 @@ class WetDepTermTest(unittest.TestCase):
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0),
+            impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
 
@@ -656,6 +698,8 @@ class WetDepTermTest(unittest.TestCase):
             params = WetDepParameters(
                 incloud_scale=jnp.asarray(1.0),
                 sol_factb=coeff,
+                mu_water_air=jnp.asarray(60.0),
+                impact_scale=jnp.asarray(1.0),
                 conv_scav_ratio=jnp.asarray(0.99),
             )
             term = WetScavenging(params=params)
@@ -675,6 +719,8 @@ class WetDepTermTest(unittest.TestCase):
             params = WetDepParameters(
                 incloud_scale=jnp.asarray(1.0),
                 sol_factb=jnp.asarray(0.1),
+                mu_water_air=jnp.asarray(60.0),
+                impact_scale=jnp.asarray(1.0),
                 conv_scav_ratio=ratio,
             )
             term = WetScavenging(params=params)
@@ -768,6 +814,8 @@ class FormationLedgerTest(unittest.TestCase):
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.0),          # isolate in-cloud
+            mu_water_air=jnp.asarray(60.0),
+            impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
         cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
@@ -795,6 +843,8 @@ class FormationLedgerTest(unittest.TestCase):
         params = WetDepParameters(
             incloud_scale=jnp.asarray(1.0),
             sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0),
+            impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
         )
         implicit = WetScavenging(
