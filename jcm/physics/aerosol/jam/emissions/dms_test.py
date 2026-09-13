@@ -78,3 +78,26 @@ class DmsTermTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Wind10mTest(unittest.TestCase):
+    """Nightingale's piston velocity reads the diagnosed 10 m wind (#723)."""
+
+    def test_uses_the_diagnosed_10m_wind(self):
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        state, diagnostics, forcing, terrain = _inputs(wind=10.0)
+        nlev, ncols = state.temperature.shape
+        vd = VerticalDiffusionData.zeros((ncols,), nlev).copy(
+            wind_10m=jnp.full((ncols,), 9.04))
+        lowest, _ = DmsEmissions()(state, diagnostics, forcing, terrain)
+        reduced, _ = DmsEmissions()(
+            state, {**diagnostics, "vertical_diffusion": vd}, forcing, terrain)
+        key = gas_name("dms")
+        ratio = (float(reduced.tracers[key][-1, 0])
+                 / float(lowest.tracers[key][-1, 0]))
+        # kw = 0.222 u^2 + 0.333 u, so the reduction is between u and u^2.
+        expect = ((0.222 * 9.04 ** 2 + 0.333 * 9.04)
+                  / (0.222 * 10.0 ** 2 + 0.333 * 10.0))
+        self.assertAlmostEqual(ratio, expect, places=4)

@@ -60,7 +60,8 @@ def convective_precip_fluxes(
     pdmfup: jnp.ndarray,
     pdmfdp: jnp.ndarray,
     dt: float,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+           jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
 
     Walks the column top→bottom three times, exactly as the Fortran:
@@ -92,10 +93,11 @@ def convective_precip_fluxes(
         dt: Time step [s].
 
     Returns:
-        ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj)`` — surface rain
-        and snow fluxes, the production-only diagnostic ``prain``, the
-        per-layer snow melt, and ``pdmfup`` including the (negative)
-        sub-cloud evaporation increments.
+        ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux)`` —
+        surface rain and snow fluxes, the production-only diagnostic
+        ``prain``, the per-layer snow melt, ``pdmfup`` including the
+        (negative) sub-cloud evaporation increments, and the total
+        (rain + snow) precipitation flux ENTERING each layer from above.
 
     """
     nlev = len(temperature)
@@ -130,10 +132,10 @@ def convective_precip_fluxes(
         )
         zsfl = zsfl - zsnmlt
         zrfl = zrfl + zsnmlt
-        return (zrfl, zsfl), zsnmlt
+        return (zrfl, zsfl), (zsnmlt, zrfl, zsfl)
 
     gen = pdmfup + pdmfdp
-    (prfl, psfl), pdpmel = lax.scan(
+    (prfl, psfl), (pdpmel, rain_lev, snow_lev) = lax.scan(
         partition_step, (jnp.zeros(()), jnp.zeros(())),
         (gen, temperature, humidity, dp_lev),
     )
@@ -174,7 +176,25 @@ def convective_precip_fluxes(
     rain_sfc = jnp.maximum(prfl + zdpevap_tot * prfl * inv, 0.0)
     snow_sfc = jnp.maximum(psfl + zdpevap_tot * psfl * inv, 0.0)
 
-    return rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj
+    # Total precip flux crossing each layer's TOP interface. Built from the
+    # PHASE-RESOLVED legs with the same per-leg floor cuflx applies at the
+    # surface (lines above): a downdraft sink can drive one leg negative
+    # while the other is still falling, and a floored total would let that
+    # negative cancel the surviving phase and understate the carrier. Each
+    # leg is floored, then the sub-cloud evaporation already charged above
+    # is applied to their sum, which reproduces ``rain_sfc + snow_sfc``
+    # exactly at the surface. Shift by one layer for the top interface
+    # (zero at the model top).
+    flux_bottom = jnp.maximum(
+        jnp.maximum(rain_lev, 0.0) + jnp.maximum(snow_lev, 0.0)
+        + jnp.cumsum(zdrfl_per_level),
+        0.0,
+    )
+    precip_flux = jnp.concatenate(
+        [jnp.zeros_like(flux_bottom[:1]), flux_bottom[:-1]]
+    )
+
+    return rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux
 
 
 def calculate_tendencies(
@@ -312,7 +332,8 @@ def calculate_tendencies(
 
     # ECHAM cuflx precipitation budget: rain/snow partition, snow melt
     # (pdpmel), sub-cloud Kessler evaporation charged back into pdmfup.
-    rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj = convective_precip_fluxes(
+    (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj,
+     precip_flux) = convective_precip_fluxes(
         temperature, humidity, pressure, dp_lev, kbase,
         updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
     )
@@ -403,9 +424,15 @@ def calculate_tendencies(
     # exported precip the column never paid for (review finding 0.1).
     precip_rate = rain_sfc + snow_sfc
 
-    # In-plume condensate diagnostic (kg/kg where the updraft is active).
-    qc_conv = jnp.where(updraft_state.mfu > 0, updraft_state.lu, 0.0)
-    qi_conv = jnp.zeros_like(qc_conv)
+    # In-plume condensate (kg/kg where the updraft is active), phase-split by
+    # the UPDRAFT temperature: ECHAM keys in-plume latent heat to ``ptu``
+    # (mo_cuascent.f90:370) and only environment quantities to ``ptenh``, so
+    # the plume's own freezing level is the plume's, not the environment's.
+    # Consumers read the SUM; the split makes each half meaningful on its own.
+    lu_in_plume = jnp.where(updraft_state.mfu > 0, updraft_state.lu, 0.0)
+    plume_liquid = jnp.where(updraft_state.tu > c.tmelt, 1.0, 0.0)
+    qc_conv = plume_liquid * lu_in_plume
+    qi_conv = (1.0 - plume_liquid) * lu_in_plume
 
     # Detrained-condensate tendencies (ECHAM zxtec = g/Δp·plude split by
     # full-level temperature into pxtecl/pxteci). Replaces the previous
@@ -422,6 +449,7 @@ def calculate_tendencies(
         qi_conv=qi_conv,
         precip_formation=jnp.maximum(updraft_state.pdmfup, 0.0),
         precip_conv=precip_rate,
+        precip_flux=precip_flux,
         dqc_dt=dqc_dt,
         dqi_dt=dqi_dt
     )

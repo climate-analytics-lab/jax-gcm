@@ -166,6 +166,74 @@ def _budget_dataset(dtype, dyn=0.0, mass=1.0, ptend=5e-12,
     return xr.Dataset(data, coords={"lat": lat, "lon": lon})
 
 
+class TestEmissionWindProvenance(unittest.TestCase):
+    """#723's model-level fallback: reported always, fatal only if persistent.
+
+    Under ``output_averages`` the saved field is an interval mean, so a cold
+    start's one legitimate fallback step reads 1/N — the same value a single
+    defective step mid-chunk would give, which is why "> 0" cannot be the rule
+    (it aborted a healthy 30-day run at day 5 on 1/480). A fallback that never
+    stops is separable though: it reads 1.0 in every chunk, and after the first
+    chunk the flag can only be zero.
+    """
+
+    def _ds(self, flagged_fraction: float):
+        ds = _make_dataset(250.0, 300.0)
+        nt, nx, ny = ds["temperature"].shape
+        flag = np.full((nt, nx, ny), flagged_fraction)
+        ds["wind_10m_model_level"] = (("time", "lon", "lat"), flag)
+        return ds
+
+    def test_bootstrap_fraction_is_reported_and_not_fatal(self):
+        # 1/480: one step of a 5-day chunk at dt = 15 min.
+        ok, report = check_health(self._ds(1.0 / 480.0), 0, 5.0)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(
+            report["emission_wind_model_level_frac"], 1.0 / 480.0, places=6)
+
+    def test_a_persistent_fallback_after_the_first_chunk_fails(self):
+        # 1.0 in a later chunk can only mean the 10 m wind is never diagnosed
+        # (no vdiff term, or wind_10m unpublished) — +37-46 % sea salt for the
+        # whole run, which used to reach the end with only a stdout line.
+        ok, report = check_health(self._ds(1.0), 7, 200.0)
+        self.assertFalse(ok)
+        self.assertIn("emission wind", "; ".join(report["reasons"]))
+
+    def test_a_one_step_first_chunk_reads_one_and_still_passes(self):
+        # The only legitimate way to read 1.0: a first chunk of a single step,
+        # where the interval mean IS the bootstrap step. Needs no timestep and
+        # no cold-start flag to tell apart — it can only be chunk 0.
+        self.assertTrue(check_health(self._ds(1.0), 0, 0.02)[0])
+
+    def test_a_single_defective_step_mid_chunk_is_reported_not_fatal(self):
+        # 1/N is the legitimate bootstrap value too, so no rule can separate
+        # them; it is reported and left to the per-step unit tests.
+        ok, report = check_health(self._ds(1.0 / 480.0), 3, 20.0)
+        self.assertTrue(ok)
+        self.assertGreater(report["emission_wind_model_level_frac"], 0.0)
+
+    def test_it_is_printed(self):
+        import contextlib
+        import io
+        _, report = check_health(self._ds(1.0), 7, 200.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(report)
+        self.assertIn("Emis wind", buf.getvalue())
+
+    def test_absent_field_is_not_reported(self):
+        # Non-JAM runs publish no such field.
+        ok, report = check_health(_make_dataset(250.0, 300.0), 0, 5.0)
+        self.assertTrue(ok)
+        self.assertNotIn("emission_wind_model_level_frac", report)
+
+    def test_real_blowup_signatures_still_fail(self):
+        # The demotion must not have loosened the gate's actual job.
+        ds = self._ds(0.0)
+        ds["temperature"] = ds["temperature"] * 0.0 + 600.0
+        self.assertFalse(check_health(ds, 0, 5.0)[0])
+
+
 class TestAerosolBudgetReport(unittest.TestCase):
     def test_no_budget_gauges_returns_empty(self):
         ds = xr.Dataset({"temperature": (("time",), np.zeros(1))})

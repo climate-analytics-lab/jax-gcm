@@ -172,7 +172,5 @@ the summed tendency).
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
   removal (the non-carrier stance in `wetdep_term`); CAM has no ice-phase
   aerosol scavenging either.
-- The convective below-cloud pathway still drives every sub-cloud level
-  with the surface convective precip flux rather than a per-level profile.
 - Dry deposition uses a neutral log-law aerodynamic resistance; a
   Monin-Obukhov stability correction awaits a usable surface `L`.

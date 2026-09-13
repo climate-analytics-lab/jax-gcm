@@ -247,6 +247,10 @@ class VDiffDiagnostics(NamedTuple):
     friction_velocity: jnp.ndarray        # u* [m/s] (ncol,)
     convective_velocity: jnp.ndarray      # w* [m/s] (ncol,)
 
+    # Grid-mean 10 m wind speed, the reference height every surface-flux
+    # parameterization (sea salt, DMS) is calibrated to.
+    wind_10m: jnp.ndarray                 # |U(10 m)| [m/s] (ncol,)
+
     # Richardson number
     richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
 
@@ -351,6 +355,10 @@ class VerticalDiffusionData:
     surface_friction_velocity: jnp.ndarray  # u* [m/s] (ncols,)
     monin_obukhov_length: jnp.ndarray       # L [m] (ncols,)
 
+    # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
+    # height the surface-flux emission schemes are calibrated to.
+    wind_10m: jnp.ndarray            # |U(10 m)| [m/s] (ncols,)
+
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
     # column solve this step (diagnosed from the implicit solution, so they
     # equal the column-integrated vdiff tendencies exactly — the ECHAM
@@ -378,6 +386,7 @@ class VerticalDiffusionData:
             pbl_height=jnp.zeros(nodal_shape),
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
+            wind_10m=jnp.zeros(nodal_shape),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
@@ -399,6 +408,7 @@ class VerticalDiffusionData:
             'pbl_height': self.pbl_height,
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
+            'wind_10m': self.wind_10m,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
             'surface_latent_heat': self.surface_latent_heat,

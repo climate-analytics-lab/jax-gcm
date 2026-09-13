@@ -140,6 +140,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
             qi_conv=dqi_col * dt_seconds,
             precip_formation=zeros,
             precip_conv=jnp.array(0.0),
+            precip_flux=zeros,
             dqc_dt=dqc_col,
             dqi_dt=dqi_col,
         ), None
@@ -208,6 +209,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
             dtedt=zeros, dqdt=moisture_tend_profile, dudt=zeros, dvdt=zeros,
             qc_conv=temperature, qi_conv=humidity,
             precip_formation=jnp.zeros_like(temperature),
+            precip_flux=jnp.zeros_like(temperature),
             # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
             # zero so cap_scale == 1 and it passes through unscaled.
             precip_conv=thvsig,
@@ -314,6 +316,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
             qi_conv=zeros,
             precip_formation=zeros,
             precip_conv=jnp.array(0.0),
+            precip_flux=zeros,
             dqc_dt=zeros,
             dqi_dt=zeros,
         ), None

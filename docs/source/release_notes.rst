@@ -1,6 +1,16 @@
 Release Notes
 =============
 
+Unreleased — RCE initial state seeds a mixed sub-cloud layer
+------------------------------------------------------------
+
+- ``jcm.rce.rce_initial_state`` now seeds a dry-adiabatic, well-mixed
+  sub-cloud layer below ``mixed_layer_top_m`` (default 800 m). This changes
+  results for any RCE case composing ``TiedtkeConvection``: ECHAM's ``cubase``
+  trigger finds no cloud base at all in a sounding running at ``lapse_rate``
+  to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
+  profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
+
 Unreleased — dinosaur pinned to a release
 -----------------------------------------
 
