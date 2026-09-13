@@ -4,7 +4,6 @@ This module calculates optical properties of clouds using proper Mie scattering
 theory for liquid droplets and improved parameterizations for ice crystals.
 Includes wavelength-dependent optical properties across multiple spectral bands.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp

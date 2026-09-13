@@ -1,7 +1,7 @@
 """Dinosaur-backed implementation of the :class:`DynamicalCore` protocol.
 
 Wraps the spectral primitive-equations dycore from the external ``dinosaur``
-package. Owns the IMEX-RK SIL3 step, the three diffusion filter closures,
+package. Owns the semi-Lagrangian Crank-Nicolson RK2 step, the three diffusion filter closures,
 the global-mean ps-conservation filter, the modal-orography truncation,
 and the gridpoint↔modal conversions. Outside this subpackage the rest of
 jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
@@ -432,11 +432,11 @@ class DinosaurDycore(DynamicalCore):
         return filters
 
     # ------------------------------------------------------------------
-    # Dynamics step (IMEX-RK SIL3)
+    # Dynamics step (SL Crank-Nicolson RK2)
     # ------------------------------------------------------------------
 
     def _build_dynamics_step_fn(self):
-        """Build the dynamics step (IMEX-RK SIL3, or SL Crank–Nicolson RK2).
+        """Build the dynamics step (SL Crank–Nicolson RK2).
 
         The op-split caller adds the physics dynamics-tendency to the state
         forward-Euler-style before invoking this; the integrator advances
@@ -687,7 +687,7 @@ class DinosaurDycore(DynamicalCore):
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        IMEX-RK SIL3 dynamics step → spectral filters.
+        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters.
         """
         if physics_tendency is not None:
             # The tendency comes back from physics in the "physics" sharding;

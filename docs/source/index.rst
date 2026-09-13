@@ -28,6 +28,7 @@ Contents
    running_at_scale
    speedy_physics
    echam_physics
+   science
    release_notes
    v1_to_v2
    speedy_translation

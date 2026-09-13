@@ -12,7 +12,6 @@ This module integrates jax-rrtmgp with ICON's radiation interface, handling:
 Key entry point: ``radiation_scheme_rrtmgp`` -- ICON-signature drop-in
 replacement for the grey ``radiation_scheme``.
 
-Date: 2025-08-01
 """
 
 from pathlib import Path

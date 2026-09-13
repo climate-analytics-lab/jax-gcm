@@ -7,7 +7,6 @@ converted to heating rates via flux divergence.
 
 Reference: https://github.com/peterukk/rte-rrtmgp-nn (nn_dev branch)
 
-Date: 2026-04-11
 """
 
 from typing import Optional

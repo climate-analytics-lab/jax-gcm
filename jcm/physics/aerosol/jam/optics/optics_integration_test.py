@@ -47,7 +47,10 @@ class OpticsIntegrationTest(unittest.TestCase):
                 radiation=RadiationParameters.default(radiation_interval=0),
             ),
         )
-        predictions = model.run(save_interval=0.0625, total_time=0.0625)
+        # 6 steps, not 3: the emission -> transport -> core -> optics chain
+        # needs the aerosol to reach the core before AOD can be non-zero (see
+        # jam_integration_test).
+        predictions = model.run(save_interval=0.125, total_time=0.125)
         dyn = predictions.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         self.assertTrue(bool(jnp.all(dyn.temperature > 150.0)))

@@ -164,6 +164,52 @@ class TestRceColumnConstruction(unittest.TestCase):
                        vertical=SigmaCoordinates.equidistant(8),
                        radiation=GreyTwoStreamRadiation())
 
+    def test_initial_state_can_trigger_the_echam_cubase_walk(self):
+        """The seeded tropical column must be one Tiedtke can convect in.
+
+        ECHAM's ``cubase`` drops a column the moment the dry-lifted parcel
+        is not buoyant, so a sounding running at ``lapse_rate`` down to the
+        surface never reaches its own LCL and gets NO convection — which is
+        how the release-validation SCM lost its whole convective aerosol
+        pathway (#773) while every convection unit test stayed green.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base,
+        )
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        vertical = get_echam_levels(47)
+        ic = rce_initial_state(vertical, sst=302.0, relative_humidity=0.8)
+        pfull = _pressure_centers(vertical, jnp.asarray(c.p0))
+        ph = (np.asarray(vertical.a_boundaries)
+              + np.asarray(vertical.b_boundaries) * float(c.p0))
+        dp = jnp.asarray(np.abs(np.diff(ph)))
+        rho = pfull / (c.rd * ic.temperature)
+        dz = dp / (rho * c.grav)
+        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        _cb, found = find_cloud_base(ic.temperature, ic.specific_humidity,
+                                     pfull, cfg, None, dz)
+        self.assertTrue(bool(found), "no cloud base in the seeded RCE column")
+        # ...because the sub-cloud layer is well mixed. Compare the
+        # potential-temperature spread through it against the unmixed
+        # profile rather than an absolute threshold: the seeded height is a
+        # scale-height estimate, so the mixed layer is near-neutral rather
+        # than exactly isentropic in the true (p, T) coordinates.
+        unmixed = rce_initial_state(vertical, sst=302.0, relative_humidity=0.8,
+                                    mixed_layer_top_m=0.0)
+        exner = (float(c.p0) / np.asarray(pfull)) ** (float(c.rd) / float(c.cpd))
+        z = np.asarray(ic.geopotential) / c.grav
+        ml = z < 700.0
+        self.assertTrue(np.any(ml))
+        spread = float(np.ptp(np.asarray(ic.temperature)[ml] * exner[ml]))
+        spread_unmixed = float(
+            np.ptp(np.asarray(unmixed.temperature)[ml] * exner[ml]))
+        self.assertLess(spread, 0.5 * spread_unmixed)
+        _cb2, found_unmixed = find_cloud_base(
+            unmixed.temperature, unmixed.specific_humidity, pfull, cfg, None, dz,
+        )
+        self.assertFalse(bool(found_unmixed),
+                         "the unmixed profile should not trigger cubase")
+
     def test_interactive_humidity_frees_q_and_drops_closure(self):
         scm = rce_column(relative_humidity=0.7, vertical=SigmaCoordinates.equidistant(8),
                          radiation=GreyTwoStreamRadiation(), interactive_humidity=True)

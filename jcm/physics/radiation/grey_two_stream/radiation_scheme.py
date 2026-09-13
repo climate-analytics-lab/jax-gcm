@@ -3,7 +3,6 @@
 This module provides the main entry point for radiation calculations,
 coordinating shortwave and longwave radiation computations.
 
-Date: 2025-01-10
 """
 
 import jax.numpy as jnp
@@ -239,8 +238,8 @@ def radiation_scheme(
         surface_albedo_nir: Surface near-infrared albedo
         surface_emissivity: Surface emissivity
         solar: Precomputed solar/orbital geometry — see jcm.forcing.SolarGeometry.
-            Replaces the legacy `date` argument; the radiation scheme no longer
-            needs to know what calendar date it is.
+            Carries all the geometry the scheme needs, so it never has to know
+            the calendar date.
         latitude: Latitude (degrees)
         longitude: Longitude (degrees)
         parameters: Radiation parameters

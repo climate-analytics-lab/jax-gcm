@@ -415,10 +415,8 @@ def calculate_cloud_fraction(
         1.0,                     # b0 >= 1 → cc = 1
     )
 
-    # Apply minimum cloud fraction threshold (matches ECHAM convention).
-    # (The former cf < 0.01 -> 0 truncation claimed an "ECHAM convention"
-    # that does not exist in mo_cover and added a gradient discontinuity;
-    # removed - review finding 2.28.)
+    # No minimum cloud-fraction truncation: a cf < 0.01 → 0 cutoff is not an
+    # ECHAM mo_cover convention and would add a gradient discontinuity.
 
     # Stratospheric cutoff (ECHAM ``jks``, mo_cover.f90:142-144): no cloud
     # above ``cloud_top_pressure_pa``. The RH-closure otherwise fills the
@@ -507,8 +505,7 @@ def condensation_evaporation(
     We act on the WHOLE grid (no cloud-fraction weighting). ECHAM
     weights pass 1 by ``zclcaux`` then runs a grid-box-wide pass-2
     cleanup; the net effect for our microphysics chain is closer to
-    the unweighted single-pass form (verified by the harness in
-    ``/tmp/sundqvist_audit/``). One pass is sufficient because the
+    the unweighted single-pass form. One pass is sufficient because the
     moist-static-energy budget converges at the per-step scale we use
     (verified by ``test_no_oversat_after_step``).
 

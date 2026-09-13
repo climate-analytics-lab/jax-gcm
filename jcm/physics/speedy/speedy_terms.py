@@ -4,7 +4,6 @@ Each wrapper delegates to the original SPEEDY function, translating between
 the composable ``diagnostics`` dict and the legacy typed ``PhysicsData``
 struct. The numerical implementation is untouched.
 
-Date: 2026-04-12
 """
 
 from __future__ import annotations

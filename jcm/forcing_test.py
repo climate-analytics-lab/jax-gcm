@@ -973,6 +973,109 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertAlmostEqual(float(arr[0, 2, 1]), 0.7)
         self.assertEqual(arr[0, 3, 0], 0.0)   # NaN → 0
 
+    def test_disabling_dust_also_drops_its_companion_keys(self):
+        # `dust_file: null` must not leave four `auto` companions fetching
+        # bundles the run never opens (Codex P2).
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        cfg = OmegaConf.create({"physics": {"aerosol_module": "jam"}})
+        forcing_cfg = OmegaConf.create(
+            {"dust_file": None, "dust_preferential_file": "auto",
+             "dust_soil_types_file": "auto", "dust_regions_file": "auto",
+             "dust_roughness_file": "auto", "emissions_file": None,
+             "dms_file": None, "oxidants_file": None})
+        out = fa._resolve_emission_inputs(forcing_cfg, cfg, coords=None,
+                                          is_pyses=True)
+        for key in ("dust_preferential_file", "dust_soil_types_file",
+                    "dust_regions_file", "dust_roughness_file"):
+            self.assertIsNone(out.get(key), key)
+
+    def test_dust_reader_rejects_a_non_monthly_time_axis(self):
+        from jcm.forcing import read_dust_source
+        ds = self._dataset("pot_source",
+                           np.zeros((12, self.NLAT, self.NLON)))
+        with self.assertRaisesRegex(ValueError, "12 monthly records"):
+            read_dust_source(ds.isel(time=slice(0, 6)))
+
+    def _static(self, variables):
+        import xarray as xr
+        return xr.Dataset(
+            {name: (("time", "lat", "lon"), values[None])
+             for name, values in variables.items()},
+            coords={"time": self.TIME[:1], "lat": self.LAT_DESC, "lon": self.LON},
+        )
+
+    def test_preferential_reader_drops_the_degenerate_time_axis(self):
+        from jcm.forcing import TimeSeries, read_dust_preferential
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[2, 2] = 0.8
+        out = read_dust_preferential(
+            self._static({"source": vals}),
+            lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        self.assertNotIsInstance(out, TimeSeries)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        self.assertAlmostEqual(float(arr[2, 1]), 0.8)
+
+    def test_soil_type_reader_returns_all_nine_fractions(self):
+        from jcm.forcing import read_dust_soil_types
+        names = ("type2", "type3", "type4", "type6", "type13", "type14",
+                 "type15", "type16", "type17")
+        out = read_dust_soil_types(
+            self._static({n: np.full((self.NLAT, self.NLON), 0.1)
+                          for n in names}),
+            lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        self.assertEqual(sorted(out), sorted(names))
+        for arr in out.values():
+            self.assertEqual(np.asarray(arr).shape, (self.NLON, self.NLAT))
+
+    def test_soil_type_reader_rejects_a_broken_global_partition(self):
+        from jcm.forcing import read_dust_soil_types
+        names = ("type2", "type3", "type4", "type6", "type13", "type14",
+                 "type15", "type16", "type17")
+        values = {n: np.full((self.NLAT, self.NLON), 0.3) for n in names}
+        with self.assertRaisesRegex(ValueError, "must be a partition"):
+            read_dust_soil_types(self._static(values))
+
+    def test_regions_reader_accepts_integers_and_refuses_the_rest(self):
+        from jcm.forcing import read_dust_regions
+        good = np.tile(np.arange(1, self.NLAT + 1)[:, None],
+                       (1, self.NLON)).astype(float)
+        out = read_dust_regions(self._static({"regions": good}),
+                                lat_deg=self.LAT_DESC[::-1], lon_deg=self.LON)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        np.testing.assert_array_equal(arr[0], [4, 3, 2, 1])
+        # An interpolated mask: the failure this guard exists for.
+        smeared = good.copy()
+        smeared[1, 1] = 2.5
+        with self.assertRaisesRegex(ValueError, "non-integer"):
+            read_dust_regions(self._static({"regions": smeared}))
+        out_of_range = good.copy()
+        out_of_range[0, 0] = 9.0
+        with self.assertRaisesRegex(ValueError, "tuning-region range"):
+            read_dust_regions(self._static({"regions": out_of_range}))
+
+    def test_roughness_reader_is_a_monthly_wrap_year_series(self):
+        from jcm.forcing import WRAP_YEAR, read_dust_roughness
+        ds = self._dataset("surfrough",
+                           np.full((12, self.NLAT, self.NLON), 0.02),
+                           units="1.")
+        ts = read_dust_roughness(ds, lat_deg=self.LAT_DESC[::-1],
+                                 lon_deg=self.LON)
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        self.assertEqual(np.asarray(ts.values).shape,
+                         (12, self.NLON, self.NLAT))
+
+    def test_roughness_reader_rejects_metres(self):
+        from jcm.forcing import read_dust_roughness
+        ds = self._dataset("surfrough",
+                           np.full((12, self.NLAT, self.NLON), 0.02),
+                           units="m")
+        with self.assertRaisesRegex(ValueError, "centimetres"):
+            read_dust_roughness(ds)
+
     def test_dust_reader_accepts_static_lat_lon_map(self):
         # A time-invariant potential-source / erodibility map has no `time`
         # axis. DustEmissions reads a bare 2-D field, so the reader must
@@ -1424,6 +1527,11 @@ class TestForcingFromBundles(unittest.TestCase):
             mock.patch("jcm.forcing.validate_emissions_grid"),
             mock.patch("jcm.forcing.read_dms_seawater", return_value=dms),
             mock.patch("jcm.forcing.read_dust_source", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_preferential", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_soil_types",
+                       return_value={"type2": dust}),
+            mock.patch("jcm.forcing.read_dust_regions", return_value=dust),
+            mock.patch("jcm.forcing.read_dust_roughness", return_value=dust),
             mock.patch("jcm.forcing.read_oxidant_vmr", return_value=oxi),
             mock.patch("jcm.forcing.validate_oxidant_levels"),
         ]
@@ -1446,6 +1554,10 @@ class TestForcingFromBundles(unittest.TestCase):
                         "file": "hf://bundles/t63/forcing_pd.nc",
                         "ozone_file": "auto", "emissions_file": "auto",
                         "dms_file": "auto", "dust_file": "auto",
+                        "dust_preferential_file": "auto",
+                        "dust_soil_types_file": "auto",
+                        "dust_regions_file": "auto",
+                        "dust_roughness_file": "auto",
                         "oxidants_file": "auto"},
             "physics": {"aerosol_module": "jam"}})
 

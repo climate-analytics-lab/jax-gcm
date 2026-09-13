@@ -757,13 +757,12 @@ def cloud_microphysics_column_sweep(
 
     Why no within-step cleanup pass: the 0.99·(qs - q') cap on rain
     evap means the layer cannot be pushed past saturation in step 4,
-    so a second saturation-adjustment pass would always be a no-op.
-    An earlier draft of this routine ran one anyway as a defensive
-    measure; in practice it re-condensed the slight super-saturation
-    that rain-evap-cooling produced (qs drops with T → small
+    so a second saturation-adjustment pass would be a no-op — and must
+    be avoided, because it would re-condense the slight super-saturation
+    that rain-evap cooling produces (qs drops with T → small
     super-saturation appears → cleanup condenses → more autoconv →
     more rain), reigniting the rain-evap ↔ re-condensation feedback
-    PR #458 originally caught. The cap alone is sufficient.
+    PR #458 caught. The cap alone is sufficient.
 
     Bottom-of-column ``zrfl`` / ``zsfl`` become the surface precipitation
     flux (``state.precip_rain`` / ``state.precip_snow``).
@@ -945,18 +944,11 @@ def cloud_microphysics_column_sweep(
         # depletion in ``[0, zxlb]`` by construction so neither qc nor
         # qi can be driven negative.
 
-        # Density correction: ECHAM defines ``zqrho = 1.3/ρ`` and uses
-        # ``sqrt(zqrho)`` — i.e. sqrt(1.3/ρ) — in BOTH the Marshall-Palmer
-        # concentrations and the Rotstayn rain evaporation (mo_cloud.f90;
-        # review finding 2.13). The previous code used the inverted
-        # sqrt(ρ/1.3) for zxrp1 (its comment asserted the opposite of the
-        # reference), overestimating accretion by (1.3/ρ)^(8/9) — ~1.85×
-        # at 500 hPa.
+        # Density correction: ECHAM ``zqrho = 1.3/ρ``. The Marshall-Palmer
+        # concentrations use sqrt(zqrho) = sqrt(1.3/ρ); the Rotstayn rain
+        # evaporation uses sqrt(zqrho)/sqrt(1.3) = 1/sqrt(ρ), exactly as
+        # mo_cloud.f90:542 divides its zqrho_sqrt by SQRT(1.3).
         zclcpre_safe = jnp.maximum(zclcpre, config.epsilon)
-        # Density correction: ECHAM defines ``zqrho = 1.3/ρ`` and uses
-        # ``sqrt(zqrho)`` in BOTH the Marshall-Palmer concentrations and
-        # the Rotstayn rain evaporation (review finding 2.13 — the
-        # previous zxrp1 divisor used the inverted sqrt(ρ/1.3)).
         zqrho_sqrt = jnp.sqrt(jnp.maximum(1.3 / jnp.maximum(rho, config.epsilon), 0.0))
         zqrho_sqrt_inv = zqrho_sqrt
         rain_present = (zrfl > config.epsilon) & (zclcpre > config.epsilon)
@@ -1096,14 +1088,11 @@ def cloud_microphysics_column_sweep(
         zbst = c.rv * T1 / jnp.maximum(zdv * esw, config.epsilon)
         zthermo = jnp.maximum(zast + zbst, config.epsilon)
         zrfl_in_cf = zrfl / zclcpre_safe
-        # Rotstayn (1997) per-area rate. The density factor here is the
-        # *inverse* of the one accretion uses: see ECHAM mo_cloud.f90:415
-        # — ``870 * sub * (zrfl/zclcpre)**0.61 * zqrho/cqtmin / zthermo``
-        # where ``zqrho = sqrt(1.3/rho)``. Earlier drafts of this routine
-        # mistakenly reused the accretion-direction ``sqrt(rho/1.3)``
-        # here, which inverted the density dependence (suppressing
-        # rain-evap in low-density layers and amplifying it in dense
-        # layers — the opposite of physical).
+        # Rotstayn (1997) per-area rate, ECHAM mo_cloud.f90:415:
+        # ``870 * sub * (zrfl/zclcpre)**0.61 * zqrho/cqtmin / zthermo`` with
+        # ``zqrho = sqrt(1.3/rho)`` — the inverse of the density dependence in
+        # the Marshall-Palmer zxrp1 divisor, so rain-evap strengthens in
+        # low-density layers as it must.
         # Same double-where guard as zxrp1 above: ``x**0.61`` at x == 0 has
         # an infinite derivative, and ``zevp`` is where-masked to 0 below
         # when no rain is present — the safe base of 1.0 in that masked

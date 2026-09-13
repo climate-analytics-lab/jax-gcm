@@ -121,6 +121,19 @@ user-facing behaviour is incomplete until the docs say so:
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
 
+## The model description is a living document
+``docs/source/science/`` is the by-process model description: every consequential
+scientific choice stated positively, with its reference provenance and its
+``science``/``compute``/``differentiability`` motivation. It is a *living*
+document, held to the same discipline as the issue-filing rule above: a PR that
+**makes or changes a science-relevant choice** — deferring to or deviating from
+ECHAM/CAM, a new scheme or default, a differentiability-driven reformulation, a
+new supported configuration — must add or update the corresponding process
+section (or configuration selection page) in the same PR. State what the code
+*is* and why, with a reference (Fortran ``file::routine``, paper, scheme name);
+never a fix narrative or a before/after. A reviewer should be able to read the
+science doc and the diff together and find them consistent.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
