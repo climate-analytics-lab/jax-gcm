@@ -2,7 +2,7 @@
 
 Run ONCE on a login node (needs the on-disk CESM inputdata tree). Produces
 three small netCDFs in the jcm reader-contract layouts (see
-``jcm.forcing.read_dms_seawater`` / ``read_dust_source`` /
+``jcm.forcing.read_dms_seawater`` /
 ``read_oxidant_vmr``), which the pySES ``build_forcing`` then interpolates
 onto the physics columns at model-build time — so the files stay on their
 native lon/lat grids here.
@@ -46,7 +46,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 _INPUTDATA = "/glade/campaign/cesm/cesmdata/inputdata"
 _DMS_SRC = f"{_INPUTDATA}/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"
-_DUST_SRC = f"{_INPUTDATA}/atm/cam/dst/dst_0.23x0.31_c130710.nc"
 _OXID_SRC = (f"{_INPUTDATA}/atm/cam/chem/trop_mozart_aero/oxid/"
              "oxid_1.9x2.5_L26_1850-2015_c20181106.nc")
 
@@ -71,23 +70,6 @@ def prep_dms(out: Path) -> None:
     )
     out_ds.to_netcdf(out)
     print(f"wrote {out} {dict(out_ds.sizes)} max={np.nanmax(da.values):.2f} nM")
-
-
-def prep_dust(out: Path) -> None:
-    """Write the static erodibility map: mbl_bsn_fct_geo -> pot_source (lat, lon)."""
-    ds = xr.open_dataset(_DUST_SRC)
-    arr = np.clip(np.nan_to_num(ds["mbl_bsn_fct_geo"].values), 0.0, 1.0)
-    out_ds = xr.Dataset(
-        {"pot_source": (("lat", "lon"), arr,
-                        {"units": "1",
-                         "long_name": "CAM geomorphic dust source (mbl_bsn_fct_geo)"})},
-        coords={"lat": ds["lat"].values, "lon": ds["lon"].values},
-        attrs={"source": _DUST_SRC,
-               "history": "prep_jam_aux_inputs.py: renamed to the jcm "
-                          "pot_source contract (read_dust_source, static path)"},
-    )
-    out_ds.to_netcdf(out)
-    print(f"wrote {out} {dict(out_ds.sizes)} max={arr.max():.2f}")
 
 
 def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
@@ -269,18 +251,14 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     oxid_name = (f"oxidants_{args.oxid_source}_echam_l{args.nlevels}_"
                  f"{args.year}.nc")
-    products = [outdir / "dms_lana2011_climo.nc",
-                outdir / "dust_erodibility_cam_f05.nc",
-                outdir / oxid_name]
+    products = [outdir / "dms_lana2011_climo.nc", outdir / oxid_name]
     if not products[0].exists():
         prep_dms(products[0])
     if not products[1].exists():
-        prep_dust(products[1])
-    if not products[2].exists():
         if args.oxid_source == "waccm":
-            prep_oxidants_waccm(products[2], args.year, args.nlevels)
+            prep_oxidants_waccm(products[1], args.year, args.nlevels)
         else:
-            prep_oxidants(products[2], args.year, args.nlevels)
+            prep_oxidants(products[1], args.year, args.nlevels)
     if args.target_truncation:
         for p in products:
             _regrid_to_gaussian(p, args.target_truncation)

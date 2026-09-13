@@ -33,7 +33,12 @@ class TestManifestLoads(unittest.TestCase):
         # (jcm.forcing.packaged_macv2_path), not a mirror product.
         for key, expected in (("emissions_file", "emissions_pd"),
                               ("dms_file", "dms"),
-                              ("dust_file", "dust"),
+                              ("dust_file", "dust_potential_sources"),
+                              ("dust_preferential_file",
+                               "dust_preferential_sources"),
+                              ("dust_soil_types_file", "dust_soil_types"),
+                              ("dust_regions_file", "dust_regions"),
+                              ("dust_roughness_file", "dust_surface_roughness"),
                               ("oxidants_file", "oxidants_pd"),
                               ("ozone_file", "ozone_pd")):
             self.assertEqual(
@@ -81,7 +86,10 @@ class TestIsPublishedMatrix(unittest.TestCase):
 
     def test_publication_matrix(self):
         manifest = mm.load_manifest()
-        for product in ("emissions_pd", "dms", "dust", "oxidants_pd"):
+        for product in ("emissions_pd", "dms", "dust_potential_sources",
+                        "dust_preferential_sources", "dust_soil_types",
+                        "dust_regions", "dust_surface_roughness",
+                        "oxidants_pd"):
             for grid in ("t42", "t63", "t106"):
                 for nlev in (8, 47, 95):
                     for vertical in ("hybrid", "sigma"):

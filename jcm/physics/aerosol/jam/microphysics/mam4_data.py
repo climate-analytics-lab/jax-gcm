@@ -70,14 +70,19 @@ MAM4_SPECIES = tuple(SPECIES[t] for t in _USED) + (SPECIES["h2o"],)
 #: ``primary_split`` instead of hardcoding modes; see #498). Primary sulfate is
 #: split 50/50 into the Aitken and accumulation modes (HAMMOZ ``cmr_sk``/
 #: ``cmr_sa``); primary carbonaceous mass (BC, POA) goes wholly to the
-#: primary-carbon mode (MAM4 carries no BC/POA in the Aitken mode). Dust's
-#: accum/coarse split default (Tegen) lives here too, though the dust term lets
-#: a tunable parameter override the fractions. Size-mapped source schemes (Gong
-#: sea salt) instead partition over ``classes_for`` and need no entry.
+#: primary-carbon mode (MAM4 carries no BC/POA in the Aitken mode). Dust names
+#: the two modes it emits into; the FRACTIONS here are unused — the Tegen scheme
+#: integrates its online 191-class spectrum over MAM4's emission windows instead
+#: of applying a fixed split. Size-mapped source schemes (Gong sea salt) instead
+#: partition over ``classes_for`` and need no entry.
 _MAM4_PRIMARY_EMISSION = {
     "so4": (("ait", 0.5), ("acc", 0.5)),
     "bc": (("pcm", 1.0),),
     "poa": (("pcm", 1.0),),
+    # Dust: only the two MODE NAMES are read. DustEmissions ignores these
+    # fractions entirely — it integrates its online 191-class spectrum over
+    # MAM4's emission windows — and they are kept only so the entry satisfies
+    # the population's sum-to-one invariant.
     "du": (("acc", 0.1), ("cor", 0.9)),
 }
 

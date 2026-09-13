@@ -125,7 +125,10 @@ canonical *forcing* set for a composition in one call, fetching each per-grid
 bundle into the local Hugging Face cache, through the same engine the CLI uses,
 so the two doors agree input-for-input. For a JAM (prognostic-aerosol) package
 it supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant
-set; a non-JAM package gets surface + ozone only. Reach for it when composing
+set (dust is five products: ``dust_file`` plus ``dust_preferential_file``,
+``dust_soil_types_file``, ``dust_regions_file`` and ``dust_roughness_file`` —
+the first four are mandatory together, so setting only ``dust_file`` raises);
+a non-JAM package gets surface + ozone only. Reach for it when composing
 your *own* model, as below. It supplies only the forcing: a validated
 end-to-end setup such as ``t63-echam-jam`` also pins the radiation scheme,
 aerosol core, activation variant, native-grid terrain and sponge, so to
@@ -154,7 +157,8 @@ by hand.
                                                  # terrain_file= for orography
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
-   # Surface (present-day), ozone and the JAM emission/dms/dust/oxidant bundles,
+   # Surface (present-day), ozone and the JAM emission/dms/dust/oxidant bundles
+   # (dust is the five-product Tegen input set),
    # all for the model grid. surface="amip"/"era5" take a transient years=[...]
    # range; aerosol=None supplies surface + ozone only.
    forcing = ForcingData.from_bundles(coords, aerosol="jam", surface="pd")
