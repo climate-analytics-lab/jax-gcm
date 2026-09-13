@@ -46,10 +46,10 @@ and names both remedies — `pip install -e .`, or `JCM_DINOSAUR=<checkout>`.
 (Failing is the point: without SL every model-construction test raises, and
 ~100 unrelated failures bury the ones that matter.)
 
-**`~/.venvs/jaxgcm` is still on dinosaur 1.3.6**, which predates the pin, so
-gate jobs launched from it must pass `JCM_DINOSAUR=$HOME/dinosaur-sl`
-explicitly until that venv is upgraded — at which point the override should
-be dropped, since it is the upgrade that restores parity.
+`~/.venvs/jaxgcm` satisfies the pin (dinosaur 1.5.0), so gate jobs from it
+need no override — just run the script. `JCM_DINOSAUR` remains the escape
+hatch for a pre-release checkout, and a run using it says so and states that
+it is not at CI dependency parity.
 
 ## The gates, individually
 
