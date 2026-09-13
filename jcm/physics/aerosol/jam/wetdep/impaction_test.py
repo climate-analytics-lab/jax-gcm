@@ -13,6 +13,8 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+import jcm.constants as c
 from jax.test_util import check_jvp, check_vjp
 
 from jcm.physics.aerosol.jam.wetdep.impaction import (
@@ -96,6 +98,32 @@ class ImpactionRateTest(unittest.TestCase):
         vol = np.array([
             impaction_scavenging_rates(d, 1.8, 2000.0)[1] for d in diameters])
         self.assertTrue(bool(np.all(np.diff(vol) > 0.0)))
+
+
+class SharedConstantsTest(unittest.TestCase):
+    """The cgs values track ``set_constants``, not the import-time snapshot."""
+
+    def tearDown(self):
+        c.set_constants(c.PhysicalConstants())
+
+    def test_set_constants_after_import_is_honoured(self):
+        args = (0.11e-6, 1.8, 1770.0)
+        before = impaction_scavenging_rates(*args)
+        # r_universal feeds the air molar density, so the coefficient must move.
+        c.set_constants(r_universal=c.r_universal * 1.02)
+        after = impaction_scavenging_rates(*args)
+        c.set_constants(c.PhysicalConstants())
+        restored = impaction_scavenging_rates(*args)
+        self.assertNotAlmostEqual(after[1] / before[1], 1.0, places=4)
+        self.assertAlmostEqual(restored[1] / before[1], 1.0, places=10)
+
+    def test_table_build_also_reads_the_live_constants(self):
+        base = build_impaction_table(2.0e-6, 1.8, 2600.0)
+        c.set_constants(r_universal=c.r_universal * 1.02)
+        moved = build_impaction_table(2.0e-6, 1.8, 2600.0)
+        c.set_constants(c.PhysicalConstants())
+        self.assertGreater(
+            float(np.max(np.abs(moved.e_brown - base.e_brown))), 0.0)
 
 
 class ImpactionTableTest(unittest.TestCase):

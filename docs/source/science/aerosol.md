@@ -187,14 +187,14 @@ tmelt)``) and reserves the environment ``ptenh`` for environment quantities.
   what ECHAM ``cudtdq`` uses for it.
 
 **Status & known limitations.**
-- ``WetScavenging`` has only the **stratiform** cloud fraction to partition the
-  grid box with, and applies it to the convective carrier as well
-  (``clear_fraction = clip(1 - cloud_fraction)`` in ``below_cloud_rate``). In a
-  deep convective column with little stratiform cloud that fraction is near one,
-  so nearly all the grid-mean interstitial aerosol is exposed to convective
-  impaction through the depth of the convective cloud as well as below its base,
-  on top of the in-plume sink. The references partition by the cover belonging to
-  the carrier. Tracked in #781.
+- ``WetScavenging`` applies **no cloud cover** to either below-cloud carrier:
+  CAM's swept precipitating volume cancels against the in-precip-area rain rate,
+  so ``below_cloud_rate`` acts on the grid-mean interstitial mixing ratio. The
+  convective carrier therefore still has no area of its own, and the full
+  grid-mean aerosol is exposed to convective impaction through the depth of the
+  convective cloud as well as below its base, on top of the in-plume sink — the
+  same air removed twice under two different area assumptions. The references
+  partition by the cover belonging to the carrier. Tracked in #781.
 - The in-plume and transport pathways read the previous step's plume profiles
   (the one-``dt`` lag above); the below-cloud pathway reads the convective
   precipitation flux from the same carry.

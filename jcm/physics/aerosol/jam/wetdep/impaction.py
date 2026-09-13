@@ -104,12 +104,18 @@ IMPACT_SCALE_DEFAULT = 1.0
 _REF_TEMPERATURE_K = 273.16
 _REF_PRESSURE_PA = 0.75e5
 
-# cgs values of the shared constants, converted at use: 1 J = 1e7 erg,
-# 1 kg/mol = 1e3 g/mol. CAM's own ``mo_constants`` differ from these in the
-# 6th-7th significant digit (see ``impaction_test``).
-_BOLTZ_CGS = c.ak * 1.0e7                    # erg/K
-_RGAS_CGS = c.r_universal * 1.0e7            # erg/K/mol
-_M_AIR_CGS = c.m_air * 1.0e3                 # g/mol
+def _cgs_constants(boltz_cgs=None, rgas_cgs=None, m_air_cgs=None):
+    """Resolve the cgs constants, reading the live shared singleton.
+
+    Converted at use (1 J = 1e7 erg, 1 kg/mol = 1e3 g/mol) and read on every
+    call, not bound at import, so a ``set_constants`` override after import
+    is honoured. Explicit values override, which is how the CAM-parity test
+    passes CAM's own ``mo_constants`` (they differ from jcm's in the 6th-7th
+    significant digit).
+    """
+    return (c.ak * 1.0e7 if boltz_cgs is None else boltz_cgs,
+            c.r_universal * 1.0e7 if rgas_cgs is None else rgas_cgs,
+            c.m_air * 1.0e3 if m_air_cgs is None else m_air_cgs)
 
 #: Growth-ratio table: ``nimptblgrow_mind``/``_maxd`` and ``log(1.25)`` from
 #: CAM ``aero_model.F90``. Covers wet/dry diameter ratios 0.21–14.6.
@@ -170,9 +176,9 @@ def impaction_scavenging_rates(
     *,
     mu_water_air=MU_WATER_AIR_DEFAULT,
     impact_scale=IMPACT_SCALE_DEFAULT,
-    boltz_cgs: float = _BOLTZ_CGS,
-    rgas_cgs: float = _RGAS_CGS,
-    m_air_cgs: float = _M_AIR_CGS,
+    boltz_cgs: float | None = None,
+    rgas_cgs: float | None = None,
+    m_air_cgs: float | None = None,
     xp=np,
 ) -> tuple[float, float]:
     """Compute the number- and volume-weighted impaction coefficients [1/mm].
@@ -189,9 +195,9 @@ def impaction_scavenging_rates(
         pressure: Air pressure [Pa].
         mu_water_air: Water/air dynamic-viscosity ratio (Slinn interception).
         impact_scale: Multiplier on the inertial-impaction efficiency.
-        boltz_cgs: Boltzmann constant [erg/K].
-        rgas_cgs: Universal gas constant [erg/K/mol].
-        m_air_cgs: Molar mass of dry air [g/mol].
+        boltz_cgs: Boltzmann constant [erg/K]; ``jcm.constants`` if None.
+        rgas_cgs: Universal gas constant [erg/K/mol]; ditto.
+        m_air_cgs: Molar mass of dry air [g/mol]; ditto.
         xp: ``numpy`` (reference, float64) or ``jax.numpy`` (differentiable).
 
     Returns:
@@ -199,6 +205,8 @@ def impaction_scavenging_rates(
         in kg m⁻² s⁻¹ to get a first-order removal rate in 1/s.
 
     """
+    boltz_cgs, rgas_cgs, m_air_cgs = _cgs_constants(
+        boltz_cgs, rgas_cgs, m_air_cgs)
     dg_cgs = dg_wet * 1.0e2                       # m -> cm
     rho_p_cgs = particle_density * 1.0e-3         # kg/m³ -> g/cm³
     press_cgs = pressure * 10.0                   # Pa -> dyne/cm²
@@ -275,12 +283,13 @@ class ImpactionTable:
 def _kernel_at(dg_wet, geom_std_dev, particle_density,
                temperature=_REF_TEMPERATURE_K, pressure=_REF_PRESSURE_PA):
     """Build the knob-independent pieces of ``calc_1_impact_rate``."""
+    boltz_cgs, rgas_cgs, m_air_cgs = _cgs_constants()
     dg_cgs = dg_wet * 1.0e2
     rho_p_cgs = particle_density * 1.0e-3
     press_cgs = pressure * 10.0
 
-    c_air = press_cgs / (_RGAS_CGS * temperature)
-    rho_air = _M_AIR_CGS * c_air
+    c_air = press_cgs / (rgas_cgs * temperature)
+    rho_air = m_air_cgs * c_air
     freepath = _MFP_COEF_CGS / c_air
     dyn_visc = (_VISC_MU0_CGS * (_VISC_TS1_K / (temperature + _VISC_TS2_K))
                 * (temperature / _VISC_TS3_K) ** 1.5)
@@ -297,7 +306,7 @@ def _kernel_at(dg_wet, geom_std_dev, particle_density,
     fuchs = 1.0 + _FUCHS_A * dum + _FUCHS_B * dum * np.exp(-_FUCHS_C / dum)
     tau = 2.0 * rho_p_cgs * a ** 2 * fuchs / (9.0 * rho_air * kin_visc)
     aero_mass = 4.0 * math.pi * a ** 3 * rho_p_cgs / 3.0
-    diffus = _BOLTZ_CGS * temperature * tau / aero_mass
+    diffus = boltz_cgs * temperature * tau / aero_mass
     schmidt = kin_visc / diffus
     stokes = vfall[:, None] * tau[None, :] / r[:, None]
 
