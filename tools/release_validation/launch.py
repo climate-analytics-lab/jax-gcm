@@ -9,8 +9,10 @@ override sets) and becomes a PBS job running a full-output year on one
 A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
 ``forcing.ozone_file=auto``); JAM members additionally need the aux
 inputs staged per
-``jcm/data/mirror/SOURCES.md`` (dms/dust/oxidants + emissions on the
-model grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment.
+``jcm/data/mirror/SOURCES.md`` (dms/oxidants + emissions on the model
+grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment. The five
+Tegen dust bundles are mirror products and are fetched here, on the
+login node, so the compute nodes need no network.
 Each run directory is namespaced by ``--tag`` (default: the launched
 repo's HEAD short SHA), because a release-validation member is a *fresh*
 year: a fixed rundir let a second matrix run silently resume the first
@@ -33,6 +35,39 @@ sys.path.insert(0, str(HERE.parent))
 from benchmark import PRESETS  # noqa: E402
 
 
+#: The Tegen dust inputs (#802). Mirror products, so unlike the other JAM aux
+#: files they are not produced by the local prep tool.
+_DUST_KEYS = ("dust_file", "dust_preferential_file", "dust_soil_types_file",
+              "dust_regions_file", "dust_roughness_file")
+
+
+def dust_overrides(token: str) -> list[str]:
+    """Fetch the five dust bundles HERE and pass their local cache paths.
+
+    ``auto`` would resolve — and therefore download — inside the PBS job, where
+    there is no internet: the member would abort before integrating on any
+    cache that was not already warm. Fetching on the login node at generation
+    time and baking in concrete paths is the same contract the rest of this
+    launcher uses for its aux inputs.
+    """
+    from jcm.data import mirror_manifest as mm
+    from jcm.data.remote import fetch
+    manifest = mm.load_manifest()
+    out = []
+    for key in _DUST_KEYS:
+        product = mm.product_for_key(manifest, key)
+        rel = mm.bundle_path(manifest, product, token, None)
+        try:
+            out.append(f"forcing.{key}={fetch(rel)}")
+        except Exception as exc:                              # noqa: BLE001
+            raise SystemExit(
+                f"could not fetch the dust bundle {rel} for {token}: {exc}. "
+                "Release validation generates jobs on a login node precisely "
+                "so the compute nodes need no network; fix the fetch here "
+                "rather than letting the member abort in the queue.") from exc
+    return out
+
+
 def jam_aux(grid: str, levels: str) -> list[str]:
     inputs = os.environ.get(
         "JAM_INPUTS", "/glade/derecho/scratch/" + os.environ.get("USER", "")
@@ -51,7 +86,7 @@ def jam_aux(grid: str, levels: str) -> list[str]:
     ov = [
         f"forcing.emissions_file={emis}",
         f"forcing.dms_file={inputs}/dms_lana2011_climo_{token}.nc",
-        f"forcing.dust_file={inputs}/dust_erodibility_cam_f05_{token}.nc",
+        *dust_overrides(token),
     ]
     if ox:
         ov.append(f"forcing.oxidants_file={ox[-1]}")
@@ -60,7 +95,7 @@ def jam_aux(grid: str, levels: str) -> list[str]:
             f"no oxidants_*_echam_{levels}_2014_{token}.nc under {inputs} — "
             "regenerate per jcm/data/mirror/SOURCES.md (scratch is "
             "purge-eligible)")
-    for o in ov[:3]:
+    for o in ov[:2]:
         path = o.split("=", 1)[1]
         if not Path(path).exists():
             raise SystemExit(

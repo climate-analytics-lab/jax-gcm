@@ -105,8 +105,8 @@
       "auto": true,
       "staged": true
     },
-    "dust": {
-      "path": "bundles/{grid}/dust.nc",
+    "dust_potential_sources": {
+      "path": "bundles/{grid}/dust_potential_sources.nc",
       "source": "mirror",
       "grids": [
         "t106",
@@ -117,6 +117,66 @@
       "coverage": null,
       "alignment": "climatology",
       "key": "dust_file",
+      "auto": true,
+      "staged": true
+    },
+    "dust_preferential_sources": {
+      "path": "bundles/{grid}/dust_preferential_sources.nc",
+      "source": "mirror",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "dust_preferential_file",
+      "auto": true,
+      "staged": true
+    },
+    "dust_soil_types": {
+      "path": "bundles/{grid}/dust_soil_types.nc",
+      "source": "mirror",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "dust_soil_types_file",
+      "auto": true,
+      "staged": true
+    },
+    "dust_regions": {
+      "path": "bundles/{grid}/dust_regions.nc",
+      "source": "mirror",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "dust_regions_file",
+      "auto": true,
+      "staged": true
+    },
+    "dust_surface_roughness": {
+      "path": "bundles/{grid}/dust_surface_roughness.nc",
+      "source": "mirror",
+      "grids": [
+        "t106",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "dust_roughness_file",
       "auto": true,
       "staged": true
     },

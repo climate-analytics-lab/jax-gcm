@@ -20,7 +20,7 @@
 #    T119 by the loader. forcing.ozone_file: supply a level-matched L47
 #    T119 ozone file (no mirror bundle exists); left as auto here, which
 #    warns + falls back to the analytic profile if none is packaged.
-#  - forcing.{emissions,dms,dust,oxidants}_file=null: T119 has NO mirror
+#  - forcing.{emissions,dms,dust*,oxidants}_file=null: T119 has NO mirror
 #    bundle, so the JAM ``auto`` default cannot resolve them (the per-grid
 #    bundles only exist for t63/t106 — jcm/data/mirror/build_mirror.py's
 #    GRIDS) and would abort build_forcing. This member therefore runs
@@ -51,5 +51,9 @@ forcing:
   emissions_file: null
   dms_file: null
   dust_file: null
+  dust_preferential_file: null
+  dust_soil_types_file: null
+  dust_regions_file: null
+  dust_roughness_file: null
   oxidants_file: null
 sl_off_centering: 0.2

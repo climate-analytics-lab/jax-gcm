@@ -860,7 +860,27 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         xr.Dataset(
             ox_vars, coords={**base, "mlev": np.arange(nlev)},
         ).to_netcdf(ox)
-        return str(dms), str(dust), str(ox)
+
+        # The Tegen scheme's three mandatory static companions (#802).
+        static = {"lat": lat, "lon": lon}
+        pref = Path(tmp) / "dust_pref.nc"
+        xr.Dataset({"source": (("lat", "lon"), np.full((nlat, nlon), 0.2))},
+                   coords=static).to_netcdf(pref)
+        soils = Path(tmp) / "dust_soils.nc"
+        xr.Dataset(
+            {f"type{i}": (("lat", "lon"),
+                          np.full((nlat, nlon), 0.2 if i in (2, 3, 4, 6) else 0.0))
+             for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)},
+            coords=static).to_netcdf(soils)
+        regions = Path(tmp) / "dust_regions.nc"
+        xr.Dataset(
+            {"regions": (("lat", "lon"), np.full((nlat, nlon), 4.0))},
+            coords=static).to_netcdf(regions)
+        return (str(dms), str(dust), str(ox),
+                [f"forcing.dust_preferential_file={pref}",
+                 f"forcing.dust_soil_types_file={soils}",
+                 f"forcing.dust_regions_file={regions}",
+                 "forcing.dust_roughness_file=null"])
 
     def test_cfg_populates_all_three_fields_nonzero(self):
         import tempfile
@@ -868,12 +888,13 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            dms, dust, ox = self._write_files(tmp, coords)
+            dms, dust, ox, companions = self._write_files(tmp, coords)
             cfg = _compose([
                 *_NULL_EMISSIONS,
                 "physics=echam-jam", "grid=echam_t42_l8_sigma",
                 f"forcing.dms_file={dms}",
                 f"forcing.dust_file={dust}",
+                *companions,
                 f"forcing.oxidants_file={ox}",
             ])
             f = build_forcing(cfg, coords)
@@ -915,7 +936,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            dms, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
+            dms, _, _, _ = self._write_files(tmp, coords, lat_offset=3.0)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.dms_file={dms}"])
             with self.assertRaisesRegex(ValueError, "latitudes"):
@@ -945,7 +966,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
-            _, _, ox = self._write_files(tmp, coords,
+            _, _, ox, _ = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
                             f"forcing.oxidants_file={ox}"])
@@ -2484,12 +2505,34 @@ class TestWarnOnConfigTraps:
                     "oxidants_file"):
             assert key in caplog.text
 
+    def test_nulling_the_real_sources_still_warns_with_dust_companions_auto(
+            self, caplog):
+        """The dust companions must not vote on whether a run has emissions.
+
+        Adding them to ``emission_keys`` silently broke ``len(unset) ==
+        len(emission_keys)`` and suppressed the warning for exactly the
+        aerosol-dark JAM run it exists to catch (Codex P2). Any non-None
+        companion reproduces it; ``_resolve_emission_inputs`` discards them
+        anyway once ``dust_file`` is null.
+        """
+        from jcm.runners import warn_on_config_traps
+        cfg = self._cfg(terrain="from_file",
+                        emissions_file=None, dms_file=None, dust_file=None,
+                        oxidants_file=None,
+                        dust_preferential_file="/tmp/pref.nc",
+                        dust_soil_types_file="/tmp/soil.nc",
+                        dust_regions_file="/tmp/reg.nc",
+                        dust_roughness_file="/tmp/rough.nc")
+        with caplog.at_level("WARNING"):
+            warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
+        assert "zero-emission JAM baseline" in caplog.text
+
     def test_jam_with_emissions_silent(self, caplog):
         from jcm.runners import warn_on_config_traps
         cfg = self._cfg(terrain="from_file",
                         emissions_file="hf://bundles/t63/emissions_pd.nc",
                         dms_file="hf://bundles/t63/dms.nc",
-                        dust_file="hf://bundles/t63/dust.nc",
+                        dust_file="hf://bundles/t63/dust_potential_sources.nc",
                         oxidants_file="hf://bundles/t63_l47/oxidants_pd.nc")
         with caplog.at_level("WARNING"):
             warn_on_config_traps(cfg, self._physics("jam_dust_emissions"), None)
@@ -3083,7 +3126,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_potential_sources.nc")
         # The level-dependent oxidant bundle does not exist at l8 → auto→None.
         self.assertIsNone(out.get("oxidants_file"))
 
@@ -3147,7 +3191,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         self.assertEqual(out.get("emissions_file"),
                          "hf://bundles/t63/emissions_pd.nc")
         self.assertEqual(out.get("dms_file"), "hf://bundles/t63/dms.nc")
-        self.assertEqual(out.get("dust_file"), "hf://bundles/t63/dust.nc")
+        self.assertEqual(out.get("dust_file"),
+                         "hf://bundles/t63/dust_potential_sources.nc")
         # The hybrid-level oxidant bundle must NOT be pulled onto sigma.
         self.assertIsNone(out.get("oxidants_file"))
 
