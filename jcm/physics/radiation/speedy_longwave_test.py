@@ -5,6 +5,8 @@ import jax
 import functools
 from jax.test_util import check_vjp, check_jvp
 
+from jcm.testing import check_gradients
+
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
     ta = jnp.zeros((kx, ix, il))
@@ -233,19 +235,11 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # eps is wedged: below ~1e-5 it is under an ulp of the O(400) st4a/dfabs
-        # fields, and at 1e-4 it steps across a where-branch in them. The
-        # quantisation that leaves puts the inner product ~7e-2 from AD.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1e-1, eps=0.00001)
-        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
-        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # The step is chosen by jcm.testing from the difference's own
+        # self-consistency: st4a carries where-branches whose distance from
+        # this point depends on the direction, so no fixed step is safe.
+        # Measured agreement here is 7.1e-4.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
 
     def test_upward_longwave_rad_fluxes_gradient_check(self):
@@ -284,18 +278,9 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # Same float32 wedge as the downward check, but on a smaller output
-        # tree: the inner product lands ~3e-2 from AD.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=5e-2, eps=0.00001)
-        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
-        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # Same branch structure as the downward check on a smaller output
+        # tree; measured agreement 9.9e-4.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
 
 

@@ -2,8 +2,8 @@ import unittest
 import numpy as np
 import jax.numpy as jnp
 import jax
-import functools
-from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 
 class TestConvectionUnit(unittest.TestCase):
 
@@ -268,15 +268,35 @@ class TestConvectionUnit(unittest.TestCase):
                                        forcing=convert_back(forcing_f, forcing), 
                                        terrain=convert_back(terrain_f, terrain)
                                        )
-            return convert_to_float(iptop), convert_to_float(qdif)
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+            return convert_to_float(qdif)
 
-        check_vjp(f, f_vjp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
+        def f_iptop(ps, se, qa, qsat, parameters_f, physics_data_f, forcing_f, terrain_f):
+            iptop, _ = diagnose_convection(ps, se, qa, qsat,
+                                       parameters=convert_back(parameters_f, parameters),
+                                       physics_data=convert_back(physics_data_f, physics_data),
+                                       forcing=convert_back(forcing_f, forcing),
+                                       terrain=convert_back(terrain_f, terrain)
+                                       )
+            return convert_to_float(iptop)
+
+        args = (ps, se, qa, qsat, parameters_floats, physics_data_floats, forcing_floats, terrain_floats)
+
+        # qdif's finite difference is unusable in most directions (it happens
+        # to converge at seed 0, but not at seeds 1 or 2): the moisture excess
+        # is gated on a convection trigger that the secant straddles. Rather
+        # than rest on the one direction that works, take the adjoint identity
+        # plus a live, finite gradient.
+        check_gradients(f, args, reference="adjoint")
+
+        # iptop is a cloud-top *level index* selected from integer constants by
+        # jnp.where, so its gradient is structurally zero rather than merely
+        # hard to measure. Asserted rather than left implicit, because anything
+        # downstream that tries to learn through the cloud top will silently
+        # get nothing.
+        _, iptop_vjp = jax.vjp(f_iptop, *args)
+        grads = iptop_vjp(jnp.ones_like(f_iptop(*args)))
+        self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
+                        "iptop is expected to carry no gradient")
 
 
     def test_get_convection_tendencies_varying_gradient_check(self):
@@ -307,14 +327,14 @@ class TestConvectionUnit(unittest.TestCase):
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.001)
+        # Measured 1.2e-5, against the rtol=1 the fixed-step pair needed. The
+        # step has to reach 1e-6 to get there: the difference sits on a
+        # plateau near 5.7e7 from 1e-3 down to 4e-6, with neighbouring rungs
+        # agreeing to 0.3%, and only below 2e-6 does the secant clear the
+        # branch and drop onto the true value. That plateau is why the step is
+        # chosen by best convergence over the whole ladder, not by the first
+        # rung that looks self-consistent.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3)
 
 
     

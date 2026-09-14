@@ -2,8 +2,8 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 import jax
-import functools
-from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 
 class TestLargeScaleCondensationUnit(unittest.TestCase):
 
@@ -129,14 +129,9 @@ class TestLargeScaleCondensationUnit(unittest.TestCase):
                                        )
             return convert_to_float(tend_out), convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.001)
+        # Measured agreement 8.8e-8 on the realistic profile, against the
+        # rtol=1 the fixed-step pair needed.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3)
 
 
 
