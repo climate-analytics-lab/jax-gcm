@@ -3,10 +3,13 @@
 kind: default
 
 # Ozone climatology netCDF. ``auto`` (default) picks the packaged
-# ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid, warning and
-# falling back to the analytical profile when none fits (that profile
-# biases clear-sky OLR ~12 W/m² low). Explicit path, or ``null`` for the
-# analytical profile without the warning.
+# ``jcm/data/bc/<grid>/ozone.nc`` matching the model grid, then the mirror's
+# per-grid bundle, and RAISES when neither resolves — the analytical profile
+# carries ~7.6x the tropospheric ozone column and biases clear-sky OLR ~12 W/m²
+# low, so it is never substituted silently. Also accepts an explicit path, or
+# ``analytic`` (``null``) to select that profile deliberately. A sigma grid is
+# the exception: no ozone product exists on sigma levels, so ``auto`` warns and
+# uses the analytic profile there.
 ozone_file: auto
 
 # --- Prescribed-emission inputs (JAM / online aerosol) -----------------------

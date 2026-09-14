@@ -34,8 +34,10 @@ Load-bearing pieces:
 - **`run=longrun`** — carries the calibrated upper sponge (10 levels,
   1.5 h, `target_T_K=250`). Without it the model top refrigerates
   (T_min < 100 K by day ~135).
-- **`forcing.ozone_file: auto`** (default) — the packaged climatological
-  ozone. The analytic fallback biases clear-sky OLR ~12 W/m² low.
+- **`forcing.ozone_file: auto`** (default) — the packaged or mirrored
+  climatological ozone. `auto` now raises on a hybrid grid it cannot
+  resolve; the analytic profile biases clear-sky OLR ~12 W/m² low and is
+  reached only via `ozone_file=analytic`.
 
 ## Timestep: why dt = 15 min
 

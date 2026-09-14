@@ -9,6 +9,7 @@ trace events, so it needs neither a GPU nor a model.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -467,3 +468,43 @@ def test_completeness_rejects_a_short_trace_when_all_probes_are_present():
 def test_completeness_accepts_a_full_trace():
     """Every probe present at the full step count passes silently."""
     assert pt.check_trace_completeness(_full(20), 20, 12345, cycle=10) is None
+
+
+def test_default_window_is_one_sub_cycle():
+    """The shipped default must be admissible on the flagship config.
+
+    ``ma-t63-l47`` runs dt=12 min with 2 h radiation, so a sub-cycle is 10
+    steps and the profiler's buffer holds about 20. The old two-cycle default
+    sat exactly on that ceiling and overflowed, and because the window must
+    also span a whole sub-cycle, ``--steps 10`` was the only admissible value —
+    i.e. the default was unusable for the configuration the tool exists for.
+    """
+    src = pathlib.Path(pt.__file__).read_text()
+    match = re.search(r'"--cycles",\s*type=int,\s*default=(\d+)', src)
+    assert match, "--cycles default not found"
+    assert int(match.group(1)) == 1
+
+
+def test_default_window_fits_the_event_buffer_at_t63l47():
+    """One sub-cycle at T63L47 stays inside the ~1e6-event buffer."""
+    steps = 1 * 10                      # --cycles 1 x 10-step sub-cycle
+    assert steps * 19_000 < 1_000_000
+
+
+def test_completeness_says_so_when_no_admissible_window_fits():
+    """Below one sub-cycle there is no shorter window to suggest.
+
+    Rounding down to a multiple of the sub-cycle gives zero, and naming
+    ``--steps 0`` (or the old ``max(cycle, ...)``, which is longer than what
+    fitted) would send the user round the same failure again.
+    """
+    from jcm import profiling
+
+    seen = _full(20)
+    seen[profiling.DYNAMICS] = 4        # fewer steps than one 10-step cycle
+    with pytest.raises(SystemExit) as e:
+        pt.check_trace_completeness(seen, 20, 12345, cycle=10)
+    msg = str(e.value)
+    assert "No admissible window fits" in msg
+    assert "radiation_interval" in msg
+    assert "--steps 0" not in msg

@@ -142,10 +142,11 @@ entirely in an A/B at the same `--chunk-days` — but do not quote a
 **The run must be a real one.** This is a production configuration made
 shorter and more instrumented, not a reduced-physics proxy: real orography,
 real SSTs, the packaged CMIP6 ozone, JW init and the production sponge. Check
-the log line `forcing.ozone_file=auto resolved to .../t63/ozone.nc` — if it
-warns about the **ANALYTIC** ozone profile instead, the radiation is seeing
-~7.6x the tropospheric ozone column and the benchmark is measuring the wrong
-workload.
+the log line `forcing.ozone_file=auto resolved to .../t63/ozone.nc`. On a
+hybrid grid an unresolvable `auto` now raises rather than degrading, so this
+cannot pass silently; on a **sigma** grid it still warns about the **ANALYTIC**
+profile, and there the radiation is seeing ~7.6x the tropospheric ozone column
+and the benchmark is measuring the wrong workload.
 
 **A NaN'd run is not a benchmark.** The tool reports `nan_any` and exits
 non-zero. Timing from a run that blew up mid-flight is meaningless — fix the

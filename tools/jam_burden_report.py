@@ -60,7 +60,34 @@ _EMIS_SPECIES = {"so4": ("so2", 96.0 / 64.0), "bc": ("bc", 1.0),
 # implementation. ``_area_weights`` preserves the tool's "no lat -> None"
 # contract; ``jcm.analysis.area_weights`` returns Gauss-Legendre-exact weights
 # for dinosaur output grids (cos(lat) only for non-Gaussian grids).
-_layer_dp = layer_pressure_thickness
+def _interfaces_are_toa_first(ds: xr.Dataset) -> bool:
+    """Report whether ``pressure_half`` runs top-down (pre-#710 files).
+
+    Read from the pressure values themselves rather than from the axis
+    labels, so a file whose ``level_i`` is a bare integer index is still
+    oriented correctly. See ``docs/source/design/jam_regression.md``.
+    """
+    ph = ds["pressure_half"]
+    other = [d for d in ph.dims if d != "level_i"]
+    prof = np.asarray(ph.mean(other).values) if other else np.asarray(ph.values)
+    return bool(prof[0] < prof[-1])
+
+
+def _layer_dp(ds: xr.Dataset) -> xr.DataArray:
+    """Per-layer Δp [Pa] aligned with the ``level`` axis of the 3-D fields.
+
+    Post-#710 files run both vertical axes surface-first, which is what
+    :func:`jcm.analysis.layer_pressure_thickness` assumes. Pre-#710 files
+    store interfaces TOA-first while ``level`` fields stay surface-first, so
+    the differenced Δp is reversed to align; without that, ``q·Δp`` pairs the
+    thinnest stratospheric layers with the boundary layer and every burden is
+    wrong. The model's own ``pressure_thickness`` diagnostic is already on the
+    ``level`` axis and never needs the flip.
+    """
+    dp = layer_pressure_thickness(ds)
+    if "pressure_thickness" not in ds and _interfaces_are_toa_first(ds):
+        return dp.isel(level=slice(None, None, -1))
+    return dp
 
 
 def _area_weights(ds: xr.Dataset):
@@ -75,7 +102,12 @@ def _wmean(da: xr.DataArray, weights) -> float:
 
 def burden(ds: xr.Dataset, species: str, modes) -> xr.DataArray | None:
     """Time-mean column burden [mg/m²] of a species summed over modes."""
-    names = [f"{p}_{species}_{m}" for m in modes for p in ("m", "mc")]
+    # Interstitial ``m_<sp>_<mode>`` are top-level tracers; the cloud-borne
+    # phase is a carry diagnostic and is written under the flattened
+    # ``jam_cloud_borne.`` namespace (bare ``mc_`` kept for hand-built files).
+    names = [f"{p}_{species}_{m}"
+             for m in modes
+             for p in ("m", "mc", "jam_cloud_borne.mc")]
     present = [n for n in names if n in ds]
     if not present:
         return None

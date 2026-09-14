@@ -4,7 +4,7 @@
 Usage::
 
     python tools/profile_terms.py --preset ma-t63-l47 --gpu 3
-    python tools/profile_terms.py --preset ma-t63-l47 --gpu 3 --cycles 4
+    python tools/profile_terms.py --preset ma-t63-l47 --gpu 3
     python tools/profile_terms.py --preset speedy-t31 --gpu 0 --outdir /tmp/p
 
 Writes ``report.md``, ``result.json`` and the raw trace to
@@ -47,11 +47,13 @@ hidden:
 A third consequence is a hard ceiling on the window. The profiler's event
 buffer holds ~1e6 events and a T63L47 JAM step emits ~19,000 kernels, so ~20
 steps is all that fits at that resolution; past it the profiler stops recording
-and the averages silently come out low. The default window is two radiation
-sub-cycles for that reason, and the tool fails rather than reports if the
-buffer overflows. Nothing is lost by the short window: kernel shapes are static
-and the model takes no data-dependent branches, so a step's cost does not vary
-with the state.
+and the averages silently come out low. The window must also span a whole
+number of radiation sub-cycles, so the default is ONE sub-cycle: the largest
+window that satisfies both. The tool fails rather than reports if the buffer
+overflows, naming the largest window that is both admissible and within it.
+Nothing is lost by the short window: kernel shapes are static and the model
+takes no data-dependent branches, so a step's cost does not vary with the
+state.
 
 Methodology follows the ``jcm-benchmark`` skill: run only on a verified-free
 GPU, discard the compile pass, and quote steady state only.
@@ -755,12 +757,25 @@ def check_trace_completeness(steps_seen: dict[str, int], steps: int,
         )
     worst = min(seen.values())
     if worst < steps:
-        fits = max(cycle, worst // cycle * cycle)
+        # Name the largest window that is BOTH within the buffer and a whole
+        # number of sub-cycles -- the only kind the window gate will accept.
+        # Below one sub-cycle there is no such window, and suggesting one
+        # would send the user round the same failure again.
+        fits = worst // cycle * cycle
+        remedy = (
+            f"Profile a shorter window: --steps {fits} or fewer "
+            f"(a multiple of the {cycle}-step sub-cycle)."
+            if fits else
+            f"No admissible window fits: the buffer holds only {worst} steps "
+            f"but the window must span a whole {cycle}-step radiation "
+            "sub-cycle. Profile a cheaper configuration, or shorten the "
+            "sub-cycle with a smaller run.radiation_interval."
+        )
         raise SystemExit(
             f"the trace covers only {worst} of the {steps} steps run "
             f"({n_kernels} kernels captured; per-probe {seen}), so the "
             "profiler's event buffer overflowed and every number would be an "
-            f"undercount. Profile a shorter window: --steps {fits} or fewer."
+            f"undercount. {remedy}"
         )
 
 
@@ -782,22 +797,23 @@ def main(argv=None) -> int:
                    help="configuration to profile (shared with benchmark.py)")
     p.add_argument("--gpu", type=int, required=True,
                    help="GPU index; must be free (see tools/gpu_util.py)")
-    # Default: two radiation sub-cycles (20 steps at dt=12 min). Not a whole
-    # simulated day, though that is the intuitive choice, for two reasons.
+    # Default: ONE radiation sub-cycle (10 steps at dt=12 min, 2 h radiation),
+    # not a whole simulated day, for two reasons.
     #
-    # It is not needed: every kernel in a step has a static shape and the model
-    # takes no data-dependent branches, so a step's cost does not vary with the
-    # state or the time of day. Once the window spans a whole number of
-    # radiation sub-cycles the per-step average is already exact, and further
-    # steps only reduce timing jitter.
+    # A longer window is not needed: every kernel in a step has a static shape
+    # and the model takes no data-dependent branches, so a step's cost does not
+    # vary with the state or the time of day. Once the window spans a whole
+    # number of sub-cycles the per-step average is exact; further steps only
+    # reduce timing jitter.
     #
-    # And it does not fit: the profiler's event buffer holds ~1e6 events, and a
-    # T63L47 JAM step emits ~19,000 kernels, so ~20 steps is the ceiling at
-    # that resolution. A one-day (120-step) window silently recorded 20 steps
-    # and reported a 4x undercount. --days is still available for cheaper
-    # configurations; the run fails loudly if the buffer overflows.
-    p.add_argument("--cycles", type=int, default=2,
-                   help="radiation sub-cycles to trace (default 2)")
+    # And it does not fit: the profiler's event buffer holds ~1e6 events and a
+    # T63L47 JAM step emits ~19,000 kernels, so ~20 steps is the ceiling there.
+    # Since the window must also span a whole sub-cycle, one cycle is the
+    # largest window that is both admissible and reliably inside the buffer.
+    p.add_argument("--cycles", type=int, default=1,
+                   help="radiation sub-cycles to trace (default 1: the "
+                        "largest window that fits the profiler's event buffer "
+                        "at T63L47 JAM)")
     p.add_argument("--days", type=float, default=None,
                    help="simulated days to trace; overrides --cycles")
     p.add_argument("--steps", type=int, default=None,

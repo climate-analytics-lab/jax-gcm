@@ -18,7 +18,8 @@
 #    sub-grid-orography fields.
 #  - forcing=from_file + hf:// present-day bundle: prescribed SST/sea-ice from
 #    the project data mirror (fetched once into the local HF cache). Ozone
-#    stays forcing.ozone_file: auto unless a level-matched bundle is set.
+#    stays forcing.ozone_file: auto, which resolves the packaged
+#    climatology then the mirror bundle and RAISES if neither fits.
 #  - run=longrun: 30-day health-gated chunks with the settled production
 #    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
 #    stratosphere; the 12-min L47/L95 step now comes from the shared default (run/default.yaml).

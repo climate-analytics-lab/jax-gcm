@@ -129,8 +129,8 @@ PYTHONPATH=<worktree> $PY -c "import rrtmgp,os; print(os.path.dirname(rrtmgp.__f
 
 Terrain, forcing and ozone are **packaged in the repo** (`jcm/data/bc/t63/`)
 and `forcing.ozone_file: auto` resolves the right one — pass no ozone
-override. See `jcm-run` for the full explanation and the ANALYTIC-fallback
-warning to watch for. There is no scratch-purge concern here, unlike Derecho's
+override. See `jcm-run` for the full explanation; on a hybrid grid `auto`
+raises rather than falling back, so a resolution failure is loud. There is no scratch-purge concern here, unlike Derecho's
 prepared JAM aux inputs.
 
 ## Reference points (this machine)

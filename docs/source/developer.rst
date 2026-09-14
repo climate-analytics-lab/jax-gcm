@@ -161,12 +161,15 @@ prints milliseconds per step for the dynamical core, each direction of the
 dynamics/physics bridge, and every physics term individually, alongside the
 fraction of device time it could not attribute cleanly.
 
-The default window is two radiation sub-cycles. Resist lengthening it: the
-profiler's event buffer holds about a million events and a T63L47 JAM step
-emits ~19,000 kernels, so a longer window overflows it and undercounts. The
-short window loses nothing, because kernel shapes are static and the model
-takes no data-dependent branches, so a step's cost does not vary with the
-state.
+The default window is one radiation sub-cycle — 10 steps at T63L47's 12 min
+step and 2 h radiation. Resist lengthening it: the profiler's event buffer
+holds about a million events and a T63L47 JAM step emits ~19,000 kernels, so a
+longer window overflows it and undercounts. The window must *also* span a whole
+number of sub-cycles, so on that configuration one cycle is the only window
+both admissible and within the buffer; the previous two-cycle default sat on
+the ceiling and failed. The short window loses nothing, because kernel shapes
+are static and the model takes no data-dependent branches, so a step's cost
+does not vary with the state.
 
 The attribution works because :mod:`jcm.profiling` wraps the dycore call, the
 bridge and each :class:`~jcm.physics.physics_term.PhysicsTerm` in a
@@ -184,7 +187,10 @@ outside every loop and branch in the step, so each must show up in the
 attribution exactly once per step. It fails — naming the labels — if any of the
 three is missing (the HLO-metadata join broke, so every number would be
 misattributed) or if any is short of the step count (the event buffer
-overflowed, so every number would be an undercount).
+overflowed, so every number would be an undercount). The overflow error names
+the largest window that is both within the buffer and a whole number of
+sub-cycles, or says plainly that no admissible window fits when even one cycle
+is too long.
 
 Note that ``profile_terms.py`` disables CUDA graph capture — otherwise every
 kernel reports the same synthetic instruction and nothing is attributable — so
