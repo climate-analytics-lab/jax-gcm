@@ -23,14 +23,25 @@ recovers the declared field name from ``dataclasses.fields``.
 
 **The finite-difference step is fixed.** SPEEDY's schemes are piecewise smooth —
 ``jnp.where`` on level masks, ``jnp.clip`` in the band-fraction lookup — so a
-central difference is only meaningful while the secant stays inside one piece.
-The distance to the nearest branch varies with the direction, and when the
-secant straddles one the reference is not noisy but *wrong by* ``jump/eps``: at
-the step the longwave check used to be tuned to, its reference was 800x the
-true derivative and grew tenfold for each tenfold shrink of the step.
-``_finite_difference`` picks the step by a criterion that never looks at the AD
-value: halve the step until two successive secants agree, which is exactly the
-statement that both lie in the same smooth piece.
+central difference is only meaningful while the secant stays inside one piece,
+and the distance to the nearest branch varies with the direction.
+``_finite_difference`` chooses the step by two criteria, neither of which reads
+the AD value, because the two ways a secant can go wrong look nothing alike:
+
+* across a *jump* the reference is not noisy but *wrong by* ``jump/eps`` — at
+  the step the longwave check used to be tuned to, its reference was 800x the
+  true derivative and grew tenfold for each tenfold shrink of the step. Halving
+  the step doubles that, so successive rungs disagree. Agreement between
+  neighbours is necessary but **not** sufficient: convection's difference sits
+  on a plateau near 5.7e7 from 1e-3 down to 4e-6, neighbouring rungs agreeing
+  to 0.3%, and only below 2e-6 does the secant clear the branch and drop onto
+  the true -2.6e6. So the ladder is walked out rather than stopped at the first
+  locally-consistent rung.
+* across a *kink* none of that fires at all. A central difference there
+  converges, stably and at every rung, to the *mean* of the two one-sided
+  derivatives, which is not what AD computes. Only comparing the one-sided
+  secants with each other sees it: they differ by O(1) across a kink and
+  converge together, as O(eps*f''), on a smooth piece.
 
 **One projection hides a lost gradient.** Contracting the whole output tree onto
 one random cotangent lets a large-magnitude leaf mask a small one — these ``f``
