@@ -473,7 +473,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def _build_realistic_state_and_data(self, compute_shortwave=True):
         """Column setup matching test_shortwave_radiation, before clouds/shortwave
-        are computed (i.e. shortwave_rad still carries its default cloud fields)."""
+        are computed (i.e. shortwave_rad still carries its default cloud fields).
+        """
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -519,7 +520,8 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_shortwave_replay_returns_cached_heating(self):
         """On a replay step (compute_shortwave=False) get_shortwave_rad_fluxes must
         return exactly the tendency cached from the last compute step, and must leave
-        the carried radiative diagnostics unchanged (issue #752)."""
+        the carried radiative diagnostics unchanged (issue #752).
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
 
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
@@ -539,7 +541,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_shortwave_replay_does_not_recompute(self):
         """A replay step must not touch `state` at all -- it should return the cached
-        heating rate exactly, even if the state passed in has since changed."""
+        heating rate exactly, even if the state passed in has since changed.
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
 
@@ -556,7 +559,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         """The exact failure mode of issue #752: one compute step followed by two
         replay steps must apply the same heating rate all three times, so the sum
         of the three tendencies is 3x the compute-step tendency (before the fix it
-        was 1x, since replay steps returned zero)."""
+        was 1x, since replay steps returned zero).
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
 
@@ -571,7 +575,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_clouds_skipped_on_replay_step(self):
         """get_clouds must carry the previous cloud fields unchanged on a replay
-        step, and must actually (re)compute them on a compute step."""
+        step, and must actually (re)compute them on a compute step.
+        """
         state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave=False)
         initial_sw = physics_data.shortwave_rad
 
