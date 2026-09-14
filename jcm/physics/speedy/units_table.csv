@@ -11,7 +11,8 @@ shortwave_rad.zenit,radian,zenit,The zenith angle
 condensation.dqlsc,g/kg/s,dqlsc,Specific humidity tendency due to large-scale condensation
 convection.se,J/kg,se,dry static energy
 shortwave_rad.rsns,W/m²,fsfc,Net downward flux of short-wave radiation at the surface
-shortwave_rad.dfabs,W/m²,dfabs,Flux of long-wave radiation absorbed in each atmospheric layer
+shortwave_rad.dfabs,W/m²,dfabs,Flux of short-wave radiation absorbed in each atmospheric layer
+shortwave_rad.heating_rate,K/s,heating_rate,Cached shortwave temperature tendency from the last radiation step (re-applied on intermediate steps)
 surface_flux.ustr,N/m²,ustr,u-stress (fmask-weighted land/sea mean)
 mod_radcon.flux.2,W/m²,flux,Radiative flux in spectral band 3 of 4
 shortwave_rad.compute_shortwave,bool,compute_shortwave,Flag to compute shortwave radiation
