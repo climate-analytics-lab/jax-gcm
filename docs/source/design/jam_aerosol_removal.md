@@ -102,6 +102,70 @@ short-circuits a growth ratio within 1 % of unity to node 0 exactly, where
 and CAM gates the lookup on an `isprx` precipitation mask, where jcm relies
 on `Λ ∝ R` vanishing without precip — equivalent, and why there is no mask.
 
+### The convective carrier's footprint
+
+CAM's cancellation above holds for the stratiform carrier, whose rain rate
+`wetdepa_v2` rescales to the precipitating area. For the convective carrier
+jcm follows HAMMOZ instead (#781). `mo_hammoz_wetdep.f90::prep_wetdep_hydro`
+takes the fraction of the grid box the convective precipitation falls
+through to be the **updraft area**,
+
+```
+f_cu = M_u / (ρ · w_u),      w_u = 2 m/s   (zwu)
+```
+
+and `mo_ham_wetdep.f90::ham_wetdep` removes `q_ambient · f_cu · (1 − exp(−Λ·Δt))`
+from each layer, with `Λ` looked up at the grid-mean rain flux (`bc_rain`).
+The updraft mass flux it sees is the one ECHAM `mo_cufluxdts.f90::cuflx`
+hands on: the plume profile through the cloud and, below the cloud base,
+`pmfu(jk) = pmfu(kcbot)·zzp` with `zzp = (p_s − p_half(jk))/(p_s − p_half(kcbot))`
+(squared for mid-level convection) — the updraft draws on the whole sub-cloud
+layer, so the shaft keeps its footprint under the base and tapers to zero at
+the surface.
+
+`conv_precip_cover` reproduces both. `ConvectionData.mass_flux_up` is the
+plume profile alone (the tracer transport derives the cloud-base supply from
+its jump and must keep doing so), so the sub-cloud taper is rebuilt from the
+layer masses: `p_s − p_half(k) = g·Σ_{j≥k} m_j`, so the pressure ratio is the
+ratio of the air mass below the two interfaces, which the term already holds
+as `ρ·Δz`. The cover is clipped to [0, 1] (HAMMOZ does not clip; an updraft
+area above the whole box is a closure artefact, not a cover). `w_u` is the
+differentiable `WetDepParameters.conv_updraft_velocity`, floored at a
+physical 0.01 m/s inside the division. The density is the environment's
+where HAMMOZ uses the updraft's (`zrhou = p/(rd·ptu)`,
+`mo_cufluxdts.f90:406`): `ConvectionData` publishes no updraft temperature,
+and the resulting under-estimate of `f_cu`, `(T_u − T_env)/T_env`, is under
+2 % against an assumed `w_u` that is the estimate's dominant uncertainty.
+
+`conv_below_cloud_rate` applies the cover to the **removed fraction**, as
+HAMMOZ does, and converts it back to the equivalent first-order rate
+`−log1p(−f_cu·(1 − exp(−Λ·Δt)))/Δt` so it composes with the other pathways in
+the term's batched exponential update: a step can take at most `f_cu` of a
+layer's aerosol however hard it rains, and for `Λ·Δt ≪ 1` the rate is
+`f_cu·Λ`.
+
+Two things to be clear about:
+
+- **The references disagree, by the factor `f_cu`.** CAM would have the
+  shaft rain at `R/f_cu` inside the exponential, which cancels the area for
+  `Λ·Δt ≪ 1`; HAMMOZ evaluates `Λ` at the grid-mean `R`, so its convective
+  washout is `f_cu` (a few per cent) times CAM's. jcm takes HAMMOZ's form for
+  the convective carrier: the updraft area is the physical footprint of the
+  shaft, and the in-plume sink (`ConvectiveTracerTransport`) already removes
+  what is inside it — the double counting #781 describes. The CAM-consistent
+  variant (`R/f_cu` in the exponential, still capped at `f_cu` per step) is a
+  one-line change here if validation says otherwise — and ECHAM's own
+  sub-cloud rain evaporation argues for it: under `lham`, `cuflx` uses this
+  same updraft area as its evaporation footprint and evaluates the rain
+  intensity inside the shaft, `sqrt(zrfl/zcucov)`. jcm's convection scheme
+  still carries ECHAM's non-HAM `zcucov = 0.05` for that evaporation (#812).
+- **HAMMOZ's cloud-free gating is not ported.** `ham_wetdep` zeroes
+  below-cloud scavenging wherever the stratiform cover exceeds `1e-10`. jcm's
+  stratiform carrier carries no cover (CAM), and gating the convective carrier
+  on the stratiform cover is exactly the cross-carrier coupling #781 removed.
+  The ambient tracer scavenged is the grid-mean working copy, standing in for
+  HAMMOZ's environment value `pxtenh` to O(`f_cu`).
+
 ## Wet particle density
 
 Settling and Slinn deposition use the **wet** radius, so they must use the

@@ -104,7 +104,13 @@ def convective_precip_fluxes(
     zcons1 = c.cpd / (c.alhf * c.grav * dt)
     zcons2 = 1.0 / (c.grav * dt)
     ztmelp2 = c.tmelt + 2.0
-    zcucov = 0.05  # fractional precip cover (cuflx line 419)
+    # Fractional precip cover for the sub-cloud evaporation: ECHAM's
+    # non-HAM branch (mo_cufluxdts.f90:419). Under ``lham`` ECHAM uses the
+    # updraft area ``pmfu/(zwu*zrhou)`` instead, the footprint the JAM
+    # convective washout already uses (wetdep_term.conv_precip_cover);
+    # sharing it here changes the convective moisture budget and is
+    # tracked as jax-gcm#812.
+    zcucov = 0.05
 
     from .tiedtke_nordeng import saturation_mixing_ratio
     qs_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)

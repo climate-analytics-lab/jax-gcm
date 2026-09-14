@@ -159,6 +159,20 @@ per-column cap scaling. Because that profile is zero above the level where
 convective precip first forms, it is itself the cloud-top confinement of the
 convective washout; no separately diagnosed convective cloud top is needed.
 
+That washout acts only in the fraction of the grid box the convective rain
+falls through, HAMMOZ's **updraft area** ``f_cu = M_u / (ρ·w_u)``
+(``wetdep_term.py::conv_precip_cover``): the updraft mass flux
+``ConvectionData.mass_flux_up`` over the air density and an assumed in-cloud
+updraft velocity ``w_u = 2 m/s`` (``WetDepParameters.conv_updraft_velocity``,
+differentiable). Below the cloud base the mass flux is tapered as ECHAM
+``cuflx`` tapers it — linearly in the air mass below the interface to zero at
+the surface, squared for mid-level convection — so the shaft keeps its
+footprint under the base; the taper is rebuilt from the layer masses because
+``mass_flux_up`` publishes the plume profile alone. Each layer loses
+``f_cu · (1 − exp(−Λ·Δt))`` of its interstitial aerosol to the convective
+carrier (``conv_below_cloud_rate``), with ``Λ`` evaluated at the grid-mean
+convective flux, so a step can take at most the covered fraction.
+
 **What ECHAM/CAM does.** ECHAM transports every tracer through Tiedtke
 (``cuxtte`` / ``mo_cuascn`` xt budgeting); CAM's ``convtran`` does the same;
 in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
@@ -171,6 +185,16 @@ convective precipitation profile is ECHAM ``mo_cufluxdts.f90::cuflx``. The
 liquid/ice phase of an in-plume quantity follows the plume: ``mo_cuascent.f90``
 keys the updraft's own latent heat to ``ptu`` (``zalvs = MERGE(alv, als, ptu >
 tmelt)``) and reserves the environment ``ptenh`` for environment quantities.
+For the convective wet-deposition call (``cuflx_subm`` →
+``mo_hammoz_wetdep.f90::wetdep_interface``), HAMMOZ's ``prep_wetdep_hydro``
+sets the precipitating fraction to the updraft area
+``pclceff = pmfu/(zwu·prhou)`` with ``zwu = 2`` m/s, on the ``pmfu`` that
+``mo_cufluxdts.f90::cuflx`` has already filled below the cloud base
+(``pmfu(jk) = pmfu(kcbot)·zzp``), and ``mo_ham_wetdep.f90::ham_wetdep``
+removes ``pxtp10·pclc·(1 − exp(−Λ·Δt))`` from the ambient air with ``Λ`` from
+``bc_rain`` at the grid-mean rain flux. CAM's ``wetdepa_v2`` partitions
+differently: it rescales the rain rate to the precipitating area, so the area
+cancels and its below-cloud term acts on the grid mean.
 
 **Why we differ.**
 - `science` (documented deviation) — the downdraft **seeds the level of free
@@ -181,23 +205,39 @@ tmelt)``) and reserves the environment ``ptenh`` for environment quantities.
   modelled — the removed flux goes straight to the surface, matching the existing
   wet-deposition treatment. When active, ``WetScavenging`` retires its
   own environment-profile convective in-cloud pathway to avoid double-counting.
+- `science` (reference disagreement) — the convective carrier follows HAMMOZ's
+  updraft-area footprint with ``Λ`` at the grid-mean flux; the stratiform
+  carrier follows CAM's cancellation (see [aerosol removal](#aerosol-removal-below-cloud-scavenging-settling-and-the-removal-chain)).
+  For the convective carrier the two references differ by the factor ``f_cu``
+  (a few per cent). HAMMOZ's form is used because the updraft area is the
+  footprint of the shaft and the in-plume sink already removes what is inside
+  it — the double counting of #781. The ambient tracer scavenged is the
+  grid-mean working copy, which stands in for HAMMOZ's environment value
+  ``pxtenh`` to O(``f_cu``).
+- `science` (documented deviation) — HAMMOZ zeroes below-cloud scavenging in
+  any layer with stratiform cloud (``paclc ≥ 1e-10`` in ``ham_wetdep``). jcm
+  does not gate the convective carrier on the stratiform cover: its stratiform
+  carrier carries no cover at all, and gating one carrier on the other's cover
+  is the cross-carrier coupling #781 removed.
+- `compute` (documented deviation) — HAMMOZ's updraft area divides by the
+  **updraft** density ``zrhou = p/(rd·ptu)``; ``ConvectionData`` publishes no
+  updraft temperature, so the environment density stands in and ``f_cu`` is
+  low by ``(T_u − T_env)/T_env``, under 2 % in the plume core.
 - Faithful otherwise — the convective carrier flux, the in-cloud/below-cloud
   separation and the updraft-temperature phase split all follow the references
   above. Detrained condensate keeps the **environment** split instead, which is
   what ECHAM ``cudtdq`` uses for it.
 
 **Status & known limitations.**
-- ``WetScavenging`` applies **no cloud cover** to either below-cloud carrier:
-  CAM's swept precipitating volume cancels against the in-precip-area rain rate,
-  so ``below_cloud_rate`` acts on the grid-mean interstitial mixing ratio. The
-  convective carrier therefore still has no area of its own, and the full
-  grid-mean aerosol is exposed to convective impaction through the depth of the
-  convective cloud as well as below its base, on top of the in-plume sink — the
-  same air removed twice under two different area assumptions. The references
-  partition by the cover belonging to the carrier. Tracked in #781.
+- Under HAMMOZ's form the convective washout is ``f_cu`` times the CAM form
+  for ``Λ·Δt ≪ 1``. The CAM-consistent alternative — the in-shaft intensity
+  ``R/f_cu`` inside the exponential, which reduces to CAM in that limit and
+  still caps the per-step removal at ``f_cu`` — is a one-line change in
+  ``conv_below_cloud_rate`` should validation call for it.
 - The in-plume and transport pathways read the previous step's plume profiles
-  (the one-``dt`` lag above); the below-cloud pathway reads the convective
-  precipitation flux from the same carry.
+  (the one-``dt`` lag above). The below-cloud pathway does not: ``WetScavenging``
+  runs after ``TiedtkeConvection`` in the ECHAM chain, so its convective
+  precipitation flux and updraft-area footprint are the current step's.
 
 ### Emissions, deposition, sedimentation, wet scavenging, ice nucleation
 
@@ -433,10 +473,12 @@ zero for the cloud-borne phase, which is in-droplet by definition. Two further
 differentiable knobs sit on the collection integral itself — ``mu_water_air``
 (Slinn's water/air viscosity ratio, 60) and ``impact_scale`` (a multiplier on
 the inertial-impaction efficiency, 1) — because impaction is the least
-constrained part of the scheme; both default to CAM as written; no cloud
-weighting is applied, because the swept precipitating volume cancels against the
-in-precip-area rain rate and the stratiform in-cloud pathway acts on the
-cloud-borne tracers rather than the interstitial ones.
+constrained part of the scheme; both default to CAM as written. The stratiform
+carrier is not cloud-weighted, because the swept precipitating volume cancels
+against the in-precip-area rain rate and the stratiform in-cloud pathway acts on
+the cloud-borne tracers rather than the interstitial ones; the convective
+carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
+transport](#convective-tracer-transport--in-plume-scavenging)).
 
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
@@ -510,7 +552,8 @@ which has no ice-phase aerosol scavenging.
 - ``jcm/physics/aerosol/jam/wetdep/impaction.py`` — ``impaction_scavenging_rates``
   (the Slinn integral), ``build_impaction_table``, ``bcscavcoef`` (the lookup).
 - ``jcm/physics/aerosol/jam/wetdep/wetdep_term.py`` — ``below_cloud_rate``,
-  ``WetDepParameters`` (``sol_factb``).
+  ``conv_precip_cover``, ``conv_below_cloud_rate``, ``WetDepParameters``
+  (``sol_factb``, ``conv_updraft_velocity``).
 - ``jcm/physics/aerosol/jam/sedimentation/sedi_term.py`` — ``stokes_velocity``,
   ``moment_radius``.
 - ``jcm/physics/aerosol/jam/drydep/resistances.py`` — ``deposition_velocity``.

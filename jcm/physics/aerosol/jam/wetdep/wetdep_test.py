@@ -15,7 +15,9 @@ from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
     below_cloud_rate,
+    conv_below_cloud_rate,
     conv_in_cloud_rate,
+    conv_precip_cover,
     reinjection_budget,
 )
 
@@ -107,6 +109,54 @@ class ScavengingFunctionTest(unittest.TestCase):
         self.assertAlmostEqual(float(rate[2, 0]), 0.0)    # no formation
         none = conv_in_cloud_rate(jnp.zeros((3, 1)), qcond, rho, dz, params)
         self.assertAlmostEqual(float(jnp.abs(none).max()), 0.0)
+
+    def test_conv_precip_cover_is_the_updraft_area(self):
+        # HAMMOZ prep_wetdep_hydro: the precipitating fraction is the
+        # updraft area mfu/(rho*w_u), with ECHAM cuflx's sub-cloud taper —
+        # linear in the air mass below the interface, squared for
+        # mid-level convection — and nothing at all without a plume.
+        nlev, ncols = 4, 3
+        mfu = jnp.array([0.0, 0.2, 0.2, 0.0])[:, None] * jnp.array([1.0, 1.0, 0.0])
+        ktype = jnp.array([1, 3, 0], dtype=jnp.int32)
+        layer_mass = jnp.full((nlev, ncols), 200.0)
+        rho = jnp.ones((nlev, ncols))
+        cover = np.asarray(conv_precip_cover(mfu, ktype, layer_mass, rho, 2.0))
+        # In-cloud levels: 0.2 / (1 * 2) = 0.1. Sub-cloud level 3 sits under
+        # base level 2 with half the air mass below its top interface
+        # (200 of 400), so zzp = 0.5 — squared to 0.25 for ktype 3.
+        np.testing.assert_allclose(cover[:, 0], [0.0, 0.1, 0.1, 0.05], rtol=1e-6)
+        np.testing.assert_allclose(cover[:, 1], [0.0, 0.1, 0.1, 0.025], rtol=1e-6)
+        np.testing.assert_array_equal(cover[:, 2], 0.0)
+        # An updraft area above the whole box is clipped to the box.
+        huge = jnp.array([0.0, 10.0, 10.0, 10.0])[:, None] * jnp.ones((1, ncols))
+        np.testing.assert_array_equal(
+            np.asarray(conv_precip_cover(huge, ktype, layer_mass, rho, 2.0))[1:],
+            1.0,
+        )
+        # Broadcasting-native: a single column agrees with the block.
+        single = conv_precip_cover(mfu[:, 0], ktype[0], layer_mass[:, 0],
+                                   rho[:, 0], 2.0)
+        np.testing.assert_allclose(np.asarray(single), cover[:, 0], rtol=1e-6)
+
+    def test_conv_below_cloud_rate_removes_the_covered_fraction(self):
+        # HAMMOZ ham_wetdep: the layer loses cover * (1 - exp(-Lambda*dt)),
+        # so however hard it rains the step can take at most the covered
+        # fraction; for small Lambda*dt the rate is simply cover * Lambda.
+        params = WetDepParameters.default()
+        dt = 1800.0
+        cover = jnp.full((2, 1), 0.3)
+        coef = jnp.ones((2, 1))
+        saturating = conv_below_cloud_rate(
+            jnp.full((2, 1), 1.0), cover, coef, params, dt)   # Lambda*dt = 180
+        removed = -np.expm1(-np.asarray(saturating) * dt)
+        np.testing.assert_allclose(removed, 0.3, rtol=1e-6)
+        weak_flux = jnp.full((2, 1), 1.0e-6)
+        weak = conv_below_cloud_rate(weak_flux, cover, coef, params, dt)
+        expected = 0.3 * np.asarray(below_cloud_rate(weak_flux, coef, params))
+        np.testing.assert_allclose(np.asarray(weak), expected, rtol=1e-3)
+        none = conv_below_cloud_rate(
+            jnp.full((2, 1), 1.0), jnp.zeros((2, 1)), coef, params, dt)
+        np.testing.assert_array_equal(np.asarray(none), 0.0)
 
 
 class WetDepTermTest(unittest.TestCase):
@@ -253,7 +303,7 @@ class WetDepTermTest(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(tend.tracers[key], 0.0)))
 
     def _attach_convection(self, diagnostics, nlev, ncols, conv_precip=1.0e-4,
-                           precip_flux=None):
+                           precip_flux=None, mass_flux_up=None):
         from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
 
         import dataclasses
@@ -267,8 +317,16 @@ class WetDepTermTest(unittest.TestCase):
             precip_flux = jnp.concatenate(
                 [jnp.zeros((1, ncols)), jnp.cumsum(form, axis=0)[:-1]], axis=0,
             )
+        if mass_flux_up is None:
+            # A vigorous plume through the cloud levels: with rho = 1 and
+            # w_u = 2 m/s this is a 10 % updraft area, the footprint the
+            # convective washout acts in (tapering to 5 % in the sub-cloud
+            # level below base level nlev-2).
+            mass_flux_up = prof * 0.2
         conv = dataclasses.replace(
             ConvectionData.zeros((ncols,), nlev),
+            mass_flux_up=mass_flux_up,
+            ktype=jnp.ones((ncols,), dtype=jnp.int32),
             precip_conv=jnp.full((ncols,), conv_precip),
             precip_formation=form,
             precip_flux=precip_flux,
@@ -327,8 +385,11 @@ class WetDepTermTest(unittest.TestCase):
             (1, ncols))
         state, diagnostics, spec, mass_name = self._setup(
             nlev=nlev, ncols=ncols, precip=0.0)
+        # A plume reaching the surface layer keeps the updraft footprint
+        # uniform over levels 1..3, so only the flux varies between them.
+        mfu = jnp.array([0.0, 0.2, 0.2, 0.2])[:, None] * jnp.ones((1, ncols))
         diagnostics = self._attach_convection(
-            diagnostics, nlev, ncols, precip_flux=flux)
+            diagnostics, nlev, ncols, precip_flux=flux, mass_flux_up=mfu)
         # in_plume_convective retires the environment-profile convective
         # in-cloud rate, so washout is the only convective sink left.
         tend, _ = WetScavenging(in_plume_convective=True)(
@@ -342,6 +403,33 @@ class WetDepTermTest(unittest.TestCase):
         # per-level removal follows the flux ratios 1 : 2 : 4.
         np.testing.assert_allclose(dq[2] / dq[1], 2.0, rtol=2e-3)
         np.testing.assert_allclose(dq[3] / dq[1], 4.0, rtol=2e-3)
+
+    def test_conv_washout_acts_in_the_updraft_footprint(self):
+        # jax-gcm#781: convective impaction removes aerosol only from the
+        # fraction of the box the convective rain falls through — HAMMOZ's
+        # updraft area — so it scales with the updraft mass flux and
+        # vanishes without a plume, however much flux the profile carries.
+        nlev, ncols = 4, 2
+        flux = jnp.array([0.0, 1.0e-6, 1.0e-6, 1.0e-6])[:, None] * jnp.ones(
+            (1, ncols))
+        state, diagnostics, spec, mass_name = self._setup(
+            nlev=nlev, ncols=ncols, precip=0.0)
+        mode = next(m for m in spec.modes if not m.can_activate)
+        key = mass_name(mode.species[0], mode.short)
+
+        def washout(mfu_base):
+            mfu = jnp.array([0.0, 1.0, 1.0, 1.0])[:, None] * jnp.full(
+                (1, ncols), mfu_base)
+            diag = self._attach_convection(
+                diagnostics, nlev, ncols, precip_flux=flux, mass_flux_up=mfu)
+            tend, _ = WetScavenging(in_plume_convective=True)(
+                state, diag, None, None)
+            return np.asarray(tend.tracers[key])
+
+        weak, strong, none = washout(0.1), washout(0.2), washout(0.0)
+        self.assertTrue(np.all(weak[1:] < 0.0))
+        np.testing.assert_allclose(strong[1:] / weak[1:], 2.0, rtol=1e-3)
+        np.testing.assert_array_equal(none, 0.0)
 
     def test_conv_scavenging_no_convection_key_is_noop(self):
         # Without a "convection" diagnostic the term must fall back to the
@@ -487,6 +575,7 @@ class WetDepTermTest(unittest.TestCase):
             mu_water_air=jnp.asarray(60.0),
             impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0),
         )
         term = WetScavenging(params=params)
         tend, out = term(state, diagnostics, None, None)
@@ -636,6 +725,7 @@ class WetDepTermTest(unittest.TestCase):
             mu_water_air=jnp.asarray(60.0),
             impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0),
         )
 
         # The (interstitial key, cloud-borne key, total, fraction) tuples
@@ -701,6 +791,7 @@ class WetDepTermTest(unittest.TestCase):
                 mu_water_air=jnp.asarray(60.0),
                 impact_scale=jnp.asarray(1.0),
                 conv_scav_ratio=jnp.asarray(0.99),
+                conv_updraft_velocity=jnp.asarray(2.0),
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
@@ -722,6 +813,7 @@ class WetDepTermTest(unittest.TestCase):
                 mu_water_air=jnp.asarray(60.0),
                 impact_scale=jnp.asarray(1.0),
                 conv_scav_ratio=ratio,
+                conv_updraft_velocity=jnp.asarray(2.0),
             )
             term = WetScavenging(params=params)
             tend, _ = term(state, diagnostics, None, None)
@@ -730,6 +822,31 @@ class WetDepTermTest(unittest.TestCase):
         g = jax.grad(loss)(jnp.asarray(0.99))
         self.assertTrue(np.isfinite(float(g)))
         self.assertNotEqual(float(g), 0.0)
+
+    def test_grad_through_conv_updraft_velocity(self):
+        # The updraft velocity sets the convective footprint, so with the
+        # washout as the only sink a faster updraft (smaller area) must
+        # remove less: a finite, strictly negative gradient of the squared
+        # removal.
+        state, diagnostics, spec, mass_name = self._setup(precip=0.0)
+        diagnostics = self._attach_convection(diagnostics, 4, 2)
+
+        def loss(w_u):
+            params = WetDepParameters(
+                incloud_scale=jnp.asarray(1.0),
+                sol_factb=jnp.asarray(0.1),
+                mu_water_air=jnp.asarray(60.0),
+                impact_scale=jnp.asarray(1.0),
+                conv_scav_ratio=jnp.asarray(0.99),
+                conv_updraft_velocity=w_u,
+            )
+            term = WetScavenging(params=params, in_plume_convective=True)
+            tend, _ = term(state, diagnostics, None, None)
+            return sum(jnp.sum(v ** 2) for v in tend.tracers.values())
+
+        g = jax.grad(loss)(jnp.asarray(2.0))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertLess(float(g), 0.0)
 
 
 if __name__ == "__main__":
@@ -817,6 +934,7 @@ class FormationLedgerTest(unittest.TestCase):
             mu_water_air=jnp.asarray(60.0),
             impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0),
         )
         cb_key = mass_name(spec.modes[0].species[0], spec.modes[0].short,
                            cloud_borne=True)
@@ -846,6 +964,7 @@ class FormationLedgerTest(unittest.TestCase):
             mu_water_air=jnp.asarray(60.0),
             impact_scale=jnp.asarray(1.0),
             conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0),
         )
         implicit = WetScavenging(
             params=params,
