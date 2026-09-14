@@ -8,6 +8,7 @@ plumbing.
 
 import unittest
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr
@@ -52,6 +53,17 @@ class TestNudgingConfig(unittest.TestCase):
         cfg = NudgingConfig.winds_only(self.nlev, pbl_levels=2)
         self.assertTrue(jnp.all(cfg.inv_tau_wind[:-2] > 0.0))
         self.assertTrue(jnp.all(cfg.inv_tau_wind[-2:] == 0.0))
+
+    def test_winds_only_zeros_humidity(self):
+        cfg = NudgingConfig.winds_only(self.nlev)
+        self.assertTrue(jnp.all(cfg.inv_tau_humidity == 0.0))
+
+    def test_temp_humidity_zeros_winds(self):
+        # The offline-warmup config nudges T and q, leaves winds free.
+        cfg = NudgingConfig.temp_humidity(self.nlev, tau_seconds=86400.0)
+        self.assertTrue(jnp.all(cfg.inv_tau_wind == 0.0))
+        self.assertTrue(jnp.all(cfg.inv_tau_temperature > 0.0))
+        self.assertTrue(jnp.all(cfg.inv_tau_humidity > 0.0))
 
 
 class TestInvTauProfile(unittest.TestCase):
@@ -112,16 +124,21 @@ class TestNudgingTendencyDirection(unittest.TestCase):
         shape = (nlev, nlon, nlat)
 
         ds = _zero_winds_target_dataset(nlev, nlon, nlat, T_K=250.0)
+        # A real humidity reference below the state's 0.01: this case is about
+        # the direction of the tendency, not about a missing ``q``.
+        ds["q"] = (("lev", "lon", "lat"),
+                   np.full((nlev, nlon, nlat), 5e-3, dtype=np.float32))
         target = NudgingTarget.from_dataset(ds, time_var=None)
         config = NudgingConfig(
             inv_tau_wind=jnp.ones(nlev),
             inv_tau_temperature=jnp.ones(nlev),
+            inv_tau_humidity=jnp.ones(nlev),
         )
         state = PhysicsState(
             u_wind=jnp.full(shape, 5.0),
             v_wind=jnp.full(shape, -3.0),
             temperature=jnp.full(shape, 280.0),
-            specific_humidity=jnp.zeros(shape),
+            specific_humidity=jnp.full(shape, 0.01),
             geopotential=jnp.zeros(shape),
             normalized_surface_pressure=jnp.ones((nlon, nlat)),
             tracers={},
@@ -130,6 +147,113 @@ class TestNudgingTendencyDirection(unittest.TestCase):
         self.assertTrue(jnp.all(tend.u_wind <= 0.0))
         self.assertTrue(jnp.all(tend.v_wind >= 0.0))         # state v < target v
         self.assertTrue(jnp.all(tend.temperature <= 0.0))    # state T > target T
+        self.assertTrue(jnp.all(tend.specific_humidity <= 0.0))  # state q > target q
+
+
+class TestNudgingTendencyBroadcasting(unittest.TestCase):
+    """The tendency is broadcasting-native: column block agrees with the grid."""
+
+    def test_column_block_matches_grid(self):
+        nlev, nlon, nlat = 4, 6, 3
+        ncols = nlon * nlat
+        key = jax.random.split(jax.random.key(0), 4)
+        config = NudgingConfig(
+            inv_tau_wind=jnp.linspace(0.5, 1.5, nlev),
+            inv_tau_temperature=jnp.linspace(1.0, 2.0, nlev),
+            inv_tau_humidity=jnp.linspace(0.1, 0.4, nlev),
+        )
+
+        def make(shape, horiz):
+            return PhysicsState(
+                u_wind=jax.random.normal(key[0], shape),
+                v_wind=jax.random.normal(key[1], shape),
+                temperature=250.0 + jax.random.normal(key[2], shape),
+                specific_humidity=1.0 + jax.random.uniform(key[3], shape),
+                geopotential=jnp.zeros(shape),
+                normalized_surface_pressure=jnp.ones(horiz),
+                tracers={},
+            )
+
+        grid = make((nlev, nlon, nlat), (nlon, nlat))
+        block = jax.tree_util.tree_map(
+            lambda a: a.reshape((nlev, ncols) if a.ndim == 3 else (ncols,)),
+            grid)
+        target_grid = jax.tree_util.tree_map(jnp.zeros_like, grid)
+        target_block = jax.tree_util.tree_map(jnp.zeros_like, block)
+        t_grid = nudging_tendency(
+            grid, NudgingTarget(target_grid.u_wind, target_grid.v_wind,
+                                target_grid.temperature,
+                                target_grid.specific_humidity), config)
+        t_block = nudging_tendency(
+            block, NudgingTarget(target_block.u_wind, target_block.v_wind,
+                                 target_block.temperature,
+                                 target_block.specific_humidity), config)
+        self.assertEqual(t_block.temperature.shape, (nlev, ncols))
+        np.testing.assert_allclose(
+            np.asarray(t_grid.temperature).reshape(nlev, ncols),
+            np.asarray(t_block.temperature), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(t_grid.specific_humidity).reshape(nlev, ncols),
+            np.asarray(t_block.specific_humidity), rtol=1e-6)
+
+
+class TestNudgingTargetHumidity(unittest.TestCase):
+    """``from_dataset`` carries specific humidity when present, ``None`` when not."""
+
+    def test_humidity_absent_stays_none(self):
+        """A missing ``q`` must not become a zero-humidity reference.
+
+        ``None`` is the documented "no humidity reference" sentinel, and the
+        tendency reads it as "leave humidity alone". Filling zeros instead
+        turns a wind/temperature target into a reference for a bone-dry
+        atmosphere.
+        """
+        nlev, nlon, nlat = 4, 8, 6
+        ds = _zero_winds_target_dataset(nlev, nlon, nlat)
+        target = NudgingTarget.from_dataset(ds, time_var=None)
+        self.assertIsNone(target.specific_humidity)
+
+    def test_humidity_absent_does_not_dry_the_atmosphere(self):
+        """A q-less target under ``temp_humidity`` leaves humidity untouched."""
+        nlev, nlon, nlat = 4, 8, 6
+        shape = (nlev, nlon, nlat)
+        ds = _zero_winds_target_dataset(nlev, nlon, nlat, T_K=250.0)
+        target = NudgingTarget.from_dataset(ds, time_var=None)
+        state = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 280.0),
+            specific_humidity=jnp.full(shape, 8.0),  # g/kg, a moist column
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones((nlon, nlat)),
+            tracers={},
+        )
+        tend = nudging_tendency(
+            state, target, NudgingConfig.temp_humidity(nlev=nlev))
+        # Temperature is still relaxed; humidity is left entirely alone.
+        self.assertTrue(jnp.all(tend.temperature < 0.0))
+        self.assertTrue(jnp.all(tend.specific_humidity == 0.0))
+
+    def test_humidity_absent_time_varying_stays_none(self):
+        """The ``TimeSeries`` path preserves the sentinel too."""
+        nlev, nlon, nlat, nt = 4, 8, 6, 2
+        zeros = np.zeros((nt, nlev, nlon, nlat), dtype=np.float32)
+        dims = ("time", "lev", "lon", "lat")
+        ds = xr.Dataset(
+            {"u": (dims, zeros), "v": (dims, zeros.copy()),
+             "T": (dims, np.full_like(zeros, 250.0))},
+            coords={"time": np.array(["2000-01-01", "2000-01-02"],
+                                     dtype="datetime64[ns]")},
+        )
+        target = NudgingTarget.from_dataset(ds)
+        self.assertIsNone(target.specific_humidity)
+
+    def test_humidity_present_is_loaded(self):
+        nlev, nlon, nlat = 4, 8, 6
+        q = np.full((nlev, nlon, nlat), 5e-3, dtype=np.float32)
+        ds = _zero_winds_target_dataset(nlev, nlon, nlat)
+        ds["q"] = (("lev", "lon", "lat"), q)
+        target = NudgingTarget.from_dataset(ds, time_var=None)
+        np.testing.assert_allclose(np.asarray(target.specific_humidity), q)
 
 
 class TestNudgingTermInPhysicsStack(unittest.TestCase):
