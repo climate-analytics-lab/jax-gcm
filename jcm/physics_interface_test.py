@@ -1,5 +1,6 @@
 import unittest
 import jax.numpy as jnp
+import numpy as np
 from dinosaur import primitive_equations_states
 from dinosaur.scales import units
 from jcm.constants import p0
@@ -198,6 +199,49 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
         result = verify_tendencies(state, tend, time_step=1800.0)
         qc_next = state.tracers["qc"] + 1800.0 * result.tracers["qc"]
         self.assertTrue(jnp.all(qc_next >= 0.0))
+
+    def test_conservative_transport_of_aerosol_survives_the_interface(self):
+        """A column-conserving redistribution must pass through untouched.
+
+        Tracer vertical diffusion and convective transport both read the
+        step-start state and both return conservative redistributions; their
+        SUM can drive a donor cell negative while the column total is exact.
+        A per-cell positivity cap would clamp the donor and leave the
+        receiving cells' gain, creating mass — so aerosol and gas tracers are
+        not capped here at all.
+        """
+        from jcm.physics_interface import PhysicsTendency, verify_tendencies
+        dt = 1800.0
+        shape = (2, 1, 1)
+        q0 = jnp.array([0.0, 1.0]).reshape(shape)
+        # Two individually valid updates, [0,1] -> [1,0] and -> [0.083,0.917].
+        moved = (jnp.array([1.0, -1.0]).reshape(shape)
+                 + jnp.array([0.083, -0.083]).reshape(shape)) / dt
+        for name in ("m_ss_cor", "n_cor", "g_so2"):
+            state = PhysicsState.zeros(shape, tracers={name: q0})
+            tend = PhysicsTendency.zeros(shape, tracers={name: moved})
+            out = verify_tendencies(state, tend, time_step=dt).tracers[name]
+            self.assertAlmostEqual(
+                float(jnp.sum(out)) * dt, 0.0, places=6,
+                msg=f"{name}: the interface broke column conservation")
+            np.testing.assert_allclose(np.asarray(out), np.asarray(moved))
+
+    def test_water_tracers_are_capped_despite_the_redistribution(self):
+        """Pins today's behaviour for the retained water fields.
+
+        Not a claim that it is right: vdiff redistributes q/qc/qi, so the
+        cap can clamp an overdrawn donor layer and create water mass — the
+        same defect removed here for aerosol. Kept because the moist
+        physics requires q >= 0; tracked in #806.
+        """
+        from jcm.physics_interface import PhysicsTendency, verify_tendencies
+        shape = (4, 8, 8)
+        state = PhysicsState.zeros(shape, tracers={"qc": jnp.full(shape, 1e-5)})
+        tend = PhysicsTendency.zeros(shape, tracers={"qc": jnp.full(shape, -1.0)})
+        result = verify_tendencies(state, tend, time_step=1800.0)
+        nxt = state.tracers["qc"] + 1800.0 * result.tracers["qc"]
+        self.assertTrue(bool(jnp.all(nxt >= 0.0)))
+        self.assertTrue(bool(jnp.allclose(nxt, 0.0)))
 
     def test_unknown_tracer_tendency_passes_through(self):
         """Tendencies of tracers not in the positive-definite set must

@@ -15,6 +15,8 @@ from typing import ClassVar
 
 import jax.numpy as jnp
 
+import jcm.constants as c
+
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
@@ -69,6 +71,9 @@ def equilibrium_modal_state(
     mass_modes, num_modes = [], []
 
     for mode in spec.modes:
+        # Density an empty mode falls back to: its first species, as CAM
+        # uses ``specdens_amode(1,mode)``.
+        default_density = spec.species_props(mode.species[0]).density
         # Per-species volume [m³/kg] and totals.
         total_mass = jnp.zeros_like(saturation)
         total_vol = jnp.zeros_like(saturation)
@@ -83,10 +88,11 @@ def equilibrium_modal_state(
 
         number = jnp.maximum(numbers[number_name(mode.short)], _TINY_NUM)
 
-        # Mass-mean particle density and volume-weighted κ (guarded).
+        # Volume-weighted κ and the DRY material density (guarded); the
+        # wet density follows once the growth factor is known.
         safe_vol = jnp.maximum(total_vol, _TINY_VOL)
-        rho = total_mass / safe_vol
-        rho = jnp.where(total_vol > _TINY_VOL, rho, props.density)
+        rho_dry = jnp.where(
+            total_vol > _TINY_VOL, total_mass / safe_vol, default_density)
         kappa = jnp.where(total_vol > _TINY_VOL, vol_kappa / safe_vol, 0.0)
 
         # Number-median dry diameter from total volume of a log-normal mode:
@@ -105,6 +111,12 @@ def equilibrium_modal_state(
         #   (r_wet/r_dry)³ = 1 + κ a_w/(1 - a_w)
         growth = jnp.cbrt(1.0 + kappa * saturation / (1.0 - saturation))
         r_wet = r_dry * growth
+
+        # ρ_wet = (ρ_dry + (g³-1)ρ_w)/g³ — settling and deposition use the
+        # wet radius, so they need the density of that same particle
+        # (CAM's ``wetdens`` from ``modal_aero_wateruptake``).
+        vol_growth = growth ** 3
+        rho = (rho_dry + (vol_growth - 1.0) * c.rhow) / vol_growth
 
         r_dry_modes.append(r_dry)
         r_wet_modes.append(r_wet)

@@ -24,6 +24,7 @@ from jcm.constants import m_air as _MA
 from jcm.constants import r_universal as _RGAS
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
@@ -180,6 +181,9 @@ class StokesSedimentation(PhysicsTerm):
         # during ``Model.get_empty_data``'s structural probe, so fall back to
         # zeros there (real runs have every declared tracer seeded).
         zeros = jnp.zeros_like(state.temperature)
+        # Operator splitting: settle what the terms already run this step
+        # left behind (see ``removal_split``).
+        view = split_view(self._spec, state, diagnostics)
         names: list[str] = []
         q_list: list[jnp.ndarray] = []
         v_list: list[jnp.ndarray] = []
@@ -218,9 +222,7 @@ class StokesSedimentation(PhysicsTerm):
                 # Floored at 0: donor-cell settling of a negative
                 # (ringing) value transports negative mass downward and
                 # deposits it (see the wetdep note).
-                q_list.append(
-                    jnp.maximum(state.tracers.get(nm, zeros), 0.0)
-                )
+                q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
                 v_list.append(v)
 
         q_stack = jnp.stack(q_list)            # (K, nlev, ncols)

@@ -328,6 +328,20 @@ _NON_NEGATIVE_TRACERS = frozenset({
     "co2_vmr", "methane_vmr", "ozone_vmr",
 })
 
+# Deliberately just the membership test above: JAM aerosol and gas tracers
+# are NOT capped. Their tendency sums conservative redistributions (tracer
+# vertical diffusion, convective transport) with paired transfers (sulfur
+# chemistry, activation exchange), and clipping one side of a conserved
+# pair creates mass. Their removal is bounded where it is produced, by the
+# operator split in ``aerosol/jam/removal_split.py``. Do not re-add a name
+# family here without re-reading that argument (and #806, the same defect
+# in the retained water fields).
+
+
+def has_non_negative_tendency(name: str) -> bool:
+    """Whether a tracer's tendency must not drive it below zero."""
+    return name in _NON_NEGATIVE_TRACERS
+
 
 def _clip_non_negative_tracers(tracers: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
     """Return a copy of ``tracers`` with positive-definite ones clamped to ``>= 0``."""
@@ -342,7 +356,9 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 
     Clips ``specific_humidity`` and every positive-definite tracer (cloud
     water, ice, rain, snow, droplet- and ice-number concentrations, GHG
-    volume mixing ratios) to ``>= 0``. We deliberately do NOT clip to an
+    volume mixing ratios) to ``>= 0``. Aerosol and gas tracers are
+    deliberately left alone, here and on the tendency side (see
+    :func:`has_non_negative_tendency`). We deliberately do NOT clip to an
     upper bound — aggressive caps hide bugs in the physics (particularly
     convection) that should surface as unphysical values rather than be
     silently masked. Individual physics routines apply local NaN-avoidance
@@ -372,11 +388,21 @@ def verify_state(state: PhysicsState) -> PhysicsState:
 def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_step) -> PhysicsTendency:
     """Adjust tendencies to prevent the state from becoming physically invalid in the next time step.
 
-    For every positive-definite scalar (``specific_humidity`` plus the
-    set of tracers in ``_NON_NEGATIVE_TRACERS``) we cap the negative part
-    of the tendency at ``-state / dt``, i.e. just enough to drive the
+    For every positive-definite scalar (``specific_humidity`` plus every
+    tracer :func:`has_non_negative_tendency` accepts) we cap the negative
+    part of the tendency at ``-state / dt``, i.e. just enough to drive the
     field to zero rather than below. This mirrors what an implicit step
     on a linear sink would do for the same field.
+
+    The cap is only sound for a field whose tendency is a pure sink plus
+    sources: clipping the donor half of a conservative redistribution
+    while its receivers keep their gain CREATES mass. Aerosol and gas
+    tracers are excluded for that reason. The retained water fields do
+    not strictly satisfy it either — vdiff redistributes q/qc/qi — so the
+    cap can create water mass in an overdrawn donor layer; it is kept
+    because the moist physics downstream requires q >= 0, and reshaping
+    it is a moist-physics change with its own validation. Tracked in
+    #806.
 
     Args:
         state: The current ``PhysicsState`` (already passed through
@@ -397,8 +423,12 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
         # fires routinely wherever precip/evaporation drives q toward 0,
         # silently detaching those cells from any parameter being
         # calibrated. Positivity in the forward pass is unaffected.
-        next_value = value + time_step * tend
-        capped = jnp.where(next_value < 0, -value / time_step, tend)
+        # Floor the tendency at the drain rate that empties the tracer and
+        # no further. ``max(tend, -max(value,0)/dt)`` equals the plain
+        # ``-value/dt`` cap wherever ``value >= 0``, leaves any source
+        # untouched, and on a tracer that arrives negative (aerosol is not
+        # entry-clipped) stops the sink rather than inventing mass.
+        capped = jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
         # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
         # tend)) is bitwise ``capped`` in the forward pass (the tend
         # terms cancel exactly), unlike tend + stop_grad(capped - tend)
@@ -414,7 +444,7 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     clipped_tracer_tends = {
         name: (
             _cap_negative_tend(state.tracers[name], tend)
-            if name in _NON_NEGATIVE_TRACERS and name in state.tracers
+            if has_non_negative_tendency(name) and name in state.tracers
             else tend
         )
         for name, tend in tendencies.tracers.items()
