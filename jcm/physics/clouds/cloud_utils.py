@@ -252,11 +252,16 @@ def eff_liquid_droplet_radius(
     # these radii from the cloud carry, i.e. from the second step of a rollout
     # onwards.
     has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
-    radius_base = jnp.where(
-        has_liquid,
-        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density / jnp.maximum(cdnc, eps),
-        1.0,
+    radius_base = (
+        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
+        / jnp.maximum(cdnc, eps)
     )
+    # Positive liquid can still underflow to a zero base in the arithmetic
+    # above. Guard the computed base too: preserve its zero forward radius,
+    # but never differentiate the cube root at zero. Use != 0 rather than
+    # > 0 so invalid negative/NaN bases remain visible, not silently masked.
+    has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
+    radius_base = jnp.where(has_liquid, radius_base, 1.0)
     liq_eff_radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
     return jnp.where(has_liquid, liq_eff_radius, 0.0)
 

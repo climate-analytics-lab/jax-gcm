@@ -5,6 +5,7 @@ from math import pi
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import jcm.constants as c
 from .cloud_utils import (
@@ -29,6 +30,40 @@ def _echam_reference_radius(qc_in_cloud, air_density, cdnc_m3):
 
 
 class TestEffLiquidDropletRadius:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("seed", [0.0, 1.0])
+    def test_gradient_finite_when_positive_liquid_base_underflows(self, dtype, seed):
+        # The liquid remains a positive normal number, but the radius-base
+        # arithmetic underflows. Guarding liquid > 0 alone misses this case.
+        with jax.enable_x64(dtype == np.float64):
+            qc = jnp.asarray([16*np.finfo(dtype).tiny, 0., 1e-4, -1e-4, 1e-4], dtype=dtype)
+            rho = jnp.ones_like(qc)
+            cdnc = jnp.full_like(qc, 1e8)
+            flag = jnp.asarray([True, True, True, True, False])
+            base = jax.jit(lambda q, r, n: (3./(4.*pi*c.rhow))*q*r/n)(qc, rho, cdnc)
+            assert float(qc[0]) > 0.
+            assert float(base[0]) == 0.
+
+            def objective(q, r, n, weight):
+                radius = eff_liquid_droplet_radius(q, r, n, _EPS, flag)
+                return weight*jnp.sum(radius), radius
+
+            (value, radius), gradients = jax.jit(jax.value_and_grad(
+                objective, argnums=(0, 1, 2), has_aux=True,
+            ))(qc, rho, cdnc, jnp.asarray(seed, dtype=dtype))
+            assert np.isfinite(value)
+            np.testing.assert_array_equal(np.asarray(radius)[[0, 1, 3, 4]], 0.)
+            assert float(radius[2]) > 0.
+            for gradient in gradients:
+                assert np.all(np.isfinite(gradient))
+                np.testing.assert_array_equal(np.asarray(gradient)[[0, 1, 3, 4]], 0.)
+                if seed == 0.:
+                    np.testing.assert_array_equal(gradient, 0.)
+            if seed:
+                np.testing.assert_allclose(
+                    gradients[0][2], radius[2]/(3.*qc[2]), rtol=2e-5,
+                )
+
     def test_matches_echam_reference_law(self):
         qc = np.array([2.0e-4, 5.0e-5, 1.0e-3])
         rho = np.array([1.0, 0.8, 1.2])
