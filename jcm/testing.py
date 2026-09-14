@@ -278,8 +278,15 @@ def _finite_difference(f, args, tangent, cotangent, steps, rtol, atol):
         coarse = secants(coarse_eps)[0]
         central, left, right = secants(fine_eps)
         # A derivative that is legitimately ~0 gives no meaningful relative
-        # spread; accept it on the caller's absolute tolerance instead.
-        if max(abs(coarse), abs(central)) <= atol:
+        # spread; accept it on the caller's absolute tolerance instead. The
+        # *one-sided* secants have to clear atol too, and that is the whole
+        # point rather than belt and braces: at a symmetric kink (|x| at 0)
+        # every central secant is exactly 0 however small the step gets, so
+        # testing only the central pair would accept a zero reference — and
+        # with it a wrongly-zero gradient — for a point where no derivative
+        # exists. On a smooth zero the one-sided pair shrinks as O(eps*f'') and
+        # drops under atol; at a kink it stays pinned at the one-sided slopes.
+        if max(abs(coarse), abs(central), abs(left), abs(right)) <= atol:
             return central, fine_eps
         neighbour, one_sided = spread(coarse, central), spread(left, right)
         tried.append((fine_eps, coarse, central, left, right, neighbour, one_sided))

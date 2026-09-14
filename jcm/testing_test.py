@@ -195,6 +195,26 @@ class TestCheckGradients(unittest.TestCase):
         check_gradients(f, (jnp.array([1.0, -1.0, 2.0, -2.0]),),
                         rtol=1e-3, atol=1e-5)
 
+    def test_atol_does_not_wave_through_a_symmetric_kink(self):
+        """The central secant of |x| at 0 is exactly 0 at every step, so an
+        absolute-tolerance escape that looked only at the central pair would
+        accept a zero reference — and a wrongly-zero gradient with it — where
+        no derivative exists.
+
+        """
+
+        @jax.custom_jvp
+        def bad_abs(x):
+            return jnp.sum(jnp.abs(x))
+
+        @bad_abs.defjvp
+        def _jvp(primals, _tangents):
+            (x,) = primals
+            return bad_abs(x), jnp.zeros(())
+
+        with self.assertRaises(AssertionError):
+            check_gradients(bad_abs, (jnp.zeros(32),), rtol=1e-3, atol=1e-5)
+
     def test_adjoint_reference_needs_no_smoothness(self):
         f = lambda x: jnp.sum(jnp.floor(x) + 1e-3 * x)
         check_gradients(f, (jnp.linspace(0.0, 4.0, 32),), reference="adjoint")
