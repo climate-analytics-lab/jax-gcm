@@ -107,7 +107,10 @@ class PhysicsState:
 PhysicsState.__doc__ = """Represents the state of the atmosphere in physical (nodal) space.
 
 This structure holds the atmospheric variables on a grid, which are used as
-inputs for the physics parameterizations.
+inputs for the physics parameterizations. All fields are dimensional. In
+particular, ``specific_humidity`` has one canonical representation throughout
+the public physics API: the dimensionless mass fraction kg/kg. Backends and
+legacy schemes with another native convention must convert at their boundary.
 
 Attributes:
     u_wind : jnp.ndarray
@@ -115,11 +118,11 @@ Attributes:
     v_wind : jnp.ndarray
         Meridional (north-south) component of wind.
     temperature : jnp.ndarray
-        Atmospheric temperature.
+        Atmospheric temperature [K].
     specific_humidity : jnp.ndarray
-        The mass of water vapor per unit mass of moist air.
+        Mass of water vapor per unit mass of moist air [kg/kg].
     geopotential : jnp.ndarray
-        The gravitational potential energy per unit mass at a given height.
+        Gravitational potential energy per unit mass [m2/s2].
     normalized_surface_pressure : jnp.ndarray
         Surface pressure normalized by a reference pressure p0.
 """
@@ -173,7 +176,9 @@ class PhysicsTendency:
 
 PhysicsTendency.__doc__ = """Represents the tendencies (rates of change) of physical variables.
 These tendencies are computed by the physics parameterizations and are used
-to update the model state over a time step.
+to update the model state over a time step. Fields use the same dimensional
+conventions as :class:`PhysicsState` per second; specific humidity is therefore
+kg/kg/s.
 
 Attributes:
     u_wind : jnp.ndarray
@@ -183,7 +188,7 @@ Attributes:
     temperature : jnp.ndarray
         Tendency of temperature.
     specific_humidity : jnp.ndarray
-        Tendency of specific humidity.
+        Tendency of specific humidity [kg/kg/s].
 """
 
 

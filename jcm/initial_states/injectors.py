@@ -155,41 +155,22 @@ def jw_state(model: Model, rh: float = 0.6):
     rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
     q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)
 
-    # Preserve the dry-balanced VIRTUAL temperature. The dynamical core's mass
-    # field is driven by ``Tv = T*(1 + 0.61 q - q_cloud)`` (dinosaur
-    # ``primitive_equations``). Injecting moisture onto the dry-balanced ``T``
-    # raises Tv and breaks the hydrostatic balance the resting state was built
-    # for, seeding a moisture-magnitude-dependent gravity-wave blow-up (rh=0.5
-    # NaNs in ~3 h, rh=0.2 by day 2; the dry init is stable because Tv=T).
-    # Lowering T so the moist Tv equals the dry-balanced value makes the
-    # dynamics see the *identical*, stable state while the moisture is carried
-    # transparently. The temperature change is tiny (~1 K at q~6 g/kg) but it
-    # is exactly what restores the balance. Physics then evolves from a
-    # consistent moist resting state.
-    T_balanced_profile = T_profile / (1.0 + 0.61 * q_profile)
-
     T_ref = jnp.asarray(model.dycore.primitive.reference_temperature)
-    T_var_profile = T_balanced_profile - T_ref
+    # Temperature is the physical air temperature. Dinosaur now receives the
+    # physical kg/kg humidity and applies its own virtual-temperature coupling;
+    # pre-dividing T by (1 + 0.61 q) would apply that correction twice and hand
+    # physics a colder state than this initializer documents.
+    T_var_profile = T_profile - T_ref
     T_var_nodal = jnp.broadcast_to(
         T_var_profile[:, None, None], (nlev, nlon, nlat)
     ).astype(state.temperature_variation.dtype)
     state.temperature_variation = model.coords.horizontal.to_modal(T_var_nodal)
 
-    # Nondimensionalize the humidity exactly as the canonical physics→dynamics
-    # bridge does (``state_bridge.physics_state_to_dynamics_state`` line ~149:
-    # ``nondimensionalize(specific_humidity * gram/kilogram)``). The dynamics
-    # ``State`` stores the *nondimensional* tracer; the forward bridge then
-    # re-dimensionalizes with ``dimensionalize(q, gram/kilogram)`` (≈ ×1000)
-    # when handing the gridpoint state to physics. Injecting the raw kg/kg
-    # ``q_profile`` straight into ``state.tracers`` skipped this scaling, so
-    # the physics saw ``q`` 1000× too large (~5 kg/kg) — the cloud saturation
-    # adjustment (qs ~ 0.008) then read it as ~650× supersaturated, condensed
-    # the whole column, and dumped L·Δq/cp ≈ 7000 K of latent heat in a single
-    # step → instantaneous blow-up of every moist init. Mirroring the bridge's
-    # nondimensionalization makes the gridpoint physics see the intended
-    # ``q_profile`` value and the moist resting state is stable.
+    # kg/kg is a dimensionless mass fraction. This is the same conversion as
+    # ``physics_state_to_dynamics_state`` and is intentionally distinct from
+    # the g/kg conversion retained for non-humidity mass tracers.
     q_nondim = model.dycore.physics_specs.nondimensionalize(
-        q_profile * units.gram / units.kilogram
+        q_profile * units.dimensionless
     )
     q_dtype = state.tracers["specific_humidity"].dtype
     q_nodal = jnp.broadcast_to(

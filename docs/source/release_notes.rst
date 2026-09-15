@@ -45,6 +45,21 @@ Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
 
+Unreleased — specific humidity has one kg/kg contract
+------------------------------------------------------
+
+- **Breaking for direct SPEEDY-state and output consumers:**
+  ``PhysicsState.specific_humidity`` is now kg/kg for every dycore and physics
+  package, and ``PhysicsTendency.specific_humidity`` is kg/kg/s. Dinosaur stores
+  that dimensionless mass fraction directly so its hybrid moist dynamics sees
+  the physical humidity; pySES/ECHAM and raw ERA5 inputs are unchanged. The
+  translated SPEEDY routines still calculate internally in g/kg behind a
+  centralized adapter. Serialized ``specific_humidity`` now contains kg/kg
+  and advertises the equivalent CF unit ``kg kg-1``. Remove any ``* 1000``
+  conversion previously applied when
+  constructing a nudging target, and divide old saved g/kg humidity values by
+  1000 before supplying them as a new ``PhysicsState`` (#666).
+
 Unreleased — ChemistryData uses ppmv consistently
 --------------------------------------------------
 

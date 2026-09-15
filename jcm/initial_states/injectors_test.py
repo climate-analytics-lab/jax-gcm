@@ -21,6 +21,21 @@ def _held_suarez_model():
     return model
 
 
+def test_jw_temperature_is_physical_not_virtual_precompensation():
+    """Adding JW humidity must not silently lower the documented T profile."""
+    from jcm.initial_states import jw_state
+
+    model = _held_suarez_model()
+    dry = model.dycore.to_physics_state(jw_state(model, rh=0.0))
+    moist = model.dycore.to_physics_state(jw_state(model, rh=0.6))
+
+    np.testing.assert_allclose(
+        np.asarray(moist.temperature), np.asarray(dry.temperature), rtol=2e-6,
+    )
+    assert float(np.max(np.asarray(moist.specific_humidity))) > 1e-3
+    assert float(np.max(np.asarray(moist.specific_humidity))) < 0.03
+
+
 def test_era5_state_reexport_is_accepted_by_run(monkeypatch):
     """``era5_state`` re-exports ``jcm.data.era5.initial_state``, and the
     ``PhysicsState`` it returns is accepted by ``model.run``.

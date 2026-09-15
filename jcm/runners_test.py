@@ -2246,13 +2246,9 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
-    Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
-    into the dynamics ``State.tracers`` skipped the
-    ``nondimensionalize(q * gram/kilogram)`` that the canonical
-    physics->dynamics bridge applies. The forward bridge then re-dimensionalized
-    (~x1000), so the physics saw q ~ 5 kg/kg; the cloud saturation adjustment
-    read that as hugely supersaturated and dumped ~7000 K of latent heat in a
-    single step, NaNing every moist init at step 1.
+    The dycore-native state and public ``PhysicsState`` both represent q as a
+    dimensionless kg/kg mass fraction. This catches either a missing or an
+    accidental extra factor of 1000 in the direct JW injection path.
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):

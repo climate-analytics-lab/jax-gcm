@@ -12,16 +12,148 @@ from __future__ import annotations
 
 import unittest
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jcm.dycore.dinosaur.state_bridge import (
     dynamics_state_to_physics_state,
     physics_state_to_dynamics_state,
+    physics_tendency_to_dynamics_tendency,
 )
 from jcm.model import Model
 from jcm.physics.physics_term import TracerSpec
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics_interface import PhysicsTendency
+
+
+class TestSpecificHumidityContract(unittest.TestCase):
+    """Humidity crosses the Dinosaur boundary as dimensionless kg/kg."""
+
+    def setUp(self):
+        self._previous_x64 = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", False)
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.model = Model(coords=self.coords, time_step=720)
+        self.primitive = self.model.dycore.primitive
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._previous_x64)
+
+    def test_float32_state_and_tendency_round_trip(self):
+        """Canonical q keeps magnitude/dtype while other tracer units do not change."""
+        base = self.model.dycore.to_physics_state(self.model.initial_state())
+        shape = base.specific_humidity.shape
+        q = jnp.full(shape, 0.0125, dtype=jnp.float32)
+        legacy_mass = jnp.full(shape, 2.5, dtype=jnp.float32)
+        specs = {"legacy_mass": TracerSpec("legacy_mass")}
+        seeded = base.copy(
+            specific_humidity=q,
+            tracers={"legacy_mass": legacy_mass},
+        )
+
+        modal = physics_state_to_dynamics_state(
+            seeded, self.primitive, tracer_specs=specs,
+        )
+        q_in_dynamics = self.coords.horizontal.to_nodal(
+            modal.tracers["specific_humidity"]
+        )
+        mass_in_dynamics = self.coords.horizontal.to_nodal(
+            modal.tracers["legacy_mass"]
+        )
+        recovered = dynamics_state_to_physics_state(
+            modal, self.primitive, tracer_specs=specs,
+        )
+
+        self.assertEqual(recovered.specific_humidity.dtype, jnp.float32)
+        np.testing.assert_allclose(recovered.specific_humidity, q, rtol=1e-6)
+        np.testing.assert_allclose(q_in_dynamics, q, rtol=1e-6)
+        # Non-humidity mass tracers retain their pre-existing g/kg bridge.
+        np.testing.assert_allclose(
+            mass_in_dynamics, legacy_mass * 1e-3, rtol=2e-6,
+        )
+        np.testing.assert_allclose(
+            recovered.tracers["legacy_mass"], legacy_mass, rtol=2e-6,
+        )
+
+        dqdt = jnp.full(shape, 1.25e-8, dtype=jnp.float32)
+        legacy_mass_tend = jnp.full(shape, 2.5e-5, dtype=jnp.float32)
+        tendency = PhysicsTendency.zeros(
+            shape,
+            specific_humidity=dqdt,
+            tracers={"legacy_mass": legacy_mass_tend},
+        )
+        modal_tendency = physics_tendency_to_dynamics_tendency(
+            tendency, self.primitive, tracer_specs=specs,
+        )
+        q_tend_in_dynamics = self.coords.horizontal.to_nodal(
+            modal_tendency.tracers["specific_humidity"]
+        )
+        mass_tend_in_dynamics = self.coords.horizontal.to_nodal(
+            modal_tendency.tracers["legacy_mass"]
+        )
+        self.assertEqual(q_tend_in_dynamics.dtype, jnp.float32)
+        np.testing.assert_allclose(q_tend_in_dynamics, dqdt, rtol=1e-6)
+        np.testing.assert_allclose(
+            mass_tend_in_dynamics, legacy_mass_tend * 1e-3, rtol=2e-6,
+        )
+
+    def test_moist_geopotential_uses_specific_humidity(self):
+        base = self.model.dycore.to_physics_state(self.model.initial_state())
+        moist = base.copy(
+            specific_humidity=jnp.full_like(base.specific_humidity, 0.02),
+        )
+        dry = base.copy(specific_humidity=jnp.zeros_like(base.specific_humidity))
+
+        moist_phi = dynamics_state_to_physics_state(
+            physics_state_to_dynamics_state(moist, self.primitive),
+            self.primitive,
+        ).geopotential
+        dry_phi = dynamics_state_to_physics_state(
+            physics_state_to_dynamics_state(dry, self.primitive),
+            self.primitive,
+        ).geopotential
+
+        # Moist virtual temperature increases the layer thickness above the
+        # same surface geopotential; the bottom full level is above the surface
+        # too, so every layer responds.
+        self.assertTrue(jnp.all(moist_phi > dry_phi))
+
+
+class TestHybridVirtualTemperatureContract(unittest.TestCase):
+    """The hybrid primitive equations see physical q, not q/1000."""
+
+    def test_virtual_temperature_adjustment_uses_kg_per_kg(self):
+        from dinosaur.primitive_equations import compute_diagnostic_state_hybrid
+
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords,
+            physics=held_suarez_physics(),
+            time_step=180.0,
+        )
+        physical = model.dycore.to_physics_state(model.initial_state())
+        q = jnp.full_like(physical.specific_humidity, 0.01)
+        modal = physics_state_to_dynamics_state(
+            physical.copy(specific_humidity=q), model.dycore.primitive,
+        )
+        diagnostic = compute_diagnostic_state_hybrid(modal, coords)
+
+        adjustment = model.dycore.primitive._virtual_temperature_adjustment(
+            diagnostic
+        )
+        expected = 1.0 + (
+            model.dycore.physics_specs.R_vapor / model.dycore.physics_specs.R
+            - 1.0
+        ) * q
+        np.testing.assert_allclose(adjustment, expected, rtol=2e-6)
 
 
 @pytest.mark.slow

@@ -50,12 +50,8 @@ def build_moist_initial_state(model, q_surface_gkg=10.0, scale_height_km=2.0,
     grav = 9.81
     height = np.asarray(ps.geopotential) / grav  # meters
     H_q_m = scale_height_km * 1000.0
-    # NOTE: PhysicsState.specific_humidity is stored in g/kg in this
-    # codebase (see ``dynamics_state_to_physics_state``:
-    #   q = physics_specs.dimensionalize(q, units.gram / units.kilogram).m
-    # and the inverse conversion in physics_state_to_dynamics_state).
-    # So q_profile stays in g/kg throughout; saturation cap is applied
-    # in kg/kg then scaled up at the end.
+    # PhysicsState uses kg/kg. Keep the user-facing argument in g/kg for
+    # convenience, then convert once before constructing the profile.
     q_surf_kgkg = q_surface_gkg * 1e-3  # kg/kg for sat comparison
     q_exp_kgkg = q_surf_kgkg * np.exp(-np.abs(height) / H_q_m)
 
@@ -78,10 +74,9 @@ def build_moist_initial_state(model, q_surface_gkg=10.0, scale_height_km=2.0,
 
     q_profile_kgkg = np.minimum(q_exp_kgkg, rh_cap * q_sat_kgkg)
     q_profile_kgkg = np.clip(q_profile_kgkg, 1e-8, 0.03)
-    # PhysicsState expects g/kg.
-    q_profile_gkg = q_profile_kgkg * 1000.0
-
-    new_ps = ps.copy(specific_humidity=jnp.asarray(q_profile_gkg, dtype=jnp.float32))
+    new_ps = ps.copy(
+        specific_humidity=jnp.asarray(q_profile_kgkg, dtype=jnp.float32)
+    )
     return new_ps
 
 

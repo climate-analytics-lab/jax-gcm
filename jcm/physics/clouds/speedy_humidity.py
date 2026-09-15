@@ -26,7 +26,7 @@ def spec_hum_to_rel_hum(
         ta: Absolute temperature [K] - PhysicsState.temperature
         ps: Normalized pressure (p/1000 hPa) - state.normalized_surface_pressure
         sig: Sigma level - fsg from geometry
-        qa: Specific humidity - PhysicsState.specific_humidity
+        qa: Specific humidity [g/kg] from the SPEEDY compatibility adapter.
 
     Returns:
         rh: Relative humidity

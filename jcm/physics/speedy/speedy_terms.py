@@ -2,7 +2,9 @@
 
 Each wrapper delegates to the original SPEEDY function, translating between
 the composable ``diagnostics`` dict and the legacy typed ``PhysicsData``
-struct. The numerical implementation is untouched.
+struct. The wrappers also own SPEEDY's humidity-unit boundary: public
+``PhysicsState`` values are kg/kg, while the translated routines retain their
+native g/kg arithmetic. The numerical implementation is untouched.
 
 """
 
@@ -35,6 +37,41 @@ from jcm.terrain import TerrainData
 
 #: Units and descriptions of every diagnostic the SPEEDY terms publish.
 SPEEDY_UNITS_TABLE_CSV_PATH = resources.files('jcm.physics.speedy') / 'units_table.csv'
+
+_KG_PER_KG_TO_G_PER_KG = 1000.0
+
+
+def _state_in_legacy_speedy_units(state: PhysicsState) -> PhysicsState:
+    """Return ``state`` with only specific humidity converted to g/kg.
+
+    SPEEDY's thermodynamic constants, thresholds, and precipitation budgets
+    were translated in their original g/kg convention. Keeping the conversion
+    here makes the public physics contract unambiguous without perturbing those
+    validated calculations. Additional tracers are deliberately untouched;
+    their contracts are declared independently by ``TracerSpec``.
+    """
+    return state.copy(
+        specific_humidity=(
+            state.specific_humidity * _KG_PER_KG_TO_G_PER_KG
+        ),
+    )
+
+
+def _tendency_from_legacy_speedy_units(
+    tendency: PhysicsTendency,
+) -> PhysicsTendency:
+    """Convert only SPEEDY's humidity tendency from g/kg/s to kg/kg/s."""
+    return tendency.copy(
+        specific_humidity=(
+            tendency.specific_humidity / _KG_PER_KG_TO_G_PER_KG
+        ),
+    )
+
+
+def _call_legacy_speedy(routine, state: PhysicsState, *args):
+    """Call one translated SPEEDY routine across the humidity-unit boundary."""
+    tendency, data = routine(_state_in_legacy_speedy_units(state), *args)
+    return _tendency_from_legacy_speedy_units(tendency), data
 
 
 def set_physics_flags(
@@ -193,7 +230,9 @@ class SpeedyFlags(SpeedyTermBase):
         data = self._build_data(diagnostics)
         params = Parameters.default()  # flags don't use tunable params
 
-        tend, data = set_physics_flags(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            set_physics_flags, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -221,7 +260,9 @@ class SpeedyForcing(SpeedyTermBase):
         )
 
         from jcm.physics.forcing.speedy_forcing import set_forcing
-        tend, data = set_forcing(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            set_forcing, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         # Downstream terms read the current-step forcing slice off this
@@ -242,7 +283,9 @@ class SpeedyHumidity(SpeedyTermBase):
         params = Parameters.default()
 
         from jcm.physics.clouds.speedy_humidity import spec_hum_to_rel_hum
-        tend, data = spec_hum_to_rel_hum(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            spec_hum_to_rel_hum, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -266,7 +309,9 @@ class SpeedyConvection(SpeedyTermBase):
         params = _params_with(convection=self.params.get_value())
 
         from jcm.physics.convection.speedy_convection import get_convection_tendencies
-        tend, data = get_convection_tendencies(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_convection_tendencies, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -292,7 +337,8 @@ class SpeedyLargeScaleCondensation(SpeedyTermBase):
         from jcm.physics.clouds.speedy_condensation import (
             get_large_scale_condensation_tendencies,
         )
-        tend, data = get_large_scale_condensation_tendencies(
+        tend, data = _call_legacy_speedy(
+            get_large_scale_condensation_tendencies,
             state, data, params, forcing, terrain,
         )
 
@@ -318,7 +364,9 @@ class SpeedyClouds(SpeedyTermBase):
         params = _params_with(shortwave_radiation=self.params.get_value())
 
         from jcm.physics.radiation.speedy_shortwave import get_clouds
-        tend, data = get_clouds(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_clouds, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -354,7 +402,9 @@ class SpeedyShortwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_shortwave import (
             get_shortwave_rad_fluxes,
         )
-        tend, data = get_shortwave_rad_fluxes(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_shortwave_rad_fluxes, state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -384,7 +434,8 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_longwave import (
             get_downward_longwave_rad_fluxes,
         )
-        tend, data = get_downward_longwave_rad_fluxes(
+        tend, data = _call_legacy_speedy(
+            get_downward_longwave_rad_fluxes,
             state, data, params, forcing, terrain,
         )
 
@@ -451,7 +502,9 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         forcing_2d = diagnostics.get("_forcing_2d", forcing)
 
         from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
-        tend, data = get_surface_fluxes(state, data, params, forcing_2d, terrain)
+        tend, data = _call_legacy_speedy(
+            get_surface_fluxes, state, data, params, forcing_2d, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics
@@ -481,7 +534,8 @@ class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):
         from jcm.physics.radiation.speedy_longwave import (
             get_upward_longwave_rad_fluxes,
         )
-        tend, data = get_upward_longwave_rad_fluxes(
+        tend, data = _call_legacy_speedy(
+            get_upward_longwave_rad_fluxes,
             state, data, params, forcing, terrain,
         )
 
@@ -507,7 +561,10 @@ class SpeedyVerticalDiffusion(SpeedyTermBase):
         params = _params_with(vertical_diffusion=self.params.get_value())
 
         from jcm.physics.vertical_diffusion.speedy_vdiff import get_vertical_diffusion_tend
-        tend, data = get_vertical_diffusion_tend(state, data, params, forcing, terrain)
+        tend, data = _call_legacy_speedy(
+            get_vertical_diffusion_tend,
+            state, data, params, forcing, terrain,
+        )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
         return tend, diagnostics

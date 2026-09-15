@@ -8,17 +8,15 @@ sees the dycore-agnostic :class:`PhysicsState` / :class:`PhysicsTendency`
 types.
 
 The three functions here are pure JAX (no side effects, no Python conditionals
-on traced values) and the implementations match what was in
-``physics_interface.py`` line-for-line up to import paths; the dinosaur-side
-refactor regression in :mod:`jcm.dycore.dinosaur.regression_test` is the bit-
-level guardrail.
+on traced values). This module also owns Dinosaur's nondimensionalisation
+boundary, including the dimensionless kg/kg representation its moist primitive
+equations require.
 """
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from dinosaur import scales
 from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import (
     State, PrimitiveEquations,
@@ -82,6 +80,10 @@ def dynamics_state_to_physics_state(
     else:
         nodal_state = compute_diagnostic_state(state, dynamics.coords)
     t = nodal_state.temperature_variation
+    # Dinosaur's moisture-aware primitive equations consume q numerically as a
+    # dimensionless mass fraction. Keep that representation through the
+    # diagnostic calculations; treating the same value as g/kg suppresses the
+    # virtual-temperature contribution by a factor of 1000.
     q = nodal_state.tracers['specific_humidity']
 
     nodal_orography = dynamics.coords.horizontal.to_nodal(dynamics.orography)
@@ -97,27 +99,29 @@ def dynamics_state_to_physics_state(
         phi = get_geopotential_on_hybrid(
             temperature=full_temperature,
             surface_pressure=sp,
-            specific_humidity=None,
+            specific_humidity=q,
             nodal_orography=nodal_orography,
             coordinates=dynamics.nondim_levels,
-            gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-            ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
+            gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
+            ideal_gas_constant=dynamics.physics_specs.R,
+            water_vapor_gas_constant=dynamics.physics_specs.R_vapor,
             sharding=None,
         )
     else:
         full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
         phi = get_geopotential_on_sigma(
             temperature=full_temperature,
-            specific_humidity=None,
+            specific_humidity=q,
             nodal_orography=nodal_orography,
             sigma=dynamics.coords.vertical,
-            gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-            ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
+            gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
+            ideal_gas_constant=dynamics.physics_specs.R,
+            water_vapor_gas_constant=dynamics.physics_specs.R_vapor,
             sharding=None,
         )
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
-    q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
+    q = dynamics.physics_specs.dimensionalize(q, units.dimensionless).m
 
     # Extra tracers — those with ``nondimensionalize=False`` (e.g. number
     # concentrations) pass through untouched; everything else is treated as a
@@ -163,7 +167,12 @@ def physics_state_to_dynamics_state(
         dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind,
     )
 
-    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram)
+    # kg/kg is dimensionless. Dinosaur must store the physical mass fraction,
+    # because its hybrid primitive equations use this tracer directly in the
+    # virtual-temperature and moist thermodynamic terms.
+    q = dynamics.physics_specs.nondimensionalize(
+        physics_state.specific_humidity * units.dimensionless
+    )
     q_modal = dynamics.coords.horizontal.to_modal(q)
 
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
@@ -226,7 +235,9 @@ def physics_tendency_to_dynamics_tendency(
     t_tend = physics_tendency.temperature
     q_tend = physics_tendency.specific_humidity
 
-    q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
+    q_tend = dynamics.physics_specs.nondimensionalize(
+        q_tend * units.dimensionless / units.second
+    )
 
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(
         dynamics.coords.horizontal, u_tend, v_tend,

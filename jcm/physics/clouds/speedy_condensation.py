@@ -24,7 +24,7 @@ def get_large_scale_condensation_tendencies(
 
     Args:
         psa: Normalized surface pressure
-        qa: Specific humidity [g/kg] - state.specific_humidity
+        qa: Specific humidity [g/kg] in the adapter-provided legacy state.
         qsat: Saturation specific humidity [g/kg] - humidity.qsat
         iptop: Cloud top diagnosed from precipitation due to convection and large-scale condensation conv.iptop
 

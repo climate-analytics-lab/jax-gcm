@@ -619,8 +619,8 @@ CLI flag (``nudging=era5``, pulling the run window from cloud ERA5) — see
 
 .. note::
    ``NudgingTarget`` fields use the model-state units: winds in m/s,
-   temperature in K, and specific humidity in **g/kg**. ERA5 stores
-   humidity in kg/kg, so multiply by 1000 before building the target.
+   temperature in K, and specific humidity in **kg/kg**. ERA5 stores
+   humidity in the same units, so pass it through without rescaling.
 
 Composing extra terms: the upper sponge
 ----------------------------------------
