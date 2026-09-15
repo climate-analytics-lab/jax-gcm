@@ -37,9 +37,11 @@ total-cloud-cover diagnostic uses the maximum-random closure.
 Radiation **sub-steps** on the ECHAM-family backends (grey, RRTMGP, NN
 emulator): a gate (``radiation_should_compute``) skips the expensive solve and
 rescales cached heating on intermediate steps. SPEEDY has its own, different
-cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls and the skipped
-calls contribute a *zero* shortwave tendency rather than replaying cached
-heating (#752).
+cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls, and the
+skipped calls re-apply the heating rate cached from the last solve
+(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``) rather than rescaling
+it, which is what the Fortran does. The two families therefore differ in how
+they *reuse* the cached solve, not in whether they reuse it.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For

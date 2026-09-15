@@ -5,6 +5,8 @@ import jax
 import jax_datetime as jdt
 import functools
 from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 # truth for test cases are generated from https://github.com/duncanwp/speedy_test
 
 class TestSolar(unittest.TestCase):
@@ -473,7 +475,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def _build_realistic_state_and_data(self, compute_shortwave=True):
         """Column setup matching test_shortwave_radiation, before clouds/shortwave
-        are computed (i.e. shortwave_rad still carries its default cloud fields)."""
+        are computed (i.e. shortwave_rad still carries its default cloud fields).
+        """
         qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
         rh = qa/qsat
@@ -519,7 +522,8 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_shortwave_replay_returns_cached_heating(self):
         """On a replay step (compute_shortwave=False) get_shortwave_rad_fluxes must
         return exactly the tendency cached from the last compute step, and must leave
-        the carried radiative diagnostics unchanged (issue #752)."""
+        the carried radiative diagnostics unchanged (issue #752).
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
 
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
@@ -539,7 +543,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_shortwave_replay_does_not_recompute(self):
         """A replay step must not touch `state` at all -- it should return the cached
-        heating rate exactly, even if the state passed in has since changed."""
+        heating rate exactly, even if the state passed in has since changed.
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
 
@@ -556,7 +561,8 @@ class TestShortWaveRadiation(unittest.TestCase):
         """The exact failure mode of issue #752: one compute step followed by two
         replay steps must apply the same heating rate all three times, so the sum
         of the three tendencies is 3x the compute-step tendency (before the fix it
-        was 1x, since replay steps returned zero)."""
+        was 1x, since replay steps returned zero).
+        """
         state, physics_data, forcing_now, terrain_new = self._build_shortwave_inputs()
         tend_compute, physics_data_compute = get_shortwave_rad_fluxes(state, physics_data, parameters, forcing_now, terrain_new)
 
@@ -571,7 +577,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
     def test_clouds_skipped_on_replay_step(self):
         """get_clouds must carry the previous cloud fields unchanged on a replay
-        step, and must actually (re)compute them on a compute step."""
+        step, and must actually (re)compute them on a compute step.
+        """
         state, physics_data, forcing_now, terrain_new = self._build_realistic_state_and_data(compute_shortwave=False)
         initial_sw = physics_data.shortwave_rad
 
@@ -633,17 +640,9 @@ class TestShortWaveRadiation(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.00001)
-        # float32 resolves ~1e-7 relative, so eps must move the O(1e3) scalar
-        # leaves (dt_seconds, fsol) by several ulps: 1e-4 leaves them unchanged
-        # and reports a zero reference slope, 1e-3 does not.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # Zonal averaging is smooth in its arguments, so the difference is
+        # well conditioned here: measured agreement 1.2e-9.
+        check_gradients(f, (physics_data_floats, state_floats, forcing_floats, terrain_floats), rtol=1e-4)
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
@@ -671,21 +670,12 @@ class TestShortWaveRadiation(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # PhysicsData.ones() is an unphysical state that puts mod_radcon.tau2 and
-        # stratc on the transmissivity where-branches, so their central
-        # difference is a step of size 1/eps that AD (correctly) reports as
-        # smooth; it dominates the inner product, which needs rtol=1 as a
-        # result. The jvp below compares leaf-by-leaf and is unaffected.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds, fsol) bit-unchanged
-        # in float32 and reports a zero reference slope; 1e-3 moves them by ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # PhysicsData.ones() is an unphysical state that sits on the tau2 and
+        # stratc transmissivity where-branches; a step small enough to stay off
+        # them is what jcm.testing's consistency search finds, which is why this
+        # no longer needs the rtol=1 the fixed-step version did. Measured
+        # agreement 7.2e-4.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
 
     def test_clouds_gradient_check_realistic_values(self):
         from jcm.utils import convert_back, convert_to_float
@@ -750,20 +740,10 @@ class TestShortWaveRadiation(unittest.TestCase):
                 icltop=jnp.zeros_like(data_out.shortwave_rad.icltop)))
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # With icltop held fixed the inner product agrees to ~2.5e-2; the
-        # residual is float32 finite differencing of cloudc, which get_clouds
-        # clips at 1.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=5e-2, eps=0.00001)
-        # float32 carries ~1e-7 relative resolution, so a central difference with
-        # eps=1e-6 leaves the O(1e3) scalar leaves (dt_seconds, fsol) bit-unchanged
-        # and reports a zero reference derivative; 1e-3 moves them by many ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # icltop is held fixed by f above (an integer cloud-top index has no
+        # meaningful derivative); the residual is float32 differencing of
+        # cloudc, which get_clouds clips at 1. Measured agreement 7.5e-7.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3)
 
 class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma

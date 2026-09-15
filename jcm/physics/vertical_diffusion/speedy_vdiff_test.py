@@ -2,8 +2,8 @@ import jax
 import unittest
 import jax.numpy as jnp
 import numpy as np
-import functools
-from jax.test_util import check_vjp, check_jvp
+
+from jcm.testing import check_gradients
 
 class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
@@ -99,15 +99,49 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                                        forcing=convert_back(forcing_f, forcing), 
                                        terrain=convert_back(terrain_f, terrain)
                                        )
-            return convert_to_float(tend_out)
-        
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
+            # Only the temperature tendency carries a gradient at this
+            # operating point; see the assertions below for the other two.
+            return convert_to_float(tend_out.temperature)
 
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.00001)
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1, eps=0.000001)
+        # No finite difference is usable here in any direction tried (seeds
+        # 0-4): the diffusion coefficients are kinked in the bulk Richardson
+        # number at this operating point, and a central difference across a
+        # kink converges — stably, at every step — to the *mean* of the two
+        # one-sided derivatives, which is not what AD computes. The one-sided
+        # secants stay a factor ~4000 apart however far the step comes down.
+        # An earlier rtol here passed only because one direction happened to
+        # land near the mean; the adjoint identity plus a live, finite gradient
+        # is what is actually verifiable.
+        args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats)
+        check_gradients(f, args, reference="adjoint")
+
+        # Two of the three tendency components are dead here, for different
+        # reasons, and both are asserted rather than left to pass silently
+        # inside a projection:
+        #
+        #  * wind - SPEEDY's vertical diffusion is a heat and moisture scheme
+        #    (vdifsc.f90 returns ttenvd/qtenvd only) and momentum is handled by
+        #    the surface drag, so this is structural.
+        #  * specific humidity - the moisture branch is gated on
+        #    ``drh = rh[surface] - rh[nl1] > drh0``, and PhysicsData.ones()
+        #    makes rh uniform, so drh is exactly 0 and the gate never opens.
+        #    That is a property of this operating point, not of the scheme:
+        #    the moisture half of vdiff has therefore never been covered by a
+        #    gradient check. Tracked in issue #814.
+        def f_dead(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
+            tend_out, _ = get_vertical_diffusion_tend(physics_data=convert_back(physics_data_f, physics_data),
+                                       state=convert_back(state_f, state),
+                                       parameters=convert_back(parameters_f, parameters),
+                                       forcing=convert_back(forcing_f, forcing),
+                                       terrain=convert_back(terrain_f, terrain)
+                                       )
+            return (convert_to_float(tend_out.u_wind),
+                    convert_to_float(tend_out.v_wind),
+                    convert_to_float(tend_out.specific_humidity))
+
+        primal, dead_vjp = jax.vjp(f_dead, *args)
+        grads = dead_vjp(tuple(jnp.ones_like(x) for x in primal))
+        self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
+                        "wind and moisture tendencies are expected to be dead here")
 
         
