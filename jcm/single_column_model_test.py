@@ -420,3 +420,56 @@ class TestSelectColumn(unittest.TestCase):
         expected = 2 * 100.0 + 4
         np.testing.assert_array_equal(column["temperature"], expected)
         np.testing.assert_array_equal(column["surface"], expected)
+
+    def test_longitude_is_matched_on_the_circle(self):
+        """A westward (negative) longitude must not land at the prime meridian.
+
+        JCM writes ``lon`` as 0-360, so ``argmin(abs(lon - lon_deg))`` answers
+        ``-120`` with the column at 0 — 120 degrees from the one asked for,
+        silently. The same flaw mis-picks either side of the 0/360 seam.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, lon = self._synthetic()   # lon = 0, 75, 150, 225, 300
+        lat_req = float(lat[0])
+        for lon_req, expected_i in (
+                (-120.0, 3),    # 240E; nearest grid lon is 225
+                (-60.0, 4),     # 300E, exactly on a grid point
+                (359.0, 0),     # 1 degree below the seam -> 0, not 300
+                (420.0, 1),     # 60E -> 75 is nearer than 0
+        ):
+            with self.subTest(lon_deg=lon_req):
+                _, (i_lon, _, _, actual_lon) = select_column(
+                    states, ds, lat_req, lon_req)
+                self.assertEqual(i_lon, expected_i)
+                # Never further than half a grid spacing, measured the short
+                # way round — the property the SCM log line reports on.
+                spacing = float(lon[1] - lon[0])
+                separation = abs((actual_lon - lon_req + 180.0) % 360.0 - 180.0)
+                self.assertLessEqual(separation, spacing / 2 + 1e-9)
+
+    def test_an_impossible_latitude_is_refused(self):
+        """Swapping the two keys must fail, not pick the polar-most row.
+
+        Longitude wraps, so any value is meaningful and none can be
+        rejected; latitude does not, so a value outside [-90, 90] is not a
+        coordinate at all. Without this, ``lat_deg=120`` silently returned
+        the most northerly row — and the line reporting that choice is INFO,
+        below the default ``run.log_level``.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, _, _ = self._synthetic()
+        with self.assertRaisesRegex(ValueError, r"not a latitude"):
+            select_column(states, ds, 120.0, 30.0)
+
+    def test_a_non_finite_coordinate_is_refused(self):
+        """NaN wins no comparison, so it would resolve to column 0 unseen."""
+        from jcm.single_column_model import select_column
+
+        states, ds, _, _ = self._synthetic()
+        for lat_req, lon_req in ((0.0, float("nan")), (float("inf"), 0.0)):
+            with self.subTest(lat_deg=lat_req, lon_deg=lon_req):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    select_column(states, ds, lat_req, lon_req)
+
