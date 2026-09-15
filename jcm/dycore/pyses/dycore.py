@@ -92,6 +92,7 @@ physics memory/throughput win matters).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence
 
 import jax.numpy as jnp
@@ -111,6 +112,8 @@ from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.dycore.pyses.physics_grid import FVPhysicsGrid
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData, _SSO_NAMES
+
+logger = logging.getLogger(__name__)
 
 
 # Default deepened upper sponge for the finite-top full-L47 column (see the
@@ -513,8 +516,7 @@ class PysesCamSEDycore(DynamicalCore):
                                             workers=-1)
                 spacing = np.sqrt(4.0 * np.pi / ds.sizes["ncol"])
                 if ds.sizes["ncol"] != ncol or np.median(d_col) > 0.1 * spacing:
-                    import logging
-                    logging.warning(
+                    logger.warning(
                         "terrain file has %d columns vs model %d (median "
                         "offset %.2g of a cell) — sampling nearest-neighbor,"
                         " which is piecewise-constant across file cells",
@@ -585,8 +587,7 @@ class PysesCamSEDycore(DynamicalCore):
                     np.asarray(ds["orog_gll"].values)[gi], 0.0)
             else:
                 if "ncol" in ds.dims:
-                    import logging
-                    logging.warning(
+                    logger.warning(
                         "native terrain file has no orog_gll: GLL "
                         "orography falls back to nearest-column sampling "
                         "(piecewise-constant); include orog_gll for a "

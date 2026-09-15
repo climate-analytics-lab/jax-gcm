@@ -41,6 +41,7 @@ from jcm.physics_interface import (
     PhysicsTendency,
     verify_state,
 )
+
 from jcm.terrain import TerrainData
 
 #: Prognostic state variables, as opposed to tracers. ``free_evolve`` accepts
@@ -150,13 +151,41 @@ def select_column(states, ds, lat_deg: float, lon_deg: float):
     The state's xarray ``ds`` carries ``lat`` / ``lon`` coordinates from the
     JCM run that wrote it; pick by nearest neighbour so users can give
     physical degrees rather than grid indices.
+
+    Longitude is matched on the circle, so any convention works: JCM writes
+    its ``lon`` axis as 0-360, and a plain ``argmin(abs(lon - lon_deg))``
+    would answer ``lon_deg=-120`` — the ordinary way to write 120W — with
+    the column at 0, 120 degrees away, and would also mis-pick across the
+    0/360 seam. Latitude is not periodic, so an out-of-range value cannot be
+    folded into meaning and is refused instead.
+
+    Both of those assume the file's axes span the globe, which is what JCM
+    writes. Given a regional or single-column state file they do not, and
+    the nearest column can be arbitrarily far from the one requested with
+    nothing said about it — ``_run_scm`` reports the cell it resolved to at
+    INFO, below the default ``run.log_level``. Detecting that reliably means
+    deciding when a grid covers a pole (a Gaussian axis stops short of
+    +/-90 while its cell does not), which is issue #818, not this function.
     """
     import numpy as np
 
     lat = np.asarray(ds["lat"].values)
     lon = np.asarray(ds["lon"].values)
+    import math
+
+    for name, value in (("lat_deg", lat_deg), ("lon_deg", lon_deg)):
+        # NaN would win no comparison, so argmin would quietly return 0 and
+        # the separation check below could not fire either.
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name}={value!r} is not a finite coordinate.")
+    if not -90.0 <= float(lat_deg) <= 90.0:
+        raise ValueError(
+            f"lat_deg={lat_deg} is not a latitude; expected [-90, 90]. "
+            "Longitude wraps, so lon_deg needs no such range — check the "
+            "two have not been swapped.")
     i_lat = int(np.argmin(np.abs(lat - lat_deg)))
-    i_lon = int(np.argmin(np.abs(lon - lon_deg)))
+    # Signed separation folded into [-180, 180): the shorter way round.
+    i_lon = int(np.argmin(np.abs((lon - lon_deg + 180.0) % 360.0 - 180.0)))
 
     def slice_field(arr):
         # JCM xarray output is laid out (time, level, lon, lat) for column

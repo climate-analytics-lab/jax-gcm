@@ -800,7 +800,7 @@ class TestLoadStatesFromXarray(unittest.TestCase):
         ds = self._make_dataset(level_coord=None, nlev=4)
         file_profile = ds["temperature"].values[:, 0, 0]
 
-        with self.assertLogs(level="WARNING") as cm:
+        with self.assertLogs("jcm.utils", level="WARNING") as cm:
             state = load_states_from_xarray(ds)
         loaded_profile = np.asarray(state.temperature)[:, 0, 0]
 
@@ -832,7 +832,7 @@ class TestLoadStatesTracerResolution(unittest.TestCase):
         from jcm.physics.physics_term import TracerSpec
 
         ds = self._dataset()
-        with self.assertLogs(level="INFO") as cm:
+        with self.assertLogs("jcm.utils", level="INFO") as cm:
             state = load_states_from_xarray(
                 ds, required_tracers=(TracerSpec(name="qc"),
                                       TracerSpec(name="qi")),
@@ -859,7 +859,7 @@ class TestLoadStatesTracerResolution(unittest.TestCase):
         # is a warning rather than an error -- but it must not be silent:
         # physics will run with that tracer at zero.
         ds = self._dataset(tracers=("qc",))
-        with self.assertLogs(level="WARNING") as cm:
+        with self.assertLogs("jcm.utils", level="WARNING") as cm:
             state = load_states_from_xarray(
                 ds, required_tracers=["qc", "qi"])
 
@@ -871,7 +871,7 @@ class TestLoadStatesTracerResolution(unittest.TestCase):
         # dropping a declared tracer the file actually carries is exactly the
         # silent failure #718 was about, so it is reported.
         ds = self._dataset()
-        with self.assertLogs(level="WARNING") as cm:
+        with self.assertLogs("jcm.utils", level="WARNING") as cm:
             state = load_states_from_xarray(
                 ds, tracer_vars={"qc": "qc"}, required_tracers=["qc", "qi"])
 
@@ -881,7 +881,7 @@ class TestLoadStatesTracerResolution(unittest.TestCase):
     def test_empty_mapping_opts_out_of_inference(self):
         # ``{}`` is how a caller says "no tracers" and must not be treated as
         # "unset"; only the explicit-drop warning fires.
-        with self.assertLogs(level="WARNING"):
+        with self.assertLogs("jcm.utils", level="WARNING"):
             state = load_states_from_xarray(
                 self._dataset(), tracer_vars={}, required_tracers=["qc", "qi"])
         self.assertEqual(state.tracers, {})

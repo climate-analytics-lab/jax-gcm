@@ -302,11 +302,55 @@ the window's start time and that is a tracer there: pass a concrete
 windows, pass tables from ``model.prepare_observers(t0_days,
 save_interval, total_time)`` as ``observer_xs``.
 
-**Logging**: ``Model(log_level=...)`` defaults to ``logging.WARNING`` and is
-applied to the ``jcm`` logger rather than the root logger, so jcm's warnings
-about a run stay audible without jcm reconfiguring logging for your
-application. Pass ``logging.CRITICAL`` to quieten it. (The Hydra CLI exposes
-the same knob as ``run.log_level``.)
+**Logging**: jcm is a library, so it configures no logging at all — no
+handlers, no levels, no ``basicConfig``. Every module emits through its own
+``jcm.<module>`` logger and leaves policy to whoever assembles the process,
+which is the standard contract for a library. To see or silence jcm's output
+from your own code, configure it as you would any other library::
+
+    import logging
+    logging.basicConfig()                            # a handler, once, for your app
+    logging.getLogger("jcm").setLevel(logging.INFO)  # then jcm's verbosity
+
+Both lines are needed to *see* INFO: a level alone does not create a handler,
+and with none configured records fall through to Python's last-resort handler,
+whose own level is ``WARNING``. That is also why warnings reach you with no
+configuration at all — they print to stderr — while INFO does not. Conversely, an application that
+silences logging gets silence — jcm will not override that. Findings that must
+survive it are recorded in the run's provenance, which is a file rather than a
+stream (see :mod:`jcm.provenance`).
+
+Under the CLI, jcm *is* the application, so there it does configure: Hydra's
+``job_logging`` installs the console and file handlers, and ``run.log_level``
+sets the level for the ``jcm`` hierarchy (``WARNING`` by default; accepts a
+level name or a number, and refuses anything else rather than quietly running
+at a verbosity you did not choose). It applies in every run mode and from the
+start of the run.
+
+**A default run is quieter than it was before v2.1.** ``run.log_level`` used to
+be applied only by ``Model.__init__``, so it did nothing at all in
+``run.mode=prescribed`` and ``run.mode=scm``, nothing before the model was
+built in ``full``, and nothing for the several modules that logged to the root
+logger directly. Now every jcm INFO message obeys it. Run with
+``run.log_level=INFO`` (as ``run=longrun``, ``run=smoke`` and
+``run=pyses_year`` already do) to get them back. The two worth knowing about,
+because they report what the run resolved your request *to*:
+
+* ``run.mode=scm``: the grid cell the requested ``column.lat_deg`` /
+  ``lon_deg`` landed on. It stays INFO rather than becoming a warning because
+  a global state file — which is what JCM writes — resolves the request to a
+  cell that contains it: longitude is matched on the circle, so a westward
+  ``lon_deg`` such as ``-120`` is the 120W you meant, and a ``lat_deg``
+  outside [-90, 90], or either value non-finite, is refused outright. A
+  *regional* or single-column state file can still resolve to a distant
+  column, and at the ``WARNING`` default nothing says so — see issue #818.
+* ``run.mode=prescribed`` / ``scm``: which tracers the state file actually
+  contributed. (The complementary message — tracers the physics declared and
+  the file does *not* carry — is a warning, so it stays audible.)
+
+Nothing needed for a restart audit depends on the console log: the resolved
+ozone source is recorded in the run's provenance as ``ozone_source``, and the
+CLI still prints the output path it wrote.
 
 **Dynamical core**: Pass a backend explicitly when you need backend-specific
 configuration. ``Model(coords=...)`` remains the shorthand for constructing

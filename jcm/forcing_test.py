@@ -6,7 +6,6 @@ Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 import unittest
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from jcm.forcing import (
     ForcingData, _fixed_ssts, default_forcing, expand_yearly_files,
 )
@@ -1668,17 +1667,6 @@ class TestForcingFromBundles(unittest.TestCase):
 
 class TestForcingFromBundlesWarnings:
     """The emission-family config traps fire on the Python door too (#751)."""
-
-    @pytest.fixture(autouse=True)
-    def _audible_jcm_logger(self):
-        import logging
-        jcm_logger = logging.getLogger("jcm")
-        prev = jcm_logger.level
-        jcm_logger.setLevel(logging.WARNING)
-        try:
-            yield
-        finally:
-            jcm_logger.setLevel(prev)
 
     def test_zero_emission_warns_on_unpublished_grid(self, caplog):
         import logging

@@ -16,6 +16,8 @@ import xarray
 
 from jcm import cf_metadata
 
+logger = logging.getLogger(__name__)
+
 DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
@@ -500,14 +502,14 @@ def _resolve_tracer_vars(ds, tracer_vars, required_tracers) -> dict[str, str]:
     if tracer_vars is None:
         resolved = {name: name for name in names if name in ds}
         if resolved:
-            logging.info(
+            logger.info(
                 "load_states_from_xarray: loading tracer(s) %s, declared by "
                 "the physics and present in the state file.",
                 ", ".join(resolved),
             )
         missing = [name for name in names if name not in resolved]
         if missing:
-            logging.warning(
+            logger.warning(
                 "load_states_from_xarray: the physics declares tracer(s) %s "
                 "but the state file carries no such variable(s); physics will "
                 "see them as absent (zero).",
@@ -517,7 +519,7 @@ def _resolve_tracer_vars(ds, tracer_vars, required_tracers) -> dict[str, str]:
 
     dropped = [name for name in names if name not in tracer_vars and name in ds]
     if dropped:
-        logging.warning(
+        logger.warning(
             "load_states_from_xarray: tracer(s) %s are declared by the physics "
             "and present in the state file, but the explicit tracer_vars "
             "mapping omits them; physics will see them as zero.",
@@ -674,14 +676,14 @@ def load_states_from_xarray(
                 ds = cf_metadata.orient_top_first(ds)
             # else: ascending sigma is already top-first; pass through.
         else:
-            logging.warning(
+            logger.warning(
                 "load_states_from_xarray: %r coordinate is non-numeric or "
                 "size<=1; cannot determine vertical orientation. Assuming the "
                 "Dataset is already top-first (physics frame).",
                 cf_metadata.LEVEL_DIM,
             )
     else:
-        logging.warning(
+        logger.warning(
             "load_states_from_xarray: no %r coordinate present; cannot "
             "determine vertical orientation. Assuming the Dataset is already "
             "top-first (physics frame).",

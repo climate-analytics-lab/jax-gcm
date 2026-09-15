@@ -1,6 +1,50 @@
 Release Notes
 =============
 
+Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
+------------------------------------------------------------------------
+
+- **Breaking:** ``Model(log_level=...)`` is gone. It applied a level to the
+  ``jcm`` logger, so building a model reconfigured logging for the whole
+  process — resetting a verbosity the host application had chosen. A library
+  emits records and leaves handlers and levels to whoever assembles the
+  process; jcm now does only that. Code passing the argument raises
+  ``TypeError`` and should set the level itself instead::
+
+      logging.getLogger("jcm").setLevel(logging.CRITICAL)
+
+- ``import jcm`` no longer calls ``logging.basicConfig``, so it installs no
+  handler or format on your root logger. Warnings still reach an unconfigured
+  program through Python's last-resort handler (WARNING and above, on stderr);
+  to see INFO, configure logging as you would for any library. This never
+  affected ``python -m jcm.main``, whose handlers come from Hydra's
+  ``job_logging`` regardless.
+- An application that silences logging now gets silence — jcm will not
+  override it, which it previously did by design (#735). Findings that must
+  survive a quiet application are recorded in the run's provenance instead;
+  the parameters-changed-after-compilation warning, the case #735 was about,
+  is also the ``live_parameters_differ_from_compiled`` provenance key.
+- **A default CLI run prints less.** ``run.log_level`` (default ``WARNING``)
+  now actually takes effect: previously it was applied only by
+  ``Model.__init__``, so it did nothing at all in ``run.mode=prescribed`` and
+  ``run.mode=scm``, nothing before the model was built in ``full``, and
+  nothing for the four modules that logged to the root logger directly.
+  Messages that used to appear regardless — the resolved ``ozone_file=auto``
+  product, the JAX compilation-cache directory, the ERA5 store, the SCM
+  column resolution — are INFO and now obey it. Use ``run.log_level=INFO``
+  to restore them. It also now accepts a numeric level, and refuses an
+  unrecognised one rather than silently running at ``WARNING``.
+- ``SingleColumnModel`` column selection is fixed on both axes. A westward
+  ``run.column.lon_deg`` (``-120`` for 120W) selected a column up to 180
+  degrees away, because longitude was matched on the number line rather than
+  the circle; requests near the 0/360 seam and above 360 were wrong too. A
+  ``lat_deg`` outside [-90, 90] was silently clamped to the polar-most row
+  and now raises, as does a non-finite coordinate. A ``lon_deg`` already in
+  [0, 360) is unaffected **unless its nearest cell lies across the 0/360
+  seam** — a request within half a cell of 360 used to fall back to the
+  axis's last centre and now correctly wraps to its first, so such a run
+  selects a different column than it did before.
+
 Unreleased — RCE initial state seeds a mixed sub-cloud layer
 ------------------------------------------------------------
 
