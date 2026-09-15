@@ -62,26 +62,26 @@ STRATOCUMULUS = dict(
 # Tendencies from the unmodified body of SPEEDY's ``vertical_diffusion.f90``
 # (samhatfield/speedy.f90) run in double precision on exactly the literals
 # above, with cp = 1004.64 and alhc = 2501.0 so that only the formulation --
-# not the choice of constants -- is being compared. Keyed by (sounding, icnv);
-# icnv > 0 is the deep-convection column where shallow convection is damped by
-# redshc, which is reachable only through the dmse >= 0 branch and so is
-# covered here for the first time.
+# not the choice of constants -- is being compared. Keyed by
+# (sounding, deep_convection); in the deep-convection column shallow convection
+# is damped by redshc, which is reachable only through the dmse >= 0 branch and
+# so is covered here for the first time.
 FORTRAN_REFERENCE = {
-    ("trade_cumulus", 0): dict(
+    ("trade_cumulus", False): dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                 2.2506675098057929e-04, -2.9258677627475314e-04],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
                 1.3020053681520057e-05, 6.9235409235962714e-05,
                 -1.1630304231481483e-04],
     ),
-    ("trade_cumulus", 1): dict(
+    ("trade_cumulus", True): dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                 1.1253337549028965e-04, -1.4629338813737657e-04],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
                 1.3020053681520057e-05, 2.4503469884110871e-05,
                 -5.8151521157407417e-05],
     ),
-    ("stratocumulus", 0): dict(
+    ("stratocumulus", False): dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
                 -5.3839539379103348e-06, -5.3839539379103348e-06,
                 -5.3839539379103348e-06],
@@ -89,9 +89,9 @@ FORTRAN_REFERENCE = {
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
     ),
-    # Identical to icnv = 0: redshc only damps the dmse >= 0 branch, which this
-    # stable sounding does not take.
-    ("stratocumulus", 1): dict(
+    # Identical to the quiescent column: redshc only damps the dmse >= 0
+    # branch, which this stable sounding does not take.
+    ("stratocumulus", True): dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
                 -5.3839539379103348e-06, -5.3839539379103348e-06,
                 -5.3839539379103348e-06],
@@ -251,13 +251,17 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     # and the whole dmse >= 0 branch -- its heat flux and the redshc damping
     # included -- had no value coverage at all.
 
-    def _sounding_inputs(self, sounding, icnv):
+    def _sounding_inputs(self, sounding, deep_convection):
         """Assemble the scheme's arguments from a sounding literal.
 
-        ``icnv`` is the diagnostic the scheme actually branches on; the field
-        carried in ``ConvectionData`` is ``iptop``, from which
-        ``icnv = kx - iptop``.
+        ``iptop`` is the convective cloud-top level index and the scheme
+        branches on ``icnv = kx - iptop > 0``. SPEEDY's convection initialises
+        ``iptop`` to the ``kx + 1`` sentinel and lowers it only where it
+        triggers, so those are the two kinds of value a real column presents;
+        the cloud top itself is arbitrary, since only the sign of ``icnv``
+        is read.
         """
+        iptop = 3 if deep_convection else kx + 1
         def col(values):
             return jnp.asarray(values, dtype=jnp.float32)[:, jnp.newaxis, jnp.newaxis] \
                 * jnp.ones((ix, il))
@@ -265,7 +269,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         humidity = HumidityData.zeros((ix, il), kx, rh=col(sounding["rh"]),
                                       qsat=col(sounding["qsat"]))
         convection = ConvectionData.zeros(
-            (ix, il), kx, iptop=jnp.full((ix, il), kx - icnv, dtype=int),
+            (ix, il), kx, iptop=jnp.full((ix, il), iptop, dtype=int),
             se=col(sounding["se"]))
         physics_data = PhysicsData.zeros(
             (ix, il), kx, humidity=humidity, convection=convection,
@@ -279,8 +283,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         """Both moisture branches, against the reference Fortran.
 
         The two soundings split the lowest-interface gate between them:
-        trade cumulus takes ``dmse >= 0`` (shallow convection, and with
-        ``icnv > 0`` the redshc damping), stratocumulus takes ``dmse < 0`` with
+        trade cumulus takes ``dmse >= 0`` (shallow convection, and under deep
+        convection the redshc damping), stratocumulus takes ``dmse < 0`` with
         ``drh > drh0`` (stable diffusion). Both also open the two active
         free-tropospheric interfaces of step 3.
 
@@ -291,13 +295,14 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         """
         for name, sounding in (("trade_cumulus", TRADE_CUMULUS),
                                ("stratocumulus", STRATOCUMULUS)):
-            for icnv in (0, 1):
-                with self.subTest(sounding=name, icnv=icnv):
-                    state, physics_data = self._sounding_inputs(sounding, icnv)
+            for deep_convection in (False, True):
+                with self.subTest(sounding=name, deep_convection=deep_convection):
+                    state, physics_data = self._sounding_inputs(
+                        sounding, deep_convection)
                     tend, _ = get_vertical_diffusion_tend(
                         state, physics_data, parameters, ForcingData.ones((ix, il)),
                         terrain)
-                    expected = FORTRAN_REFERENCE[(name, icnv)]
+                    expected = FORTRAN_REFERENCE[(name, deep_convection)]
                     np.testing.assert_allclose(
                         np.asarray(tend.temperature[:, 0, 0]),
                         expected["ttenvd"], rtol=2e-4, atol=1e-12)
@@ -358,7 +363,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         for name, sounding in (("trade_cumulus", TRADE_CUMULUS),
                                ("stratocumulus", STRATOCUMULUS)):
             with self.subTest(sounding=name):
-                state, physics_data = self._sounding_inputs(sounding, icnv=0)
+                state, physics_data = self._sounding_inputs(
+                    sounding, deep_convection=False)
                 forcing = ForcingData.ones((ix, il))
 
                 def f(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
