@@ -37,6 +37,16 @@ from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
 
+#: Floor [m] on the dry radius in the hygroscopic growth ratio
+#: ``(r_wet/r_dry)³``. A picometre is orders of magnitude below any
+#: aerosol particle, so it never engages on a mode that holds material;
+#: it exists only so a core that reports ``r_dry = 0`` for an empty mode
+#: leaves a ratio whose CUBE is still representable in float32 — the
+#: generic ``_TINY`` used as a radius floor would give ``inf``, and the
+#: empty mode's ``vol_dry = 0`` would then turn the water volume into
+#: ``0 × inf = NaN`` instead of the 0 it must be.
+_MIN_DRY_RADIUS = 1.0e-12
+
 # AeroCom diagnostic wavelengths [nm]. 550 is the reference observable;
 # 440/670/865 give the Angstrom exponent and the 440 nm single-scattering
 # albedo AERONET reports; 355 is the lidar (ATLID/EarthCARE) wavelength.
@@ -49,7 +59,6 @@ _I355, _I440, _I550, _I670, _I865 = 0, 1, 2, 3, 4
 _GH_NODES, _GH_WEIGHTS = (
     tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
 )
-_FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 
 
 #: Reference wavelength for the column AOD diagnostic — 550 nm is the
@@ -280,9 +289,39 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_tot = vol_tot + v
                     vol_sp[sp] = v
                 vol_dry = vol_tot
-                v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
-                    r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
-                )
+                # Hygroscopic water volume from the DRY volume just summed
+                # and the mode's growth factor, ``V_w = V_dry·(g³ − 1)`` with
+                # ``g = r_wet/r_dry``. κ-Köhler growth (Kelvin term dropped)
+                # multiplies EVERY radius in the mode by the same ``g``, so
+                # the wet third moment is exactly ``g³`` times the dry one.
+                # ``vol_tot`` below is then precisely the third moment of the
+                # same lognormal the Gauss–Hermite quadrature integrates the
+                # Mie efficiencies over — mixing rule and size integral read
+                # one particle population. It is exact for any ``σ_g``, and
+                # — because only the RATIO of the two radii is used, and the
+                # cores set ``r_wet = r_dry·g`` — it stays exact where the
+                # core clips ``dg`` to its per-mode bounds.
+                #
+                # The per-particle form ``N·(4/3)π·(r_wet³ − r_dry³)`` is NOT
+                # an equivalent substitute: ``r_dry`` is the NUMBER-MEDIAN
+                # radius, defined by both cores through the third moment
+                # ``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``, so ``N·(4/3)π·r_dry³``
+                # is the dry volume divided by ``exp(4.5 ln²σ_g)``. Mixed with
+                # the third-moment ``vol_dry`` it understates the water by
+                # that factor — 2.70 for σ_g = 1.6 (Aitken, primary carbon),
+                # 4.73 for σ_g = 1.8 (accumulation, coarse), more still
+                # wherever ``dg`` sits on a clip bound — and biases the
+                # volume-mixed index towards the dry species (#790).
+                #
+                # Being number-free, the term is also identically zero on a
+                # mode with no dry material, whatever ringing the number
+                # field carries.
+                growth_cubed = (
+                    r_wet / jnp.maximum(aer.r_dry[i], _MIN_DRY_RADIUS)
+                ) ** 3
+                # Clamped at zero so a core that reports r_wet < r_dry cannot
+                # put a negative volume into the mixing rule.
+                v_water = vol_dry * jnp.maximum(growth_cubed - 1.0, 0.0)
                 n_w, k_w = ri_band["h2o"]
                 vol_n = vol_n + v_water * n_w
                 vol_k = vol_k + v_water * k_w
@@ -332,10 +371,13 @@ class JamOpticsTerm(PhysicsTerm):
                 # +90 K in 6 h and a global NaN by day 10 of the first
                 # coupled JAM year. 1e-24 m³/kg (≈1e-21 kg/kg of aerosol)
                 # is radiatively nothing and far above ringing amplitudes.
-                # Gate on the DRY species volume: the hygroscopic water
-                # term n·(r_wet³−r_dry³) is itself ringing garbage when
-                # there is no dry aerosol to condense on, and it passes a
-                # total-volume gate on its own.
+                # Gate on the DRY species volume: it is the quantity that
+                # says whether there is anything to condense on or to
+                # scatter from. (The hygroscopic water volume is
+                # proportional to ``vol_dry`` — see above — so a gate on
+                # the TOTAL volume would be the same test; the extinction
+                # ``n·q_ext·π·r²``, built from the ringing fields, is what
+                # would otherwise sneak through.)
                 gate = (vol_dry > 1.0e-24)
                 area = num_per_area[i] * math.pi * r_wet ** 2
                 aod_gated = jnp.where(gate, aod_i, 0.0)

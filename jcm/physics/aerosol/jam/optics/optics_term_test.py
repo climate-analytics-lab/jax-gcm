@@ -66,6 +66,28 @@ def _setup(nlev=4, ncols=3, n_sw=3, n_lw=2):
     return state, diagnostics, band, n_sw, n_lw
 
 
+def _consistent_state(state, diagnostics, saturation=0.8):
+    """Replace ``_jam_state`` with the κ-Köhler state implied by the tracers.
+
+    ``_setup`` sets ``mass``, ``number``, ``r_dry`` and ``r_wet``
+    independently of the tracers it writes, which is fine for plumbing tests
+    but not for any test about the modal GEOMETRY: the optics read the dry
+    volume from the mass tracers and the radii/number from ``_jam_state``,
+    and only a state the microphysics core actually produced makes the two
+    agree. This runs the placeholder core's diagnosis on the fixture's
+    tracers so ``r_dry`` satisfies ``V = N (π/6) Dg³ exp(4.5 ln²σ)`` and
+    ``r_wet = r_dry·g`` with the κ-Köhler growth factor at ``saturation``.
+    """
+    from jcm.physics.aerosol.jam.microphysics.placeholder import (
+        equilibrium_modal_state,
+    )
+    masses = {k: v for k, v in state.tracers.items() if k.startswith("m_")}
+    numbers = {k: v for k, v in state.tracers.items() if k.startswith("n_")}
+    sat = jnp.full(state.temperature.shape, saturation)
+    aer = equilibrium_modal_state(masses, numbers, MAM4_SPEC, sat)
+    return {**diagnostics, "_jam_state": aer}
+
+
 class JamOpticsTermTest(unittest.TestCase):
     def _term(self, band):
         term = JamOpticsTerm()
@@ -208,7 +230,10 @@ class JamOpticsTermTest(unittest.TestCase):
         num = num.at[:, 0, :].set(-jnp.abs(num[:, 0, :]))
         num = num.at[:, :, 1].set(-1.0e7)
         diagnostics = {**diagnostics, "_jam_state": aer.copy(number=num)}
-        # And the corresponding number tracers (used for the water volume).
+        # And the corresponding number tracers: the ringing field this models
+        # drives both negative together. (The optics read the number only
+        # through ``num_per_area`` — the water volume is number-free, #790 —
+        # so this pairing is realism, not a load-bearing input.)
         tracers = dict(state.tracers)
         for mode in MAM4_SPEC.modes:
             nm = number_name(mode.short)
@@ -259,16 +284,109 @@ class JamOpticsTermTest(unittest.TestCase):
         self.assertEqual(float(jnp.max(jnp.abs(a.aod_lw_per_band))), 0.0)
 
     def test_more_aerosol_more_aod(self):
+        """Doubling the aerosol mass at fixed number grows every particle and
+        so must raise the extinction.
+
+        The modal state must be re-diagnosed from the doubled tracers, not
+        held fixed: the per-particle cross-section comes from ``_jam_state``
+        (number and wet radius), so doubling the mass tracers ALONE leaves
+        the extinction exactly unchanged — mass enters only through the
+        volume-mixed refractive index, whose species ratios and water
+        fraction are both scale-free (#790). Pairing doubled tracers with a
+        fixed state therefore asserts nothing about "more aerosol".
+        """
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
-        _, d1 = term(state, diagnostics, None, None)
-        # double the mass tracers
-        state2 = state.copy(tracers={k: 2.0 * v for k, v in state.tracers.items()})
-        _, d2 = term(state2, diagnostics, None, None)
+        d_in1 = _consistent_state(state, diagnostics)
+        _, d1 = term(state, d_in1, None, None)
+        mass2 = {k: (2.0 * v if k.startswith("m_") else v)
+                 for k, v in state.tracers.items()}
+        state2 = state.copy(tracers=mass2)
+        d_in2 = _consistent_state(state2, diagnostics)
+        _, d2 = term(state2, d_in2, None, None)
         self.assertGreater(
             float(jnp.sum(d2["aerosol"].aod_sw_per_band)),
             float(jnp.sum(d1["aerosol"].aod_sw_per_band)),
         )
+
+    def test_refractive_index_independent_of_number(self):
+        """At fixed radii and masses, the modal number scales the extinction
+        but must not touch the volume-mixed refractive index.
+
+        The dry volume in the mixing rule comes from the mass tracers, so a
+        water volume carrying an ``N`` of its own — as ``N·(4/3)π·(r_wet³ −
+        r_dry³)`` does — would make the water FRACTION, and with it the SSA,
+        move with a quantity the dry volume never saw (#790). With the
+        number-free form the SSA and asymmetry are invariant and the AOD is
+        exactly linear in the number.
+        """
+        state, diagnostics, band, *_ = _setup()
+        term = self._term(band)
+        aer = diagnostics["_jam_state"]
+        _, d1 = term(state, diagnostics, None, None)
+        # The fixture peaks near tau = 0.13 per layer and band, so tripling
+        # the number stays clear of the ``_MAX_LAYER_TAU`` = 1 clamp and the
+        # scaling below is exact rather than clipped.
+        d_in3 = {**diagnostics, "_jam_state": aer.copy(number=3.0 * aer.number)}
+        _, d3 = term(state, d_in3, None, None)
+        a1, a3 = d1["aerosol"], d3["aerosol"]
+        np.testing.assert_allclose(
+            np.asarray(a3.aod_sw_per_band), 3.0 * np.asarray(a1.aod_sw_per_band),
+            rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(a3.ssa_sw_per_band), np.asarray(a1.ssa_sw_per_band),
+            rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(a3.asy_sw_per_band), np.asarray(a1.asy_sw_per_band),
+            rtol=1e-6)
+
+    def test_dry_particles_add_no_water(self):
+        """``r_wet == r_dry`` (zero growth) contributes exactly no water,
+        whatever the number: the AeroCom water component must be identically
+        zero while the dry species still extinguish.
+
+        The pairing of ``number`` with ``r_dry`` is made grossly inconsistent
+        on purpose: a water volume built from ``N·(4/3)π·(r_wet³ − r_dry³)``
+        depends on exactly that pairing, ``V_dry·(g³ − 1)`` does not (#790).
+        """
+        state, diagnostics, band, *_ = _setup()
+        aer = diagnostics["_jam_state"]
+        dry = aer.copy(r_wet=aer.r_dry, number=1.0e3 * aer.number)
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, {**diagnostics, "_jam_state": dry}, None, None)
+        np.testing.assert_array_equal(np.asarray(out["od550_wat"]), 0.0)
+        np.testing.assert_array_equal(np.asarray(out["abs550_wat"]), 0.0)
+        self.assertTrue(bool(np.all(np.asarray(out["od550aer"]) > 0.0)))
+
+    def test_empty_mode_with_zero_dry_radius_stays_finite(self):
+        """A core reporting ``r_dry = 0`` on an empty mode must give 0, not NaN.
+
+        The growth ratio ``(r_wet/r_dry)³`` is the one division the water
+        volume makes, and it multiplies a ``vol_dry`` that is zero on exactly
+        the modes where ``r_dry`` could be zero. Floored by the generic
+        ``_TINY`` (1e-30 m) the cube overflows float32 to ``inf`` and
+        ``0 × inf`` is NaN, which reaches the diagnostics through the water
+        apportionment; ``_MIN_DRY_RADIUS`` keeps the cube representable so
+        the product is the 0 it must be. float64 has the range to absorb
+        either floor, so only the default float32 physics exercises this.
+        """
+        if jax.config.read("jax_enable_x64"):
+            self.skipTest("the float32 overflow guarded here cannot occur in x64")
+        state, diagnostics, band, *_ = _setup()
+        aer = diagnostics["_jam_state"]
+        empty = aer.copy(r_dry=jnp.zeros_like(aer.r_dry))
+        no_mass = state.copy(
+            tracers={k: (jnp.zeros_like(v) if k.startswith("m_") else v)
+                     for k, v in state.tracers.items()})
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(no_mass, {**diagnostics, "_jam_state": empty}, None, None)
+        self.assertEqual(out["aerosol"].aod_sw_per_band.dtype, jnp.float32)
+        for key in ("od550aer", "od550_wat", "abs550_wat"):
+            np.testing.assert_array_equal(np.asarray(out[key]), 0.0)
+        self.assertTrue(
+            bool(np.all(np.isfinite(np.asarray(out["aerosol"].aod_sw_per_band)))))
 
     def test_column_aod_550_diagnostic(self):
         from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -365,10 +483,6 @@ class JamOpticsTermTest(unittest.TestCase):
 
         g = jax.grad(loss)(jnp.asarray(1.0))
         self.assertTrue(np.isfinite(float(g)))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class OpticsDiagnosticsTest(unittest.TestCase):
@@ -558,6 +672,41 @@ class OpticsDiagnosticsTest(unittest.TestCase):
             np.asarray(out["abs550aer"]), rtol=1e-4, atol=1e-12)
         np.testing.assert_allclose(np.asarray(out["abs550_bc"]), 0.0, atol=1e-20)
 
+    def test_water_fraction_is_the_third_moment_growth(self):
+        """The water share of a mode's extinction equals its VOLUME share,
+        ``(g³ − 1)/g³`` with ``g = r_wet/r_dry`` — exact and Mie-independent.
+
+        Extinction is apportioned by volume fraction and every particle of
+        a κ-Köhler mode grows by the same ``g``, so the wet third moment is
+        ``g³`` times the dry one and the water fraction of the mode's total
+        volume is ``(g³ − 1)/g³`` regardless of ``σ_g``. On this
+        third-moment-consistent state a water volume built as
+        ``N·(4/3)π·(r_wet³ − r_dry³)`` comes out smaller by ``exp(4.5 ln²σ)``
+        (2.7× for σ = 1.6, 4.7× for σ = 1.8) — issue #790's table. The modes
+        carry different κ, so the column total is the per-mode-AOD-weighted
+        mean of the shares.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        d_in = _consistent_state(state, diagnostics, saturation=0.8)
+        aer = d_in["_jam_state"]
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, d_in, None, None)
+        expected = np.zeros_like(np.asarray(out["od550aer"]))
+        for i, mode in enumerate(MAM4_SPEC.modes):
+            g3 = np.asarray(aer.r_wet[i] / aer.r_dry[i]) ** 3      # (nlev, ncols)
+            # Uniform saturation and species mix -> one g per mode.
+            np.testing.assert_allclose(g3, g3.flat[0], rtol=1e-6)
+            share_i = (g3.flat[0] - 1.0) / g3.flat[0]
+            self.assertGreater(share_i, 0.0)
+            expected += share_i * np.asarray(out[f"od550_mode_{mode.short}"])
+        np.testing.assert_allclose(np.asarray(out["od550_wat"]), expected,
+                                   rtol=1e-5)
+        # And the share is substantial for the soluble modes at RH 0.8, so a
+        # number-median-radius water volume would show as a ~2-5x deficit.
+        share = np.asarray(out["od550_wat"]) / np.asarray(out["od550aer"])
+        self.assertGreater(float(share.min()), 0.3)
+
     def test_angstrom_discriminates_fine_from_coarse(self):
         """Physical validation of the spectral pass, not just its plumbing.
 
@@ -584,3 +733,7 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         self.assertGreater(fine, 1.5, f"fine-mode Angstrom too low: {fine}")
         self.assertLess(coarse, 0.5, f"coarse-mode Angstrom too high: {coarse}")
         self.assertGreater(fine, coarse)
+
+
+if __name__ == "__main__":
+    unittest.main()
