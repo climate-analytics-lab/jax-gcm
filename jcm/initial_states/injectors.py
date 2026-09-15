@@ -73,7 +73,7 @@ def balanced_isothermal_state(model: Model):
     # Bootstrap the default rest state so the physics' seeded tracers (cloud
     # water, GHG VMRs, aerosol modes, ...) are already in place; we only
     # override the temperature/ps fields below.
-    state = model._prepare_initial_dycore_state(
+    state = model.initial_state(
         physics_state=None, random_seed=0,
     )
     p0_pa = p0s1_bg
@@ -116,9 +116,9 @@ def jw_state(model: Model, rh: float = 0.6):
 
     from jcm.constants import grav, p0s1_bg, rd
 
-    # Bootstrap the default rest state; ``_prepare_initial_dycore_state(None)``
+    # Bootstrap the default rest state; ``initial_state(None)``
     # is what seeds the physics' prognostic tracers, which we preserve below.
-    state = model._prepare_initial_dycore_state(
+    state = model.initial_state(
         physics_state=None, random_seed=0,
     )
 
@@ -234,13 +234,13 @@ def checkpoint_state(model: Model, path: str):
     ``model.run(initial_state=state, initial_physics_state=physics_carry)`` so
     the warm start inherits the donor's carry fidelity rather than resetting
     it to a fresh carry at the run seam. The carry is structurally the pytree
-    :meth:`Model._build_initial_physics_carry` builds for this model — it was
+    :meth:`Model.initial_physics_carry` builds for this model — it was
     just deserialized against exactly that template — so ``run`` threads it
     straight through.
 
     Uses ``model`` as the deserialization template: ``bootstrap_state`` +
-    ``load_checkpoint`` transiently overwrite ``model._final_dycore_state`` /
-    ``_final_physics_state`` with the donor's contents. The caller immediately
+    ``load_checkpoint`` replace ``model.dycore_state`` / ``physics_carry``
+    with the donor's contents. The caller immediately
     re-bootstraps from the returned ``state`` (via ``model.run``), which
     rebuilds the template's dycore state; the physics carry we return here is
     what keeps the donor's carry alive across that re-bootstrap.
@@ -256,12 +256,12 @@ def checkpoint_state(model: Model, path: str):
     # (Model._date_from_sim_time) — without this reset a day-730 donor
     # would run with forcing at start_date + 730 d.
     state = model.dycore.with_sim_time(
-        model._final_dycore_state,
-        jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
+        model.dycore_state,
+        jnp.zeros_like(model.dycore.sim_time(model.dycore_state)),
     )
     # The restored donor carry, to be re-seeded through
     # ``model.run(initial_physics_state=...)``. Without this the warm start's
     # run would rebuild a fresh carry and silently lose the donor's radiation
     # sub-cycle cache / prior-step TKE.
-    physics_carry = model._final_physics_state
+    physics_carry = model.physics_carry
     return state, physics_carry, days

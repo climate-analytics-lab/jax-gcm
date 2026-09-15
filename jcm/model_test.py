@@ -1160,6 +1160,76 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
         self.assertLess(g1 * g2, 0.0)
 
 
+class TestModelStateApi(unittest.TestCase):
+    """Public initial/resumable-state contract (#755)."""
+
+    @staticmethod
+    def _model():
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_held_suarez_coords()
+        return Model(
+            coords=coords,
+            terrain=TerrainData.from_coords(coords),
+            time_step=180,
+            physics=held_suarez_physics(),
+        )
+
+    def test_fresh_builders_are_pure_and_bootstrap_returns_installed_pair(self):
+        model = self._model()
+
+        state = model.initial_state(sim_time=123.0)
+        carry = model.initial_physics_carry()
+        self.assertIsNone(model.dycore_state)
+        self.assertIsNone(model.physics_carry)
+        self.assertAlmostEqual(float(model.dycore.sim_time(state)), 123.0)
+        self.assertTrue(jax.tree_util.tree_leaves(carry))
+
+        bootstrapped_state, bootstrapped_carry = model.bootstrap_state()
+        self.assertIs(bootstrapped_state, model.dycore_state)
+        self.assertIs(bootstrapped_carry, model.physics_carry)
+
+    def test_resumable_properties_are_read_only_and_restore_is_atomic(self):
+        model = self._model()
+        state, carry = model.bootstrap_state()
+        replacement_state = model.dycore.with_sim_time(
+            state, jnp.asarray(4321.0),
+        )
+        replacement_carry = jax.tree.map(
+            lambda value: jnp.ones_like(value), carry,
+        )
+
+        with self.assertRaises(AttributeError):
+            model.dycore_state = replacement_state
+        with self.assertRaises(AttributeError):
+            model.physics_carry = replacement_carry
+
+        model.restore_state(replacement_state, replacement_carry)
+        self.assertIs(model.dycore_state, replacement_state)
+        self.assertIs(model.physics_carry, replacement_carry)
+        self.assertEqual(float(model.dycore.sim_time(model.dycore_state)),
+                         4321.0)
+
+        with self.assertRaisesRegex(ValueError, "requires both"):
+            model.restore_state(replacement_state, None)
+
+    def test_restore_rejects_tracers_instead_of_leaking_them(self):
+        model = self._model()
+        _, carry = model.bootstrap_state()
+
+        def attempt_restore(traced_state):
+            model.restore_state(traced_state, carry)
+            return traced_state
+
+        with self.assertRaisesRegex(ValueError, "cannot retain JAX tracers"):
+            jax.make_jaxpr(attempt_restore)(jnp.asarray(1.0))
+
+
 class TestModelLogging(unittest.TestCase):
     """jcm is a library: it emits log records and configures nothing.
 

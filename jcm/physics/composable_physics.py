@@ -424,7 +424,7 @@ class ComposablePhysics(nnx.Module, Physics):
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
         """Return a zero-filled template of the per-step diagnostics dict.
 
-        Internal helper used by ``Model._build_initial_physics_carry``
+        Internal helper used by ``Model.initial_physics_carry``
         and ``Model._get_op_split_integrate_fn`` to discover the
         pytree structure of ``compute_tendencies``' output dict. The
         ``lax.scan`` carry needs to be that exact structure on

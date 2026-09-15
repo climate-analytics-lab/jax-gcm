@@ -76,7 +76,7 @@ def test_era5_state_reexport_is_accepted_by_run(monkeypatch):
     # model.run accepts the returned gridpoint state and integrates it.
     dt_days = 180.0 / 86400.0
     model.run(initial_state=state, save_interval=dt_days, total_time=dt_days)
-    final = model.dycore.to_physics_state(model._final_dycore_state)
+    final = model.dycore.to_physics_state(model.dycore_state)
     assert np.all(np.isfinite(np.asarray(final.temperature)))
 
 
@@ -98,16 +98,17 @@ def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
     donor = _held_suarez_model()
     donor.bootstrap_state()
     # Stamp the donor state with a nonzero clock so the reset is observable.
-    donor_sim_time = donor.dycore.sim_time(donor._final_dycore_state)
-    donor._final_dycore_state = donor.dycore.with_sim_time(
-        donor._final_dycore_state,
+    donor_sim_time = donor.dycore.sim_time(donor.dycore_state)
+    stamped_state = donor.dycore.with_sim_time(
+        donor.dycore_state,
         jnp.full_like(donor_sim_time, 5.0 * 86400.0),
     )
     # Stamp the donor's physics carry with a recognizable value so we can prove
     # the restored carry — not a fresh rebuild — is what threads into the run.
-    donor._final_physics_state = jax.tree_util.tree_map(
-        lambda x: jnp.full_like(x, 0.0456), donor._final_physics_state
+    stamped_carry = jax.tree_util.tree_map(
+        lambda x: jnp.full_like(x, 0.0456), donor.physics_carry
     )
+    donor.restore_state(stamped_state, stamped_carry)
     ckpt = tmp_path / "donor.ckpt"
     save_checkpoint(donor, ckpt, elapsed_days=5.0)
 

@@ -465,7 +465,7 @@ class DinosaurDycore(DynamicalCore):
     ) -> State:
         """Build a dinosaur :class:`State` to seed the integration.
 
-        Identical semantics to :meth:`Model._prepare_initial_dycore_state`. If
+        Identical semantics to :meth:`Model.initial_state`. If
         ``physics_state`` is provided it is round-tripped through
         :func:`physics_state_to_dynamics_state`; otherwise the
         ``isothermal_rest_atmosphere`` default state is used with a small

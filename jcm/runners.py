@@ -1853,7 +1853,7 @@ def run_chunked(
         # Mirrors the init-kind branching of the fresh-start path below;
         # the template values are immediately overwritten by the
         # checkpoint's contents.
-        # ``bootstrap_state`` populates both ``_final_dycore_state`` and the
+        # ``bootstrap_state`` populates both ``dycore_state`` and the
         # physics carry (eagerly), which ``load_checkpoint`` needs as
         # deserialization templates; their values are immediately overwritten
         # by the checkpoint's contents, so the init-kind only decides the

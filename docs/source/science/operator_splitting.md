@@ -56,7 +56,7 @@ scheme.
 
 **Code pointers.**
 - ``jcm/model.py`` — ``_get_op_split_step_fn``, ``_op_split_trajectory``,
-  ``_build_initial_physics_carry``.
+  ``initial_physics_carry``.
 - ``jcm/physics_interface.py`` — ``compute_physics_step_gridpoint``,
   ``verify_state``, ``verify_tendencies``.
 - ``jcm/dycore/base.py`` — ``DynamicalCore.step``.

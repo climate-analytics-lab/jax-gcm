@@ -132,26 +132,32 @@ in-stage scheme.
 
 ### Cross-step carry persistence
 
-`Model` holds two slots of cross-step state:
+`Model` exposes two read-only slots of cross-step state:
 
-- `_final_dycore_state` — backend-native state at the end of the last
+- `dycore_state` — backend-native state at the end of the last
   `run()` / `resume()` call.
-- `_final_physics_state` — the cross-step physics carry at the end of
+- `physics_carry` — the cross-step physics carry at the end of
   the last call.
 
 `run()` resets both via `bootstrap_state` (and rebuilds the physics
-carry via `_build_initial_physics_carry`). `resume()` threads them
+carry via `initial_physics_carry`). `resume()` threads them
 back in. The result: a `run(5d)` + `resume(5d)` chain is numerically
 equivalent to a contiguous `run(10d)` — sub-cycled radiation and
 prior-step TKE do not reset at the API seam. Regression covered by
 `test_op_split_carry_persists_across_resume`.
+
+`initial_state()` and `initial_physics_carry()` return fresh pytrees without
+mutating the model. `bootstrap_state()` installs and returns a matched pair;
+checkpoint deserializers replace a pair atomically through `restore_state()`.
+The two public properties are deliberately read-only so a dycore state cannot
+be paired accidentally with a stale radiation/TKE carry.
 
 `run_from_state_with_carry` exposes the carry seed and final carry
 directly for callers that need explicit control.
 
 ### Initial physics carry
 
-`Model._build_initial_physics_carry` unions:
+`Model.initial_physics_carry` unions:
 
 - `Physics.initial_carry_state(coords)` — per-term deterministic seed.
   Each `PhysicsTerm` that has cross-step state overrides this with a
