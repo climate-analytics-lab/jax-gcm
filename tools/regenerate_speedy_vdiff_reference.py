@@ -27,14 +27,21 @@ Requires ``gfortran`` and network access.
 """
 
 import argparse
+import hashlib
 import pathlib
 import subprocess
 import sys
 import tempfile
 import urllib.request
 
+# Pinned to a commit, not a branch: the whole point of this reference is that it
+# is independent of the JAX port, and a regeneration that silently picked up an
+# upstream edit would re-pin the test to a *different* scheme while looking like
+# a constants refresh. The digest makes that failure loud rather than silent.
+SOURCE_COMMIT = "f0a358e9914a4de32836c1e126a37b37bd454fda"
 SOURCE_URL = ("https://raw.githubusercontent.com/samhatfield/speedy.f90/"
-              "master/source/vertical_diffusion.f90")
+              f"{SOURCE_COMMIT}/source/vertical_diffusion.f90")
+SOURCE_SHA256 = "5992f6a73bd3bade11c374cec5bd8078a99277d40b30c35122f7a622e87aa809"
 
 # The modules vertical_diffusion.f90 imports, cut down to the handful of names
 # it actually uses. cp and alhc are jcm's values (jcm.constants.cpd and
@@ -68,7 +75,9 @@ end module
 """
 
 # Reads the cases this script writes out, one per record, and prints the
-# tendencies. fsg and dhs are derived from the half levels exactly as
+# tendencies. The unlimited-repeat edit descriptor keeps each tendency on one
+# line whatever kx is; a fixed count would revert the format past its width and
+# split the record, which the parser below would read as a new tendency. fsg and dhs are derived from the half levels exactly as
 # compute_speedy_vertical_coords does.
 DRIVER = """\
 program vdif_reference
@@ -99,8 +108,8 @@ program vdif_reference
         read(iu,*) (phi(1,1,k),  k = 1, kx)
         call get_vertical_diffusion_tend(se, rh, qa, qsat, phi, icnv, &
             & utenvd, vtenvd, ttenvd, qtenvd)
-        write(*,'(a,8es24.16)') 'ttenvd ', (ttenvd(1,1,k), k = 1, kx)
-        write(*,'(a,8es24.16)') 'qtenvd ', (qtenvd(1,1,k), k = 1, kx)
+        write(*,'(a,*(es24.16))') 'ttenvd ', (ttenvd(1,1,k), k = 1, kx)
+        write(*,'(a,*(es24.16))') 'qtenvd ', (qtenvd(1,1,k), k = 1, kx)
     end do
     close(iu)
 end program
@@ -124,6 +133,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=SOURCE_URL,
                         help="vertical_diffusion.f90 to compile (URL or path)")
+    parser.add_argument("--allow-unpinned", action="store_true",
+                        help="skip the digest check, for trying a local edit")
     args = parser.parse_args(argv)
 
     # Imported rather than duplicated: the test module is where the soundings,
@@ -154,6 +165,14 @@ def main(argv=None):
                 scheme = response.read().decode()
         else:
             scheme = pathlib.Path(args.source).read_text()
+        digest = hashlib.sha256(scheme.encode()).hexdigest()
+        if digest != SOURCE_SHA256 and not args.allow_unpinned:
+            raise SystemExit(
+                f"{args.source} hashes to {digest}, not the pinned "
+                f"{SOURCE_SHA256}. If upstream has genuinely changed the "
+                "scheme, update SOURCE_COMMIT and SOURCE_SHA256 together and "
+                "say so where the new reference is committed -- it is then a "
+                "different scheme, not a refreshed constant.")
         (build / "vertical_diffusion.f90").write_text(scheme)
         (build / "stubs.f90").write_text(
             STUBS.format(kx=kx, cpd=float(c.cpd), alhc=float(alhc)))

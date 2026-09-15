@@ -93,6 +93,10 @@ MOISTURE_GATE_CASES = (
     # pins that this branch's threshold is 0 and not drh0.
     ("trade_cumulus_shallow_gate_open", TRADE_CUMULUS, {6: 0.86}, False),
     ("stratocumulus", STRATOCUMULUS, {}, False),
+    # Bit-identical to the line above, and that *is* what it pins: vdifsc sets
+    # fcnv inside the dmse >= 0 block only, so redshc must not reach the stable
+    # branch. Without this case, applying fcnv to the stable moisture flux too
+    # would go unnoticed here.
     ("stratocumulus_deep_convection", STRATOCUMULUS, {}, True),
     # drh = 0.050 and 0.065 straddle the stable branch's drh0 = 0.0575.
     ("stratocumulus_stable_gate_closed", STRATOCUMULUS, {6: 0.85}, False),
@@ -399,17 +403,19 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         clears 0.5 -- the frame is top-first, so interface ``k`` sits at the
         *bottom* of layer ``k`` -- and whose upper layer is not stratospheric.
 
-        Returns ``(active, sigma_shut)``: the interfaces step 3 diffuses
-        across, and those inside the same index range that only the sigma
-        condition excludes.
+        Returns ``(active, sigma_shut, strat_only)``: the interfaces step 3
+        diffuses across, those inside the same index range that the sigma
+        condition alone excludes, and those the stratosphere mask excludes but
+        the sigma condition does not.
         """
         from jcm.physics.speedy.speedy_coords import stratosphere_mask
 
         hsg = np.asarray(speedy_coords.hsg)
         strat = np.asarray(stratosphere_mask(speedy_coords.fsg))
-        candidates = [k for k in range(1, kx - 2) if not strat[k]]
-        return ([k for k in candidates if hsg[k + 1] > 0.5],
-                [k for k in candidates if hsg[k + 1] <= 0.5])
+        candidates = range(1, kx - 2)
+        return ([k for k in candidates if hsg[k + 1] > 0.5 and not strat[k]],
+                [k for k in candidates if hsg[k + 1] <= 0.5 and not strat[k]],
+                [k for k in candidates if hsg[k + 1] > 0.5 and strat[k]])
 
     def test_moisture_branch_matches_fortran(self):
         """Every moisture path and every gate, against the reference Fortran.
@@ -459,8 +465,21 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         fsg = np.asarray(speedy_coords.fsg)
         rhgrad = float(parameters.vertical_diffusion.rhgrad)
-        interfaces, sigma_shut = self._step3_interfaces()
+        interfaces, sigma_shut, strat_only = self._step3_interfaces()
         self.assertTrue(interfaces, "step 3 has no active interfaces to check")
+        # The port's one deliberate divergence from vdifsc is here: the Fortran
+        # hard-codes the range as ``do k = 3, kx-2``, and the port replaces the
+        # upper bound with the sigma<0.2 stratosphere mask so it scales with
+        # nlev. On this 8-level table the two coincide -- the mask excludes
+        # nothing ``hsg > 0.5`` does not already exclude -- which is why no case
+        # above can see the substitution. State that rather than leave it
+        # implicit: at an nlev where they part company these cases stop being a
+        # Fortran comparison at the interfaces concerned, and that should
+        # surface here rather than as a silent change of behaviour.
+        self.assertEqual(strat_only, [],
+                         "the stratosphere mask now excludes an interface the "
+                         "sigma condition keeps, so the cases here no longer "
+                         "pin step 3 against the Fortran range")
         self.assertTrue(sigma_shut, "no interface is excluded by hsg <= 0.5, so "
                                     "stratocumulus_sigma_gate_shut pins nothing")
 
