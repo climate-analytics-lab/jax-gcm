@@ -43,7 +43,7 @@ def build_moist_initial_state(model, q_surface_gkg=10.0, scale_height_km=2.0,
     import numpy as np
 
     # Get the default initial dycore-native state (isothermal 288 K or JW profile).
-    dycore_state = model._prepare_initial_dycore_state(None, random_seed=0)
+    dycore_state = model.initial_state(random_seed=0)
     ps = model.dycore.to_physics_state(dycore_state)
 
     # Altitude profile from geopotential.

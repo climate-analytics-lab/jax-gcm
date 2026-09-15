@@ -598,7 +598,7 @@ def profile_run(
     # Warm-up 1: initial state + first compile. Warm-up 2: the traced call's
     # exact signature, so that its compilation (if any) happens here.
     runners.run(cfg, model=model)
-    jax.block_until_ready(model._final_dycore_state)
+    jax.block_until_ready(model.dycore_state)
     jax.block_until_ready(model.resume(**resume_kwargs))
 
     before = _dumped_modules(dump_dir)
