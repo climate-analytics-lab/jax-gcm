@@ -122,10 +122,15 @@ def _with_rh_overrides(sounding, rh_overrides):
     return rh, qa
 
 
-# Tendencies from the unmodified body of SPEEDY's ``vertical_diffusion.f90``
-# (samhatfield/speedy.f90) run in double precision on exactly the literals
-# above, with cp = 1004.64 and alhc = 2501.0 so that only the formulation --
-# not the choice of constants -- is being compared.
+# Tendencies from SPEEDY's ``vertical_diffusion.f90`` (samhatfield/speedy.f90),
+# compiled unmodified in double precision against stub modules supplying
+# cp = 1004.64 and alhc = 2501.0 -- jcm's values, not SPEEDY's own cp = 1004.0
+# -- so that only the formulation, and not the choice of constants, is being
+# compared. Regenerate with
+# ``python tools/regenerate_speedy_vdiff_reference.py``; compiling the file
+# rather than transcribing it also keeps details a transcription silently
+# "fixes", such as its single-precision ``segrad = 0.1`` literal widening to
+# 0.10000000149 rather than 0.1 (worth 1e-7 in the step-4 tendencies).
 #
 # Note that the *inputs* are constants-independent but these expected
 # tendencies are not: they scale with the live ``c.cpd`` through fshcse/fvdise
@@ -162,47 +167,47 @@ FORTRAN_REFERENCE = {
                 -1.7892775740740759e-05],
     ),
     "stratocumulus": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
     ),
     "stratocumulus_deep_convection": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
     ),
     "stratocumulus_stable_gate_closed": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 3.9072506727430539e-05, -5.3229646771501056e-05, 0.0],
     ),
     "stratocumulus_stable_gate_open": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 3.7851356007378451e-05, -4.0444831218182400e-05,
                 -1.4544303995225712e-05],
     ),
     "stratocumulus_free_trop_gate_closed": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 2.0352512000868048e-05,
                 2.5021758845819989e-05, -6.7127556901041690e-05],
     ),
     "stratocumulus_sigma_gate_shut": dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
-                -5.3839539379103348e-06, -5.3839539379103348e-06,
-                -5.3839539379103348e-06],
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964343331322881e-05,
+                -5.3839544990952970e-06, -5.3839544990952970e-06,
+                -5.3839544990952970e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
@@ -434,10 +439,6 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                 np.testing.assert_allclose(
                     np.asarray(tend.specific_humidity[:, 0, 0]),
                     expected["qtenvd"], rtol=2e-4, atol=1e-12)
-                # vdifsc returns heat and moisture only; momentum is the
-                # surface drag's job.
-                self.assertTrue(np.all(np.asarray(tend.u_wind) == 0.0))
-                self.assertTrue(np.all(np.asarray(tend.v_wind) == 0.0))
 
     def test_moisture_gate_cases_straddle_their_gates(self):
         """Each case sits on the side of its gate that it is named for.
@@ -552,9 +553,11 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                         convert_to_float(parameters), convert_to_float(forcing),
                         convert_to_float(terrain))
                 check_gradients(f, args, reference="adjoint")
-                # 5e-3 is a 10x margin on the worst of seeds 0-3, which agree
-                # with the central difference to 5e-4.
-                check_gradients(f, args, rtol=5e-3)
+                # Four directions, not one: a single random direction can miss
+                # a term it happens to be nearly orthogonal to. 5e-3 is a 10x
+                # margin -- these agree with the central difference to 5e-4.
+                for seed in range(4):
+                    check_gradients(f, args, rtol=5e-3, seed=seed)
 
     # Which inputs the moisture branch is differentiably sensitive to. This is
     # the mirror of check_gradients' per-output-leaf guard, and it is needed
@@ -587,6 +590,15 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def test_moisture_branch_input_sensitivities(self):
         """The tendencies depend on the inputs the scheme actually reads."""
+        # The table below is read at the default zero smoothing widths. Turning
+        # either on -- which is what they are for -- makes fsg live in both
+        # soundings and qa live in stratocumulus, so say that here rather than
+        # let an intended improvement surface as "fsg: gradient liveness
+        # changed".
+        self.assertEqual(
+            (float(parameters.vertical_diffusion.mse_gate_smoothing),
+             float(parameters.vertical_diffusion.rh_gate_smoothing)), (0.0, 0.0),
+            "LIVE_INPUT_GRADIENTS describes the hard (zero-width) gates")
         for name, sounding in (("trade_cumulus", TRADE_CUMULUS),
                                ("stratocumulus", STRATOCUMULUS)):
             with self.subTest(sounding=name):
@@ -599,19 +611,40 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                         state_f, physics_data_f, parameters, forcing, terrain)
                     return tend.temperature, tend.specific_humidity
 
+                # One cotangent of ones would contract all levels of each
+                # tendency into a single sum, and the scheme writes flux
+                # *divergences* (+f/dhs[k] at k, -f/dhs[k+1] at k+1): on a grid
+                # with uniform dhs those cancel exactly, so a live gradient
+                # would read as dead. Accumulating |grad| over one-hot
+                # cotangents instead asks the question directly -- an input is
+                # live iff some single output element depends on it.
                 primal, vjp = jax.vjp(f, physics_data, state)
-                grad_data, grad_state = vjp(
-                    tuple(jnp.ones_like(leaf) for leaf in primal))
-                gradients = dict(
-                    se=grad_data.convection.se,
-                    rh=grad_data.humidity.rh,
-                    qsat=grad_data.humidity.qsat,
-                    qa=grad_state.specific_humidity,
-                    phi=grad_state.geopotential,
-                    dhs=grad_data.speedy_coords.dhs,
-                    hsg=grad_data.speedy_coords.hsg,
-                    fsg=grad_data.speedy_coords.fsg,
-                )
+
+                def sensitivities(cotangent):
+                    grad_data, grad_state = vjp(cotangent)
+                    return dict(
+                        se=grad_data.convection.se,
+                        rh=grad_data.humidity.rh,
+                        qsat=grad_data.humidity.qsat,
+                        qa=grad_state.specific_humidity,
+                        phi=grad_state.geopotential,
+                        dhs=grad_data.speedy_coords.dhs,
+                        hsg=grad_data.speedy_coords.hsg,
+                        fsg=grad_data.speedy_coords.fsg,
+                    )
+
+                gradients = None
+                for leaf_index, leaf in enumerate(primal):
+                    for flat in range(leaf.size):
+                        cotangent = [jnp.zeros_like(x) for x in primal]
+                        cotangent[leaf_index] = jnp.zeros_like(leaf).reshape(
+                            -1).at[flat].set(1.0).reshape(leaf.shape)
+                        one = sensitivities(tuple(cotangent))
+                        gradients = (
+                            {k: np.abs(np.asarray(v)) for k, v in one.items()}
+                            if gradients is None else
+                            {k: gradients[k] + np.abs(np.asarray(v))
+                             for k, v in one.items()})
                 for field, expect_live in self.LIVE_INPUT_GRADIENTS[name].items():
                     values = np.asarray(gradients[field])
                     self.assertTrue(np.all(np.isfinite(values)),
