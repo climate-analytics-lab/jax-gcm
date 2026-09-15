@@ -74,6 +74,11 @@ omit =
     jcm/physics/diagnostics/aerocom.py
     jcm/physics/diagnostics/cosp_cloudsat.py
     jcm/physics/aerosol/jam/emissions/flux_diagnostic.py
+    # The gradient-check harness: it exists to be called *from* tests, and
+    # every caller (jcm/testing_test.py and the SPEEDY gradient checks) is
+    # fast-marked, so the slow suite imports it and runs nothing in it — 14%,
+    # against 96% in the fast tier. Exactly the case this rcfile is for.
+    jcm/testing.py
     # ``DinosaurDycore`` itself is main-path code that ``Model.run``
     # routes through every step, but the branches outside the
     # SPEEDY/ECHAM default path — level-dependent diffusion at L47,
