@@ -60,6 +60,17 @@ Unreleased — specific humidity has one kg/kg contract
   constructing a nudging target, and divide old saved g/kg humidity values by
   1000 before supplying them as a new ``PhysicsState`` (#666).
 
+Unreleased — public model clock conversion
+------------------------------------------
+
+- :meth:`jcm.model.Model.date_from_sim_time` is now the public, JIT-safe way
+  to convert elapsed simulation seconds into the same :class:`jcm.date.DateData`
+  used by forcing and physics. It documents the stop-gradient boundary,
+  nearest-second date rounding and day rollover, and the independently
+  timestep-derived ``model_step``. ``Model._date_from_sim_time`` remains a
+  compatibility alias for the 2.1 release and is planned for removal
+  afterwards (#758).
+
 Unreleased — ChemistryData uses ppmv consistently
 --------------------------------------------------
 

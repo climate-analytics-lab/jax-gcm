@@ -7,6 +7,7 @@ API
 
    jcm.model
    jcm.model.Model
+   jcm.model.Model.date_from_sim_time
    jcm.dycore
    jcm.dycore.base.DynamicalCore
    jcm.dycore.dinosaur.DinosaurDycore

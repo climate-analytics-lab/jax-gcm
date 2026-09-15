@@ -234,7 +234,7 @@ def checkpoint_state(model: Model, path: str):
     days = load_checkpoint(model, path)
     # The checkpoint's dycore state carries the donor's sim_time, and dates,
     # forcing time-interpolation and output timestamps all derive from it
-    # (Model._date_from_sim_time) — without this reset a day-730 donor
+    # (Model.date_from_sim_time) — without this reset a day-730 donor
     # would run with forcing at start_date + 730 d.
     state = model.dycore.with_sim_time(
         model.dycore_state,

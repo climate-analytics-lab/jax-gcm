@@ -754,9 +754,44 @@ class Model:
             return self._DEFAULT_TIME_STEP_MINUTES
         return min(self._MAX_PHYSICS_TIME_STEP_MINUTES, float(limit))
 
-    def _date_from_sim_time(self, sim_time) -> DateData:
-        # Stop gradient: date/calendar computations use non-differentiable ops
-        # (floor, round, int casts) and should not be part of the AD graph.
+    def date_from_sim_time(self, sim_time) -> DateData:
+        """Convert elapsed simulation seconds to model date metadata.
+
+        This is the model clock conversion used internally for date-aware
+        forcing and physics.  Callers should pass the ``sim_time`` carried by
+        this model's dynamical core so that the returned step number is based
+        on the same timestep.
+
+        Args:
+            sim_time: Scalar seconds elapsed from :attr:`start_date`. Date
+                arithmetic is intentionally detached with
+                ``jax.lax.stop_gradient``, so traced values are safe under
+                ``jax.jit`` and ``jax.lax.scan`` but date metadata does
+                not contribute to derivatives.
+
+        Returns:
+            A :class:`~jcm.date.DateData` containing the rounded absolute
+            date, the timestep-derived model step, and this model's timestep
+            in seconds.
+
+        Notes:
+            Whole elapsed days are taken with ``floor(sim_time / 86400)`` and
+            the sub-day remainder is rounded to the nearest integer second
+            with ``jax.numpy.round`` (ties to even). A remainder that rounds
+            to 86,400 seconds is normalized by ``jax_datetime.Timedelta``
+            into the next day. ``model_step`` is computed independently as
+            ``int32(sim_time / dt_seconds)`` (truncation toward zero), so an
+            arbitrary time just before a rounded date rollover remains in the
+            preceding model step. Normal simulation clocks are non-negative.
+
+            :class:`~jcm.date.DateData` is calendar-neutral. Pass
+            :attr:`calendar` to calendar-dependent accessors such as
+            :meth:`~jcm.date.DateData.tyear` and
+            :meth:`~jcm.date.DateData.model_year`.
+
+        """
+        # Date/calendar computations use non-differentiable operations and
+        # represent metadata, so they must not become part of the AD graph.
         sim_time = jax.lax.stop_gradient(sim_time)
         return DateData.set_date(
             model_time=self.start_date + jdt.Timedelta(
@@ -767,6 +802,10 @@ class Model:
             dt_seconds=float(self.dt_si.m),
             calendar=self.calendar,
         )
+
+    def _date_from_sim_time(self, sim_time) -> DateData:
+        """Compatibility alias for :meth:`date_from_sim_time`."""
+        return self.date_from_sim_time(sim_time)
 
     def initial_state(
         self,
@@ -845,7 +884,7 @@ class Model:
         )
 
         def step(state, physics_state):
-            date = self._date_from_sim_time(self.dycore.sim_time(state))
+            date = self.date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             # The scopes opened here and in ComposablePhysics's term loop label
             # this step's HLO, so that a profiler trace can be split into

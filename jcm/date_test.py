@@ -1,4 +1,5 @@
 import unittest
+import jax
 from jcm.date import fraction_of_year_elapsed, DateData, parse_duration_days
 from jcm.model import Model
 import jax_datetime as jdt
@@ -64,9 +65,77 @@ class TestDateUnit(unittest.TestCase):
         )
         for i in range(6):
             year = 10**i
-            date = model._date_from_sim_time((year+.5) * 365.2425 * 86400)
+            date = model.date_from_sim_time((year+.5) * 365.2425 * 86400)
             self.assertEqual(date.model_year('gregorian'), jnp.round(1970 + year))
             self.assertTrue(jnp.isclose(date.tyear('gregorian'), 0.5, atol=2e-2))
+
+
+class TestModelDateFromSimTime(unittest.TestCase):
+    """Public model-clock conversion in eager and transformed code (#758)."""
+
+    def setUp(self):
+        # Gregorian and 7.5 minutes are both non-default Model settings. The
+        # leap-day boundary makes an incorrect calendar/date rollover visible.
+        self.model = Model(
+            coords=get_speedy_coords(),
+            time_step=7.5,
+            start_date=jdt.to_datetime('2000-02-28 12:00:00'),
+            calendar='gregorian',
+        )
+
+    def assert_datetime_equal(self, actual, expected):
+        self.assertEqual(int(actual.delta.days), int(expected.delta.days))
+        self.assertEqual(int(actual.delta.seconds), int(expected.delta.seconds))
+
+    def test_eager_sub_day_rounding_rolls_into_next_day(self):
+        before = self.model.date_from_sim_time(43199.4)
+        after = self.model.date_from_sim_time(43199.6)
+
+        self.assert_datetime_equal(
+            before.dt, jdt.to_datetime('2000-02-28 23:59:59'))
+        self.assert_datetime_equal(
+            after.dt, jdt.to_datetime('2000-02-29 00:00:00'))
+        # Date rounding and step counting are deliberately independent: both
+        # inputs are still short of the 96th 450-second model step.
+        self.assertEqual(int(before.model_step), 95)
+        self.assertEqual(int(after.model_step), 95)
+        self.assertEqual(after.dt_seconds, 450.0)
+        self.assertEqual(int(after.model_year(self.model.calendar)), 2000)
+
+    def test_jitted_boundary_uses_model_timestep_and_calendar(self):
+        convert = jax.jit(self.model.date_from_sim_time)
+
+        at_boundary = convert(jnp.asarray(43200.0))
+        next_day = convert(jnp.asarray(129600.0))
+
+        self.assert_datetime_equal(
+            at_boundary.dt, jdt.to_datetime('2000-02-29 00:00:00'))
+        self.assert_datetime_equal(
+            next_day.dt, jdt.to_datetime('2000-03-01 00:00:00'))
+        self.assertEqual(int(at_boundary.model_step), 96)
+        self.assertEqual(int(next_day.model_step), 288)
+        self.assertEqual(at_boundary.dt_seconds, 450.0)
+        self.assertEqual(int(next_day.model_year(self.model.calendar)), 2000)
+
+    def test_date_metadata_is_outside_the_gradient_graph(self):
+        def seconds_since_epoch(sim_time):
+            date = self.model.date_from_sim_time(sim_time)
+            return (
+                date.dt.delta.days.astype(jnp.float32) * 86400.0
+                + date.dt.delta.seconds.astype(jnp.float32)
+            )
+
+        derivative = jax.grad(seconds_since_epoch)(jnp.asarray(123.4))
+        self.assertEqual(float(derivative), 0.0)
+
+    def test_private_name_is_a_compatibility_alias(self):
+        sim_time = jnp.asarray(43200.0)
+        public = self.model.date_from_sim_time(sim_time)
+        compatibility = self.model._date_from_sim_time(sim_time)
+
+        self.assert_datetime_equal(public.dt, compatibility.dt)
+        self.assertEqual(int(public.model_step), int(compatibility.model_step))
+        self.assertEqual(public.dt_seconds, compatibility.dt_seconds)
 
 
 class TestParseDurationDays(unittest.TestCase):
