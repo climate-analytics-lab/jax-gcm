@@ -112,6 +112,21 @@ MOISTURE_GATE_CASES = (
     ("stratocumulus_sigma_gate_shut", STRATOCUMULUS, {3: 0.10}, False),
 )
 
+def iptop_for(deep_convection, nlev):
+    """Return the cloud-top index a column with or without deep convection has.
+
+    SPEEDY's convection initialises ``iptop`` to the ``nlev + 1`` sentinel and
+    lowers it to a cloud top only where it triggers, so those are the two kinds
+    of value a real column presents. The scheme branches on
+    ``icnv = nlev - iptop > 0``, so the cloud top itself is arbitrary.
+
+    Public because ``tools/regenerate_speedy_vdiff_reference.py`` hands the same
+    ``icnv`` to the Fortran; deriving it twice is how the reference and the port
+    would come to be given different inputs.
+    """
+    return 3 if deep_convection else nlev + 1
+
+
 def _with_rh_overrides(sounding, rh_overrides):
     """Return ``(rh, qa)`` with a case's relative-humidity overrides applied.
 
@@ -369,14 +384,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     def _sounding_inputs(self, sounding, rh_overrides, deep_convection):
         """Assemble the scheme's arguments from a sounding literal.
 
-        ``iptop`` is the convective cloud-top level index and the scheme
-        branches on ``icnv = kx - iptop > 0``. SPEEDY's convection initialises
-        ``iptop`` to the ``kx + 1`` sentinel and lowers it only where it
-        triggers, so those are the two kinds of value a real column presents;
-        the cloud top itself is arbitrary, since only the sign of ``icnv`` is
-        read.
+        See :func:`iptop_for` for the two ``iptop`` values a real column
+        presents.
         """
-        iptop = 3 if deep_convection else kx + 1
+        iptop = iptop_for(deep_convection, kx)
         rh, qa = _with_rh_overrides(sounding, rh_overrides)
 
         def col(values):
@@ -455,11 +466,13 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         unexplained match of two arrays of zeros.
 
         The comparisons are strict because the scheme's width-0 gates are:
-        ``smooth_gate(x, thr, 0)`` is ``x > thr``. vdifsc itself writes
-        ``drh >= 0`` and ``drh >= drh0``, so the two differ on a column landing
-        exactly on a threshold -- unreachable in practice, and the strict form
-        is what these assertions must describe if they are to predict what the
-        scheme does.
+        ``smooth_gate(x, thr, 0)`` is ``x > thr``. vdifsc matches that exactly
+        on the step-2 *stable* branch, which it writes ``else if (drh > drh0)``;
+        it is the shallow branch (``drh >= 0``) and step 3 (``drh >= drh0``)
+        that are non-strict there, so those two differ from the port on a
+        column landing exactly on a threshold. Unreachable in practice, and the
+        strict form is what these assertions must describe if they are to
+        predict what the scheme does.
         """
         from jcm.physics.speedy.physical_constants import alhc
 
@@ -480,6 +493,14 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                          "the stratosphere mask now excludes an interface the "
                          "sigma condition keeps, so the cases here no longer "
                          "pin step 3 against the Fortran range")
+        # And the other direction: the port's index range starts at 1, which the
+        # Fortran's ``do k = 3, kx-2`` (0-based: k >= 2) excludes outright. Only
+        # ``hsg[2] = 0.14`` keeps interface 1 shut on this table, so an nlev that
+        # opened it would put the port outside the Fortran's range with nothing
+        # else noticing.
+        self.assertGreaterEqual(min(interfaces), 2,
+                                "step 3 now diffuses across an interface below "
+                                "vdifsc's own k >= 3 lower bound")
         self.assertTrue(sigma_shut, "no interface is excluded by hsg <= 0.5, so "
                                     "stratocumulus_sigma_gate_shut pins nothing")
 

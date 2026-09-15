@@ -34,6 +34,15 @@ import sys
 import tempfile
 import urllib.request
 
+# Source-checkout bootstrap: put *this* repo root ahead of any installed jcm, so
+# the soundings come from the checkout being regenerated rather than from
+# whatever else is on the path -- a different checkout that happens to define
+# the same names would silently regenerate literals for a different set of
+# cases (mirrors the idiom in tools/jam_burden_report.py).
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+if sys.path[:1] != [str(_REPO)]:
+    sys.path.insert(0, str(_REPO))
+
 # Pinned to a commit, not a branch: the whole point of this reference is that it
 # is independent of the JAX port, and a regeneration that silently picked up an
 # upstream edit would re-pin the test to a *different* scheme while looking like
@@ -145,10 +154,21 @@ def main(argv=None):
     from jcm.physics.speedy.physical_constants import alhc
     from jcm.physics.speedy.speedy_coords import SpeedyCoords
     from jcm.physics.vertical_diffusion.speedy_vdiff_test import (
-        MOISTURE_GATE_CASES, _with_rh_overrides,
+        MOISTURE_GATE_CASES, _with_rh_overrides, iptop_for,
     )
 
-    kx = 8
+    # Derived from the soundings, not assumed: Fortran list-directed input
+    # silently discards surplus values in a record, so a kx smaller than the
+    # profiles would integrate a truncated column and emit a plausible but
+    # wrong reference with no diagnostic.
+    kx = len(MOISTURE_GATE_CASES[0][1]["se"])
+    for name, sounding, _, _ in MOISTURE_GATE_CASES:
+        for field in ("se", "rh", "qa", "qsat", "phi"):
+            if len(sounding[field]) != kx:
+                raise SystemExit(
+                    f"{name}: {field} has {len(sounding[field])} levels, "
+                    f"expected {kx}")
+
     # SIGMA_LAYER_BOUNDARIES declares the table as exact decimals but stores it
     # float32, so widen through the shortest decimal that round-trips: the
     # Fortran then runs SPEEDY's own table rather than its float32 rounding.
@@ -183,7 +203,10 @@ def main(argv=None):
             handle.write(f"{len(MOISTURE_GATE_CASES)}\n")
             for _, sounding, overrides, deep in MOISTURE_GATE_CASES:
                 rh, qa = _with_rh_overrides(sounding, overrides)
-                handle.write("1\n" if deep else "0\n")
+                # The icnv the port computes, not a stand-in for its sign: the
+                # value of this reference is that both sides see identical
+                # inputs.
+                handle.write(f"{kx - iptop_for(deep, kx)}\n")
                 for field in (sounding["se"], rh, qa, sounding["qsat"],
                               sounding["phi"]):
                     handle.write(" ".join(f"{v:.17e}" for v in field) + "\n")
