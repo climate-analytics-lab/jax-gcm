@@ -58,6 +58,18 @@ Unreleased — ChemistryData uses ppmv consistently
   ``ozone_mole_fraction()`` / ``methane_mole_fraction()`` helpers make the
   conversion to gas-optics mol/mol explicit (#749).
 
+Unreleased — delegated timesteps have one effective value
+----------------------------------------------------------
+
+- Runner and profiling paths now resolve an explicit ``run.time_step`` in
+  minutes or, when it is ``null``, adopt the built model/dycore timestep.
+  A pySES configuration owns its timestep in ``dycore.dt_seconds``; an
+  explicit ``run.time_step`` must repeat that value or model construction
+  raises. Prescribed-state runs, single-column runs, chunk budget tolerances
+  and term profiles therefore use the same number of seconds as the model
+  instead of raising on ``None``, silently falling back to 900 seconds, or
+  reporting against a conflicting config value (#801).
+
 Unreleased — RCE initial state seeds a mixed sub-cloud layer
 ------------------------------------------------------------
 

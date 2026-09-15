@@ -11,6 +11,7 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
+import types
 
 import pytest
 
@@ -359,6 +360,21 @@ def test_subcycle_steps_defaults_to_every_step():
     assert pt.subcycle_steps(_FakeModel([_FakeTerm()]), 12.0) == (
         1, frozenset())
     assert pt.subcycle_steps(_FakeModel([]), 12.0) == (1, frozenset())
+
+
+def test_profile_timestep_delegates_to_built_model():
+    """A null pySES-style config profiles the model's actual step (#801)."""
+    cfg = {"run": {"time_step": None}}
+    model = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+    assert pt._effective_time_step_minutes(cfg, model) == 30.0
+
+
+def test_profile_timestep_preserves_explicit_value():
+    """An explicit config value wins over the model supplied to the helper."""
+    cfg = {"run": {"time_step": 7.5}}
+    model = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+    assert pt._effective_time_step_minutes(cfg, model) == 7.5
+    assert pt._config_summary(["run=default"], 7.5).endswith("dt=7.5min")
 
 
 class _FakeGatedTerm:

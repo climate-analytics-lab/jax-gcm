@@ -766,6 +766,57 @@ def _apply_log_level(cfg: DictConfig) -> None:
     logging.getLogger("jcm").setLevel(level)
 
 
+def resolve_effective_time_step_seconds(
+    cfg: DictConfig,
+    model_or_dycore=None,
+) -> float:
+    """Resolve the runner timestep in seconds from its owning source.
+
+    ``run.time_step`` is expressed in minutes. Any explicit value, including
+    zero, is preserved. ``None`` delegates ownership to an already-built
+    model or dycore, whose seconds value is authoritative because a dynamical
+    core bakes its timestep into its integrator at construction.
+
+    Args:
+        cfg: Hydra configuration containing the ``run`` group.
+        model_or_dycore: Built :class:`Model` or dynamical core used when the
+            config delegates with ``run.time_step: null``.
+
+    Returns:
+        Effective timestep in seconds.
+
+    Raises:
+        ValueError: If the config delegates but no built source with a
+            timestep is supplied.
+
+    """
+    configured_minutes = cfg.get("run", {}).get("time_step", None)
+    if configured_minutes is not None:
+        return float(configured_minutes) * 60.0
+
+    if model_or_dycore is None:
+        raise ValueError(
+            "run.time_step is null, so timestep ownership is delegated to "
+            "the built model/dycore; pass that built object when resolving "
+            "the effective timestep."
+        )
+
+    dt_si = getattr(model_or_dycore, "dt_si", None)
+    if dt_si is not None:
+        return float(getattr(dt_si, "m", dt_si))
+
+    dycore = getattr(model_or_dycore, "dycore", model_or_dycore)
+    dt_seconds = getattr(dycore, "dt_seconds", None)
+    if dt_seconds is None:
+        dt_seconds = getattr(model_or_dycore, "dt_seconds", None)
+    if dt_seconds is None:
+        raise ValueError(
+            "run.time_step is null, but the built model/dycore exposes "
+            "neither dt_si nor dt_seconds."
+        )
+    return float(dt_seconds)
+
+
 def build_model(cfg: DictConfig) -> Model:
     """Build a fully-configured ``Model`` from a Hydra config.
 
@@ -810,14 +861,15 @@ def build_model(cfg: DictConfig) -> Model:
     # dycore constructor (Model itself no longer takes a diffusion kwarg —
     # that's a dinosaur-backend concern). The tracer filter is the same kind of
     # dycore-side knob.
-    time_step = float(cfg.run.time_step)
+    time_step_seconds = resolve_effective_time_step_seconds(cfg)
+    time_step = time_step_seconds / 60.0
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
     sl_options = {"off_centering": float(
         cfg.get("sl_off_centering", DEFAULT_OFF_CENTERING))}
     dycore = DinosaurDycore(
         coords=coords,
         terrain=terrain,
-        dt_seconds=time_step * 60.0,
+        dt_seconds=time_step_seconds,
         tracer_specs=tracer_specs,
         diffusion=diffusion,
         tracer_filter=tracer_filter,
@@ -836,9 +888,11 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     """Build a Model on the pySES CAM-SE backend from ``cfg.dycore``.
 
     Composition mirrors the production ne30 campaign driver this replaces:
-    the backend owns resolution and timestep (``grid`` group and
-    ``run.time_step`` are ignored — the Model adopts ``dt_seconds``), the
-    physics runs float32 on the float64 core, and a finite-lid sponge term
+    the backend owns resolution and timestep (the Model adopts
+    ``dycore.dt_seconds``). ``run.time_step`` may be null or repeat that value;
+    a conflicting explicit value raises instead of letting runner diagnostics
+    use a different step from the dynamics. The physics runs float32 on the
+    float64 core, and a finite-lid sponge term
     (USSA temperature relaxation + implicit Rayleigh wind friction, see the
     dycore config's ``lid_sponge``) is appended to the physics: the ~1 Pa
     lid sits outside the shipped radiation schemes' validity and both
@@ -871,9 +925,14 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     if sponge is not None and int(sponge.get("levels", 0)) > 0:
         physics = physics + _pyses_lid_sponge_term(dycore, sponge)
 
-    # No time_step: the Model adopts the dycore's dt_seconds (single source
-    # of truth; a conflicting run.time_step would raise).
-    return Model(dycore=dycore, physics=physics,
+    # Pass an explicit runner value through Model's consistency check. Null
+    # delegates to the backend; an equal explicit value is accepted; a
+    # mismatch raises before physics, dates, and diagnostics can diverge.
+    configured_time_step = cfg.get("run", {}).get("time_step", None)
+    model_time_step = (
+        None if configured_time_step is None else float(configured_time_step)
+    )
+    return Model(dycore=dycore, physics=physics, time_step=model_time_step,
                  start_date=_resolve_start_date(cfg))
 
 
@@ -1214,9 +1273,9 @@ def run(cfg: DictConfig, model: Model | None = None):
     if mode == "full":
         return _run_full(cfg, model)
     if mode == "prescribed":
-        return _run_prescribed(cfg)
+        return _run_prescribed(cfg, model)
     if mode == "scm":
-        return _run_scm(cfg)
+        return _run_scm(cfg, model)
     raise ValueError(
         f"Unknown run.mode={mode!r}; expected 'full', 'prescribed' or 'scm'."
     )
@@ -1660,9 +1719,17 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     )
 
 
-def _run_prescribed(cfg: DictConfig):
+def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     """Diagnose physics tendencies from a JCM state-file time series."""
     from jcm.prescribed_state_model import PrescribedStateModel
+
+    if (cfg.get("run", {}).get("time_step", None) is None
+            and time_step_model is None):
+        # A null runner timestep means the configured backend owns it. Build
+        # that backend before constructing the physics-only driver so both
+        # execute with the same effective step.
+        time_step_model = build_model(cfg)
+    dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     coords = build_coords(cfg)
     physics = build_physics(cfg)
@@ -1676,7 +1743,7 @@ def _run_prescribed(cfg: DictConfig):
         physics=physics,
         coords=coords,
         terrain=terrain,
-        dt_seconds=float(cfg.run.time_step) * 60.0,
+        dt_seconds=dt_seconds,
     )
     return model.run(states, forcing=forcing)
 
@@ -1686,7 +1753,7 @@ def _run_prescribed(cfg: DictConfig):
 _select_column = select_column
 
 
-def _run_scm(cfg: DictConfig):
+def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     """Run the single-column model on the column nearest to the user's lat/lon."""
     from jcm.single_column_model import SingleColumnModel
 
@@ -1697,6 +1764,14 @@ def _run_scm(cfg: DictConfig):
         )
     lat_deg = float(column_cfg.lat_deg)
     lon_deg = float(column_cfg.lon_deg)
+
+    if (cfg.get("run", {}).get("time_step", None) is None
+            and time_step_model is None):
+        # The SCM has no dycore of its own. A delegating run therefore gets
+        # its step from the configured full-model backend before the column
+        # driver is constructed.
+        time_step_model = build_model(cfg)
+    dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
@@ -1723,7 +1798,7 @@ def _run_scm(cfg: DictConfig):
         vertical=coords.vertical,
         lat_deg=actual_lat,
         lon_deg=actual_lon,
-        dt_seconds=float(cfg.run.time_step) * 60.0,
+        dt_seconds=dt_seconds,
     )
     return scm.run(column_states)
 
@@ -1862,14 +1937,14 @@ def run_chunked(
         reports.append(report)
         print_report(report)
 
-        # #713: one greppable aerosol-budget line per species per chunk
-        # (jcm.diagnostics.aerosol_budget_report). pySES presets omit
-        # run.time_step (the Model adopts the dycore's dt); the closure
-        # floor is an order-of-magnitude guide, so a nominal 900 s stands
-        # in rather than reaching into the dycore from here.
-        _dt_cfg = cfg.get("run", {}).get("time_step", None)
-        _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
-        for _line in aerosol_budget_report(ds, _dt_s):
+        # #713: one greppable aerosol-budget line per species per chunk. The
+        # rounding floor depends on the timestep, so use the same effective
+        # value that advanced this model (including delegated backends).
+        # This diagnostic describes the run that just completed, so the
+        # model's actual timestep is authoritative even when a caller passes
+        # a separately assembled cfg with a conflicting explicit value.
+        dt_seconds = float(model.dt_si.m)
+        for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
         nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
