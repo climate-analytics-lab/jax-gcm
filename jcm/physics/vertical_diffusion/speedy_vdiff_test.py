@@ -15,8 +15,9 @@ from jcm.testing import check_gradients
 #    (``dmse >= 0``, whose moisture flux is gated only on ``drh >= 0``) and a
 #    stable moisture-diffusion branch (``dmse < 0``), whose onset is
 #    ``drh0 = rhgrad * (fsg[-1] - fsg[-2]) = 0.0575``;
-#  * step 3 runs on the interfaces inside ``1 .. kx-3`` whose upper half level
-#    clears ``hsg > 0.5``, which here is interfaces 4 and 5, with
+#  * step 3 runs on the interfaces inside ``1 .. kx-3`` whose own sigma
+#    ``hsg[k+1]`` clears 0.5 -- interface ``k`` sits at the *bottom* of layer
+#    ``k`` in this top-first frame -- which here is interfaces 4 and 5, with
 #    ``drh0 = 0.0875`` and ``0.075``.
 #
 # Each sounding was built from a temperature profile by integrating the
@@ -99,7 +100,27 @@ MOISTURE_GATE_CASES = (
     # drh = 0.085 at interface 4, just below its drh0 = 0.0875; the unmodified
     # sounding sits just above at 0.10.
     ("stratocumulus_free_trop_gate_closed", STRATOCUMULUS, {4: 0.265}, False),
+    # Interface 3's RH gate thrown wide open (drh = 0.15 against drh0 = 0.085)
+    # where only ``hsg[4] = 0.42 <= 0.5`` keeps it shut. Without this the sigma
+    # condition does no work in any case -- both soundings leave interface 3 at
+    # drh = 0.05, already shut on RH -- and deleting it outright changes
+    # nothing. The expected tendencies are the unmodified sounding's.
+    ("stratocumulus_sigma_gate_shut", STRATOCUMULUS, {3: 0.10}, False),
 )
+
+def _with_rh_overrides(sounding, rh_overrides):
+    """Return ``(rh, qa)`` with a case's relative-humidity overrides applied.
+
+    Shared by the input builder and the straddle guard so the two cannot
+    disagree about what a case actually presents to the scheme.
+    """
+    rh = list(sounding["rh"])
+    qa = list(sounding["qa"])
+    for index, value in rh_overrides.items():
+        rh[index] = value
+        qa[index] = value * sounding["qsat"][index]
+    return rh, qa
+
 
 # Tendencies from the unmodified body of SPEEDY's ``vertical_diffusion.f90``
 # (samhatfield/speedy.f90) run in double precision on exactly the literals
@@ -177,6 +198,14 @@ FORTRAN_REFERENCE = {
                 -5.3839539379103348e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 2.0352512000868048e-05,
                 2.5021758845819989e-05, -6.7127556901041690e-05],
+    ),
+    "stratocumulus_sigma_gate_shut": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
+                -5.3839539379103348e-06, -5.3839539379103348e-06,
+                -5.3839539379103348e-06],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
+                1.8719994726562494e-05, 2.5021758845819989e-05,
+                -6.7127556901041690e-05],
     ),
 }
 
@@ -339,11 +368,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         read.
         """
         iptop = 3 if deep_convection else kx + 1
-        rh = list(sounding["rh"])
-        qa = list(sounding["qa"])
-        for index, value in rh_overrides.items():
-            rh[index] = value
-            qa[index] = value * sounding["qsat"][index]
+        rh, qa = _with_rh_overrides(sounding, rh_overrides)
 
         def col(values):
             return jnp.asarray(values, dtype=jnp.float32)[:, jnp.newaxis, jnp.newaxis] \
@@ -361,18 +386,25 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                                    geopotential=col(sounding["phi"]))
         return state, physics_data
 
-    def _active_step3_interfaces(self):
-        """Interfaces step 3 diffuses across, derived rather than written out.
+    def _step3_interfaces(self):
+        """How step 3 selects its interfaces, derived rather than written out.
 
         Mirrors the scheme's own selection (``jcm.physics.vertical_diffusion.
-        speedy_vdiff``): interfaces ``1 .. kx-3``, whose upper half level clears
-        ``hsg > 0.5``, and whose upper layer is not stratospheric.
+        speedy_vdiff``): interfaces ``1 .. kx-3`` whose own sigma ``hsg[k+1]``
+        clears 0.5 -- the frame is top-first, so interface ``k`` sits at the
+        *bottom* of layer ``k`` -- and whose upper layer is not stratospheric.
+
+        Returns ``(active, sigma_shut)``: the interfaces step 3 diffuses
+        across, and those inside the same index range that only the sigma
+        condition excludes.
         """
         from jcm.physics.speedy.speedy_coords import stratosphere_mask
 
         hsg = np.asarray(speedy_coords.hsg)
         strat = np.asarray(stratosphere_mask(speedy_coords.fsg))
-        return [k for k in range(1, kx - 2) if hsg[k + 1] > 0.5 and not strat[k]]
+        candidates = [k for k in range(1, kx - 2) if not strat[k]]
+        return ([k for k in candidates if hsg[k + 1] > 0.5],
+                [k for k in candidates if hsg[k + 1] <= 0.5])
 
     def test_moisture_branch_matches_fortran(self):
         """Every moisture path and every gate, against the reference Fortran.
@@ -426,20 +458,24 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         fsg = np.asarray(speedy_coords.fsg)
         rhgrad = float(parameters.vertical_diffusion.rhgrad)
-        interfaces = self._active_step3_interfaces()
+        interfaces, sigma_shut = self._step3_interfaces()
         self.assertTrue(interfaces, "step 3 has no active interfaces to check")
+        self.assertTrue(sigma_shut, "no interface is excluded by hsg <= 0.5, so "
+                                    "stratocumulus_sigma_gate_shut pins nothing")
 
         for name, sounding, rh_overrides, _ in MOISTURE_GATE_CASES:
             with self.subTest(case=name):
                 se = np.asarray(sounding["se"])
                 qsat = np.asarray(sounding["qsat"])
-                rh = np.asarray(sounding["rh"], dtype=float)
-                for index, value in rh_overrides.items():
-                    rh[index] = value
-                # The overrides never touch qa[-1] or qsat[-2], so dmse -- and
-                # with it the branch -- is a property of the sounding alone.
-                dmse = se[-1] - se[-2] + alhc * (np.asarray(sounding["qa"])[-1]
-                                                 - qsat[-2])
+                # Read the *overridden* rh and qa, the same arrays the scheme
+                # is handed. None of the present cases moves qa[-1], so dmse is
+                # in practice a property of the sounding alone -- but computing
+                # it from the pristine literals would keep this assertion
+                # passing against stale data if one ever did, and dmse is only
+                # +6.3 kJ/kg on trade cumulus, close enough to flip the branch.
+                rh, qa = (np.asarray(a, dtype=float)
+                          for a in _with_rh_overrides(sounding, rh_overrides))
+                dmse = se[-1] - se[-2] + alhc * (qa[-1] - qsat[-2])
                 shallow = sounding is TRADE_CUMULUS
                 self.assertEqual(bool(dmse > 0.0), shallow)
 
@@ -466,6 +502,15 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                 if "free_trop_gate_closed" in name:
                     self.assertTrue(shut, "the override no longer shuts an "
                                           "active step-3 interface")
+
+                # The sigma-gate case has to leave an interface whose RH gate is
+                # wide open and which only hsg <= 0.5 keeps shut; otherwise the
+                # sigma condition is doing no work and its case pins nothing.
+                if "sigma_gate_shut" in name:
+                    self.assertTrue(
+                        any(rh[k + 1] - rh[k] > rhgrad * (fsg[k + 1] - fsg[k])
+                            for k in sigma_shut),
+                        "no sigma-excluded interface has its RH gate open")
 
     def test_moisture_branch_gradients(self):
         """Gradients where the moisture tendency is live.
