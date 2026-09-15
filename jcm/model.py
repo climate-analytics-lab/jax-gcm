@@ -462,6 +462,10 @@ class Model:
         # The ``jcm`` package logger, not the root logger: every jcm module
         # logs through ``logging.getLogger(__name__)``, so this reaches all
         # of them without deciding logging policy for the host application.
+        # That "every" is enforced —
+        # ``TestModelLogging.test_no_jcm_module_logs_through_the_root_logger``
+        # fails on a bare ``logging.warning(...)``, which would log to root
+        # and so escape this level entirely (#815).
         logging.getLogger("jcm").setLevel(log_level)
         self.calendar = calendar
         # Default built HERE, not as a def-time default: a def-time

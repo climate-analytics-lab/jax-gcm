@@ -505,7 +505,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
             provenance.record_fact(
                 "ozone_source", "analytic (auto: no product for a sigma grid)")
             return forcing
-        logging.info("forcing.ozone_file=auto resolved to %s", ozone_file)
+        logger.info("forcing.ozone_file=auto resolved to %s", ozone_file)
     import numpy as np
 
     from jcm.forcing import default_forcing

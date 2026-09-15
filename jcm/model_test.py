@@ -1212,6 +1212,78 @@ class TestModelLogging(unittest.TestCase):
             logging.getLogger("jcm.predictions").isEnabledFor(
                 logging.WARNING))
 
+    def test_no_jcm_module_logs_through_the_root_logger(self):
+        """``log_level`` reaches only modules with their own logger.
+
+        The module-level ``logging.warning(...)`` helpers, ``logging.root``
+        and the ``from logging import warning`` aliases all emit on the ROOT
+        logger, so a message sent that way sits outside the ``jcm``
+        hierarchy: ``log_level`` cannot quieten it, and an application that
+        silenced its own root logger cannot hear it — both halves of the
+        contract this class tests.
+
+        Matched on the parsed AST rather than the source text, so a call
+        nested in an expression or reached through an alias counts, and a
+        usage example in a docstring does not.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent
+        # Names ``logging`` exports that emit on the root logger.
+        emitters = {"debug", "info", "warning", "warn", "error", "critical",
+                    "exception", "log"}
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Whatever this module calls the logging package (``import
+            # logging as log``), and any emitter pulled into its namespace
+            # directly (``from logging import warning``).
+            modules, aliased = set(), set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_name = alias.name.split(".")[0]
+                        if root_name != "logging":
+                            continue
+                        # ``import logging.config`` binds the bare name
+                        # ``logging`` too; ``... as c`` binds only ``c``.
+                        modules.add(alias.asname or root_name)
+                elif (isinstance(node, ast.ImportFrom)
+                      and node.module == "logging"):
+                    aliased |= {alias.asname or alias.name
+                                for alias in node.names
+                                if alias.name in emitters}
+
+            def _is_logging_module(node):
+                # ``logging`` itself, or ``logging.root`` — both emit on root.
+                if isinstance(node, ast.Name):
+                    return node.id in modules
+                return (isinstance(node, ast.Attribute)
+                        and node.attr == "root"
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in modules)
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                hit = (
+                    (isinstance(func, ast.Attribute)
+                     and func.attr in emitters
+                     and _is_logging_module(func.value))
+                    or (isinstance(func, ast.Name) and func.id in aliased))
+                if hit:
+                    offenders.append(
+                        f"{path.relative_to(root.parent)}:{node.lineno}")
+        self.assertEqual(
+            offenders, [],
+            "these emit on the root logger, where ``log_level`` cannot reach "
+            "them; use a module-level ``logger = "
+            "logging.getLogger(__name__)`` instead. A message deliberately "
+            "aimed at the root logger — and so deliberately outside the "
+            "knob — must say so explicitly via ``logging.getLogger()``.")
+
 
 class TestObserversUnderJit(unittest.TestCase):
     """Observers under an enclosing ``jax.jit`` (#735).
