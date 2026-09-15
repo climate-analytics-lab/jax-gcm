@@ -2418,23 +2418,6 @@ class TestWarnOnConfigTraps:
     that it fires on its trap combo and that it stays silent on the sane one.
     """
 
-    @pytest.fixture(autouse=True)
-    def _audible_jcm_logger(self):
-        # ``caplog.at_level("WARNING")`` sets only the ROOT logger level, so a
-        # leaked ``jcm``-hierarchy level (another module's logging test can
-        # leave ``logging.getLogger("jcm")`` at CRITICAL under xdist) would
-        # filter these warnings before they reach caplog and make the
-        # assert-present cases spuriously fail. Force the ``jcm`` logger audible
-        # for the duration and restore it, so the capture is order-independent.
-        import logging
-        jcm_logger = logging.getLogger("jcm")
-        prev = jcm_logger.level
-        jcm_logger.setLevel(logging.WARNING)
-        try:
-            yield
-        finally:
-            jcm_logger.setLevel(prev)
-
     @staticmethod
     def _physics(*names):
         import types
