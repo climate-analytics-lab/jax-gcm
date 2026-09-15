@@ -6,6 +6,7 @@ so it can run in the regular pytest sweep — we do not test the full ECHAM
 T85x47 grid here.
 """
 
+import logging
 import os
 import unittest
 from pathlib import Path
@@ -440,6 +441,107 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
             np.asarray(forcing_with_ozone.sea_surface_temperature),
             np.asarray(baseline.sea_surface_temperature),
         )
+
+
+class TestRunLogLevel(unittest.TestCase):
+    """``run.log_level`` must reach jcm's loggers in every run mode (#815).
+
+    It is applied by ``Model.__init__``, and only the ``full`` mode builds a
+    ``Model`` — ``prescribed`` and ``scm`` construct a ``PrescribedStateModel``
+    / ``SingleColumnModel``, neither of which takes a level. So the knob used
+    to do nothing at all in those two modes: the ``jcm`` logger stayed NOTSET
+    and deferred to the root level Hydra's job logging sets (INFO), which is
+    the opposite of what a user asking for WARNING wants.
+    """
+
+    def _level_seen_by(self, mode, requested):
+        """Level on the ``jcm`` logger when ``run`` dispatches to ``mode``.
+
+        The mode's runner is stubbed out, so this asserts the level is in
+        place *before* dispatch — which is what makes it mode-independent,
+        rather than a property of whatever each runner happens to build.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        # Set on the composed config rather than as a Hydra override: the
+        # override grammar parses ``run.log_level=50`` to an int either way,
+        # so an override string could not exercise the numeric-*string* path.
+        cfg.run.log_level = requested
+        cfg.run.mode = mode
+        seen = {}
+
+        def _capture(*args, **kwargs):
+            seen["level"] = logging.getLogger("jcm").level
+            return None
+
+        target = {"full": "_run_full", "prescribed": "_run_prescribed",
+                  "scm": "_run_scm"}[mode]
+        with mock.patch.object(runners, target, _capture):
+            runners.run(cfg)
+        return seen["level"]
+
+    def test_every_mode_applies_the_requested_level(self):
+        for mode in ("full", "prescribed", "scm"):
+            for requested, expected in (("WARNING", logging.WARNING),
+                                        ("CRITICAL", logging.CRITICAL),
+                                        ("INFO", logging.INFO)):
+                with self.subTest(mode=mode, log_level=requested):
+                    self.assertEqual(
+                        self._level_seen_by(mode, requested), expected)
+
+    def test_a_numeric_level_is_taken_as_is(self):
+        """The Python door spells this as an int, so the config may too.
+
+        The string spelling is not hypothetical: an interpolation such as
+        ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always resolves to ``str``, as
+        does a shell-quoted CLI override.
+        """
+        for requested in (50, "50"):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._level_seen_by("scm", requested), logging.CRITICAL)
+
+    def test_a_missing_level_uses_the_documented_default(self):
+        """A hand-rolled ``run`` group must not die before the run starts."""
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.mode = "scm"
+        del cfg.run.log_level
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_scm",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg)
+        self.assertEqual(seen["level"], logging.WARNING)
+
+    def test_the_config_wins_over_a_supplied_model(self):
+        """``run(cfg, model=...)`` still applies the config's level.
+
+        ``Model.__init__`` sets the level too, so a caller passing a model
+        they built with their own ``log_level`` has two sources. The config
+        describes the run, so it wins — pinned here because it is a choice,
+        not an accident of call order.
+        """
+        from jcm import runners
+
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # as a Model would
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_full",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg, model=object())
+        self.assertEqual(seen["level"], logging.CRITICAL)
+
+    def test_an_unrecognised_level_is_refused(self):
+        """A typo must not silently run the job at some other verbosity."""
+        with self.assertRaisesRegex(ValueError, "not a logging level"):
+            self._level_seen_by("scm", "warnign")
 
 
 class TestAutoOzoneDefault(unittest.TestCase):
