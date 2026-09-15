@@ -240,8 +240,6 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
                         "wind and moisture tendencies are expected to be dead here")
 
-        
-
     # -- The moisture branch ------------------------------------------------
     #
     # Everything below exercises the half of vdifsc that a uniform-rh state
@@ -262,6 +260,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         is read.
         """
         iptop = 3 if deep_convection else kx + 1
+
         def col(values):
             return jnp.asarray(values, dtype=jnp.float32)[:, jnp.newaxis, jnp.newaxis] \
                 * jnp.ones((ix, il))
