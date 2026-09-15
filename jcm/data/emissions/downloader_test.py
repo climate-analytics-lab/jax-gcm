@@ -24,7 +24,11 @@ class DownloaderTest(unittest.TestCase):
             cwd = os.getcwd()
             try:
                 os.chdir(d)
-                self.assertEqual(fetch("rel.nc"), os.path.abspath(p))
+                resolved = fetch("rel.nc")
+                self.assertTrue(os.path.isabs(resolved))
+                # macOS may spell the same temporary file through either the
+                # /var or /private/var alias, so compare filesystem identity.
+                self.assertTrue(os.path.samefile(resolved, p))
             finally:
                 os.chdir(cwd)
 

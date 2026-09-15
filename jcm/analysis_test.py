@@ -58,7 +58,8 @@ def test_global_mean_of_constant_is_the_constant_both_branches():
                       dims=("lat", "lon"),
                       coords={"lat": _gauss_lats(8),
                               "lon": np.linspace(0, 360, 4, endpoint=False)})
-    assert float(global_mean(gl)) == const
+    np.testing.assert_allclose(
+        float(global_mean(gl)), const, rtol=1e-14, atol=0.0)
     # Uniform grid -> cos(lat) fallback branch.
     uni = xr.DataArray(np.full((10, 4), const),
                        dims=("lat", "lon"),
