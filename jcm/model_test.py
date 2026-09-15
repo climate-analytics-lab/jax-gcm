@@ -451,6 +451,9 @@ class TestModelUnit(unittest.TestCase):
 
         # check whether zonal averages over the last month are within 2 std deviations of the expected values
         for var in default_stat_vars:
+            if var == 'specific_humidity':
+                assert default_stats[f'{var}.mean'].attrs['units'] == 'kg kg-1'
+                assert pred_ds_monthly[var].attrs['units'] == 'kg kg-1'
             lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
             upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
