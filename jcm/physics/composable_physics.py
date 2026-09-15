@@ -29,12 +29,57 @@ from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
 from jcm import profiling
-from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
+from jcm.physics_interface import (
+    Physics,
+    PhysicsState,
+    PhysicsTendency,
+    _record_water_positivity_corrections,
+    _verify_tendencies_with_water_corrections,
+)
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.budget_gauge import gauge_aerosol_budget
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
+
+
+_WATER_POSITIVITY_OUTPUT_ATTRS = {
+    "water_positivity_correction.specific_humidity_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "specific-humidity positivity correction tendency",
+        "description": "specific-humidity positivity correction tendency",
+    },
+    "water_positivity_correction.qc_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "cloud-liquid positivity correction tendency",
+        "description": "cloud-liquid positivity correction tendency",
+    },
+    "water_positivity_correction.qi_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "cloud-ice positivity correction tendency",
+        "description": "cloud-ice positivity correction tendency",
+    },
+    "water_positivity_correction.qr_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "rain-water positivity correction tendency",
+        "description": "rain-water positivity correction tendency",
+    },
+    "water_positivity_correction.qs_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "snow-water positivity correction tendency",
+        "description": "snow-water positivity correction tendency",
+    },
+    "water_positivity_correction.total_water_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "total artificial water source from positivity correction",
+        "description": "total artificial water source from positivity correction",
+    },
+    "water_positivity_correction.column_water_source": {
+        "units": "kg m-2 s-1",
+        "long_name": "column artificial water source from positivity correction",
+        "description": "column artificial water source from positivity correction",
+    },
+}
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -251,6 +296,39 @@ class ComposablePhysics(nnx.Module, Physics):
         diagnostics = jax.tree.map(_pin, diagnostics)
         return tendencies, diagnostics
 
+    def _finalize_tendency_verification(
+        self,
+        state: PhysicsState,
+        raw_tendencies: PhysicsTendency,
+        applied_tendencies: PhysicsTendency,
+        water_corrections: dict[str, jnp.ndarray],
+        physics_data: dict,
+    ) -> dict:
+        """Record the exact positivity source and applied carry tendency."""
+        del state
+        # The diagnostics carry must have one static pytree shape across a
+        # scan.  A caller may carry extra dormant tracers in ``PhysicsState``
+        # (the RCE helpers do this for reuse across minimal and full-ECHAM
+        # columns), but those extras are not part of this composition's
+        # contract.  Limit the ledger to specific humidity plus water tracers
+        # declared by the active terms so the template and every live step
+        # publish the same keys.  A term that evolves a tracer must declare it
+        # via ``required_tracers()``.
+        declared_tracers = {
+            spec.name for spec in self.required_tracers()
+        }
+        water_corrections = {
+            name: value
+            for name, value in water_corrections.items()
+            if name == "specific_humidity" or name in declared_tracers
+        }
+        return _record_water_positivity_corrections(
+            physics_data,
+            raw_tendencies,
+            applied_tendencies,
+            water_corrections,
+        )
+
     def _compute_tendencies_3d(
         self, state, forcing, terrain, prev_physics_data=None,
     ):
@@ -285,6 +363,9 @@ class ComposablePhysics(nnx.Module, Physics):
             tendencies += tend
 
         # Same cross-step handoff as the columns path (see there for why).
+        # This raw value fixes the compute_tendencies output structure; the
+        # gridpoint interface replaces it with the applied post-cap tendency
+        # before the carry leaves the host.
         diagnostics["_prev_step"] = {
             "specific_humidity": state.specific_humidity,
             "q_tendency": tendencies.specific_humidity,
@@ -392,6 +473,9 @@ class ComposablePhysics(nnx.Module, Physics):
         # information ECHAM's ``pqte`` carries into ``cucall`` — and with
         # the same one-step-lagged provenance, since ECHAM's leapfrog
         # dynamics tendency is computed from the previous time level too.
+        # ``acc`` is provisional here so compute_tendencies has one stable
+        # output structure. The gridpoint interface replaces q_tendency with
+        # its applied post-cap value before the carry leaves the host.
         # First consumer: the Tiedtke deep/shallow moisture-convergence
         # test (``zdqcv``, #699). Excluded from xarray output; zeros on
         # step 1 (the structural template), which reads as "no known
@@ -478,8 +562,26 @@ class ComposablePhysics(nnx.Module, Physics):
             lambda s, f, t: self.compute_tendencies(s, f, t)[1],
             probe_state, probe_forcing, probe_terrain,
         )
-        return tree_map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
-                        diagnostics)
+        diagnostics = tree_map(
+            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics,
+        )
+        zero_tendency = PhysicsTendency.zeros(
+            shape_3d,
+            tracers={
+                spec.name: jnp.zeros(shape_3d)
+                for spec in self.required_tracers()
+            },
+        )
+        _, zero_corrections = _verify_tendencies_with_water_corrections(
+            probe_state, zero_tendency, self.dt_seconds,
+        )
+        return self._finalize_tendency_verification(
+            probe_state,
+            zero_tendency,
+            zero_tendency,
+            zero_corrections,
+            diagnostics,
+        )
 
     def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
         """Aggregate per-term cross-step carry-state slots.
@@ -631,6 +733,8 @@ class ComposablePhysics(nnx.Module, Physics):
         for term in self.terms:
             for var, attrs in getattr(term, "output_attrs", {}).items():
                 merged.setdefault(var, dict(attrs))
+        for var, attrs in _WATER_POSITIVITY_OUTPUT_ATTRS.items():
+            merged.setdefault(var, dict(attrs))
         return merged
 
     def data_struct_to_dict(

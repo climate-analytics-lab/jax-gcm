@@ -11,6 +11,8 @@ import numpy as np
 import xarray as xr
 
 from jcm.dycore.base import Predictions
+from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.physics_interface import PhysicsState
 from jcm.predictions import ModelPredictions
 
@@ -79,6 +81,64 @@ def _predictions():
         normalized_surface_pressure=jnp.ones((1, 2, 3)),
     )
     return Predictions(dynamics=dynamics, physics={}, times=jnp.array([11.0]))
+
+
+class WaterPositivityOutputTest(unittest.TestCase):
+    """Water-correction profiles and columns survive public serialization."""
+
+    def test_column_source_shape_and_attrs_survive_to_xarray(self):
+        coords = get_speedy_coords(layers=2, spectral_truncation=21)
+        physics = ComposablePhysics(terms=[], vectorize_columns=True)
+        physics.cache_coords(coords)
+        nlev, nlon, nlat = coords.nodal_shape
+        ntime = 2
+        ncols = nlon * nlat
+        state_shape = (ntime, nlev, nlon, nlat)
+        dynamics = PhysicsState(
+            u_wind=jnp.zeros(state_shape),
+            v_wind=jnp.zeros(state_shape),
+            temperature=jnp.full(state_shape, 280.0),
+            specific_humidity=jnp.full(state_shape, 1.0e-3),
+            geopotential=jnp.zeros(state_shape),
+            normalized_surface_pressure=jnp.ones((ntime, nlon, nlat)),
+            tracers={},
+        )
+        correction = {
+            # Reproduce the scan output of column-vectorized physics before
+            # data_struct_to_dict restores the two horizontal dimensions.
+            "specific_humidity_tendency": jnp.zeros(
+                (ntime, nlev, ncols),
+            ),
+            "total_water_tendency": jnp.zeros((ntime, nlev, ncols)),
+            "column_water_source": jnp.arange(
+                ntime * ncols, dtype=jnp.float32,
+            ).reshape(ntime, ncols),
+        }
+        predictions = Predictions(
+            dynamics=dynamics,
+            physics={"water_positivity_correction": correction},
+            times=jnp.arange(ntime, dtype=jnp.float32),
+        )
+
+        ds = ModelPredictions(predictions, coords, physics).to_xarray()
+
+        profile = ds[
+            "water_positivity_correction.specific_humidity_tendency"
+        ]
+        source = ds["water_positivity_correction.column_water_source"]
+        self.assertEqual(profile.dims, ("time", "level", "lon", "lat"))
+        self.assertEqual(profile.shape, (ntime, nlev, nlon, nlat))
+        self.assertEqual(source.dims, ("time", "lon", "lat"))
+        self.assertEqual(source.shape, (ntime, nlon, nlat))
+        self.assertEqual(source.attrs["units"], "kg m-2 s-1")
+        self.assertEqual(
+            source.attrs["long_name"],
+            "column artificial water source from positivity correction",
+        )
+        self.assertEqual(
+            source.attrs["description"],
+            "column artificial water source from positivity correction",
+        )
 
 
 class ModelPredictionsWithContextTest(unittest.TestCase):

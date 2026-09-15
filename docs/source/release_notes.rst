@@ -45,6 +45,38 @@ Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
 
+Unreleased — positivity corrections are an explicit water-budget source
+-------------------------------------------------------------------------
+
+- The final physics-interface positivity cap remains in place for water vapor,
+  cloud liquid/ice, rain and snow. When summed operator-split sinks overdraw a
+  layer, this safety cap can create a small artificial water source; this is an
+  accepted known limitation for this release, not a conservative
+  redistribution scheme. ``water_positivity_correction`` diagnostics now
+  report the exact stop-gradient ``applied - raw`` tendency for specific
+  humidity and every water field declared by the active composition, plus
+  their total. ECHAM-family compositions, which publish
+  ``pressure_thickness``, additionally report
+  ``column_water_source`` in kg m\ :sup:`-2`\  s\ :sup:`-1`; SPEEDY does not
+  claim a pressure-weighted source because it has no pressure-thickness
+  diagnostic (#806).
+- Full-model and single-column drivers now return and integrate the same
+  verified tendency, and the cross-step humidity carry records that applied
+  value. For release monitoring, cumulative positivity correction should be
+  negligible relative to cumulative precipitation, with an informational
+  target below 0.1%. This target is not yet a runtime failure threshold;
+  conservative vertical redistribution is deferred to a separately validated
+  physics change.
+- Explicit SCM humidity nudging retains a separate non-negativity guard for
+  aggressive ``dt/tau`` configurations. Because nudging is user-configured
+  outside the physics tendency, any truncation there is not included in the
+  physics positivity-correction diagnostics.
+- The existing ``thermo_run`` and Tiedtke qc/qi floors remain as guards on the
+  provisional inter-term state consumed by downstream microphysics. They can
+  influence those downstream tendencies but do not directly update the
+  prognostic state, so they are intentionally outside the reported interface
+  correction; the diagnostics quantify the final positivity cap only.
+
 Unreleased — specific humidity has one kg/kg contract
 ------------------------------------------------------
 

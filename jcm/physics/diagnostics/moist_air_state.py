@@ -100,6 +100,15 @@ def advance_thermo_run(
     accumulation is algebraically identical to applying the terms sequentially
     (T_final = T0 + dt*(conv_dT + cloud_dT(post-conv)) either way).
 
+    The ``qc`` / ``qi`` floors below protect this provisional diagnostic view
+    because downstream cloud schemes cannot consume negative condensate. They
+    can affect the downstream tendencies computed from that view, but do not
+    themselves alter or replace the tendency returned by the calling physics
+    term or add an increment to the prognostic state. They are therefore not
+    represented in the interface positivity-correction ledger. The final
+    summed tendency is independently capped and accounted at the physics
+    interface.
+
     Returns a new diagnostics dict with ``thermo_run`` advanced; a no-op
     (returns the input unchanged) if ``thermo_run`` is absent, so callers stay
     backward-safe.
@@ -116,6 +125,8 @@ def advance_thermo_run(
     qc = tr.get("qc")
     qi = tr.get("qi")
     if d_qc is not None and qc is not None:
+        # This is an inter-term input guard, not a prognostic update; see the
+        # accounting boundary in the docstring above.
         qc = jnp.maximum(qc + d_qc * dt, 0.0)
     if d_qi is not None and qi is not None:
         qi = jnp.maximum(qi + d_qi * dt, 0.0)

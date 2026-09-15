@@ -47,6 +47,10 @@ class _DryingPhysics(Physics):
     def compute_tendencies(self, state, forcing, terrain, prev_physics_data=None):
         tend = PhysicsTendency.zeros(state.temperature.shape).copy(
             specific_humidity=jnp.full_like(state.specific_humidity, -1.0),
+            tracers={
+                name: jnp.full_like(value, -1.0)
+                for name, value in state.tracers.items()
+            },
         )
         return tend, (prev_physics_data if prev_physics_data is not None else {})
 
@@ -170,6 +174,14 @@ class TestSCMEcham(unittest.TestCase):
         self.assertEqual(predictions.tendencies.temperature.shape, (2, 8))
         self.assertIn('qc', predictions.tracer_states)
         self.assertIn('qi', predictions.tracer_states)
+        correction = predictions.physics_data["water_positivity_correction"]
+        self.assertIn("specific_humidity_tendency", correction)
+        self.assertIn("qc_tendency", correction)
+        self.assertIn("qi_tendency", correction)
+        self.assertIn("total_water_tendency", correction)
+        self.assertIn("column_water_source", correction)
+        self.assertTrue(bool(jnp.all(correction["total_water_tendency"] >= 0.0)))
+        self.assertTrue(bool(jnp.all(correction["column_water_source"] >= 0.0)))
 
     def test_radiation_step_counter_starts_at_zero(self):
         """Regression: SCM bootstrap must not advance the radiation carry.
@@ -265,8 +277,8 @@ class TestSCMFreeEvolveAndClosure(unittest.TestCase):
                 ),
             )
 
-    def test_free_evolved_humidity_is_floored_at_zero(self):
-        """A freely evolving specific_humidity never carries a negative value."""
+    def test_free_evolved_humidity_uses_applied_tendency_exactly(self):
+        """SCM returns the capped humidity tendency that creates its state."""
         nlev = 4
         column = _simple_column(nlev, jnp.full(nlev, 280.0)).copy(
             specific_humidity=jnp.full(nlev, 0.5),
@@ -279,10 +291,64 @@ class TestSCMFreeEvolveAndClosure(unittest.TestCase):
         )
         preds = scm.run([column, column, column])
         q_hist = preds.relaxed_states["specific_humidity"]
-        # dq/dt = -1, dt = 1 would drive 0.5 -> -0.5 on step 0; the clamp holds
-        # it at 0 and keeps it there.
+        q_before = jnp.concatenate(
+            (column.specific_humidity[jnp.newaxis], q_hist[:-1]), axis=0,
+        )
         self.assertTrue(bool(jnp.all(q_hist >= 0.0)))
         self.assertTrue(jnp.allclose(q_hist, 0.0))
+        np.testing.assert_array_equal(
+            np.asarray(q_hist),
+            np.asarray(
+                q_before
+                + scm.dt_seconds * preds.tendencies.specific_humidity
+            ),
+        )
+
+    def test_explicit_humidity_nudging_cannot_overdraw_layer(self):
+        """The SCM's non-physics q nudge retains its own positivity guard."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0))
+        initial_q = jnp.full(nlev, 0.1)
+        scm = SingleColumnModel(
+            physics=_IdentityTempPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+            relaxation_timescales={"specific_humidity": 0.25},
+        )
+        preds = scm.run(
+            [column, column],
+            initial_relaxed_vars={"specific_humidity": initial_q},
+        )
+        q_hist = preds.relaxed_states["specific_humidity"]
+        self.assertTrue(bool(jnp.all(q_hist >= 0.0)))
+        np.testing.assert_array_equal(
+            np.asarray(q_hist), np.zeros_like(np.asarray(q_hist)),
+        )
+
+    def test_evolved_water_tracer_uses_applied_tendency_exactly(self):
+        """SCM does not hide a second qc clip after returning its tendency."""
+        nlev = 4
+        column = _simple_column(nlev, jnp.full(nlev, 280.0)).copy(
+            tracers={"qc": jnp.full(nlev, 0.5)},
+        )
+        scm = SingleColumnModel(
+            physics=_DryingPhysics(),
+            vertical=SigmaCoordinates.equidistant(nlev),
+            dt_seconds=1.0,
+        )
+        preds = scm.run([column, column, column])
+        qc_hist = preds.tracer_states["qc"]
+        qc_before = jnp.concatenate(
+            (column.tracers["qc"][jnp.newaxis], qc_hist[:-1]), axis=0,
+        )
+        self.assertTrue(bool(jnp.all(qc_hist >= 0.0)))
+        np.testing.assert_array_equal(
+            np.asarray(qc_hist),
+            np.asarray(
+                qc_before
+                + scm.dt_seconds * preds.tendencies.tracers["qc"]
+            ),
+        )
 
     def test_state_closure_overwrites_state_before_physics(self):
         """A closure pinning T to a constant makes physics see that constant."""
