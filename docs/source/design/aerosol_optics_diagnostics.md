@@ -58,6 +58,12 @@ Both sets of fractions therefore sum to one over species-plus-water, so
 `test_species_apportionment_closes`, and it is the property that makes
 the diagnostic safe to use in a budget.
 
+That water volume is the third-moment-consistent `V_dry·(g³ − 1)`, where
+every radius in the mode grows by the same κ-Köhler factor `g = r_wet/r_dry`
+and so the wet third moment is `g³` times the dry one. Water's share of the
+mode's volume, and hence of its extinction, is therefore exactly
+`(g³ − 1)/g³` — see #790 and `test_water_fraction_is_the_third_moment_growth`.
+
 The absorption weight is not an ad-hoc choice. Under the volume mixing rule,
 `Σ_s V_s k_s` **is** `V_tot · k_eff` — the very effective imaginary index the
 Mie call used. So `abs_s / abs_mode = V_s k_s / (V_tot k_eff)` is exactly the

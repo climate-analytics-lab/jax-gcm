@@ -70,6 +70,57 @@ lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
 observations, SO4 is somewhat long (wet scavenging too weak), and the sea-salt
 source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
 
+### Online aerosol optics
+
+**What we do.** ``JamOpticsTerm`` (``jcm/physics/aerosol/jam/optics/optics_term.py``)
+gives the modal population a direct radiative effect: per mode and radiation
+band it forms a **volume-mixed complex refractive index** over the mode's dry
+species plus its **hygroscopic water**, looks up Mie efficiencies at the wet
+size parameter, integrates them over the mode's lognormal with an 8-node
+Gauss–Hermite quadrature in ``ln r`` (σ_g preserved under growth), and sums
+extinction across modes; single-scattering albedo and asymmetry are
+extinction-/scattering-weighted. The water volume is the
+**third-moment-consistent** ``V_w = V_dry·(g³ − 1)`` with the κ-Köhler growth
+factor ``g = r_wet/r_dry``: that growth (Kelvin term dropped) scales every radius
+in a mode by the same ``g``, so the wet third moment is exactly ``g³`` times
+the dry one, whatever ``σ_g``. ``V_dry`` is the species mass over density
+summed within the mode. The mixing rule's volume basis ``V_dry + V_w`` is then
+exactly the third moment of the same lognormal the Gauss–Hermite quadrature
+integrates the Mie efficiencies over, and the water share of a mode's volume —
+hence of its apportioned extinction, ``od550aerh2o`` — is ``(g³ − 1)/g³``.
+Only the *ratio* of the two radii enters, so the identity survives the core
+clipping ``dg`` to its per-mode bounds.
+
+**What ECHAM-HAM/MAM does.** HAM's ``ham_rad`` volume-mixes the mode's dry
+species with its aerosol water before the optics lookup, integrates over the
+lognormal, and reports the water as an optics component of its own
+(``TAU_COMP_WAT``, mirrored here by ``od550aerh2o``). The ``g³`` relation
+between a mode's wet and dry volume is the one the core here already applies
+to the wet density, ``ρ_wet = (ρ_dry + (g³−1)ρ_w)/g³`` (``placeholder.py``,
+following CAM's ``wetdens`` in ``modal_aero_wateruptake``), so the optics and
+the core describe the same particle.
+
+**Why we differ.** Faithful in the mixing rule and the lognormal integration;
+the LUT-and-quadrature evaluation is a `compute` choice (Mie paid once at
+construction, differentiable table interpolation per step). The water-volume
+form is stated explicitly because a **per-particle** form,
+``N·(4/3)π·(r_wet³ − r_dry³)``, is *not* equivalent when ``r_dry`` is the
+number-median radius: both cores define that radius through the third moment
+``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``, so ``N·(4/3)π·r_dry³`` is the dry volume
+divided by ``exp(4.5 ln²σ_g)`` — 2.70 for σ_g = 1.6 (Aitken, primary carbon)
+and 4.73 for σ_g = 1.8 (accumulation, coarse), and by a larger, size-dependent
+factor wherever ``dg`` sits on a clip bound. Mixed with the third-moment
+``V_dry`` it understates the water by that factor and biases the mixed index
+towards the dry species, which is what issue #790 records. The form used is
+also identically zero where a mode holds no dry material, whatever ringing
+the number field carries.
+
+**Status & known limitations.** Spherical, homogeneously mixed particles (no
+core–shell treatment of black carbon; a NeuralMie core–shell backend is
+proposed in #791). Per-species optics are an apportionment of the mixed
+mode's extinction, not a decomposition — see
+{doc}`../design/aerosol_optics_diagnostics`.
+
 ### Cloud-droplet activation (ARG)
 
 **What we do.** Abdul-Razzak & Ghan (2000) closed-form maximum-supersaturation
