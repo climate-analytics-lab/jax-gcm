@@ -7,12 +7,12 @@ import sys
 class TestLoggingLevelIsolation:
     """A ``jcm``-hierarchy level must not outlive the test that set it (#815).
 
-    ``Model(log_level=...)`` sets the level on the ``jcm`` logger, so a test
-    that builds a deliberately quiet model silences the whole hierarchy for
-    every later test in the same process. Later tests asserting that a
-    warning fires then fail, because ``assertLogs(level=...)`` and
-    ``caplog.at_level(...)`` raise only the ROOT logger's level — the record
-    is filtered at its own logger and never reaches the capture.
+    ``runners.run()`` sets the level on the ``jcm`` logger from
+    ``run.log_level``, so every test that drives a run leaves one behind.
+    Later tests asserting that a warning fires then fail, because
+    ``assertLogs(level=...)`` and ``caplog.at_level(...)`` raise only the
+    ROOT logger's level — the record is filtered at its own logger and never
+    reaches the capture.
 
     Neither test here leaks a level of its own. A canary that deliberately
     left one behind would, if ``_pin_logging_levels`` ever regressed, seed

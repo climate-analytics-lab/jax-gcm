@@ -100,14 +100,19 @@ def _restore_logging():
 def _pin_logging_levels():
     """Hold the ``jcm`` logger levels at the session default (#815).
 
-    ``Model(log_level=...)`` sets the level on the ``jcm`` logger, so a test
-    that builds a deliberately quiet model (``logging.CRITICAL``) silences
-    the whole ``jcm`` hierarchy for every later test in the same process.
-    That breaks any later test asserting a warning fires, because
+    ``runners.run()`` sets the level on the ``jcm`` logger from
+    ``run.log_level`` — the CLI is the application, so that is where the
+    knob belongs — and every test that drives a run therefore leaves one
+    behind. That breaks any later test asserting a warning fires, because
     ``assertLogs(level=...)`` and ``caplog.at_level(...)`` raise only the
     ROOT logger's level: the record is filtered at its own logger and never
-    propagates. Under xdist it depends on which worker drew the quiet model,
-    so it surfaces as an unreproducible failure in an unrelated module.
+    propagates. Under xdist it depends on which worker drew the run, so it
+    surfaces as an unreproducible failure in an unrelated module.
+
+    This is what #815 was, in its original form: ``Model.__init__`` used to
+    set the level too, so merely *constructing* a quiet model leaked one.
+    That is gone — jcm the library configures no logging — but the runners
+    layer still legitimately sets a level, so the isolation is still needed.
 
     Restored before as well as after the test, so a leak from a test that
     errored out of its own teardown does not travel any further either.

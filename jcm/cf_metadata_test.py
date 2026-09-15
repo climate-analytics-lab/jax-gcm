@@ -215,8 +215,6 @@ class TestWrittenFileConvention(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import logging
-
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics
@@ -228,7 +226,6 @@ class TestWrittenFileConvention(unittest.TestCase):
             physics=echam_physics(radiation_scheme="grey",
                                   checkpoint_terms=False),
             time_step=3.0,
-            log_level=logging.CRITICAL,
         )
         preds = model.run(save_interval=1.0 / 24.0, total_time=1.0 / 24.0)
         cls._tmp = tempfile.TemporaryDirectory()

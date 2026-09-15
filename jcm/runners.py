@@ -721,20 +721,22 @@ def _resolve_start_date(cfg: DictConfig):
 _LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
-def _apply_log_level(cfg: DictConfig) -> int:
-    """Set the ``jcm`` logger level from ``cfg.run.log_level`` and return it.
+def _apply_log_level(cfg: DictConfig) -> None:
+    """Set the ``jcm`` logger level from ``cfg.run.log_level``.
 
-    The level goes on the ``jcm`` logger rather than the root one, matching
-    :meth:`Model.__init__`: the CLI's verbosity knob covers jcm's own output
-    without deciding a level for anything else in the host process.
+    The level goes on the ``jcm`` logger rather than the root one, so the
+    CLI's verbosity knob covers jcm's own output without deciding a level for
+    anything else in the host process. ``jcm`` the *library* sets no level at
+    all — this function and Hydra's own ``job_logging`` are the only logging
+    configuration jcm performs, and both belong to the CLI. Called only from
+    :func:`run`, never from the model builders: those are reachable from
+    :func:`jcm.configurations.load`, a library door.
 
-    A numeric level is taken as-is, spelled as an int or a string, because
-    the Python door spells this ``Model(log_level=logging.CRITICAL)`` — an
-    int — so a config writer reasonably tries ``run.log_level=50``, and an
-    interpolation such as ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always arrives
-    as a string. Anything else unrecognised raises rather than quietly
-    falling back: a typo would otherwise run the whole job at a verbosity
-    nobody chose.
+    A numeric level is taken as-is, spelled as an int or a string: a config
+    writer reasonably tries ``run.log_level=50``, and an interpolation such
+    as ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always arrives as a string.
+    Anything else unrecognised raises rather than quietly falling back: a
+    typo would otherwise run the whole job at a verbosity nobody chose.
 
     Read with ``.get`` like every other ``run`` key, so a hand-rolled ``run``
     group that omits it keeps working on the documented default rather than
@@ -762,7 +764,6 @@ def _apply_log_level(cfg: DictConfig) -> int:
                     f"expected one of {', '.join(_LOG_LEVEL_NAMES)} or an "
                     "int.") from None
     logging.getLogger("jcm").setLevel(level)
-    return level
 
 
 def build_model(cfg: DictConfig) -> Model:
@@ -805,7 +806,6 @@ def build_model(cfg: DictConfig) -> Model:
     diffusion = build_diffusion(cfg)
     tracer_filter = build_tracer_filter(cfg)
 
-    log_level = _apply_log_level(cfg)
     # Build the dycore explicitly so the diffusion config flows in via the
     # dycore constructor (Model itself no longer takes a diffusion kwarg —
     # that's a dinosaur-backend concern). The tracer filter is the same kind of
@@ -829,7 +829,6 @@ def build_model(cfg: DictConfig) -> Model:
         physics=physics,
         time_step=time_step,
         start_date=_resolve_start_date(cfg),
-        log_level=log_level,
     )
 
 
@@ -872,11 +871,10 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     if sponge is not None and int(sponge.get("levels", 0)) > 0:
         physics = physics + _pyses_lid_sponge_term(dycore, sponge)
 
-    log_level = _apply_log_level(cfg)
     # No time_step: the Model adopts the dycore's dt_seconds (single source
     # of truth; a conflicting run.time_step would raise).
     return Model(dycore=dycore, physics=physics,
-                 start_date=_resolve_start_date(cfg), log_level=log_level)
+                 start_date=_resolve_start_date(cfg))
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -1169,11 +1167,11 @@ def run(cfg: DictConfig, model: Model | None = None):
       ``cfg.run.column.{lat_deg,lon_deg}``, and run :class:`SingleColumnModel`
       for tracer evolution at that column.
     """
-    # Apply the verbosity knob before anything can log. It reaches the jcm
-    # loggers via ``Model.__init__`` on the ``full`` path, but ``prescribed``
-    # and ``scm`` build no ``Model`` at all, so setting it only there left
-    # ``run.log_level`` a silent no-op in those two modes — the ``jcm`` logger
-    # stayed NOTSET and deferred to Hydra's root INFO whatever was asked for.
+    # Apply the verbosity knob before anything can log. ``run()`` is the only
+    # place jcm sets a level, deliberately: it is the CLI's own entry point,
+    # whereas ``build_model`` is reachable from the documented Python door
+    # ``jcm.configurations.load``, where resetting the caller's ``jcm`` level
+    # would be the library configuring logging all over again.
     _apply_log_level(cfg)
 
     # Best-effort raise of the CPU device count, looked up from

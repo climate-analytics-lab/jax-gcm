@@ -446,11 +446,12 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
 class TestRunLogLevel(unittest.TestCase):
     """``run.log_level`` must reach jcm's loggers in every run mode (#815).
 
-    It is applied by ``Model.__init__``, and only the ``full`` mode builds a
-    ``Model`` — ``prescribed`` and ``scm`` construct a ``PrescribedStateModel``
-    / ``SingleColumnModel``, neither of which takes a level. So the knob used
-    to do nothing at all in those two modes: the ``jcm`` logger stayed NOTSET
-    and deferred to the root level Hydra's job logging sets (INFO), which is
+    ``runners`` is the only layer that sets a level — jcm the library sets
+    none — so ``run()`` applying it before the mode dispatch is what makes
+    the knob mean the same thing everywhere. It used to be applied by
+    ``Model.__init__``, and only ``full`` builds a ``Model``, so it did
+    nothing at all in ``prescribed`` and ``scm``: the ``jcm`` logger stayed
+    NOTSET and deferred to the root level Hydra's job logging sets (INFO),
     the opposite of what a user asking for WARNING wants.
     """
 
@@ -517,17 +518,17 @@ class TestRunLogLevel(unittest.TestCase):
             runners.run(cfg)
         self.assertEqual(seen["level"], logging.WARNING)
 
-    def test_the_config_wins_over_a_supplied_model(self):
-        """``run(cfg, model=...)`` still applies the config's level.
+    def test_the_config_applies_even_with_a_supplied_model(self):
+        """``run(cfg, model=...)`` applies the config's level regardless.
 
-        ``Model.__init__`` sets the level too, so a caller passing a model
-        they built with their own ``log_level`` has two sources. The config
-        describes the run, so it wins — pinned here because it is a choice,
-        not an accident of call order.
+        ``run()`` is the only caller of ``_apply_log_level``, so this pins
+        that its own call covers the pre-built-model path too, and that a
+        level the caller had already set is superseded by the config, which
+        is what describes the run.
         """
         from jcm import runners
 
-        logging.getLogger("jcm").setLevel(logging.DEBUG)   # as a Model would
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # a caller's own choice
         cfg = _compose()
         cfg.run.log_level = "CRITICAL"
         seen = {}
@@ -537,6 +538,29 @@ class TestRunLogLevel(unittest.TestCase):
                     level=logging.getLogger("jcm").level)):
             runners.run(cfg, model=object())
         self.assertEqual(seen["level"], logging.CRITICAL)
+
+    def test_the_python_door_leaves_the_callers_level_alone(self):
+        """Only the CLI configures logging — ``build_model`` must not.
+
+        ``jcm.configurations.load`` is a documented library API and reaches
+        ``build_model``, so applying the config's level there would put jcm
+        back to reconfiguring logging for a host application that never
+        asked for a CLI run (found by review on #819). ``run()`` is the CLI's
+        own entry point and is the only place that may.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # the caller's choice
+
+        from jcm.dycore.dinosaur import dycore as dinosaur_dycore
+        with mock.patch.object(dinosaur_dycore, "DinosaurDycore",
+                               side_effect=RuntimeError("stop here")):
+            with self.assertRaises(RuntimeError):
+                runners.build_model(cfg)
+
+        self.assertEqual(logging.getLogger("jcm").level, logging.DEBUG)
 
     def test_an_unrecognised_level_is_refused(self):
         """A typo must not silently run the job at some other verbosity."""
