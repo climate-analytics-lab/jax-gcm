@@ -10,12 +10,42 @@ checks loose climatological ranges (spin-up tolerant — this is a
     TOA net  = radiation.toa_sw_down - toa_sw_up - toa_lw_up   |net| <= 10 W/m2
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
-    cloud    = column max of clouds.cloud_fraction              0.4 - 0.8
+    cloud    = max-random total cover of clouds.cloud_fraction  0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
 settled sim-days/hr (last chunk wall) for runtime-regression tracking.
 Exit code 0 = all checks pass.
+
+Cloud cover
+-----------
+``cloud_cover`` scores ECHAM's own total cover ``aclcov``
+(:func:`jcm.analysis.total_cloud_cover`, ``mo_cloud.f90`` section 10.2):
+maximum overlap within a vertically contiguous cloud, random overlap between
+clouds separated by clear air. That is the quantity the reference model
+reports and the one the satellite climatologies are quoted on, it is
+deterministic, and it needs nothing but ``clouds.cloud_fraction`` — so every
+saved output, at any radiation scheme, can be scored the same way. A SPEEDY
+run instead scores its own ``shortwave_rad.cloudc``, which is already a column
+cover and has no profile to overlap.
+
+Two further covers are **printed and not gated**, because they answer
+different questions and have no agreed band of their own:
+``cloud_cover_colmax`` is the previous gate quantity (a column maximum, hence
+only a lower bound on cover) and is kept so the #638/#782 tables stay
+readable across this change; ``cloud_cover_radiation`` is the McICA
+sub-column cover the RRTMGP flux solve actually integrates, under the
+configured overlap and decorrelation length — the radiation-view cross-check.
+
+**Cover numbers from before #707 are not comparable to these, on any of the
+three definitions.** #707 gave the 1M scheme ECHAM's post-microphysics cover
+write-back (``mo_cloud.f90``: ``paclc = FSEL(-(zxlp1_d*zxip1_d), paclc, 0)``),
+which clears a cell's cover when its end-of-step condensate is below ``ccwmin``
+in *both* phases. That redefined what ``clouds.cloud_fraction`` counts, and
+the TOA column says the redefinition is bookkeeping rather than cloud: the
+#782 bisect measured that merge at -0.066 of low cloud for +0.15 W/m2.
+Rationale, magnitudes and the #782 decomposition:
+``docs/source/design/cloud_cover_gate.md``.
 """
 import argparse
 import re
@@ -39,7 +69,8 @@ for _p in (str(_REPO), str(_TOOLS)):
 # the species table and the mode-summing burden() are tool domain and stay in
 # tools/jam_burden_report.py (it includes cloud-borne tracers and the
 # pressure_half level-orientation handling).
-from jcm.analysis import area_weights, global_mean  # noqa: E402
+from jcm.analysis import (  # noqa: E402
+    area_weights, global_mean, total_cloud_cover)
 from aerosol_stats import (  # noqa: E402
     _AOD_KEYS, BURDEN_RANGES, anchor_gates, chunk_day, collect, format_table,
     is_jam_run, positive_int,
@@ -49,6 +80,13 @@ from aerosol_stats import (  # noqa: E402
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
     "precip_mm_day": (2.0, 4.0),
+    # Total cloud cover under maximum-random overlap (see the module
+    # docstring). The band brackets the physical anchors with spin-up slack:
+    # ECHAM6's climatological aclcov is ~0.62-0.65 and the satellite estimates
+    # ~0.66-0.70 (ISCCP/MODIS) to ~0.70 (CALIPSO-GOCCP). It is deliberately
+    # NOT tightened around those: no post-#707 year has yet been scored on
+    # this definition, so there is nothing to tighten it against. The next
+    # sweep prints all three covers and supplies those values.
     "cloud_cover": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
     # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
@@ -62,6 +100,43 @@ def wmean(da, weights):
     if "time" in da.dims:
         da = da.mean("time")
     return float(global_mean(da, weights))
+
+
+def cloud_cover_fields(ds, speedy):
+    """Cloud-cover diagnostics for one opened run window, by field dialect.
+
+    Returns ``{name: DataArray}``. ``cloud_cover`` is always present and is the
+    only entry the exit code depends on; the others are reported for context.
+    Each is still a full field — the overlap product is non-linear, so the time
+    and area means are taken downstream of it by :func:`wmean`, never of the
+    cloud fraction.
+
+    ECHAM dialect: ``cloud_cover`` is the max-random total cover,
+    ``cloud_cover_colmax`` the column maximum kept for continuity with the
+    earlier tables, and ``cloud_cover_radiation`` the McICA sub-column cover
+    when the run saved it. The last is absent from output written before the
+    diagnostic existed (``b772ffec``, 2026-07-31) and is identically zero
+    under grey two-stream radiation, which samples no sub-columns; both cases
+    drop the key rather than report a zero as if it were a measurement. The
+    NN emulator does publish it — the analytic expectation of the same McICA
+    draw — so it is a real cross-check there too.
+
+    SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
+    column cover, so there is nothing to overlap and nothing to cross-check.
+    """
+    if speedy:
+        return {"cloud_cover": ds["shortwave_rad.cloudc"]}
+
+    cloud_fraction = ds["clouds.cloud_fraction"]
+    fields = {
+        "cloud_cover": total_cloud_cover(cloud_fraction),
+        "cloud_cover_colmax": cloud_fraction.max("level"),
+    }
+    radiation_cover = ds.get("radiation.total_cloud_cover")
+    if radiation_cover is not None and np.any(
+            np.asarray(radiation_cover.values) != 0.0):
+        fields["cloud_cover_radiation"] = radiation_cover
+    return fields
 
 
 def main():
@@ -131,11 +206,20 @@ def main():
                   + ds.get("convection.precip_conv", 0)) * 86400.0
     check("precip_mm_day", wmean(precip, weights), *RANGES["precip_mm_day"])
 
-    if speedy:
-        cf = ds["shortwave_rad.cloudc"]
-    else:
-        cf = ds["clouds.cloud_fraction"].max("level")
-    check("cloud_cover", wmean(cf, weights), *RANGES["cloud_cover"])
+    cover = cloud_cover_fields(ds, speedy)
+    check("cloud_cover", wmean(cover["cloud_cover"], weights),
+          *RANGES["cloud_cover"])
+    # Reported, never gated: the column max carries the #638/#782 tables
+    # forward, the McICA cover says what the flux solve actually saw.
+    for name in ("cloud_cover_colmax", "cloud_cover_radiation"):
+        if name in cover:
+            print(f"INFO  {name} = {wmean(cover[name], weights):.2f} "
+                  "(reported, not gated)")
+    if not speedy and "cloud_cover_radiation" not in cover:
+        print("NOTE  no non-zero radiation.total_cloud_cover saved (output "
+              "written before b772ffec carries none, and grey two-stream "
+              "publishes zero as it samples no sub-columns); no "
+              "radiation-view cover to compare")
 
     # Lowest model level (level index orientation: take the max-pressure end;
     # jcm output has level index 0 = lowest layer).

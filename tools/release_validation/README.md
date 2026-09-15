@@ -52,6 +52,26 @@ scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 dialects. Post the table to the release issue; compare settled sim-days/hr
 against the baselines in #638 (>15% drop = runtime regression).
 
+**Cloud cover** is ECHAM's own total cover `aclcov` — maximum-random
+overlap of `clouds.cloud_fraction`, `mo_cloud.f90` §10.2, via
+`jcm.analysis.total_cloud_cover` — because that is the definition the
+reference model and the satellite climatologies are quoted on, and it is
+computable from any saved output. Two more covers are **printed and not
+gated**: `cloud_cover_colmax`, the column maximum the gate used to score
+(a lower bound, kept so the #638/#782 tables stay readable), and
+`cloud_cover_radiation`, the McICA sub-column cover the RRTMGP flux solve
+integrates (dropped when the run saved none, or an all-zero field under
+grey radiation). SPEEDY scores its own `shortwave_rad.cloudc` and has no
+profile to overlap. **Cover numbers from before #707 are not comparable
+with these on any of the three definitions** — that PR gave the 1M scheme
+ECHAM's `ccwmin` cover write-back, which redefined what
+`clouds.cloud_fraction` counts (−0.066 of low cloud for +0.15 W/m²:
+bookkeeping, not cloud). The 0.4–0.8 band is unchanged and deliberately
+untightened until a post-#707 year has been scored on this definition.
+Rationale,
+magnitudes and the #782 decomposition:
+`docs/source/design/cloud_cover_gate.md`.
+
 ### The JAM aerosol block
 
 On a run whose saved variables show JAM is composed (modal mass tracers
