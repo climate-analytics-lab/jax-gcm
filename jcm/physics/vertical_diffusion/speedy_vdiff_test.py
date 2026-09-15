@@ -77,7 +77,8 @@ STRATOCUMULUS = dict(
 # though vdifsc reads it at the surface level only.
 #
 # Index 6 is the layer above the surface, which sets the lowest interface's drh;
-# index 4 is the lower layer of step-3 interface 4.
+# index 4 is the layer above step-3 interface 4 -- the frame is top-first, and
+# the scheme takes ``drh = rh[k+1] - rh[k]`` weighted by ``qsat[k]``.
 MOISTURE_GATE_CASES = (
     # name, sounding, rh overrides, deep convection
     ("trade_cumulus", TRADE_CUMULUS, {}, False),
@@ -449,25 +450,39 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                 else:
                     self.assertGreater(pbl_drh, pbl_drh0)
 
+                # A free-troposphere case shuts exactly the interface whose
+                # upper layer it overrode; derived from the override so the two
+                # cannot drift apart if the sigma table changes which
+                # interfaces are active.
+                shut = (set(rh_overrides) & set(interfaces)
+                        if "free_trop_gate_closed" in name else set())
                 for k in interfaces:
                     drh = rh[k + 1] - rh[k]
                     drh0 = rhgrad * (fsg[k + 1] - fsg[k])
-                    if "free_trop_gate_closed" in name and k == 4:
+                    if k in shut:
                         self.assertLessEqual(drh, drh0)
                     else:
                         self.assertGreater(drh, drh0)
+                if "free_trop_gate_closed" in name:
+                    self.assertTrue(shut, "the override no longer shuts an "
+                                          "active step-3 interface")
 
     def test_moisture_branch_gradients(self):
         """Gradients where the moisture tendency is live.
 
         Unlike the uniform-rh operating point above, a real finite difference
-        is usable here: within a branch the fluxes are smooth in every input,
-        and the perturbations stay far from the gates (the nearest margin on
-        these two soundings is ``drh - drh0 = 0.012``). The ``adjoint`` pass
-        runs first for its per-output-leaf guard -- a difference contracts the
-        outputs onto one projection, where an identically zero
-        specific-humidity gradient, the exact defect this test exists for,
-        would be invisible.
+        is usable here: within a branch the fluxes are smooth, and the
+        perturbations stay far from the gates (the nearest margin on these two
+        soundings is ``drh - drh0 = 0.012``). The ``adjoint`` pass runs first
+        for its per-output-leaf guard -- a difference contracts the outputs
+        onto one projection, where an identically zero specific-humidity
+        gradient, the exact defect this test exists for, would be invisible.
+
+        What the difference does *not* constrain is which inputs the answer is
+        sensitive to. The projection here is dominated by the sigma-grid
+        metrics, and ``check_gradients`` steps by an absolute 1e-3, which is
+        below a float32 ulp of ``se ~ 3e5``, so an ``se`` perturbation rounds
+        away entirely. See test_moisture_branch_input_sensitivities.
         """
         from jcm.utils import convert_back, convert_to_float
 
@@ -495,3 +510,66 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                 # 5e-3 is a 10x margin on the worst of seeds 0-3, which agree
                 # with the central difference to 5e-4.
                 check_gradients(f, args, rtol=5e-3)
+
+    # Which inputs the moisture branch is differentiably sensitive to. This is
+    # the mirror of check_gradients' per-output-leaf guard, and it is needed
+    # because the central difference cannot check it here: the projection is
+    # dominated by the sigma-grid metrics, and an absolute 1e-3 step on
+    # ``se ~ 3e5`` (float32 ulp 0.03) rounds away, so a stop_gradient on ``se``
+    # or ``phi`` slips through the difference untouched. That blind spot is a
+    # property of the step ladder rather than of this scheme -- tracked in
+    # issue #820.
+    #
+    # The dead entries are as much of the point as the live ones, and each has
+    # a reason in the scheme:
+    #
+    #  * geopotential is read only by step 4's super-adiabatic damping, and the
+    #    trade-cumulus column is stable to the dry-adiabatic test everywhere,
+    #    so there is nothing to damp.
+    #  * specific humidity is read only through ``dmse``, and in the stable
+    #    branch both of its consumers are flat: ``g_mse`` is a step, and the
+    #    dry-static-energy hinge ``smooth_pos`` is zero below its threshold.
+    #  * fsg enters only the gate thresholds ``drh0`` and the static
+    #    stratosphere mask. At the default zero smoothing width the gates are
+    #    steps, so a threshold has no derivative -- which is exactly the
+    #    differentiability that ``rh_gate_smoothing`` exists to restore.
+    LIVE_INPUT_GRADIENTS = {
+        "trade_cumulus": dict(se=True, rh=True, qsat=True, qa=True, phi=False,
+                              dhs=True, hsg=True, fsg=False),
+        "stratocumulus": dict(se=True, rh=True, qsat=True, qa=False, phi=True,
+                              dhs=True, hsg=True, fsg=False),
+    }
+
+    def test_moisture_branch_input_sensitivities(self):
+        """The tendencies depend on the inputs the scheme actually reads."""
+        for name, sounding in (("trade_cumulus", TRADE_CUMULUS),
+                               ("stratocumulus", STRATOCUMULUS)):
+            with self.subTest(sounding=name):
+                state, physics_data = self._sounding_inputs(
+                    sounding, {}, deep_convection=False)
+                forcing = ForcingData.ones((ix, il))
+
+                def f(physics_data_f, state_f):
+                    tend, _ = get_vertical_diffusion_tend(
+                        state_f, physics_data_f, parameters, forcing, terrain)
+                    return tend.temperature, tend.specific_humidity
+
+                primal, vjp = jax.vjp(f, physics_data, state)
+                grad_data, grad_state = vjp(
+                    tuple(jnp.ones_like(leaf) for leaf in primal))
+                gradients = dict(
+                    se=grad_data.convection.se,
+                    rh=grad_data.humidity.rh,
+                    qsat=grad_data.humidity.qsat,
+                    qa=grad_state.specific_humidity,
+                    phi=grad_state.geopotential,
+                    dhs=grad_data.speedy_coords.dhs,
+                    hsg=grad_data.speedy_coords.hsg,
+                    fsg=grad_data.speedy_coords.fsg,
+                )
+                for field, expect_live in self.LIVE_INPUT_GRADIENTS[name].items():
+                    values = np.asarray(gradients[field])
+                    self.assertTrue(np.all(np.isfinite(values)),
+                                    f"{field}: gradient is not finite")
+                    self.assertEqual(bool(np.any(values != 0.0)), expect_live,
+                                     f"{field}: gradient liveness changed")
