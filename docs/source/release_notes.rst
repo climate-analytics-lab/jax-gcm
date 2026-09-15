@@ -45,6 +45,19 @@ Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
 
+Unreleased — ChemistryData uses ppmv consistently
+--------------------------------------------------
+
+- **Breaking for direct simple-chemistry callers:** ``ChemistryData``,
+  ``ChemistryState``, ``ChemistryTendencies`` and ``ChemistryParameters`` now
+  consistently use ppmv (and ppmv s⁻¹ for rates). The old documentation said
+  ppbv even though ECHAM boundary conditions supplied ppmv and radiation
+  treated the values as ppmv. Divide caller-provided values that followed the
+  old ppbv documentation by 1000. Existing callers that supplied the actual
+  ECHAM/RRTMGP ppmv convention are unchanged. Field-specific
+  ``ozone_mole_fraction()`` / ``methane_mole_fraction()`` helpers make the
+  conversion to gas-optics mol/mol explicit (#749).
+
 Unreleased — RCE initial state seeds a mixed sub-cloud layer
 ------------------------------------------------------------
 
@@ -430,5 +443,3 @@ Known Beta Caveats
   the shipped column physics packages.
 - The beta is intended for named early users and API feedback. Pin the exact
   beta version in user environments and update deliberately between beta tags.
-
-

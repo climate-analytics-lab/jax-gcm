@@ -8,7 +8,9 @@ import jax
 from unittest import TestCase
 
 from .simple_chemistry import (
+    ChemistryData,
     ChemistryParameters,
+    ppmv_to_mole_fraction,
     simple_chemistry,
     fixed_ozone_distribution,
     simple_methane_chemistry,
@@ -30,8 +32,25 @@ class TestChemistryParameters(TestCase):
         self.assertGreater(config.methane_surface_vmr, 0)
 
         # Check reasonable values
-        self.assertGreater(config.ozone_max_vmr, 1000.0)  # > 1 ppmv
-        self.assertLess(config.ozone_max_vmr, 20000.0)    # < 20 ppmv
+        self.assertEqual(float(config.ozone_max_vmr), 8.0)
+        self.assertAlmostEqual(float(config.methane_surface_vmr), 1.9)
+
+    def test_chemistry_data_ppmv_conversion_is_field_specific(self):
+        """Public ppmv fields convert exactly once at radiation boundaries."""
+        chemistry = ChemistryData.zeros((2,), 3).copy(
+            ozone_vmr=jnp.full((3, 2), 8.0),
+            methane_vmr=jnp.full((3, 2), 1.9),
+        )
+
+        self.assertTrue(jnp.allclose(
+            chemistry.ozone_mole_fraction(), 8.0e-6,
+        ))
+        self.assertTrue(jnp.allclose(
+            chemistry.methane_mole_fraction(), 1.9e-6,
+        ))
+        self.assertTrue(jnp.allclose(
+            ppmv_to_mole_fraction(jnp.asarray(0.327)), 0.327e-6,
+        ))
 
 
 class TestOzoneDistribution(TestCase):
@@ -58,7 +77,8 @@ class TestOzoneDistribution(TestCase):
         self.assertTrue(jnp.all(ozone_vmr > 0))
         
         # Check maximum is reasonable
-        self.assertLess(jnp.max(ozone_vmr), 20000.0)  # < 20 ppmv
+        self.assertLess(jnp.max(ozone_vmr), 20.0)
+        self.assertGreaterEqual(jnp.min(ozone_vmr), 0.01)  # 10 ppbv floor
         
         # Check ozone increases with height (up to some level)
         # Lower levels should have less ozone than upper levels
@@ -76,7 +96,7 @@ class TestMethaneChemistry(TestCase):
         nlev, ncols = 10, 5
         pressure = jnp.linspace(100000, 10000, nlev)[:, None] * jnp.ones((1, ncols))
         temperature = jnp.ones((nlev, ncols)) * 280.0
-        methane_vmr = jnp.ones((nlev, ncols)) * 1900.0  # 1.9 ppmv
+        methane_vmr = jnp.ones((nlev, ncols)) * 1.9
         dt = 3600.0  # 1 hour
         
         methane_loss = simple_methane_chemistry(
@@ -107,8 +127,8 @@ class TestFullChemistry(TestCase):
         temperature = jnp.ones((nlev, ncols)) * 250.0
         
         # Initialize with some values
-        current_ozone = jnp.ones((nlev, ncols)) * 5000.0  # 5 ppmv
-        current_methane = jnp.ones((nlev, ncols)) * 1800.0  # 1.8 ppmv
+        current_ozone = jnp.ones((nlev, ncols)) * 5.0
+        current_methane = jnp.ones((nlev, ncols)) * 1.8
         dt = 3600.0
         
         tendencies, state = simple_chemistry(
@@ -172,8 +192,8 @@ class TestJAXCompatibility(TestCase):
         pressure = jnp.linspace(100000, 10000, nlev)[:, None] * jnp.ones((1, ncols))
         surface_pressure = jnp.ones(ncols) * 100000.0
         temperature = jnp.ones((nlev, ncols)) * 250.0
-        current_ozone = jnp.ones((nlev, ncols)) * 5000.0
-        current_methane = jnp.ones((nlev, ncols)) * 1800.0
+        current_ozone = jnp.ones((nlev, ncols)) * 5.0
+        current_methane = jnp.ones((nlev, ncols)) * 1.8
         dt = 3600.0
         
         # Test JIT compilation
@@ -197,7 +217,7 @@ class TestJAXCompatibility(TestCase):
             pressure = jnp.linspace(100000, 10000, nlev)[:, None] * jnp.ones((1, ncols))
             surface_pressure = jnp.ones(ncols) * 100000.0
             temperature = jnp.ones((nlev, ncols)) * 250.0
-            current_methane = jnp.ones((nlev, ncols)) * 1800.0
+            current_methane = jnp.ones((nlev, ncols)) * 1.8
             dt = 3600.0
             
             tendencies, _ = simple_chemistry(
@@ -208,7 +228,7 @@ class TestJAXCompatibility(TestCase):
         
         # Test gradient computation
         grad_fn = jax.grad(loss_fn)
-        ozone_test = jnp.ones((5, 3)) * 5000.0
+        ozone_test = jnp.ones((5, 3)) * 5.0
         grad = grad_fn(ozone_test)
         
         self.assertEqual(grad.shape, ozone_test.shape)

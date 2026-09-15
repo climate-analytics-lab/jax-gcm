@@ -251,7 +251,7 @@ class EchamBoundaryConditions(PhysicsTerm):
             defaults = ChemistryParameters.default()
             ozone_params = ChemistryParameters(
                 ozone_scale_height=jnp.asarray(self._ozone_scale_height_m),
-                ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv * 1000.0),
+                ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv),
                 ozone_tropopause_height=jnp.asarray(self._ozone_peak_height_m),
                 ozone_stratosphere_coeff=defaults.ozone_stratosphere_coeff,
                 methane_surface_vmr=defaults.methane_surface_vmr,
@@ -263,7 +263,7 @@ class EchamBoundaryConditions(PhysicsTerm):
                 surface_pressure=diagnostics["surface_pressure"],
                 temperature=state.temperature,
                 config=ozone_params,
-            ) * 1e-3
+            )
 
         # Start from whatever the previous step (or upstream term) left us
         # so we don't clobber radiation cache or other sub-struct fields.

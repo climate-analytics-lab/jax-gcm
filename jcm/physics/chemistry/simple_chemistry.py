@@ -12,18 +12,26 @@ import tree_math
 import jcm.constants as c
 
 
+PPMV_TO_MOLE_FRACTION = 1.0e-6
+
+
+def ppmv_to_mole_fraction(vmr_ppmv: jnp.ndarray) -> jnp.ndarray:
+    """Convert a volume mixing ratio from ppmv to dimensionless mol/mol."""
+    return jnp.asarray(vmr_ppmv) * PPMV_TO_MOLE_FRACTION
+
+
 @tree_math.struct
 class ChemistryParameters:
     """Configuration parameters for chemistry schemes"""
     
     # Ozone parameters
     ozone_scale_height: float      # Ozone scale height (m)
-    ozone_max_vmr: float          # Maximum ozone volume mixing ratio (ppbv)
+    ozone_max_vmr: float          # Maximum ozone volume mixing ratio (ppmv)
     ozone_tropopause_height: float # Height of ozone maximum (m)
     ozone_stratosphere_coeff: float # Stratospheric ozone coefficient
     
     # Methane parameters
-    methane_surface_vmr: float     # Surface methane VMR (ppbv)
+    methane_surface_vmr: float     # Surface methane VMR (ppmv)
     methane_lifetime: float        # Methane lifetime (s)
     methane_oh_scaling: float      # OH scaling factor
 
@@ -36,10 +44,10 @@ class ChemistryParameters:
         """Return default chemistry parameters"""
         return cls(
             ozone_scale_height=jnp.array(7000.0),      # 7 km
-            ozone_max_vmr=jnp.array(8000.0),           # 8 ppmv
+            ozone_max_vmr=jnp.array(8.0),              # 8 ppmv
             ozone_tropopause_height=jnp.array(20000.0), # 20 km
             ozone_stratosphere_coeff=jnp.array(0.1),
-            methane_surface_vmr=jnp.array(1900.0),     # 1.9 ppmv
+            methane_surface_vmr=jnp.array(1.9),        # 1.9 ppmv
             methane_lifetime=jnp.array(9.0 * 365.25 * 24 * 3600), # 9 years
             methane_oh_scaling=jnp.array(1.0),
         )
@@ -49,29 +57,31 @@ class ChemistryState(NamedTuple):
     """Chemistry state variables and diagnostics"""
     
     # Gas concentrations (volume mixing ratios)
-    ozone_vmr: jnp.ndarray          # Ozone VMR (ppbv)
-    methane_vmr: jnp.ndarray        # Methane VMR (ppbv)
+    ozone_vmr: jnp.ndarray          # Ozone VMR (ppmv)
+    methane_vmr: jnp.ndarray        # Methane VMR (ppmv)
 
     # Production/loss rates
-    ozone_production: jnp.ndarray   # Ozone production rate (ppbv/s)
-    ozone_loss: jnp.ndarray        # Ozone loss rate (ppbv/s)
-    methane_loss: jnp.ndarray      # Methane loss rate (ppbv/s)
+    ozone_production: jnp.ndarray   # Ozone production rate (ppmv/s)
+    ozone_loss: jnp.ndarray        # Ozone loss rate (ppmv/s)
+    methane_loss: jnp.ndarray      # Methane loss rate (ppmv/s)
 
 
 class ChemistryTendencies(NamedTuple):
     """Tendencies from chemistry processes"""
 
     # Trace gas tendencies (mixing ratio per second)
-    ozone_tend: jnp.ndarray         # Ozone tendency (ppbv/s)
-    methane_tend: jnp.ndarray       # Methane tendency (ppbv/s)
+    ozone_tend: jnp.ndarray         # Ozone tendency (ppmv/s)
+    methane_tend: jnp.ndarray       # Methane tendency (ppmv/s)
 
 
 @tree_math.struct
 class ChemistryData:
     """Diagnostic sub-struct for the chemistry diagnostic-dict slot.
 
-    Seeded by ``EchamBoundaryConditions`` (which fills the CH4/O3 VMRs, CH4
-    from ``forcing.ch4_vmr``) and consumed by the radiation terms; the
+    All trace-gas concentrations use ppmv, matching ``ForcingData`` and
+    ``OzoneClimatology``. Seeded by ``EchamBoundaryConditions`` (which fills
+    the CH4/O3 VMRs, CH4 from ``forcing.ch4_vmr``) and consumed by the
+    radiation terms, which convert explicitly to dimensionless mol/mol; the
     ``SimpleChemistry`` term also writes its production/loss diagnostics
     here. CO2 is NOT carried here — it is a prescribed forcing read directly
     from ``forcing.co2_vmr`` by radiation. Lives next to the chemistry scheme so
@@ -80,16 +90,16 @@ class ChemistryData:
     """
 
     # Gas concentrations (volume mixing ratios)
-    ozone_vmr: jnp.ndarray           # Ozone VMR [ppbv] (nlev, ncols)
-    methane_vmr: jnp.ndarray         # Methane VMR [ppbv] (nlev, ncols)
+    ozone_vmr: jnp.ndarray           # Ozone VMR [ppmv] (nlev, ncols)
+    methane_vmr: jnp.ndarray         # Methane VMR [ppmv] (nlev, ncols)
 
     # Production/loss rates
-    ozone_production: jnp.ndarray    # Ozone production rate [ppbv/s] (nlev, ncols)
-    ozone_loss: jnp.ndarray         # Ozone loss rate [ppbv/s] (nlev, ncols)
-    methane_loss: jnp.ndarray       # Methane loss rate [ppbv/s] (nlev, ncols)
+    ozone_production: jnp.ndarray    # Ozone production rate [ppmv/s] (nlev, ncols)
+    ozone_loss: jnp.ndarray         # Ozone loss rate [ppmv/s] (nlev, ncols)
+    methane_loss: jnp.ndarray       # Methane loss rate [ppmv/s] (nlev, ncols)
 
     # Surface emissions/deposition
-    methane_surface_flux: jnp.ndarray  # Surface methane flux [ppbv m/s] (ncols,)
+    methane_surface_flux: jnp.ndarray  # Surface methane flux [ppmv m/s] (ncols,)
     ozone_dry_deposition: jnp.ndarray  # Ozone dry deposition velocity [m/s] (ncols,)
 
     @classmethod
@@ -127,6 +137,14 @@ class ChemistryData:
         }
         new_data.update(kwargs)
         return ChemistryData(**new_data)
+
+    def ozone_mole_fraction(self) -> jnp.ndarray:
+        """Return ``ozone_vmr`` as dimensionless mol(O3)/mol(air)."""
+        return ppmv_to_mole_fraction(self.ozone_vmr)
+
+    def methane_mole_fraction(self) -> jnp.ndarray:
+        """Return ``methane_vmr`` as dimensionless mol(CH4)/mol(air)."""
+        return ppmv_to_mole_fraction(self.methane_vmr)
 
 
 def compute_height_from_pressure(
@@ -175,7 +193,7 @@ def fixed_ozone_distribution(
         config: Chemistry configuration
         
     Returns:
-        Ozone volume mixing ratio (ppbv) [nlev, ncols]
+        Ozone volume mixing ratio (ppmv) [nlev, ncols]
 
     """
     # Calculate approximate height
@@ -195,7 +213,7 @@ def fixed_ozone_distribution(
     )
     
     # Ensure positive values
-    ozone_profile = jnp.maximum(ozone_profile, 10.0)  # Minimum 10 ppbv
+    ozone_profile = jnp.maximum(ozone_profile, 0.01)  # Minimum 10 ppbv
     
     return ozone_profile
 
@@ -212,12 +230,12 @@ def simple_methane_chemistry(
     Args:
         pressure: Pressure (Pa) [nlev, ncols]
         temperature: Temperature (K) [nlev, ncols]
-        methane_vmr: Current methane VMR (ppbv) [nlev, ncols]
+        methane_vmr: Current methane VMR (ppmv) [nlev, ncols]
         dt: Time step (s)
         config: Chemistry configuration
         
     Returns:
-        Methane loss rate (ppbv/s) [nlev, ncols]
+        Methane loss rate (ppmv/s) [nlev, ncols]
 
     """
     # Temperature-dependent loss rate
@@ -252,8 +270,8 @@ def simple_chemistry(
         pressure: Pressure (Pa) [nlev, ncols]
         surface_pressure: Surface pressure (Pa) [ncols]
         temperature: Temperature (K) [nlev, ncols]
-        current_ozone: Current ozone VMR (ppbv) [nlev, ncols]
-        current_methane: Current methane VMR (ppbv) [nlev, ncols]
+        current_ozone: Current ozone VMR (ppmv) [nlev, ncols]
+        current_methane: Current methane VMR (ppmv) [nlev, ncols]
         dt: Time step (s)
         config: Chemistry configuration
         

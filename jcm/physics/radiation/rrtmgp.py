@@ -27,6 +27,7 @@ from jcm.physics.coords_util import column_lat_lon
 from jax import lax
 
 from jax_solar import OrbitalTime, direct_solar_irradiance, get_solar_sin_altitude
+from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.clouds.cloud_data import radiation_cloud_fields
 from jcm.physics.radiation.radiation_types import (
     CLEAR_SKY_KEYS,
@@ -73,6 +74,16 @@ _GLOBAL_RRTMGP_INSTANCE = None
 
 
 logger = logging.getLogger(__name__)
+
+
+def _greenhouse_gas_mole_fractions(chemistry, forcing):
+    """Convert jcm's field-specific ppmv inputs to RRTMGP mol/mol values."""
+    return (
+        chemistry.ozone_mole_fraction(),
+        chemistry.methane_mole_fraction(),
+        ppmv_to_mole_fraction(forcing.co2_vmr),
+        ppmv_to_mole_fraction(forcing.n2o_vmr),
+    )
 
 
 def _ensure_rrtmgp():
@@ -1287,10 +1298,9 @@ class RRTMGPRadiation(PhysicsTerm):
         # Radiation never reads a GHG concentration from its own parameters, and
         # never lets a value be silently redeclared.
         chemistry = diagnostics["chemistry"]
-        ozone_vmr = chemistry.ozone_vmr * 1e-6     # (nlev, ncols)
-        ch4_vmr = chemistry.methane_vmr * 1e-6     # (nlev, ncols)
-        co2_vmr = forcing.co2_vmr * 1e-6           # scalar
-        n2o_vmr = forcing.n2o_vmr * 1e-6           # scalar
+        ozone_vmr, ch4_vmr, co2_vmr, n2o_vmr = (
+            _greenhouse_gas_mole_fractions(chemistry, forcing)
+        )
 
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
