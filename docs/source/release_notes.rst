@@ -96,6 +96,20 @@ Unreleased — delegated timesteps have one effective value
   instead of raising on ``None``, silently falling back to 900 seconds, or
   reporting against a conflicting config value (#801).
 
+Unreleased — public state and transformed-output contracts
+-----------------------------------------------------------
+
+- ``Model.initial_state()`` and ``Model.initial_physics_carry()`` return fresh
+  dycore/carry pytrees for external steppers. ``bootstrap_state()`` now returns
+  the pair it installs, ``dycore_state`` and ``physics_carry`` expose the
+  resumable pair read-only, and checkpoint restore replaces both atomically
+  (#755).
+- ``ModelPredictions.with_context(model)`` reattaches the static coordinates,
+  physics, dycore and observer metadata intentionally omitted at JAX pytree
+  boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
+  custom drivers; re-derived live parameters are labelled so they cannot be
+  mistaken for trace-time provenance (#756).
+
 Unreleased — RCE initial state seeds a mixed sub-cloud layer
 ------------------------------------------------------------
 
