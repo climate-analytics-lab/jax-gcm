@@ -7,24 +7,31 @@ from jcm.testing import check_gradients
 
 # Two reference soundings for the moisture half of the scheme, with the levels
 # top-first (index 0 = model top, index -1 = surface) as the physics-internal
-# frame requires. They are chosen against ``vdifsc.f90``'s own gate arithmetic
-# rather than tuned until a branch opens: on the SPEEDY 8-level sigma table the
-# shallow-convection onset is ``drh0 = rhgrad * (fsg[-1] - fsg[-2]) = 0.0575``
-# and the two active free-tropospheric interfaces (the only ones with
-# ``hsg > 0.5``) have ``drh0 = 0.0875`` and ``0.075``.
+# frame requires. They are chosen against vdifsc.f90's own gate arithmetic
+# rather than tuned until a branch opened. That arithmetic, on the SPEEDY
+# 8-level sigma table:
 #
-# Each was built from a temperature profile by integrating the geopotential
-# hydrostatically from ``phi_surface = 0`` with ``jcm.constants.rd``, taking
-# ``qsat`` from :func:`jcm.physics.clouds.speedy_humidity.get_qsat` at
-# ``ps = 1013 hPa``, then ``qa = rh * qsat`` and ``se = cpd * T + phi``. The
-# results are frozen as literals so the test pins ``vdifsc`` alone and does not
-# move when the saturation formula or the hydrostatic integration does.
+#  * the lowest interface splits between a shallow-convection branch
+#    (``dmse >= 0``, whose moisture flux is gated only on ``drh >= 0``) and a
+#    stable moisture-diffusion branch (``dmse < 0``), whose onset is
+#    ``drh0 = rhgrad * (fsg[-1] - fsg[-2]) = 0.0575``;
+#  * step 3 runs on the interfaces inside ``1 .. kx-3`` whose upper half level
+#    clears ``hsg > 0.5``, which here is interfaces 4 and 5, with
+#    ``drh0 = 0.0875`` and ``0.075``.
+#
+# Each sounding was built from a temperature profile by integrating the
+# geopotential hydrostatically from ``phi_surface = 0`` with
+# ``jcm.constants.rd``, taking ``qsat`` from
+# :func:`jcm.physics.clouds.speedy_humidity.get_qsat` at ``ps = 1013 hPa``,
+# then ``qa = rh * qsat`` and ``se = cpd * T + phi``. The results are frozen as
+# literals so the test pins ``vdifsc`` alone, and does not move when the
+# saturation formula or the hydrostatic integration does.
 
 # Trade cumulus: a moist boundary layer (RH 0.88) under a drier free
 # troposphere, with a near-moist-adiabatic lapse rate
 # (T = 220, 200, 216, 240, 262, 279, 289, 297 K). This is conditionally
 # unstable -- dmse = +6.3 kJ/kg -- so SPEEDY's *shallow convection* branch runs
-# and carries both the dry-static-energy flux and, since drh = 0.13 >= 0, the
+# and carries both the dry-static-energy flux and, since drh = 0.13 > 0, the
 # moisture flux. The column is stable to the dry-adiabatic test throughout, so
 # step 4 contributes nothing and ttenvd here is the shallow-convection flux
 # alone.
@@ -59,29 +66,80 @@ STRATOCUMULUS = dict(
          26997.5253, 10685.1311, 0.0],
 )
 
+# The cases run against the Fortran. A sounding sitting far on the open side of
+# a gate pins the flux but not the *threshold*: deleting the gate outright would
+# not change its answer. So each gate additionally gets a pair of variants that
+# straddle it, made by moving the relative humidity of one layer and nothing
+# else. Perturbing ``rh`` alone is safe because none of the three thresholds
+# depends on it: dmse is built from se, qa[-1] and qsat[-2], so the *branch*
+# does not change under these overrides -- only which side of the moisture gate
+# the column falls on. ``qa`` is kept consistent (``qa = rh * qsat``) even
+# though vdifsc reads it at the surface level only.
+#
+# Index 6 is the layer above the surface, which sets the lowest interface's drh;
+# index 4 is the lower layer of step-3 interface 4.
+MOISTURE_GATE_CASES = (
+    # name, sounding, rh overrides, deep convection
+    ("trade_cumulus", TRADE_CUMULUS, {}, False),
+    ("trade_cumulus_deep_convection", TRADE_CUMULUS, {}, True),
+    # drh = -0.02: below the shallow branch's drh >= 0, so the dry-static-energy
+    # flux still fires but the moisture flux must not. This is the case that
+    # would otherwise let a dropped guard drive a *reversed* moisture flux,
+    # moistening the surface out of the PBL top.
+    ("trade_cumulus_shallow_gate_closed", TRADE_CUMULUS, {6: 0.90}, False),
+    # drh = +0.02: open, but below the stable branch's drh0 = 0.0575, so it also
+    # pins that this branch's threshold is 0 and not drh0.
+    ("trade_cumulus_shallow_gate_open", TRADE_CUMULUS, {6: 0.86}, False),
+    ("stratocumulus", STRATOCUMULUS, {}, False),
+    ("stratocumulus_deep_convection", STRATOCUMULUS, {}, True),
+    # drh = 0.050 and 0.065 straddle the stable branch's drh0 = 0.0575.
+    ("stratocumulus_stable_gate_closed", STRATOCUMULUS, {6: 0.85}, False),
+    ("stratocumulus_stable_gate_open", STRATOCUMULUS, {6: 0.835}, False),
+    # drh = 0.085 at interface 4, just below its drh0 = 0.0875; the unmodified
+    # sounding sits just above at 0.10.
+    ("stratocumulus_free_trop_gate_closed", STRATOCUMULUS, {4: 0.265}, False),
+)
+
 # Tendencies from the unmodified body of SPEEDY's ``vertical_diffusion.f90``
 # (samhatfield/speedy.f90) run in double precision on exactly the literals
 # above, with cp = 1004.64 and alhc = 2501.0 so that only the formulation --
-# not the choice of constants -- is being compared. Keyed by
-# (sounding, deep_convection); in the deep-convection column shallow convection
-# is damped by redshc, which is reachable only through the dmse >= 0 branch and
-# so is covered here for the first time.
+# not the choice of constants -- is being compared.
+#
+# Note that the *inputs* are constants-independent but these expected
+# tendencies are not: they scale with the live ``c.cpd`` through fshcse/fvdise
+# and with alhc through dmse. The same 0.06% cpd revision that forced the
+# tolerance note in test_get_vertical_diffusion_tend would put these outside
+# rtol = 2e-4 as well, so a constants change means regenerating them rather
+# than hunting for a port bug.
 FORTRAN_REFERENCE = {
-    ("trade_cumulus", False): dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                2.2506675098057929e-04, -2.9258677627475314e-04],
+    "trade_cumulus": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.2506675098057929e-04,
+                -2.9258677627475314e-04],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
                 1.3020053681520057e-05, 6.9235409235962714e-05,
                 -1.1630304231481483e-04],
     ),
-    ("trade_cumulus", True): dict(
-        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                1.1253337549028965e-04, -1.4629338813737657e-04],
+    "trade_cumulus_deep_convection": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.1253337549028965e-04,
+                -1.4629338813737657e-04],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
                 1.3020053681520057e-05, 2.4503469884110871e-05,
                 -5.8151521157407417e-05],
     ),
-    ("stratocumulus", False): dict(
+    "trade_cumulus_shallow_gate_closed": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.2506675098057929e-04,
+                -2.9258677627475314e-04],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
+                2.2301351437307094e-05, -3.2365551148385563e-05, 0.0],
+    ),
+    "trade_cumulus_shallow_gate_open": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.2506675098057929e-04,
+                -2.9258677627475314e-04],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 2.3127328052662036e-06,
+                1.9826338702430550e-05, -1.5365322386823345e-05,
+                -1.7892775740740759e-05],
+    ),
+    "stratocumulus": dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
                 -5.3839539379103348e-06, -5.3839539379103348e-06,
                 -5.3839539379103348e-06],
@@ -89,15 +147,35 @@ FORTRAN_REFERENCE = {
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
     ),
-    # Identical to the quiescent column: redshc only damps the dmse >= 0
-    # branch, which this stable sounding does not take.
-    ("stratocumulus", True): dict(
+    "stratocumulus_deep_convection": dict(
         ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
                 -5.3839539379103348e-06, -5.3839539379103348e-06,
                 -5.3839539379103348e-06],
         qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
                 1.8719994726562494e-05, 2.5021758845819989e-05,
                 -6.7127556901041690e-05],
+    ),
+    "stratocumulus_stable_gate_closed": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
+                -5.3839539379103348e-06, -5.3839539379103348e-06,
+                -5.3839539379103348e-06],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
+                3.9072506727430539e-05, -5.3229646771501056e-05, 0.0],
+    ),
+    "stratocumulus_stable_gate_open": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
+                -5.3839539379103348e-06, -5.3839539379103348e-06,
+                -5.3839539379103348e-06],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 1.5418218701774688e-06,
+                3.7851356007378451e-05, -4.0444831218182400e-05,
+                -1.4544303995225712e-05],
+    ),
+    "stratocumulus_free_trop_gate_closed": dict(
+        ttenvd=[0.0, 0.0, 0.0, 0.0, 1.1964342084245189e-05,
+                -5.3839539379103348e-06, -5.3839539379103348e-06,
+                -5.3839539379103348e-06],
+        qtenvd=[0.0, 0.0, 0.0, 0.0, 0.0, 2.0352512000868048e-05,
+                2.5021758845819989e-05, -6.7127556901041690e-05],
     ),
 }
 
@@ -244,28 +322,33 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     #
     # Everything below exercises the half of vdifsc that a uniform-rh state
     # cannot reach. ``PhysicsData.ones()`` gives drh == 0 exactly, so neither
-    # the shallow-convection moisture flux (dmse >= 0, drh >= 0) nor the stable
+    # the shallow-convection moisture flux (dmse >= 0, drh > 0) nor the stable
     # diffusion branch (dmse < 0, drh > drh0) ever ran under a gradient check,
     # and the whole dmse >= 0 branch -- its heat flux and the redshc damping
     # included -- had no value coverage at all.
 
-    def _sounding_inputs(self, sounding, deep_convection):
+    def _sounding_inputs(self, sounding, rh_overrides, deep_convection):
         """Assemble the scheme's arguments from a sounding literal.
 
         ``iptop`` is the convective cloud-top level index and the scheme
         branches on ``icnv = kx - iptop > 0``. SPEEDY's convection initialises
         ``iptop`` to the ``kx + 1`` sentinel and lowers it only where it
         triggers, so those are the two kinds of value a real column presents;
-        the cloud top itself is arbitrary, since only the sign of ``icnv``
-        is read.
+        the cloud top itself is arbitrary, since only the sign of ``icnv`` is
+        read.
         """
         iptop = 3 if deep_convection else kx + 1
+        rh = list(sounding["rh"])
+        qa = list(sounding["qa"])
+        for index, value in rh_overrides.items():
+            rh[index] = value
+            qa[index] = value * sounding["qsat"][index]
 
         def col(values):
             return jnp.asarray(values, dtype=jnp.float32)[:, jnp.newaxis, jnp.newaxis] \
                 * jnp.ones((ix, il))
 
-        humidity = HumidityData.zeros((ix, il), kx, rh=col(sounding["rh"]),
+        humidity = HumidityData.zeros((ix, il), kx, rh=col(rh),
                                       qsat=col(sounding["qsat"]))
         convection = ConvectionData.zeros(
             (ix, il), kx, iptop=jnp.full((ix, il), iptop, dtype=int),
@@ -273,89 +356,118 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         physics_data = PhysicsData.zeros(
             (ix, il), kx, humidity=humidity, convection=convection,
             speedy_coords=speedy_coords)
-        state = PhysicsState.zeros((kx, ix, il),
-                                   specific_humidity=col(sounding["qa"]),
+        state = PhysicsState.zeros((kx, ix, il), specific_humidity=col(qa),
                                    geopotential=col(sounding["phi"]))
         return state, physics_data
 
-    def test_moisture_branch_matches_fortran(self):
-        """Both moisture branches, against the reference Fortran.
+    def _active_step3_interfaces(self):
+        """Interfaces step 3 diffuses across, derived rather than written out.
 
-        The two soundings split the lowest-interface gate between them:
-        trade cumulus takes ``dmse >= 0`` (shallow convection, and under deep
+        Mirrors the scheme's own selection (``jcm.physics.vertical_diffusion.
+        speedy_vdiff``): interfaces ``1 .. kx-3``, whose upper half level clears
+        ``hsg > 0.5``, and whose upper layer is not stratospheric.
+        """
+        from jcm.physics.speedy.speedy_coords import stratosphere_mask
+
+        hsg = np.asarray(speedy_coords.hsg)
+        strat = np.asarray(stratosphere_mask(speedy_coords.fsg))
+        return [k for k in range(1, kx - 2) if hsg[k + 1] > 0.5 and not strat[k]]
+
+    def test_moisture_branch_matches_fortran(self):
+        """Every moisture path and every gate, against the reference Fortran.
+
+        The two soundings split the lowest interface between them: trade
+        cumulus takes ``dmse > 0`` (shallow convection, and under deep
         convection the redshc damping), stratocumulus takes ``dmse < 0`` with
-        ``drh > drh0`` (stable diffusion). Both also open the two active
-        free-tropospheric interfaces of step 3.
+        ``drh > drh0`` (stable diffusion). The variants straddle each gate, so
+        the thresholds are pinned and not just the fluxes they admit.
 
         The tolerance is float32: ``dmse`` is a difference of O(3e5) dry static
         energies, so it loses about two decimal digits to cancellation and the
         worst component here agrees with the double-precision Fortran to 2e-5
-        relative.
+        relative. A shut gate must give *exactly* zero, which ``atol`` covers.
         """
-        for name, sounding in (("trade_cumulus", TRADE_CUMULUS),
-                               ("stratocumulus", STRATOCUMULUS)):
-            for deep_convection in (False, True):
-                with self.subTest(sounding=name, deep_convection=deep_convection):
-                    state, physics_data = self._sounding_inputs(
-                        sounding, deep_convection)
-                    tend, _ = get_vertical_diffusion_tend(
-                        state, physics_data, parameters, ForcingData.ones((ix, il)),
-                        terrain)
-                    expected = FORTRAN_REFERENCE[(name, deep_convection)]
-                    np.testing.assert_allclose(
-                        np.asarray(tend.temperature[:, 0, 0]),
-                        expected["ttenvd"], rtol=2e-4, atol=1e-12)
-                    np.testing.assert_allclose(
-                        np.asarray(tend.specific_humidity[:, 0, 0]),
-                        expected["qtenvd"], rtol=2e-4, atol=1e-12)
-                    # vdifsc returns heat and moisture only; momentum is the
-                    # surface drag's job.
-                    self.assertTrue(np.all(np.asarray(tend.u_wind) == 0.0))
-                    self.assertTrue(np.all(np.asarray(tend.v_wind) == 0.0))
+        for name, sounding, rh_overrides, deep in MOISTURE_GATE_CASES:
+            with self.subTest(case=name):
+                state, physics_data = self._sounding_inputs(
+                    sounding, rh_overrides, deep)
+                tend, _ = get_vertical_diffusion_tend(
+                    state, physics_data, parameters, ForcingData.ones((ix, il)),
+                    terrain)
+                expected = FORTRAN_REFERENCE[name]
+                np.testing.assert_allclose(
+                    np.asarray(tend.temperature[:, 0, 0]),
+                    expected["ttenvd"], rtol=2e-4, atol=1e-12)
+                np.testing.assert_allclose(
+                    np.asarray(tend.specific_humidity[:, 0, 0]),
+                    expected["qtenvd"], rtol=2e-4, atol=1e-12)
+                # vdifsc returns heat and moisture only; momentum is the
+                # surface drag's job.
+                self.assertTrue(np.all(np.asarray(tend.u_wind) == 0.0))
+                self.assertTrue(np.all(np.asarray(tend.v_wind) == 0.0))
 
-    def test_moisture_branch_is_actually_open(self):
-        """The soundings open the gates they were chosen to open.
+    def test_moisture_gate_cases_straddle_their_gates(self):
+        """Each case sits on the side of its gate that it is named for.
 
-        Asserted separately from the value test so that a sounding which
-        silently stopped clearing ``drh0`` -- after a change to rhgrad or to the
-        sigma table -- fails as the coverage regression it is, rather than as an
-        unexplained mismatch of two arrays of zeros.
+        Asserted separately from the value test so that a case which silently
+        stopped straddling ``drh0`` -- after a change to rhgrad or to the sigma
+        table -- fails as the coverage regression it is, rather than as an
+        unexplained match of two arrays of zeros.
+
+        The comparisons are strict because the scheme's width-0 gates are:
+        ``smooth_gate(x, thr, 0)`` is ``x > thr``. vdifsc itself writes
+        ``drh >= 0`` and ``drh >= drh0``, so the two differ on a column landing
+        exactly on a threshold -- unreachable in practice, and the strict form
+        is what these assertions must describe if they are to predict what the
+        scheme does.
         """
         from jcm.physics.speedy.physical_constants import alhc
 
         fsg = np.asarray(speedy_coords.fsg)
         rhgrad = float(parameters.vertical_diffusion.rhgrad)
-        for name, sounding, expect_shallow in (
-                ("trade_cumulus", TRADE_CUMULUS, True),
-                ("stratocumulus", STRATOCUMULUS, False)):
-            with self.subTest(sounding=name):
+        interfaces = self._active_step3_interfaces()
+        self.assertTrue(interfaces, "step 3 has no active interfaces to check")
+
+        for name, sounding, rh_overrides, _ in MOISTURE_GATE_CASES:
+            with self.subTest(case=name):
                 se = np.asarray(sounding["se"])
-                rh = np.asarray(sounding["rh"])
-                qa = np.asarray(sounding["qa"])
                 qsat = np.asarray(sounding["qsat"])
-                dmse = se[-1] - se[-2] + alhc * (qa[-1] - qsat[-2])
-                drh = rh[-1] - rh[-2]
-                self.assertEqual(dmse >= 0.0, expect_shallow)
-                if expect_shallow:
-                    self.assertGreaterEqual(drh, 0.0)
+                rh = np.asarray(sounding["rh"], dtype=float)
+                for index, value in rh_overrides.items():
+                    rh[index] = value
+                # The overrides never touch qa[-1] or qsat[-2], so dmse -- and
+                # with it the branch -- is a property of the sounding alone.
+                dmse = se[-1] - se[-2] + alhc * (np.asarray(sounding["qa"])[-1]
+                                                 - qsat[-2])
+                shallow = sounding is TRADE_CUMULUS
+                self.assertEqual(bool(dmse > 0.0), shallow)
+
+                pbl_drh = rh[-1] - rh[-2]
+                pbl_drh0 = 0.0 if shallow else rhgrad * (fsg[-1] - fsg[-2])
+                if "shallow_gate_closed" in name or "stable_gate_closed" in name:
+                    self.assertLessEqual(pbl_drh, pbl_drh0)
                 else:
-                    self.assertGreater(drh, rhgrad * (fsg[-1] - fsg[-2]))
-                # Step 3 runs on the interfaces with hsg > 0.5, indices 4 and 5
-                # on the 8-level table.
-                for k in (4, 5):
-                    self.assertGreaterEqual(rh[k + 1] - rh[k],
-                                            rhgrad * (fsg[k + 1] - fsg[k]))
+                    self.assertGreater(pbl_drh, pbl_drh0)
+
+                for k in interfaces:
+                    drh = rh[k + 1] - rh[k]
+                    drh0 = rhgrad * (fsg[k + 1] - fsg[k])
+                    if "free_trop_gate_closed" in name and k == 4:
+                        self.assertLessEqual(drh, drh0)
+                    else:
+                        self.assertGreater(drh, drh0)
 
     def test_moisture_branch_gradients(self):
         """Gradients where the moisture tendency is live.
 
         Unlike the uniform-rh operating point above, a real finite difference
         is usable here: within a branch the fluxes are smooth in every input,
-        and the perturbations stay far from the gates (the nearest margin is
-        ``drh - drh0 = 0.012``). The ``adjoint`` pass runs first for its
-        per-output-leaf guard -- a difference contracts the outputs onto one
-        projection, where an identically zero specific-humidity gradient, the
-        exact defect this test exists for, would be invisible.
+        and the perturbations stay far from the gates (the nearest margin on
+        these two soundings is ``drh - drh0 = 0.012``). The ``adjoint`` pass
+        runs first for its per-output-leaf guard -- a difference contracts the
+        outputs onto one projection, where an identically zero
+        specific-humidity gradient, the exact defect this test exists for,
+        would be invisible.
         """
         from jcm.utils import convert_back, convert_to_float
 
@@ -363,7 +475,7 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                                ("stratocumulus", STRATOCUMULUS)):
             with self.subTest(sounding=name):
                 state, physics_data = self._sounding_inputs(
-                    sounding, deep_convection=False)
+                    sounding, {}, deep_convection=False)
                 forcing = ForcingData.ones((ix, il))
 
                 def f(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
