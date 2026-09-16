@@ -91,9 +91,12 @@ comparable, for two independent reasons, and the measured gap is large:
   (`jcm/physics/radiation/mcica.py`), which zeroes every cell with
   `cloud_fraction <= 2*cld_frac_min` so the sampler and the optics agree about
   which cells are empty. `cloud_cover` reduces the cloud fraction as saved.
-* **Different time treatment.** Under `run.output_averages` (the release
-  configurations' default) the saved frame is the running mean over the output
-  interval (`jcm/model.py`). So `radiation.total_cloud_cover` is a time mean of
+* **Different time treatment.** Under `run.output_averages` the saved frame is
+  the running mean over the output interval (`jcm/model.py`), and the
+  release-validation launcher sets it unconditionally
+  (`tools/release_validation/launch.py`: `run.output_averages=true`), as do
+  the `longrun` and `pyses_year` run configs. So
+  `radiation.total_cloud_cover` is a time mean of
   an *instantaneous* cover, while `cloud_cover` and `cloud_cover_colmax` are
   overlaps of a *time-mean* profile. The overlap product is non-linear, so
   those are different numbers: smoothing over the output interval moves each
