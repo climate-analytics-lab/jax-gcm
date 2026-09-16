@@ -184,12 +184,24 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
             \frac{1 - \max(c_k, c_{k-1})}{1 - \min(c_{k-1}, 1-\epsilon)},
         \qquad \mathrm{aclcov} = 1 - C_\mathrm{clear},
 
-    a transcription of ``mo_cloud.f90`` section "10.2 Total cloud cover"
-    (ICON ``atm_phy_echam/mo_cloud.f90`` lines 1165-1182; the same loop is
-    ECHAM6 ``mo_cloud.f90`` lines 1359-1381). The running product is evaluated
-    level by level exactly as the Fortran's ``DO 923`` loop does, which also
-    keeps peak memory at one horizontal slice rather than materialising every
-    pair factor of a full year of output at once.
+    with the product running over ``k = 1 … n-1`` (the Fortran's
+    ``DO 923 jk = 2, klev``, one-based). This is a transcription of
+    ``mo_cloud.f90`` section "10.2 Total cloud cover" (ICON
+    ``atm_phy_echam/mo_cloud.f90`` lines 1165-1182; the same loop is ECHAM6
+    ``mo_cloud.f90`` lines 1359-1383, whose ``paclcov`` is a time accumulation
+    of it and whose ``aclcov_na`` is this instantaneous value). The one
+    addition to the Fortran is the ``[0, 1]`` clip of the input: saved output
+    can carry small out-of-range excursions that the in-model ``paclc`` never
+    has, and an unclipped ``c > 1`` would make the numerator negative and the
+    "clear-sky fraction" meaningless.
+
+    The product is built **level by level with lazy xarray slices**, so a
+    dask-backed array (anything opened with
+    :func:`xarray.open_mfdataset`, as the release-validation gate does) stays
+    lazy and is evaluated chunk by chunk. Nothing here calls ``.values`` or
+    otherwise forces the whole window into memory, and on a numpy-backed array
+    the same loop holds one horizontal slice at a time rather than
+    materialising every pair factor of a year of output at once.
 
     **Why this quantity.** Two cheaper reductions of a cloud-fraction profile
     bracket it but neither is the cover a climate model reports:
@@ -217,22 +229,31 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
     levels' ``1 - c_k``, and both sets are invariant under reversing the axis —
     so no surface-first/TOA-first guard is needed, and pre-#710 files (whose
     vertical conventions are described in
-    ``docs/source/design/output_vertical_conventions.md``) score identically to
-    current ones. Only floating-point rounding distinguishes the two orders.
+    ``docs/source/design/output_vertical_conventions.md``) score the same as
+    current ones. The two orders agree to rounding, differing by at most
+    ``O(zepsec)``: the ``min(c_{k-1}, zxsec)`` guard is applied in loop order,
+    so it caps a *different* denominator in the reversed column and a profile
+    holding cover within ``1e-12`` of 1 (say ``[0.2, 1 - 5e-13]``) can differ
+    in that last digit. The cancellation argument itself is exact.
 
     Parameters
     ----------
     cloud_fraction : xarray.DataArray
         Grid-mean cloud fraction, any dimensionality, with a vertical axis
-        named ``dim``. Values are clipped to ``[0, 1]`` before use.
+        named ``dim``. May be dask-backed; the result then is too. Values are
+        clipped to ``[0, 1]`` before use, out of place — the caller's array is
+        never modified. ``NaN`` propagates: a column with a missing level
+        scores ``NaN`` rather than a cover computed from the rest of it.
     dim : str, optional
         Name of the vertical dimension to reduce over. Default ``"level"``.
 
     Returns
     -------
     xarray.DataArray
-        Total cloud cover, with ``dim`` (and any coordinate defined on it)
-        removed and every other dimension and coordinate preserved.
+        Total cloud cover in ``[0, 1]``, named ``total_cloud_cover`` and
+        carrying CF attributes (``standard_name`` ``cloud_area_fraction``),
+        with ``dim`` (and any coordinate defined on it) removed and every other
+        dimension and coordinate preserved.
 
     Notes
     -----
@@ -245,26 +266,43 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
             f"{dim!r} is not a dimension of the cloud fraction "
             f"(dims: {cloud_fraction.dims})")
 
-    axis = list(cloud_fraction.dims).index(dim)
-    # float64 throughout, in one allocation. ``zxsec`` is not representable in
-    # float32 (it rounds to 1.0, turning an overcast layer's guarded 0/1e-12
-    # into 0/0), so the working copy has to be double precision; and it has to
-    # be a genuine copy, since the in-place clip must not reach back into the
-    # caller's Dataset the way ``np.asarray`` on float64 input would allow.
-    c = np.array(cloud_fraction.values, dtype=np.float64)
-    np.clip(c, 0.0, 1.0, out=c)
-    c = np.moveaxis(c, axis, 0)
+    # Drop the coordinates defined on the reduced axis (``level`` itself, and
+    # any auxiliary coordinate that varies with it) *before* slicing, so the
+    # per-level slices below carry no conflicting scalar ``level`` coordinate
+    # and align positionally. The rest of the coordinates ride through.
+    c = cloud_fraction.drop_vars(
+        [name for name, coord in cloud_fraction.coords.items()
+         if dim in coord.dims])
+
+    def level(k):
+        """Level ``k`` of the cloud fraction, clipped, as float64.
+
+        float64 because ``zxsec`` is not representable in float32 (it rounds
+        to 1.0, turning an overcast layer's guarded 0/1e-12 into 0/0). Per
+        level rather than on the whole array so the numpy path's peak stays at
+        a couple of horizontal slices; ``astype`` and ``clip`` are both out of
+        place, so the caller's array is never modified, and on a dask array
+        both are lazy, so nothing is loaded here at all.
+        """
+        return c.isel({dim: k}).astype(np.float64).clip(0.0, 1.0)
 
     zxsec = 1.0 - _ZEPSEC
-    clear = 1.0 - c[0]
-    for k in range(1, c.shape[0]):
-        clear = clear * ((1.0 - np.maximum(c[k], c[k - 1]))
-                         / (1.0 - np.minimum(c[k - 1], zxsec)))
+    lower = level(0)
+    clear = 1.0 - lower
+    for k in range(1, c.sizes[dim]):
+        upper = level(k)
+        clear = clear * ((1.0 - np.maximum(upper, lower))
+                         / (1.0 - np.minimum(lower, zxsec)))
+        lower = upper
 
-    dims = tuple(d for d in cloud_fraction.dims if d != dim)
-    # Drop coordinates defined on the reduced axis (``level`` itself, and any
-    # auxiliary coordinate that varies with it); keep the rest.
-    coords = {name: coord for name, coord in cloud_fraction.coords.items()
-              if dim not in coord.dims}
-    return xr.DataArray(1.0 - clear, dims=dims, coords=coords,
-                        name="total_cloud_cover")
+    # No clip is needed on the way out. Each factor's numerator
+    # ``1 - max(c_k, c_{k-1})`` is at most its denominator
+    # ``1 - min(c_{k-1}, zxsec)`` (both branches of the min), so every factor
+    # is in [0, 1] under IEEE division, and so is the product.
+    cover = 1.0 - clear
+    cover.attrs = {
+        "standard_name": "cloud_area_fraction",
+        "long_name": "total cloud cover (maximum-random overlap)",
+        "units": "1",
+    }
+    return cover.rename("total_cloud_cover")

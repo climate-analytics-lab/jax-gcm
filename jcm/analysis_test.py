@@ -227,6 +227,12 @@ def test_total_cloud_cover_is_orientation_independent():
     profile = np.array([0.1, 0.0, 0.85, 0.3, 0.3, 0.0, 0.55, 0.2])
     np.testing.assert_allclose(_cover(profile), _cover(profile[::-1]),
                                rtol=1e-12)
+    # The agreement is "to rounding", not exact: ``min(c_{k-1}, zxsec)`` is
+    # applied in loop order, so it caps a different denominator in the
+    # reversed column. A cover within zepsec of 1 is where that shows, and it
+    # shows at O(zepsec) — far below anything a gate or a climatology reads.
+    near_one = np.array([0.2, 1.0 - 5e-13])
+    assert abs(_cover(near_one) - _cover(near_one[::-1])) < 1e-11
 
 
 def test_total_cloud_cover_clips_out_of_range_values():
@@ -278,3 +284,46 @@ def test_total_cloud_cover_rejects_a_missing_vertical_dim():
     cf = xr.DataArray(np.array([0.5, 0.25]), dims=("lat",))
     with pytest.raises(ValueError, match="not a dimension"):
         total_cloud_cover(cf)
+
+
+def test_total_cloud_cover_carries_cf_attributes():
+    cover = total_cloud_cover(xr.DataArray(np.array([0.3, 0.4]),
+                                           dims=("level",)))
+    assert cover.name == "total_cloud_cover"
+    assert cover.attrs["standard_name"] == "cloud_area_fraction"
+    assert cover.attrs["units"] == "1"
+
+
+def test_total_cloud_cover_stays_lazy_on_a_dask_array():
+    # The release-validation gate hands this an open_mfdataset (dask) array
+    # spanning a whole year, so the reduction must build a graph rather than
+    # pull every level of every step into memory. Laziness is the assertion;
+    # exact agreement with the numpy path is the correctness check.
+    import dask.array as dask_array
+
+    rng = np.random.default_rng(3)
+    values = rng.uniform(0.0, 1.0, size=(4, 6, 8, 4))
+    cf = xr.DataArray(values, dims=("time", "level", "lat", "lon"))
+    lazy = xr.DataArray(dask_array.from_array(values, chunks=(2, 3, 4, 4)),
+                        dims=cf.dims)
+
+    cover = total_cloud_cover(lazy)
+    assert isinstance(cover.data, dask_array.Array)
+    # Bit-identical, not merely close: the two paths run the same arithmetic.
+    np.testing.assert_array_equal(np.asarray(cover.compute()),
+                                  np.asarray(total_cloud_cover(cf)))
+
+
+def test_total_cloud_cover_propagates_nan_and_leaves_the_input_alone():
+    # A missing level must not be silently skipped — a column with one is
+    # unscoreable, and reporting the cover of the remaining levels would hide
+    # a corrupt file from the gate's NaN scan. And the [0, 1] clip must not
+    # write back into the caller's Dataset.
+    values = np.array([[0.3, 0.5], [np.nan, 0.5], [1.4, -0.2]])
+    cf = xr.DataArray(values.copy(), dims=("level", "col"))
+
+    cover = np.asarray(total_cloud_cover(cf))
+    assert np.isnan(cover[0])
+    np.testing.assert_allclose(cover[1], 0.5)
+    # The caller's array still holds its NaN and its out-of-range values.
+    np.testing.assert_array_equal(np.asarray(cf), values)
