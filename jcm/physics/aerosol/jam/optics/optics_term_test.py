@@ -66,7 +66,7 @@ def _setup(nlev=4, ncols=3, n_sw=3, n_lw=2):
     return state, diagnostics, band, n_sw, n_lw
 
 
-def _consistent_state(state, diagnostics, saturation=0.8):
+def _consistent_state(state, diagnostics, saturation=0.8, center_modes=False):
     """Replace ``_jam_state`` with the κ-Köhler state implied by the tracers.
 
     ``_setup`` sets ``mass``, ``number``, ``r_dry`` and ``r_wet``
@@ -75,14 +75,32 @@ def _consistent_state(state, diagnostics, saturation=0.8):
     volume from the mass tracers and the radii/number from ``_jam_state``,
     and only a state the microphysics core actually produced makes the two
     agree. This runs the placeholder core's diagnosis on the fixture's
-    tracers so ``r_dry`` satisfies ``V = N (π/6) Dg³ exp(4.5 ln²σ)`` and
-    ``r_wet = r_dry·g`` with the κ-Köhler growth factor at ``saturation``.
+    tracers, so ``r_wet = r_dry·g`` at the κ-Köhler growth factor for
+    ``saturation`` — which is all the water volume depends on.
+
+    ``r_dry`` is a different matter. With ``_setup``'s own numbers the core
+    CLIPS three of the four modes (Aitken and primary carbon at ``dgnum_hi``,
+    coarse at ``dgnum_lo``), so ``r_dry`` is the clipped radius, not the
+    solution of ``V = N (π/6) Dg³ exp(4.5 ln²σ)``. Pass ``center_modes=True``
+    to pick, per mode, the number that puts ``dg`` exactly on ``mode.dgnum``
+    — strictly inside every bound, so no clip is active and that identity
+    holds for all four modes. Only tests that assert something about the
+    third moment itself need it; the water volume is a pure ratio and does
+    not care either way.
     """
     from jcm.physics.aerosol.jam.microphysics.placeholder import (
         equilibrium_modal_state,
     )
     masses = {k: v for k, v in state.tracers.items() if k.startswith("m_")}
     numbers = {k: v for k, v in state.tracers.items() if k.startswith("n_")}
+    if center_modes:
+        numbers = {}
+        for mode in MAM4_SPEC.modes:
+            vol = sum(masses[mass_name(sp, mode.short)]
+                      / MAM4_SPEC.species_props(sp).density
+                      for sp in mode.species)
+            k = (np.pi / 6.0) * np.exp(4.5 * np.log(mode.geom_std_dev) ** 2)
+            numbers[number_name(mode.short)] = vol / (k * mode.dgnum ** 3)
     sat = jnp.full(state.temperature.shape, saturation)
     aer = equilibrium_modal_state(masses, numbers, MAM4_SPEC, sat)
     return {**diagnostics, "_jam_state": aer}
@@ -340,36 +358,56 @@ class JamOpticsTermTest(unittest.TestCase):
             np.asarray(a3.asy_sw_per_band), np.asarray(a1.asy_sw_per_band),
             rtol=1e-6)
 
-    def test_dry_particles_add_no_water(self):
-        """``r_wet == r_dry`` (zero growth) contributes exactly no water,
-        whatever the number: the AeroCom water component must be identically
-        zero while the dry species still extinguish.
+    def test_water_depends_on_growth_ratio_not_on_number(self):
+        """The water volume is set by ``r_wet/r_dry`` alone.
 
-        The pairing of ``number`` with ``r_dry`` is made grossly inconsistent
-        on purpose: a water volume built from ``N·(4/3)π·(r_wet³ − r_dry³)``
-        depends on exactly that pairing, ``V_dry·(g³ − 1)`` does not (#790).
+        Two cases with the number/radius pairing made grossly inconsistent on
+        purpose (1000x the number the radii imply):
+
+        * ``r_wet == r_dry`` — no growth, so exactly zero water, while the
+          dry species still extinguish;
+        * ``r_wet == 1.05·r_dry`` — one uniform growth factor across modes,
+          so water's share of EVERY mode's volume, and hence of the column
+          extinction it is apportioned by, is exactly ``(g³ − 1)/g³``.
+
+        The second case is the discriminating one: ``N·(4/3)π·(r_wet³ −
+        r_dry³)`` would put the inflated ``N`` into the water while the dry
+        volume it mixes with comes from the mass tracers, so it misses that
+        share by orders of magnitude (#790). The first case alone does not
+        discriminate — both forms vanish at zero growth.
         """
         state, diagnostics, band, *_ = _setup()
         aer = diagnostics["_jam_state"]
-        dry = aer.copy(r_wet=aer.r_dry, number=1.0e3 * aer.number)
         term = JamOpticsTerm(optics_diagnostics=True)
         term.cache_band_config(band)
+
+        dry = aer.copy(r_wet=aer.r_dry, number=1.0e3 * aer.number)
         _, out = term(state, {**diagnostics, "_jam_state": dry}, None, None)
         np.testing.assert_array_equal(np.asarray(out["od550_wat"]), 0.0)
         np.testing.assert_array_equal(np.asarray(out["abs550_wat"]), 0.0)
         self.assertTrue(bool(np.all(np.asarray(out["od550aer"]) > 0.0)))
 
-    def test_empty_mode_with_zero_dry_radius_stays_finite(self):
-        """A core reporting ``r_dry = 0`` on an empty mode must give 0, not NaN.
+        g = 1.05
+        grown = aer.copy(r_wet=g * aer.r_dry, number=1.0e3 * aer.number)
+        _, out = term(state, {**diagnostics, "_jam_state": grown}, None, None)
+        share = np.asarray(out["od550_wat"]) / np.asarray(out["od550aer"])
+        np.testing.assert_allclose(share, (g ** 3 - 1.0) / g ** 3, rtol=1e-5)
 
-        The growth ratio ``(r_wet/r_dry)³`` is the one division the water
-        volume makes, and it multiplies a ``vol_dry`` that is zero on exactly
-        the modes where ``r_dry`` could be zero. Floored by the generic
-        ``_TINY`` (1e-30 m) the cube overflows float32 to ``inf`` and
-        ``0 × inf`` is NaN, which reaches the diagnostics through the water
-        apportionment; ``_MIN_DRY_RADIUS`` keeps the cube representable so
-        the product is the 0 it must be. float64 has the range to absorb
-        either floor, so only the default float32 physics exercises this.
+    def test_degenerate_dry_radius_gives_zero_water_and_zero_gradient(self):
+        """A core reporting ``r_dry = 0`` must give 0 water, not NaN, and must
+        not leave a gradient on the degenerate branch.
+
+        Defensive: no in-repo core produces ``r_dry = 0`` (the placeholder
+        falls back to ``mode.dgnum``, MAM4-JAX takes ``0.5·dgncur_a``), so
+        this pins the behaviour for an external or future core. The growth
+        ratio ``(r_wet/r_dry)³`` is the one division the water volume makes,
+        and it multiplies a ``vol_dry`` that is zero on exactly those modes.
+        The ``jnp.where`` selects no growth there — value and gradient both
+        zero — and ``_MIN_DRY_RADIUS`` keeps the ratio's cube finite in the
+        arm the select discards, since both arms are evaluated and an ``inf``
+        there would come back as a NaN in the reverse pass. float64 has the
+        range to absorb a smaller floor, so only the default float32 physics
+        exercises the overflow half of this.
         """
         if jax.config.read("jax_enable_x64"):
             self.skipTest("the float32 overflow guarded here cannot occur in x64")
@@ -387,6 +425,29 @@ class JamOpticsTermTest(unittest.TestCase):
             np.testing.assert_array_equal(np.asarray(out[key]), 0.0)
         self.assertTrue(
             bool(np.all(np.isfinite(np.asarray(out["aerosol"].aod_sw_per_band)))))
+
+        def water_from_mass(jam_state, scale):
+            tr = {k: (scale * v if k.startswith("m_") else v)
+                  for k, v in state.tracers.items()}
+            _, o = term(state.copy(tracers=tr),
+                        {**diagnostics, "_jam_state": jam_state}, None, None)
+            return jnp.sum(o["od550_wat"])
+
+        # A degenerate r_dry carrying REAL mass must still add no water. This
+        # is the discriminating half: with a bare floor instead of the select
+        # the growth ratio would be (r_wet/1e-12)³ and the mode would be
+        # essentially all water.
+        wet = lambda s: water_from_mass(empty, s)
+        self.assertEqual(float(wet(jnp.float32(1.0))), 0.0)
+        self.assertEqual(float(jax.grad(wet)(jnp.float32(1.0))), 0.0)
+
+        # And an all-empty cell must leave a FINITE gradient. Making the water
+        # proportional to vol_dry means vol_tot is exactly zero there, which a
+        # floored denominator would turn into a NaN cotangent (0 x inf) and
+        # poison the whole reverse pass; clean columns are most of a cold-start
+        # aerosol field, so this is a hard requirement, not a corner case.
+        clean = lambda s: water_from_mass(aer, s)
+        self.assertEqual(float(jax.grad(clean)(jnp.float32(0.0))), 0.0)
 
     def test_column_aod_550_diagnostic(self):
         from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -679,21 +740,33 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         Extinction is apportioned by volume fraction and every particle of
         a κ-Köhler mode grows by the same ``g``, so the wet third moment is
         ``g³`` times the dry one and the water fraction of the mode's total
-        volume is ``(g³ − 1)/g³`` regardless of ``σ_g``. On this
-        third-moment-consistent state a water volume built as
-        ``N·(4/3)π·(r_wet³ − r_dry³)`` comes out smaller by ``exp(4.5 ln²σ)``
-        (2.7× for σ = 1.6, 4.7× for σ = 1.8) — issue #790's table. The modes
-        carry different κ, so the column total is the per-mode-AOD-weighted
-        mean of the shares.
+        volume is ``(g³ − 1)/g³`` regardless of ``σ_g``. The modes carry
+        different κ, so the column total is the per-mode-AOD-weighted mean of
+        the shares.
+
+        ``center_modes=True`` keeps every mode strictly inside its ``dg``
+        bounds, which is what makes the comparison against issue #790's table
+        exact here: with no clip active, ``N·(4/3)π·(r_wet³ − r_dry³)`` on
+        this state gives a water volume smaller by precisely
+        ``exp(4.5 ln²σ_g)`` — 2.70 at σ_g = 1.6, 4.73 at σ_g = 1.8. (On a
+        clipped mode the factor is ``(dg_clip/dg_true)³/exp(4.5 ln²σ_g)``
+        instead, which can land either side of 1.) The assertion itself does
+        not depend on that: it is a pure ratio and holds clipped or not.
         """
         state, diagnostics, band, _, _ = _setup()
-        d_in = _consistent_state(state, diagnostics, saturation=0.8)
+        d_in = _consistent_state(state, diagnostics, saturation=0.8,
+                                 center_modes=True)
         aer = d_in["_jam_state"]
         term = JamOpticsTerm(optics_diagnostics=True)
         term.cache_band_config(band)
         _, out = term(state, d_in, None, None)
         expected = np.zeros_like(np.asarray(out["od550aer"]))
         for i, mode in enumerate(MAM4_SPEC.modes):
+            # The docstring's appeal to #790's table holds only off the clip
+            # bounds, so assert that rather than trusting ``center_modes``.
+            dg = 2.0 * np.asarray(aer.r_dry[i])
+            self.assertTrue(bool(np.all(dg > mode.dgnum_lo)), mode.short)
+            self.assertTrue(bool(np.all(dg < mode.dgnum_hi)), mode.short)
             g3 = np.asarray(aer.r_wet[i] / aer.r_dry[i]) ** 3      # (nlev, ncols)
             # Uniform saturation and species mix -> one g per mode.
             np.testing.assert_allclose(g3, g3.flat[0], rtol=1e-6)
@@ -702,8 +775,9 @@ class OpticsDiagnosticsTest(unittest.TestCase):
             expected += share_i * np.asarray(out[f"od550_mode_{mode.short}"])
         np.testing.assert_allclose(np.asarray(out["od550_wat"]), expected,
                                    rtol=1e-5)
-        # And the share is substantial for the soluble modes at RH 0.8, so a
-        # number-median-radius water volume would show as a ~2-5x deficit.
+        # And the share is substantial for the soluble modes at RH 0.8, so on
+        # this unclipped state the number-median-radius form would show as the
+        # 2.70x/4.73x deficit of #790's table.
         share = np.asarray(out["od550_wat"]) / np.asarray(out["od550aer"])
         self.assertGreater(float(share.min()), 0.3)
 
