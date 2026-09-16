@@ -95,16 +95,21 @@ comparable, for two independent reasons, and the measured gap is large:
   configurations' default) the saved frame is the running mean over the output
   interval (`jcm/model.py`). So `radiation.total_cloud_cover` is a time mean of
   an *instantaneous* cover, while `cloud_cover` and `cloud_cover_colmax` are
-  overlaps of a *time-mean* profile. The overlap product is non-linear, and
-  smoothing a profile over five days moves cloud in each layer toward its
-  time-mean value, which in general lowers the overlap-derived cover.
+  overlaps of a *time-mean* profile. The overlap product is non-linear, so
+  those are different numbers: smoothing over the output interval moves each
+  layer toward its time-mean fraction, and where cloud moved between layers
+  during the interval that lowers the overlap-derived cover relative to the
+  mean of the instantaneous covers. (The inequality is not general — a column
+  that is overcast half the time and clear the other half gives the same
+  answer either way — but it is the usual direction.)
 
 On the 90-day 2M arm in the table below the two read **0.53 and 0.78**. A gap
 of that size is expected; it is not evidence of a defect in either. It also
-means `cloud_cover` is, strictly, a lower bound on the time-mean of the
-instantaneous total cover that ECHAM6 and the satellite products report —
-which is worth remembering before reading a small offset against an anchor as
-a model bias.
+means the gated number is not the same quantity as the time-mean of the
+instantaneous total cover that ECHAM6 and the satellite products report, and
+on the one archived arm where both are available it is the smaller of the two
+— worth remembering before reading a small offset against an anchor as a
+model bias.
 
 ### Measured magnitudes
 
