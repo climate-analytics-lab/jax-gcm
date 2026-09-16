@@ -118,6 +118,12 @@ user-facing behaviour is incomplete until the docs say so:
  - **User-facing behaviour changes** (new/changed defaults, new mechanisms like
    timestep resolution, new CLI/config knobs) must be reflected in
    ``README.md`` and/or ``docs/source/getting_started.rst`` in the same PR.
+   Keep both **lean**: they orient a new user, they are not a reference. Add
+   only what someone needs in order to do the new thing, and nothing else. A new
+   public function is **not** by itself such a change — ``docs/source/api.rst``
+   autodocs the modules, so its docstring is its documentation. Rationale,
+   provenance, measured numbers and caveats belong in ``docs/source/design/*.md``
+   (or ``docs/source/science/`` for a science choice), never in the guide.
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
 
