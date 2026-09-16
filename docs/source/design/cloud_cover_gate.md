@@ -212,8 +212,8 @@ a tuning target) and brackets both anchors:
   under the COSP simulator definitions, MODIS reads 0.49 and CloudSat 0.50
   against higher CALIOP/MISR/ISCCP values ([Kay et al. 2012, J. Climate 25,
   5190-5207](https://doi.org/10.1175/JCLI-D-11-00469.1), figure caption on
-  p. 5196).
-  Which is the point of quoting a range rather than a single satellite number.
+  p. 5196) — which is why the anchor here is a range and not one satellite
+  number.
 * **The model.** Every member of the #638/#782 matrix maps into **0.59-0.83**,
   and the directly measured year runs sit at 0.68-0.70. The tightest margin is
   0.07, at the ceiling, and it is held by a *superseded* baseline; the current
