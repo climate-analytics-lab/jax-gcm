@@ -132,10 +132,10 @@ that understates the water by ``exp(4.5 ln²σ_g)`` — 2.70 for σ_g = 1.6
 (Aitken, primary carbon), 4.73 for σ_g = 1.8 (accumulation, coarse). On a clip
 bound the factor moves either way: clipping down to ``dgnum_hi`` understates
 further, while clipping up to ``dgnum_lo`` — more number than the mass
-supports — can *overstate* the water instead. Either way the mixed index is
-wrong, which is what issue #790 records. The form used is also identically
-zero where a mode holds no dry material, whatever ringing the number field
-carries.
+supports — can *overstate* the water instead. Either way the mixed index would
+be wrong on these radii, which is why the volume form is the one used. It is
+also identically zero where a mode holds no dry material, whatever ringing the
+number field carries.
 
 **Status & known limitations.** Spherical, homogeneously mixed particles (no
 core–shell treatment of black carbon; a NeuralMie core–shell backend is
