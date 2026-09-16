@@ -9,7 +9,11 @@ these independently reimplemented at least four times
 :func:`total_cloud_cover` joins them for the same reason: overlap is a
 definition, not an incidental reduction, so the release-validation gate and any
 analysis notebook must read the same one
-(``docs/source/design/cloud_cover_gate.md``).
+(``docs/source/design/cloud_cover_gate.md``). It is **not** the saved
+``radiation.total_cloud_cover`` diagnostic despite the matching name: that one
+is the in-model McICA sub-column cover, sampled under the flux solve's own
+overlap rule from a differently-preprocessed cloud fraction, and the design doc
+above sets out how far apart the two run in practice.
 
 Everything here takes labelled xarray in and returns xarray (or a Python
 ``float``) out, using numpy internally. It operates on *saved* output — never

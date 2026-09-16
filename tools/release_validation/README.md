@@ -45,7 +45,8 @@ design until fixed or the matrix declares them expected. Post the table
 as-is.
 
 Gates: NaN scan on every saved variable; TOA net |≤10| W/m²; precip
-2–4 mm/day; cloud cover 0.5–0.9; near-surface T 278–295 K; AOD₅₅₀
+2–4 mm/day; cloud cover 0.5–0.9 (SPEEDY 0.4–0.8, see below);
+near-surface T 278–295 K; AOD₅₅₀
 0.02–0.35; JAM per-species burdens vs loose AeroCom ranges. `--last-n 40`
 scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 ~9 months — see #638). The checker speaks both the ECHAM and SPEEDY field
@@ -57,13 +58,18 @@ overlap of `clouds.cloud_fraction`, `mo_cloud.f90` §10.2, via
 `jcm.analysis.total_cloud_cover` — because that is the construction the
 reference model uses and a total cover is the basis the satellite
 climatologies are quoted on, and because it is computable from any saved
-output. SPEEDY scores its own `shortwave_rad.cloudc` and has no profile to
-overlap.
+output.
 
-The band moved from 0.4–0.8 to **0.5–0.9** with the definition: max-random
-reads +0.11 to +0.15 above the column max the gate used to score, so the
-old numbers would have failed correct members on the ceiling for a purely
-definitional reason.
+The ECHAM band is **0.5–0.9**, calibrated on this definition: max-random
+reads +0.11 to +0.15 above the column max the gate used to score, so a band
+carried over from column-max experience would fail correct members on the
+ceiling for a purely definitional reason.
+
+SPEEDY scores its own `shortwave_rad.cloudc` — an RH-based column cover with
+no profile to overlap, and untouched by this work — so it gates on its own
+**0.4–0.8**. Shifting it with the ECHAM band would tighten the floor of the
+member that sits closest to it (recorded 0.57 and 0.58) for a reason that
+does not apply to it.
 
 Two more covers are **printed and not gated**: `cloud_cover_colmax`, the
 column maximum the gate used to score (a lower bound, kept so the #638/#782

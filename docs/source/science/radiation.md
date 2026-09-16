@@ -34,6 +34,17 @@ layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
 carries its own cloud formulation. Swapping backends therefore changes the
 cloud-overlap treatment, not just the gas optics. The AeroCom
 total-cloud-cover diagnostic uses the maximum-random closure.
+
+**Offline**, the total cloud cover jcm reports from saved output is also
+maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
+:func:`jcm.analysis.total_cloud_cover`, and it is what the release-validation
+``cloud_cover`` gate scores. That choice defers to ECHAM and is deliberate:
+overlap is a definition, the three in common use differ by ~0.3 in the global
+mean, and a total cover is the basis the satellite climatologies are quoted
+on. It is a different number from the McICA ``radiation.total_cloud_cover``
+above — sampled quantity, different preprocessing, different time treatment —
+and {doc}`../design/cloud_cover_gate` sets out the provenance, the measured
+magnitudes and how far apart the two run.
 Radiation **sub-steps** on the ECHAM-family backends (grey, RRTMGP, NN
 emulator): a gate (``radiation_should_compute``) skips the expensive solve and
 rescales cached heating on intermediate steps. SPEEDY has its own, different

@@ -175,12 +175,24 @@ definitional offset, so the matrix maps onto the new definition as:
 | `echam-1m-t63` | 0.68 → 0.63 | ~0.81 → ~0.74 |
 | `echam-1m-t106` | 0.70 → 0.66 | ~0.83 → ~0.77 |
 | `echam-2m-t63` | 0.60 → 0.48 | ~0.75 → ~0.59 |
+| `echam-2m-t106` | 0.61 → 0.49 | ~0.76 → ~0.60 |
+| `echam-jam-t63-l47` | 0.61 → (scrapped) | ~0.76 → — |
+| `echam-jam-t63-l95` | 0.61 → (scrapped) | ~0.76 → — |
+| `speedy-t31` | 0.57 → 0.58 | **n/a — different quantity** |
 
 using the offset measured on the matching scheme for the #638 column (1M
-+0.128, 2M +0.148) and the post-#707 offset (+0.110) for the current one.
-These are *mapped* values, not measurements: no post-#707 year run has been
-scored on this definition, because none is archived. The next validation sweep
-prints all three covers and replaces this mapping with measurements.
++0.128, 2M +0.148, the JAM members being 2M) and the post-#707 offset (+0.110)
+for the current one. The two JAM members were scrapped in the #782 sweep
+pending the dust/sea-salt emissions investigation, so they have a #638 column
+only. These are *mapped* values, not measurements: no post-#707 year run has
+been scored on this definition, because none is archived. The next validation
+sweep prints all three covers and replaces this mapping with measurements.
+
+`speedy-t31` is deliberately outside the mapping. SPEEDY scores
+`shortwave_rad.cloudc`, its own RH-based column cover
+(`jcm/physics/radiation/speedy_shortwave.py`), which has no profile to overlap
+and which nothing in this work touched. There is no offset to apply to it, and
+it keeps the band it was calibrated with — see below.
 
 ### The band
 
@@ -214,10 +226,24 @@ a tuning target) and brackets both anchors:
   5190-5207](https://doi.org/10.1175/JCLI-D-11-00469.1), figure caption on
   p. 5196) — which is why the anchor here is a range and not one satellite
   number.
-* **The model.** Every member of the #638/#782 matrix maps into **0.59-0.83**,
-  and the directly measured year runs sit at 0.68-0.70. The tightest margin is
-  0.07, at the ceiling, and it is held by a *superseded* baseline; the current
-  code point maps to 0.59-0.77, with 0.09 at the floor.
+* **The model.** Every **ECHAM** member of the #638/#782 matrix maps into
+  **0.59-0.83**, and the directly measured year runs sit at 0.68-0.70. The
+  tightest margin is 0.07, at the ceiling, and it is held by a *superseded*
+  baseline; the current code point maps to 0.59-0.77, with 0.09 at the floor.
+
+### SPEEDY keeps the old band
+
+`speedy-t31` is gated on `RANGES["cloud_cover_speedy"]`, which stays at
+**0.4-0.8**.
+
+This is the same argument applied honestly in the other direction. A band is
+calibrated against a quantity; SPEEDY's quantity did not change, so its band
+must not move either. Its recorded values are 0.57 (#638) and 0.58 (#782) —
+inside 0.4-0.8 with 0.17 of floor headroom, and inside 0.5-0.9 too, but with
+only 0.07. Carrying the ECHAM shift onto it would have tightened the floor of
+the member that sits closest to it, for a definitional reason that does not
+apply to it: exactly the failure this document argues against, pointed the
+other way.
 
 An ECHAM6 figure would be the natural third anchor, and the earlier draft of
 this document quoted one (~0.62-0.65). That number could not be verified from
