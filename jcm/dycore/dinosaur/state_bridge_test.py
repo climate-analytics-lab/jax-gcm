@@ -42,15 +42,21 @@ class TestSpecificHumidityContract(unittest.TestCase):
         jax.config.update("jax_enable_x64", self._previous_x64)
 
     def test_float32_state_and_tendency_round_trip(self):
-        """Canonical q keeps magnitude/dtype while other tracer units do not change."""
+        """Every mass mixing ratio crosses the boundary unscaled, in kg/kg."""
         base = self.model.dycore.to_physics_state(self.model.initial_state())
         shape = base.specific_humidity.shape
         q = jnp.full(shape, 0.0125, dtype=jnp.float32)
-        legacy_mass = jnp.full(shape, 2.5, dtype=jnp.float32)
-        specs = {"legacy_mass": TracerSpec("legacy_mass")}
+        # A generic mass mixing ratio (condensate, aerosol or gas mass all
+        # take this path) and a number concentration, which opts out.
+        cloud_mass = jnp.full(shape, 2.5e-4, dtype=jnp.float32)
+        number = jnp.full(shape, 1.0e8, dtype=jnp.float32)
+        specs = {
+            "qc": TracerSpec("qc", units="kg/kg"),
+            "qnc": TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
+        }
         seeded = base.copy(
             specific_humidity=q,
-            tracers={"legacy_mass": legacy_mass},
+            tracers={"qc": cloud_mass, "qnc": number},
         )
 
         modal = physics_state_to_dynamics_state(
@@ -60,7 +66,7 @@ class TestSpecificHumidityContract(unittest.TestCase):
             modal.tracers["specific_humidity"]
         )
         mass_in_dynamics = self.coords.horizontal.to_nodal(
-            modal.tracers["legacy_mass"]
+            modal.tracers["qc"]
         )
         recovered = dynamics_state_to_physics_state(
             modal, self.primitive, tracer_specs=specs,
@@ -69,20 +75,24 @@ class TestSpecificHumidityContract(unittest.TestCase):
         self.assertEqual(recovered.specific_humidity.dtype, jnp.float32)
         np.testing.assert_allclose(recovered.specific_humidity, q, rtol=1e-6)
         np.testing.assert_allclose(q_in_dynamics, q, rtol=1e-6)
-        # Non-humidity mass tracers retain their pre-existing g/kg bridge.
+        # Condensate is stored unscaled: Dinosaur reads it directly for the
+        # virtual-temperature loading term, so a g/kg store would weaken that
+        # coupling by 1000x — the same defect #666 fixed for humidity.
+        np.testing.assert_allclose(mass_in_dynamics, cloud_mass, rtol=2e-6)
         np.testing.assert_allclose(
-            mass_in_dynamics, legacy_mass * 1e-3, rtol=2e-6,
+            recovered.tracers["qc"], cloud_mass, rtol=2e-6,
         )
+        # ``nondimensionalize=False`` still passes straight through.
         np.testing.assert_allclose(
-            recovered.tracers["legacy_mass"], legacy_mass, rtol=2e-6,
+            recovered.tracers["qnc"], number, rtol=2e-6,
         )
 
         dqdt = jnp.full(shape, 1.25e-8, dtype=jnp.float32)
-        legacy_mass_tend = jnp.full(shape, 2.5e-5, dtype=jnp.float32)
+        cloud_mass_tend = jnp.full(shape, 2.5e-9, dtype=jnp.float32)
         tendency = PhysicsTendency.zeros(
             shape,
             specific_humidity=dqdt,
-            tracers={"legacy_mass": legacy_mass_tend},
+            tracers={"qc": cloud_mass_tend},
         )
         modal_tendency = physics_tendency_to_dynamics_tendency(
             tendency, self.primitive, tracer_specs=specs,
@@ -91,12 +101,12 @@ class TestSpecificHumidityContract(unittest.TestCase):
             modal_tendency.tracers["specific_humidity"]
         )
         mass_tend_in_dynamics = self.coords.horizontal.to_nodal(
-            modal_tendency.tracers["legacy_mass"]
+            modal_tendency.tracers["qc"]
         )
         self.assertEqual(q_tend_in_dynamics.dtype, jnp.float32)
         np.testing.assert_allclose(q_tend_in_dynamics, dqdt, rtol=1e-6)
         np.testing.assert_allclose(
-            mass_tend_in_dynamics, legacy_mass_tend * 1e-3, rtol=2e-6,
+            mass_tend_in_dynamics, cloud_mass_tend, rtol=2e-6,
         )
 
     def test_moist_geopotential_uses_specific_humidity(self):

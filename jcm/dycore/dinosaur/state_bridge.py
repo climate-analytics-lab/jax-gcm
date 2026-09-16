@@ -9,8 +9,12 @@ types.
 
 The three functions here are pure JAX (no side effects, no Python conditionals
 on traced values). This module also owns Dinosaur's nondimensionalisation
-boundary, including the dimensionless kg/kg representation its moist primitive
-equations require.
+boundary. Every mass mixing ratio — specific humidity, cloud condensate,
+aerosol and gas mass — crosses it as the dimensionless kg/kg value, because
+Dinosaur's moist primitive equations consume the stored humidity and
+condensate tracers directly in their virtual-temperature terms. Tracers
+declaring ``nondimensionalize=False`` (number concentrations, VMRs) are
+passed through untouched.
 """
 
 from __future__ import annotations
@@ -124,9 +128,13 @@ def dynamics_state_to_physics_state(
     q = dynamics.physics_specs.dimensionalize(q, units.dimensionless).m
 
     # Extra tracers — those with ``nondimensionalize=False`` (e.g. number
-    # concentrations) pass through untouched; everything else is treated as a
-    # mass mixing ratio in gram/kilogram. Nodal tracers (split off above) are
-    # already gridpoint arrays and only need the same dimensionalization.
+    # concentrations) pass through untouched; every other tracer is a mass
+    # mixing ratio and shares specific humidity's contract: kg/kg, which is
+    # dimensionless, stored as the physical value. Dinosaur reads the stored
+    # condensate directly for the virtual-temperature loading term, so any
+    # rescaling here would weaken that coupling by exactly the scale factor.
+    # Nodal tracers (split off above) are already gridpoint arrays and only
+    # need the same dimensionalization.
     all_tracers = {}
     for tracer_name, tracer_value in {**nodal_state.tracers, **nodal_direct}.items():
         if tracer_name == 'specific_humidity':
@@ -136,7 +144,7 @@ def dynamics_state_to_physics_state(
             all_tracers[tracer_name] = tracer_value
         else:
             all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(
-                tracer_value, units.gram / units.kilogram,
+                tracer_value, units.dimensionless,
             ).m
 
     # Produce ``normalized_surface_pressure = P_s / p0`` on a common scale
@@ -199,8 +207,9 @@ def physics_state_to_dynamics_state(
         if spec is not None and not spec.nondimensionalize:
             tracer_nd = tracer_value
         else:
+            # Mass mixing ratios share specific humidity's kg/kg contract.
             tracer_nd = dynamics.physics_specs.nondimensionalize(
-                tracer_value * units.gram / units.kilogram,
+                tracer_value * units.dimensionless,
             )
         # Nodal tracers stay gridpoint (the semi-Lagrangian core transports
         # them without any spectral round trip — see
@@ -258,7 +267,7 @@ def physics_tendency_to_dynamics_tendency(
             tracer_tend_nd = tracer_tend
         else:
             tracer_tend_nd = dynamics.physics_specs.nondimensionalize(
-                tracer_tend * units.gram / units.kilogram / units.second,
+                tracer_tend * units.dimensionless / units.second,
             )
         # Nodal tracer tendencies stay gridpoint so the operator-split
         # forward-Euler add matches the nodal state entries shape-for-shape.
