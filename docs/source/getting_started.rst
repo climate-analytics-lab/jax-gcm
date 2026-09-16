@@ -680,8 +680,7 @@ Post-processing with ``jcm.analysis``
 
 :mod:`jcm.analysis` is the one home for the xarray post-processing recipes that
 otherwise get re-implemented per script — area weights, global means, layer
-pressure thicknesses, column burdens and total cloud cover, all computed on
-*saved* netCDF output:
+pressure thicknesses and column burdens, all computed on *saved* netCDF output:
 
 .. code-block:: python
 
@@ -706,23 +705,6 @@ pressure thicknesses, column burdens and total cloud cover, all computed on
 
    # column_burden already time-broadcasts, so a global-mean burden time series is:
    burden_ts = analysis.global_mean(analysis.column_burden(ds, 'qc'))
-
-   # Total cloud cover under ECHAM's maximum-random overlap (its own
-   # aclcov, mo_cloud.f90 section 10.2) — the construction the reference
-   # model uses, and the one the release-validation cloud gate scores. A
-   # column max would be a lower bound (0.11-0.15 low on the jcm years
-   # measured) and random overlap an upper one. The overlap product is
-   # non-linear, so reduce AFTER it, never before.
-   cover = analysis.global_mean(
-       analysis.total_cloud_cover(ds['clouds.cloud_fraction'])).mean('time')
-
-:func:`~jcm.analysis.total_cloud_cover` is symmetric in the vertical, so it
-needs no surface-first/TOA-first guard and scores files written under either
-of the output vertical conventions identically. It accepts a dask-backed array
-and stays lazy, so a whole year opened with ``xarray.open_mfdataset`` is
-reduced chunk by chunk. See :doc:`design/cloud_cover_gate` for its provenance,
-for the measured spread between overlap definitions, and for why cloud-cover
-numbers from older output are not comparable with current ones.
 
 :func:`~jcm.analysis.area_weights` deliberately returns a dims-only
 ``DataArray`` (no ``lat`` coordinate) so ``.weighted()`` broadcasts it by
