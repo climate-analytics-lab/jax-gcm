@@ -21,7 +21,7 @@ as
 ```
 c(k)   = clip(paclc(k), 0, 1)                      ! guard added here, not ECHAM's
 zclcov = 1 - c(1)
-DO k = 2, klev                                     ! the Fortran's DO 923
+DO k = 2, klev                                     ! DO 923; ICON: jks+1, klev
   zclcov = zclcov * (1 - max(c(k), c(k-1))) / (1 - min(c(k-1), zxsec))
 END DO
 aclcov = 1 - zclcov
@@ -197,7 +197,13 @@ tuning target — and it brackets both anchors:
   1031-1049](https://doi.org/10.1175/BAMS-D-12-00117.1); values as summarised
   by the [NCAR Climate Data
   Guide](https://climatedataguide.ucar.edu/climate-data/cloud-dataset-overview)).
-  The whole 0.56-0.74 range sits inside the band.
+  The whole 0.56-0.74 range sits inside the band. Individual products can sit
+  a long way below that when their definition excludes thin or broken cloud:
+  under the COSP simulator definitions, MODIS reads 0.49 and CloudSat 0.50
+  against higher CALIOP/MISR/ISCCP values ([Kay et al. 2012, J. Climate 25,
+  5190-5207](https://doi.org/10.1175/JCLI-D-11-00469.1), figure caption on
+  p. 5196).
+  Which is the point of quoting a range rather than a single satellite number.
 * **The model.** Every member of the #638/#782 matrix maps into **0.59-0.83**,
   and the directly measured year runs sit at 0.68-0.70. The tightest margin is
   0.07, at the ceiling, and it is held by a *superseded* baseline; the current

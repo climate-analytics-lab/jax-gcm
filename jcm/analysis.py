@@ -184,8 +184,10 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
             \frac{1 - \max(c_k, c_{k-1})}{1 - \min(c_{k-1}, 1-\epsilon)},
         \qquad \mathrm{aclcov} = 1 - C_\mathrm{clear},
 
-    with the product running over ``k = 1 … n-1`` (the Fortran's
-    ``DO 923 jk = 2, klev``, one-based). This is a transcription of
+    with the product running over ``k = 1 … n-1`` — the Fortran's ``DO 923``
+    loop, ``jk = 2, klev`` in ECHAM6 and ``jk = jks+1, klev`` in ICON, where
+    ``jks`` is the first active level and is 1 for a full column. This is a
+    transcription of
     ``mo_cloud.f90`` section "10.2 Total cloud cover" (ICON
     ``atm_phy_echam/mo_cloud.f90`` lines 1165-1182; the same loop is ECHAM6
     ``mo_cloud.f90`` lines 1359-1383, whose ``paclcov`` is a time accumulation
