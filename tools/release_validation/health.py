@@ -23,10 +23,12 @@ Cloud cover
 ``cloud_cover`` scores ECHAM's own total cover ``aclcov``
 (:func:`jcm.analysis.total_cloud_cover`, ``mo_cloud.f90`` section 10.2):
 maximum overlap within a vertically contiguous cloud, random overlap between
-clouds separated by clear air. That is the quantity the reference model
-reports and the one the satellite climatologies are quoted on, it is
-deterministic, and it needs nothing but ``clouds.cloud_fraction`` — so every
-saved output, at any radiation scheme, can be scored the same way. A SPEEDY
+clouds separated by clear air. That is the construction the reference model
+uses, and a *total* cover is the basis the satellite climatologies are quoted
+on; it is deterministic, and it needs nothing but ``clouds.cloud_fraction`` —
+so every saved output, at any radiation scheme, can be scored the same way.
+The gated number is still not identical to what either reports, because the
+saved cloud fraction is already a time mean (see below). A SPEEDY
 run instead scores its own ``shortwave_rad.cloudc``, which is already a column
 cover and has no profile to overlap.
 
