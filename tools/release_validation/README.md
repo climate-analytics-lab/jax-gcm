@@ -45,7 +45,7 @@ design until fixed or the matrix declares them expected. Post the table
 as-is.
 
 Gates: NaN scan on every saved variable; TOA net |≤10| W/m²; precip
-2–4 mm/day; cloud cover 0.4–0.8; near-surface T 278–295 K; AOD₅₅₀
+2–4 mm/day; cloud cover 0.5–0.9; near-surface T 278–295 K; AOD₅₅₀
 0.02–0.35; JAM per-species burdens vs loose AeroCom ranges. `--last-n 40`
 scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 ~9 months — see #638). The checker speaks both the ECHAM and SPEEDY field
@@ -54,22 +54,33 @@ against the baselines in #638 (>15% drop = runtime regression).
 
 **Cloud cover** is ECHAM's own total cover `aclcov` — maximum-random
 overlap of `clouds.cloud_fraction`, `mo_cloud.f90` §10.2, via
-`jcm.analysis.total_cloud_cover` — because that is the definition the
-reference model and the satellite climatologies are quoted on, and it is
-computable from any saved output. Two more covers are **printed and not
-gated**: `cloud_cover_colmax`, the column maximum the gate used to score
-(a lower bound, kept so the #638/#782 tables stay readable), and
-`cloud_cover_radiation`, the McICA sub-column cover the RRTMGP flux solve
-integrates (dropped when the run saved none, or an all-zero field under
-grey radiation). SPEEDY scores its own `shortwave_rad.cloudc` and has no
-profile to overlap. **Cover numbers from before #707 are not comparable
-with these on any of the three definitions** — that PR gave the 1M scheme
-ECHAM's `ccwmin` cover write-back, which redefined what
-`clouds.cloud_fraction` counts (−0.066 of low cloud for +0.15 W/m²:
-bookkeeping, not cloud). The 0.4–0.8 band is unchanged and deliberately
-untightened until a post-#707 year has been scored on this definition.
-Rationale,
-magnitudes and the #782 decomposition:
+`jcm.analysis.total_cloud_cover` — because that is the construction the
+reference model uses and a total cover is the basis the satellite
+climatologies are quoted on, and because it is computable from any saved
+output. SPEEDY scores its own `shortwave_rad.cloudc` and has no profile to
+overlap.
+
+The band moved from 0.4–0.8 to **0.5–0.9** with the definition: max-random
+reads +0.11 to +0.15 above the column max the gate used to score, so the
+old numbers would have failed correct members on the ceiling for a purely
+definitional reason.
+
+Two more covers are **printed and not gated**: `cloud_cover_colmax`, the
+column maximum the gate used to score (a lower bound, kept so the #638/#782
+tables stay readable), and `cloud_cover_radiation`, the McICA sub-column
+cover the RRTMGP flux solve integrates (dropped when the run saved none, or
+an all-zero field under grey radiation; the NOTE says which). The McICA
+cover is a **different measurement, not a cross-check** — a time mean of an
+instantaneous cover from a differently-preprocessed field, against an
+overlap of the output-averaged fraction — and the two differ by ~0.25 on a
+measured arm, which is expected.
+
+**Cover numbers from before #707 are not comparable with these** — that PR
+gave the 1M scheme ECHAM's `ccwmin` cover write-back, which redefined what
+`clouds.cloud_fraction` counts. Its measured size (−0.066 of low cloud for
++0.15 W/m²: bookkeeping, not cloud) is a **column-max** figure and does not
+carry over to the other two definitions, where it is unmeasured. Rationale,
+the measured table and the #782 decomposition:
 `docs/source/design/cloud_cover_gate.md`.
 
 ### The JAM aerosol block

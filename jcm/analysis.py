@@ -214,14 +214,20 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
       and so double-counts its edges.
 
     Maximum-random sits between them, is deterministic, is computable from any
-    saved output (only ``cloud_fraction`` is needed), and is the definition the
-    reference model and the satellite products are quoted on. On two July-2026
-    T63 L47 ECHAM+RRTMGP year runs (last chunk, area-weighted, pre-#690 code,
-    so indicative magnitudes only) the three definitions gave, for the 2M / 1M
-    members: column max 0.546 / 0.559, this function 0.682 / 0.665, random
-    overlap 0.835 / 0.798. The middle pair is the one that lands on ECHAM6's
-    climatological total cover (~0.62-0.65) and near the satellite estimates
-    (ISCCP/MODIS ~0.66-0.67, CALIPSO-GOCCP ~0.70).
+    saved output (only ``cloud_fraction`` is needed), is the construction
+    ECHAM6 itself uses for ``aclcov`` (Stevens et al. 2013,
+    doi:10.1002/jame.20015), and is a *total* cover — the basis the
+    satellite climatologies are quoted on. On two archived T63 L47
+    ECHAM+RRTMGP year runs, settled window, area-weighted, the three
+    definitions gave for the 2M / 1M members: column max 0.553 / 0.563, this
+    function 0.701 / 0.691, random overlap 0.847 / 0.823. For scale, the GEWEX
+    Cloud Assessment puts the observed global cloud amount at 0.68 +/- 0.03
+    for optical depth > 0.1 (0.56 to 0.74 across detection thresholds;
+    Stubenrauch et al. 2013, doi:10.1175/BAMS-D-12-00117.1). Those runs
+    predate #690/#707, so they calibrate the definitions against each other
+    and are not validation numbers for current code — the full table, its
+    provenance and its caveats are in
+    ``docs/source/design/cloud_cover_gate.md``.
 
     **Orientation.** The result does not depend on which end of ``dim`` is the
     surface. Cancelling the denominators leaves the clear-sky product as the
