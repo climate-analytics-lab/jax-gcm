@@ -39,6 +39,32 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 logger = logging.getLogger(__name__)
 
 
+
+#: Prognostic condensate species that load the virtual temperature. ECHAM6
+#: computes ``Tv = T (1 + vtmpc1 q - (xl + xi))`` in both its dynamics
+#: (``dyn.f90::ztv``) and the geopotential it hands physics
+#: (``physc.f90::ztvm1``); jcm adds prognostic rain and snow, which ECHAM6's
+#: one-moment scheme does not carry, because suspended precipitation loads a
+#: column exactly as suspended cloud does. Names absent from a composition's
+#: tracer set are simply skipped.
+CONDENSATE_TRACERS = ("qc", "qi", "qr", "qs")
+
+
+def _condensate_loading(tracers):
+    """Sum the condensate mass mixing ratios present in ``tracers``.
+
+    Returns ``None`` when the composition carries no condensate, which is the
+    signal Dinosaur's geopotential helpers take to mean "no cloud loading".
+    """
+    present = [tracers[name] for name in CONDENSATE_TRACERS if name in tracers]
+    if not present:
+        return None
+    total = present[0]
+    for value in present[1:]:
+        total = total + value
+    return total
+
+
 def dynamics_state_to_physics_state(
     state: State,
     dynamics: PrimitiveEquations,
@@ -90,6 +116,11 @@ def dynamics_state_to_physics_state(
     # virtual-temperature contribution by a factor of 1000.
     q = nodal_state.tracers['specific_humidity']
 
+    # Condensate loading for the virtual temperature, from whichever frame
+    # each species is carried in. Both dicts hold the dimensionless kg/kg
+    # value, the same representation the dynamics' own Tv term reads.
+    clouds = _condensate_loading({**nodal_state.tracers, **nodal_direct})
+
     nodal_orography = dynamics.coords.horizontal.to_nodal(dynamics.orography)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
     sp = jnp.exp(log_sp)
@@ -104,6 +135,7 @@ def dynamics_state_to_physics_state(
             temperature=full_temperature,
             surface_pressure=sp,
             specific_humidity=q,
+            clouds=clouds,
             nodal_orography=nodal_orography,
             coordinates=dynamics.nondim_levels,
             gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
@@ -116,6 +148,7 @@ def dynamics_state_to_physics_state(
         phi = get_geopotential_on_sigma(
             temperature=full_temperature,
             specific_humidity=q,
+            clouds=clouds,
             nodal_orography=nodal_orography,
             sigma=dynamics.coords.vertical,
             gravity_acceleration=dynamics.physics_specs.gravity_acceleration,

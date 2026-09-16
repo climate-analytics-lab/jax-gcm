@@ -28,6 +28,7 @@ from jcm.constants import PhysicalConstants
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.state_bridge import (
+    CONDENSATE_TRACERS,
     dynamics_state_to_physics_state,
     physics_state_to_dynamics_state,
     physics_tendency_to_dynamics_tendency,
@@ -245,10 +246,22 @@ class DinosaurDycore(DynamicalCore):
         # transport (see the constructor docstring).
         self._nodal_tracers = tuple(self._tracer_specs)
 
+        # Condensate species this composition actually carries. Dinosaur
+        # subtracts them from the virtual-temperature factor, matching
+        # ECHAM6's ``Tv = T (1 + vtmpc1 q - (xl + xi))`` (dyn.f90::ztv). It
+        # reads the stored tracer directly, which is why mass mixing ratios
+        # cross the state bridge unscaled. Derived here rather than at
+        # construction so a physics swap that adds or drops a condensate
+        # species re-derives it alongside ``_nodal_tracers``.
+        self._cloud_keys = tuple(
+            name for name in CONDENSATE_TRACERS if name in self._tracer_specs
+        ) or None
+
         # Dispatch on the vertical-coordinate family. Hybrid coords carry
         # ``a_boundaries`` in Pa; tell the dycore to interpret
         # ``hpa_quantity`` accordingly. Hybrid is the only family that
-        # currently accepts a ``humidity_key`` (q <-> Tv coupling).
+        # currently accepts a ``humidity_key`` / ``cloud_keys`` (q, condensate
+        # <-> Tv coupling); the sigma family's dynamics stays dry.
         sl_kwargs = dict(
             interpolation_order=self._sl_options.get("interpolation_order", "cubic"),
             monotone_tracers=self._sl_options.get("monotone_tracers", True),
@@ -265,6 +278,7 @@ class DinosaurDycore(DynamicalCore):
                 physics_specs=self._physics_specs,
                 hpa_quantity=units.pascal,
                 humidity_key='specific_humidity',
+                cloud_keys=self._cloud_keys,
                 **sl_kwargs,
             )
         else:

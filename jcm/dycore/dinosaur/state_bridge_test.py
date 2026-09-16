@@ -165,6 +165,81 @@ class TestHybridVirtualTemperatureContract(unittest.TestCase):
         ) * q
         np.testing.assert_allclose(adjustment, expected, rtol=2e-6)
 
+    def test_condensate_loads_the_virtual_temperature(self):
+        """Tv = T(1 + (Rv/Rd-1)q - (qc+qi+qr+qs)), ECHAM6 dyn.f90::ztv."""
+        from dinosaur.primitive_equations import compute_diagnostic_state_hybrid
+
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        specs = {
+            name: TracerSpec(name, units="kg/kg")
+            for name in ("qc", "qi", "qr", "qs")
+        }
+        model = Model(
+            coords=coords, physics=held_suarez_physics(), time_step=180.0,
+        )
+        model.dycore.tracer_specs = specs
+
+        physical = model.dycore.to_physics_state(
+            model.initial_state()
+        )
+        q = jnp.full_like(physical.specific_humidity, 0.01)
+        condensate = {
+            "qc": jnp.full_like(q, 3.0e-4),
+            "qi": jnp.full_like(q, 1.0e-4),
+            "qr": jnp.full_like(q, 5.0e-5),
+            "qs": jnp.full_like(q, 2.0e-5),
+        }
+        modal = physics_state_to_dynamics_state(
+            physical.copy(specific_humidity=q, tracers=condensate),
+            model.dycore.primitive,
+            tracer_specs=specs,
+        )
+        diagnostic = compute_diagnostic_state_hybrid(modal, coords)
+
+        adjustment = model.dycore.primitive._virtual_temperature_adjustment(
+            diagnostic
+        )
+        ratio = (
+            model.dycore.physics_specs.R_vapor
+            / model.dycore.physics_specs.R - 1.0
+        )
+        expected = 1.0 + ratio * q - sum(condensate.values())
+        np.testing.assert_allclose(adjustment, expected, rtol=2e-6)
+        # Every species must be represented: dropping rain/snow would leave a
+        # 7e-5 gap, far outside this tolerance.
+        self.assertEqual(
+            model.dycore._cloud_keys, ("qc", "qi", "qr", "qs"),
+        )
+
+    def test_cloud_keys_follow_the_composition(self):
+        """Only condensate the composition declares enters the coupling."""
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, physics=held_suarez_physics(), time_step=180.0,
+        )
+        # Held-Suarez alone carries no condensate.
+        self.assertIsNone(model.dycore._cloud_keys)
+
+        # A rebuild that introduces condensate re-derives the keys, and a
+        # non-condensate tracer is not swept in.
+        model.dycore.tracer_specs = {
+            "qc": TracerSpec("qc", units="kg/kg"),
+            "dust": TracerSpec("dust", units="kg/kg"),
+        }
+        self.assertEqual(model.dycore._cloud_keys, ("qc",))
+
 
 @pytest.mark.slow
 class TestStateBridgeRoundTripSlow(unittest.TestCase):
