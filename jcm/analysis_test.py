@@ -286,6 +286,29 @@ def test_total_cloud_cover_rejects_a_missing_vertical_dim():
         total_cloud_cover(cf)
 
 
+def test_total_cloud_cover_handles_float32_input():
+    # Production runs integrate in float32 (``physics_dtype``), so saved
+    # cloud_fraction is float32 and this is the realistic input. Without the
+    # float64 upcast, ``zxsec`` rounds to exactly 1.0 there and an overcast
+    # layer's guarded 0/1e-12 becomes 0/0 — the column scores NaN, silently,
+    # and only for the columns that are fully cloudy somewhere.
+    profile = np.array([0.5, 1.0, 0.2], dtype=np.float32)
+    cover = total_cloud_cover(xr.DataArray(profile, dims=("level",)))
+    assert np.isfinite(float(cover))
+    np.testing.assert_allclose(float(cover), 1.0)
+    # And a float32 column with no overcast layer matches the float64 answer.
+    partly = np.array([0.5, 0.0, 0.2], dtype=np.float32)
+    np.testing.assert_allclose(
+        float(total_cloud_cover(xr.DataArray(partly, dims=("level",)))),
+        _cover(partly.astype(np.float64)), rtol=1e-7)
+
+
+def test_total_cloud_cover_rejects_an_empty_vertical_axis():
+    cf = xr.DataArray(np.zeros((0, 3)), dims=("level", "col"))
+    with pytest.raises(ValueError, match="no levels"):
+        total_cloud_cover(cf)
+
+
 def test_total_cloud_cover_carries_cf_attributes():
     cover = total_cloud_cover(xr.DataArray(np.array([0.3, 0.4]),
                                            dims=("level",)))

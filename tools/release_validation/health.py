@@ -12,6 +12,7 @@ checks loose climatological ranges (spin-up tolerant — this is a
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
     cloud    = max-random total cover of clouds.cloud_fraction  0.5 - 0.9
+               (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
@@ -28,9 +29,14 @@ uses, and a *total* cover is the basis the satellite climatologies are quoted
 on; it is deterministic, and it needs nothing but ``clouds.cloud_fraction`` —
 so every saved output, at any radiation scheme, can be scored the same way.
 The gated number is still not identical to what either reports, because the
-saved cloud fraction is already a time mean (see below). A SPEEDY
-run instead scores its own ``shortwave_rad.cloudc``, which is already a column
-cover and has no profile to overlap.
+saved cloud fraction is already a time mean (see below).
+
+A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
+a column cover and has no profile to overlap — so it is a **different
+quantity**, gated on its own band (``RANGES["cloud_cover_speedy"]``). Nothing
+about it changed with the ECHAM definition, and shifting its band with the
+ECHAM one would tighten a floor it sits closest to for a reason that does not
+apply to it.
 
 Two further covers are **printed and not gated**, because they answer
 different questions and have no agreed band of their own:
@@ -95,7 +101,7 @@ from aerosol_stats import (  # noqa: E402
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
     "precip_mm_day": (2.0, 4.0),
-    # Total cloud cover under maximum-random overlap (see the module
+    # ECHAM total cloud cover under maximum-random overlap (see the module
     # docstring). Deliberately wide: this is a "did the model produce a
     # climate" gate, not a tuning target. It is also calibrated on THIS
     # definition, which matters because max-random reads 0.11-0.15 above a
@@ -106,10 +112,18 @@ RANGES = {
     # 0.68 +/- 0.03 for clouds of optical depth > 0.1, itself running from
     # 0.56 (COD > 2) to 0.74 (COD > 0.01) with the detection threshold (GEWEX
     # Cloud Assessment, Stubenrauch et al. 2013, BAMS 94, 1031-1049,
-    # doi:10.1175/BAMS-D-12-00117.1). Model: every jcm member recorded in the
-    # #638/#782 matrix maps into 0.59-0.83 on this definition.
+    # doi:10.1175/BAMS-D-12-00117.1). Model: every ECHAM member recorded in
+    # the #638/#782 matrix maps into 0.59-0.83 on this definition.
     # Derivation and the measured table: docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
+    # SPEEDY scores a different quantity and so gets its own band. Its
+    # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
+    # (speedy_shortwave.py), not an overlap of a profile, and no part of this
+    # definition work touched it — so the max-random offset that places the
+    # band above does not apply, and applying it anyway would tighten a floor
+    # the member is already closest to. The recorded values are 0.57 (#638)
+    # and 0.58 (#782), both comfortably inside.
+    "cloud_cover_speedy": (0.4, 0.8),
     "near_surface_T": (278.0, 295.0),
     # Global-mean 550 nm AOD: JAM's jam_optics.aod_550 or MACv2-SP's
     # macsp.od550aer. Wide gate — a from-zero JAM spin-up year sits low,
@@ -132,9 +146,13 @@ def cloud_cover_fields(ds, speedy):
     depends on; the others are reported for context. Each is still a full
     field — the overlap product is non-linear, so the time and area means are
     taken downstream of it by :func:`wmean`, never of the cloud fraction.
-    ``radiation_note`` is ``None`` when ``cloud_cover_radiation`` is reported,
-    and otherwise says *why* it is not — the two reasons are different states
-    of the run and printing one for the other misleads.
+    ``radiation_note`` says *why* ``cloud_cover_radiation`` is not among the
+    fields, in the two cases where a reader would otherwise wonder — the
+    diagnostic is absent from the window, or it is present and identically
+    zero. Those are different states of the run and printing one for the other
+    misleads. It is ``None`` both when the cover *is* reported and on the
+    SPEEDY path, where no radiation-view cover is expected in the first place
+    and a note would be noise.
 
     ECHAM dialect: ``cloud_cover`` is the max-random total cover,
     ``cloud_cover_colmax`` the column maximum kept for continuity with the
@@ -242,8 +260,9 @@ def main():
     check("precip_mm_day", wmean(precip, weights), *RANGES["precip_mm_day"])
 
     cover, radiation_note = cloud_cover_fields(ds, speedy)
+    # The band follows the dialect, because the quantity does: see RANGES.
     check("cloud_cover", wmean(cover["cloud_cover"], weights),
-          *RANGES["cloud_cover"])
+          *RANGES["cloud_cover_speedy" if speedy else "cloud_cover"])
     # Reported, never gated: the column max carries the earlier
     # release-validation tables forward, the McICA cover says what the flux
     # solve saw (a different measurement, not a check on the gate — see the

@@ -174,7 +174,7 @@ def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
             ds[name] = (("time", "lat", "lon"), np.full(shape, value))
         ds["temperature"] = (
             ("time", "level", "lat", "lon"),
-            _levels(np.linspace(288.0, 220.0, len(_PROFILE))))
+            _levels(np.linspace(288.0, 220.0, len(profile))))
         ds.to_netcdf(tmp_path / f"run_day{day}.nc")
     return str(tmp_path)
 
@@ -231,3 +231,66 @@ class TestGateWiring:
                                 profile=np.zeros(len(_PROFILE)))
         assert "FAIL  cloud_cover = 0.00" in out
         assert status == 1
+
+
+class TestBandPlacement:
+    """Where the ECHAM band sits, pinned by runs on each side of it.
+
+    The quantity and the band moved together; a test that only pins the
+    quantity would let the band drift back to a column-max calibration
+    unnoticed, which is the half of this change that decides pass or fail.
+    Both cases below are chosen to straddle the previous 0.4-0.8 band: 0.85
+    passes now and would have failed its ceiling, 0.45 fails now and would
+    have passed its floor.
+    """
+
+    def test_a_cover_above_the_old_ceiling_passes(self, tmp_path, monkeypatch,
+                                                  capsys):
+        # A single deck at 0.85 — well inside a band calibrated on this
+        # definition, over the ceiling of one calibrated on column maxima.
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                profile=np.array([0.85, 0.0, 0.0, 0.0]))
+        assert "PASS  cloud_cover = 0.85" in out
+        assert status == 0
+
+    def test_a_cover_below_the_new_floor_fails(self, tmp_path, monkeypatch,
+                                               capsys):
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                profile=np.array([0.45, 0.0, 0.0, 0.0]))
+        assert "FAIL  cloud_cover = 0.45" in out
+        assert status == 1
+
+    def test_speedy_keeps_its_own_band(self):
+        # SPEEDY's cloudc is a different quantity that this work did not
+        # touch, so it must not inherit the ECHAM band's shift. (Concretely:
+        # the sweeps recorded speedy-t31 at 0.57 and 0.58, which under the
+        # ECHAM floor would have 0.07 of headroom instead of 0.17 — for a
+        # definitional reason that does not apply to it.)
+        speedy_lo, _speedy_hi = H.RANGES["cloud_cover_speedy"]
+        echam_lo, _echam_hi = H.RANGES["cloud_cover"]
+        assert speedy_lo < echam_lo
+
+    def test_the_speedy_band_is_the_one_applied_to_a_speedy_run(
+            self, tmp_path, monkeypatch, capsys):
+        # A 0.45 cover fails the ECHAM floor (above) but passes SPEEDY's, so
+        # this pins which band main() reaches for, not just that one exists.
+        ds = xr.Dataset(
+            {"shortwave_rad.cloudc": (("time", "lat", "lon"),
+                                      np.full((1, len(_LAT), len(_LON)),
+                                              0.45)),
+             "shortwave_rad.ftop": (("time", "lat", "lon"),
+                                    np.full((1, len(_LAT), len(_LON)), 240.0)),
+             "longwave_rad.ftop": (("time", "lat", "lon"),
+                                   np.full((1, len(_LAT), len(_LON)), 240.0)),
+             "condensation.precls": (("time", "lat", "lon"),
+                                     np.full((1, len(_LAT), len(_LON)), 0.03)),
+             "temperature": (("time", "level", "lat", "lon"),
+                             _levels(np.linspace(288.0, 220.0, 4)))},
+            coords={"lat": _LAT, "lon": _LON,
+                    "time": [np.datetime64("2000-01-01")]})
+        ds.to_netcdf(tmp_path / "run_day30.nc")
+        monkeypatch.setattr(sys, "argv", ["health.py", str(tmp_path)])
+        status = H.main()
+        out = capsys.readouterr().out
+        assert "PASS  cloud_cover = 0.45" in out
+        assert status == 0

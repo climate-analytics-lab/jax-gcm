@@ -273,6 +273,10 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
         raise ValueError(
             f"{dim!r} is not a dimension of the cloud fraction "
             f"(dims: {cloud_fraction.dims})")
+    if cloud_fraction.sizes[dim] == 0:
+        raise ValueError(
+            f"the cloud fraction has no levels along {dim!r}; a column with "
+            "no layers has no cover to compute")
 
     # Drop the coordinates defined on the reduced axis (``level`` itself, and
     # any auxiliary coordinate that varies with it) *before* slicing, so the
