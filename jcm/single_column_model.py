@@ -40,6 +40,7 @@ from jcm.physics_interface import (
     PhysicsState,
     PhysicsTendency,
     compute_physics_step_gridpoint,
+    has_non_negative_tendency,
 )
 
 from jcm.terrain import TerrainData
@@ -375,13 +376,32 @@ class SingleColumnModel:
                     updated_tracers[name] = tracer
                     continue
                 tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
-                # Integrate exactly the verified tendency returned above.
-                # Water and other declared positive-definite tracers are
-                # already bounded by the common interface; a second clip here
-                # would make SCMPredictions.tendencies disagree with the state
-                # it produced and would hide its water source from the common
-                # positivity diagnostics.
-                updated_tracers[name] = tracer + dt_seconds * tracer_tend
+                # Integrate exactly the verified tendency returned above: it
+                # is already bounded by the common interface, and clipping the
+                # RESULT would make SCMPredictions.tendencies disagree with
+                # the state it produced and hide the water source from the
+                # common positivity diagnostics.
+                #
+                # Clip the ENTRY value instead, for the positive-definite
+                # tracers only. ``compute_physics_step_gridpoint`` bounds the
+                # tendency against a clamped copy of the state, so a column
+                # that arrives with a negative ``qc``/``qi`` (numerical noise
+                # in an externally supplied profile) gets a tendency that is
+                # merely non-negative — which never repairs the value it is
+                # added to, leaving the carry negative indefinitely. The full
+                # model has no equivalent exposure: its prognostic state is
+                # the dycore's, which spectral filtering and the optional
+                # ``tracer_filter`` clean each step. The SCM carry has
+                # neither and is what ``SCMPredictions`` reports.
+                #
+                # Aerosol and gas tracers are excluded exactly as they are in
+                # the interface: their tendencies sum conservative
+                # redistributions, so clamping either end creates mass.
+                entry = (
+                    jnp.maximum(tracer, 0.0)
+                    if has_non_negative_tendency(name) else tracer
+                )
+                updated_tracers[name] = entry + dt_seconds * tracer_tend
 
             updated_evolving_vars = {}
             for name, tau in evolving_var_params:

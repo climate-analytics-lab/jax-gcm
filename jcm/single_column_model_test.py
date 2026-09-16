@@ -434,6 +434,43 @@ class FreeEvolveTracersTest(unittest.TestCase):
         self.assertGreater(float(free[-1].max()), 0.0)
         np.testing.assert_array_equal(held, np.zeros_like(held))
 
+    def test_negative_water_entering_the_column_is_repaired(self):
+        """A negative qc must not persist in the carry (Codex review, #824).
+
+        ``compute_physics_step_gridpoint`` bounds the tendency against a
+        CLAMPED copy of the state, so a column supplied with a negative
+        condensate gets a merely non-negative tendency — which never repairs
+        the value it is added to. The full model is not exposed this way (its
+        prognostic state is the dycore's, which spectral filtering cleans);
+        the SCM carry is what ``SCMPredictions`` reports, so it clamps the
+        entry value for positive-definite tracers only.
+        """
+        vertical, state = self._column()
+        scm = SingleColumnModel(
+            physics=_ConstantTracerTendencyPhysics(rate=0.0),
+            vertical=vertical, dt_seconds=900.0,
+            free_evolve=("qc", "dust"),
+        )
+        states = tree_map(
+            lambda x: jnp.broadcast_to(x, (4,) + jnp.shape(x)), state,
+        )
+        seed = {
+            "qc": jnp.full(4, -1e-9),      # positive-definite: repaired
+            "dust": jnp.full(4, -1e-9),    # conservative: left alone
+        }
+        out = scm.run(states, initial_tracers=seed,
+                      times=jnp.arange(4) * 900.0 / 86400.0)
+
+        qc = np.asarray(out.tracer_states["qc"])
+        self.assertTrue(
+            (qc >= 0.0).all(),
+            msg=f"negative qc persisted in the carry: min={qc.min():.3e}",
+        )
+        # An aerosol tracer must NOT be clamped: its tendency sums
+        # conservative redistributions, so clipping either end creates mass.
+        dust = np.asarray(out.tracer_states["dust"])
+        self.assertLess(float(dust.min()), 0.0)
+
     def test_unknown_free_evolve_name_raises(self):
         vertical, state = self._column()
         scm = SingleColumnModel(
