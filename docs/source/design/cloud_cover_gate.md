@@ -96,8 +96,8 @@ comparable, for two independent reasons, and the measured gap is large:
   release-validation launcher sets it unconditionally
   (`tools/release_validation/launch.py`: `run.output_averages=true`), as do
   the `longrun` and `pyses_year` run configs. So
-  `radiation.total_cloud_cover` is a time mean of
-  an *instantaneous* cover, while `cloud_cover` and `cloud_cover_colmax` are
+  `radiation.total_cloud_cover` is a time mean of an *instantaneous* cover,
+  while `cloud_cover` and `cloud_cover_colmax` are
   overlaps of a *time-mean* profile. The overlap product is non-linear, so
   those are different numbers: smoothing over the output interval moves each
   layer toward its time-mean fraction, and where cloud moved between layers
@@ -157,8 +157,8 @@ Two readings come out of this. First, the spread across definitions is
 **~0.27-0.30**, larger than any model change the gate has ever been asked to
 judge — which is the whole reason the definition has to be pinned down.
 Second, the column max is **0.11 to 0.15 low** against max-random, and that
-offset is stable across two microphysics schemes, two code points and the
-#690/#707 boundary. That offset is the artefact the previous gate carried.
+offset is stable across two microphysics schemes, two code points and
+the #690/#707 boundary. It is the artefact the previous gate carried.
 
 ### Reconciling with the #638 and #782 tables
 
@@ -227,8 +227,8 @@ the *formulation* of `aclcov`, not for a global mean.
 
 ## The #707 discontinuity: cover numbers do not cross it
 
-#707 gave the 1M scheme ECHAM's post-microphysics cover write-back, which the
-2M scheme already had (#687). `mo_cloud.f90` section 8.4, "Corrections: avoid
+PR #707 gave the 1M scheme ECHAM's post-microphysics cover write-back, which
+the 2M scheme already had (#687). `mo_cloud.f90` section 8.4, "Corrections: avoid
 negative cloud water/ice" (ICON lines 1129-1138), reads
 
 ```
@@ -273,9 +273,9 @@ The **size** of the shift, though, is known only for the column max. The
 band; nothing has measured what the same merge did to the max-random cover,
 and that figure must not be carried across to it. `cloud_cover_radiation` is
 further removed still: it reduces `effective_cloud_fraction`, which
-independently zeroes every cell with `cloud_fraction <= 2*cld_frac_min`, so the
-#707 write-back and that threshold bite on overlapping but different sets of
-cells — a cell with, say, `cf = 0.5` and no condensate is cleared by the
+independently zeroes every cell with `cloud_fraction <= 2*cld_frac_min`, so
+the #707 write-back and that threshold bite on overlapping but different sets
+of cells — a cell with, say, `cf = 0.5` and no condensate is cleared by the
 write-back and not by the threshold. Its offset across #707 is unmeasured too.
 The correct statement is that the boundary applies to all three and its
 magnitude is measured for one.
