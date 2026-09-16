@@ -161,7 +161,9 @@ def cloud_cover_fields(ds, speedy):
     if radiation_cover is None:
         return fields, ("the window saves no radiation.total_cloud_cover "
                         "(output written before b772ffec carries none)")
-    if not bool(np.any(np.asarray(radiation_cover.values) != 0.0)):
+    # Lazily: the window is an open_mfdataset, and even this 2-D field is a
+    # year of it. ``.values`` here would load the lot to answer a yes/no.
+    if not bool((radiation_cover != 0.0).any()):
         return fields, ("radiation.total_cloud_cover is identically zero "
                         "(grey two-stream publishes zero as it samples no "
                         "sub-columns)")
@@ -206,9 +208,12 @@ def main():
     # NaN scan over everything saved, across the WHOLE opened window —
     # a run that NaN'd mid-year and was restarted can end on a finite
     # chunk, so the last time step alone is not evidence of health.
+    # ``np.isfinite(ds[v])`` rather than ``np.isfinite(ds[v].values)``: on the
+    # dask-backed window the former reduces chunk by chunk, the latter pulls
+    # every variable of the whole window into memory one at a time.
     bad = []
     for v in ds.data_vars:
-        if not bool(np.isfinite(ds[v].values).all()):
+        if not bool(np.isfinite(ds[v]).all()):
             bad.append(v)
     print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
           f"{len(bad)}/{len(ds.data_vars)} variables non-finite "
