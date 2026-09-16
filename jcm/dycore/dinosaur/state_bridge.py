@@ -16,7 +16,6 @@ level guardrail.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 from dinosaur import scales
 from dinosaur.hybrid_coordinates import HybridCoordinates
@@ -64,7 +63,8 @@ def dynamics_state_to_physics_state(
         Gridpoint :class:`PhysicsState`.
 
     """
-    jax.debug.callback(lambda: logger.debug("Converting state variables from dynamics to physics state variables"))
+    # No logging here: this runs per timestep inside the model's scan, and a
+    # host callback makes the whole integration uncacheable by XLA.
 
     # Nodal tracers must not enter the modal->nodal diagnostic pipeline;
     # split them off and merge them (dimensionalized) into the output below.
