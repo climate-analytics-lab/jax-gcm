@@ -37,6 +37,16 @@ from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
 
+#: Degeneracy floor [m] on the dry radius in the hygroscopic growth ratio
+#: ``(r_wet/r_dry)³``. Defensive only — neither in-repo core can reach it
+#: (``PlaceholderMicrophysics`` falls back to ``mode.dgnum`` on an empty
+#: mode, MAM4-JAX takes ``0.5·dgncur_a``), so it guards against an external
+#: or future core reporting ``r_dry = 0``. A picometre is far below any
+#: aerosol particle, and it keeps the ratio's CUBE representable in float32
+#: rather than ``inf``, which matters because both arms of the ``jnp.where``
+#: below are evaluated.
+_MIN_DRY_RADIUS = 1.0e-12
+
 # AeroCom diagnostic wavelengths [nm]. 550 is the reference observable;
 # 440/670/865 give the Angstrom exponent and the 440 nm single-scattering
 # albedo AERONET reports; 355 is the lidar (ATLID/EarthCARE) wavelength.
@@ -49,7 +59,6 @@ _I355, _I440, _I550, _I670, _I865 = 0, 1, 2, 3, 4
 _GH_NODES, _GH_WEIGHTS = (
     tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
 )
-_FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 
 
 #: Reference wavelength for the column AOD diagnostic — 550 nm is the
@@ -280,17 +289,77 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_tot = vol_tot + v
                     vol_sp[sp] = v
                 vol_dry = vol_tot
-                v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
-                    r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
-                )
+                # Hygroscopic water volume from the DRY volume just summed
+                # and the mode's growth factor, ``V_w = V_dry·(g³ − 1)`` with
+                # ``g = r_wet/r_dry``. Both cores grow a mode by applying ONE
+                # ratio to the whole of it — the placeholder core's κ-Köhler
+                # factor with the Kelvin term dropped, MAM4's ``wateruptake``
+                # Köhler solve (Kelvin kept) rescaling ``dgncur_awet`` from
+                # ``dgncur_a`` — so every radius scales by the same ``g`` and
+                # the wet third moment is exactly ``g³`` times the dry one.
+                # Only that RATIO appears here, so the identity holds for any
+                # ``σ_g`` and also where a core clips ``dg`` to a per-mode
+                # bound.
+                #
+                # A per-particle ``N·(4/3)π·(r_wet³ − r_dry³)`` is NOT an
+                # equivalent substitute: ``r_dry`` is the NUMBER-MEDIAN
+                # radius, defined through the third moment
+                # ``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``, so ``N·(4/3)π·r_dry³``
+                # is not ``V_dry`` but ``V_dry·(dg_clip/dg_true)³ /
+                # exp(4.5 ln²σ_g)``. Unclipped that understates the water by
+                # ``exp(4.5 ln²σ_g)`` — 2.70 at σ_g = 1.6 (Aitken, primary
+                # carbon), 4.73 at σ_g = 1.8 (accumulation, coarse) — but on a
+                # clip bound the factor moves either way: clipping DOWN to
+                # ``dgnum_hi`` understates further, while clipping UP to
+                # ``dgnum_lo`` (more number than the mass supports) can
+                # OVERSTATE the water instead. Either way the volume-mixed
+                # index is wrong (#790).
+                #
+                # Being number-free, the term is also identically zero on a
+                # mode with no dry material, whatever ringing the number
+                # field carries.
+                #
+                # Where ``dg`` is unclipped, ``vol_tot`` below is moreover the
+                # third moment of the very lognormal the Gauss–Hermite
+                # quadrature integrates the Mie efficiencies over, so mixing
+                # rule and size integral describe one population. That
+                # stronger property is what clipping breaks: the size integral
+                # then follows the clipped radius while ``vol_dry`` follows
+                # the mass, and the two differ by ``(dg_clip/dg_true)³``.
+                #
+                # ``r_dry`` is floored so the ratio and its cube stay finite
+                # in the arm ``where`` does not take (both are evaluated, and
+                # an ``inf`` there would poison the reverse pass); the select
+                # returns 1.0 — no growth, no water, and zero gradient — on a
+                # degenerate dry radius.
+                r_dry_i = aer.r_dry[i]
+                ratio = r_wet / jnp.maximum(r_dry_i, _MIN_DRY_RADIUS)
+                growth_cubed = jnp.where(
+                    r_dry_i > _MIN_DRY_RADIUS, ratio ** 3, 1.0)
+                # Clamped at zero so a core that reports r_wet < r_dry cannot
+                # put a negative volume into the mixing rule.
+                v_water = vol_dry * jnp.maximum(growth_cubed - 1.0, 0.0)
                 n_w, k_w = ri_band["h2o"]
                 vol_n = vol_n + v_water * n_w
                 vol_k = vol_k + v_water * k_w
                 vol_tot = vol_tot + v_water
 
-                safe = jnp.maximum(vol_tot, _TINY)
-                m_n = jnp.where(vol_tot > _TINY, vol_n / safe, 1.5)
-                m_k = jnp.where(vol_tot > _TINY, vol_k / safe, 1.0e-8)
+                # Double ``where`` rather than a floored denominator, here and
+                # in the apportionment below. A mode with no dry material now
+                # has ``vol_tot`` EXACTLY zero — the water is proportional to
+                # ``vol_dry`` — where before it inherited a spurious
+                # number-driven water volume that kept it positive. Dividing
+                # by a floored ``vol_tot`` is finite forward but not in
+                # reverse: the local partial of ``1/max(v, 1e-30)`` is
+                # ``-1e60``, which overflows float32 to ``-inf``, and the
+                # outer select's zero cotangent then gives ``0 × inf = NaN``.
+                # Substituting the denominator BEFORE the division keeps both
+                # arms finite, so clean columns contribute a zero gradient
+                # instead of poisoning the whole reverse pass.
+                ok = vol_tot > _TINY
+                safe = jnp.where(ok, vol_tot, 1.0)
+                m_n = jnp.where(ok, vol_n / safe, 1.5)
+                m_k = jnp.where(ok, vol_k / safe, 1.0e-8)
                 # Integrate Mie efficiencies over the mode's lognormal in
                 # ln r — ``r_wet`` is the NUMBER-MEDIAN radius, so a single
                 # Qext(r_wet)·π·r_wet² misses the r² moment (×e^{2ln²σ})
@@ -332,10 +401,13 @@ class JamOpticsTerm(PhysicsTerm):
                 # +90 K in 6 h and a global NaN by day 10 of the first
                 # coupled JAM year. 1e-24 m³/kg (≈1e-21 kg/kg of aerosol)
                 # is radiatively nothing and far above ringing amplitudes.
-                # Gate on the DRY species volume: the hygroscopic water
-                # term n·(r_wet³−r_dry³) is itself ringing garbage when
-                # there is no dry aerosol to condense on, and it passes a
-                # total-volume gate on its own.
+                # Gate on the DRY species volume: it is the quantity that
+                # says whether there is anything to condense on or to
+                # scatter from. (``vol_tot`` is ``vol_dry·g³`` — see above —
+                # so it is monotone in ``vol_dry`` and a total-volume gate
+                # would select the same cells, at a threshold differing by
+                # ``g³``. The extinction ``n·q_ext·π·r²``, built from the
+                # ringing fields, is what would otherwise sneak through.)
                 gate = (vol_dry > 1.0e-24)
                 area = num_per_area[i] * math.pi * r_wet ** 2
                 aod_gated = jnp.where(gate, aod_i, 0.0)
@@ -371,8 +443,10 @@ class JamOpticsTerm(PhysicsTerm):
                 # added above, so the fractions sum to one over the mode's
                 # species plus water — no extinction is dropped or double
                 # counted.
-                inv_vol = jnp.where(vol_tot > _TINY, 1.0 / jnp.maximum(vol_tot, _TINY), 0.0)
-                inv_volk = jnp.where(vol_k > _TINY, 1.0 / jnp.maximum(vol_k, _TINY), 0.0)
+                # Same reverse-mode-safe substitution as ``safe`` above.
+                ok_k = vol_k > _TINY
+                inv_vol = jnp.where(ok, 1.0 / safe, 0.0)
+                inv_volk = jnp.where(ok_k, 1.0 / jnp.where(ok_k, vol_k, 1.0), 0.0)
                 abs_gated = aod_gated - scat_gated
                 for sp, v_sp in vol_sp.items():
                     sp_aod[sp] = sp_aod.get(sp, 0.0) + aod_gated * (v_sp * inv_vol)
