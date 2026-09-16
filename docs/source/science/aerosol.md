@@ -70,6 +70,87 @@ lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
 observations, SO4 is somewhat long (wet scavenging too weak), and the sea-salt
 source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
 
+### Online aerosol optics
+
+**What we do.** ``JamOpticsTerm`` (``jcm/physics/aerosol/jam/optics/optics_term.py``)
+gives the modal population a direct radiative effect: per mode and radiation
+band it forms a **volume-mixed complex refractive index** over the mode's dry
+species plus its **hygroscopic water**, looks up Mie efficiencies at the wet
+size parameter, integrates them over the mode's lognormal with an 8-node
+Gauss–Hermite quadrature in ``ln r`` (σ_g preserved under growth), and sums
+extinction across modes; single-scattering albedo and asymmetry are
+extinction-/scattering-weighted. The water volume is
+``V_w = V_dry·(g³ − 1)`` with the hygroscopic growth factor
+``g = r_wet/r_dry``: each core grows a mode by applying one ratio to the whole
+of it, so every radius scales by the same ``g`` and the wet third moment is
+exactly ``g³`` times the dry one, whatever ``σ_g``. ``V_dry`` is the species
+mass over density summed within the mode. Water's share of a mode's volume —
+hence of its apportioned extinction, ``od550aerh2o`` — is therefore
+``(g³ − 1)/g³``. Only the *ratio* of the two radii enters, so this holds
+whether or not the core clips ``dg`` to a per-mode bound.
+
+Where ``dg`` is **unclipped** there is a stronger property: ``V_dry + V_w`` is
+then the third moment of the very lognormal the Gauss–Hermite quadrature
+integrates over, so the mixing rule and the size integral describe one
+particle population. Clipping breaks that second statement (not the first):
+the size integral follows the clipped radius while ``V_dry`` follows the mass,
+and the two part company by ``(dg_clip/dg_true)³``.
+
+**What ECHAM-HAM/MAM does.** HAM carries aerosol water as a per-mode tracer
+and volume-mixes it with the mode's dry species before the optics lookup
+(``mo_ham_rad.f90::ham_rad_refrac_volume``, the "Add aerosol water" block at
+lines 277-298 summing ``zv = mass/density`` into the same ``znrsum``/
+``znisum``/``zvsum`` as the dry species), then reports it as an optics
+component of its own — ``zvcomp`` at ``ham_rad_diag`` lines 1898-1906,
+apportioned by volume fraction at 1927-1933 and written to the
+``TAU_COMP_WAT`` stream (``mo_ham_streams.f90:652``), which ``od550aerh2o``
+mirrors.
+
+CAM computes the same quantity per particle:
+``modal_aero_wateruptake.F90::modal_aero_wateruptake_sub`` takes
+``wetvol = (4/3)π·wetrad³`` and ``wtrvol = wetvol − dryvol`` (lines 596-598),
+and ``qaerwat = ρ_w·naer·wtrvol`` (line 456). That is consistent because its
+``dryrad`` is the dry **volume-mean** radius, defined by
+``dryrad = (dryvol/((4/3)π))^(1/3)`` from the single-particle-mean ``dryvol``
+(``modal_aero_calcsize.F90::modal_aero_calcdry``, lines 1565-1567), so
+``naer·wtrvol`` telescopes to exactly ``V_dry·(g³ − 1)``. CAM's *number-median*
+diameter is a separate quantity, ``dgncur_a = (drv/(dumfac·num))^(1/3)`` with
+``dumfac = exp(4.5 ln²σ_g)·π/6`` (``modal_aero_calcsize.F90:549, 685``), and
+the mode is grown by one ratio applied to it,
+``dgncur_awet = dgncur_a·(wetrad/dryrad)`` (``modal_aero_wateruptake.F90:455``).
+
+**Why we differ.** Faithful in the mixing rule and the lognormal integration;
+the LUT-and-quadrature evaluation is a `compute` choice (Mie paid once at
+construction, differentiable table interpolation per step). The mode-volume
+form is stated explicitly because CAM's **per-particle** shape,
+``N·(4/3)π·(r_wet³ − r_dry³)``, is *not* transferable to this code's radii:
+CAM applies it to the volume-mean ``dryrad``, whereas ``r_dry`` here (and in
+MAM4-JAX) is the **number-median** radius, defined through the third moment
+``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``. On those radii ``N·(4/3)π·r_dry³`` is not
+``V_dry`` but ``V_dry·(dg_clip/dg_true)³/exp(4.5 ln²σ_g)``. Off a clip bound
+that understates the water by ``exp(4.5 ln²σ_g)`` — 2.70 for σ_g = 1.6
+(Aitken, primary carbon), 4.73 for σ_g = 1.8 (accumulation, coarse). On a clip
+bound the factor moves either way: clipping down to ``dgnum_hi`` understates
+further, while clipping up to ``dgnum_lo`` — more number than the mass
+supports — can *overstate* the water instead. Either way the mixed index would
+be wrong on these radii, which is why the volume form is the one used. It is
+also identically zero where a mode holds no dry material, whatever ringing the
+number field carries.
+
+**Status & known limitations.** Spherical, homogeneously mixed particles (no
+core–shell treatment of black carbon; a NeuralMie core–shell backend is
+proposed in #791). Per-species optics are an apportionment of the mixed
+mode's extinction, not a decomposition — see
+{doc}`../design/aerosol_optics_diagnostics`.
+
+Because the water volume is number-free, the mixed refractive index is
+scale-free in the mode's masses, so **the core's ``dg`` diagnosis is the only
+channel from aerosol burden to radiation**. That channel saturates on a mode
+whose ``dg`` sits on a ``dgnum_lo``/``dgnum_hi`` bound: its radii, and hence
+its cross-section, stop responding to mass entirely. Neither core adjusts
+number to bring a clipped mode back inside its bounds the way MAM4's
+``calcsize`` does, so a clipped mode stays clipped — tracked in issue #823.
+
 ### Cloud-droplet activation (ARG)
 
 **What we do.** Abdul-Razzak & Ghan (2000) closed-form maximum-supersaturation

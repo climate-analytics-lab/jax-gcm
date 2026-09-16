@@ -826,10 +826,8 @@ class Model:
         boundary so spectral Gibbs ringing of the physics tendency doesn't leak
         negative values into user-visible output.
         """
-        jax.debug.callback(
-            lambda t: logger.info("Post processing: %s simulated seconds", t),
-            self.dycore.sim_time(state),
-        )
+        # No logging inside the scan: a host callback here makes the whole
+        # integration ineligible for XLA's persistent compilation cache.
         if isinstance(physics_state, dict) and "_sampler_state" in physics_state:
             # The StateSampler's per-step state snapshot exists only for the
             # per-dt observer channel; saving it would duplicate the dynamics
@@ -1325,10 +1323,11 @@ class Model:
                 "and physics states alongside the predictions; outside one, "
                 "start again from an explicit state with run(initial_state)."
             )
-        jax.debug.callback(
-            lambda: logger.info(
-                "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
-                save_interval, total_time, output_averages),
+        # Plain logging: these are static Python values, so there is nothing to
+        # defer to a host callback (which would also block the cache).
+        logger.info(
+            "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
+            save_interval, total_time, output_averages,
         )
         final_dycore_state, final_physics_state, predictions = self.run_from_state_with_carry(
             initial_state=self._final_dycore_state,
@@ -1342,7 +1341,7 @@ class Model:
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
         )
-        jax.debug.callback(lambda: logger.info("Run completed."))
+        logger.info("Run completed.")
         # Under an enclosing transformation these are tracers, and storing
         # them poisons the model: the next ``resume`` would thread a value
         # that escaped its trace back into a new one and raise
