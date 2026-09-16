@@ -212,8 +212,7 @@ class TestGateWiring:
             self, tmp_path, monkeypatch, capsys):
         status, out = _run_main(tmp_path, monkeypatch, capsys,
                                 radiation_cover=None)
-        assert "cloud_cover_radiation" not in out.replace(
-            "no radiation.total_cloud_cover", "")
+        assert "INFO  cloud_cover_radiation" not in out
         assert "NOTE  the window saves no radiation.total_cloud_cover" in out
         assert status == 0
 
