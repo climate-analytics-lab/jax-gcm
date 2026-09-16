@@ -77,6 +77,31 @@ Unreleased — positivity corrections are an explicit water-budget source
   prognostic state, so they are intentionally outside the reported interface
   correction; the diagnostics quantify the final positivity cap only.
 
+Unreleased — moist dynamics: condensate loading and one tracer contract
+------------------------------------------------------------------------
+
+- The hybrid dynamical core's virtual temperature now carries condensate
+  loading as well as moisture,
+  ``Tv = T (1 + (Rv/Rd - 1) q - sum(q_condensate))``, and the geopotential
+  handed to physics is built from that same virtual temperature. This matches
+  ECHAM6 (``dyn.f90::ztv`` and ``physc.f90::ztvm1``). The condensate set is
+  whatever the active composition declares out of ``qc``/``qi``/``qr``/``qs``;
+  including prognostic rain and snow is a deliberate departure from ECHAM6,
+  which carries no prognostic precipitation. Pure-sigma (SPEEDY)
+  configurations keep a dry dynamics — only their physics geopotential
+  changes.
+- **Breaking for dycore-native saved state:** every mass mixing-ratio tracer
+  (cloud condensate, aerosol mass, gas mass) now crosses the Dinosaur boundary
+  as the dimensionless kg/kg value rather than being nondimensionalised as
+  g/kg, the same contract specific humidity received above. The dynamics reads
+  condensate directly for the loading term, so a scaled store would suppress
+  it by 1000x. Values in a checkpoint written before this release are 1000x
+  smaller than the new convention; multiply them by 1000, or start from a
+  gridpoint ``PhysicsState``, which is unaffected. Tracers declaring
+  ``nondimensionalize=False`` (number concentrations, VMRs) are unchanged.
+  The rescale is behaviourally neutral on its own — transport, filters and the
+  modal round trip are all linear in the tracer.
+
 Unreleased — specific humidity has one kg/kg contract
 ------------------------------------------------------
 
@@ -91,6 +116,15 @@ Unreleased — specific humidity has one kg/kg contract
   conversion previously applied when
   constructing a nudging target, and divide old saved g/kg humidity values by
   1000 before supplying them as a new ``PhysicsState`` (#666).
+- **Migration, both production resume paths.** A ``run.checkpoint_path``
+  msgpack checkpoint stores the dycore-native humidity, which was
+  physical/1000 before this release; resuming one without conversion gives a
+  1000x too dry atmosphere with no error. An ``init=from_state`` netCDF stores
+  g/kg, so reading it as kg/kg gives a 1000x too wet one. The ``units``
+  attribute does not distinguish the two — output written since the CF
+  metadata pass already advertises ``kg kg-1`` on g/kg values — but the
+  magnitude does: a near-surface ``specific_humidity`` above 0.1 is g/kg, and
+  is impossible in kg/kg.
 
 Unreleased — public model clock conversion
 ------------------------------------------

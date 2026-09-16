@@ -19,10 +19,54 @@ On the **dinosaur** backend tracer transport is **semi-Lagrangian only** —
 departure-point transport with a Bermejo–Staniforth quasi-monotone limiter.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
-q↔Tᵥ coupling. The **pySES** backend instead carries every declared tracer as a
+q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
+the virtual temperature (below), for which Dinosaur converts them to modal
+coefficients once per step without changing how they are stored or
+transported. The **pySES** backend instead carries every declared tracer as a
 pySES passive tracer in physical units — advected and vertically remapped by
 the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
+**Moist coupling and the mass mixing-ratio contract.** On hybrid coordinates the
+dynamics is moist: the virtual temperature is
+
+```
+Tv = T · (1 + (Rv/Rd − 1)·q − Σ q_condensate)
+```
+
+which drives the geopotential, the temperature adiabatic tendency and the
+humidity vorticity/divergence corrections
+(``SemiLagrangianPrimitiveEquationsHybrid`` with ``humidity_key`` and
+``cloud_keys``, set in ``jcm/dycore/dinosaur/dycore.py::_build_transport``).
+The **same** virtual temperature builds the geopotential handed to physics
+(``jcm/dycore/dinosaur/state_bridge.py::dynamics_state_to_physics_state``), so
+dynamics and physics see one thermodynamic state. This follows ECHAM6, which
+uses ``ztv = t·(1 + vtmpc1·q − (xl + xi))`` in the dynamics
+(``dyn.f90::ztv``) and the identical expression for the physics geopotential
+(``physc.f90::ztvm1``).
+
+The condensate set is whatever the active composition declares out of
+``qc``/``qi``/``qr``/``qs`` (``state_bridge.py::CONDENSATE_TRACERS``). Including
+prognostic rain and snow is a deliberate departure from ECHAM6, whose
+one-moment scheme carries no prognostic precipitation: suspended precipitation
+loads a column exactly as suspended cloud water does, and which hydrometeors a
+scheme makes prognostic is largely a modelling convention rather than a
+physical distinction. A composition carrying no condensate couples humidity
+only.
+
+Because the dynamics reads these tracers directly, every mass mixing ratio —
+humidity, condensate, aerosol and gas mass — crosses the Dinosaur boundary as
+the **dimensionless kg/kg value**, unscaled (``TracerSpec`` with
+``nondimensionalize=True``, the default). Quantities that are not mixing
+ratios (number concentrations per kg, volume mixing ratios) declare
+``nondimensionalize=False`` and pass through untouched. A scaled store would
+silently weaken the Tᵥ coupling by the scale factor while leaving every
+linear operation — transport, filters, the modal round trip — unchanged, so
+the contract is what makes the coupling correct rather than merely present.
+
+On **pure-σ** coordinates (the SPEEDY configurations) Dinosaur exposes no
+``humidity_key``, so that dynamics remains dry; only the geopotential handed to
+physics carries the moisture and condensate terms.
+
 Horizontal hyperdiffusion is configured by ``jcm/diffusion.py::DiffusionFilter``:
 for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects the
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
