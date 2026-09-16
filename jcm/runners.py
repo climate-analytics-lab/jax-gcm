@@ -772,49 +772,62 @@ def resolve_effective_time_step_seconds(
 ) -> float:
     """Resolve the runner timestep in seconds from its owning source.
 
-    ``run.time_step`` is expressed in minutes. Any explicit value, including
-    zero, is preserved. ``None`` delegates ownership to an already-built
-    model or dycore, whose seconds value is authoritative because a dynamical
-    core bakes its timestep into its integrator at construction.
+    A **built** model or dycore is authoritative: it has already baked its
+    timestep into its integrator, so a config value that disagrees describes
+    a run that is not happening. Diagnostics that quote a timestep must quote
+    the one that actually advanced the state.
+
+    Without a built object, ownership follows the config. ``run.time_step``
+    is in minutes and any explicit value, including zero, is used as given.
+    ``run.time_step: null`` delegates to the dycore group, which is
+    meaningful only for a backend that owns its step in its own config
+    (pySES, via ``dycore.dt_seconds``). The dinosaur backend derives
+    ``dt_seconds`` *from* ``run.time_step``, so its group value is not an
+    independent source and is deliberately not consulted.
 
     Args:
         cfg: Hydra configuration containing the ``run`` group.
-        model_or_dycore: Built :class:`Model` or dynamical core used when the
-            config delegates with ``run.time_step: null``.
+        model_or_dycore: Built :class:`Model` or dynamical core. When given,
+            it wins over the config.
 
     Returns:
         Effective timestep in seconds.
 
     Raises:
-        ValueError: If the config delegates but no built source with a
-            timestep is supplied.
+        ValueError: If nothing in scope owns a timestep.
 
     """
+    if model_or_dycore is not None:
+        dt_si = getattr(model_or_dycore, "dt_si", None)
+        if dt_si is not None:
+            return float(getattr(dt_si, "m", dt_si))
+
+        dycore = getattr(model_or_dycore, "dycore", model_or_dycore)
+        dt_seconds = getattr(dycore, "dt_seconds", None)
+        if dt_seconds is None:
+            dt_seconds = getattr(model_or_dycore, "dt_seconds", None)
+        if dt_seconds is not None:
+            return float(dt_seconds)
+        raise ValueError(
+            "a built model/dycore was supplied but exposes neither dt_si "
+            "nor dt_seconds."
+        )
+
     configured_minutes = cfg.get("run", {}).get("time_step", None)
     if configured_minutes is not None:
         return float(configured_minutes) * 60.0
 
-    if model_or_dycore is None:
-        raise ValueError(
-            "run.time_step is null, so timestep ownership is delegated to "
-            "the built model/dycore; pass that built object when resolving "
-            "the effective timestep."
-        )
+    dycore_cfg = cfg.get("dycore", {})
+    if dycore_cfg.get("name", "dinosaur") == "pyses":
+        dycore_dt = dycore_cfg.get("dt_seconds", None)
+        if dycore_dt is not None:
+            return float(dycore_dt)
 
-    dt_si = getattr(model_or_dycore, "dt_si", None)
-    if dt_si is not None:
-        return float(getattr(dt_si, "m", dt_si))
-
-    dycore = getattr(model_or_dycore, "dycore", model_or_dycore)
-    dt_seconds = getattr(dycore, "dt_seconds", None)
-    if dt_seconds is None:
-        dt_seconds = getattr(model_or_dycore, "dt_seconds", None)
-    if dt_seconds is None:
-        raise ValueError(
-            "run.time_step is null, but the built model/dycore exposes "
-            "neither dt_si nor dt_seconds."
-        )
-    return float(dt_seconds)
+    raise ValueError(
+        "run.time_step is null and nothing else in scope owns a timestep: "
+        "pass the built model/dycore, or select a backend whose config "
+        "declares one (pySES's dycore.dt_seconds)."
+    )
 
 
 def build_model(cfg: DictConfig) -> Model:
@@ -925,14 +938,28 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     if sponge is not None and int(sponge.get("levels", 0)) > 0:
         physics = physics + _pyses_lid_sponge_term(dycore, sponge)
 
-    # Pass an explicit runner value through Model's consistency check. Null
-    # delegates to the backend; an equal explicit value is accepted; a
-    # mismatch raises before physics, dates, and diagnostics can diverge.
+    # The dycore owns the step, so the Model adopts ``dycore.dt_seconds`` and
+    # ``run.time_step`` is ignored — which is what
+    # ``config/dycore/pyses_ne30l47.yaml`` has always documented. Forwarding
+    # the runner value into ``Model`` instead would make every pySES run that
+    # does not also select ``run=pyses_year`` fail its consistency check on
+    # ``run/default.yaml``'s 12 minutes, vetoing the dycore group with a value
+    # the user never chose. Warn on a disagreement rather than refusing to
+    # build; ``resolve_effective_time_step_seconds`` reads the built model, so
+    # no diagnostic can quote the losing number.
     configured_time_step = cfg.get("run", {}).get("time_step", None)
-    model_time_step = (
-        None if configured_time_step is None else float(configured_time_step)
-    )
-    return Model(dycore=dycore, physics=physics, time_step=model_time_step,
+    if (configured_time_step is not None
+            and abs(float(configured_time_step) * 60.0
+                    - float(dycore.dt_seconds)) > 1e-6):
+        logger.warning(
+            "pySES owns the timestep: adopting dycore.dt_seconds=%.1f s "
+            "(%.4g min) and ignoring run.time_step=%s min. Select "
+            "run=pyses_year, whose time_step is null, to make the delegation "
+            "explicit.",
+            float(dycore.dt_seconds), float(dycore.dt_seconds) / 60.0,
+            configured_time_step,
+        )
+    return Model(dycore=dycore, physics=physics,
                  start_date=_resolve_start_date(cfg))
 
 
@@ -1723,12 +1750,8 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     """Diagnose physics tendencies from a JCM state-file time series."""
     from jcm.prescribed_state_model import PrescribedStateModel
 
-    if (cfg.get("run", {}).get("time_step", None) is None
-            and time_step_model is None):
-        # A null runner timestep means the configured backend owns it. Build
-        # that backend before constructing the physics-only driver so both
-        # execute with the same effective step.
-        time_step_model = build_model(cfg)
+    # A null runner timestep is resolved from the dycore group's own value;
+    # there is no need to construct the backend just to read a number.
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     coords = build_coords(cfg)
@@ -1765,12 +1788,8 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     lat_deg = float(column_cfg.lat_deg)
     lon_deg = float(column_cfg.lon_deg)
 
-    if (cfg.get("run", {}).get("time_step", None) is None
-            and time_step_model is None):
-        # The SCM has no dycore of its own. A delegating run therefore gets
-        # its step from the configured full-model backend before the column
-        # driver is constructed.
-        time_step_model = build_model(cfg)
+    # The SCM has no dycore of its own; a delegating run reads the step from
+    # the configured backend's group rather than building that backend.
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     physics = build_physics(cfg)

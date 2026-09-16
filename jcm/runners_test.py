@@ -56,7 +56,12 @@ _NULL_EMISSIONS = (
 class TestEffectiveTimeStepResolution(unittest.TestCase):
     """One config/model contract supplies every runner timestep (#801)."""
 
-    def test_explicit_minutes_take_precedence_over_built_model(self):
+    def test_built_model_takes_precedence_over_an_explicit_config_value(self):
+        """A built integrator is authoritative; the config cannot outvote it.
+
+        A diagnostic that quoted the config value here would describe a run
+        that is not happening — the pySES failure mode of #801.
+        """
         import types
 
         cfg = _compose(["run.time_step=7.5"])
@@ -64,8 +69,31 @@ class TestEffectiveTimeStepResolution(unittest.TestCase):
             dt_si=types.SimpleNamespace(m=1800.0),
         )
         self.assertEqual(
-            resolve_effective_time_step_seconds(cfg, model), 450.0,
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
         )
+
+    def test_explicit_minutes_used_when_nothing_is_built(self):
+        cfg = _compose(["run.time_step=7.5"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 450.0)
+
+    def test_null_falls_back_to_the_pyses_dycore_group(self):
+        """The pySES group owns its step, so no build is needed to read it."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 900.0)
+
+    def test_null_does_not_read_dt_seconds_from_a_dinosaur_config(self):
+        """The dinosaur group derives dt_seconds FROM run.time_step.
+
+        Treating it as an independent owner would resolve a stale number, so
+        the fallback is gated on the backend that genuinely owns its step.
+        """
+        from omegaconf import open_dict
+
+        cfg = _compose(["run.time_step=null"])
+        with open_dict(cfg):
+            cfg.dycore.dt_seconds = 4242.0
+        with self.assertRaises(ValueError):
+            resolve_effective_time_step_seconds(cfg)
 
     def test_explicit_zero_is_not_treated_as_delegation(self):
         cfg = _compose(["run.time_step=0"])
@@ -93,17 +121,16 @@ class TestEffectiveTimeStepResolution(unittest.TestCase):
 
     def test_null_without_an_owner_raises_a_contract_error(self):
         cfg = _compose(["run.time_step=null"])
-        with self.assertRaisesRegex(ValueError, "built model/dycore"):
+        with self.assertRaisesRegex(ValueError, "owns a timestep"):
             resolve_effective_time_step_seconds(cfg)
 
-    def test_pyses_build_validates_an_explicit_runner_timestep(self):
-        """Model rejects a runner step that conflicts with pySES (#801)."""
+    def _build_pyses_with_mocks(self, cfg):
         from jcm.runners import _build_pyses_model
 
-        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])
         physics = mock.MagicMock()
         physics.required_tracers.return_value = ()
         dycore = mock.MagicMock()
+        dycore.dt_seconds = 900.0
         expected = object()
 
         with mock.patch("jcm.runners.build_physics", return_value=physics), \
@@ -114,9 +141,40 @@ class TestEffectiveTimeStepResolution(unittest.TestCase):
                 mock.patch("jcm.runners._pyses_lid_sponge_term"), \
                 mock.patch("jcm.runners.Model", return_value=expected) as model:
             result = _build_pyses_model(cfg)
-
         self.assertIs(result, expected)
-        self.assertEqual(model.call_args.kwargs["time_step"], 30.0)
+        return model
+
+    def test_pyses_never_forwards_a_runner_timestep_to_model(self):
+        """The dycore owns the step; run.time_step must not veto the build.
+
+        ``run/default.yaml`` sets 12 minutes, so forwarding it would make
+        ``dycore=pyses_ne30l47`` fail construction unless the user also
+        selected ``run=pyses_year`` — a value they never chose overriding the
+        group that owns it.
+        """
+        for overrides in (
+            ["dycore=pyses_ne30l47"],                      # default run group
+            ["dycore=pyses_ne30l47", "run.time_step=30"],  # explicit conflict
+            ["dycore=pyses_ne30l47", "run.time_step=null"],
+        ):
+            with self.subTest(overrides=overrides):
+                model = self._build_pyses_with_mocks(_compose(overrides))
+                self.assertNotIn("time_step", model.call_args.kwargs)
+
+    def test_pyses_warns_when_the_runner_value_disagrees(self):
+        """A conflicting value is ignored loudly, not silently."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])
+        with self.assertLogs("jcm.runners", level="WARNING") as logs:
+            self._build_pyses_with_mocks(cfg)
+        joined = "\n".join(logs.output)
+        self.assertIn("pySES owns the timestep", joined)
+        self.assertIn("900.0", joined)
+
+    def test_pyses_is_quiet_when_the_runner_value_agrees(self):
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=15"])
+        with mock.patch("jcm.runners.logger") as log:
+            self._build_pyses_with_mocks(cfg)
+        log.warning.assert_not_called()
 
 
 class TestTracerPositivityResolution(unittest.TestCase):
@@ -1381,39 +1439,65 @@ class TestModeDispatch(unittest.TestCase):
 
                 budget.assert_called_once_with(dataset, 1800.0)
 
-    def test_prescribed_mode_builds_owner_for_delegated_timestep(self):
-        """A physics-only run inherits a null timestep from its backend."""
-        import types
+    def test_prescribed_mode_resolves_a_delegated_timestep_without_building(self):
+        """A delegating backend's step is read from its config group.
 
+        The physics-only driver has no dycore of its own, but constructing a
+        whole ne30L47 core just to read ``dt_seconds`` is not the way to get
+        one.
+        """
         from jcm.runners import _run_prescribed
 
-        cfg = _compose(["run.time_step=null"])
-        owner = types.SimpleNamespace(
-            dt_si=types.SimpleNamespace(m=1800.0),
-        )
-        coords = object()
-        physics = object()
-        terrain = object()
-        forcing = object()
-        states = object()
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
         expected = object()
 
-        with mock.patch("jcm.runners.build_model", return_value=owner) as build, \
-                mock.patch("jcm.runners.build_coords", return_value=coords), \
-                mock.patch("jcm.runners.build_physics", return_value=physics), \
-                mock.patch("jcm.runners.build_terrain", return_value=terrain), \
-                mock.patch("jcm.runners.build_forcing", return_value=forcing), \
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
                 mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
                 mock.patch("jcm.runners.warn_on_config_traps"), \
                 mock.patch("jcm.runners._load_states_from_cfg",
-                           return_value=(None, states)), \
+                           return_value=(None, object())), \
                 mock.patch(
                     "jcm.prescribed_state_model.PrescribedStateModel",
                 ) as prescribed_cls:
             prescribed_cls.return_value.run.return_value = expected
             result = _run_prescribed(cfg)
 
-        build.assert_called_once_with(cfg)
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 900.0,
+        )
+
+    def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
+        """When the caller already built the model, it owns the step."""
+        import types
+
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12"])
+        owner = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(None, object())), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg, owner)
+
+        build.assert_not_called()
         self.assertIs(result, expected)
         self.assertEqual(
             prescribed_cls.call_args.kwargs["dt_seconds"], 1800.0,

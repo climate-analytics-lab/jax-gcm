@@ -369,12 +369,17 @@ def test_profile_timestep_delegates_to_built_model():
     assert pt._effective_time_step_minutes(cfg, model) == 30.0
 
 
-def test_profile_timestep_preserves_explicit_value():
-    """An explicit config value wins over the model supplied to the helper."""
+def test_profile_timestep_follows_the_built_model():
+    """The profiled model's own step is what the report must quote.
+
+    A profile labelled with a config value the model did not use describes a
+    run that did not happen — the pySES case, where the Model adopts
+    ``dycore.dt_seconds`` and ignores ``run.time_step``.
+    """
     cfg = {"run": {"time_step": 7.5}}
     model = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
-    assert pt._effective_time_step_minutes(cfg, model) == 7.5
-    assert pt._config_summary(["run=default"], 7.5).endswith("dt=7.5min")
+    assert pt._effective_time_step_minutes(cfg, model) == 30.0
+    assert pt._config_summary(["run=default"], 30.0).endswith("dt=30min")
 
 
 class _FakeGatedTerm:
