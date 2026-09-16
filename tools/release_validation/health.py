@@ -94,19 +94,17 @@ RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
     "precip_mm_day": (2.0, 4.0),
     # Total cloud cover under maximum-random overlap (see the module
-    # docstring). The band is the previous one (0.4-0.8, on the column max)
-    # kept at the same width and shifted by the measured offset between the
-    # two definitions, rounded to 0.1: max-random scores +0.11 to +0.15 above
-    # the column max on every jcm output measured so far, so a band left at
-    # 0.4-0.8 would loosen the floor and tighten the ceiling by that much and
-    # fail correct members for a definitional reason.
+    # docstring). Deliberately wide: this is a "did the model produce a
+    # climate" gate, not a tuning target. It is also calibrated on THIS
+    # definition, which matters because max-random reads 0.11-0.15 above a
+    # column maximum of the same field — a band taken from column-max
+    # experience sits ~0.1 low here and fails correct members on the ceiling.
     #
-    # Deliberately wide, as a "did the model produce a climate" gate: the
-    # observational anchor is a global cloud amount of 0.68 +/- 0.03 for
-    # clouds of optical depth > 0.1, itself running from 0.56 (COD > 2) to
-    # 0.74 (COD > 0.01) with the detection threshold (GEWEX Cloud Assessment,
-    # Stubenrauch et al. 2013, BAMS 94, 1031-1049,
-    # doi:10.1175/BAMS-D-12-00117.1), and every jcm member recorded in the
+    # Both anchors sit inside it. Observations: a global cloud amount of
+    # 0.68 +/- 0.03 for clouds of optical depth > 0.1, itself running from
+    # 0.56 (COD > 2) to 0.74 (COD > 0.01) with the detection threshold (GEWEX
+    # Cloud Assessment, Stubenrauch et al. 2013, BAMS 94, 1031-1049,
+    # doi:10.1175/BAMS-D-12-00117.1). Model: every jcm member recorded in the
     # #638/#782 matrix maps into 0.59-0.83 on this definition.
     # Derivation and the measured table: docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),

@@ -174,20 +174,22 @@ These are *mapped* values, not measurements: no post-#707 year run has been
 scored on this definition, because none is archived. The next validation sweep
 prints all three covers and replaces this mapping with measurements.
 
-### The band moves with the definition
+### The band
 
-The gate band becomes **0.5-0.9**, from **0.4-0.8**.
+The gate band is **0.5-0.9**: the same width the gate has always had, placed
+on this definition.
 
-Leaving it at 0.4-0.8 while changing what the gate measures would have
-loosened the floor and tightened the ceiling by the definitional offset — and
-the mapped matrix above shows that is not academic: `echam-1m-t106`'s #638
-baseline maps to ~0.83 and `echam-1m-t63`'s to ~0.81, so members that passed
-would fail on the ceiling for a reason that has nothing to do with the model.
-
-The band is therefore the previous one at the **same width**, shifted by the
-measured offset rounded to 0.1. That keeps the gate's character — loose,
-spin-up tolerant, a "did the model produce a climate" test rather than a
-tuning target — and it brackets both anchors:
+Placement is the whole question, because a band is calibrated against a
+quantity. The previous band, 0.4-0.8, was calibrated by experience with column
+maxima. Carrying it unchanged onto a quantity that reads 0.11-0.15 higher
+would loosen the floor and tighten the ceiling by that offset, and the mapped
+matrix above shows that is not academic: `echam-1m-t106`'s #638 baseline maps
+to ~0.83 and `echam-1m-t63`'s to ~0.81, so members that passed would fail on
+the ceiling for a reason that has nothing to do with the model. Shifting by
+the measured offset rounded to 0.1 — rather than the full 0.13, which would
+eat into the floor where the 2M member sits — keeps the gate's character
+(loose, spin-up tolerant, a "did the model produce a climate" test rather than
+a tuning target) and brackets both anchors:
 
 * **Observations.** The GEWEX Cloud Assessment database gives a global cloud
   amount of **0.68 ± 0.03** for clouds of optical depth > 0.1, rising to 0.74
