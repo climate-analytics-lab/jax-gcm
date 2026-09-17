@@ -189,7 +189,7 @@ def _simple_aqueous_so4(so2, h2o2, rho):
     [kg m⁻³]. Returns the in-cloud SO₄ mass produced [kg/kg]; the term applies
     the cloud-fraction weighting and the S-conserving SO₂ sink.
     """
-    n_air = rho * _avo_xtoc() / _mw_air()                       # molec/cm³
+    n_air = rho * _avo_xtoc() / _mw_air()            # molec/cm³
     h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
     # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).
     h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _mw_air())
