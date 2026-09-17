@@ -19,15 +19,19 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
-from jcm.constants import grav as _G
-from jcm.constants import m_air as _MA
-from jcm.constants import r_universal as _RGAS
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
+
+# Constants are read through the module alias and never bound with
+# ``from jcm.constants import grav``: a from-import captures the float at
+# import time, so a later ``set_constants`` override (another planet, a
+# sensitivity study, gradient calibration) would silently never reach this
+# scheme while the dynamics used the new value (#772).
+import jcm.constants as c
 
 
 @tree_math.struct
@@ -114,11 +118,13 @@ def stokes_velocity(
     ln_sigma = math.log(geom_std_dev)
     r = moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment)
     mu = air_viscosity(temperature)
-    # Mean free path λ = (μ/p)·√(π R T / (2 M_a)).
-    mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
+    # Mean free path λ = (μ/p)·√(π R* T / (2 M_a)), R* the universal constant.
+    mfp = (mu / pressure) * jnp.sqrt(
+        jnp.pi * c.r_universal * temperature / (2.0 * c.m_air)
+    )
     kn = mfp / jnp.maximum(r, 1.0e-10)
     cunningham = 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
-    return ((2.0 * _G * rho_p * r ** 2 * cunningham) / (9.0 * mu)
+    return ((2.0 * c.grav * rho_p * r ** 2 * cunningham) / (9.0 * mu)
             * math.exp(2.0 * ln_sigma ** 2))
 
 

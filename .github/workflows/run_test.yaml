@@ -106,6 +106,12 @@ jobs:
         run: |
           pytest -v -s -m "not slow" --cov=jcm --cov-fail-under=90
 
+      # Same belt as the PR job's floor below, against the base .coveragerc.
+      - name: Enforce fast-test coverage floor (push)
+        if: github.event_name == 'push'
+        run: |
+          coverage report --fail-under=90
+
       # run slow tests when triggered by a push to an open PR
       # Uses .coveragerc-pr which omits utility / orchestration modules
       # already well-covered by the push-mode fast-test suite, so the
@@ -123,3 +129,17 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           pytest -v -s -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80
+
+      # Belt to the --cov-fail-under braces above. The floor is enforced twice
+      # on purpose: `--cov-fail-under` lives in a plugin whose enforcement
+      # semantics have already changed under us once (pytest-cov 6.0.0 made the
+      # check honour the reporting precision, silently turning this 80 floor
+      # into a 79.5 floor until `.coveragerc-pr` set `precision = 2` — #786),
+      # whereas this step is a plain non-zero exit from coverage itself.
+      # It reads the same `.coverage` file pytest-cov has just combined across
+      # the xdist workers, so it re-reports the identical total rather than
+      # re-measuring anything, and it costs about a second.
+      - name: Enforce slow-test coverage floor (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          coverage report --rcfile=.coveragerc-pr --fail-under=80

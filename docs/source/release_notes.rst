@@ -1,6 +1,23 @@
 Release Notes
 =============
 
+Unreleased — ``set_constants`` reaches the JAM and tropopause modules
+---------------------------------------------------------------------
+
+- ``jcm.constants.set_constants(...)`` now propagates into the JAM aerosol
+  activation, sedimentation, dry-deposition, ice-nucleation and
+  aqueous-chemistry schemes, the TTE-TKE vertical-diffusion closure, the
+  emissions preparation step and the WMO-tropopause diagnostic. All of these
+  captured constants at import time — as a value import, as a reference to the
+  singleton object, or by evaluating ``c.<name>`` in a module-level constant or
+  a default argument — and so silently kept Earth values while the rest of the
+  model used the override (#772). A run with a non-default ``grav``, ``cpd``,
+  ``m_air``, ``r_universal`` or ``ak`` composing any of those terms therefore
+  **changes results**: it was computing with a mixed constant set before.
+  Overrides must still be applied before the model is built (a constant read
+  inside a jitted term is fixed when that term is traced), and constants
+  internal to ``mam4-jax`` remain outside jcm's control.
+
 Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
 ------------------------------------------------------------------------
 

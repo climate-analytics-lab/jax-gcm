@@ -243,9 +243,22 @@ already seen, not discover it:
 ```bash
 ruff check .                     # MUST be clean before EVERY push
 JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+coverage report --fail-under=90                      # belt: enforce it again
 JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
+coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```
+
+Both floors are checked twice because `--cov-fail-under` alone did not enforce
+them. `fail_under` is judged at the *reported* precision
+(`round(total, precision) < fail_under`), so at coverage's default precision of
+0 the 80 floor was really a 79.5 floor: the slow job printed `FAIL ... Total
+coverage: 79.68%` and still exited 0. Both rcfiles now set
+`[report] precision = 2`, which is the actual fix; the extra `coverage report`
+line re-checks the same `.coverage` data through coverage itself, so a future
+plugin change cannot silently disarm the gate again (#786). Keep the rcfile
+precision and the `coverage report` steps together — either alone leaves a
+hole.
 
 Then review your own diff adversarially **before pushing** and fix or refute
 every finding (`jcm-dev-workflow` step 3). Codex credits are finite and a CI

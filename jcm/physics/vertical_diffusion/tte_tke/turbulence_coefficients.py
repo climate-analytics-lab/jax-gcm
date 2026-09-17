@@ -19,7 +19,7 @@ def compute_richardson_number(
     temperature: jnp.ndarray,
     height_full: jnp.ndarray,
     height_half: jnp.ndarray,
-    gravity: float = c.grav
+    gravity: float | None = None,
 ) -> jnp.ndarray:
     """Compute bulk Richardson number for atmospheric stability.
     
@@ -29,7 +29,10 @@ def compute_richardson_number(
         temperature: Temperature [K] (ncol, nlev)
         height_full: Full level heights [m] (ncol, nlev)
         height_half: Half level heights [m] (ncol, nlev+1)
-        gravity: Gravitational acceleration [m/s²]
+        gravity: Gravitational acceleration [m/s²]. ``None`` (the
+            default) reads ``jcm.constants.grav`` at trace time, so a
+            ``set_constants`` override applies; a default argument
+            would have captured it at import instead (#772).
         
     Returns:
         Richardson number [-] (ncol, nlev-1)
@@ -48,6 +51,9 @@ def compute_richardson_number(
     
     # Brunt-Väisälä frequency squared (buoyancy frequency)
     # N² = (g/T) * (dT/dz + g/cp)
+    # Resolved here, not as a default argument: a default is evaluated
+    # once at import and would freeze the pre-override value (#772).
+    gravity = c.grav if gravity is None else gravity
     lapse_rate = gravity / c.cpd
     buoyancy_freq_squared = (gravity / temp_avg) * (dt_dz + lapse_rate)
     

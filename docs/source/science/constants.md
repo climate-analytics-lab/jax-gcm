@@ -32,19 +32,46 @@ constants such as ``alf = als − alv`` computed once at init). CAM uses
 **Status & known limitations.** Only *base* fields may be overridden by keyword;
 passing a derived quantity to ``set_constants`` raises. ``alhf`` is derived (not
 an independent base) so the fusion enthalpy always equals ``alhs − alhc``.
-Overrides do **not** yet reach everything: six modules — the JAM
-activation / sedimentation / dry-deposition / dust / ice-nucleation chain and
-the WMO-tropopause diagnostic — capture constants at import time (the JAM
-chain binds values; the tropopause diagnostic holds a reference to the
-singleton *object*, which ``set_constants`` rebinds rather than mutates, so
-the reference goes equally stale) and would silently keep Earth values after
-an override (#772). Consumers following the contract (``import jcm.constants
-as c``, read ``c.<name>`` when traced or at construction) are unaffected —
-the dinosaur dycore wrapper reads the live singleton at construction through
-the ``jcm.constants`` module alias (its only ``from``-import is the
-``PhysicalConstants`` class, used as a type), so it honours overrides. Until
-#772 lands, a ``set_constants`` run is consistent everywhere except a
-composition using those six.
+Every consumer in the package now reads constants **when the value is used**
+— inside the function, at construction, or at trace time — so an override
+reaches all of them: the dinosaur dycore wrapper takes the live singleton at
+construction, and the JAM activation / sedimentation / dry-deposition /
+ice-nucleation / aqueous-chemistry chain, the TTE-TKE closure, the emissions
+preparation step and the WMO-tropopause diagnostic all read theirs per call.
+
+The contract is about *timing*, not merely about the import form, and the
+guard in ``jcm/constants_test.py`` enforces it that way: it parses every
+non-test module and rejects three distinct captures, each of which silently
+froze Earth values after an override.
+
+1. ``from jcm.constants import grav`` — binds the float at import.
+2. ``from jcm.constants import physical_constants`` — binds the singleton
+   *object*, equally stale because ``set_constants`` rebinds the module global
+   rather than mutating it (``PhysicalConstants`` is a ``NamedTuple``).
+3. Evaluating ``c.<name>`` at import time *despite* using the approved module
+   alias — a derived module constant (``_MW_AIR = c.m_air * 1000.0``), a
+   default argument (``def f(..., gravity=c.grav)``, evaluated once when the
+   ``def`` executes), or a class-body attribute. This is the easiest form to
+   miss: the TTE-TKE closure read ``c.cpd`` live and took gravity from a
+   frozen default two lines earlier, in the same expression.
+
+Only ``PhysicalConstants`` itself may be imported by name — it is a type and
+binds no value; the dycore uses it as an annotation.
+
+The guard is structural, so it has one blind spot worth naming: a module-level
+*call* that reads constants inside itself (``_TABLE = _build_table()``) is not
+detected. The package's one such value, ``dycore.PHYSICS_SPECS``, is built from
+``PhysicalConstants.default()`` rather than the live singleton and is
+referenced only by tests, so it is a fixed default by construction rather than
+a stale override — the dycore's own specs are built at construction from the
+live values.
+
+Two boundaries remain, both by design rather than oversight. ``set_constants``
+must be called **before** the model is built: a constant read inside a jitted
+term is baked in when that term is traced, so an override afterwards does not
+propagate until recompilation. And constants internal to ``mam4-jax`` belong to
+that package — JAM's calls into it use its values, which ``set_constants`` does
+not reach.
 
 **Code pointers.**
 - ``jcm/constants.py`` — ``PhysicalConstants``, the ``physical_constants``
@@ -56,3 +83,8 @@ composition using those six.
 **Validation evidence.** The override / derived-quantity behaviour is exercised
 through dycore construction (``jcm/dycore/dinosaur/dycore_test.py``) and the
 SPEEDY-specific ``jcm/physics/speedy/physical_constants_test.py``.
+``jcm/constants_test.py`` adds the structural import guard plus per-module
+behavioural checks: with gravity overridden, the tropopause geopotential
+height, the ARG maximum supersaturation, the Stokes settling velocity, the
+quasi-laminar deposition resistance and the ice-nucleation cooling rate all
+move, and each restores the original constants afterwards.

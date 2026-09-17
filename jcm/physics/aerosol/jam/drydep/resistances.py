@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from jcm.constants import ak as _KB  # Boltzmann constant [J/K]
-from jcm.constants import grav as _G
-from jcm.constants import m_air as _MA
-from jcm.constants import r_universal as _RGAS
 from jcm.physics.aerosol.jam.sedimentation.sedi_term import moment_radius
+
+# Constants are read through the module alias and never bound with
+# ``from jcm.constants import grav``: a from-import captures the float at
+# import time, so a later ``set_constants`` override (another planet, a
+# sensitivity study, gradient calibration) would silently never reach this
+# scheme while the dynamics used the new value (#772).
+import jcm.constants as c
 
 
 def air_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
@@ -35,7 +38,10 @@ def cunningham_slip(
 ) -> jnp.ndarray:
     """Cunningham slip-correction factor [-]."""
     mu = air_viscosity(temperature)
-    mfp = (mu / pressure) * jnp.sqrt(jnp.pi * _RGAS * temperature / (2.0 * _MA))
+    # c.r_universal is R* (J/mol/K), not the per-mass dry-air gas constant.
+    mfp = (mu / pressure) * jnp.sqrt(
+        jnp.pi * c.r_universal * temperature / (2.0 * c.m_air)
+    )
     kn = mfp / jnp.maximum(r, 1.0e-10)
     return 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
 
@@ -68,10 +74,13 @@ def quasi_laminar_resistance(
     mu = air_viscosity(temperature)
     nu = mu / air_density                              # kinematic viscosity
     cc = cunningham_slip(r_wet, temperature, pressure)
-    diffusivity = _KB * temperature * cc / (6.0 * jnp.pi * mu * jnp.maximum(r_wet, 1e-10))
+    # c.ak is the Boltzmann constant [J/K].
+    diffusivity = (
+        c.ak * temperature * cc / (6.0 * jnp.pi * mu * jnp.maximum(r_wet, 1e-10))
+    )
     schmidt = nu / diffusivity
     u = jnp.maximum(u_star, 1.0e-3)
-    stokes = v_grav * u ** 2 / (_G * nu)
+    stokes = v_grav * u ** 2 / (c.grav * nu)
     conductance = u * (schmidt ** -0.5 + 10.0 ** (-3.0 / jnp.maximum(stokes, 1e-6)))
     return 1.0 / jnp.maximum(conductance, 1e-12)
 

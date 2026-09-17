@@ -73,7 +73,7 @@ def compute_buoyancy_production(
     temperature: jnp.ndarray,
     dz: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    gravity: float = c.grav
+    gravity: float | None = None,
 ) -> jnp.ndarray:
     """Compute buoyancy production term in TKE budget.
     
@@ -83,7 +83,10 @@ def compute_buoyancy_production(
         temperature: Temperature [K] (ncol, nlev)
         dz: Increments between full level heights [m] (ncol, nlev-1)
         exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        gravity: Gravitational acceleration [m/s²]
+        gravity: Gravitational acceleration [m/s²]. ``None`` (the
+            default) reads ``jcm.constants.grav`` at trace time, so a
+            ``set_constants`` override applies; a default argument
+            would have captured it at import instead (#772).
         
     Returns:
         Buoyancy production [m²/s³] (ncol, nlev)
@@ -103,6 +106,9 @@ def compute_buoyancy_production(
     
     # Buoyancy production: P_b = -K_h * (g/T) * (dT/dz + g/cp)
     # Note: The dry adiabatic lapse rate g/cp is included for stability
+    # Resolved here, not as a default argument: a default is evaluated
+    # once at import and would freeze the pre-override value (#772).
+    gravity = c.grav if gravity is None else gravity
     lapse_rate = gravity / c.cpd
     buoyancy_freq = (gravity / temp_avg) * (dt_dz_extended + lapse_rate)
     
