@@ -83,8 +83,9 @@ Run the test suite to ensure your changes don't break existing functionality:
    # Run only fast tests (skip slow integration tests)
    $ pytest -m "not slow"
 
-   # Match the CI fast-test coverage gate
+   # Match the CI fast-test coverage gate (both steps, as CI runs them)
    $ pytest -m "not slow" --cov=jcm --cov-fail-under=90
+   $ coverage report --fail-under=90
 
    # Run the linter
    $ ruff check .

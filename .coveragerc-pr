@@ -89,3 +89,9 @@ omit =
     # ``runners.py`` / ``utils.py`` omit pattern for code the slow
     # suite touches only through entry-point shims.
     jcm/dycore/dinosaur/dycore.py
+
+[report]
+# See the identical block in the base ``.coveragerc``: ``fail_under`` is judged
+# at the *reported* precision, so the default precision of 0 turned this file's
+# 80 floor into a 79.5 floor and let 79.68% pass while printing FAIL (#786).
+precision = 2
