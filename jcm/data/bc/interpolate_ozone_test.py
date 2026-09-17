@@ -199,7 +199,11 @@ class VerticalInterpDtypeTest(unittest.TestCase):
     def test_dtype_preserved(self):
         psrc, ptgt = _plev_ascending(), _plev_target()
         for dtype in (np.float32, np.float64):
-            with self.subTest(dtype=dtype):
+            # The subtest label must be a plain string: xdist ships subtest
+            # reports through execnet, which cannot serialise a numpy type
+            # object, so passing ``dtype=np.float32`` fails under -n but
+            # passes serially.
+            with self.subTest(dtype=np.dtype(dtype).name):
                 field = np.ones((2, 11, 3), dtype=dtype)
                 out = vertical_interp_log_p(field, psrc, ptgt)
                 self.assertEqual(out.dtype, dtype)
