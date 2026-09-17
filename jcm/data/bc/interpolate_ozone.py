@@ -37,42 +37,85 @@ REFERENCE_SURFACE_PRESSURE_PA = 101325.0
 
 
 def vertical_interp_log_p(
-    o3_source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
+    source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
 ) -> np.ndarray:
-    """Vertical-interp ``o3_source`` from ``plev_source`` to ``plev_target``.
+    """Vertical-interp ``source`` from ``plev_source`` to ``plev_target``.
 
-    Public because nothing here is ozone-specific beyond the argument names:
-    the same log-pressure interpolation applies to any field given on pressure
-    levels, temperature, humidity and winds included.
+    Public because nothing here is ozone-specific: the same log-pressure
+    interpolation applies to any field given on pressure levels, temperature,
+    humidity and winds included. Only *axis 1* is fixed as the pressure axis;
+    every other axis is carried through untouched whatever it means, so a
+    ``(time, plev, lat, lon)`` file, a ``(time, plev, column)`` set of columns
+    and an ``(ensemble, plev, time, lat, lon)`` stack all work unchanged
+    (#830 — the earlier version unpacked exactly four dimensions, which
+    contradicted this documented contract).
 
     Args:
-        o3_source: ``(..., nplev_source, ..., ...)`` ozone field; the
-            ``plev_source`` axis is assumed to be the second one
-            (``(time, plev, lat, lon)`` files).
-        plev_source: ``(nplev_source,)`` source pressure (Pa).
+        source: ``(d0, nplev_source, ...)`` field with the source pressure on
+            axis 1 and at least two dimensions. Any number of leading and
+            trailing axes is allowed and their order is preserved.
+        plev_source: ``(nplev_source,)`` source pressure (Pa), strictly
+            monotonic in either direction.
         plev_target: ``(nplev_target,)`` target pressure (Pa).
 
     Returns:
-        ``(time, nplev_target, lat, lon)`` interpolated array.
+        ``source``'s shape with axis 1 replaced by ``plev_target``, in
+        ``source``'s dtype.
+
+    Raises:
+        ValueError: if ``source`` has fewer than two dimensions, if
+            ``plev_source`` is not 1-D, if its length does not match
+            ``source.shape[1]``, or if it is not strictly monotonic.
 
     """
+    source = np.asarray(source)
+    plev_source = np.asarray(plev_source)
+    plev_target = np.asarray(plev_target)
+
+    if source.ndim < 2:
+        raise ValueError(
+            f"source carries the pressure on axis 1, so it needs at least 2 "
+            f"dimensions; got shape {source.shape}"
+        )
+    if plev_source.ndim != 1:
+        raise ValueError(
+            f"plev_source must be 1-D; got shape {plev_source.shape}"
+        )
+    if plev_source.size != source.shape[1]:
+        raise ValueError(
+            f"plev_source has {plev_source.size} levels but source axis 1 has "
+            f"{source.shape[1]} (source shape {source.shape}); the pressure "
+            f"axis of source must be axis 1"
+        )
+
     log_src = np.log(plev_source)
-    log_tgt = np.log(plev_target)
-    if log_src[0] > log_src[-1]:
+    # ``np.interp`` needs increasing ``xp`` and returns silent nonsense
+    # otherwise, so a descending source — the common top-first file
+    # convention, which the shipped ozone climatologies use — is flipped, and
+    # a non-monotonic one is rejected rather than quietly interpolated.
+    if plev_source.size > 1 and log_src[0] > log_src[-1]:
         log_src = log_src[::-1]
-        o3_source = o3_source[:, ::-1]
-    out = np.empty(
-        (o3_source.shape[0], plev_target.size, *o3_source.shape[2:]),
-        dtype=o3_source.dtype,
-    )
-    # numpy.interp is 1-D — loop over horizontal+time. Once-only offline,
-    # so the explicit loop is fine.
-    ntime, _, nlat, nlon = o3_source.shape
-    for t in range(ntime):
-        for j in range(nlat):
-            for i in range(nlon):
-                out[t, :, j, i] = np.interp(log_tgt, log_src, o3_source[t, :, j, i])
-    return out
+        source = np.flip(source, axis=1)
+    if plev_source.size > 1 and not np.all(np.diff(log_src) > 0):
+        raise ValueError(
+            "plev_source must be strictly monotonic (ascending or "
+            f"descending); got {plev_source}"
+        )
+
+    log_tgt = np.log(plev_target)
+
+    # numpy.interp is 1-D, so the field is reshaped to (ncolumns, nplev) and
+    # looped over. Moving axis 1 to the end and flattening everything else is
+    # what makes the rank arbitrary: no axis but the pressure one is ever
+    # named. This runs once, offline, so the explicit loop is fine — and it
+    # keeps the result bit-identical to the per-column loop this replaced.
+    moved = np.moveaxis(source, 1, -1)
+    lead_shape = moved.shape[:-1]
+    flat = moved.reshape(-1, plev_source.size)
+    out = np.empty((flat.shape[0], plev_target.size), dtype=source.dtype)
+    for k in range(flat.shape[0]):
+        out[k] = np.interp(log_tgt, log_src, flat[k])
+    return np.moveaxis(out.reshape(*lead_shape, plev_target.size), -1, 1)
 
 
 def interpolate_ozone(
