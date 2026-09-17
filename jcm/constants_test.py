@@ -23,9 +23,18 @@ mechanical; the behavioural tests prove it end-to-end for the modules that
 were converted, so a future regression fails on the physics, not just on a
 lint-style rule.
 
-Scope note: this covers jcm's *own* bindings. A JAM scheme that takes a value
-from ``mam4_jax``'s internal constants is out of scope here — threading
-``set_constants`` into that package is a separate concern.
+Scope note, stated because the guard is structural and therefore has a
+boundary. It covers jcm's *own* bindings, read directly. Two things it
+cannot see:
+
+* a module-level *call* that reads constants inside itself
+  (``_TABLE = _build_table()``). The one instance in the package is
+  ``dycore.PHYSICS_SPECS``, which is deliberate and safe: it is built from
+  ``PhysicalConstants.default()`` rather than the live singleton, and is
+  referenced only by tests — production code builds its specs at
+  construction from ``self.constants``.
+* constants internal to ``mam4_jax``. Threading ``set_constants`` into that
+  package is a separate concern and is not attempted here.
 """
 
 import ast

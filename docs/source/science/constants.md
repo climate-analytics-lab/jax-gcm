@@ -58,6 +58,14 @@ froze Earth values after an override.
 Only ``PhysicalConstants`` itself may be imported by name — it is a type and
 binds no value; the dycore uses it as an annotation.
 
+The guard is structural, so it has one blind spot worth naming: a module-level
+*call* that reads constants inside itself (``_TABLE = _build_table()``) is not
+detected. The package's one such value, ``dycore.PHYSICS_SPECS``, is built from
+``PhysicalConstants.default()`` rather than the live singleton and is
+referenced only by tests, so it is a fixed default by construction rather than
+a stale override — the dycore's own specs are built at construction from the
+live values.
+
 Two boundaries remain, both by design rather than oversight. ``set_constants``
 must be called **before** the model is built: a constant read inside a jitted
 term is baked in when that term is traced, so an override afterwards does not
