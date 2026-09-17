@@ -37,9 +37,9 @@ REFERENCE_SURFACE_PRESSURE_PA = 101325.0
 
 
 def vertical_interp_log_p(
-    source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
+    o3_source: np.ndarray, plev_source: np.ndarray, plev_target: np.ndarray,
 ) -> np.ndarray:
-    """Vertical-interp ``source`` from ``plev_source`` to ``plev_target``.
+    """Vertical-interp ``o3_source`` from ``plev_source`` to ``plev_target``.
 
     Public because nothing here is ozone-specific: the same log-pressure
     interpolation applies to any field given on pressure levels, temperature,
@@ -50,8 +50,13 @@ def vertical_interp_log_p(
     (#830 — the earlier version unpacked exactly four dimensions, which
     contradicted this documented contract).
 
+    The first parameter keeps its ``o3_source`` name: it is part of the
+    published signature (this helper became public in #767) and renaming it
+    would break any caller passing it by keyword, which the rank
+    generalisation does not require.
+
     Args:
-        source: ``(d0, nplev_source, ...)`` field with the source pressure on
+        o3_source: ``(d0, nplev_source, ...)`` field with the source pressure on
             axis 1 and at least two dimensions. Any number of leading and
             trailing axes is allowed and their order is preserved.
         plev_source: ``(nplev_source,)`` source pressure (Pa), strictly
@@ -59,33 +64,33 @@ def vertical_interp_log_p(
         plev_target: ``(nplev_target,)`` target pressure (Pa).
 
     Returns:
-        ``source``'s shape with axis 1 replaced by ``plev_target``, in
-        ``source``'s dtype.
+        ``o3_source``'s shape with axis 1 replaced by ``plev_target``, in
+        ``o3_source``'s dtype.
 
     Raises:
-        ValueError: if ``source`` has fewer than two dimensions, if
+        ValueError: if ``o3_source`` has fewer than two dimensions, if
             ``plev_source`` is not 1-D, if its length does not match
-            ``source.shape[1]``, or if it is not strictly monotonic.
+            ``o3_source.shape[1]``, or if it is not strictly monotonic.
 
     """
-    source = np.asarray(source)
+    o3_source = np.asarray(o3_source)
     plev_source = np.asarray(plev_source)
     plev_target = np.asarray(plev_target)
 
-    if source.ndim < 2:
+    if o3_source.ndim < 2:
         raise ValueError(
-            f"source carries the pressure on axis 1, so it needs at least 2 "
-            f"dimensions; got shape {source.shape}"
+            f"o3_source carries the pressure on axis 1, so it needs at least 2 "
+            f"dimensions; got shape {o3_source.shape}"
         )
     if plev_source.ndim != 1:
         raise ValueError(
             f"plev_source must be 1-D; got shape {plev_source.shape}"
         )
-    if plev_source.size != source.shape[1]:
+    if plev_source.size != o3_source.shape[1]:
         raise ValueError(
-            f"plev_source has {plev_source.size} levels but source axis 1 has "
-            f"{source.shape[1]} (source shape {source.shape}); the pressure "
-            f"axis of source must be axis 1"
+            f"plev_source has {plev_source.size} levels but o3_source axis 1 has "
+            f"{o3_source.shape[1]} (o3_source shape {o3_source.shape}); the pressure "
+            f"axis of o3_source must be axis 1"
         )
 
     log_src = np.log(plev_source)
@@ -95,7 +100,7 @@ def vertical_interp_log_p(
     # a non-monotonic one is rejected rather than quietly interpolated.
     if plev_source.size > 1 and log_src[0] > log_src[-1]:
         log_src = log_src[::-1]
-        source = np.flip(source, axis=1)
+        o3_source = np.flip(o3_source, axis=1)
     if plev_source.size > 1 and not np.all(np.diff(log_src) > 0):
         raise ValueError(
             "plev_source must be strictly monotonic (ascending or "
@@ -109,10 +114,10 @@ def vertical_interp_log_p(
     # what makes the rank arbitrary: no axis but the pressure one is ever
     # named. This runs once, offline, so the explicit loop is fine — and it
     # keeps the result bit-identical to the per-column loop this replaced.
-    moved = np.moveaxis(source, 1, -1)
+    moved = np.moveaxis(o3_source, 1, -1)
     lead_shape = moved.shape[:-1]
     flat = moved.reshape(-1, plev_source.size)
-    out = np.empty((flat.shape[0], plev_target.size), dtype=source.dtype)
+    out = np.empty((flat.shape[0], plev_target.size), dtype=o3_source.dtype)
     for k in range(flat.shape[0]):
         out[k] = np.interp(log_tgt, log_src, flat[k])
     return np.moveaxis(out.reshape(*lead_shape, plev_target.size), -1, 1)
