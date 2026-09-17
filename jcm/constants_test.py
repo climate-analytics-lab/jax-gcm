@@ -70,20 +70,23 @@ def _import_time_nodes(tree: ast.AST):
     the ``def`` statement executes at import, which is precisely how
     ``gravity: float = c.grav`` froze a constant while looking innocuous.
     Class bodies are not skipped either; they execute on import like any
-    other statement. Lambdas are skipped for the same reason as function
-    bodies.
+    other statement.
+
+    A ``lambda`` is treated exactly like a ``def`` and for the same reason:
+    its *body* runs at call time, but ``lambda g=c.grav: g`` evaluates that
+    default the moment the lambda is created. Skipping the whole node would
+    leave the one expression that is not lazy unchecked.
     """
     for child in ast.iter_child_nodes(tree):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            decorators = getattr(child, "decorator_list", [])
             for expr in (
-                *child.decorator_list,
+                *decorators,
                 *child.args.defaults,
                 *(d for d in child.args.kw_defaults if d is not None),
             ):
                 yield expr
                 yield from _import_time_nodes(expr)
-            continue
-        if isinstance(child, ast.Lambda):
             continue
         yield child
         yield from _import_time_nodes(child)
@@ -209,6 +212,17 @@ class ConstantsImportContractTest(unittest.TestCase):
         )
         flagged = sorted(text for _, text in _captured_attributes(ast.parse(source)))
         self.assertEqual(flagged, ["c.grav", "c.grav", "c.m_air"])
+
+    def test_guard_catches_a_lambda_default_but_not_a_lambda_body(self):
+        # A lambda's body is lazy; its defaults are not — they are evaluated
+        # when the lambda object is created, which at module level is import.
+        source = (
+            "import jcm.constants as c\n"
+            "frozen = lambda g=c.grav: g\n"
+            "live = lambda x: x * c.cpd\n"
+        )
+        flagged = [text for _, text in _captured_attributes(ast.parse(source))]
+        self.assertEqual(flagged, ["c.grav"])
 
     def test_guard_accepts_the_bare_module_import_form(self):
         source = (
