@@ -68,27 +68,41 @@ _ZHPBASE = 2.5e-6          # background H+ [mol/l]
 _ZE1K, _ZE1H = 1.1e-2, 2300.0   # O3 Henry
 _ZE3K, _ZE3H = 1.2e-2, 2010.0   # SO2 first dissociation
 _ZQ298 = 1.0 / 298.0
-# Gas constant in l·atm/mol/K (HAM ``zrgas``), from R* (1 l·atm = 101.325 J).
-_ZRGAS = c.r_universal / 101.325
 _ZLWCMIN = 1.0e-7         # in-cloud LWC threshold [kg/kg]
-_AVOGADRO = c.avogadro    # molec/mol
-_AVO_XTOC = _AVOGADRO * 1.0e-3   # HAM's xtoc/ctox factor (avo·1e-3 unit fold)
 # SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — HAMMOZ speclist(id_so2).
 _H_SO2_0, _H_SO2_ACT = 1.23, 3020.0
 
 # Molar masses in g/mol (HAM works in grams).
 _MW_SO2 = GAS_SPECIES["so2"].molar_mass * 1000.0          # 64.0648
 _MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0 (jcm so4)
-_MW_AIR = c.m_air * 1000.0                               # ~28.96
 _CONV_SO2_SO4_MASS = _MW_SO4 / _MW_SO2
 
 _TINY = 1.0e-30
 _NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no droplets
 
 
+# Quantities derived from jcm.constants are functions, not module-level
+# constants: evaluating them at import would capture the values before any
+# ``set_constants`` override and is exactly the staleness #772 is about. They
+# are called at trace time, so the cost is nil.
+def _zrgas() -> float:
+    """Gas constant in l·atm/mol/K (HAM ``zrgas``), from R* (1 l·atm = 101.325 J)."""
+    return c.r_universal / 101.325
+
+
+def _avo_xtoc() -> float:
+    """HAM's xtoc/ctox factor: N_A·1e-3, the unit fold between molec/cm³ and g."""
+    return c.avogadro * 1.0e-3
+
+
+def _mw_air() -> float:
+    """Molar mass of dry air in g/mol (HAM works in grams), ~28.96."""
+    return c.m_air * 1000.0
+
+
 def _xtoc(rho: jnp.ndarray, mw: float) -> jnp.ndarray:
     """Mass-mixing-ratio → molec cm⁻³ factor (HAM ``xtoc``: ``ρ·6.022e20/mw``)."""
-    return rho * _AVO_XTOC / mw
+    return rho * _avo_xtoc() / mw
 
 
 def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
@@ -103,14 +117,14 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
     lwcl = jnp.maximum(lwc * rho * 1.0e-6, _TINY)   # [l-water/cm^3-air]
     lwcv = lwc * rho * 1.0e-3                        # liquid volume fraction
     # molec/cm^3(air) -> mol/l(water): HAM ``zfac1 = 1/(zlwcl·avo)``.
-    fac1 = 1.0 / (lwcl * _AVOGADRO)
+    fac1 = 1.0 / (lwcl * c.avogadro)
 
     # --- SO2 + H2O2 effective rate (pH from initial sulfate) ---
     hp0 = _ZHPBASE + so4 * 1000.0 / (jnp.maximum(lwc, _TINY) * _MW_SO4)
     rk = 8.0e4 * jnp.exp(-3650.0 * qtp1) / (0.1 + hp0)
-    rke = rk / (lwcl * _AVOGADRO)
+    rke = rk / (lwcl * c.avogadro)
     h_so2 = _H_SO2_0 * jnp.exp(_H_SO2_ACT * qtp1)
-    pfac = _ZRGAS * lwcv * temperature
+    pfac = _zrgas() * lwcv * temperature
     p_so2 = h_so2 * pfac
     f_so2 = p_so2 / (1.0 + p_so2)
     h_h2o2 = 9.7e4 * jnp.exp(6600.0 * qtp1)
@@ -121,10 +135,10 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
     # --- O3-path constants ---
     e1 = _ZE1K * jnp.exp(_ZE1H * qtp1)
     e3 = _ZE3K * jnp.exp(_ZE3H * qtp1)
-    za = h_so2 * _ZRGAS * temperature * lwcv
+    za = h_so2 * _zrgas() * temperature * lwcv
     a21 = 4.39e11 * jnp.exp(-4131.0 / temperature)
     a22 = 2.56e3 * jnp.exp(-926.0 / temperature)
-    ph_o3 = e1 * _ZRGAS * temperature * lwcv
+    ph_o3 = e1 * _zrgas() * temperature * lwcv
     f_o3 = ph_o3 / (1.0 + ph_o3)
 
     so2m = so2 * _xtoc(rho, _MW_SO2)
@@ -160,7 +174,7 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
         so2m = so2mo
 
     # ctox: molec/cm3 -> mmr is mw/(6.022e20·rho); SO2 remaining as mmr.
-    so2_rem = so2m * (_MW_SO2 / (_AVO_XTOC * rho))
+    so2_rem = so2m * (_MW_SO2 / (_avo_xtoc() * rho))
     dso2tot = jnp.clip(so2 - so2_rem, 0.0, so2)
     return dso2tot * _CONV_SO2_SO4_MASS
 
@@ -175,10 +189,10 @@ def _simple_aqueous_so4(so2, h2o2, rho):
     [kg m⁻³]. Returns the in-cloud SO₄ mass produced [kg/kg]; the term applies
     the cloud-fraction weighting and the S-conserving SO₂ sink.
     """
-    n_air = rho * _AVO_XTOC / _MW_AIR                       # molec/cm³
+    n_air = rho * _avo_xtoc() / _mw_air()                       # molec/cm³
     h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
     # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).
-    h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _MW_AIR)
+    h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _mw_air())
     so2_oxidised = jnp.minimum(jnp.maximum(so2, 0.0), h2o2_as_so2)
     return so2_oxidised * _CONV_SO2_SO4_MASS
 

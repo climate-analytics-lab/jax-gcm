@@ -32,19 +32,31 @@ constants such as ``alf = als − alv`` computed once at init). CAM uses
 **Status & known limitations.** Only *base* fields may be overridden by keyword;
 passing a derived quantity to ``set_constants`` raises. ``alhf`` is derived (not
 an independent base) so the fusion enthalpy always equals ``alhs − alhc``.
-Every consumer in the package now reads constants through the module alias
-(``import jcm.constants as c``, ``c.<name>`` at call, trace or construction
-time), so an override reaches all of them: the dinosaur dycore wrapper takes
-the live singleton at construction — its only ``from``-import is the
-``PhysicalConstants`` class, used as a type — and the JAM
-activation / sedimentation / dry-deposition / ice-nucleation chain and the
-WMO-tropopause diagnostic read theirs per call. A structural guard
-(``jcm/constants_test.py``) parses every non-test module and fails on any
-module-level ``from jcm.constants import <value>``, the binding that made
-those modules keep Earth values after an override; the tropopause diagnostic
-additionally showed the *object* form of the same bug, since ``set_constants``
-rebinds the singleton (``PhysicalConstants`` is a ``NamedTuple`` and cannot be
-mutated in place) and a captured reference goes equally stale.
+Every consumer in the package now reads constants **when the value is used**
+— inside the function, at construction, or at trace time — so an override
+reaches all of them: the dinosaur dycore wrapper takes the live singleton at
+construction, and the JAM activation / sedimentation / dry-deposition /
+ice-nucleation / aqueous-chemistry chain, the TTE-TKE closure, the emissions
+preparation step and the WMO-tropopause diagnostic all read theirs per call.
+
+The contract is about *timing*, not merely about the import form, and the
+guard in ``jcm/constants_test.py`` enforces it that way: it parses every
+non-test module and rejects three distinct captures, each of which silently
+froze Earth values after an override.
+
+1. ``from jcm.constants import grav`` — binds the float at import.
+2. ``from jcm.constants import physical_constants`` — binds the singleton
+   *object*, equally stale because ``set_constants`` rebinds the module global
+   rather than mutating it (``PhysicalConstants`` is a ``NamedTuple``).
+3. Evaluating ``c.<name>`` at import time *despite* using the approved module
+   alias — a derived module constant (``_MW_AIR = c.m_air * 1000.0``), a
+   default argument (``def f(..., gravity=c.grav)``, evaluated once when the
+   ``def`` executes), or a class-body attribute. This is the easiest form to
+   miss: the TTE-TKE closure read ``c.cpd`` live and took gravity from a
+   frozen default two lines earlier, in the same expression.
+
+Only ``PhysicalConstants`` itself may be imported by name — it is a type and
+binds no value; the dycore uses it as an annotation.
 
 Two boundaries remain, both by design rather than oversight. ``set_constants``
 must be called **before** the model is built: a constant read inside a jitted

@@ -9,7 +9,13 @@ it, both silent:
 * ``from jcm.constants import physical_constants`` binds the singleton
   *object*, and ``set_constants`` rebinds the module global rather than
   mutating it (``PhysicalConstants`` is a ``NamedTuple``), so the captured
-  reference goes equally stale.
+  reference goes equally stale;
+* and — the form that is easiest to miss, because the module *does* use the
+  approved alias — evaluating ``c.<name>`` at import time anyway: a derived
+  module constant (``_MW_AIR = c.m_air * 1000.0``), a default argument
+  (``def f(..., gravity=c.grav)``, evaluated once when the ``def`` executes)
+  or a class-body attribute. The alias is necessary but not sufficient; what
+  matters is *when* the attribute is read.
 
 Either leaves a process computing with a mix of overridden and Earth values
 and no error anywhere. The structural test below makes the contract
@@ -26,6 +32,7 @@ import ast
 import pathlib
 import unittest
 
+import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
@@ -56,16 +63,75 @@ def _resolve_import(node: ast.ImportFrom, module_name: str) -> str | None:
 def _import_time_nodes(tree: ast.AST):
     """Yield every node evaluated when the module is imported.
 
-    Function bodies are skipped — an import inside a function runs at *call*
-    time and therefore reads the live singleton, which is a legitimate
-    pattern the codebase uses (``jcm/utils.py``, ``state_bridge.py``). Class
-    bodies are not skipped: they execute on import like any other statement.
+    A function *body* is skipped — code there runs at call time and therefore
+    reads the live singleton, which is a legitimate pattern the codebase uses
+    (``jcm/utils.py``, ``state_bridge.py``). Its decorators and default
+    arguments are **not** skipped: those expressions are evaluated once, when
+    the ``def`` statement executes at import, which is precisely how
+    ``gravity: float = c.grav`` froze a constant while looking innocuous.
+    Class bodies are not skipped either; they execute on import like any
+    other statement. Lambdas are skipped for the same reason as function
+    bodies.
     """
     for child in ast.iter_child_nodes(tree):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for expr in (
+                *child.decorator_list,
+                *child.args.defaults,
+                *(d for d in child.args.kw_defaults if d is not None),
+            ):
+                yield expr
+                yield from _import_time_nodes(expr)
+            continue
+        if isinstance(child, ast.Lambda):
             continue
         yield child
         yield from _import_time_nodes(child)
+
+
+def _constants_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Names referring to ``jcm.constants``, as ``(module, package)`` sets.
+
+    ``module`` names hold the module itself (``import jcm.constants as c``,
+    ``from jcm import constants``), so ``<name>.grav`` is a constant read.
+    ``package`` names come from a bare ``import jcm.constants``, which binds
+    ``jcm``; there the read is ``jcm.constants.grav`` and the intermediate
+    ``jcm.constants`` is the module, not a constant.
+    """
+    module, package = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "jcm.constants":
+                    (module if alias.asname else package).add(alias.asname or "jcm")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "jcm" and not node.level:
+                for alias in node.names:
+                    if alias.name == "constants":
+                        module.add(alias.asname or "constants")
+    return module, package
+
+
+def _captured_attributes(tree: ast.AST):
+    """Yield ``(lineno, text)`` for each constant read at import time."""
+    module_names, package_names = _constants_aliases(tree)
+    if not module_names and not package_names:
+        return
+    for node in _import_time_nodes(tree):
+        if not isinstance(node, ast.Attribute) or node.attr in _ALLOWED_NAMES:
+            continue
+        target = node.value
+        # ``c.grav`` where ``c`` is the module itself.
+        if isinstance(target, ast.Name) and target.id in module_names:
+            yield node.lineno, f"{target.id}.{node.attr}"
+        # ``jcm.constants.grav`` after a bare ``import jcm.constants``.
+        elif (
+            isinstance(target, ast.Attribute)
+            and target.attr == "constants"
+            and isinstance(target.value, ast.Name)
+            and target.value.id in package_names
+        ):
+            yield node.lineno, f"jcm.constants.{node.attr}"
 
 
 class ConstantsImportContractTest(unittest.TestCase):
@@ -89,12 +155,20 @@ class ConstantsImportContractTest(unittest.TestCase):
                             f"{path.relative_to(_REPO_ROOT)}:{node.lineno}: "
                             f"from jcm.constants import {alias.name}"
                         )
+            for lineno, text in _captured_attributes(tree):
+                offenders.append(
+                    f"{path.relative_to(_REPO_ROOT)}:{lineno}: {text} "
+                    f"evaluated at import time"
+                )
         self.assertEqual(
             offenders, [],
-            "These module-level imports bind a constant at import time, so "
-            "jcm.constants.set_constants() will not reach them (#772). Use "
-            "`import jcm.constants as c` and read `c.<name>` where it is "
-            "used. Only PhysicalConstants (a type) may be imported by name:\n"
+            "These read a constant at import time, so "
+            "jcm.constants.set_constants() will not reach them (#772). Read "
+            "`c.<name>` where the value is USED — inside the function, at "
+            "construction, or at trace time — not at module level, not in a "
+            "derived module constant, and not in a default argument (which is "
+            "evaluated once when the def executes). Only PhysicalConstants, a "
+            "type that binds no value, may be imported by name:\n"
             + "\n".join(offenders),
         )
 
@@ -119,6 +193,30 @@ class ConstantsImportContractTest(unittest.TestCase):
             if alias.name not in _ALLOWED_NAMES
         ]
         self.assertEqual(flagged, ["grav", "physical_constants"])
+
+    def test_guard_would_catch_an_import_time_attribute_read(self):
+        # The alias is necessary but not sufficient: these all USE the
+        # approved `import jcm.constants as c` and are still frozen at import.
+        # Reads inside a function body are the legitimate case and must not
+        # fire, which is the half that makes this test worth writing.
+        source = (
+            "import jcm.constants as c\n"
+            "_MW_AIR = c.m_air * 1000.0\n"
+            "class K:\n"
+            "    g = c.grav\n"
+            "def f(x, gravity=c.grav):\n"
+            "    return x * c.cpd + c.rd\n"
+        )
+        flagged = sorted(text for _, text in _captured_attributes(ast.parse(source)))
+        self.assertEqual(flagged, ["c.grav", "c.grav", "c.m_air"])
+
+    def test_guard_accepts_the_bare_module_import_form(self):
+        source = (
+            "import jcm.constants\n"
+            "_G = jcm.constants.grav\n"
+        )
+        flagged = [text for _, text in _captured_attributes(ast.parse(source))]
+        self.assertEqual(flagged, ["jcm.constants.grav"])
 
 
 class _OverrideCase(unittest.TestCase):
@@ -248,6 +346,58 @@ class IceNucleationHonoursOverrideTest(_OverrideCase):
 
         baseline, doubled_g = self.under_grav(2.0, cooling_rate)
         self.assertAlmostEqual(doubled_g / baseline, 2.0, places=5)
+
+
+class TurbulenceDefaultArgHonoursOverrideTest(_OverrideCase):
+    """``turbulence_coefficients`` froze grav in a *default argument*.
+
+    The subtle case: the module already used the approved ``c`` alias and read
+    ``c.cpd`` live two lines down, but ``gravity: float = c.grav`` was
+    evaluated once when the ``def`` executed at import.
+    """
+
+    def test_richardson_number_moves_with_gravity(self):
+        from jcm.physics.vertical_diffusion.tte_tke.turbulence_coefficients import (
+            compute_richardson_number,
+        )
+
+        u = jnp.asarray([[1.0, 4.0, 9.0]])
+        v = jnp.zeros((1, 3))
+        temperature = jnp.asarray([[290.0, 284.0, 276.0]])
+        height_full = jnp.asarray([[10.0, 200.0, 800.0]])
+        height_half = jnp.asarray([[0.0, 100.0, 500.0]])
+
+        def ri():
+            # The function is ``@jax.jit``-ed, so its trace — constants and
+            # all — is cached. Clearing first is what makes this the real
+            # contract: a model *built after* set_constants sees the new
+            # value. An override after tracing does not propagate until
+            # recompilation, which is why the docs say to override first.
+            jax.clear_caches()
+            return compute_richardson_number(
+                u, v, temperature, height_full, height_half
+            )[0, 0]
+
+        baseline, doubled_g = self.under_grav(2.0, ri)
+        self.assertNotAlmostEqual(baseline, doubled_g, places=6)
+
+
+class AqueousChemistryHonoursOverrideTest(_OverrideCase):
+    """``chemistry/aqueous.py`` baked R*, N_A and M_air into module constants."""
+
+    def test_xtoc_factor_scales_with_avogadro(self):
+        from jcm.physics.aerosol.jam.chemistry import aqueous
+
+        original = c.physical_constants
+        try:
+            baseline = aqueous._avo_xtoc()
+            # N_A is derived (R*/k_B), so halving k_B doubles it.
+            c.set_constants(ak=original.ak * 0.5)
+            doubled = aqueous._avo_xtoc()
+        finally:
+            c.set_constants(original)
+        self.assertAlmostEqual(doubled / baseline, 2.0, places=6)
+        self.assertEqual(c.physical_constants.ak, original.ak)
 
 
 class SetConstantsRestorationTest(unittest.TestCase):
