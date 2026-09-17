@@ -32,19 +32,26 @@ constants such as ``alf = als − alv`` computed once at init). CAM uses
 **Status & known limitations.** Only *base* fields may be overridden by keyword;
 passing a derived quantity to ``set_constants`` raises. ``alhf`` is derived (not
 an independent base) so the fusion enthalpy always equals ``alhs − alhc``.
-Overrides do **not** yet reach everything: six modules — the JAM
-activation / sedimentation / dry-deposition / dust / ice-nucleation chain and
-the WMO-tropopause diagnostic — capture constants at import time (the JAM
-chain binds values; the tropopause diagnostic holds a reference to the
-singleton *object*, which ``set_constants`` rebinds rather than mutates, so
-the reference goes equally stale) and would silently keep Earth values after
-an override (#772). Consumers following the contract (``import jcm.constants
-as c``, read ``c.<name>`` when traced or at construction) are unaffected —
-the dinosaur dycore wrapper reads the live singleton at construction through
-the ``jcm.constants`` module alias (its only ``from``-import is the
-``PhysicalConstants`` class, used as a type), so it honours overrides. Until
-#772 lands, a ``set_constants`` run is consistent everywhere except a
-composition using those six.
+Every consumer in the package now reads constants through the module alias
+(``import jcm.constants as c``, ``c.<name>`` at call, trace or construction
+time), so an override reaches all of them: the dinosaur dycore wrapper takes
+the live singleton at construction — its only ``from``-import is the
+``PhysicalConstants`` class, used as a type — and the JAM
+activation / sedimentation / dry-deposition / ice-nucleation chain and the
+WMO-tropopause diagnostic read theirs per call. A structural guard
+(``jcm/constants_test.py``) parses every non-test module and fails on any
+module-level ``from jcm.constants import <value>``, the binding that made
+those modules keep Earth values after an override; the tropopause diagnostic
+additionally showed the *object* form of the same bug, since ``set_constants``
+rebinds the singleton (``PhysicalConstants`` is a ``NamedTuple`` and cannot be
+mutated in place) and a captured reference goes equally stale.
+
+Two boundaries remain, both by design rather than oversight. ``set_constants``
+must be called **before** the model is built: a constant read inside a jitted
+term is baked in when that term is traced, so an override afterwards does not
+propagate until recompilation. And constants internal to ``mam4-jax`` belong to
+that package — JAM's calls into it use its values, which ``set_constants`` does
+not reach.
 
 **Code pointers.**
 - ``jcm/constants.py`` — ``PhysicalConstants``, the ``physical_constants``
@@ -56,3 +63,8 @@ composition using those six.
 **Validation evidence.** The override / derived-quantity behaviour is exercised
 through dycore construction (``jcm/dycore/dinosaur/dycore_test.py``) and the
 SPEEDY-specific ``jcm/physics/speedy/physical_constants_test.py``.
+``jcm/constants_test.py`` adds the structural import guard plus per-module
+behavioural checks: with gravity overridden, the tropopause geopotential
+height, the ARG maximum supersaturation, the Stokes settling velocity, the
+quasi-laminar deposition resistance and the ice-nucleation cooling rate all
+move, and each restores the original constants afterwards.

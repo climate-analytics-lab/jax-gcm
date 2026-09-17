@@ -11,7 +11,12 @@ within 2 kilometers does not exceed 2°C per kilometer.
 import jax
 import jax.numpy as jnp
 from typing import Optional
-from jcm.constants import physical_constants
+# The module alias, not ``from jcm.constants import physical_constants``:
+# ``set_constants`` REBINDS that module global (PhysicalConstants is a
+# NamedTuple, so it cannot be mutated in place), which leaves a captured
+# reference pointing at the pre-override object — stale in exactly the same
+# way a captured float would be (#772).
+import jcm.constants as c
 
 # WMO tropopause constants
 GWMO = -0.002  # K/m - The -2°C/km threshold
@@ -34,9 +39,9 @@ def compute_geopotential_height(pressure: jnp.ndarray,
         Geopotential height [m] (shape: [..., nlev])
 
     """
-    # Constants
-    g = physical_constants.grav
-    R = physical_constants.rd
+    # Read per call from the live singleton so set_constants applies (#772).
+    g = c.grav
+    R = c.rd
     
     # Ensure surface_pressure has compatible shape for concatenation
     batch_shape = pressure.shape[:-1]
