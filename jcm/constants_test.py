@@ -101,14 +101,21 @@ def _import_time_nodes(tree: ast.AST):
         yield from _import_time_nodes(child)
 
 
-def _constants_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
+def _constants_aliases(
+    tree: ast.AST, module_name: str
+) -> tuple[set[str], set[str]]:
     """Names referring to ``jcm.constants``, as ``(module, package)`` sets.
 
     ``module`` names hold the module itself (``import jcm.constants as c``,
-    ``from jcm import constants``), so ``<name>.grav`` is a constant read.
-    ``package`` names come from a bare ``import jcm.constants``, which binds
-    ``jcm``; there the read is ``jcm.constants.grav`` and the intermediate
+    ``from jcm import constants``, and the package-relative ``from . import
+    constants as c``), so ``<name>.grav`` is a constant read. ``package``
+    names come from a bare ``import jcm.constants``, which binds ``jcm``;
+    there the read is ``jcm.constants.grav`` and the intermediate
     ``jcm.constants`` is the module, not a constant.
+
+    The ``from`` forms are resolved through :func:`_resolve_import` so a
+    relative import counts exactly as the absolute one does — otherwise
+    ``from . import constants as c`` inside the package would slip past.
     """
     module, package = set(), set()
     for node in ast.walk(tree):
@@ -117,16 +124,16 @@ def _constants_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
                 if alias.name == "jcm.constants":
                     (module if alias.asname else package).add(alias.asname or "jcm")
         elif isinstance(node, ast.ImportFrom):
-            if node.module == "jcm" and not node.level:
+            if _resolve_import(node, module_name) == "jcm":
                 for alias in node.names:
                     if alias.name == "constants":
                         module.add(alias.asname or "constants")
     return module, package
 
 
-def _captured_attributes(tree: ast.AST):
+def _captured_attributes(tree: ast.AST, module_name: str = "jcm.fake"):
     """Yield ``(lineno, text)`` for each constant read at import time."""
-    module_names, package_names = _constants_aliases(tree)
+    module_names, package_names = _constants_aliases(tree, module_name)
     if not module_names and not package_names:
         return
     for node in _import_time_nodes(tree):
@@ -167,7 +174,7 @@ class ConstantsImportContractTest(unittest.TestCase):
                             f"{path.relative_to(_REPO_ROOT)}:{node.lineno}: "
                             f"from jcm.constants import {alias.name}"
                         )
-            for lineno, text in _captured_attributes(tree):
+            for lineno, text in _captured_attributes(tree, module_name):
                 offenders.append(
                     f"{path.relative_to(_REPO_ROOT)}:{lineno}: {text} "
                     f"evaluated at import time"
@@ -232,6 +239,34 @@ class ConstantsImportContractTest(unittest.TestCase):
         )
         flagged = [text for _, text in _captured_attributes(ast.parse(source))]
         self.assertEqual(flagged, ["c.grav"])
+
+    def test_guard_catches_a_relative_constants_alias(self):
+        # ``from . import constants as c`` inside the package binds the same
+        # module as the absolute form, so it must be resolved the same way —
+        # the value-import path already did, the attribute path did not.
+        source = (
+            "from . import constants as c\n"
+            "FROZEN = c.grav\n"
+        )
+        tree = ast.parse(source)
+        self.assertEqual(
+            [t for _, t in _captured_attributes(tree, "jcm.some_module")],
+            ["c.grav"],
+        )
+        # ``from .. import constants`` from one level deeper resolves to the
+        # same module; a same-named module in a *sub*package does not.
+        deep = ast.parse("from .. import constants\nFROZEN = constants.grav\n")
+        self.assertEqual(
+            [t for _, t in _captured_attributes(deep, "jcm.physics.thing")],
+            ["constants.grav"],
+        )
+        unrelated = ast.parse(
+            "from . import constants as c\nFROZEN = c.grav\n"
+        )
+        self.assertEqual(
+            [t for _, t in _captured_attributes(unrelated, "jcm.physics.thing")],
+            [],
+        )
 
     def test_guard_accepts_the_bare_module_import_form(self):
         source = (
