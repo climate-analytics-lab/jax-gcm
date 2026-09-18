@@ -521,7 +521,8 @@ convention yourself, per leaf:
    # or, having checked the file is already in the current convention:
    load_checkpoint(path, model, unstamped_scale={})
 
-and from the CLI through the ``init`` group:
+and, for a *fresh start from* a saved state, from the CLI through the ``init``
+group:
 
 .. code-block:: console
 
@@ -531,6 +532,37 @@ and from the CLI through the ``init`` group:
 An empty mapping asserts "already in the current convention"; a name that is
 not a leaf of this model, or is not a floating-point leaf, is rejected rather
 than silently ignored. Use it only when you know how the file was written.
+
+.. warning::
+
+   **A pre-3.0 campaign cannot be resumed from the command line.** This is a
+   deliberate break, not an oversight: ``run.checkpoint_path`` has **no**
+   rescale knob, and is not getting one. The hatch above is on the ``init``
+   group and on the Python API only, so
+   ``python -m jcm.main run.checkpoint_path=<pre-3.0 file>`` refuses and there
+   is no override to add.
+
+   You have two options:
+
+   1. **Regenerate the state on 3.0** — the clean choice if the spin-up is
+      affordable.
+   2. **Launder the file once through Python**: load it with the assertion, then
+      save it back out. The result is an ordinary stamped 3.0 checkpoint that
+      the CLI resumes normally.
+
+   .. code-block:: python
+
+      from jcm.checkpoint import load_checkpoint, save_checkpoint
+
+      model = ...                      # the same composition the donor used
+      model.bootstrap_state()
+      days = load_checkpoint(model, "old.msgpack", unstamped_scale={...})
+      save_checkpoint(model, "migrated.msgpack", elapsed_days=days)
+
+   ``save_checkpoint`` stamps whatever it writes, so ``migrated.msgpack``
+   carries ``schema_version`` and loads with no assertion at all — verified
+   end to end, including that the elapsed-day count survives the round trip, so
+   the resumed run continues on the donor's clock rather than restarting it.
 
 .. important::
 
