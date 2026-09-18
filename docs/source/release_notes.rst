@@ -665,8 +665,8 @@ Accepted limitations (proposed)
 - **The release-validation matrix has three gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, ``echam-jam`` at
   L95 needs L95 oxidant and ozone inputs staged, and the single-column RCE
-  check composes grey radiation against the matrix's own RRTMGP-for-ECHAM
-  pairing policy (#638).
+  JAM check (``scm_check.py``) composes grey radiation against the matrix's own
+  RRTMGP-for-ECHAM pairing policy (#638).
 
 Calibration and capability gaps
 "
@@ -692,8 +692,11 @@ Calibration and capability gaps
 - **Middle-atmosphere memory.** T63L95 fits one 40 GB A100; T106L95 does not
   and needs a 4-GPU mesh there. ne30L95 does not fit a single 80 GB A100
   either and needs a memory reduction rather than a faster backend (#595).
-- **Betts-Miller / RCE is covered by a single-column check only**, not by the
-  release-validation matrix.
+- **Betts-Miller is a Python-only entry point.** It is the default convection
+  of the single-column RCE layer (``jcm.rce``), which no ``physics=`` or
+  ``+configuration=`` group composes, and its coverage is the ``rce_test.py`` /
+  ``betts_miller_test.py`` unit suites rather than the release-validation
+  matrix.
 
 :ref:`The migration guide <v3-support-matrix>` carries the support matrix and
 the evidence behind each accepted-limitation verdict.

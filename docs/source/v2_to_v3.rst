@@ -653,22 +653,33 @@ free.
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
      - **Release-validated**, T63 and T106 L47
-     - Not offered (see :ref:`v3-limitation-omega`)
+     - No packaged configuration; composes only with ``cu_lmfmid=false``
+       (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
      - **Release-validated**, T63 and T106 L47
-     - Not offered (see :ref:`v3-limitation-omega`)
+     - No packaged configuration; composes only with ``cu_lmfmid=false``
+       (:ref:`v3-limitation-omega`)
    * - ``echam-jam``
      - **Release-validated**, T63 L47 and T63 L95
-     - Benchmark-validated at ne30 L47/L95, emission-free (below)
+     - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
+       prescribed-emission-free (below)
    * - ``echam-emulated-2m``
      - Benchmark-validated, T63 L47
-     - Not offered
+     - No packaged configuration
    * - ``held_suarez``
      - Composes and builds; no packaged configuration
      - Composes and builds; no packaged configuration
    * - Betts-Miller / RCE
-     - Single-column check only (``tools/release_validation/scm_check.py``)
-     - Not offered
+     - Python-only (``jcm.rce.rce_physics``); unit tests, no Hydra group
+     - No packaged configuration
+
+Betts-Miller is the default convection of the single-column RCE layer
+(``jcm.rce``), which is a Python entry point rather than a Hydra group: no
+``physics=`` or ``+configuration=`` option composes it, and its coverage is the
+``rce_test.py`` / ``betts_miller_test.py`` unit suites. The separate
+``tools/release_validation/scm_check.py`` is **not** an RCE check despite
+borrowing ``jcm.rce``'s column setup — it drives ECHAM+JAM with Tiedtke
+convection on one prescribed column.
 
 "Release-validated" means a member of ``tools/release_validation/matrix.yaml``:
 a full A100 year with 5-day means, scored by ``health.py`` against TOA net,
@@ -816,9 +827,9 @@ quoting a validated configuration:
   full year**;
 * ``echam-jam`` at **L95** needs L95 oxidant and ozone inputs staged, which is
   a data dependency rather than a code one;
-* the single-column RCE check composes **grey** radiation, while the stated
-  pairing policy for the matrix is RRTMGP for ECHAM. Either the check or the
-  policy should move.
+* the single-column JAM check (``scm_check.py``) composes **grey** radiation,
+  while the stated pairing policy for the matrix is RRTMGP for ECHAM. Either
+  the check or the policy should move.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the
