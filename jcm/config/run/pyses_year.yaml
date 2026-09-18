@@ -2,9 +2,18 @@
 # checkpoint + .prev rotation after each healthy chunk, permanent checkpoint
 # archives every 60 days (so later experiments can restart from before a
 # slowly-developing failure), 5-day-mean saves. Pair with
-# ``dycore=pyses_ne30l47`` and an ECHAM physics group, e.g.:
+# ``dycore=pyses_ne30l47`` and an ECHAM physics group. ECHAM's mid-level
+# convection trigger needs an ``omega`` the pySES backend does not publish
+# (#698), so it must be switched off or ``Model`` construction raises — see
+# ``dycore/pyses_ne30l47.yaml`` for which of the two spellings each physics
+# group takes:
 #
-#   python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year
+#   python -m jcm.main dycore=pyses_ne30l47 physics=echam-rrtmgp-2m run=pyses_year \
+#       +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+#
+# Or just use the packaged preset, which sets it for you:
+#
+#   python -m jcm.main +configuration=ma-ne30-l47
 #
 # ``time_step`` is set null deliberately — the Model adopts the dycore's
 # dt_seconds. The dinosaur-style ``sponge`` group is not used here (it stays

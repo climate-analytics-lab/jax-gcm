@@ -79,8 +79,9 @@ remapping, and other representation-specific operations.
 
 The shipped `DinosaurDycore` converts the tendency to a spectral
 primitive-equation tendency, applies the forward-Euler physics update,
-runs IMEX-RK SIL3, then applies the surface-pressure conservation and
-spectral diffusion filters.
+runs the two-time-level semi-Lagrangian semi-implicit Crank–Nicolson RK2
+step, then applies the surface-pressure conservation and spectral
+diffusion filters.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
@@ -241,9 +242,14 @@ kwarg on `run()` / `resume()` / `run_from_state()`.
 
 ## Performance notes
 
-- Physics runs once per `dt` rather than three times per `dt` (one per
-  IMEX-RK explicit substage). For RRTMGP / TTE-TKE / Tiedtke-Nordeng
-  this is roughly 3× the wall-time saving on the physics path.
+- Physics runs once per `dt`. The removed in-stage path called it once
+  per explicit substage of the IMEX-RK SIL3 step the Dinosaur backend
+  integrated with at the time — three times per `dt` — so for RRTMGP /
+  TTE-TKE / Tiedtke-Nordeng the change was roughly a 3× wall-time saving
+  on the physics path. (The backend now integrates with a two-stage
+  semi-Lagrangian Crank–Nicolson RK2 step, so a hypothetical in-stage
+  path today would cost 2×, not 3×; the measured saving above is the
+  historical one against SIL3.)
 - Backward passes pay `~3×` less memory under `jax.checkpoint` for the
   physics path because each checkpoint re-traces a single physics call.
 - Radiation sub-cycling honours one timeline (`radiation_should_compute`
@@ -286,16 +292,22 @@ called exactly once per dynamics timestep.**
 Two structural differences from JCM:
 
 1. **Dynamics integrator.** ECHAM uses leapfrog + semi-implicit
-   (spectral); JCM's shipped Dinosaur backend uses IMEX-RK SIL3.
-   The split point is the same — operator-split physics — but the
-   dynamics integrator on each side differs. ECHAM's split is forced
-   by leapfrog's single RHS evaluation per `dt`; Dinosaur's SIL3 has
-   substages and *could* in principle evaluate physics at each one,
-   so for JCM operator-splitting is a real design choice. CAM (HOMME
-   spectral element), E3SM (HOMME with sub-cycled advection), and IFS
-   (semi-Lagrangian + semi-implicit) op-split despite having more
-   than one dynamics evaluation per physics `dt` — the same situation
-   JCM-with-SIL3 is in.
+   (spectral); JCM's shipped Dinosaur backend uses a two-time-level
+   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step (both are
+   semi-implicit — the contrast is the time-level structure and the SL
+   transport; see {doc}`../science/dynamical_core`). The split point is
+   the same — operator-split physics — but the dynamics integrator on
+   each side differs. ECHAM's split is forced by leapfrog's single RHS
+   evaluation per `dt`; the RK2 step has two stages and *could* in
+   principle evaluate physics at each one, so for JCM
+   operator-splitting is a real design choice. That places JCM with IFS
+   (semi-Lagrangian + semi-implicit, op-split), and with CAM (HOMME
+   spectral element) and E3SM (HOMME with sub-cycled advection), all of
+   which op-split despite more than one dynamics evaluation per physics
+   `dt` — as does JCM's own pySES CAM-SE backend, whose explicit
+   RK3-5STAGE core takes the physics tendency once per coupling step
+   (under the shipped `coupling: hybrid`, CAM-SE `se_ftype 2`, tracers
+   are lumped while u/v/T are dribbled across the dynamics substeps).
 
 2. **Within-physics coupling.** ECHAM is **sequential** (each scheme
    reads the state with prior schemes' tendencies already applied via

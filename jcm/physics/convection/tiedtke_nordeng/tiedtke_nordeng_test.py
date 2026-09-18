@@ -1278,12 +1278,17 @@ class TestConvectionNumericalStability:
     """Regression tests for numerical stability fixes.
 
     These tests reproduce conditions that previously caused NaN in the
-    convection scheme — particularly when called on intermediate IMEX
-    Runge-Kutta states with marginal humidity near zero.
+    convection scheme: a column whose humidity is marginal, i.e. positive
+    but within rounding distance of zero. Such columns first showed up
+    historically, when physics was still called on the intermediate
+    substages of the dycore's Runge-Kutta step; under operator splitting
+    physics sees only end-of-step states, but the same marginal column
+    arises from one step of surface evaporation into a dry atmosphere, so
+    these remain live regression tests rather than historical ones.
     """
 
     def _create_marginal_humidity_profile(self, nlev=40):
-        """Create profile mimicking an IMEX stage-1 state.
+        """Create a profile with marginal (near-zero but positive) humidity.
 
         Starts from a near-isothermal atmosphere with tiny surface humidity
         (as produced by one step of surface evaporation from a dry initial state).
