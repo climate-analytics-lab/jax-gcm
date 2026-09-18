@@ -1,6 +1,26 @@
 Release Notes
 =============
 
+Unreleased — checkpoints carry a schema stamp and migrate by field name
+------------------------------------------------------------------------
+
+- ``save_checkpoint`` now writes a ``schema_version`` stamp, the ``jcm``
+  version and every state array under its pytree name, and
+  ``load_checkpoint`` matches those names against the destination model: a
+  physics-carry field a newer jcm added is seeded from the freshly
+  bootstrapped carry, one it removed is dropped, both logged at INFO, so an
+  upgrade that touches a diagnostic struct no longer invalidates a restart
+  (#731). A grid, level-count, precision or physics-composition difference is
+  still refused, naming the file and the leaf. **Breaking:** a checkpoint
+  written before this release carries no stamp and is refused, because it does
+  not record which unit convention its dycore state uses (#824 changed what a
+  stored mass mixing ratio means, and #666 changed what a gridpoint humidity
+  means, differently per physics package) — start from a fresh initial state,
+  or assert the file's convention explicitly with
+  ``load_checkpoint(..., unstamped_scale=...)`` / ``init.unstamped_scale``.
+  The policy, its evidence and the rule for bumping the schema are in
+  :doc:`design/checkpoint_compatibility`.
+
 Unreleased — ``set_constants`` reaches the JAM and tropopause modules
 ---------------------------------------------------------------------
 

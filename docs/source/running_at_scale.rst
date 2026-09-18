@@ -257,12 +257,20 @@ via :py:mod:`jcm.checkpoint`:
    elapsed = load_checkpoint(model, '/scratch/run.ckpt')
    model.resume(forcing=forcing, total_time=20 - elapsed)
 
-The on-disk format is flax's msgpack codec applied to flattened lists of arrays
-— small (state pytrees are a few MB even at T63L47) and portable across hosts as
-long as the destination ``Model`` was built with the same coords and physics
-term composition. (Warm-starting from an *equilibrated* state while resetting the
-clock is the separate :func:`jcm.initial_states.checkpoint_state` path in the
-getting-started guide.)
+The on-disk format is flax's msgpack codec applied to the state arrays, each
+keyed by its pytree name (``tracers.qc``, ``radiation.lw_flux_up``) under a
+schema-version stamp — small (state pytrees are a few MB even at T63L47) and
+portable across hosts as long as the destination ``Model`` was built with the
+same coords and physics term composition. Because the arrays are named, a jcm
+upgrade that adds or removes a physics-carry diagnostic still restores; a
+grid, level-count, precision or composition difference is refused with the
+file and leaf named, and so is a file written before jcm 3.0, which has no
+stamp. The full policy — including the explicit ``unstamped_scale`` assertion
+that reads a pre-3.0 file anyway — is
+:doc:`design/checkpoint_compatibility`. (Warm-starting from an *equilibrated*
+state while resetting the clock is the separate
+:func:`jcm.initial_states.checkpoint_state` path in the getting-started
+guide.)
 
 Nudging from config
 -------------------
