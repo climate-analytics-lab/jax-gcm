@@ -1,17 +1,30 @@
 """Default-ECHAM-on-T63L47 statistics harness.
 
 Mirrors ``jcm/data/test/t30/generate_default_stats.py`` (the SPEEDY
-equivalent) but targets the production ECHAM wiring: T63L47 hybrid
-coords, real ECHAM terrain + forcing under ``jcm/data/bc/t63``,
-``echam_physics(grey) + UpperSponge``, and a 5-day stats window resumed
-from a saved spun-up state.
+equivalent) on the T63L47 hybrid grid: real ECHAM terrain + forcing
+under ``jcm/data/bc/t63``, ``echam_physics(grey) + UpperSponge``, and a
+5-day stats window resumed from a saved spun-up state.
+
+Radiation here is **grey**, which is deliberately not the
+``physics=echam`` production composition — that composes RRTMGP, and
+``jcm/config/physics/echam.yaml`` records grey-ECHAM as an unsupported
+hybrid with no CLI route. Grey is the right choice for *this* harness
+because what it regresses is the hybrid-coordinate dynamics–physics
+coupling, which a cheap radiation scheme exercises just as well while
+keeping the run affordable; the bands in this directory describe the
+grey composition and nothing else. Composing RRTMGP here would be a new
+fixture with its own bands, not a regeneration of these.
 
 The companion files ``spinup_state.nc`` and ``default_statistics.nc``
 in this directory are produced by running this module's
 :func:`generate` once on a GPU. The slow regression test in
 ``model_test.py`` loads ``spinup_state.nc`` as its initial condition
 and asserts every variable's daily-mean global mean falls inside the
-saved climatology band.
+saved climatology band. Both files are written by the same
+:func:`generate` call and are only meaningful as a pair: the bands
+describe the five days that *follow* the saved state, so regenerating
+one without the other leaves the test comparing a trajectory against
+bands drawn from a different starting point.
 
 T63L47 is too heavy for CPU CI — use GPU::
 
