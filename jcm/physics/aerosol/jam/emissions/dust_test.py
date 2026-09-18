@@ -23,6 +23,7 @@ from jcm.physics.aerosol.jam.emissions.dust import (
     DUST_SUPERCOARSE_KEY,
     DUST_WETNESS_KEY,
     HIGH_WIND_MS,
+    NDUSCALE_JCM_T63_SCALE,
     MIXTURE_ROWS,
     NCLASS,
     SOIL_TYPE_VARS,
@@ -453,10 +454,12 @@ class RegionTuningTest(unittest.TestCase):
     def test_free_running_t63_vector(self):
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg),
-            [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63, nudged=True).nduscale_reg),
-            [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            np.array([0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            * NDUSCALE_JCM_T63_SCALE)
         # The ndust=3 resolution polynomial, clamped to 0.86 above T63.
         for nn, expected in ((21, 0.740), (42, 0.8360), (63, 0.86), (106, 0.86)):
             np.testing.assert_allclose(
@@ -473,7 +476,8 @@ class RegionTuningTest(unittest.TestCase):
 
         term = DustEmissions()
         np.testing.assert_allclose(
-            np.asarray(term.params.get_value().nduscale_reg)[1], 1.45)
+            np.asarray(term.params.get_value().nduscale_reg)[1],
+            1.45 * NDUSCALE_JCM_T63_SCALE)
         term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
                                      spectral_truncation=106))
         np.testing.assert_allclose(
@@ -482,7 +486,32 @@ class RegionTuningTest(unittest.TestCase):
                                      spectral_truncation=63))
         np.testing.assert_allclose(
             np.asarray(term.params.get_value().nduscale_reg),
-            [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
+
+    def test_the_global_multiplier_preserves_hams_regional_ratios(self):
+        # One scalar is jcm's whole dust calibration: eight regional
+        # parameters cannot be identified against a single global budget, so
+        # the RATIOS stay HAM's and only the level moves (#808).
+        ham = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+        scaled = np.asarray(
+            DustParameters.preset(4, 63, nduscale_scale=0.5).nduscale_reg)
+        np.testing.assert_allclose(scaled, ham * 0.5)
+        np.testing.assert_allclose(scaled / scaled[0], ham / ham[0])
+
+    def test_the_calibrated_default_applies_at_t63_only(self):
+        # T106/ne30 keep HAM's untuned value: the tuning is a T63 calibration
+        # and the source maps only exist there (#810).
+        np.testing.assert_allclose(
+            float(DustParameters.preset(4, 106).nduscale_reg[0]), 0.86)
+        np.testing.assert_allclose(
+            float(DustParameters.preset(4, None).nduscale_reg[0]), 0.86)
+        # An EXPLICIT multiplier still applies anywhere, so a sweep is
+        # expressible at any resolution.
+        np.testing.assert_allclose(
+            float(DustParameters.preset(4, 106,
+                                        nduscale_scale=0.5).nduscale_reg[0]),
+            0.43)
 
     def test_a_non_spectral_grid_takes_hams_default(self):
         # The pySES CAM-SE grid has no total_wavenumbers; HAM tunes

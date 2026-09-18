@@ -1070,3 +1070,63 @@ class TestAnchorGates:
         stats = A.summarize(days, series)
         assert all(ok for *_r, ok in A.physics_gates(stats))    # drift/closure fine
         assert not all(ok for *_r, ok in A.anchor_gates(stats))  # anchor is not
+
+
+class TestDustEmissionBand:
+    """The release gate on the annual dust budget (#808).
+
+    Dust vanishing is the failure this exists to catch: HAM's untuned
+    threshold gave jcm 5 Tg/yr against a mid-hundreds target, and every other
+    statistic in this module was happy about it — the burden was stationary,
+    the ledger closed, the drift was zero.
+    """
+
+    def _series(self, tg_per_yr, n=74, nlat=96):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        return days, {"emi_du": np.full(n, flux),
+                      "nlat": np.full(n, float(nlat))}
+
+    def test_a_budget_in_band_passes(self):
+        days, series = self._series(450.0)
+        stats = A.summarize(days, series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                 rel=1e-6)
+        rows = dict((name, ok) for name, _v, _lim, ok in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]
+
+    def test_dust_that_vanished_fails(self):
+        days, series = self._series(5.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(A.summarize(days, series)))
+        assert rows["dust_emission_tg_per_yr"] is False
+
+    def test_dust_that_ran_away_fails(self):
+        days, series = self._series(4000.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(A.summarize(days, series)))
+        assert rows["dust_emission_tg_per_yr"] is False
+
+    def test_a_partial_year_is_unscored_not_failed(self):
+        # 30 days of a dust season annualises to nonsense either way.
+        days, series = self._series(5.0, n=6)
+        stats = A.summarize(days, series)
+        assert "dust_emission_tg_per_yr" not in stats
+        reasons = dict(A.unscored_gates(days, series))
+        assert "seasonal" in reasons["dust_emission_tg_per_yr"]
+
+    def test_another_grid_is_unscored_not_failed(self):
+        # T106 keeps HAM's untuned nduscale_reg (#810), so the T63 band must
+        # not be applied to it.
+        days, series = self._series(450.0, nlat=160)
+        stats = A.summarize(days, series)
+        assert "dust_emission_tg_per_yr" not in stats
+        assert "T63" in dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+
+    def test_a_run_without_the_emission_diagnostic_is_unscored(self):
+        days = np.arange(5.0, 5.0 * 74 + 5.0, 5.0)
+        series = {"nlat": np.full(74, 96.0)}
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        assert "emi_du" in dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]

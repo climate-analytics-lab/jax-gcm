@@ -144,6 +144,17 @@ MIXTURE_ROWS = ((1, 1), (2, 2), (3, 3), (4, 4), (6, 6),
                 (10, 10), (10, 11))
 _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 
+#: Global multiplier on HAM's ``ndust = 4`` T63 regional threshold vector,
+#: fitted for jcm's own 10 m wind distribution (#808). HAM's values were tuned
+#: in ECHAM5; ``nduscale_reg`` scales the saltation THRESHOLD, and emission
+#: lives in the far tail of the wind distribution, so it is exactly the
+#: parameter that absorbs a difference in host-model wind climate. One scalar,
+#: because HAM's eight regional parameters cannot be identified against a
+#: single global budget — the regional RATIOS stay HAM's. Provenance and the
+#: target budget are in ``docs/source/science/aerosol.md``; the value applies
+#: at T63 only (#810).
+NDUSCALE_JCM_T63_SCALE = 1.0
+
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,
 #: 8 = Australia; Huneeus et al. 2011).
@@ -282,17 +293,28 @@ class DustParameters:
 
     @classmethod
     def preset(cls, ndust: int = 4, truncation: int | None = 63,
-               nudged: bool = False) -> "DustParameters":
+               nudged: bool = False,
+               nduscale_scale: float | None = None) -> "DustParameters":
         """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-4.
 
         ``truncation = None`` means a non-spectral grid (the pySES CAM-SE
         backend). HAM tunes ``nduscale_reg`` only at T63 and its ``ndust = 3``
         polynomial only up to T63, so such a grid takes the same 0.86 the
         Fortran's ``CASE DEFAULT`` gives every other resolution.
+
+        ``nduscale_scale`` multiplies the whole regional vector, preserving
+        HAM's *ratios* between regions while moving the global emission — the
+        single degree of freedom jcm calibrates (eight regional parameters
+        against one global budget would be unidentifiable). ``None`` means
+        "the calibrated default where jcm has one", which is
+        :data:`NDUSCALE_JCM_T63_SCALE` on the ``ndust = 4`` T63 vector and 1
+        everywhere else; an explicit value applies to whichever vector the
+        preset built.
         """
         table = np.array(SOIL_TABLE, dtype=float)
         scale = np.ones(N_REGIONS)
         thresh = np.ones(_N_EAST_ASIA_ROWS)
+        calibrated = 1.0
         if ndust == 2:                       # Cheng (2008)
             rough, lai, smst, easo = 0.0, 1.0e-10, True, 0
             scale[:] = 0.68
@@ -311,6 +333,10 @@ class DustParameters:
                 high = 1.25 if nudged else 1.45
                 low = 0.95 if nudged else 1.05
                 scale[:] = [low, high, high, low, low, low, high, low]
+                # The one grid/preset combination jcm has calibrated against
+                # a dust budget of its own (#808); everything else keeps
+                # HAM's number untouched (#810).
+                calibrated = NDUSCALE_JCM_T63_SCALE
             else:
                 scale[:] = 0.86
         else:
@@ -318,6 +344,8 @@ class DustParameters:
                 f"ndust={ndust}: only the 2 (Cheng), 3 (Stier 2005) and 4 "
                 "(Stier + East-Asia soils, HAM2) presets are ported; ndust=5 "
                 "needs the MSG-SEVIRI activation map, which is not available.")
+        scale = scale * (calibrated if nduscale_scale is None
+                         else float(nduscale_scale))
         return cls(
             soil_table=jnp.asarray(table),
             nduscale_reg=jnp.asarray(scale),
@@ -437,18 +465,21 @@ class DustEmissions(PhysicsTerm):
         *,
         ndust: int = 4,
         nudged: bool = False,
+        nduscale_scale: float | None = None,
         spec: ModalAerosolSpec | None = None,
     ):
         """Hold the parameters, the population and the static soil size grid.
 
-        ``ndust``/``nudged`` select the preset :meth:`cache_coords` rebuilds at
-        the model's own truncation; an explicit ``params`` overrides both and is
-        never rebuilt.
+        ``ndust``/``nudged``/``nduscale_scale`` select the preset
+        :meth:`cache_coords` rebuilds at the model's own truncation; an
+        explicit ``params`` overrides all three and is never rebuilt.
         """
-        self._preset = None if params is not None else (ndust, nudged)
+        self._preset = (None if params is not None
+                        else (ndust, nudged, nduscale_scale))
         self.params = nnx.Param(
             params if params is not None
-            else DustParameters.preset(ndust, nudged=nudged))
+            else DustParameters.preset(ndust, nudged=nudged,
+                                       nduscale_scale=nduscale_scale))
         self._spec = spec or MAM4_SPEC
         self._diameters = jnp.asarray(soil_diameters())
         (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
@@ -463,13 +494,14 @@ class DustEmissions(PhysicsTerm):
         """
         if self._preset is None:
             return
-        ndust, nudged = self._preset
+        ndust, nudged, nduscale_scale = self._preset
         # truncation = total_wavenumbers - 2, the relation utils.get_coords uses;
         # a non-spectral grid (pySES CAM-SE) has none and takes HAM's default.
         wavenumbers = getattr(coords.horizontal, "total_wavenumbers", None)
         truncation = None if wavenumbers is None else int(wavenumbers) - 2
         self.params = nnx.Param(
-            DustParameters.preset(ndust, truncation=truncation, nudged=nudged))
+            DustParameters.preset(ndust, truncation=truncation, nudged=nudged,
+                                  nduscale_scale=nduscale_scale))
 
     def _soil_weights(self, forcing, ncols, params):
         """Per-cell area weights of :data:`MIXTURE_ROWS`, before the wind switch.

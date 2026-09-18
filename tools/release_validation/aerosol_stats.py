@@ -124,6 +124,30 @@ _POSITIVE_RESIDUAL_CAVEAT = (
 #: over a few chunks swamps the flux integral it is compared against.
 MIN_WINDOW_DAYS = 90.0
 
+#: Shortest window on which the annual dust-emission budget is scored. Dust
+#: emission is strongly seasonal, so annualising a partial year measures the
+#: season rather than the year. A scored member has to cover most of one.
+MIN_DUST_WINDOW_DAYS = 300.0
+
+#: Earth's surface area [m²] — turns a global-mean flux into a global total.
+EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
+
+#: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
+#: jcm actually emits (coarser mass is discarded and published separately as
+#: ``dust_supercoarse_flux``). Derivation and provenance are in
+#: ``docs/source/science/aerosol.md``; in short, HAM2's own present-day total
+#: over the whole emitted spectrum (1221 Tg/yr, Krätschmer et al. 2022 with
+#: ECHAM6.3-HAM2.3, the parent of this port), less the super-coarse remainder
+#: this port measures, puts the comparable target in the mid-hundreds, and the
+#: band is opened either side of it. It is NOT a tuning target: it is the
+#: check that dust has neither vanished (HAM's untuned threshold gave jcm
+#: 5 Tg/yr, #808) nor run away.
+DUST_EMISSION_TG_PER_YR = (250.0, 1000.0)
+
+#: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
+#: the HAMMOZ source maps exist only at T63), so it is scored only there.
+_T63_NLAT = 96
+
 #: Regression tolerance: whichever of a 3-sigma excursion and a 15 % relative
 #: change is larger. 3 sigma alone is far too tight for a well-sampled mean
 #: (sigma is ~1 % of the annual mean); 15 % alone would let a slow bias
@@ -355,6 +379,11 @@ def chunk_reduction(ds: xr.Dataset) -> dict[str, float]:
             if name.startswith(f"{prefix}_") and ds[var].ndim <= 3:
                 out[name] = float(global_mean(tmean(ds[var]), weights))
 
+    # Grid size, so the dust band — a T63 calibration — knows whether it
+    # applies to this member at all rather than failing a T106 run for a
+    # number that was never tuned there (#810).
+    out["nlat"] = float(ds.sizes.get("lat", 0))
+
     aod_key = _optional_key(ds, _AOD_KEYS)
     if aod_key:
         out["aod_550"] = float(global_mean(tmean(ds[aod_key]), weights))
@@ -457,6 +486,17 @@ def regression_tolerance(reference: float, sigma: float,
     value. See the design doc.
     """
     return max(_N_SIGMA * sigma, _REL_TOLERANCE * abs(reference), floor)
+
+
+def _is_t63(series: dict[str, np.ndarray]) -> bool:
+    """Was every scored chunk written on the T63 grid the dust band assumes?
+
+    Unknown (output without the ``nlat`` reduction) counts as NOT T63: a band
+    applied to an unidentified grid would be scoring a number it cannot
+    attribute.
+    """
+    nlat = series.get("nlat")
+    return nlat is not None and bool(np.all(nlat == _T63_NLAT))
 
 
 def _budget_residual(days, series, species,
@@ -595,6 +635,18 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     if residuals:
         stats["budget_residual_max"] = max(residuals.values(), key=abs)
 
+    # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
+    # flux, so the total is that times the Earth's area; the mass above
+    # 10 µm never enters a tracer and is not in this number. Emitted only for
+    # a window long enough to mean the year rather than a season, and only on
+    # the grid the band was calibrated for — an unscored statistic is dropped
+    # here and explained in :func:`unscored_gates`, exactly like the drifts.
+    if ("emi_du" in series and span_days >= MIN_DUST_WINDOW_DAYS
+            and _is_t63(series)):
+        stats["dust_emission_tg_per_yr"] = (
+            float(np.nanmean(series["emi_du"]))
+            * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
+
     if "so4_above_500hPa" in series and "burden_so4" in series:
         aloft = float(np.nanmean(series["so4_above_500hPa"]))
         total = float(np.nanmean(series["burden_so4"]))
@@ -730,6 +782,23 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
             rows.append((f"burden_{species}_mg_m2", reason))
         elif span < MIN_WINDOW_DAYS:
             rows.append((name, short_slope))
+
+    # The dust budget: say which of the three preconditions is missing, so a
+    # silently unscored release blocker (#808) cannot look like a pass.
+    if "emi_du" not in series:
+        rows.append(("dust_emission_tg_per_yr",
+                     "the run publishes no emi_du flux, so no dust was "
+                     "emitted or the emission diagnostic is absent"))
+    elif not _is_t63(series):
+        rows.append(("dust_emission_tg_per_yr",
+                     "the band is a T63 calibration (#808/#810) and this "
+                     "output is on another grid, where nduscale_reg keeps "
+                     "HAM's untuned value"))
+    elif span < MIN_DUST_WINDOW_DAYS:
+        rows.append(("dust_emission_tg_per_yr",
+                     f"window spans {span:.0f} days; dust emission is "
+                     f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
+                     "days measures the season, not the year"))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
@@ -868,6 +937,12 @@ def physics_gates(stats: dict[str, float]) -> list[tuple[str, float, str, bool]]
             ok = np.isfinite(value) and value < DYN_RESIDUAL_PER_STEP
             rows.append((key, value,
                          f"x < {DYN_RESIDUAL_PER_STEP:.1%}/step", bool(ok)))
+    if "dust_emission_tg_per_yr" in stats:
+        value = stats["dust_emission_tg_per_yr"]
+        lo, hi = DUST_EMISSION_TG_PER_YR
+        ok = np.isfinite(value) and lo <= value <= hi
+        rows.append(("dust_emission_tg_per_yr", value,
+                     f"{lo:g} <= x <= {hi:g} Tg/yr", bool(ok)))
     if "budget_residual_max" in stats:
         value = stats["budget_residual_max"]
         ok = np.isfinite(value) and abs(value) < BUDGET_RESIDUAL_LIMIT
