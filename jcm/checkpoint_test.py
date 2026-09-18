@@ -32,7 +32,8 @@ import numpy as np
 import tree_math
 
 from jcm.checkpoint import (
-    SCHEMA_VERSION, load_checkpoint, parse_unstamped_scale, save_checkpoint,
+    SCHEMA_VERSION, _named_leaves, load_checkpoint, parse_unstamped_scale,
+    save_checkpoint,
 )
 from jcm.model import Model
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
@@ -536,7 +537,7 @@ class TestCompositionCoverage(unittest.TestCase):
             _max_abs_diff(donor.dycore_state, target.dycore_state), 0.0)
         self.assertEqual(
             _max_abs_diff(donor.physics_carry, target.physics_carry), 0.0)
-        return payload
+        return payload, donor, target
 
     def test_speedy_round_trip_and_tracer_metadata(self):
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -548,10 +549,26 @@ class TestCompositionCoverage(unittest.TestCase):
                          terrain=TerrainData.from_coords(coords),
                          physics=speedy_physics())
 
-        payload = self._round_trip(build)
+        payload, donor, target = self._round_trip(build)
         # SPEEDY declares no extra tracers: humidity is the whole set.
         self.assertEqual(list(payload["dycore_tracers"].values()), [True])
         self.assertIn("tracers.specific_humidity", payload["dycore"])
+
+        # SPEEDY's carry holds integer and boolean sub-cycle state
+        # (``_shortwave_rad.step``, ``_convection.iptop``). A unit rescale
+        # on one of those would quietly corrupt it, so asserting a factor
+        # for a non-float leaf is refused rather than applied.
+        integer_leaf = next(
+            name for name, leaf in _named_leaves(donor.physics_carry)
+            if not np.issubdtype(leaf.dtype, np.floating)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.msgpack"
+            _write_unstamped(donor, path, elapsed_days=0.0)
+            with self.assertRaises(ValueError) as ctx:
+                load_checkpoint(target, path,
+                                unstamped_scale={integer_leaf: 1000.0})
+        self.assertIn("floating-point", str(ctx.exception))
 
     def test_echam_round_trip_and_condensate_metadata(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
@@ -564,7 +581,7 @@ class TestCompositionCoverage(unittest.TestCase):
                          terrain=TerrainData.aquaplanet(coords),
                          physics=echam_physics(radiation_scheme="grey"))
 
-        payload = self._round_trip(build)
+        payload, _, _ = self._round_trip(build)
         tracers = payload["dycore_tracers"]
         # The condensate species PR #824's rescale applies to, flagged as
         # the kg/kg mass mixing ratios they are.

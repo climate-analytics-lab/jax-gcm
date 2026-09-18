@@ -428,6 +428,17 @@ def _load_unstamped(
             "model's state. Nothing was loaded rather than silently "
             f"ignoring the factor. Known names: {sorted(names)[:8]}..."
         )
+    floating = {name for name, leaf in (*dycore_template, *physics_template)
+                if np.issubdtype(leaf.dtype, np.floating)}
+    non_numeric = sorted(str(k) for k in unstamped_scale if str(k) not in floating)
+    if non_numeric:
+        # A scale factor only means anything on a float leaf; applying one
+        # to an integer counter or a boolean flag would quietly corrupt it.
+        raise ValueError(
+            f"unstamped_scale names {non_numeric}, which are not "
+            "floating-point leaves. A unit rescale applies to a float "
+            "array only."
+        )
 
     groups = []
     for key, template, group_label in (
@@ -465,7 +476,7 @@ def _load_unstamped(
         groups.append(leaves)
     logger.info(
         "Checkpoint %s: read as unstamped (schema 0) against a "
-        "caller-asserted scale for %d leaf/leaves",
+        "caller-asserted scale for %d leaf name(s)",
         path, len(unstamped_scale),
     )
     return groups[0], groups[1]
