@@ -251,7 +251,7 @@ Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
 - **Activation fallback.** In the JAM path the 2M scheme falls back, where
   ARG's ``activated_cdnc`` is empty, to its own ECHAM-HAM minimum-CDNC floor
   (``cdnc_min_fixed`` = 40 cm⁻³, or the dynamic max-radius floor; #674) rather
-  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp``+2M path's
+  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp`` + 2M path's
   Twomey link.
 - **Breaking: aerosol output variables are renamed into explicit namespaces.**
   MACv2-SP's ``aerosol.*`` output moves to ``macsp.*`` with CF/AeroCom names
