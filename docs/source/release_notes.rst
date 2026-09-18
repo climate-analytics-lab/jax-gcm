@@ -107,9 +107,12 @@ Delegated timesteps have one effective value
 
 - Runner and profiling paths now resolve an explicit ``run.time_step`` in
   minutes or, when it is ``null``, adopt the built model/dycore timestep.
-  A pySES configuration owns its timestep in ``dycore.dt_seconds``; an
-  explicit ``run.time_step`` must repeat that value or model construction
-  raises. Prescribed-state runs, single-column runs, chunk budget tolerances
+  A pySES configuration owns its timestep in ``dycore.dt_seconds``: on that
+  Hydra path an explicit ``run.time_step`` is ignored with a warning rather
+  than forwarded, so it cannot veto the group that owns the step (the Python
+  API is the strict door — ``Model(dycore=..., time_step=...)`` raises on a
+  disagreement). Prescribed-state runs, single-column runs, chunk budget
+  tolerances
   and term profiles therefore use the same number of seconds as the model
   instead of raising on ``None``, silently falling back to 900 seconds, or
   reporting against a conflicting config value (#801).

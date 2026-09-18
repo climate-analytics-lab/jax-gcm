@@ -413,9 +413,13 @@ from dinosaur import primitive_equations
 Built with Sphinx + Furo theme:
 
 ```bash
-cd docs && make html                                        # convenient loop
+(cd docs && make html)                                      # convenient loop
 sphinx-build -W --keep-going -b html docs/source /tmp/docs   # THE GATE
 ```
+
+Both run from the repository root — the subshell keeps `make html` from
+leaving the shell in `docs/`, where the gate's `docs/source` path would not
+resolve.
 
 The second command is what `.github/workflows/run_docs.yaml` runs on every
 `docs/**` change: the full tree with warnings as errors (#829). It must end in

@@ -200,11 +200,24 @@ model's step is used. Delegated configurations such as
 ``jcm/config/run/pyses_year.yaml`` set ``run.time_step: null`` deliberately and
 the Model adopts the dycore's value.
 
-**Breaking:** an explicit ``run.time_step`` that disagrees with
-``dycore.dt_seconds`` now fails during model construction instead of letting
-runner-side diagnostics quote a different step from the dynamics. Code that
-read ``float(cfg.run.time_step)`` directly must go through the resolver, since
-that value is legitimately ``null``.
+What happens on a disagreement depends on which door you came in by, and the
+difference matters:
+
+* **Python API.** ``Model(dycore=..., time_step=...)`` with a step that
+  disagrees with the dycore's ``dt_seconds`` **raises** ``ValueError``. The
+  dycore bakes its step into its integrator at construction, so the Model
+  cannot honour the other value; drop ``time_step=`` or rebuild the dycore.
+* **Hydra, pySES.** ``run.time_step`` is **ignored with a warning** and the
+  dycore's ``dt_seconds`` is used. It is not forwarded to ``Model`` at all.
+  This is deliberate: ``run/default.yaml`` sets 12 minutes, so forwarding it
+  would make ``dycore=pyses_ne30l47`` fail to build unless the user had also
+  selected ``run=pyses_year`` — a value they never chose vetoing the group
+  that owns the step. **So a pySES run that sets** ``run.time_step`` **does not
+  change its timestep**; change ``dycore.dt_seconds`` instead, and watch for
+  the ``pySES owns the timestep`` warning.
+
+Either way, code that read ``float(cfg.run.time_step)`` directly must go
+through the resolver, since that value is legitimately ``null``.
 
 ``Model(log_level=...)`` is removed
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -333,10 +346,18 @@ every extra tracer is **nodal**, so the two no longer share a shape.
 
 ``physics=echam`` used to compose the grey two-stream scheme, which is an
 unsupported pairing (the supported ones are grey-for-SPEEDY and
-RRTMGP-for-ECHAM). It now composes RRTMGP, making ``physics=echam`` and
-``physics=echam-rrtmgp`` equivalent term lists. **There is deliberately no CLI
-route to a grey-ECHAM composition.** The Python factory still defaults to grey
-for the cheap A/B, so the two doors disagree on purpose:
+RRTMGP-for-ECHAM). It now composes RRTMGP — and because that made the separate
+``echam-rrtmgp`` group redundant, **that group was deleted**:
+
+.. code-block:: console
+
+   $ python -m jcm.main physics=echam-rrtmgp   # v2 — now a Hydra missing-config error
+   $ python -m jcm.main physics=echam          # v3 — the same term list
+
+(The ``+configuration=t63-echam-rrtmgp`` *configuration* preset is a different
+group and still exists.) **There is deliberately no CLI route to a grey-ECHAM
+composition.** The Python factory still defaults to grey for the cheap A/B, so
+the two doors disagree on purpose:
 
 .. code-block:: python
 

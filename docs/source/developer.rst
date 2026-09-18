@@ -251,10 +251,13 @@ The strict build is the gate
 ``make html`` is the convenient loop, but CI
 (``.github/workflows/run_docs.yaml``) builds the **whole** tree with warnings
 as errors, and that is what a documentation change has to clear. Run the
-identical command before pushing:
+identical command before pushing, **from the repository root** (the path is
+``docs/source``, so this fails if you are still inside ``docs/`` from the
+``make html`` above):
 
 .. code-block:: console
 
+   $ cd <repo root>
    $ sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
 
 ``-W`` turns every warning into an error; ``--keep-going`` reports all of them
