@@ -288,6 +288,34 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
             0.0,
         )
 
+    def test_the_seed_comes_from_a_fresh_carry_not_the_current_one(self):
+        """The restore template may be an evolved carry; the seed must not be.
+
+        ``load_checkpoint`` accepts a model whose state came from an
+        earlier ``Model.run``, so the pytree it deserializes against can
+        hold that run's evolved values. A field the checkpoint predates
+        must still be filled with the term's documented seed, not with
+        the unrelated run's state.
+        """
+        donor = _build_model()
+        donor.bootstrap_state()
+        upgraded = _build_model(
+            physics=held_suarez_physics() + _ExtraCarryTerm())
+        state, carry = upgraded.bootstrap_state()
+        # Stand in for a carry an earlier integration left behind.
+        evolved = dict(carry)
+        evolved["extra_carry"] = _ExtraCarryData(
+            counter=jnp.full_like(carry["extra_carry"].counter, 7.0))
+        upgraded.restore_state(state, evolved)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=1.0)
+            load_checkpoint(upgraded, path)
+
+        restored = np.asarray(upgraded.physics_carry["extra_carry"].counter)
+        np.testing.assert_array_equal(restored, np.zeros_like(restored))
+
     def test_field_the_model_no_longer_carries_is_dropped(self):
         """A file from a jcm whose carry had one more field still loads."""
         donor = _build_model(physics=held_suarez_physics() + _ExtraCarryTerm())

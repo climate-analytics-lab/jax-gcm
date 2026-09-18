@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import functools
 import logging
 from collections.abc import Mapping
 from importlib import metadata
@@ -348,6 +349,41 @@ def _check_leaf(got: np.ndarray, want: np.ndarray, name: str, path, group: str):
         )
 
 
+def _fresh_carry_seeds(model):
+    """Build ``{name: array}`` from a genuinely fresh physics carry.
+
+    ``Model.initial_physics_carry`` is a pure builder: it returns the
+    per-term documented seed (``.zeros()`` for most slots, TTE-TKE's
+    turbulence floor, …) without touching the model's own carry. That is
+    what a field the checkpoint predates must be filled with — the
+    destination model's *current* carry is an evolved state whenever it
+    came from an earlier ``Model.run``, and injecting that into a
+    restored run would change its results.
+    """
+    builder = getattr(model, "initial_physics_carry", None)
+    if builder is None:  # pragma: no cover - non-Model host
+        return {}
+    return dict(_named_leaves(builder()))
+
+
+def _seed_value(name, want, seeds, path, group):
+    """Fill value for one absent leaf, from the fresh carry when possible."""
+    fresh = seeds() if callable(seeds) else (seeds or {})
+    value = fresh.get(name)
+    if value is None or value.shape != want.shape or (
+            value.dtype.kind != want.dtype.kind):
+        # No fresh counterpart (a host without the builder, or a carry
+        # this composition sizes differently): fall back to the template,
+        # but say so — the value is then whatever the model held.
+        logger.warning(
+            "Checkpoint %s: %s %r has no fresh-carry seed; filled from the "
+            "destination model's current value instead",
+            path, group, name,
+        )
+        return want
+    return value.astype(want.dtype) if value.dtype != want.dtype else value
+
+
 def _match_by_name(
     stored: Mapping,
     template: list[tuple[str, np.ndarray]],
@@ -356,6 +392,7 @@ def _match_by_name(
     group: str,
     fill_missing: bool,
     protected: frozenset[str] = frozenset(),
+    seeds=None,
 ) -> tuple[list[np.ndarray], list[str], list[str]]:
     """Order the file's arrays to the template, matching on name.
 
@@ -372,6 +409,13 @@ def _match_by_name(
     living in the carry (the cloud-borne aerosol phase). A leaf under one
     of those is refused rather than seeded or dropped, whichever way the
     field sets differ, because nothing recomputes it.
+
+    ``seeds`` supplies the fill values: a callable returning
+    ``{name: array}`` from a *freshly built* carry, evaluated only if
+    something actually has to be seeded. The template cannot serve that
+    role — it is whatever the destination model currently holds, which
+    for a model populated by an earlier ``Model.run`` is an evolved state
+    from an unrelated integration, not the term's documented seed.
     """
     leaves: list[np.ndarray] = []
     seeded: list[str] = []
@@ -397,7 +441,7 @@ def _match_by_name(
                     f"{_POLICY_DOC}."
                 )
             seeded.append(name)
-            leaves.append(want)
+            leaves.append(_seed_value(name, want, seeds, path, group))
             continue
         got = np.asarray(stored[name])
         _check_leaf(got, want, name, path, group)
@@ -574,9 +618,12 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
 
     Leaves are matched **by name**, so an upgrade that adds or removes a
     field on a physics-carry struct still restores: a field the file does
-    not have takes the freshly bootstrapped model's value for it (the
-    term's documented seed — ``.zeros()`` for most carry slots), and a
-    field the file has but this model does not is dropped. Both are
+    not have is filled from a *freshly built* carry
+    (:meth:`Model.initial_physics_carry` — the term's documented seed,
+    ``.zeros()`` for most slots), not from whatever this model currently
+    holds, which for a model populated by an earlier ``Model.run`` is an
+    evolved state from an unrelated integration. A field the file has but
+    this model does not is dropped. Both are
     logged at INFO on the ``jcm.checkpoint`` logger so a resume is
     auditable. Carry fields are diagnostics recomputed within a step or
     two, with one bounded exception: a radiation sub-cycle cache seeded
@@ -681,15 +728,20 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
         protected = frozenset(_prognostic_carry_slots(model)) | frozenset(
             str(key) for key in _as_sequence(raw.get("prognostic_carry_slots"))
         )
+        # Built at most once, and only if a field actually has to be
+        # seeded — it re-runs the structural probe.
+        seeds = functools.lru_cache(maxsize=1)(
+            lambda: _fresh_carry_seeds(model))
         physics_leaves, seeded, dropped = _match_by_name(
             raw["physics"], physics_template,
             path=path, group="physics carry", fill_missing=True,
-            protected=protected,
+            protected=protected, seeds=seeds,
         )
         if seeded:
             logger.info(
                 "Checkpoint %s: physics carry field(s) %s absent from the "
-                "file; seeded from this model's fresh carry",
+                "file; seeded from a freshly built carry (the terms' "
+                "documented initial values)",
                 path, seeded,
             )
         if dropped:
