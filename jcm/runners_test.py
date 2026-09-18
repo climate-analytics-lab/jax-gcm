@@ -1381,12 +1381,34 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports1), 1)
             self.assertTrue(Path(ckpt_path).exists())
 
+            # The file carries the schema stamp, which is what lets a later
+            # jcm migrate a changed carry field set rather than reject the
+            # whole checkpoint (#731).
+            import flax.serialization
+
+            from jcm.checkpoint import SCHEMA_VERSION
+
+            day1 = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertEqual(int(day1["schema_version"]), SCHEMA_VERSION)
+            self.assertAlmostEqual(float(day1["elapsed_days"]), 1.0)
+
             # Second invocation: total 2 days, but the first chunk
             # should be skipped because the checkpoint records day=1.
             cfg2 = _compose(base_overrides + ["run.total_time=2"])
             reports2 = run(cfg2)
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
+            # That chunk rotated the day-1 checkpoint to ``.prev`` instead of
+            # overwriting the only restartable state.
+            prev = Path(f"{ckpt_path}.prev")
+            self.assertTrue(prev.exists())
+            rotated = flax.serialization.msgpack_restore(prev.read_bytes())
+            self.assertAlmostEqual(float(rotated["elapsed_days"]), 1.0)
+            current = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertAlmostEqual(float(current["elapsed_days"]), 2.0)
 
     def test_chunked_budget_uses_model_timestep(self):
         """The budget floor uses the step that advanced the model (#801)."""

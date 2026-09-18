@@ -603,7 +603,14 @@ def _state_from_file(model: Model, cfg: DictConfig):
     ``model.run(initial_state=..., initial_physics_state=...)`` — the donor's
     physics carry is threaded through so the warm start keeps its radiation
     sub-cycle cache / prior-step TKE rather than resetting them.
+
+    ``init.unstamped_scale`` (default unset) is the escape hatch for a
+    donor written before the checkpoint schema stamp, which is otherwise
+    refused because its unit convention is unrecorded — the position any
+    state spun up with an earlier jcm is in. See
+    ``docs/source/design/checkpoint_compatibility.md``.
     """
+    from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
@@ -614,7 +621,11 @@ def _state_from_file(model: Model, cfg: DictConfig):
             "first chunk checkpoint would overwrite the donor init state. "
             "Give the run its own checkpoint_path."
         )
-    state, physics_carry, days = checkpoint_state(model, path)
+    state, physics_carry, days = checkpoint_state(
+        model, path,
+        unstamped_scale=parse_unstamped_scale(
+            cfg.init.get("unstamped_scale", None)),
+    )
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,
