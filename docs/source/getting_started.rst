@@ -450,6 +450,19 @@ The other builders follow the identical pattern:
   the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`
   path documented under :doc:`running_at_scale`.)
 
+Both paths read the same file and follow the same compatibility policy: a
+checkpoint carries a schema stamp and its arrays are matched to the
+destination model by field name, so a jcm upgrade that adds or removes a
+physics-carry diagnostic still restores (the added field is seeded from the
+fresh carry, the removed one dropped, both logged at INFO), while a different
+grid, level count, precision or physics composition is refused with the file
+and leaf named. A file written before jcm 3.0 has no stamp and is refused
+outright — including any state you spun up with an earlier version — because
+it does not record which unit convention its dycore state uses; pass
+``init.unstamped_scale`` (or ``unstamped_scale=`` to ``checkpoint_state`` /
+``load_checkpoint``) to assert that convention yourself. See
+:doc:`design/checkpoint_compatibility`.
+
 External steppers and transformed predictions
 ---------------------------------------------
 

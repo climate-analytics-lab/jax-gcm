@@ -151,6 +151,20 @@ class PhysicsTerm(nnx.Module):
     # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
     carry_slots: ClassVar[dict[str, type]] = {}
 
+    # Carry keys whose contents are PROGNOSTIC state: the only copy of a
+    # physical quantity, not something the next step recomputes. The
+    # cloud-borne aerosol phase is the case this exists for — it lives in
+    # the carry and nowhere else (#602), so a zero seed would destroy
+    # aerosol mass rather than cost one step of staleness.
+    #
+    # A checkpoint restore migrates a changed carry field set by name
+    # (``docs/source/design/checkpoint_compatibility.md``), which is safe
+    # precisely because carry fields are normally rewritten within a step
+    # or two. Keys listed here are excluded: a restore that would have to
+    # seed or drop one is refused instead. Declare a key here only when a
+    # fresh seed would be *wrong*, not merely stale.
+    prognostic_carry_slots: ClassVar[tuple[str, ...]] = ()
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """Declare the tracers this term needs in ``state.tracers``.
