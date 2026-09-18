@@ -19,9 +19,11 @@ Read this first: the three changes that silently alter results
 Most items below fail loudly. These three do not, so check them before
 comparing any v3 number against a v2 one.
 
-1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2
-   checkpoint or a v2-written netCDF read as-is gives an atmosphere 1000x too
-   dry or 1000x too wet depending on which one it is.
+1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
+   state file read as-is gives an atmosphere 1000x too wet. (A v2 *checkpoint*
+   is the safe case — it is refused outright, see
+   :ref:`v3-checkpoints` — but only because it is unstamped; override that
+   refusal carelessly and you get the same class of error.)
 2. **Chemistry volume mixing ratios are ppmv, not ppbv**
    (:ref:`v3-chem-units`). Code that followed the old docstrings now supplies
    1000x too much ozone and methane.
@@ -97,10 +99,12 @@ single adapter.
 Two **opposite** 1000x hazards follow, and they are easy to conflate:
 
 * a **checkpoint** (``run.checkpoint_path``, msgpack) written by v2 holds the
-  dycore-native value, i.e. physical/1000. Resumed without conversion it is an
-  atmosphere 1000x too **dry**;
-* an ``init=from_state`` **netCDF** written by v2 holds g/kg. Read as kg/kg it
-  is 1000x too **wet**.
+  dycore-native value. On ECHAM that is physical/1000, so forcing such a file
+  in without the ``x1000`` gives an atmosphere 1000x too **dry**. v3 refuses
+  unstamped files precisely so this cannot happen by accident — see
+  :ref:`v3-checkpoints`, and note the factor is ECHAM's, not SPEEDY's;
+* a **netCDF** written by v2 and fed back as a gridpoint state holds g/kg.
+  Read as kg/kg it is 1000x too **wet**.
 
 The reliable tell is magnitude, not provenance: a near-surface
 ``specific_humidity`` above 0.1 is g/kg, because that value is impossible in
@@ -465,42 +469,100 @@ Other config-surface changes
   MACv2-SP on default all-ones weights; and transient by-date forcing composed
   with present-day JAM emission bundles.
 
+.. _v3-checkpoints:
+
 Checkpoint compatibility
 ------------------------
 
 .. warning::
 
-   **Assume a v2 checkpoint does not load into v3.** ``load_checkpoint``
-   deserializes against the composed model's exact pytree, so any release that
-   adds a leaf to a diagnostic struct invalidates every earlier checkpoint. The
-   loader names the file and the reason rather than surfacing a bare leaf-count
-   error, but it cannot repair the file.
+   **A v2 checkpoint is refused by v3, by design.** It carries no
+   ``schema_version`` stamp, and without one the loader cannot tell which unit
+   convention its numbers follow — which matters because v3 changed that
+   convention, and changed it *differently per physics package*. Rather than
+   restore plausible-looking numbers that are wrong by a factor of 1000,
+   ``load_checkpoint`` refuses and names the file.
 
-Two independent reasons a v2 checkpoint fails or misleads in v3:
+The mechanism, and how to get a v2 state in anyway
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-**1. Diagnostic-struct growth (fails loudly).** v3 adds fields to several
-diagnostic pytrees — ``SWRadiationData.heating_rate`` for the cached SPEEDY
-shortwave, four clear-sky flux profiles, the ``*_noa`` and ``noa_frac_*``
-aerosol-free leaves, and the water-positivity ledger. Each addition alone is
-enough. Existing SPEEDY checkpoints will not load, **including the packaged**
-``t31_l8`` **init state on the data mirror**; regenerate the state, or pin the
-previous release.
+``save_checkpoint`` now stamps every file with ``schema_version``, the writing
+``jcm`` version, and every state array **under its pytree name** rather than
+its position. Matching on names is what makes ordinary upgrades survive: a
+physics-carry field a newer jcm added is seeded from the freshly bootstrapped
+carry, one it removed is dropped, both logged at INFO. **The struct-growth
+breakage that invalidated every checkpoint in the 2.x line is therefore gone**
+— that was reason (1) in earlier drafts of this guide and it no longer applies.
 
-**2. The tracer store changed convention (does not fail loudly).** Cloud
-condensate, aerosol mass and gas mass tracers are now stored unscaled in kg/kg
-rather than nondimensionalised. **Values in a checkpoint written before that
-change are 1000x smaller than the new convention.** Multiply by 1000, or avoid
-the problem by starting from a gridpoint ``PhysicsState``, which is unaffected.
-Tracers that declare ``nondimensionalize=False`` — number concentrations, volume
-mixing ratios — are unaffected either way.
+Still refused, because no automatic answer is safe:
 
-.. note::
+* a different grid, level count, precision or physics composition — the file
+  names the leaf;
+* a changed field set under a carry slot a term declares **prognostic**
+  (``PhysicsTerm.prognostic_carry_slots``). JAM's cloud-borne aerosol phase is
+  the one case today: it lives only in the carry, so seeding it would invent
+  mass and dropping it would destroy mass;
+* **any unstamped file**, i.e. anything written before v3.
 
-   A versioned checkpoint format is being added under issue #731: a schema/
-   version marker written by ``save_checkpoint``, and a documented policy for
-   what a version bump promises. This section will be finalised against that
-   mechanism once it lands; until then the guidance above is "regenerate, or
-   pin", and there is no automatic migration.
+For that last case there is a deliberate escape hatch. You assert the file's
+convention yourself, per leaf:
+
+.. code-block:: python
+
+   from jcm.checkpoint import load_checkpoint
+
+   # a pre-#824 ECHAM donor: its stored mass mixing ratios are 1000x small
+   load_checkpoint(path, model, unstamped_scale={
+       "tracers.specific_humidity": 1000.0,
+       "tracers.qc": 1000.0,
+       "tracers.qi": 1000.0,
+   })
+
+   # or, having checked the file is already in the current convention:
+   load_checkpoint(path, model, unstamped_scale={})
+
+and from the CLI through the ``init`` group:
+
+.. code-block:: console
+
+   $ python -m jcm.main init=from_state init.file=<path> \
+       'init.unstamped_scale=["tracers.specific_humidity=1000","tracers.qc=1000"]'
+
+An empty mapping asserts "already in the current convention"; a name that is
+not a leaf of this model, or is not a floating-point leaf, is rejected rather
+than silently ignored. Use it only when you know how the file was written.
+
+.. important::
+
+   **The 1000x factor is ECHAM's, not SPEEDY's — do not copy the entries
+   across.** Before v3 the bridge stored ``gridpoint_q x 1e-3``, while the
+   *gridpoint* humidity itself was package-specific: ECHAM's schemes were
+   kg/kg-native, so an ECHAM donor's store is physical/1000 and needs the
+   ``x1000``; SPEEDY's were g/kg-native, so the two factors cancelled and a
+   SPEEDY donor's store is **already physical**. Scaling a SPEEDY donor by 1000
+   would be the same error in the opposite direction.
+
+The full policy, the evidence behind it and the rule for bumping the schema
+are in :doc:`design/checkpoint_compatibility`; the shipped
+``jcm/config/init/from_state.yaml`` carries the same warning next to the knob.
+
+What changed underneath
+^^^^^^^^^^^^^^^^^^^^^^^
+
+For reference, the two convention changes the stamp exists to disambiguate:
+
+* **Gridpoint humidity** is kg/kg on every package (#666) — see
+  :ref:`v3-q-units`. What the *dycore* stored for it changed with it, and
+  differently per package, as above.
+* **Mass mixing-ratio tracers** — cloud condensate, aerosol mass, gas mass —
+  are stored unscaled in kg/kg rather than nondimensionalised (#824), so a
+  pre-v3 file's values are 1000x smaller than the new convention. Tracers
+  declaring ``nondimensionalize=False`` (number concentrations, volume mixing
+  ratios) are unaffected.
+
+If none of this applies to your situation, the simplest path is unchanged:
+start from a fresh initial state, or from a gridpoint ``PhysicsState``, which
+carries no dycore convention at all.
 
 Science-changing fixes
 ----------------------
