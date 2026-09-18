@@ -27,9 +27,15 @@ Requirements
 - Python ≥ 3.11
 - JAX
 - Dinosaur ≥ 1.5.0 (the dynamical-core backend)
+- Flax ≥ 0.12.1
 - XArray (for I/O and data handling)
+- pySES ≥ 0.1.3.1 for the optional CAM-SE backend (``pip install jcm[pyses]``)
 
-See ``requirements.txt`` for the complete list of dependencies.
+See ``requirements.txt`` for the complete list of dependencies, and
+:doc:`v2_to_v3` for why each of those floors is a floor.
+
+Upgrading from v2? Read :doc:`v2_to_v3` first: v3.0 changes unit contracts,
+public APIs, configuration group names and checkpoint compatibility.
 
 .. note::
 
@@ -327,7 +333,7 @@ level name or a number, and refuses anything else rather than quietly running
 at a verbosity you did not choose). It applies in every run mode and from the
 start of the run.
 
-**A default run is quieter than it was before v2.1.** ``run.log_level`` used to
+**A default run is quieter than it was before v3.0.** ``run.log_level`` used to
 be applied only by ``Model.__init__``, so it did nothing at all in
 ``run.mode=prescribed`` and ``run.mode=scm``, nothing before the model was
 built in ``full``, and nothing for the several modules that logged to the root

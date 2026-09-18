@@ -38,6 +38,10 @@ JCM requires Python 3.11 or newer. See
 [the getting-started guide](https://jax-gcm.readthedocs.io/en/latest/getting_started.html)
 for the development install and the full dependency set.
 
+Upgrading from v2? v3.0 changes unit contracts, public APIs, configuration
+group names and checkpoint compatibility — see
+[the v2-to-v3 migration guide](https://jax-gcm.readthedocs.io/en/latest/v2_to_v3.html).
+
 ## Quick start
 
 Run a short SPEEDY aquaplanet integration from Python:
