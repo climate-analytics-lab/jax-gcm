@@ -450,6 +450,47 @@ The other builders follow the identical pattern:
   the elapsed clock — is the separate :func:`jcm.checkpoint.load_checkpoint`
   path documented under :doc:`running_at_scale`.)
 
+External steppers and transformed predictions
+---------------------------------------------
+
+Couplers and custom steppers can obtain both initial pytrees without reading
+private model attributes. The two builder methods are pure; they do not change
+the state retained by ``model``:
+
+.. code-block:: python
+
+   state = model.initial_state()
+   physics_carry = model.initial_physics_carry()
+   state, physics_carry, predictions = model.run_from_state_with_carry(
+       initial_state=state,
+       initial_physics_state=physics_carry,
+       forcing=forcing,
+       total_time=1.0,
+       save_interval=1.0,
+   )
+
+``model.bootstrap_state()`` is the stateful alternative: it installs and
+returns a matched ``(state, physics_carry)`` pair for a later ``resume()``.
+The installed pair is available through the read-only ``model.dycore_state``
+and ``model.physics_carry`` properties. Checkpoint readers replace both values
+atomically through ``model.restore_state(...)`` so a dycore state cannot be
+paired accidentally with stale radiation or turbulence carry state.
+
+``ModelPredictions`` deliberately drops coordinate and physics objects when it
+crosses a JAX pytree boundary. Reattach that static context before converting a
+transformed trajectory to xarray:
+
+.. code-block:: python
+
+   import jax
+
+   transformed = jax.tree.map(lambda value: value, predictions)
+   ds = transformed.with_context(model).to_xarray()
+
+The rebuilt parameter record is labelled as a live-model read rather than a
+trace-time claim. If observer or snapshot arrays were not pytree children, pass
+their run-specific metadata explicitly to ``with_context``.
+
 
 Calendar-aware durations and resampling
 ---------------------------------------
@@ -619,8 +660,8 @@ CLI flag (``nudging=era5``, pulling the run window from cloud ERA5) — see
 
 .. note::
    ``NudgingTarget`` fields use the model-state units: winds in m/s,
-   temperature in K, and specific humidity in **g/kg**. ERA5 stores
-   humidity in kg/kg, so multiply by 1000 before building the target.
+   temperature in K, and specific humidity in **kg/kg**. ERA5 stores
+   humidity in the same units, so pass it through without rescaling.
 
 Composing extra terms: the upper sponge
 ----------------------------------------

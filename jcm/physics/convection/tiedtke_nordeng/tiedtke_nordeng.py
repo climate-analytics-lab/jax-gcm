@@ -1786,6 +1786,11 @@ class TiedtkeConvection(PhysicsTerm):
             moistening_rate=tendency.specific_humidity,
         )
 
+        # These floors protect the provisional CloudData consumed by the
+        # downstream microphysics. They can affect what that scheme computes,
+        # but do not modify ``tendency`` above or directly update prognostic
+        # state; the final summed qc/qi tendency is capped and accounted once
+        # at the physics interface.
         clouds = diagnostics["clouds"].copy(
             qc=jnp.maximum(
                 diagnostics["clouds"].qc + tendency.tracers["qc"] * dt,

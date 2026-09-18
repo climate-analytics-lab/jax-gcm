@@ -273,12 +273,21 @@ class TestOutputAttrs(unittest.TestCase):
         self.assertEqual(merged["shared"]["units"], "from_a")
 
     def test_terms_without_output_attrs_are_tolerated(self):
-        """A term predating the attribute contributes nothing, no error."""
+        """A term predating the attribute contributes no term-owned metadata."""
         # ``LinearHeating`` declares no ``output_attrs``; the base default {}
         # plus the ``getattr`` guard must keep it out of the merge cleanly.
+        # Container-owned positivity diagnostics still carry their metadata.
         physics = ComposablePhysics(
             terms=[LinearHeating(), DiagnosticConsumer()])
-        self.assertEqual(physics.output_attrs(), {})
+        attrs = physics.output_attrs()
+        self.assertEqual(
+            attrs["water_positivity_correction.total_water_tendency"]["units"],
+            "kg kg-1 s-1",
+        )
+        self.assertEqual(
+            attrs["water_positivity_correction.column_water_source"]["units"],
+            "kg m-2 s-1",
+        )
 
 
 class TestDifferentiabilityGate(unittest.TestCase):
@@ -633,6 +642,13 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         empty = physics.get_empty_data(coords)
         self.assertIsInstance(empty, dict)
         self.assertIn("heating_rate", empty)
+        self.assertIn("water_positivity_correction", empty)
+        self.assertIn(
+            "total_water_tendency", empty["water_positivity_correction"],
+        )
+        self.assertNotIn(
+            "column_water_source", empty["water_positivity_correction"],
+        )
         # Array values should be zeros
         for v in empty.values():
             if isinstance(v, jax.Array) and v.shape:

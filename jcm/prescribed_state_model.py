@@ -249,8 +249,7 @@ class PrescribedStateModel:
         dt_seconds = self.dt_seconds
 
         # ``times`` is days-since-``start_date``; convert to sim_time
-        # seconds so ``_date_for`` matches the wiring in
-        # ``Model._step_fn``.
+        # seconds so ``_date_for`` matches ``Model.date_from_sim_time``.
         sim_times = jnp.asarray(times) * 86400.0
 
         def _date_for(sim_time):
@@ -268,7 +267,8 @@ class PrescribedStateModel:
         def step(state, sim_time):
             clamped = verify_state(state)
             # Collapse any TimeSeries forcing leaves to the slice valid
-            # at this state's sim_time (same wiring as Model._step_fn).
+            # at this state's sim_time (same clock as
+            # Model.date_from_sim_time).
             forcing_now = forcing.select(_date_for(sim_time), calendar=calendar)
             return physics.compute_tendencies(clamped, forcing_now, terrain)
 

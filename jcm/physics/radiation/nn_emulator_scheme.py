@@ -15,6 +15,7 @@ from typing import Tuple, Optional
 
 import jax.numpy as jnp
 
+from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.coords_util import column_lat_lon
 
 from jcm.physics.radiation.radiation_types import (
@@ -688,9 +689,9 @@ class NNEmulatorRadiation(PhysicsTerm):
         )
 
         chemistry = diagnostics["chemistry"]
-        ozone_vmr = chemistry.ozone_vmr * 1e-6
+        ozone_vmr = chemistry.ozone_mole_fraction()
         # CO2 is a prescribed forcing read straight from ForcingData.
-        co2_vmr = forcing.co2_vmr * 1e-6
+        co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Microphysical effective radii from the clouds carry, sourced exactly
         # as RRTMGP sources them so the emulator sees the cloud its labels

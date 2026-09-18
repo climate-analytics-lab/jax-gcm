@@ -4,7 +4,11 @@ import numpy as np
 from dinosaur import primitive_equations_states
 from dinosaur.scales import units
 from jcm.constants import p0
-from jcm.physics_interface import PhysicsState
+from jcm.forcing import ForcingData
+from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+from jcm.physics_interface import PhysicsState, PhysicsTendency
+from jcm.terrain import TerrainData
 from jcm.dycore.dinosaur.state_bridge import (
     dynamics_state_to_physics_state, physics_state_to_dynamics_state,
 )
@@ -119,14 +123,185 @@ class TestVerifyTendencies(unittest.TestCase):
         self.assertTrue(jnp.all(q_next >= 0))
 
     def test_large_positive_tendency_not_capped(self):
-        """A tendency that would drive q very high is NOT silently clamped
-        (by design — masking would hide upstream bugs).
-        """
+        """A large positive tendency passes through so upstream bugs remain visible."""
         from jcm.physics_interface import verify_tendencies
         state, tend = self._make_state_and_tendency(q_init=0.001, dqdt=1.0)
         result = verify_tendencies(state, tend, time_step=1800.0)
-        # Unchanged tendency passes through
-        self.assertTrue(jnp.allclose(result.specific_humidity, tend.specific_humidity))
+        self.assertTrue(jnp.allclose(
+            result.specific_humidity, tend.specific_humidity,
+        ))
+
+
+class _WaterDrainTerm(PhysicsTerm):
+    """Toy operator-split sink used to exercise the interface accounting."""
+
+    name = "water_drain"
+    category = "microphysics"
+
+    def __init__(self, drain_fraction: float):
+        self.drain_fraction = float(drain_fraction)
+
+    def required_tracers(self):
+        """Declare the water fields whose tendencies this term emits."""
+        return tuple(
+            TracerSpec(name=name) for name in ("qc", "qi", "qr", "qs")
+        )
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        del forcing, terrain
+        dt = diagnostics["_dt_seconds"]
+        tendency = PhysicsTendency.zeros(state.temperature.shape).copy(
+            specific_humidity=(
+                -self.drain_fraction * state.specific_humidity / dt
+            ),
+            tracers={
+                name: -self.drain_fraction * value / dt
+                for name, value in state.tracers.items()
+            },
+        )
+        # Two unequal layers make the pressure-weighted source distinguishable
+        # from an unweighted vertical sum.
+        dp = jnp.array([10_000.0, 30_000.0], dtype=state.temperature.dtype)
+        return tendency, {
+            **diagnostics,
+            "pressure_thickness": dp[:, jnp.newaxis],
+        }
+
+
+class TestWaterPositivityAccounting(unittest.TestCase):
+    """The retained water cap publishes the exact artificial source."""
+
+    def _run(self, drain_fraction):
+        from jcm.physics_interface import compute_physics_step_gridpoint
+
+        shape = (2, 1, 1)
+        q = jnp.array([1.0e-3, 2.0e-3]).reshape(shape)
+        tracers = {
+            "qc": jnp.array([2.0e-4, 4.0e-4]).reshape(shape),
+            "qi": jnp.array([3.0e-4, 6.0e-4]).reshape(shape),
+            "qr": jnp.array([4.0e-4, 8.0e-4]).reshape(shape),
+            "qs": jnp.array([5.0e-4, 1.0e-3]).reshape(shape),
+        }
+        state = PhysicsState.zeros(
+            shape,
+            temperature=jnp.full(shape, 280.0),
+            normalized_surface_pressure=jnp.ones((1, 1)),
+            specific_humidity=q,
+            tracers=tracers,
+        )
+        physics = ComposablePhysics(
+            terms=[_WaterDrainTerm(drain_fraction)],
+            checkpoint_terms=False,
+            vectorize_columns=True,
+            dt_seconds=10.0,
+        )
+        applied, diagnostics = compute_physics_step_gridpoint(
+            state,
+            ForcingData.zeros((1, 1)),
+            TerrainData.single_column(),
+            {},
+            physics=physics,
+            time_step=10.0,
+        )
+        return state, applied, diagnostics, physics
+
+    def test_exact_per_field_and_pressure_weighted_source(self):
+        from jcm import constants
+
+        state, applied, diagnostics, physics = self._run(drain_fraction=2.0)
+        correction = diagnostics["water_positivity_correction"]
+        raw_q = -2.0 * state.specific_humidity / 10.0
+        q_correction = correction["specific_humidity_tendency"]
+
+        np.testing.assert_array_equal(
+            np.asarray(applied.specific_humidity),
+            np.asarray(-state.specific_humidity / 10.0),
+        )
+        np.testing.assert_allclose(
+            np.asarray(raw_q.reshape(q_correction.shape) + q_correction),
+            np.asarray(applied.specific_humidity.reshape(q_correction.shape)),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+        expected_total = state.specific_humidity / 10.0
+        for name, value in state.tracers.items():
+            field = correction[f"{name}_tendency"]
+            raw = -2.0 * value / 10.0
+            np.testing.assert_allclose(
+                np.asarray(raw.reshape(field.shape) + field),
+                np.asarray(applied.tracers[name].reshape(field.shape)),
+                rtol=0.0,
+                atol=0.0,
+            )
+            expected_total = expected_total + value / 10.0
+
+        expected_total = expected_total.reshape((2, 1))
+        np.testing.assert_allclose(
+            np.asarray(correction["total_water_tendency"]),
+            np.asarray(expected_total),
+            rtol=1e-7,
+        )
+        dp = jnp.array([10_000.0, 30_000.0])[:, jnp.newaxis]
+        expected_column_source = jnp.sum(
+            expected_total * dp / constants.grav, axis=0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(correction["column_water_source"]),
+            np.asarray(expected_column_source),
+            rtol=1e-7,
+        )
+        self.assertTrue(bool(jnp.all(q_correction >= 0.0)))
+
+        # The carry used by Tiedtke on the next step must subtract what the
+        # host actually integrated, not the overdrawn raw term sum.
+        np.testing.assert_array_equal(
+            np.asarray(diagnostics["_prev_step"]["q_tendency"]),
+            np.asarray(applied.specific_humidity.reshape((2, 1))),
+        )
+
+        flattened = physics.data_struct_to_dict(
+            diagnostics, nodal_shape=(2, 1, 1),
+        )
+        self.assertIn(
+            "water_positivity_correction.specific_humidity_tendency",
+            flattened,
+        )
+        self.assertEqual(
+            flattened["water_positivity_correction.column_water_source"].shape,
+            (1, 1),
+        )
+
+    def test_no_correction_when_cap_is_inactive(self):
+        _, _, diagnostics, _ = self._run(drain_fraction=0.5)
+        correction = diagnostics["water_positivity_correction"]
+        for field in correction.values():
+            np.testing.assert_array_equal(
+                np.asarray(field), np.zeros_like(np.asarray(field)),
+            )
+
+    def test_correction_is_stop_gradient(self):
+        import jax
+
+        from jcm.physics_interface import (
+            PhysicsTendency,
+            _verify_tendencies_with_water_corrections,
+        )
+
+        def correction_sum(raw_rate):
+            state = PhysicsState.zeros(
+                (2, 1, 1),
+                specific_humidity=jnp.full((2, 1, 1), 1.0e-3),
+            )
+            raw = PhysicsTendency.zeros(
+                (2, 1, 1), specific_humidity=jnp.full((2, 1, 1), raw_rate),
+            )
+            _, correction = _verify_tendencies_with_water_corrections(
+                state, raw, 10.0,
+            )
+            return jnp.sum(correction["specific_humidity"])
+
+        self.assertEqual(float(jax.grad(correction_sum)(-1.0)), 0.0)
 
 
 class TestVerifyTracerNonNegativity(unittest.TestCase):

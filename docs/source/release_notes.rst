@@ -62,6 +62,137 @@ Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
 
+Unreleased — positivity corrections are an explicit water-budget source
+-------------------------------------------------------------------------
+
+- The final physics-interface positivity cap remains in place for water vapor,
+  cloud liquid/ice, rain and snow. When summed operator-split sinks overdraw a
+  layer, this safety cap can create a small artificial water source; this is an
+  accepted known limitation for this release, not a conservative
+  redistribution scheme. ``water_positivity_correction`` diagnostics now
+  report the exact stop-gradient ``applied - raw`` tendency for specific
+  humidity and every water field declared by the active composition, plus
+  their total. ECHAM-family compositions, which publish
+  ``pressure_thickness``, additionally report
+  ``column_water_source`` in kg m\ :sup:`-2`\  s\ :sup:`-1`; SPEEDY does not
+  claim a pressure-weighted source because it has no pressure-thickness
+  diagnostic (#806).
+- Full-model and single-column drivers now return and integrate the same
+  verified tendency, and the cross-step humidity carry records that applied
+  value. For release monitoring, cumulative positivity correction should be
+  negligible relative to cumulative precipitation, with an informational
+  target below 0.1%. This target is not yet a runtime failure threshold;
+  conservative vertical redistribution is deferred to a separately validated
+  physics change.
+- Explicit SCM humidity nudging retains a separate non-negativity guard for
+  aggressive ``dt/tau`` configurations. Because nudging is user-configured
+  outside the physics tendency, any truncation there is not included in the
+  physics positivity-correction diagnostics.
+- The existing ``thermo_run`` and Tiedtke qc/qi floors remain as guards on the
+  provisional inter-term state consumed by downstream microphysics. They can
+  influence those downstream tendencies but do not directly update the
+  prognostic state, so they are intentionally outside the reported interface
+  correction; the diagnostics quantify the final positivity cap only.
+
+Unreleased — moist dynamics: condensate loading and one tracer contract
+------------------------------------------------------------------------
+
+- The hybrid dynamical core's virtual temperature now carries condensate
+  loading as well as moisture,
+  ``Tv = T (1 + (Rv/Rd - 1) q - sum(q_condensate))``, and the geopotential
+  handed to physics is built from that same virtual temperature. This matches
+  ECHAM6 (``dyn.f90::ztv`` and ``physc.f90::ztvm1``). The condensate set is
+  whatever the active composition declares out of ``qc``/``qi``/``qr``/``qs``;
+  including prognostic rain and snow is a deliberate departure from ECHAM6,
+  which carries no prognostic precipitation. Pure-sigma (SPEEDY)
+  configurations keep a dry dynamics — only their physics geopotential
+  changes.
+- **Breaking for dycore-native saved state:** every mass mixing-ratio tracer
+  (cloud condensate, aerosol mass, gas mass) now crosses the Dinosaur boundary
+  as the dimensionless kg/kg value rather than being nondimensionalised as
+  g/kg, the same contract specific humidity received above. The dynamics reads
+  condensate directly for the loading term, so a scaled store would suppress
+  it by 1000x. Values in a checkpoint written before this release are 1000x
+  smaller than the new convention; multiply them by 1000, or start from a
+  gridpoint ``PhysicsState``, which is unaffected. Tracers declaring
+  ``nondimensionalize=False`` (number concentrations, VMRs) are unchanged.
+  The rescale is behaviourally neutral on its own — transport, filters and the
+  modal round trip are all linear in the tracer.
+
+Unreleased — specific humidity has one kg/kg contract
+------------------------------------------------------
+
+- **Breaking for direct SPEEDY-state and output consumers:**
+  ``PhysicsState.specific_humidity`` is now kg/kg for every dycore and physics
+  package, and ``PhysicsTendency.specific_humidity`` is kg/kg/s. Dinosaur stores
+  that dimensionless mass fraction directly so its hybrid moist dynamics sees
+  the physical humidity; pySES/ECHAM and raw ERA5 inputs are unchanged. The
+  translated SPEEDY routines still calculate internally in g/kg behind a
+  centralized adapter. Serialized ``specific_humidity`` now contains kg/kg
+  and advertises the equivalent CF unit ``kg kg-1``. Remove any ``* 1000``
+  conversion previously applied when
+  constructing a nudging target, and divide old saved g/kg humidity values by
+  1000 before supplying them as a new ``PhysicsState`` (#666).
+- **Migration, both production resume paths.** A ``run.checkpoint_path``
+  msgpack checkpoint stores the dycore-native humidity, which was
+  physical/1000 before this release; resuming one without conversion gives a
+  1000x too dry atmosphere with no error. An ``init=from_state`` netCDF stores
+  g/kg, so reading it as kg/kg gives a 1000x too wet one. The ``units``
+  attribute does not distinguish the two — output written since the CF
+  metadata pass already advertises ``kg kg-1`` on g/kg values — but the
+  magnitude does: a near-surface ``specific_humidity`` above 0.1 is g/kg, and
+  is impossible in kg/kg.
+
+Unreleased — public model clock conversion
+------------------------------------------
+
+- :meth:`jcm.model.Model.date_from_sim_time` is now the public, JIT-safe way
+  to convert elapsed simulation seconds into the same :class:`jcm.date.DateData`
+  used by forcing and physics. It documents the stop-gradient boundary,
+  nearest-second date rounding and day rollover, and the independently
+  timestep-derived ``model_step``. ``Model._date_from_sim_time`` remains a
+  compatibility alias for the 2.1 release and is planned for removal
+  afterwards (#758).
+
+Unreleased — ChemistryData uses ppmv consistently
+--------------------------------------------------
+
+- **Breaking for direct simple-chemistry callers:** ``ChemistryData``,
+  ``ChemistryState``, ``ChemistryTendencies`` and ``ChemistryParameters`` now
+  consistently use ppmv (and ppmv s⁻¹ for rates). The old documentation said
+  ppbv even though ECHAM boundary conditions supplied ppmv and radiation
+  treated the values as ppmv. Divide caller-provided values that followed the
+  old ppbv documentation by 1000. Existing callers that supplied the actual
+  ECHAM/RRTMGP ppmv convention are unchanged. Field-specific
+  ``ozone_mole_fraction()`` / ``methane_mole_fraction()`` helpers make the
+  conversion to gas-optics mol/mol explicit (#749).
+
+Unreleased — delegated timesteps have one effective value
+----------------------------------------------------------
+
+- Runner and profiling paths now resolve an explicit ``run.time_step`` in
+  minutes or, when it is ``null``, adopt the built model/dycore timestep.
+  A pySES configuration owns its timestep in ``dycore.dt_seconds``; an
+  explicit ``run.time_step`` must repeat that value or model construction
+  raises. Prescribed-state runs, single-column runs, chunk budget tolerances
+  and term profiles therefore use the same number of seconds as the model
+  instead of raising on ``None``, silently falling back to 900 seconds, or
+  reporting against a conflicting config value (#801).
+
+Unreleased — public state and transformed-output contracts
+-----------------------------------------------------------
+
+- ``Model.initial_state()`` and ``Model.initial_physics_carry()`` return fresh
+  dycore/carry pytrees for external steppers. ``bootstrap_state()`` now returns
+  the pair it installs, ``dycore_state`` and ``physics_carry`` expose the
+  resumable pair read-only, and checkpoint restore replaces both atomically
+  (#755).
+- ``ModelPredictions.with_context(model)`` reattaches the static coordinates,
+  physics, dycore and observer metadata intentionally omitted at JAX pytree
+  boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
+  custom drivers; re-derived live parameters are labelled so they cannot be
+  mistaken for trace-time provenance (#756).
+
 Unreleased — RCE initial state seeds a mixed sub-cloud layer
 ------------------------------------------------------------
 
@@ -447,5 +578,3 @@ Known Beta Caveats
   the shipped column physics packages.
 - The beta is intended for named early users and API feedback. Pin the exact
   beta version in user environments and update deliberately between beta tags.
-
-

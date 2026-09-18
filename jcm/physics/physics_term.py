@@ -30,18 +30,22 @@ class TracerSpec:
     initial state's tracer dict with ``initial_value`` for any tracer
     whose name is declared here and not already present.
 
-    ``nondimensionalize=False`` means the state/tendency converters in
-    physics_interface pass the tracer through untouched (no gram/kg
-    scaling). Use this for tracers that already carry no unit expressible
-    as a mixing ratio — e.g. number concentrations per kg of air.
+    ``nondimensionalize=True`` (the default) declares the tracer a mass
+    mixing ratio in kg/kg. kg/kg is dimensionless, so the dycore state
+    bridges store the physical value unscaled — the same contract specific
+    humidity uses, and a requirement for the condensate species Dinosaur
+    reads directly in its virtual-temperature loading term.
+    ``nondimensionalize=False`` passes the tracer through untouched. Use it
+    for tracers carrying no unit expressible as a mixing ratio — e.g. number
+    concentrations per kg of air, or volume mixing ratios.
 
     Attributes:
         name: key in ``state.tracers`` (also on the dynamics side).
         units: human-readable units, informational only.
         initial_value: fill value used when seeding the initial tracer dict.
-        nondimensionalize: whether to apply the standard gram/kg
-            nondimensionalization when converting between physics and
-            dynamics representations.
+        nondimensionalize: whether the tracer is a kg/kg mass mixing ratio
+            (see above). Informational ``units`` never drives this; the flag
+            does.
 
     """
 

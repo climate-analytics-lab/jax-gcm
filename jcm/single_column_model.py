@@ -39,7 +39,8 @@ from jcm.physics_interface import (
     Physics,
     PhysicsState,
     PhysicsTendency,
-    verify_state,
+    compute_physics_step_gridpoint,
+    has_non_negative_tendency,
 )
 
 from jcm.terrain import TerrainData
@@ -238,7 +239,9 @@ class SingleColumnModel:
             Listed prognostic variables (``u_wind``, ``v_wind``,
             ``temperature``, ``specific_humidity``) are nudged toward the
             prescribed state with timescale ``tau`` while still receiving
-            their physics tendency.
+            their physics tendency. The SCM prevents explicit humidity
+            nudging from producing negative ``specific_humidity``, but that
+            local guard is outside the physics positivity-correction ledger.
         free_evolve: Optional tuple of names that evolve under their physics
             tendency alone — no nudging toward the prescribed state. Accepts
             both prognostic variables and tracers. For a prognostic, e.g.
@@ -355,10 +358,13 @@ class SingleColumnModel:
                 column_state = state_closure(column_state, forcing)
 
             grid_state = _column_state_to_grid(column_state, nlev)
-            clamped = verify_state(grid_state)
-            tendencies_grid, new_physics_data = physics.compute_tendencies(
-                clamped, forcing, terrain,
-                prev_physics_data=physics_data,
+            tendencies_grid, new_physics_data = compute_physics_step_gridpoint(
+                grid_state,
+                forcing,
+                terrain,
+                physics_data,
+                physics=physics,
+                time_step=dt_seconds,
             )
             tendencies = _squeeze_tendency(tendencies_grid)
 
@@ -370,9 +376,32 @@ class SingleColumnModel:
                     updated_tracers[name] = tracer
                     continue
                 tracer_tend = tendencies.tracers.get(name, jnp.zeros_like(tracer))
-                updated_tracers[name] = jnp.maximum(
-                    tracer + dt_seconds * tracer_tend, 0.0,
+                # Integrate exactly the verified tendency returned above: it
+                # is already bounded by the common interface, and clipping the
+                # RESULT would make SCMPredictions.tendencies disagree with
+                # the state it produced and hide the water source from the
+                # common positivity diagnostics.
+                #
+                # Clip the ENTRY value instead, for the positive-definite
+                # tracers only. ``compute_physics_step_gridpoint`` bounds the
+                # tendency against a clamped copy of the state, so a column
+                # that arrives with a negative ``qc``/``qi`` (numerical noise
+                # in an externally supplied profile) gets a tendency that is
+                # merely non-negative — which never repairs the value it is
+                # added to, leaving the carry negative indefinitely. The full
+                # model has no equivalent exposure: its prognostic state is
+                # the dycore's, which spectral filtering and the optional
+                # ``tracer_filter`` clean each step. The SCM carry has
+                # neither and is what ``SCMPredictions`` reports.
+                #
+                # Aerosol and gas tracers are excluded exactly as they are in
+                # the interface: their tendencies sum conservative
+                # redistributions, so clamping either end creates mass.
+                entry = (
+                    jnp.maximum(tracer, 0.0)
+                    if has_non_negative_tendency(name) else tracer
                 )
+                updated_tracers[name] = entry + dt_seconds * tracer_tend
 
             updated_evolving_vars = {}
             for name, tau in evolving_var_params:
@@ -386,12 +415,13 @@ class SingleColumnModel:
                     target_val = getattr(prescribed_column, name)
                     nudging_tend = (target_val - current_val) / tau
                 updated = current_val + dt_seconds * (phys_tend + nudging_tend)
-                # Keep positive-definite prognostics non-negative in the carry,
-                # mirroring the tracer update above and ``verify_state`` in the
-                # full ``Model`` path: an interactive step whose physics dries a
-                # layer by more than its current humidity over ``dt`` would
-                # otherwise carry a negative ``specific_humidity`` forward.
-                if name == "specific_humidity":
+                # ``phys_tend`` is the common interface's applied tendency, so
+                # free evolution lands exactly on its predicted state. A
+                # sufficiently strong explicit q nudge can still overdraw the
+                # layer after that cap, so keep the nudged path non-negative.
+                # This user-configured truncation is intentionally outside the
+                # physics positivity ledger and cannot occur for ``tau=None``.
+                if name == "specific_humidity" and tau is not None:
                     updated = jnp.maximum(updated, 0.0)
                 updated_evolving_vars[name] = updated
 

@@ -287,6 +287,30 @@ class TestRRTMGPGreenhouseGases:
     normalisation branch.
     """
 
+    def test_public_ppmv_contract_converts_each_gas_once(self):
+        """A realistic ppmv input must reach gas optics as mol/mol (#749)."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.chemistry.simple_chemistry import ChemistryData
+        from jcm.physics.radiation.rrtmgp import (
+            _greenhouse_gas_mole_fractions,
+        )
+
+        chemistry = ChemistryData.zeros((1,), 2).copy(
+            ozone_vmr=jnp.full((2, 1), 8.0),
+            methane_vmr=jnp.full((2, 1), 1.9),
+        )
+        forcing = ForcingData.zeros(
+            (1,), co2_vmr=jnp.asarray(420.0), n2o_vmr=jnp.asarray(0.327),
+        )
+
+        ozone, methane, co2, n2o = _greenhouse_gas_mole_fractions(
+            chemistry, forcing,
+        )
+        np.testing.assert_allclose(ozone, 8.0e-6)
+        np.testing.assert_allclose(methane, 1.9e-6)
+        np.testing.assert_allclose(co2, 420.0e-6)
+        np.testing.assert_allclose(n2o, 0.327e-6)
+
     def test_added_ghgs_reduce_olr(self):
         nlev = 10
         base = _make_inputs(nlev=nlev)

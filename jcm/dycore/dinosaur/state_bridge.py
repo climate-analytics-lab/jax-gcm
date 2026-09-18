@@ -8,16 +8,18 @@ sees the dycore-agnostic :class:`PhysicsState` / :class:`PhysicsTendency`
 types.
 
 The three functions here are pure JAX (no side effects, no Python conditionals
-on traced values) and the implementations match what was in
-``physics_interface.py`` line-for-line up to import paths; the dinosaur-side
-refactor regression in :mod:`jcm.dycore.dinosaur.regression_test` is the bit-
-level guardrail.
+on traced values). This module also owns Dinosaur's nondimensionalisation
+boundary. Every mass mixing ratio — specific humidity, cloud condensate,
+aerosol and gas mass — crosses it as the dimensionless kg/kg value, because
+Dinosaur's moist primitive equations consume the stored humidity and
+condensate tracers directly in their virtual-temperature terms. Tracers
+declaring ``nondimensionalize=False`` (number concentrations, VMRs) are
+passed through untouched.
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
-from dinosaur import scales
 from dinosaur.hybrid_coordinates import HybridCoordinates
 from dinosaur.primitive_equations import (
     State, PrimitiveEquations,
@@ -34,6 +36,32 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 
 
 logger = logging.getLogger(__name__)
+
+
+
+#: Prognostic condensate species that load the virtual temperature. ECHAM6
+#: computes ``Tv = T (1 + vtmpc1 q - (xl + xi))`` in both its dynamics
+#: (``dyn.f90::ztv``) and the geopotential it hands physics
+#: (``physc.f90::ztvm1``); jcm adds prognostic rain and snow, which ECHAM6's
+#: one-moment scheme does not carry, because suspended precipitation loads a
+#: column exactly as suspended cloud does. Names absent from a composition's
+#: tracer set are simply skipped.
+CONDENSATE_TRACERS = ("qc", "qi", "qr", "qs")
+
+
+def _condensate_loading(tracers):
+    """Sum the condensate mass mixing ratios present in ``tracers``.
+
+    Returns ``None`` when the composition carries no condensate, which is the
+    signal Dinosaur's geopotential helpers take to mean "no cloud loading".
+    """
+    present = [tracers[name] for name in CONDENSATE_TRACERS if name in tracers]
+    if not present:
+        return None
+    total = present[0]
+    for value in present[1:]:
+        total = total + value
+    return total
 
 
 def dynamics_state_to_physics_state(
@@ -82,7 +110,16 @@ def dynamics_state_to_physics_state(
     else:
         nodal_state = compute_diagnostic_state(state, dynamics.coords)
     t = nodal_state.temperature_variation
+    # Dinosaur's moisture-aware primitive equations consume q numerically as a
+    # dimensionless mass fraction. Keep that representation through the
+    # diagnostic calculations; treating the same value as g/kg suppresses the
+    # virtual-temperature contribution by a factor of 1000.
     q = nodal_state.tracers['specific_humidity']
+
+    # Condensate loading for the virtual temperature, from whichever frame
+    # each species is carried in. Both dicts hold the dimensionless kg/kg
+    # value, the same representation the dynamics' own Tv term reads.
+    clouds = _condensate_loading({**nodal_state.tracers, **nodal_direct})
 
     nodal_orography = dynamics.coords.horizontal.to_nodal(dynamics.orography)
     log_sp = dynamics.coords.horizontal.to_nodal(state.log_surface_pressure)
@@ -97,32 +134,40 @@ def dynamics_state_to_physics_state(
         phi = get_geopotential_on_hybrid(
             temperature=full_temperature,
             surface_pressure=sp,
-            specific_humidity=None,
+            specific_humidity=q,
+            clouds=clouds,
             nodal_orography=nodal_orography,
             coordinates=dynamics.nondim_levels,
-            gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-            ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
+            gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
+            ideal_gas_constant=dynamics.physics_specs.R,
+            water_vapor_gas_constant=dynamics.physics_specs.R_vapor,
             sharding=None,
         )
     else:
         full_temperature = nodal_state.temperature_variation + dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
         phi = get_geopotential_on_sigma(
             temperature=full_temperature,
-            specific_humidity=None,
+            specific_humidity=q,
+            clouds=clouds,
             nodal_orography=nodal_orography,
             sigma=dynamics.coords.vertical,
-            gravity_acceleration=dynamics.physics_specs.nondimensionalize(scales.GRAVITY_ACCELERATION),
-            ideal_gas_constant=dynamics.physics_specs.nondimensionalize(scales.IDEAL_GAS_CONSTANT),
+            gravity_acceleration=dynamics.physics_specs.gravity_acceleration,
+            ideal_gas_constant=dynamics.physics_specs.R,
+            water_vapor_gas_constant=dynamics.physics_specs.R_vapor,
             sharding=None,
         )
 
     t += dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
-    q = dynamics.physics_specs.dimensionalize(q, units.gram / units.kilogram).m
+    q = dynamics.physics_specs.dimensionalize(q, units.dimensionless).m
 
     # Extra tracers — those with ``nondimensionalize=False`` (e.g. number
-    # concentrations) pass through untouched; everything else is treated as a
-    # mass mixing ratio in gram/kilogram. Nodal tracers (split off above) are
-    # already gridpoint arrays and only need the same dimensionalization.
+    # concentrations) pass through untouched; every other tracer is a mass
+    # mixing ratio and shares specific humidity's contract: kg/kg, which is
+    # dimensionless, stored as the physical value. Dinosaur reads the stored
+    # condensate directly for the virtual-temperature loading term, so any
+    # rescaling here would weaken that coupling by exactly the scale factor.
+    # Nodal tracers (split off above) are already gridpoint arrays and only
+    # need the same dimensionalization.
     all_tracers = {}
     for tracer_name, tracer_value in {**nodal_state.tracers, **nodal_direct}.items():
         if tracer_name == 'specific_humidity':
@@ -132,7 +177,7 @@ def dynamics_state_to_physics_state(
             all_tracers[tracer_name] = tracer_value
         else:
             all_tracers[tracer_name] = dynamics.physics_specs.dimensionalize(
-                tracer_value, units.gram / units.kilogram,
+                tracer_value, units.dimensionless,
             ).m
 
     # Produce ``normalized_surface_pressure = P_s / p0`` on a common scale
@@ -163,7 +208,12 @@ def physics_state_to_dynamics_state(
         dynamics.coords.horizontal, physics_state.u_wind, physics_state.v_wind,
     )
 
-    q = dynamics.physics_specs.nondimensionalize(physics_state.specific_humidity * units.gram / units.kilogram)
+    # kg/kg is dimensionless. Dinosaur must store the physical mass fraction,
+    # because its hybrid primitive equations use this tracer directly in the
+    # virtual-temperature and moist thermodynamic terms.
+    q = dynamics.physics_specs.nondimensionalize(
+        physics_state.specific_humidity * units.dimensionless
+    )
     q_modal = dynamics.coords.horizontal.to_modal(q)
 
     temperature = physics_state.temperature - dynamics.reference_temperature[:, jnp.newaxis, jnp.newaxis]
@@ -190,8 +240,9 @@ def physics_state_to_dynamics_state(
         if spec is not None and not spec.nondimensionalize:
             tracer_nd = tracer_value
         else:
+            # Mass mixing ratios share specific humidity's kg/kg contract.
             tracer_nd = dynamics.physics_specs.nondimensionalize(
-                tracer_value * units.gram / units.kilogram,
+                tracer_value * units.dimensionless,
             )
         # Nodal tracers stay gridpoint (the semi-Lagrangian core transports
         # them without any spectral round trip — see
@@ -226,7 +277,9 @@ def physics_tendency_to_dynamics_tendency(
     t_tend = physics_tendency.temperature
     q_tend = physics_tendency.specific_humidity
 
-    q_tend = dynamics.physics_specs.nondimensionalize(q_tend * units.gram / units.kilogram / units.second)
+    q_tend = dynamics.physics_specs.nondimensionalize(
+        q_tend * units.dimensionless / units.second
+    )
 
     vor_tend_modal, div_tend_modal = uv_nodal_to_vor_div_modal(
         dynamics.coords.horizontal, u_tend, v_tend,
@@ -247,7 +300,7 @@ def physics_tendency_to_dynamics_tendency(
             tracer_tend_nd = tracer_tend
         else:
             tracer_tend_nd = dynamics.physics_specs.nondimensionalize(
-                tracer_tend * units.gram / units.kilogram / units.second,
+                tracer_tend * units.dimensionless / units.second,
             )
         # Nodal tracer tendencies stay gridpoint so the operator-split
         # forward-Euler add matches the nodal state entries shape-for-shape.

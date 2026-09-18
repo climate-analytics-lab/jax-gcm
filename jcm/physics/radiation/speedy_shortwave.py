@@ -408,7 +408,7 @@ def clouds(operand):
     """Simplified cloud cover scheme based on relative humidity and precipitation.
 
     Args:
-        qa: Specific humidity [g/kg] - PhysicsState.specific_humidity
+        qa: Specific humidity [g/kg] from the SPEEDY compatibility adapter.
         rh: Relative humidity - PhysicsData.Humidity
         precnv: Convection precipitation - PhysicsData.Convection
         precls: Large-scale condensational precipitation - PhysicsData.Condensation

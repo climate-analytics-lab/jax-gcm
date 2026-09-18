@@ -17,7 +17,10 @@ import unittest
 
 import numpy as np
 
-from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+from jcm.physics.diagnostics.moist_air_state import (
+    MoistAirColumnState,
+    advance_thermo_run,
+)
 from jcm.physics_interface import PhysicsState
 from jcm.utils import get_coords
 
@@ -128,6 +131,40 @@ class TestDiagnosticValues(unittest.TestCase):
         lt = np.asarray(self.diags["layer_thickness"])
         self.assertTrue(np.isfinite(lt).all())
         self.assertTrue((lt >= 10.0 - 1e-6).all())
+
+
+class TestAdvanceThermoRun(unittest.TestCase):
+    """Provisional condensate guards stay separate from the final ledger."""
+
+    def test_qc_qi_floor_only_the_returned_diagnostic_view(self):
+        qc = np.array([1.0e-5, 2.0e-5], dtype=np.float32)
+        qi = np.array([3.0e-5, 4.0e-5], dtype=np.float32)
+        diagnostics = {
+            "thermo_run": {
+                "temperature": np.array([280.0, 270.0], dtype=np.float32),
+                "specific_humidity": np.array([1.0e-3, 2.0e-3], dtype=np.float32),
+                "qc": qc,
+                "qi": qi,
+            },
+        }
+        updated = advance_thermo_run(
+            diagnostics,
+            10.0,
+            d_qc=np.array([-1.0, 0.0], dtype=np.float32),
+            d_qi=np.array([0.0, -1.0], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(updated["thermo_run"]["qc"]),
+            np.array([0.0, 2.0e-5], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(updated["thermo_run"]["qi"]),
+            np.array([3.0e-5, 0.0], dtype=np.float32),
+        )
+        # The input is immutable and no tendency is returned or rewritten;
+        # final prognostic accounting belongs to the interface cap.
+        np.testing.assert_array_equal(diagnostics["thermo_run"]["qc"], qc)
+        np.testing.assert_array_equal(diagnostics["thermo_run"]["qi"], qi)
 
 
 if __name__ == "__main__":

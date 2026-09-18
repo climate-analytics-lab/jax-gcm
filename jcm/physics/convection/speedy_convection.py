@@ -158,7 +158,7 @@ def get_convection_tendencies(
     Args:
     psa: Normalised surface pressure [p/p0]
     se: Dry static energy [c_p.T + g.z]
-    qa: Specific humidity [g/kg] - state.specific_humidity
+    qa: Specific humidity [g/kg] in the adapter-provided legacy state.
     qsat: Saturation specific humidity [g/kg] - humidity.qsat
 
     Returns:

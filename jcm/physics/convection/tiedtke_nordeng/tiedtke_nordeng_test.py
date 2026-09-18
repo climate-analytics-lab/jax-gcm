@@ -122,8 +122,8 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     old_qc = jnp.ones(shape) * 1.0e-5
     old_qi = jnp.ones(shape) * 2.0e-5
 
-    dqc_col = jnp.array([1.0e-7, 2.0e-7, 0.0, -1.0e-7])
-    dqi_col = jnp.array([0.0, 1.0e-7, 2.0e-7, -1.0e-7])
+    dqc_col = jnp.array([1.0e-7, 2.0e-7, 0.0, -1.0e-3])
+    dqi_col = jnp.array([0.0, 1.0e-7, 2.0e-7, -1.0e-3])
 
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
@@ -166,6 +166,12 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
         "layer_thickness": jnp.ones(shape) * 500.0,
         "air_density": jnp.ones(shape),
         "clouds": clouds,
+        "thermo_run": {
+            "temperature": state.temperature,
+            "specific_humidity": state.specific_humidity,
+            "qc": old_qc,
+            "qi": old_qi,
+        },
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
 
@@ -177,6 +183,12 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     expected_qi = jnp.maximum(old_qi + tendency.tracers["qi"] * dt, 0.0)
     assert jnp.allclose(diagnostics_out["clouds"].qc, expected_qc)
     assert jnp.allclose(diagnostics_out["clouds"].qi, expected_qi)
+    assert jnp.allclose(diagnostics_out["thermo_run"]["qc"], expected_qc)
+    assert jnp.allclose(diagnostics_out["thermo_run"]["qi"], expected_qi)
+    # The provisional guards do not rewrite the prognostic tendency; the
+    # common interface owns its eventual cap and water-source accounting.
+    assert jnp.allclose(tendency.tracers["qc"][-1], -1.0e-3)
+    assert jnp.allclose(tendency.tracers["qi"][-1], -1.0e-3)
     assert jnp.allclose(diagnostics_out["convection"].qc_conv, dqc_col[:, None] * dt)
 
 

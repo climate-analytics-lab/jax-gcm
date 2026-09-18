@@ -28,6 +28,7 @@ from jcm.runners import (
     build_tracer_filter,
     configure_host_device_count,
     guard_emulator_ghg_forcing,
+    resolve_effective_time_step_seconds,
     run,
 )
 
@@ -50,6 +51,130 @@ _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
 )
+
+
+class TestEffectiveTimeStepResolution(unittest.TestCase):
+    """One config/model contract supplies every runner timestep (#801)."""
+
+    def test_built_model_takes_precedence_over_an_explicit_config_value(self):
+        """A built integrator is authoritative; the config cannot outvote it.
+
+        A diagnostic that quoted the config value here would describe a run
+        that is not happening — the pySES failure mode of #801.
+        """
+        import types
+
+        cfg = _compose(["run.time_step=7.5"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_explicit_minutes_used_when_nothing_is_built(self):
+        cfg = _compose(["run.time_step=7.5"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 450.0)
+
+    def test_null_falls_back_to_the_pyses_dycore_group(self):
+        """The pySES group owns its step, so no build is needed to read it."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 900.0)
+
+    def test_null_does_not_read_dt_seconds_from_a_dinosaur_config(self):
+        """The dinosaur group derives dt_seconds FROM run.time_step.
+
+        Treating it as an independent owner would resolve a stale number, so
+        the fallback is gated on the backend that genuinely owns its step.
+        """
+        from omegaconf import open_dict
+
+        cfg = _compose(["run.time_step=null"])
+        with open_dict(cfg):
+            cfg.dycore.dt_seconds = 4242.0
+        with self.assertRaises(ValueError):
+            resolve_effective_time_step_seconds(cfg)
+
+    def test_explicit_zero_is_not_treated_as_delegation(self):
+        cfg = _compose(["run.time_step=0"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 0.0)
+
+    def test_null_delegates_to_built_model(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_null_accepts_a_built_dycore(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        dycore = types.SimpleNamespace(dt_seconds=900.0)
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, dycore), 900.0,
+        )
+
+    def test_null_without_an_owner_raises_a_contract_error(self):
+        cfg = _compose(["run.time_step=null"])
+        with self.assertRaisesRegex(ValueError, "owns a timestep"):
+            resolve_effective_time_step_seconds(cfg)
+
+    def _build_pyses_with_mocks(self, cfg):
+        from jcm.runners import _build_pyses_model
+
+        physics = mock.MagicMock()
+        physics.required_tracers.return_value = ()
+        dycore = mock.MagicMock()
+        dycore.dt_seconds = 900.0
+        expected = object()
+
+        with mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch(
+                    "jcm.dycore.pyses.PysesCamSEDycore",
+                    return_value=dycore,
+                ), \
+                mock.patch("jcm.runners._pyses_lid_sponge_term"), \
+                mock.patch("jcm.runners.Model", return_value=expected) as model:
+            result = _build_pyses_model(cfg)
+        self.assertIs(result, expected)
+        return model
+
+    def test_pyses_never_forwards_a_runner_timestep_to_model(self):
+        """The dycore owns the step; run.time_step must not veto the build.
+
+        ``run/default.yaml`` sets 12 minutes, so forwarding it would make
+        ``dycore=pyses_ne30l47`` fail construction unless the user also
+        selected ``run=pyses_year`` — a value they never chose overriding the
+        group that owns it.
+        """
+        for overrides in (
+            ["dycore=pyses_ne30l47"],                      # default run group
+            ["dycore=pyses_ne30l47", "run.time_step=30"],  # explicit conflict
+            ["dycore=pyses_ne30l47", "run.time_step=null"],
+        ):
+            with self.subTest(overrides=overrides):
+                model = self._build_pyses_with_mocks(_compose(overrides))
+                self.assertNotIn("time_step", model.call_args.kwargs)
+
+    def test_pyses_warns_when_the_runner_value_disagrees(self):
+        """A conflicting value is ignored loudly, not silently."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])
+        with self.assertLogs("jcm.runners", level="WARNING") as logs:
+            self._build_pyses_with_mocks(cfg)
+        joined = "\n".join(logs.output)
+        self.assertIn("pySES owns the timestep", joined)
+        self.assertIn("900.0", joined)
+
+    def test_pyses_is_quiet_when_the_runner_value_agrees(self):
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=15"])
+        with mock.patch("jcm.runners.logger") as log:
+            self._build_pyses_with_mocks(cfg)
+        log.warning.assert_not_called()
 
 
 class TestTracerPositivityResolution(unittest.TestCase):
@@ -1263,6 +1388,153 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
 
+    def test_chunked_budget_uses_model_timestep(self):
+        """The budget floor uses the step that advanced the model (#801)."""
+        import tempfile
+        import types
+
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            def __init__(self):
+                self.attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        for configured in ("null", "7"):
+            with self.subTest(configured_time_step=configured):
+                dataset = _Dataset()
+                predictions = types.SimpleNamespace(
+                    _predictions={},
+                    params=None,
+                    to_xarray=lambda: dataset,
+                )
+                model = types.SimpleNamespace(
+                    dt_si=types.SimpleNamespace(m=1800.0),
+                    run=mock.Mock(return_value=predictions),
+                )
+                cfg = _compose([
+                    f"run.time_step={configured}",
+                    "run.total_time=1",
+                    "run.save_interval=1",
+                ])
+
+                with tempfile.TemporaryDirectory() as tmpdir, \
+                        mock.patch("jcm.diagnostics.check_health",
+                                   return_value=(True, {})), \
+                        mock.patch("jcm.diagnostics.print_report"), \
+                        mock.patch("jcm.diagnostics.aerosol_budget_report",
+                                   return_value=[]) as budget, \
+                        mock.patch("jcm.runners.provenance.attrs",
+                                   return_value={}), \
+                        mock.patch("jcm.runners.provenance.write_sidecar"):
+                    run_chunked(
+                        cfg,
+                        chunk_days=1,
+                        output_prefix=f"{tmpdir}/chunk",
+                        model=model,
+                        forcing=object(),
+                    )
+
+                budget.assert_called_once_with(dataset, 1800.0)
+
+    def test_prescribed_mode_resolves_a_delegated_timestep_without_building(self):
+        """A delegating backend's step is read from its config group.
+
+        The physics-only driver has no dycore of its own, but constructing a
+        whole ne30L47 core just to read ``dt_seconds`` is not the way to get
+        one.
+        """
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(None, object())), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 900.0,
+        )
+
+    def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
+        """When the caller already built the model, it owns the step."""
+        import types
+
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12"])
+        owner = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(None, object())), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg, owner)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 1800.0,
+        )
+
+    def test_scm_mode_preserves_explicit_zero_timestep(self):
+        """Explicit zero reaches the SCM instead of triggering fallback."""
+        import types
+
+        from jcm.runners import _run_scm
+
+        cfg = _compose(["run.time_step=0"])
+        vertical = object()
+        coords = types.SimpleNamespace(vertical=vertical)
+        physics = object()
+        states = object()
+        column_states = object()
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=coords), \
+                mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(object(), states)), \
+                mock.patch("jcm.runners._select_column", return_value=(
+                    column_states, (1, 2, 3.0, 4.0))), \
+                mock.patch(
+                    "jcm.single_column_model.SingleColumnModel",
+                ) as scm_cls:
+            scm_cls.return_value.run.return_value = expected
+            result = _run_scm(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(scm_cls.call_args.kwargs["dt_seconds"], 0.0)
+
     def test_archive_fires_on_interval_crossing_not_divisibility(self):
         """``archive_ckpt_every`` need not divide ``chunk_days``.
 
@@ -2058,13 +2330,9 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
-    Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
-    into the dynamics ``State.tracers`` skipped the
-    ``nondimensionalize(q * gram/kilogram)`` that the canonical
-    physics->dynamics bridge applies. The forward bridge then re-dimensionalized
-    (~x1000), so the physics saw q ~ 5 kg/kg; the cloud saturation adjustment
-    read that as hugely supersaturated and dumped ~7000 K of latent heat in a
-    single step, NaNing every moist init at step 1.
+    The dycore-native state and public ``PhysicsState`` both represent q as a
+    dimensionless kg/kg mass fraction. This catches either a missing or an
+    accidental extra factor of 1000 in the direct JW injection path.
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):

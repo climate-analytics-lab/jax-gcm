@@ -73,7 +73,7 @@ def balanced_isothermal_state(model: Model):
     # Bootstrap the default rest state so the physics' seeded tracers (cloud
     # water, GHG VMRs, aerosol modes, ...) are already in place; we only
     # override the temperature/ps fields below.
-    state = model._prepare_initial_dycore_state(
+    state = model.initial_state(
         physics_state=None, random_seed=0,
     )
     p0_pa = p0s1_bg
@@ -116,9 +116,9 @@ def jw_state(model: Model, rh: float = 0.6):
 
     from jcm.constants import grav, p0s1_bg, rd
 
-    # Bootstrap the default rest state; ``_prepare_initial_dycore_state(None)``
+    # Bootstrap the default rest state; ``initial_state(None)``
     # is what seeds the physics' prognostic tracers, which we preserve below.
-    state = model._prepare_initial_dycore_state(
+    state = model.initial_state(
         physics_state=None, random_seed=0,
     )
 
@@ -155,41 +155,22 @@ def jw_state(model: Model, rh: float = 0.6):
     rh_profile = jnp.where(p > _RH_CAP_PRESSURE_PA, rh, 0.0)
     q_profile = jnp.clip(rh_profile * q_sat, 1e-8, 0.03)
 
-    # Preserve the dry-balanced VIRTUAL temperature. The dynamical core's mass
-    # field is driven by ``Tv = T*(1 + 0.61 q - q_cloud)`` (dinosaur
-    # ``primitive_equations``). Injecting moisture onto the dry-balanced ``T``
-    # raises Tv and breaks the hydrostatic balance the resting state was built
-    # for, seeding a moisture-magnitude-dependent gravity-wave blow-up (rh=0.5
-    # NaNs in ~3 h, rh=0.2 by day 2; the dry init is stable because Tv=T).
-    # Lowering T so the moist Tv equals the dry-balanced value makes the
-    # dynamics see the *identical*, stable state while the moisture is carried
-    # transparently. The temperature change is tiny (~1 K at q~6 g/kg) but it
-    # is exactly what restores the balance. Physics then evolves from a
-    # consistent moist resting state.
-    T_balanced_profile = T_profile / (1.0 + 0.61 * q_profile)
-
     T_ref = jnp.asarray(model.dycore.primitive.reference_temperature)
-    T_var_profile = T_balanced_profile - T_ref
+    # Temperature is the physical air temperature. Dinosaur now receives the
+    # physical kg/kg humidity and applies its own virtual-temperature coupling;
+    # pre-dividing T by (1 + 0.61 q) would apply that correction twice and hand
+    # physics a colder state than this initializer documents.
+    T_var_profile = T_profile - T_ref
     T_var_nodal = jnp.broadcast_to(
         T_var_profile[:, None, None], (nlev, nlon, nlat)
     ).astype(state.temperature_variation.dtype)
     state.temperature_variation = model.coords.horizontal.to_modal(T_var_nodal)
 
-    # Nondimensionalize the humidity exactly as the canonical physics→dynamics
-    # bridge does (``state_bridge.physics_state_to_dynamics_state`` line ~149:
-    # ``nondimensionalize(specific_humidity * gram/kilogram)``). The dynamics
-    # ``State`` stores the *nondimensional* tracer; the forward bridge then
-    # re-dimensionalizes with ``dimensionalize(q, gram/kilogram)`` (≈ ×1000)
-    # when handing the gridpoint state to physics. Injecting the raw kg/kg
-    # ``q_profile`` straight into ``state.tracers`` skipped this scaling, so
-    # the physics saw ``q`` 1000× too large (~5 kg/kg) — the cloud saturation
-    # adjustment (qs ~ 0.008) then read it as ~650× supersaturated, condensed
-    # the whole column, and dumped L·Δq/cp ≈ 7000 K of latent heat in a single
-    # step → instantaneous blow-up of every moist init. Mirroring the bridge's
-    # nondimensionalization makes the gridpoint physics see the intended
-    # ``q_profile`` value and the moist resting state is stable.
+    # kg/kg is a dimensionless mass fraction. This is the same conversion as
+    # ``physics_state_to_dynamics_state`` and is intentionally distinct from
+    # the g/kg conversion retained for non-humidity mass tracers.
     q_nondim = model.dycore.physics_specs.nondimensionalize(
-        q_profile * units.gram / units.kilogram
+        q_profile * units.dimensionless
     )
     q_dtype = state.tracers["specific_humidity"].dtype
     q_nodal = jnp.broadcast_to(
@@ -234,13 +215,13 @@ def checkpoint_state(model: Model, path: str):
     ``model.run(initial_state=state, initial_physics_state=physics_carry)`` so
     the warm start inherits the donor's carry fidelity rather than resetting
     it to a fresh carry at the run seam. The carry is structurally the pytree
-    :meth:`Model._build_initial_physics_carry` builds for this model — it was
+    :meth:`Model.initial_physics_carry` builds for this model — it was
     just deserialized against exactly that template — so ``run`` threads it
     straight through.
 
     Uses ``model`` as the deserialization template: ``bootstrap_state`` +
-    ``load_checkpoint`` transiently overwrite ``model._final_dycore_state`` /
-    ``_final_physics_state`` with the donor's contents. The caller immediately
+    ``load_checkpoint`` replace ``model.dycore_state`` / ``physics_carry``
+    with the donor's contents. The caller immediately
     re-bootstraps from the returned ``state`` (via ``model.run``), which
     rebuilds the template's dycore state; the physics carry we return here is
     what keeps the donor's carry alive across that re-bootstrap.
@@ -253,15 +234,15 @@ def checkpoint_state(model: Model, path: str):
     days = load_checkpoint(model, path)
     # The checkpoint's dycore state carries the donor's sim_time, and dates,
     # forcing time-interpolation and output timestamps all derive from it
-    # (Model._date_from_sim_time) — without this reset a day-730 donor
+    # (Model.date_from_sim_time) — without this reset a day-730 donor
     # would run with forcing at start_date + 730 d.
     state = model.dycore.with_sim_time(
-        model._final_dycore_state,
-        jnp.zeros_like(model.dycore.sim_time(model._final_dycore_state)),
+        model.dycore_state,
+        jnp.zeros_like(model.dycore.sim_time(model.dycore_state)),
     )
     # The restored donor carry, to be re-seeded through
     # ``model.run(initial_physics_state=...)``. Without this the warm start's
     # run would rebuild a fresh carry and silently lose the donor's radiation
     # sub-cycle cache / prior-step TKE.
-    physics_carry = model._final_physics_state
+    physics_carry = model.physics_carry
     return state, physics_carry, days

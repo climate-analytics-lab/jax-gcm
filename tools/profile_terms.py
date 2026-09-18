@@ -547,12 +547,14 @@ def profile_run(
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         cfg = compose(config_name="config", overrides=overrides)
 
+    model = runners.build_model(cfg)
     # One output frame over the whole window and no chunking, so the traced
     # region is dominated by timestepping rather than by output assembly.
-    time_step_min = float(cfg.run.time_step)
+    # Delegating configurations (notably pySES) get their effective step from
+    # the built model, exactly as the runner does.
+    time_step_min = _effective_time_step_minutes(cfg, model)
     steps_were_explicit = steps is not None
 
-    model = runners.build_model(cfg)
     per_cycle, subcycled_terms = subcycle_steps(model, time_step_min)
 
     if steps is None:
@@ -596,7 +598,7 @@ def profile_run(
     # Warm-up 1: initial state + first compile. Warm-up 2: the traced call's
     # exact signature, so that its compilation (if any) happens here.
     runners.run(cfg, model=model)
-    jax.block_until_ready(model._final_dycore_state)
+    jax.block_until_ready(model.dycore_state)
     jax.block_until_ready(model.resume(**resume_kwargs))
 
     before = _dumped_modules(dump_dir)
@@ -641,7 +643,7 @@ def profile_run(
         # worktree is silent otherwise, and the numbers would describe the
         # wrong code.
         "jcm_path": str(pathlib.Path(jcm.__file__).resolve().parent),
-        "config": _config_summary(cfg, overrides),
+        "config": _config_summary(overrides, time_step_min),
         "dump_dir": str(dump_dir),
     }
 
@@ -779,12 +781,18 @@ def check_trace_completeness(steps_seen: dict[str, int], steps: int,
         )
 
 
-def _config_summary(cfg, overrides: list[str]) -> str:
+def _effective_time_step_minutes(cfg, model) -> float:
+    """Return the runner's authoritative effective timestep in minutes."""
+    from jcm.runners import resolve_effective_time_step_seconds
+
+    return resolve_effective_time_step_seconds(cfg, model) / 60.0
+
+
+def _config_summary(overrides: list[str], time_step_min: float) -> str:
     """One-line description of what was profiled, for the report header."""
     groups = [o for o in overrides
               if re.match(r"^(physics|grid|dycore|run|init)=", o)]
-    dt = cfg.run.time_step
-    return f"{' '.join(groups)} dt={dt}min"
+    return f"{' '.join(groups)} dt={time_step_min:g}min"
 
 
 def main(argv=None) -> int:

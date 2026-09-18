@@ -49,13 +49,10 @@ from jcm.terrain import TerrainData
 class NudgingTarget:
     """Gridpoint reference fields the relaxation drives the state toward.
 
-    All fields are dimensional in the model's native conventions: ``u_wind``
-    and ``v_wind`` in m/s, ``temperature`` in K, ``specific_humidity`` in
-    g/kg, the :class:`PhysicsState` convention (the state bridge
-    dimensionalizes humidity as gram/kilogram). A kg/kg reference such as raw
-    ERA5 must be multiplied by 1000 before it lands here, otherwise the
-    relaxation silently drives the model toward ~1/1000 of the intended
-    humidity. Fields are on the ``(nlev, *horizontal_shape)`` layout via
+    All fields use the :class:`PhysicsState` conventions: ``u_wind`` and
+    ``v_wind`` in m/s, ``temperature`` in K, and ``specific_humidity`` in
+    kg/kg. Raw ERA5 specific humidity is already in the canonical unit and
+    must not be rescaled. Fields are on the ``(nlev, *horizontal_shape)`` layout via
     ``coords.horizontal.nodal_shape``. Each leaf can be a bare
     ``jnp.ndarray`` (static target) or a :class:`jcm.forcing.TimeSeries`
     leaf with a leading time axis that ``select(date, calendar)`` slices
