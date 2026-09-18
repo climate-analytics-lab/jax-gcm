@@ -645,7 +645,7 @@ Positivity corrections are an explicit water-budget source
   correction; the diagnostics quantify the final positivity cap only.
 
 Accepted limitations (proposed)
-"
+"""""""""""""""""""""""""""""""
 
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
@@ -664,12 +664,12 @@ Accepted limitations (proposed)
   calibration half is #808). See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has three gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, ``echam-jam`` at
-  L95 needs L95 oxidant and ozone inputs staged, and the single-column RCE
+  L95 needs L95 oxidant and ozone inputs staged, and the single-column
   JAM check (``scm_check.py``) composes grey radiation against the matrix's own
   RRTMGP-for-ECHAM pairing policy (#638).
 
 Calibration and capability gaps
-"
+"""""""""""""""""""""""""""""""
 
 - **The aerosol configuration is validated for stability and wiring, not
   calibrated.** Shortwave cloud forcing is too strong (SW CRE −56 against an
