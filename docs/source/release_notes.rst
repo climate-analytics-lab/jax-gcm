@@ -11,7 +11,7 @@ settles a set of unit, API and output contracts that were inconsistent in the
 2.x line. Several of those corrections change the climate a configuration
 produces.
 
-**Read :doc:`v2_to_v3` before upgrading.** It carries the before/after
+**Read the** :doc:`v2-to-v3 migration guide <v2_to_v3>` **before upgrading.** It carries the before/after
 snippets, the checkpoint-compatibility rules, the support matrix and the list
 of accepted limitations; this page is the change list.
 
@@ -117,7 +117,7 @@ Delegated timesteps have one effective value
 Packaged config-tree contract; the ``experiment`` group is renamed
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-- **``jcm/config`` is now a documented public, packaged Hydra config tree**
+- ``jcm/config`` **is now a documented public, packaged Hydra config tree**
   (#757). A downstream Hydra app reaches every jcm group through
   ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole validated
   configuration under one of its own nodes with ``+configuration@<node>=<name>``.
@@ -235,8 +235,8 @@ SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
   reached the atmosphere, and ``hfluxn`` had no channel for it at all —
   ``hfluxn[:, :, 2]`` clamped to the sea value instead of raising, which a
   coupled run consumed as its grid-mean heat flux. Each of these is now a
-  single 2D variable holding the grid mean: **``surface_flux.shf.2``
-  becomes ``surface_flux.shf``**, and the per-surface ``.0``/``.1``
+  single 2D variable holding the grid mean: ``surface_flux.shf.2``
+  **becomes** ``surface_flux.shf``, and the per-surface ``.0``/``.1``
   variables are gone. ``hfluxn`` gains the grid mean it never had. The
   merged values themselves are unchanged.
 
@@ -283,7 +283,7 @@ SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
   ``<output>.nc.provenance.json`` sidecar holds the fully composed
   Hydra config, and one log line at startup summarises SHAs / precision
   / ozone source.
-- **Betts-Miller default shallow flavor is now ``SHALLOWER``** (was
+- **Betts-Miller default shallow flavor is now** ``SHALLOWER`` (was
   Isca's nominal ``SIMP``, which zeroes the shallow branch and is always
   overridden in practice — #524). Runs using the default Betts-Miller
   configuration will now do non-precipitating shallow adjustment. The
@@ -474,7 +474,7 @@ Provenance records the parameters
   ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
   Hydra runners, and a later run cannot retroactively change an earlier
   one's record.
-- **``jcm_prov_run_hash`` values change**, because the parameters are now
+- ``jcm_prov_run_hash`` **values change**, because the parameters are now
   folded into the hash. They have to be: every member of a parameter
   sweep shares one code state, config and input set, so without them a
   sweep produced a single run hash for every member.

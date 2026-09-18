@@ -135,16 +135,16 @@ Prefix       Meaning
 
 Two consequences worth committing to memory:
 
-* **Every ``run`` group exposes the same complete key schema.**
+* **Every** ``run`` **group exposes the same complete key schema.**
   ``run/default.yaml`` is the base schema and the others
   (``longrun``, ``smoke``, ``pyses_year``) inherit it via
   ``defaults: [default, _self_]``, overriding only what they change. So any run
   key sets with a plain override on any group —
   ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though the
   ``longrun`` yaml never mentions ``checkpoint_path``. The rule is simply:
-  **``run.<key>=<value>`` always works.**
+  ``run.<key>=<value>`` **always works.**
 
-* **Reserve ``+``/``++`` for keys outside a group's schema.** A per-scheme
+* **Reserve** ``+``/``++`` **for keys outside a group's schema.** A per-scheme
   physics parameter block, for instance, is intentionally absent from
   ``physics/echam.yaml`` (each field falls back to the scheme's
   ``Parameters.default()``), so overriding one field needs the append prefix::

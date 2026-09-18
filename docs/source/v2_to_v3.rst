@@ -407,7 +407,7 @@ Other config-surface changes
   ``longrun`` / ``smoke`` / ``pyses_year`` inherit from it, so
   ``run.checkpoint_path=...`` works on every run group without guessing
   between ``run.``, ``+run.`` and ``++run.``.
-* **Emission inputs default to ``auto``.** ``physics=echam-jam* grid=...``
+* **Emission inputs default to** ``auto``. ``physics=echam-jam* grid=...``
   alone now composes the per-grid emission bundles, resolving
   ``hf://bundles/<grid>/{emissions_pd,dms,dust}.nc`` plus level-matched
   oxidants at build time, the same convention ``ozone_file: auto`` already
@@ -448,8 +448,8 @@ Two independent reasons a v2 checkpoint fails or misleads in v3:
 diagnostic pytrees — ``SWRadiationData.heating_rate`` for the cached SPEEDY
 shortwave, four clear-sky flux profiles, the ``*_noa`` and ``noa_frac_*``
 aerosol-free leaves, and the water-positivity ledger. Each addition alone is
-enough. Existing SPEEDY checkpoints will not load, **including the packaged
-``t31_l8`` init state on the data mirror**; regenerate the state, or pin the
+enough. Existing SPEEDY checkpoints will not load, **including the packaged**
+``t31_l8`` **init state on the data mirror**; regenerate the state, or pin the
 previous release.
 
 **2. The tracer store changed convention (does not fail loudly).** Cloud
