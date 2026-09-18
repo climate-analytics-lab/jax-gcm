@@ -1699,6 +1699,62 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
+        """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
+
+        End-to-end through Hydra, because the escape hatch is only useful
+        if the override grammar can express it: the leaf names contain
+        dots, so the value is a list of ``"name=factor"`` entries rather
+        than a mapping (#731).
+        """
+        import tempfile
+
+        import flax.serialization
+        import jax
+
+        import numpy as np
+
+        from jcm.runners import build_model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            common = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+            ]
+            donor_cfg = _compose(common + ["run.total_time=1"])
+            donor = build_model(donor_cfg)
+            donor.bootstrap_state()
+            # The pre-#731 payload: positional leaf lists and no stamp.
+            legacy = f"{tmpdir}/legacy.ckpt"
+            Path(legacy).write_bytes(flax.serialization.to_bytes({
+                "elapsed_days": 1.0,
+                "dycore_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.dycore_state)],
+                "physics_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.physics_carry)],
+            }))
+
+            warm = common + [
+                "init=from_state",
+                f"init.file={legacy}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                run(_compose(warm))
+            self.assertIn("unstamped_scale", str(ctx.exception))
+
+            reports = run(_compose(warm + [
+                'init.unstamped_scale=["tracers.specific_humidity=1000"]',
+            ]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 1.0, places=5)
+
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
         # have a JCM-shaped state to load.

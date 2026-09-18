@@ -385,12 +385,30 @@ def _ordered_legacy(group, path, key: str) -> list[np.ndarray]:
         ) from exc
 
 
+def _mass_mixing_ratio_leaves(
+    model, dycore_template: list[tuple[str, np.ndarray]],
+) -> list[str]:
+    """Dycore-state leaf names holding a kg/kg mass mixing ratio.
+
+    These are the leaves PR #824's contract change applies to, so they are
+    the ones a caller reading an unstamped file has to make a decision
+    about. Derived from the composed model's tracer specs — a statement
+    about the reader, offered as a starting point, never as an inference
+    about what the file contains.
+    """
+    mixing_ratios = {name for name, nondim in _dycore_tracers(model).items()
+                     if nondim}
+    return [name for name, _ in dycore_template
+            if name.rsplit(".", 1)[-1] in mixing_ratios]
+
+
 def _load_unstamped(
     raw: Mapping,
     path,
     dycore_template: list[tuple[str, np.ndarray]],
     physics_template: list[tuple[str, np.ndarray]],
     unstamped_scale: Mapping[str, float] | None,
+    candidates: list[str],
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Read a pre-stamp checkpoint, only against an explicit scale assertion.
 
@@ -404,6 +422,9 @@ def _load_unstamped(
     those arrays.
     """
     if unstamped_scale is None:
+        shown = ", ".join(candidates[:12])
+        if len(candidates) > 12:
+            shown += f", ... ({len(candidates)} in total)"
         raise ValueError(
             f"Checkpoint {path} carries no schema_version stamp, so it was "
             "written before the checkpoint compatibility policy (jcm 3.0). "
@@ -414,9 +435,10 @@ def _load_unstamped(
             "these values cannot be interpreted safely. Start the run from "
             "a fresh initial state, or — if you know how this file was "
             "written — assert its convention explicitly with "
-            "load_checkpoint(..., unstamped_scale={'tracers.qc': 1000.0, "
-            f"...}}) (use {{}} for a file already in the current "
-            f"convention). See {_POLICY_DOC}."
+            "load_checkpoint(..., unstamped_scale={...}), which takes a "
+            "factor per leaf ({} asserts the file is already in the "
+            "current convention). The leaves this model holds a mass "
+            f"mixing ratio in are: {shown}. See {_POLICY_DOC}."
         )
     names = {name for name, _ in dycore_template} | {
         name for name, _ in physics_template
@@ -573,6 +595,7 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
     if schema == _UNSTAMPED_SCHEMA:
         dycore_leaves, physics_leaves = _load_unstamped(
             raw, path, dycore_template, physics_template, unstamped_scale,
+            _mass_mixing_ratio_leaves(model, dycore_template),
         )
     else:
         if unstamped_scale is not None:

@@ -120,14 +120,30 @@ those cases, so **pre-3.0 checkpoints are not resumable** and
 `load_checkpoint(..., unstamped_scale=...)` is the way through when the
 caller *does* know how a file was written. It takes a `{leaf name: factor}`
 mapping, applies it to exactly those arrays, logs each factor at INFO, and
-rejects a name that is not a leaf of this model rather than ignoring it.
-`{}` is the meaningful assertion "this file needs no rescale". A pre-#824
-ECHAM donor, for instance:
+rejects a name that is not a float leaf of this model rather than ignoring
+it. `{}` is the meaningful assertion "this file needs no rescale", and the
+refusal message lists this model's mass mixing-ratio leaves as the
+candidates to decide about.
+
+For a pre-#824 **ECHAM-family** donor that means the dycore's humidity
+*and* every `nondimensionalize=True` tracer — condensate, and aerosol and
+gas mass for a JAM composition — all by 1000, with the physics carry left
+alone, because ECHAM's gridpoint values were already kg/kg:
 
 ```python
-load_checkpoint(model, path,
-                unstamped_scale={"tracers.qc": 1000.0, "tracers.qi": 1000.0})
+load_checkpoint(model, path, unstamped_scale={
+    "tracers.specific_humidity": 1000.0,
+    "tracers.qc": 1000.0,
+    "tracers.qi": 1000.0,
+    # ... every other nondimensionalize=True tracer the composition carries
+})
 ```
+
+A SPEEDY-family donor is the mirror image and is **not** written out here
+as a recipe: by the table above its dycore humidity store was already the
+physical value and must not be touched, while the gridpoint values its
+carry holds moved from g/kg to kg/kg. Derive it from the table for the
+composition in hand rather than copying the ECHAM one.
 
 The same assertion reaches the `init=from_state` warm start as
 `init.unstamped_scale` (entries spelled `"tracers.qc=1000"`, because the

@@ -19,9 +19,12 @@ file: ???
 # neither its schema nor which unit convention its dycore state uses, and
 # #824 changed what a stored mass mixing ratio means. Set this only when you
 # know how the file was written — any state spun up with an earlier jcm is in
-# that position. Entries are "<leaf name>=<factor>"; a pre-#824 ECHAM
-# donor needs its condensate multiplied by 1000:
-#   init.unstamped_scale=["tracers.qc=1000","tracers.qi=1000"]
+# that position. Entries are "<leaf name>=<factor>"; a pre-#824 ECHAM donor
+# needs its humidity AND every other mass mixing-ratio tracer multiplied by
+# 1000 (its gridpoint values were already kg/kg, so its physics carry is
+# left alone):
+#   init.unstamped_scale=["tracers.specific_humidity=1000","tracers.qc=1000","tracers.qi=1000"]
+# A SPEEDY donor is the mirror image — do not copy the ECHAM entries.
 # An empty list asserts "already in the current convention". See
 # docs/source/design/checkpoint_compatibility.md.
 unstamped_scale: null
