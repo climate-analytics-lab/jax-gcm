@@ -115,9 +115,12 @@ user-facing behaviour is incomplete until the docs say so:
    ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
    implementation-specific details and gotchas belong in the PR description.
    Do **not** create ad-hoc top-level ``*.md`` files in the repo root.
- - **User-facing behaviour changes** (new/changed defaults, new mechanisms like
-   timestep resolution, new CLI/config knobs) must be reflected in
-   ``README.md`` and/or ``docs/source/getting_started.rst`` in the same PR.
+ - **The user guides are curated, not a changelog.** When a PR adds a **major**
+   new feature, *consider* an entry in ``docs/source/getting_started.rst`` (if it
+   is something a new user needs on day one) or ``docs/source/advanced_features.rst``
+   (if it is a capability an experienced user reaches for later). For ordinary
+   knobs, changed defaults and fixes, leave both alone — those belong in the
+   design doc, the release notes and the docstring.
    Keep both **lean**: they orient a new user, they are not a reference. Add
    only what someone needs in order to do the new thing, and nothing else. A new
    public function is **not** by itself such a change — ``docs/source/api.rst``

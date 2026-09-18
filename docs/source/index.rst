@@ -25,6 +25,7 @@ Contents
    :caption: Contents:
 
    getting_started
+   advanced_features
    running_at_scale
    speedy_physics
    echam_physics
