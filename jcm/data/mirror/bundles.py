@@ -31,6 +31,15 @@ Unit translations into the conventions the packaged t63 files establish
   ``min(1, (swvl1 + veg·3·max(0, swvl2 − swwil)) / (swcap + 3·(swcap − swwil)))``
   with ``veg = cvh + 0.8·cvl``. ERA5's layer depths (7 cm, 21 cm) match
   the formula's 1:3 layer weighting.
+* ``soilw_rel`` = ECHAM-like relative soil wetness ``ws/wsmx`` in [0, 1]:
+  ``min(1, swvl1 / θ_cap(slt))`` — the 0-7 cm volumetric water content over
+  the HTESSEL field capacity of that cell's own soil type. Numerator and
+  denominator are water contents of the same layer, so 1 means a soil at its
+  own field capacity whatever its texture: that is what ECHAM's ``ws/wsmx``
+  means, and what the Tegen dust saturation cut-off is defined against
+  (#787). Normalising every texture by one constant instead would read a
+  saturated desert sand (θ_cap = 0.244) as 0.70 and never fire the cut-off
+  in exactly the cells that emit dust.
 """
 
 from __future__ import annotations
@@ -83,10 +92,30 @@ def _to_lonlat(da2d: xr.DataArray) -> tuple:
     return dims, da2d.transpose(*dims).values
 
 
+#: HTESSEL volumetric field capacity θ_cap [m³/m³] indexed by ERA5's soil-type
+#: code ``slt`` (Balsamo et al. 2009, "A revised hydrology for the ECMWF
+#: model", Table 1 / IFS documentation Part IV): 1 coarse, 2 medium, 3 medium
+#: fine, 4 fine, 5 very fine, 6 organic, 7 tropical organic. Index 0 is ERA5's
+#: "no soil" code (ocean) and index 7 reuses the organic entry, which is the
+#: closest documented hydrology for the tropical-peat class. Slot 0 keeps the
+#: medium value so an ocean cell still divides by a real capacity rather than
+#: by zero; dust never reads one (``pot_source`` is zero there).
+HTESSEL_THETA_CAP = np.array(
+    [0.347, 0.244, 0.347, 0.383, 0.448, 0.541, 0.663, 0.663])
+
+
+def _field_capacity(slt: xr.DataArray) -> xr.DataArray:
+    """Per-cell HTESSEL field capacity [m³/m³] from ERA5's soil-type code."""
+    index = np.clip(np.rint(np.asarray(slt.values)).astype(int),
+                    0, len(HTESSEL_THETA_CAP) - 1)
+    return xr.DataArray(HTESSEL_THETA_CAP[index], dims=slt.dims,
+                        coords=slt.coords)
+
+
 def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
-    """ERA5 land fields -> jcm ``stl``/``soilw_am``/``snowc`` (module
-    docstring formulas). The single translation point for climatological
-    and transient builders, so the products cannot drift apart.
+    """ERA5 land fields -> jcm ``stl``/``soilw_am``/``soilw_rel``/``snowc``
+    (module docstring formulas). The single translation point for
+    climatological and transient builders, so the products cannot drift apart.
 
     ``permanent_snow`` (bool, no time axis) marks cells whose snow never
     melts (ice sheets): their high albedo lives in ``alb`` and blending
@@ -94,13 +123,21 @@ def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
     there. Compute it from a fixed multi-year climatology — a per-year
     minimum flickers with snowy winters and would make ice sheets blink
     in and out of a transient product (#629).
+
+    ``soilw_am`` and ``soilw_rel`` are two different quantities from the same
+    ERA5 water, not a refinement of one another: the first is SPEEDY's
+    vegetation-weighted root-zone availability index driving land evaporation,
+    the second ECHAM's relative wetness of the *saltation* layer driving the
+    dust saturation cut-off. Both are published (#787).
     """
     veg = (era5.cvh + 0.8 * era5.cvl).clip(0.0, 1.0)
     soilw = ((era5.swvl1 + veg * 3.0 * (era5.swvl2 - swwil).clip(min=0.0))
              / (swcap + 3.0 * (swcap - swwil))).clip(0.0, 1.0)
+    soilw_rel = (era5.swvl1 / _field_capacity(era5.slt)).clip(0.0, 1.0)
     snowc = (era5.sd * 1000.0 / sd2sc).clip(0.0, 1.0).where(
         ~permanent_snow, 0.0)
-    return {"stl": era5.stl1, "soilw_am": soilw, "snowc": snowc}
+    return {"stl": era5.stl1, "soilw_am": soilw, "soilw_rel": soilw_rel,
+            "snowc": snowc}
 
 
 
@@ -192,6 +229,7 @@ def build_forcing(era5_path: str, era: str, lats, lons,
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
         "stl": interp_to(land["stl"], lats, lons),
         "soilw_am": interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0),
+        "soilw_rel": interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0),
         "snowc": interp_to(land["snowc"], lats, lons).clip(0.0, 1.0),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
     }

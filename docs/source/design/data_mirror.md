@@ -193,6 +193,18 @@ inventory):
   `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`. Both
   follow the packaged files' conventions exactly (see the `bundles.py`
   docstring).
+- `soilw_rel` is a **second, independent** soil-moisture channel in the
+  same forcing bundle, not a refinement of `soilw_am`: ECHAM's relative
+  soil wetness `ws/wsmx = min(1, swvl1/θ_cap(slt))` — the ERA5 0–7 cm
+  volumetric content over the HTESSEL field capacity of that cell's own
+  soil type (Balsamo et al. 2009). That is the layer and the
+  normalisation the Tegen dust saturation cut-off is defined against, so
+  `DustEmissions` reads it and SPEEDY's land evaporation keeps
+  `soilw_am`. It needs one extra ERA5 invariant, the soil-type code
+  `slt` (`128_043_slt`), so a build tree whose Tier A `era5` product
+  predates the channel must re-run `--stage era5` before `--stage
+  bundles`. Forcing files without the channel still load — the dust term
+  warns and falls back.
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient

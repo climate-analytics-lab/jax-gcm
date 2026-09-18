@@ -1682,5 +1682,64 @@ class TestForcingFromBundlesWarnings:
         assert "t42" in caplog.text
 
 
+class TestRelativeSoilWetnessChannel(unittest.TestCase):
+    """``soilw_rel``: optional, and sliced like any other channel (#787)."""
+
+    def _ds(self, with_wetness, shape=(96, 48), n_times=12):
+        import pandas as pd
+        import xarray as xr
+        times = pd.date_range("1980-01-01", periods=n_times, freq="MS")
+        ds = xr.Dataset(
+            data_vars={
+                "stl": (["lon", "lat", "time"],
+                        np.full((*shape, n_times), 280.0)),
+                "icec": (["lon", "lat", "time"], np.zeros((*shape, n_times))),
+                "sst": (["lon", "lat", "time"],
+                        np.full((*shape, n_times), 285.0)),
+                "alb": (["lon", "lat"], np.full(shape, 0.3)),
+                "soilw_am": (["lon", "lat", "time"],
+                             np.full((*shape, n_times), 0.1)),
+                "snowc": (["lon", "lat", "time"], np.zeros((*shape, n_times))),
+            },
+            coords={"time": times},
+        )
+        if with_wetness:
+            ds["soilw_rel"] = (
+                ["lon", "lat", "time"],
+                np.broadcast_to(np.linspace(0.0, 1.0, n_times),
+                                (*shape, n_times)).copy())
+        return ds
+
+    def test_absent_stays_none_rather_than_a_fabricated_dry_soil(self):
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=False))
+        self.assertIsNone(forcing.soilw_rel)
+
+    def test_read_and_sliced_to_a_bare_field(self):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=True))
+        self.assertIsNotNone(forcing.soilw_rel)
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime('1981-07-02')),
+            calendar='gregorian')
+        sliced = forcing.select(date, calendar='gregorian')
+        self.assertEqual(sliced.soilw_rel.shape, (96, 48))
+        self.assertTrue(bool(jnp.all(sliced.soilw_rel >= 0.0)))
+        self.assertTrue(bool(jnp.all(sliced.soilw_rel <= 1.0)))
+
+    def test_out_of_range_is_rejected_as_a_unit_error(self):
+        from jcm.forcing import _validate_bc_fields
+        ds = self._ds(with_wetness=True)
+        # A volumetric content (m³/m³) or a water depth (m) written into the
+        # channel by mistake both leave the [0, 1] fraction range.
+        ds["soilw_rel"].values[:] = 1.7
+        with self.assertRaises(ValueError) as ctx:
+            _validate_bc_fields(ds)
+        self.assertIn("'soilw_rel' is out of physical range",
+                      str(ctx.exception))
+
+
 if __name__ == '__main__':
     unittest.main()
