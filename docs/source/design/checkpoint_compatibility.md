@@ -25,6 +25,7 @@ Every checkpoint records:
 | `dycore`, `physics` | the state arrays, each keyed by its **pytree name** |
 | `physics_fields` | the ordered child names of each physics-carry struct/group |
 | `dycore_tracers` | the saved tracer names, each with its `nondimensionalize` flag |
+| `prognostic_carry_slots` | carry keys the writing composition called prognostic |
 
 The array keys are what make migration possible. `tree_math.struct`
 registers its structs without key paths, so JAX labels their children by
@@ -56,6 +57,21 @@ which starts one radiation interval (default 2 h) stale — the same
 staleness `init=from_state` already accepts, and negligible against
 losing the restart.
 
+**Except where a slot is prognostic.** A term whose carry slot holds the
+only copy of a physical quantity declares it in
+`PhysicsTerm.prognostic_carry_slots`; JAM's cloud-borne aerosol phase
+(`_jam_cloud_borne`) is the case, stored in the carry and in no dycore
+tracer (#602). Seeding such a slot would invent mass and dropping it
+would destroy mass, neither recoverable, so a restore that would have to
+do either is refused. Both directions are covered: the destination
+model's declaration protects a slot the file predates, and the file's own
+recorded declaration protects one the reading composition no longer
+carries. Every other slot in the tree today is a diagnostic — the
+boundary-condition, cloud, aerosol-optics and `_prev_step` groups are
+overwritten at the top of each step, TTE-TKE's prior-step TKE reseeds at
+the ECHAM floor a cold start would use anyway, and the aerosol budget
+gauge's lagged expectation is zero on a first step by construction.
+
 The dycore state gets the same name matching but no filling or dropping:
 its leaves are the prognostic state, which is never invented. A name
 difference there means a different composition or backend and is refused.
@@ -70,12 +86,15 @@ difference there means a different composition or backend and is refused.
   array, and that pairing is exact either way.
 * **A different physics composition or dycore backend** — a dycore-state
   name in one and not the other (a tracer added or removed).
+* **A changed field set under a prognostic carry slot** — see the
+  exception under "What migrates automatically".
 * **A newer `schema_version`** than this build reads: a later schema may
   store values this version would silently misread.
 * **An unstamped file** — anything written before this policy. See the
   next section for why, and for the explicit escape hatch.
 
-Refusal is always a `ValueError` naming the file and the offending leaf.
+Refusal is always a `ValueError` naming the file and, where there is one,
+the offending leaf.
 The alternative — restoring a state that deserializes cleanly but means
 something else — surfaces as a NaN days later, far from the cause.
 

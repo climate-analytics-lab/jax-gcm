@@ -81,6 +81,20 @@ class _ExtraCarryTerm(PhysicsTerm):
         return PhysicsTendency.zeros(state.temperature.shape), diagnostics
 
 
+class _PrognosticCarryTerm(_ExtraCarryTerm):
+    """An extra slot that is the only copy of what it holds.
+
+    The real case is JAM's cloud-borne aerosol phase, which lives in the
+    carry and nowhere else (#602); this stands in for it so the guard can
+    be tested without composing JAM.
+    """
+
+    name = "prognostic_carry"
+    category = "test_prognostic_carry"
+    carry_slots = {"reservoir": _ExtraCarryData}
+    prognostic_carry_slots = ("reservoir",)
+
+
 def _read_payload(path) -> dict:
     return flax.serialization.msgpack_restore(Path(path).read_bytes())
 
@@ -294,6 +308,52 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
                 for line in logs.output),
             logs.output,
         )
+
+    def test_a_prognostic_slot_is_not_seeded(self):
+        """Nothing recomputes it, so a zero seed would invent mass."""
+        donor = _build_model()
+        donor.bootstrap_state()
+        upgraded = _build_model(
+            physics=held_suarez_physics() + _PrognosticCarryTerm())
+        upgraded.bootstrap_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=1.0)
+            with self.assertRaises(ValueError) as ctx:
+                load_checkpoint(upgraded, path)
+        message = str(ctx.exception)
+        self.assertIn("reservoir", message)
+        self.assertIn("prognostic state", message)
+
+    def test_a_prognostic_slot_is_not_dropped(self):
+        """The file records the slot, so a reader without the term still refuses."""
+        donor = _build_model(
+            physics=held_suarez_physics() + _PrognosticCarryTerm())
+        donor.bootstrap_state()
+        target = _build_model()
+        target.bootstrap_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=1.0)
+            payload = _read_payload(path)
+            self.assertIn(
+                "reservoir",
+                list(payload["prognostic_carry_slots"].values()),
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_checkpoint(target, path)
+        self.assertIn("reservoir", str(ctx.exception))
+
+    def test_jam_cloud_borne_store_declares_its_slot(self):
+        """The real prognostic carry (#602) is declared, not just the stand-in."""
+        from jcm.physics.aerosol.jam.cloud_borne_store import (
+            CARRY_KEY, CloudBorneCarryStore,
+        )
+
+        self.assertEqual(
+            CloudBorneCarryStore.prognostic_carry_slots, (CARRY_KEY,))
 
     def test_same_name_wrong_shape_still_errors(self):
         """A shared field whose shape changed names the file and the field."""

@@ -207,6 +207,21 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def prognostic_carry_slots(self) -> tuple[str, ...]:
+        """Union of the carry keys terms declare as prognostic state.
+
+        These are the keys a checkpoint restore must not seed or drop to
+        absorb a field-set change, because nothing recomputes them — see
+        :attr:`PhysicsTerm.prognostic_carry_slots` and
+        ``docs/source/design/checkpoint_compatibility.md``.
+        """
+        seen: list[str] = []
+        for term in self.terms:
+            for key in getattr(term, "prognostic_carry_slots", ()):
+                if key not in seen:
+                    seen.append(key)
+        return tuple(seen)
+
     def required_dycore_fields(self) -> tuple[str, ...]:
         """Union of per-term ``requires_dycore_fields``, minus any field an
         upstream term already ``provides`` (a physics-side provider term

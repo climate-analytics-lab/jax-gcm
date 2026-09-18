@@ -11,7 +11,9 @@ Unreleased — checkpoints carry a schema stamp and migrate by field name
   bootstrapped carry, one it removed is dropped, both logged at INFO, so an
   upgrade that touches a diagnostic struct no longer invalidates a restart
   (#731). A grid, level-count, precision or physics-composition difference is
-  still refused, naming the file and the leaf. **Breaking:** a checkpoint
+  still refused, naming the file and the leaf, as is a changed field set under
+  a carry slot a term declares prognostic (``PhysicsTerm.prognostic_carry_slots``
+  — JAM's cloud-borne aerosol phase, which nothing recomputes). **Breaking:** a checkpoint
   written before this release carries no stamp and is refused, because it does
   not record which unit convention its dycore state uses (#824 changed what a
   stored mass mixing ratio means, and #666 changed what a gridpoint humidity

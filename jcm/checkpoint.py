@@ -239,6 +239,20 @@ def parse_unstamped_scale(value) -> dict[str, float] | None:
     return scale
 
 
+def _prognostic_carry_slots(model) -> list[str]:
+    """Carry keys the composition declares as prognostic state.
+
+    These hold the only copy of a physical quantity (JAM's cloud-borne
+    aerosol phase, #602), so the name migration must neither seed nor drop
+    them — see :attr:`jcm.physics.physics_term.PhysicsTerm.prognostic_carry_slots`.
+    """
+    physics = getattr(model, "physics", None)
+    declared = getattr(physics, "prognostic_carry_slots", None)
+    if declared is None:
+        return []
+    return [str(key) for key in (declared() if callable(declared) else declared)]
+
+
 def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
     """Persist the model's current dycore + physics state to ``path``.
 
@@ -274,6 +288,10 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
         "physics": dict(_named_leaves(model.physics_carry)),
         "physics_fields": _struct_fields(model.physics_carry),
         "dycore_tracers": _dycore_tracers(model),
+        # Recorded so a *reader* that no longer composes the owning term
+        # still knows this file's carry held state nothing recomputes, and
+        # refuses to drop it rather than migrating it away.
+        "prognostic_carry_slots": _prognostic_carry_slots(model),
     }
     # Write to a sibling tmp file then rename atomically. If the run is
     # killed mid-write (the whole point of checkpointing for preemptible
@@ -297,6 +315,20 @@ def _incompatible_dtype(got: np.ndarray, want: np.ndarray) -> bool:
     if got.dtype.kind != want.dtype.kind:
         return True
     return want.ndim > 0 and got.dtype != want.dtype
+
+
+def _as_sequence(value) -> list:
+    """Read back a stored list, which msgpack holds as an index-keyed map."""
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [value[key] for key in sorted(value, key=str)]
+    return list(value)
+
+
+def _slot_of(name: str) -> str:
+    """Top-level carry key a leaf name belongs to (``a.b.c`` -> ``a``)."""
+    return name.split(".", 1)[0].split("[", 1)[0]
 
 
 def _check_leaf(got: np.ndarray, want: np.ndarray, name: str, path, group: str):
@@ -323,6 +355,7 @@ def _match_by_name(
     path,
     group: str,
     fill_missing: bool,
+    protected: frozenset[str] = frozenset(),
 ) -> tuple[list[np.ndarray], list[str], list[str]]:
     """Order the file's arrays to the template, matching on name.
 
@@ -334,6 +367,11 @@ def _match_by_name(
     sets it: a field a newer jcm added takes the freshly bootstrapped
     template's value. The dycore state does not — its leaves are the
     prognostic state, which is never invented.
+
+    ``protected`` names carry slots that are prognostic state despite
+    living in the carry (the cloud-borne aerosol phase). A leaf under one
+    of those is refused rather than seeded or dropped, whichever way the
+    field sets differ, because nothing recomputes it.
     """
     leaves: list[np.ndarray] = []
     seeded: list[str] = []
@@ -341,6 +379,15 @@ def _match_by_name(
     dropped = sorted(str(name) for name in stored if str(name) not in template_names)
     for name, want in template:
         if name not in stored:
+            if fill_missing and _slot_of(name) in protected:
+                raise ValueError(
+                    f"Checkpoint {path} does not match the composed model: "
+                    f"{group} {name!r} is missing, and its slot "
+                    f"{_slot_of(name)!r} holds prognostic state this model "
+                    "cannot reconstruct — seeding it would invent physical "
+                    "mass. Resume with a jcm that carries the same slot, or "
+                    f"start from a fresh initial state. See {_POLICY_DOC}."
+                )
             if not fill_missing:
                 raise ValueError(
                     f"Checkpoint {path} does not match the composed model: "
@@ -361,6 +408,15 @@ def _match_by_name(
             f"{group} stores {dropped} which this model does not carry. "
             "Dropping prognostic state would silently change the run — see "
             f"{_POLICY_DOC}."
+        )
+    dropped_prognostic = [n for n in dropped if _slot_of(n) in protected]
+    if dropped_prognostic:
+        raise ValueError(
+            f"Checkpoint {path} does not match the composed model: "
+            f"{group} stores {dropped_prognostic}, whose slot holds "
+            "prognostic state this model does not carry. Dropping it would "
+            "silently destroy physical mass the file is the only record of. "
+            f"See {_POLICY_DOC}."
         )
     return leaves, seeded, dropped
 
@@ -619,9 +675,16 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
             raw["dycore"], dycore_template,
             path=path, group="dycore state", fill_missing=False,
         )
+        # Protect what either side calls prognostic: this model's
+        # declaration covers a slot the file predates, the file's covers
+        # one this model no longer composes.
+        protected = frozenset(_prognostic_carry_slots(model)) | frozenset(
+            str(key) for key in _as_sequence(raw.get("prognostic_carry_slots"))
+        )
         physics_leaves, seeded, dropped = _match_by_name(
             raw["physics"], physics_template,
             path=path, group="physics carry", fill_missing=True,
+            protected=protected,
         )
         if seeded:
             logger.info(
