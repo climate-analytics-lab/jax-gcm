@@ -67,6 +67,7 @@ print(ds)
 - [Getting started](https://jax-gcm.readthedocs.io/en/latest/getting_started.html) — the Python quick start: coords, terrain, physics, running, and analysing output.
 - [Running at scale](https://jax-gcm.readthedocs.io/en/latest/running_at_scale.html) — the `python -m jcm.main` Hydra CLI, validated configurations, chunked/resumable runs, Docker, and GPU/batch patterns.
 - [ECHAM physics](https://jax-gcm.readthedocs.io/en/latest/echam_physics.html) and [SPEEDY physics](https://jax-gcm.readthedocs.io/en/latest/speedy_physics.html) — scheme notes and references.
+- [JAM optics backend seam](https://jax-gcm.readthedocs.io/en/latest/design/jam_optics_mode_seam.html) — how an out-of-tree aerosol-optics pathway (e.g. a neural Mie emulator) plugs into the JAM optics as a `JamOpticsTerm` subclass.
 - Example notebooks live in [`notebooks/`](notebooks/).
 
 Full documentation is hosted at

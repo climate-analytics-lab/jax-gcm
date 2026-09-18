@@ -207,6 +207,21 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def prognostic_carry_slots(self) -> tuple[str, ...]:
+        """Union of the carry keys terms declare as prognostic state.
+
+        These are the keys a checkpoint restore must not seed or drop to
+        absorb a field-set change, because nothing recomputes them — see
+        :attr:`PhysicsTerm.prognostic_carry_slots` and
+        ``docs/source/design/checkpoint_compatibility.md``.
+        """
+        seen: list[str] = []
+        for term in self.terms:
+            for key in getattr(term, "prognostic_carry_slots", ()):
+                if key not in seen:
+                    seen.append(key)
+        return tuple(seen)
+
     def required_dycore_fields(self) -> tuple[str, ...]:
         """Union of per-term ``requires_dycore_fields``, minus any field an
         upstream term already ``provides`` (a physics-side provider term
@@ -873,13 +888,21 @@ class ComposablePhysics(nnx.Module, Physics):
     def replace(self, category: str, new_term: PhysicsTerm) -> ComposablePhysics:
         """Replace all terms of a given category with a single new term.
 
-        The new term is inserted at the position of the first replaced term.
+        The new term is inserted at the position of the first replaced term,
+        and inherits that term's post-compose configuration through
+        :meth:`~jcm.physics.physics_term.PhysicsTerm.adopt_runtime_configuration`
+        — settings a factory applied after assembly, from a sibling term,
+        which the replacement's constructor could not have known. Without that
+        handover a swapped-in term silently reverts to constructor defaults:
+        an optics term replaced this way would lose its radiation cadence and
+        recompute every band on every step.
         """
         new_terms = []
         inserted = False
         for t in self.terms:
             if t.category == category:
                 if not inserted:
+                    new_term.adopt_runtime_configuration(t)
                     new_terms.append(new_term)
                     inserted = True
                 # skip original term

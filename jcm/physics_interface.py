@@ -220,6 +220,17 @@ class Physics:
         """
         return ()
 
+    def prognostic_carry_slots(self):
+        """Carry keys holding prognostic state rather than diagnostics.
+
+        Default is empty — a package whose whole cross-step carry is
+        recomputed each step declares nothing. ``ComposablePhysics``
+        aggregates the per-term declarations. A checkpoint restore refuses
+        to seed or drop these when migrating a changed carry field set
+        (``docs/source/design/checkpoint_compatibility.md``).
+        """
+        return ()
+
     def stable_time_step_minutes(self, coords) -> float | None:
         """Largest numerically-stable model time step (minutes), or ``None``.
 

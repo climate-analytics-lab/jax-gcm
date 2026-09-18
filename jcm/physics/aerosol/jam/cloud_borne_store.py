@@ -130,6 +130,12 @@ class CloudBorneCarryStore(PhysicsTerm):
         "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
+    # The cloud-borne phase is stored here and nowhere else (#602), so a
+    # checkpoint restore must never seed it from a fresh carry or drop it
+    # to absorb a field-set change: either would silently invent or
+    # destroy aerosol mass. See
+    # docs/source/design/checkpoint_compatibility.md.
+    prognostic_carry_slots: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
 
     def __init__(
         self,

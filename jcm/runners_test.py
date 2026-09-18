@@ -1381,12 +1381,34 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports1), 1)
             self.assertTrue(Path(ckpt_path).exists())
 
+            # The file carries the schema stamp, which is what lets a later
+            # jcm migrate a changed carry field set rather than reject the
+            # whole checkpoint (#731).
+            import flax.serialization
+
+            from jcm.checkpoint import SCHEMA_VERSION
+
+            day1 = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertEqual(int(day1["schema_version"]), SCHEMA_VERSION)
+            self.assertAlmostEqual(float(day1["elapsed_days"]), 1.0)
+
             # Second invocation: total 2 days, but the first chunk
             # should be skipped because the checkpoint records day=1.
             cfg2 = _compose(base_overrides + ["run.total_time=2"])
             reports2 = run(cfg2)
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
+            # That chunk rotated the day-1 checkpoint to ``.prev`` instead of
+            # overwriting the only restartable state.
+            prev = Path(f"{ckpt_path}.prev")
+            self.assertTrue(prev.exists())
+            rotated = flax.serialization.msgpack_restore(prev.read_bytes())
+            self.assertAlmostEqual(float(rotated["elapsed_days"]), 1.0)
+            current = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertAlmostEqual(float(current["elapsed_days"]), 2.0)
 
     def test_chunked_budget_uses_model_timestep(self):
         """The budget floor uses the step that advanced the model (#801)."""
@@ -1676,6 +1698,62 @@ class TestModeDispatch(unittest.TestCase):
             # inherits the donor clock and stamps ~day 3.
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
+
+    def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
+        """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
+
+        End-to-end through Hydra, because the escape hatch is only useful
+        if the override grammar can express it: the leaf names contain
+        dots, so the value is a list of ``"name=factor"`` entries rather
+        than a mapping (#731).
+        """
+        import tempfile
+
+        import flax.serialization
+        import jax
+
+        import numpy as np
+
+        from jcm.runners import build_model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            common = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+            ]
+            donor_cfg = _compose(common + ["run.total_time=1"])
+            donor = build_model(donor_cfg)
+            donor.bootstrap_state()
+            # The pre-#731 payload: positional leaf lists and no stamp.
+            legacy = f"{tmpdir}/legacy.ckpt"
+            Path(legacy).write_bytes(flax.serialization.to_bytes({
+                "elapsed_days": 1.0,
+                "dycore_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.dycore_state)],
+                "physics_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.physics_carry)],
+            }))
+
+            warm = common + [
+                "init=from_state",
+                f"init.file={legacy}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                run(_compose(warm))
+            self.assertIn("unstamped_scale", str(ctx.exception))
+
+            reports = run(_compose(warm + [
+                'init.unstamped_scale=["tracers.specific_humidity=1000"]',
+            ]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 1.0, places=5)
 
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes

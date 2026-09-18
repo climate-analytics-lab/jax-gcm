@@ -189,7 +189,7 @@ def jw_state(model: Model, rh: float = 0.6):
     return state
 
 
-def checkpoint_state(model: Model, path: str):
+def checkpoint_state(model: Model, path: str, *, unstamped_scale=None):
     """Warm-start: load a saved model state as the initial condition.
 
     ``path`` points at a state written by
@@ -200,7 +200,14 @@ def checkpoint_state(model: Model, path: str):
     state skips the ~9-month from-cold spin-up (#638) without inheriting
     the donor run's calendar. The state's pytree must match the composed
     model (grid, levels, physics tracer set); ``load_checkpoint`` fails
-    loudly on any mismatch.
+    loudly on any mismatch it cannot migrate by field name.
+
+    A donor written before the checkpoint schema stamp (jcm 3.0) is
+    refused, because it does not record which unit convention its dycore
+    state uses. ``unstamped_scale`` is passed through to
+    :func:`jcm.checkpoint.load_checkpoint` as the caller's explicit
+    assertion of that convention; see
+    ``docs/source/design/checkpoint_compatibility.md``.
 
     Returns ``(state, physics_carry, donor_days)``:
 
@@ -231,7 +238,7 @@ def checkpoint_state(model: Model, path: str):
     # bootstrap_state builds both state pytrees, which load_checkpoint
     # needs as deserialization templates (their values are overwritten).
     model.bootstrap_state()
-    days = load_checkpoint(model, path)
+    days = load_checkpoint(model, path, unstamped_scale=unstamped_scale)
     # The checkpoint's dycore state carries the donor's sim_time, and dates,
     # forcing time-interpolation and output timestamps all derive from it
     # (Model.date_from_sim_time) — without this reset a day-730 donor

@@ -178,6 +178,15 @@ The isothermal probe (rather than a zero-state probe) avoids a
 all-zero thermodynamic inputs. The result of `get_empty_data` is never
 used as live state — only as a shape template.
 
+Almost every carry entry is a diagnostic the next step or two rewrites,
+which is what lets a checkpoint restore absorb a changed carry field set
+by matching on names. A term whose slot is instead the *only* copy of a
+physical quantity — JAM's cloud-borne aerosol phase — declares it in
+`PhysicsTerm.prognostic_carry_slots`, and a restore that would have to
+seed or drop that slot is refused rather than silently inventing or
+destroying the quantity. See
+[checkpoint compatibility](checkpoint_compatibility.md).
+
 ### Coupling within physics
 
 `ComposablePhysics` is **process-parallel**: every term sees the same

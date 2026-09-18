@@ -21,6 +21,28 @@ Breaking changes
 Every item here requires a change to code, a config, a saved file, or a reader
 of the output. :doc:`v2_to_v3` has the migration for each.
 
+Checkpoints carry a schema stamp and migrate by field name
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``save_checkpoint`` now writes a ``schema_version`` stamp, the ``jcm``
+  version and every state array under its pytree name, and
+  ``load_checkpoint`` matches those names against the destination model: a
+  physics-carry field a newer jcm added is seeded from the freshly
+  bootstrapped carry, one it removed is dropped, both logged at INFO, so an
+  upgrade that touches a diagnostic struct no longer invalidates a restart
+  (#731). A grid, level-count, precision or physics-composition difference is
+  still refused, naming the file and the leaf, as is a changed field set under
+  a carry slot a term declares prognostic (``PhysicsTerm.prognostic_carry_slots``
+  — JAM's cloud-borne aerosol phase, which nothing recomputes). **Breaking:** a checkpoint
+  written before this release carries no stamp and is refused, because it does
+  not record which unit convention its dycore state uses (#824 changed what a
+  stored mass mixing ratio means, and #666 changed what a gridpoint humidity
+  means, differently per physics package) — start from a fresh initial state,
+  or assert the file's convention explicitly with
+  ``load_checkpoint(..., unstamped_scale=...)`` / ``init.unstamped_scale``.
+  The policy, its evidence and the rule for bumping the schema are in
+  :doc:`design/checkpoint_compatibility`.
+
 jcm configures no logging; ``Model(log_level=...)`` removed
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -406,6 +428,23 @@ Mechanisms
 """"""""""
 
 The individual public mechanisms behind the capabilities above.
+
+JAM optics: a per-mode backend seam
+"""""""""""""""""""""""""""""""""""
+
+- ``JamOpticsTerm`` exposes the one genuinely optical step as a hook, so an
+  out-of-tree Mie pathway is a subclass implementing ``_mode_optics`` rather
+  than a fork of the whole term (#791). ``_map_bands`` and ``_build_mie_lut``
+  are overridable alongside it, for a backend whose per-band intermediates
+  are large or that never reads the built lookup table. ``ModeOpticsInputs``
+  carries both normalisations — a column number per area and a total volume,
+  with the ``col_factor`` that converts between them — because backends
+  disagree about which one they predict. The hook returns optical depths
+  rather than ``(k_ext, ssa, g)``, which keeps the base class from dividing
+  by a possibly-zero number or volume. Compose one with
+  ``echam_physics(aerosol_module="jam").replace("aerosol_optics", ...)``.
+  The default pathway is untouched and its answers are unchanged; see
+  :doc:`design/jam_optics_mode_seam`.
 
 Public state and transformed-output contracts
 """""""""""""""""""""""""""""""""""""""""""""
