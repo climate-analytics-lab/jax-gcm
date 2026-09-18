@@ -315,8 +315,14 @@ backend; the Eulerian spectral path was removed because it rang negative on
 sharp emission sources and NaN'd the aerosol microphysics.
 ``+advection=semi_lagrangian`` and ``+advection=eulerian`` are both rejected,
 and the backend refuses to build on a dinosaur without the SL classes, naming
-what to install. The ``diffusion.tracer_positivity`` fallback that went with
-the Eulerian path is gone too.
+what to install.
+
+``diffusion.tracer_positivity`` is **not** gone and does not need setting: it
+defaults to ``auto`` (on for JAM) and is now only a mass-conserving hole-filler
+at the dynamics-to-physics boundary, not the positivity mechanism it had to be
+on the Eulerian path. Drop any explicit
+``diffusion.tracer_positivity=true`` from a v2 command line — it is redundant
+rather than wrong.
 
 A shape consequence worth knowing if you index a dycore-native state:
 ``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while

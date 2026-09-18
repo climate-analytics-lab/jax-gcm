@@ -67,8 +67,8 @@ documented fallback when the GPL extra is unavailable. The core's cloudy ``amicp
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
 lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
-observations, SO4 is somewhat long (wet scavenging too weak), and the sea-salt
-source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
+observations and sea salt is in range, while SO4 is somewhat long (wet
+scavenging too weak). See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
 
