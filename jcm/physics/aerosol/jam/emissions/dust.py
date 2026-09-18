@@ -27,12 +27,18 @@ a texture swap), ``dust_soil_types`` (nine texture area fractions),
 map, live only on the ``ndurough = 0`` sensitivity path — the Fortran reads it
 every month and then overwrites it with the constant).
 
+Two land fields gate the flux on top of those: ``snowc_am`` (snow cover) and
+``soilw_rel``, the ECHAM-like relative soil wetness ``ws/wsmx`` the saturation
+cut-off is defined against (#787). A forcing without ``soilw_rel`` leaves that
+cut-off inert and says so.
+
 Documented in ``docs/source/science/aerosol.md``; the ``U10 = 10 m/s`` texture
 switch is a hard step with zero gradient (#664).
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import ClassVar
 
@@ -49,6 +55,8 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
+
+logger = logging.getLogger(__name__)
 
 # --- structural constants (mo_ham_dust.f90 declaration block), CGS ----------
 #: Soil size grid: 50 classes per decade from 0.2 µm; the Fortran's
@@ -80,6 +88,16 @@ SUPERCOARSE_UM = 10.0
 #: select emission fluxes in the forcing reader and the burden report, and this
 #: mass deliberately never enters a tracer.
 DUST_SUPERCOARSE_KEY = "dust_supercoarse_flux"
+
+#: Per-column relative soil wetness the saturation cut-off actually read
+#: (ECHAM ``ws/wsmx``; 0 where the forcing supplies none).
+DUST_WETNESS_KEY = "dust_soil_wetness"
+#: Per-column 1/0 flag: every emission condition *except* the wetness cut-off
+#: is satisfied (wind over threshold, erodible source, drag partition alive).
+#: Published alongside the wetness so the cut-off's firing frequency is
+#: measurable as a conditional one — ``mean(wetness > w0 | gate)`` — rather
+#: than being diluted by the ocean and the forests, where it is meaningless.
+DUST_SALTATION_GATE_KEY = "dust_saltation_gate"
 
 #: The 17×14 soil table of ``mo_ham_dust.f90::set_dust_data``: four
 #: ``(D_med [cm], σ_g, mass fraction)`` populations, then α [cm⁻¹] (the
@@ -336,6 +354,34 @@ def _column_field(forcing, name, ncols, default=0.0):
     return jnp.ravel(value)
 
 
+def _relative_soil_wetness(forcing, ncols):
+    """Return ECHAM's ``ws/wsmx`` per column, or a warned-about stand-in.
+
+    ``forcing.soilw_rel`` (#787) is the relative wetness of the saltation
+    layer — ERA5's 0-7 cm water over that soil's own field capacity — which is
+    what ``mo_ham_dust.f90``'s ``zw1r = MIN(ws/wsmx, 1)`` means and what the
+    ``w0 = 0.99`` cut-off is calibrated against.
+
+    A forcing file without the channel leaves the cut-off inert (wetness 0 =
+    never saturated) and says so. It deliberately does NOT fall back to
+    ``soilw_am``: that field is SPEEDY's vegetation-weighted root-zone
+    availability index, and substituting it for a relative wetness is the
+    defect #787 exists to remove, so doing it quietly would be worse than
+    running with a cut-off that is declared off.
+    """
+    wetness = getattr(forcing, "soilw_rel", None) if forcing is not None else None
+    if wetness is None or jnp.size(wetness) != ncols:
+        logger.warning(
+            "DustEmissions: forcing.soilw_rel is %s, so the ws/wsmx > w0 "
+            "saturation cut-off is INERT for this run — the relative wetness "
+            "falls back to 0 everywhere, i.e. no soil is ever saturated. "
+            "Rebuild the forcing bundle with the soilw_rel channel (#787) to "
+            "gate emission on soil moisture.",
+            "missing" if wetness is None else "the wrong shape")
+        return jnp.zeros((ncols,))
+    return jnp.clip(jnp.ravel(wetness), 0.0, 1.0)
+
+
 def _soil_fractions(forcing, ncols):
     """Return the nine prescribed texture area fractions, zero where unsupplied."""
     types = getattr(forcing, "dust_soil_types", None) if forcing is not None else None
@@ -382,7 +428,8 @@ class DustEmissions(PhysicsTerm):
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ("air_density", "layer_thickness")
     provides: ClassVar[tuple[str, ...]] = (
-        emission_flux_keys() + (MODEL_LEVEL_WIND_KEY, DUST_SUPERCOARSE_KEY))
+        emission_flux_keys() + (MODEL_LEVEL_WIND_KEY, DUST_SUPERCOARSE_KEY,
+                                DUST_WETNESS_KEY, DUST_SALTATION_GATE_KEY))
 
     def __init__(
         self,
@@ -515,7 +562,9 @@ class DustEmissions(PhysicsTerm):
                        MODEL_LEVEL_WIND_KEY: jnp.maximum(
                            diagnostics.get(MODEL_LEVEL_WIND_KEY, 0.0),
                            from_model_level),
-                       DUST_SUPERCOARSE_KEY: jnp.zeros((ncols,))}
+                       DUST_SUPERCOARSE_KEY: jnp.zeros((ncols,)),
+                       DUST_WETNESS_KEY: jnp.zeros((ncols,)),
+                       DUST_SALTATION_GATE_KEY: jnp.zeros((ncols,))}
         return tendency, diagnostics
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -542,7 +591,7 @@ class DustEmissions(PhysicsTerm):
         _require_companions(forcing, ncols)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         snow = jnp.clip(_column_field(forcing, "snowc_am", ncols), 0.0, 1.0)
-        wetness = jnp.clip(_column_field(forcing, "soilw_am", ncols), 0.0, 1.0)
+        wetness = _relative_soil_wetness(forcing, ncols)
 
         z0 = self._roughness(forcing, ncols, p)
         # MB95 (17). With the default ndurough = z0s the log is zero and feff ≡ 1;
@@ -573,9 +622,13 @@ class DustEmissions(PhysicsTerm):
         safe_u = jnp.where(mask, u_star, 1.0)
         if p.fecan_moisture:
             # Fécan et al. (1999): the threshold rises once the soil water
-            # exceeds the texture's residual moisture. jcm has no ECHAM ws/wsmx,
-            # so the relative wetness stands in for the Fortran's min(ws/ρ_p,1)
-            # — a declared approximation on an off-by-default path (#787).
+            # exceeds the texture's residual moisture. The Fortran feeds this
+            # branch min(ws/ρ_p, 1) — the bucket's water DEPTH scaled by the
+            # particle density, Cheng's gravimetric stand-in — not the relative
+            # wetness the saturation cut-off uses. jcm carries no absolute soil
+            # water, so ``soilw_rel`` stands in here as well: a declared
+            # approximation, and one that only bites on the ``ndust = 2`` path
+            # this branch is exclusive to (#787).
             w_res = p.soil_table[:, WRES_COL] * 100.0                    # (17,)
             w = wetness * 100.0
             excess = w[None, :] - w_res[:, None]                         # (17, ncols)
@@ -638,7 +691,9 @@ class DustEmissions(PhysicsTerm):
                        MODEL_LEVEL_WIND_KEY: jnp.maximum(
                            diagnostics.get(MODEL_LEVEL_WIND_KEY, 0.0),
                            from_model_level),
-                       DUST_SUPERCOARSE_KEY: mass_all - mass_acc - mass_cor}
+                       DUST_SUPERCOARSE_KEY: mass_all - mass_acc - mass_cor,
+                       DUST_WETNESS_KEY: wetness,
+                       DUST_SALTATION_GATE_KEY: mask.astype(wetness.dtype)}
         return tendency, diagnostics
 
 

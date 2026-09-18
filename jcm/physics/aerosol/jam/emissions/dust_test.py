@@ -19,7 +19,9 @@ from jcm.physics.aerosol.jam.emissions.dust import (
     CD,
     COARSE_UM,
     DSTEP,
+    DUST_SALTATION_GATE_KEY,
     DUST_SUPERCOARSE_KEY,
+    DUST_WETNESS_KEY,
     HIGH_WIND_MS,
     MIXTURE_ROWS,
     NCLASS,
@@ -91,7 +93,7 @@ def _inputs(nlev=3, ncols=2, u10=9.0, source=1.0, soil=None, psrc=0.0,
     forcing = types.SimpleNamespace(
         dust_source=bc(source), dust_preferential=bc(psrc),
         dust_soil_types=fractions, dust_regions=bc(regions),
-        snowc_am=bc(snow), soilw_am=bc(wetness))
+        snowc_am=bc(snow), soilw_rel=bc(wetness))
     return state, diagnostics, forcing, None
 
 
@@ -272,6 +274,45 @@ class SnowAndMoistureTest(unittest.TestCase):
             np.testing.assert_allclose(_total_mass(wet), 0.0,
                                        err_msg=f"ndust={ndust}")
 
+    def test_missing_wetness_channel_warns_and_leaves_the_cutoff_inert(self):
+        # A forcing built before #787 carries no soilw_rel. The cut-off then
+        # has nothing to read: it must say so rather than quietly substituting
+        # soilw_am, which is a different quantity (#787).
+        import logging
+        state, diagnostics, forcing, terrain = _inputs()
+        del forcing.soilw_rel
+        with self.assertLogs(
+                "jcm.physics.aerosol.jam.emissions.dust",
+                level=logging.WARNING) as logs:
+            tend, diags = DustEmissions()(state, diagnostics, forcing, terrain)
+        self.assertIn("soilw_rel", "".join(logs.output))
+        self.assertIn("INERT", "".join(logs.output))
+        self.assertTrue(np.all(_total_mass(tend) > 0.0))
+        np.testing.assert_allclose(np.asarray(diags[DUST_WETNESS_KEY]), 0.0)
+
+    def test_gate_diagnostics_report_what_the_cutoff_saw(self):
+        # The (wetness, saltation-gate) pair is what makes the cut-off's
+        # firing frequency measurable as a CONDITIONAL one: the gate marks
+        # the cells that would emit but for the soil moisture.
+        term = DustEmissions()
+        emitting, diags = term(*_inputs(u10=9.0, wetness=0.3))
+        np.testing.assert_allclose(np.asarray(diags[DUST_WETNESS_KEY]), 0.3)
+        np.testing.assert_allclose(
+            np.asarray(diags[DUST_SALTATION_GATE_KEY]), 1.0)
+        self.assertTrue(np.all(_total_mass(emitting) > 0.0))
+
+        # Saturated: the cell stays in the denominator (wind and source are
+        # ready) while its flux is zero — that is the cut-off firing.
+        wet, wet_diags = term(*_inputs(u10=9.0, wetness=1.0))
+        np.testing.assert_allclose(
+            np.asarray(wet_diags[DUST_SALTATION_GATE_KEY]), 1.0)
+        np.testing.assert_allclose(_total_mass(wet), 0.0)
+
+        # Calm: no saltation at all, so the cell is outside the denominator.
+        _, calm_diags = term(*_inputs(u10=1.0, wetness=1.0))
+        np.testing.assert_allclose(
+            np.asarray(calm_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
     def test_damp_soil_still_emits_with_fecan_off(self):
         for ndust in (3, 4):
             term = DustEmissions(params=DustParameters.preset(ndust))
@@ -286,7 +327,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def loss(wetness):
             state, diagnostics, forcing, terrain = _inputs(u10=9.0)
-            forcing.soilw_am = jnp.full((2,), wetness)
+            forcing.soilw_rel = jnp.full((2,), wetness)
             tend, _ = DustEmissions(params=params)(
                 state, diagnostics, forcing, terrain)
             return jnp.sum(tend.tracers[mass_name("du", "cor")])
@@ -297,7 +338,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def by_table(table):
             state, diagnostics, forcing, terrain = _inputs(u10=9.0)
-            forcing.soilw_am = jnp.full((2,), 0.1)
+            forcing.soilw_rel = jnp.full((2,), 0.1)
             term = DustEmissions(params=params.replace(soil_table=table))
             tend, _ = term(state, diagnostics, forcing, terrain)
             return jnp.sum(tend.tracers[mass_name("du", "cor")])
@@ -312,7 +353,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def flux(table):
             state, diagnostics, forcing, terrain = _inputs(psrc=1.0, u10=25.0)
-            forcing.soilw_am = jnp.full((2,), 0.30)
+            forcing.soilw_rel = jnp.full((2,), 0.30)
             tend, _ = DustEmissions(params=base.replace(soil_table=table))(
                 state, diagnostics, forcing, terrain)
             return float(_total_mass(tend)[0])
