@@ -330,12 +330,25 @@ sharp emission sources and NaN'd the aerosol microphysics.
 and the backend refuses to build on a dinosaur without the SL classes, naming
 what to install.
 
-``diffusion.tracer_positivity`` is **not** gone and does not need setting: it
-defaults to ``auto`` (on for JAM) and is now only a mass-conserving hole-filler
-at the dynamics-to-physics boundary, not the positivity mechanism it had to be
-on the Eulerian path. Drop any explicit
-``diffusion.tracer_positivity=true`` from a v2 command line — it is redundant
-rather than wrong.
+``diffusion.tracer_positivity`` is **not** gone. It survives as a
+mass-conserving hole-filler at the dynamics-to-physics boundary, rather than
+the positivity mechanism it had to be on the Eulerian path, and it still
+resolves the same way:
+
+* ``auto`` (the default) enables it **only** when the physics advects
+  prognostic aerosol — that is, ``physics=echam-jam*``, where
+  ``aerosol_module == "jam"``. Every other composition (``speedy``, ``echam``,
+  ``echam-rrtmgp-2m``, ``held_suarez``, a custom term list) resolves ``auto``
+  to **off**, so those runs stay bit-identical to a run without the filter.
+* ``true`` / ``false`` force it on or off regardless.
+
+**So do not blanket-delete** ``diffusion.tracer_positivity=true`` **from a v2
+command line.** On a JAM command it is redundant — ``auto`` already enables it,
+which is why the canonical configuration in
+:doc:`design/dinosaur_sl_jam_configuration` no longer passes it. On any
+**non-JAM** command dropping it *turns the filter off*, which is a real change
+wherever a tracer reaches the boundary negative. Keep the explicit value there,
+or delete it deliberately.
 
 A shape consequence worth knowing if you index a dycore-native state:
 ``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
