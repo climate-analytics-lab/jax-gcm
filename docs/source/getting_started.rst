@@ -689,6 +689,39 @@ levels and everything above ``min_pressure_hpa``). See the
 docstrings for the full set of knobs, and :doc:`design/composable_physics`
 for the composition API (``+``, ``replace``, ``remove``).
 
+Plugging in an out-of-tree aerosol-optics backend
+-------------------------------------------------
+
+The JAM aerosol optics delegate the one genuinely optical step — the
+mode-integrated extinction, scattering and forward-scattering of a lognormal
+mode at one wavelength — to an overridable ``_mode_optics`` hook on
+``jcm.physics.aerosol.jam.optics.optics_term.JamOpticsTerm``. An
+alternative Mie pathway (a neural emulator, say) is therefore a
+``JamOpticsTerm`` subclass living in its own package, attached by category:
+
+.. code-block:: python
+
+   from jcm.physics.echam.echam_terms import echam_physics
+   from some_optics_package import SomeOpticsTerm   # subclasses JamOpticsTerm
+
+   physics = echam_physics(aerosol_module="jam").replace(
+       "aerosol_optics", SomeOpticsTerm())
+   model = Model(coords=coords, terrain=terrain, physics=physics)
+
+``replace`` keeps the term's position in the validated JAM ordering and hands
+the displaced term to the replacement's ``adopt_runtime_configuration``, so
+settings the factory applied after composition — the radiation cadence the
+optics gate rides, in particular — are carried over rather than silently reset
+to constructor defaults.
+
+Everything around the hook — the modal volumes, hygroscopic water, the
+empty-mode mass gate, the SSA/asymmetry weighting, the AeroCom per-species
+apportionment and the 550 nm column diagnostics — stays with the base class
+and applies unchanged to any backend. The contract an override must satisfy
+(finite values *and* derivatives on empty and degenerate modes, non-negative
+extinction, no Python branching on traced values) is in
+:doc:`design/jam_optics_mode_seam`.
+
 Analyzing Output
 ----------------
 

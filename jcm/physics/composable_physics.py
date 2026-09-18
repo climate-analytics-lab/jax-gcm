@@ -873,13 +873,21 @@ class ComposablePhysics(nnx.Module, Physics):
     def replace(self, category: str, new_term: PhysicsTerm) -> ComposablePhysics:
         """Replace all terms of a given category with a single new term.
 
-        The new term is inserted at the position of the first replaced term.
+        The new term is inserted at the position of the first replaced term,
+        and inherits that term's post-compose configuration through
+        :meth:`~jcm.physics.physics_term.PhysicsTerm.adopt_runtime_configuration`
+        — settings a factory applied after assembly, from a sibling term,
+        which the replacement's constructor could not have known. Without that
+        handover a swapped-in term silently reverts to constructor defaults:
+        an optics term replaced this way would lose its radiation cadence and
+        recompute every band on every step.
         """
         new_terms = []
         inserted = False
         for t in self.terms:
             if t.category == category:
                 if not inserted:
+                    new_term.adopt_runtime_configuration(t)
                     new_terms.append(new_term)
                     inserted = True
                 # skip original term
