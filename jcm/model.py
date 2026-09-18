@@ -358,9 +358,20 @@ class Model:
             }
         return primitive_equations.State(**state.asdict(), sim_time=sim_time)
 
-    def _date_from_sim_time(self, sim_time) -> DateData:
+    def _date_from_sim_time(self, sim_time, start_date: jdt.Datetime | None = None) -> DateData:
+        """DateData at ``sim_time`` seconds after ``start_date`` (default ``self.start_date``).
+
+        ``start_date`` may be a traced ``jdt.Datetime``: a caller that integrates in
+        chunks can keep ``state.sim_time`` small (re-zeroing it every chunk) and carry
+        the calendar date in exact integer arithmetic instead. That matters because
+        ``State.sim_time`` is float32: past 2**24 s (194 d) it cannot represent an
+        1800-s step exactly, from 2**27 s (4.25 yr) every step adds 1792 s, and past
+        2**32 s (136 yr) every step adds 2048 s -- a 321-day year. The date origin
+        must therefore be exact and the float32 offset on top of it must stay short.
+        """
+        origin = self.start_date if start_date is None else start_date
         return DateData.set_date(
-            model_time=self.start_date + jdt.Timedelta(
+            model_time=origin + jdt.Timedelta(
                 days=jnp.floor(sim_time / 86400).astype(jnp.int32),
                 seconds=jnp.round(sim_time % 86400).astype(jnp.int32)
             ),
@@ -368,11 +379,13 @@ class Model:
             dt_seconds=self.dt_si.m
         )
 
-    def _get_step_fn_factory(self, forcing: ForcingData) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
+    def _get_step_fn_factory(self, forcing: ForcingData, start_date: jdt.Datetime | None = None) -> Callable[[DiagnosticsCollector], Callable[[typing.PyTreeState], typing.PyTreeState]]:
         """For given surface forcing conditions, return a function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model.
 
         Args:
             forcing: ForcingData object containing surface forcing conditions.
+            start_date: optional (possibly traced) date origin for ``state.sim_time``;
+                defaults to ``self.start_date``. See ``_date_from_sim_time``.
 
         Returns:
             A function that, when optionally passed a DiagnosticsCollector, will return a function representing one step of the model, which will write to that DiagnosticsCollector.
@@ -387,7 +400,7 @@ class Model:
                 forcing=forcing,
                 terrain=self.terrain,
                 diffusion=self.diffusion,
-                date=self._date_from_sim_time(state.sim_time),
+                date=self._date_from_sim_time(state.sim_time, start_date),
                 diagnostics_collector=d
             )
         )
@@ -395,7 +408,7 @@ class Model:
         unfiltered_step_fn = lambda d: dinosaur.time_integration.imex_rk_sil3(primitive_with_speedy(d), self.dt)
         return lambda d=None: dinosaur.time_integration.step_with_filters(unfiltered_step_fn(d), self.filters)
 
-    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool) -> Predictions:
+    def _post_process(self, state: primitive_equations.State, forcing: ForcingData, output_averages: bool, start_date: jdt.Datetime | None = None) -> Predictions:
         """Post-process a single state from the simulation trajectory. This function is called by the integrator at each save point. It converts the dynamical state to a physical state and, if enabled, runs the physics package to compute diagnostic variables.
         
         Args:
@@ -417,7 +430,7 @@ class Model:
         )
 
         if not output_averages:
-            date = self._date_from_sim_time(state.sim_time)
+            date = self._date_from_sim_time(state.sim_time, start_date)
             clamped_physics_state = verify_state(predictions.dynamics)
             _, physics_data = self.physics.compute_tendencies(clamped_physics_state, forcing, self.terrain, date)
             predictions = predictions.replace(physics=physics_data)
@@ -448,6 +461,7 @@ class Model:
                        save_interval=10.0,
                        total_time=120.0,
                        output_averages=False,
+                       start_date: jdt.Datetime | None = None,
     ) -> tuple[primitive_equations.State, Predictions]:
         """Run the full simulation forward in time starting from given initial state.
         Alternative to model.run / model.resume which does not read/write model's internal current state.
@@ -463,18 +477,25 @@ class Model:
                 (float) total time to run the model in days (default 120.0).
             output_averages:
                 Whether to output time-averaged quantities (default False).
+            start_date:
+                Optional jax_datetime.Datetime giving the calendar date at which
+                ``initial_state.sim_time == 0``. Defaults to ``self.start_date``. It is a
+                dynamic (traceable) argument, so a caller that re-zeroes ``sim_time`` each
+                chunk and carries the date exactly does not retrace; see
+                ``_date_from_sim_time`` for why a long float32 ``sim_time`` is not a clock.
     
         Returns:
             A tuple containing (final dinosaur.primitive_equations.State, Predictions object containing trajectory of post-processed model states).
 
         """
-        step_fn_factory = self._get_step_fn_factory(forcing)
+        origin = self.start_date if start_date is None else start_date
+        step_fn_factory = self._get_step_fn_factory(forcing, start_date)
         # If output_averages is True, pass step_fn_factory directly so that averaged_trajectory_from_step can pass in the DiagnosticsCollector
         step_fn = step_fn_factory if output_averages else jax.checkpoint(step_fn_factory())
 
         inner_steps = int(save_interval / self.dt_si.to(units.day).m)
         outer_steps = int(total_time / save_interval)
-        times = self.start_date.delta.days \
+        times = origin.delta.days \
                 + (initial_state.sim_time*units.second).to(units.day).m \
                 + save_interval * jnp.arange(outer_steps)
 
@@ -483,7 +504,7 @@ class Model:
             outer_steps=outer_steps,
             inner_steps=inner_steps,
             start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, forcing, output_averages),
+            post_process_fn=lambda state: self._post_process(state, forcing, output_averages, start_date),
             output_averages=output_averages
         )
         
