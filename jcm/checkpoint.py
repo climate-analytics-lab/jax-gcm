@@ -440,6 +440,10 @@ def _load_unstamped(
             "current convention). The leaves this model holds a mass "
             f"mixing ratio in are: {shown}. See {_POLICY_DOC}."
         )
+    # One namespace across both groups. The leaves a unit assertion
+    # applies to are the dycore state's ``tracers.*``, which no carry slot
+    # shares a name with, so a factor cannot land on an unintended leaf;
+    # if that ever changed the name would have to carry its group.
     names = {name for name, _ in dycore_template} | {
         name for name, _ in physics_template
     }

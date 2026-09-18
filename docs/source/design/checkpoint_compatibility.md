@@ -146,8 +146,9 @@ carry holds moved from g/kg to kg/kg. Derive it from the table for the
 composition in hand rather than copying the ECHAM one.
 
 The same assertion reaches the `init=from_state` warm start as
-`init.unstamped_scale` (entries spelled `"tracers.qc=1000"`, because the
-leaf names contain dots that a Hydra override cannot put in a key) — a
+`init.unstamped_scale` (entries spelled
+`"tracers.specific_humidity=1000"`, because the leaf names contain dots
+that a Hydra override cannot put in a dictionary key) — a
 warm-start donor spun up with an earlier jcm is exactly the case. It is
 deliberately *not* wired into `run.checkpoint_path`: resuming a campaign
 whose own physics has changed underneath it is not something to make a
