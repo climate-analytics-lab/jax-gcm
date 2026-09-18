@@ -227,6 +227,31 @@ class TestComposablePhysics(unittest.TestCase):
         ])
         self.assertEqual(len(physics.terms), 2)
 
+    def test_replace_hands_the_displaced_term_to_its_replacement(self):
+        """Post-compose configuration must survive a swap (jax-gcm#835).
+
+        Settings applied by a factory AFTER composition live on the instance,
+        so without this handover a replacement silently reverts to constructor
+        defaults — which is how a swapped optics term loses its radiation
+        cadence and recomputes every band on every step.
+        """
+        seen = []
+
+        class Configurable(LinearHeating):
+            def adopt_runtime_configuration(self, previous):
+                seen.append(previous)
+
+        physics = self._make_physics()
+        original = physics.terms[0]
+        new_rad = Configurable(alpha=5.0)
+        physics.replace("radiation", new_rad)
+        self.assertEqual(seen, [original])
+
+    def test_adopt_runtime_configuration_defaults_to_noop(self):
+        """Most terms carry nothing, so the base hook must be harmless."""
+        a, b = LinearHeating(), LinearHeating(alpha=2.0)
+        self.assertIsNone(a.adopt_runtime_configuration(b))
+
     def test_replace_nonexistent_category_raises(self):
         physics = self._make_physics()
         with self.assertRaises(ValueError):

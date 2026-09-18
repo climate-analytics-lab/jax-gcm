@@ -97,6 +97,16 @@ the JAM chain's validated ordering — optics after the microphysics core that
 writes `_jam_state` — is preserved, and `ComposablePhysics` raises if it is
 not.
 
+It also hands the displaced term to the replacement's
+`adopt_runtime_configuration`, which matters more than it looks. Some settings
+are applied by the factory *after* the package is composed, because they come
+from a sibling term rather than from a constructor argument: the optics term's
+radiation cadence is read off the radiation term, so a replacement has no way
+to know it. Without the handover a swapped-in optics term would run with the
+gate unset and recompute all 30 bands on every step rather than every eighth —
+correct, roughly 8x the optics cost, and completely silent. A backend that
+holds extra post-compose state of its own overrides the same hook.
+
 There is deliberately **no config key, registry or entry point** for
 selecting a backend. Nothing in this repository implements one, so a string
 selector would have nothing to resolve to; and a user who has installed and

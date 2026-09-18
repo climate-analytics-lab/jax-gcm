@@ -228,6 +228,29 @@ class PhysicsTerm(nnx.Module):
         """
         return None
 
+    def adopt_runtime_configuration(self, previous: PhysicsTerm) -> None:
+        """Take over post-compose configuration from the term being replaced.
+
+        A handful of terms are configured *after* a package is assembled,
+        because the setting comes from a sibling term rather than from their
+        own constructor — ``JamOpticsTerm.configure_radiation_gate`` reads the
+        radiation cadence, ``Lohmann2MMicrophysics.configure_spa`` the aerosol
+        activation tuning. That configuration lives on the instance, so
+        ``ComposablePhysics.replace`` would otherwise drop it on the floor and
+        leave the replacement running on constructor defaults, silently and
+        with no error.
+
+        ``replace`` therefore calls this on the incoming term, passing the
+        first term it displaced. The default does nothing, which is right for
+        the great majority of terms; a term with post-compose configuration
+        overrides it to copy that state across. Implementations must tolerate
+        a ``previous`` of an unrelated class and one that was never configured
+        — a package can be assembled without the sibling that configures it.
+
+        This is what makes attaching an out-of-tree term by ``replace`` safe;
+        see ``docs/source/design/jam_optics_mode_seam.md``.
+        """
+
     def cache_band_config(self, band_config) -> None:
         """Capture the active radiation band config (in-place).
 

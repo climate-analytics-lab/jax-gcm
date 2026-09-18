@@ -267,6 +267,20 @@ class JamOpticsTerm(PhysicsTerm):
         v = float(interval_s)
         self._radiation_interval_s = v if v > 0 else None
 
+    def adopt_runtime_configuration(self, previous) -> None:
+        """Inherit the radiation cadence from a displaced optics term.
+
+        The gate is set by ``echam_physics`` after the package is composed,
+        from the radiation term's interval, so a term swapped in afterwards
+        has never seen it. Left unset it recomputes all 30 bands every step
+        instead of every eighth at the default 2 h / 900 s — roughly 8x the
+        optics work, correct but needlessly slow, and with nothing to signal
+        it.
+        """
+        interval = getattr(previous, "_radiation_interval_s", None)
+        if interval is not None:
+            self.configure_radiation_gate(interval)
+
     def cache_band_config(self, band_config) -> None:
         """Precompute band centers and per-species refractive indices."""
         sw_nm = np.asarray(band_config.sw_band_centers_nm, np.float64)

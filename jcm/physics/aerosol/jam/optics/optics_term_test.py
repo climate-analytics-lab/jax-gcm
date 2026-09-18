@@ -964,6 +964,16 @@ class ModeOpticsSeamTest(unittest.TestCase):
         physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
         swapped = physics.replace("aerosol_optics", _VolumeExtinctionOptics())
 
+        gate = [t for t in physics.terms
+                if t.category == "aerosol_optics"][0]._radiation_interval_s
+        self.assertEqual(gate, 7200.0)
+        swapped_gate = [t for t in swapped.terms
+                        if t.category == "aerosol_optics"][0]._radiation_interval_s
+        self.assertEqual(
+            swapped_gate, gate,
+            "the replacement lost the radiation cadence, so it would recompute "
+            "every band on every step instead of every eighth")
+
         default = [t for t in physics.terms if t.category == "aerosol_optics"]
         replaced = [t for t in swapped.terms if t.category == "aerosol_optics"]
         self.assertEqual(len(default), 1)

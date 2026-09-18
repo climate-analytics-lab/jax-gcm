@@ -708,6 +708,12 @@ alternative Mie pathway (a neural emulator, say) is therefore a
        "aerosol_optics", SomeOpticsTerm())
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
+``replace`` keeps the term's position in the validated JAM ordering and hands
+the displaced term to the replacement's ``adopt_runtime_configuration``, so
+settings the factory applied after composition — the radiation cadence the
+optics gate rides, in particular — are carried over rather than silently reset
+to constructor defaults.
+
 Everything around the hook — the modal volumes, hygroscopic water, the
 empty-mode mass gate, the SSA/asymmetry weighting, the AeroCom per-species
 apportionment and the 550 nm column diagnostics — stays with the base class
