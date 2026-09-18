@@ -137,10 +137,14 @@ be wrong on these radii, which is why the volume form is the one used. It is
 also identically zero where a mode holds no dry material, whatever ringing the
 number field carries.
 
-**Status & known limitations.** Spherical, homogeneously mixed particles (no
-core–shell treatment of black carbon; a NeuralMie core–shell backend is
-proposed in #791). Per-species optics are an apportionment of the mixed
-mode's extinction, not a decomposition — see
+**Status & known limitations.** Spherical, homogeneously mixed particles: the
+in-repo pathway has no core–shell treatment of black carbon, so BC's imaginary
+index is smeared over the whole particle by the volume mixing rule above. An
+alternative bulk-optics pathway — a core–shell treatment, or a neural emulator
+of the mode integral — is supplied out-of-tree against the per-mode seam in
+{doc}`../design/jam_optics_mode_seam`, which is why no second Mie pathway is
+carried here. Per-species optics are an apportionment of the mixed mode's
+extinction, not a decomposition — see
 {doc}`../design/aerosol_optics_diagnostics`.
 
 Because the water volume is number-free, the mixed refractive index is
