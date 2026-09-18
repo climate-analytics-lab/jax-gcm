@@ -809,5 +809,172 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         self.assertGreater(fine, coarse)
 
 
+class _VolumeExtinctionOptics(JamOpticsTerm):
+    """A minimal per-VOLUME backend, to exercise the ``_mode_optics`` seam.
+
+    Deliberately shaped like an emulator rather than like the default
+    quadrature: it predicts an extinction per unit particle VOLUME, so it
+    consumes ``vol_total``/``col_factor`` instead of ``num_per_area`` and never
+    touches the Mie LUT. That is the normalisation the seam exists to support
+    — anything that already speaks in per-particle cross-sections would fit
+    the default path without a hook.
+
+    The refractive index enters through ``m_k`` only so the test can tell that
+    the mixed index really reached the backend.
+    """
+
+    KE_RHO = 2.0e6      # [1/m]
+    SSA = 0.9
+    ASY = 0.7
+
+    def _build_mie_lut(self):
+        return None
+
+    def _mode_optics(self, inputs):
+        ke_rho = self.KE_RHO * (1.0 + inputs.m_k)
+        tau = ke_rho * inputs.vol_total * inputs.col_factor
+        scat = self.SSA * tau
+        return tau, scat, self.ASY * scat
+
+    def _map_bands(self, one_band, lam_all, ri_j):
+        return jax.lax.map(lambda xs: one_band(xs[0], xs[1]), (lam_all, ri_j))
+
+
+class _VmapVolumeExtinctionOptics(_VolumeExtinctionOptics):
+    """The same backend on the default (``vmap``) band map, for the A/B."""
+
+    def _map_bands(self, one_band, lam_all, ri_j):
+        return jax.vmap(one_band)(lam_all, ri_j)
+
+
+class ModeOpticsSeamTest(unittest.TestCase):
+    """The ``_mode_optics``/``_map_bands`` extension point (jax-gcm#791).
+
+    An external package supplies an alternative Mie pathway by subclassing
+    ``JamOpticsTerm`` and overriding these hooks; the base class keeps the
+    modal geometry, the mass gate, the SSA/asymmetry weighting and the
+    AeroCom apportionment, so none of that is duplicated. These tests pin the
+    parts of the contract an out-of-tree subclass depends on.
+    """
+
+    def test_backend_optics_reach_the_aerosol_struct(self):
+        """A per-volume backend's SSA/asymmetry survive to the band arrays."""
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics()
+        term.cache_band_config(band)
+        fields = term._compute_fields(state, diagnostics)
+
+        aod = np.asarray(fields["aod_sw_per_band"])
+        self.assertEqual(aod.shape[0], n_sw)
+        self.assertTrue(np.all(np.isfinite(aod)))
+        self.assertGreater(float(aod.max()), 0.0)
+        # Every populated cell is a mix of modes that all report the same
+        # SSA/asymmetry, so the extinction-weighted averages are exactly them.
+        lit = aod > 0.0
+        np.testing.assert_allclose(
+            np.asarray(fields["ssa_sw_per_band"])[lit],
+            _VolumeExtinctionOptics.SSA, rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(fields["asy_sw_per_band"])[lit],
+            _VolumeExtinctionOptics.ASY, rtol=1e-5)
+        self.assertEqual(
+            np.asarray(fields["aod_lw_per_band"]).shape[0], n_lw)
+
+    def test_backend_skips_the_lut_build(self):
+        """``_build_mie_lut`` is what saves a backend the ~4 s table build."""
+        self.assertIsNone(_VolumeExtinctionOptics()._lut)
+        self.assertIsNotNone(JamOpticsTerm()._lut)
+
+    def test_band_map_hook_is_memory_strategy_only(self):
+        """``lax.map`` and ``vmap`` over bands must agree to rounding.
+
+        Not bit-for-bit: XLA lowers a batched and a scanned band axis
+        differently, and the two associate the float32 arithmetic differently,
+        which shows up at ~2 ulp. The point of the test is that the choice of
+        band map is a memory strategy and nothing else — any difference beyond
+        rounding would mean it had changed the physics.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        out = {}
+        for name, cls in (("map", _VolumeExtinctionOptics),
+                          ("vmap", _VmapVolumeExtinctionOptics)):
+            term = cls()
+            term.cache_band_config(band)
+            out[name] = term._compute_fields(state, diagnostics)
+        for key in ("aod_sw_per_band", "ssa_sw_per_band", "asy_sw_per_band",
+                    "aod_lw_per_band", "aod_profile"):
+            np.testing.assert_allclose(
+                np.asarray(out["map"][key]), np.asarray(out["vmap"][key]),
+                rtol=1e-5, atol=0.0,
+                err_msg=f"{key} differs between the two band maps")
+
+    def test_base_class_still_owns_the_aerocom_decomposition(self):
+        """Per-species apportionment works for a backend that never sees it."""
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, diagnostics, None, None)
+
+        total = np.asarray(out["od550aer"])
+        self.assertGreater(float(total.mean()), 0.0)
+        species = sorted({sp for m in MAM4_SPEC.modes for sp in m.species})
+        parts = sum(np.asarray(out[f"od550_{sp}"]) for sp in species)
+        parts = parts + np.asarray(out["od550_wat"])
+        np.testing.assert_allclose(parts, total, rtol=1e-5)
+
+    def test_backend_gradients_are_finite(self):
+        """The seam's contract: finite derivatives through an aerosol mass.
+
+        The dry-mass gate and the layer-tau cap downstream select and bound
+        VALUES — they cannot repair a non-finite derivative produced inside
+        ``_mode_optics``, because reverse mode multiplies a zero cotangent
+        into whatever came back. This pins that a conforming backend's
+        gradients survive the surrounding machinery.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics()
+        term.cache_band_config(band)
+        key = mass_name("so4", "acc")
+
+        def loss(scale):
+            tracers = dict(state.tracers)
+            tracers[key] = tracers[key] * scale
+            fields = term._compute_fields(state.copy(tracers=tracers),
+                                          diagnostics)
+            return jnp.sum(fields["aod_sw_per_band"])
+
+        g = float(jax.grad(loss)(1.0))
+        self.assertTrue(np.isfinite(g))
+        self.assertGreater(g, 0.0)
+
+    def test_replace_attaches_a_subclass_by_category(self):
+        """The documented attachment route for an out-of-tree backend.
+
+        A backend ships as a ``JamOpticsTerm`` subclass and is attached in
+        Python, by category, on an assembled package — there is no in-repo
+        registry or config key to add a backend to, deliberately, because the
+        implementations live outside this repository.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        swapped = physics.replace("aerosol_optics", _VolumeExtinctionOptics())
+
+        default = [t for t in physics.terms if t.category == "aerosol_optics"]
+        replaced = [t for t in swapped.terms if t.category == "aerosol_optics"]
+        self.assertEqual(len(default), 1)
+        self.assertEqual(len(replaced), 1)
+        self.assertIsInstance(replaced[0], _VolumeExtinctionOptics)
+        # Position preserved, so the JAM chain's validated ordering — the
+        # optics sit after the microphysics core that writes ``_jam_state``
+        # — survives the swap. ``ComposablePhysics`` would raise here if not.
+        self.assertEqual([t.category for t in physics.terms],
+                         [t.category for t in swapped.terms])
+
+
 if __name__ == "__main__":
     unittest.main()
