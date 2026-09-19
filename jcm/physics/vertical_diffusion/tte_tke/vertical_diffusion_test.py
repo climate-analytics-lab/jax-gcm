@@ -1463,7 +1463,7 @@ class TestColumnSolveGradients:
         strict=True,
         reason="no float32 central difference resolves this operator: the "
                "projections are O(1e4) and cancel to O(1e3) across the six "
-               "tendencies, and the tridiagonal scan in matrix_solver.py:319 "
+               "tendencies, and the tridiagonal scans in matrix_solver.py:408/433 "
                "is contracted in opposite orders by the two AD modes. Both "
                "the difference and the adjoint identity are clean under x64. (#843)")
     def test_no_float32_difference_reference_exists(self):

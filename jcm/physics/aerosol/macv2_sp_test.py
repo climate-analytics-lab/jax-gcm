@@ -445,7 +445,7 @@ class TestSimpleAerosolGradients:
     """AD against a central difference through ``get_simple_aerosol`` (#820).
 
     Green, and no guard was needed — the double-``where`` safe denominators
-    that #547 put on the AOD-weighted means (``macv2_sp.py:105-111`` and
+    that #547 put on the AOD-weighted means (``macv2_sp.py:105-110`` and
     ``:130-145``) hold at every operating point tried here, including
     columns whose far-tail AOD is below the 1e-15 threshold and columns
     whose lower levels are cut away by orography.

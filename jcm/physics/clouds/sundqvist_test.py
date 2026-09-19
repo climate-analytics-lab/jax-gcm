@@ -522,12 +522,14 @@ class TestCondensationToCloudWater:
 class TestSundqvistGradients:
     """AD against a central difference for cover and condensation (#820).
 
-    Both are green. The operating points are chosen off the scheme's exact
-    switches: the relative humidity profile crosses the critical value
-    smoothly rather than sitting on it, so the ``relu(rh - rhc)`` hinge and
-    the ``argmax`` over reference sigmas at ``sundqvist.py:287/298`` are not
-    straddled — a fixture placed exactly there would report the kink, which
-    belongs to the point and not to the formula.
+    Both are green, and the scheme's two selectors are smooth by
+    construction rather than by fixture: review B.2.4 replaced the hard
+    ``clip(b0, 0, 1)`` with a softplus pair (``sundqvist.py:404``) and the
+    ``argmax`` inversion pick with a sigmoid gate and a softmax over the
+    BL-masked lapse (``sundqvist.py:316/326``), precisely so that ``crt`` and
+    ``cinv`` carry a gradient across the sub-critical and saturated ranges.
+    The remaining kinks are the ordinary ``maximum``/``minimum`` floors on
+    pressure and saturation; the operating points below sit off them.
     """
 
     NLEV = 14

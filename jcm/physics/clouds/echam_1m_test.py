@@ -1297,8 +1297,8 @@ class TestColumnSweepStateGradients:
     @pytest.mark.xfail(
         strict=True,
         reason="a clear layer sits exactly on three switches at once — "
-               "echam_1m.py:1216/1220 `cloud_fraction > config.epsilon`, "
-               ":426 `qc_in_cloud > 0.0` and :518 `qi_in_cloud > 0.0` — so "
+               "echam_1m.py:1241/1245 `cloud_fraction > config.epsilon`, "
+               ":444 `qc_in_cloud > 0.0` and :536 `qi_in_cloud > 0.0` — so "
                "the in-cloud condensate jumps from 0 to O(dqc/dcf) as soon "
                "as the pair is displaced, and the secant grows as jump/eps "
                "at every rung instead of converging. Not a wrong gradient: "

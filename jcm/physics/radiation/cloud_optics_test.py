@@ -294,7 +294,7 @@ class TestCloudOpticsGradients:
     **zero condensate is a discontinuity of this function, by construction.**
     A layer with ``cloud_water_path == cloud_ice_path == 0`` gets the
     clear-sky fill values ``ssa = 1`` and ``g = 0``
-    (``cloud_optics.py:617/629``), while the limit of the tau-weighted
+    (``cloud_optics.py:621/631``), while the limit of the tau-weighted
     combination as the paths go to zero is the condensate's own ``ssa`` and
     ``g`` — about 0.9999 and 0.80 for the ice deck in
     ``test_cloud_optics_integration``. Crossing zero therefore jumps ``g`` by
