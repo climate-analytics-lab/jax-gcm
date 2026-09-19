@@ -1144,6 +1144,28 @@ class TestDustEmissionBand:
         assert got == pytest.approx(1200.0 * 360.0 / 365.0, rel=1e-6)
         assert got != pytest.approx(float(np.mean(per_chunk)), rel=1e-3)
 
+    def test_a_deleted_interior_chunk_is_unscored_not_reweighted(self):
+        # A missing file leaves no NaN: the next chunk still averages only
+        # its own five days, but its window would span ten. Weighting it
+        # twice over is exactly the silent bias the finiteness check cannot
+        # see, so the gate declines to score the record at all.
+        days, series = self._series(450.0)
+        keep = days != 100.0
+        days = days[keep]
+        series = {k: v[keep] for k, v in series.items()}
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+        assert "missing" in reason and "day 105" in reason
+
+    def test_a_short_final_chunk_is_still_scored(self):
+        # run/longrun.yaml's twelve 30-day chunks plus a 5-day tail is a
+        # legitimate record, not a hole.
+        days = np.array([30.0 * (i + 1) for i in range(12)] + [365.0])
+        flux = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": np.full(13, flux), "nlat": np.full(13, 96.0)}
+        assert "dust_emission_tg_per_yr" in A.summarize(days, series)
+
     def test_the_band_is_not_also_a_regression_target(self):
         # The band is deliberately wide because the target is uncertain;
         # scoring it against one reference at 15 % would quietly replace it

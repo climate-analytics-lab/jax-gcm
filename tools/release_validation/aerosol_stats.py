@@ -250,6 +250,39 @@ def chunk_durations(days: np.ndarray, start: float | None = None
     return np.asarray(days, dtype=float) - _window_starts(days, start)
 
 
+def _uneven_window_reason(days: np.ndarray,
+                          window_start: float | None) -> str | None:
+    """Why this record's averaging windows cannot be duration-weighted.
+
+    Duration weighting assumes each chunk's value averages the window between
+    its own label and its predecessor's. A *deleted* interior chunk breaks
+    that silently: the next file still averages only its own cadence, but its
+    window now spans the gap, so it would be weighted twice over. No NaN
+    appears, so the finiteness check cannot see it. jcm writes a fixed
+    ``chunk_days`` with at most a short final chunk, so an interior window
+    that is not the common cadence — or a final one longer than it — means a
+    missing file, and the annual budget is reported unscored rather than
+    computed from a record with a hole in it.
+    """
+    durations = chunk_durations(days, window_start)
+    if durations.size < 3:
+        return None
+    cadence = float(np.median(durations[:-1]))
+    if cadence <= 0.0:
+        return "chunk labels are not increasing, so no averaging window " \
+               "can be derived"
+    odd = ~np.isclose(durations[:-1], cadence, rtol=1e-6)
+    if odd.any() or durations[-1] > cadence * (1.0 + 1e-6):
+        where = float(days[int(np.argmax(odd))]) if odd.any() else float(
+            days[-1])
+        return (f"the chunk cadence is {cadence:.0f} days but the window "
+                f"ending on day {where:.0f} spans "
+                f"{float(durations[int(np.argmax(odd)) if odd.any() else -1]):.0f}"
+                " — a chunk file is missing, and the budget of a record with "
+                "a hole in it is not this run's year")
+    return None
+
+
 def chunk_day(path, index: int | None = None) -> float | None:
     """Return the END day a chunk file is labelled with (``*_day<N>*.nc``).
 
@@ -678,7 +711,8 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # otherwise give those five days a month's weight, and dust is seasonal
     # enough for that to move the annual total across the band.
     if ("emi_du" in series and span_days >= MIN_DUST_WINDOW_DAYS
-            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))):
+            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))
+            and _uneven_window_reason(days, window_start) is None):
         stats["dust_emission_tg_per_yr"] = (
             float(np.average(series["emi_du"],
                              weights=chunk_durations(days, window_start)))
@@ -842,6 +876,9 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                      f"{missing} of {len(series['emi_du'])} chunks carry no "
                      "finite emi_du, and an annual budget averaged over the "
                      "rest would not be this run's year"))
+    elif _uneven_window_reason(days, window_start) is not None:
+        rows.append(("dust_emission_tg_per_yr",
+                     _uneven_window_reason(days, window_start)))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
