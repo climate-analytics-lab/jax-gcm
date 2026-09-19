@@ -138,11 +138,15 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 #: ``docs/source/science/aerosol.md``; in short, HAM2's own present-day total
 #: over the whole emitted spectrum (1221 Tg/yr, Krätschmer et al. 2022 with
 #: ECHAM6.3-HAM2.3, the parent of this port), less the super-coarse remainder
-#: this port measures, puts the comparable target in the mid-hundreds, and the
-#: band is opened either side of it. It is NOT a tuning target: it is the
-#: check that dust has neither vanished (HAM's untuned threshold gave jcm
-#: 5 Tg/yr, #808) nor run away.
-DUST_EMISSION_TG_PER_YR = (250.0, 1000.0)
+#: this port measures, puts the comparable target in the mid-hundreds. The
+#: upper end is deliberately well above that: HAM's own 1221 Tg/yr may itself
+#: already be the mode-borne (roughly sub-10 µm) mass rather than the whole
+#: spectrum, and Kok et al. (2021) constrain observed PM10 emission to 1.7
+#: (1.0-2.7) × 10³ Tg/yr — both readings are in the science register, and the
+#: band admits either. It is NOT a tuning target: it is the check that dust
+#: has neither vanished (HAM's untuned threshold gave jcm 5 Tg/yr, #808) nor
+#: run away.
+DUST_EMISSION_TG_PER_YR = (250.0, 1500.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
 #: the HAMMOZ source maps exist only at T63), so it is scored only there.
