@@ -11,6 +11,7 @@ that feeds only dNovrN/Nccn.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.forcing import ForcingData
 from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -24,6 +25,7 @@ from jcm.physics.aerosol.macv2_sp import (
     get_vertical_profiles,
 )
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
+from jcm.testing import check_gradients
 
 NPLUMES, NFEATURES = 9, 2
 
@@ -437,3 +439,121 @@ class TestJAXCompatibility:
         lons = jnp.linspace(0, 350, 20)
         gl, gn = jax.grad(total, argnums=(0, 1))(lats, lons)
         assert jnp.all(jnp.isfinite(gl)) and jnp.all(jnp.isfinite(gn))
+
+
+class TestSimpleAerosolGradients:
+    """AD against a central difference through ``get_simple_aerosol`` (#820).
+
+    Green, and no guard was needed — the double-``where`` safe denominators
+    that #547 put on the AOD-weighted means (``macv2_sp.py:105-111`` and
+    ``:130-145``) hold at every operating point tried here, including
+    columns whose far-tail AOD is below the 1e-15 threshold and columns
+    whose lower levels are cut away by orography.
+
+    Two places in this scheme are genuinely discontinuous, and the fixtures
+    are placed off both rather than the checks being loosened around them:
+
+    1. **Each plume's central meridian.** ``_per_feature_plume_gaussians``
+       picks the Gaussian widths with ``jnp.where(delta_lon > 0, sig_*_E,
+       sig_*_W)`` (``:192-200``). East and west widths differ, and with a
+       rotated plume (``theta != 0``) or any latitude offset the rotated
+       coordinates are non-zero at ``delta_lon = 0``, so the exponent — and
+       the plume AOD — *jumps* across the meridian. It is the reference's
+       own ``IF`` (mo_simple_plumes_v1.f90), so it stays; the test longitudes
+       below are at least 2 degrees from all nine plume meridians
+       (20.6, 277.5, 114, 88, 22.5, 298, 106, 16, 135), which is an order of
+       magnitude more than the largest step the ladder takes.
+    2. **The 1e-15 zero-AOD threshold** on the completing divisions. A
+       30-level column's top layer carries a plume AOD of O(1e-16), so a
+       step there flips ``aod_profile > tiny`` and ``ssa_profile`` jumps
+       between the plume mean and its 1.0 zero-AOD limit. Radiatively that
+       is nothing — the weight multiplying it is the same 1e-16 — but it is
+       a jump, so the difference is taken on a column that stops at 5750 m,
+       where every layer's AOD is above 1e-4, and the deep column is checked
+       for finiteness instead.
+    """
+
+    # In-plume: East Asia, Europe, South America, and the Africa/Europe
+    # overlap — off every plume meridian (see the class docstring).
+    _PLUME_LATS = jnp.array([30.0, 49.0, -10.0, 5.0])
+    _PLUME_LONS = jnp.array([118.0, 25.0, 292.0, 10.0])
+    # Remote South Pacific: the far tails of every plume at once.
+    _REMOTE_LATS = jnp.array([-45.0, -50.0, -40.0, -55.0])
+    _REMOTE_LONS = jnp.array([220.0, 230.0, 240.0, 210.0])
+    _BANDS = jnp.asarray([470.0, 550.0, 865.0])
+
+    @staticmethod
+    def _shallow_grid(ncols, nlev=12):
+        """Build a column truncated at 5750 m, where no AOD nears 1e-15.
+
+        Uniform 500 m layers as in :func:`_column_grid`, but stopping in the
+        aerosol-bearing part of the column rather than at 14.75 km.
+        """
+        z = jnp.linspace(250.0, 5750.0, nlev)[::-1]
+        return (jnp.broadcast_to(z[:, None], (nlev, ncols)),
+                jnp.full((nlev, ncols), 500.0))
+
+    def _scheme(self, nlev, ncols):
+        """Return ``f(height, dz, orography, lats, lons)`` for this grid."""
+        data = AerosolData.zeros((ncols,), nlev,
+                                 n_bnd_sw=self._BANDS.shape[0], n_bnd_lw=1)
+        parameters = AerosolParameters.default()
+        forcing = _forcing_ones()
+
+        def f(height_full, layer_thickness, orography, lats, lons):
+            return get_simple_aerosol(
+                height_full, layer_thickness, orography, lats, lons, data,
+                parameters, forcing, self._BANDS)
+
+        return f
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("orography", [None, "terrain"])
+    @pytest.mark.parametrize("region", ["plume", "remote"])
+    def test_gradients_match_a_central_difference(self, region, orography,
+                                                  seed):
+        """Plume-centre and far-tail columns, flat and over terrain."""
+        ncols, nlev = 4, 12
+        height_full, layer_thickness = self._shallow_grid(ncols, nlev)
+        surface = (jnp.zeros(ncols) if orography is None
+                   else jnp.array([0.0, 900.0, 1700.0, 400.0]))
+        lats, lons = ((self._PLUME_LATS, self._PLUME_LONS)
+                      if region == "plume"
+                      else (self._REMOTE_LATS, self._REMOTE_LONS))
+        check_gradients(
+            self._scheme(nlev, ncols),
+            (height_full, layer_thickness, surface, lats, lons),
+            rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("orography", [None, "terrain"])
+    @pytest.mark.parametrize("region", ["plume", "remote"])
+    def test_deep_column_gradients_are_finite(self, region, orography):
+        """The full 14.75 km column, where the AOD tail crosses 1e-15.
+
+        This is the case the #547 double-``where`` guards exist for: below
+        the threshold the completing divisions select a constant, and a bare
+        ``where`` (or a ``maximum(den, tiny)`` floor, whose square underflows
+        in float32) would send ``0 * inf`` back through the VJP. Over terrain
+        the ``height >= orography`` mask zeros whole layers as well, so
+        ``aod_profile`` is exactly 0 there rather than merely small.
+        """
+        ncols = 4
+        height_full, layer_thickness, surface = _column_grid(
+            nlev=30, ncols=ncols,
+            oro=(None if orography is None
+                 else jnp.array([0.0, 900.0, 1700.0, 400.0])))
+        lats, lons = ((self._PLUME_LATS, self._PLUME_LONS)
+                      if region == "plume"
+                      else (self._REMOTE_LATS, self._REMOTE_LONS))
+        f = self._scheme(30, ncols)
+        args = (height_full, layer_thickness, surface, lats, lons)
+
+        def total(*a):
+            return sum(jnp.sum(leaf ** 2) for leaf in jax.tree.leaves(f(*a)))
+
+        gradients = jax.grad(total, argnums=(0, 1, 2, 3, 4))(*args)
+        names = ("height_full", "layer_thickness", "orography", "lats",
+                 "lons")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite in a {region} column: {gradient}")
