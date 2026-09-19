@@ -77,7 +77,8 @@ from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
 from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
-from jcm.testing import _cotangent, _tangent, check_gradients
+from jcm.testing import (_cotangent, _leaf_names, _tangent,
+                         check_gradients)
 
 # Replaying twelve terms and walking a step ladder for each takes minutes in
 # total, which is a slow-suite cost rather than a per-push one. The individual
@@ -587,6 +588,57 @@ def test_term_gradients_against_a_reference(term_name, point_name):
         live_inputs=check.live_inputs,
         fixed_inputs=_FIXED_INPUTS,
     )
+
+
+@pytest.mark.xfail(strict=True, reason=_PLANCK_DEFECT)
+@pytest.mark.parametrize("point_name", sorted(_POINTS))
+def test_package_tendency_is_finite_per_state_field(point_name):
+    """The composed package's tendency, differentiated one state field at a time.
+
+    The per-term checks above cannot see a poison that only exists once terms
+    feed each other, and a projection over the whole state cannot say *which*
+    field carries one. This runs ``compute_tendencies`` on the same single
+    column and takes one jvp per ``PhysicsState`` leaf, so a non-finite
+    derivative is reported against the field that produced it.
+
+    It is the cheap counterpart of ``gradient_finiteness_test``'s two-step
+    rollout, which differentiates only ``solar_constant`` — a scalar that
+    reaches the Planck denominator through no path at all on the first step,
+    which is why that test stays green while every state field here does not.
+    """
+    replay = _replay(point_name)
+    grid = lambda x: x.reshape(x.shape[0], 1, 1) if x.ndim == 2 else x.reshape(1, 1)
+    state = PhysicsState(
+        u_wind=grid(replay.state.u_wind),
+        v_wind=grid(replay.state.v_wind),
+        temperature=grid(replay.state.temperature),
+        specific_humidity=grid(replay.state.specific_humidity),
+        geopotential=grid(replay.state.geopotential),
+        normalized_surface_pressure=grid(
+            replay.state.normalized_surface_pressure),
+        tracers={name: grid(value)
+                 for name, value in replay.state.tracers.items()},
+    )
+    carry = replay.physics.initial_carry_state(
+        ColumnCoordinates.at_location(
+            get_echam_levels(_NLEV), _POINTS[point_name].latitude_deg, 0.0))
+
+    def tendencies(state_):
+        tendency, _ = replay.physics.compute_tendencies(
+            state_, replay.forcing, replay.terrain, carry)
+        return tendency
+
+    leaves, treedef = jax.tree_util.tree_flatten(state)
+    names = _leaf_names(state)
+    for index, name in enumerate(names):
+        direction = jax.tree_util.tree_unflatten(treedef, [
+            jnp.ones_like(leaf) if position == index else jnp.zeros_like(leaf)
+            for position, leaf in enumerate(leaves)])
+        _, forward = jax.jvp(tendencies, (state,), (direction,))
+        for leaf in jax.tree.leaves(forward):
+            assert np.all(np.isfinite(np.asarray(leaf))), (
+                f"{point_name}: the package tendency has a non-finite "
+                f"derivative with respect to {name}")
 
 
 @pytest.mark.parametrize("point_name", sorted(_POINTS))
