@@ -181,8 +181,12 @@ Two kinds live there today:
   CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
   ```
 
-  and the resulting state is uploaded additively under the member's
-  `init_states/` prefix.
+  and the resulting `<member>_fixture_<digest>.msgpack` is uploaded
+  additively under the member's `init_states/` prefix. The digest is in the
+  name because `fetch` resolves cache-first and never revalidates a hit: a
+  stable name could not be republished without leaving every already-warm
+  cache pairing an old state with new bands. The band file records the exact
+  path it was generated against.
 
 `jcm.data.remote.fetch` resolves these cache-first like any other mirror file,
 so a warm cache needs no network and a cold cache on an internet-less node

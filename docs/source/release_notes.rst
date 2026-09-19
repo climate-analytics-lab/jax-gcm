@@ -17,13 +17,15 @@ Unreleased — climatology regression fixtures follow the supported matrix
   ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
   publishing them.
 - Band widths are now floored so a regression band can never be narrower than
-  the computation's own noise. The ``std == 0`` degeneracy guard becomes
-  ``std <= 1e-6 * |mean|`` (~8 float32 ULP) — a band at float32 resolution
-  carries no more information than one at exactly zero — and each band is
-  additionally floored at ``3 x <var>.noise``, the measured peak-to-peak
-  spread of the same window across independent repeats in separate processes,
-  which ``generate`` records in the fixture. Without this a band could fail on
-  a new GPU or XLA version indistinguishably from a real physics regression.
+  the computation's own noise. A ``std`` of exactly zero keeps the existing
+  relative+absolute fallback, while a **positive** ``std`` gives
+  ``max(3 * std, 1e-6 * |mean|)`` — about eight float32 ULP — so a band can
+  never be finer than the arithmetic underneath it without widening any band
+  that carries real information. Each band is additionally floored at
+  ``3 x <var>.noise``, the measured peak-to-peak spread of the same window
+  across independent repeats in separate processes, which ``generate`` records
+  in the fixture. Without these a band could fail on a new GPU or XLA version
+  indistinguishably from a real physics regression.
 
 
 Unreleased — checkpoints carry a schema stamp and migrate by field name

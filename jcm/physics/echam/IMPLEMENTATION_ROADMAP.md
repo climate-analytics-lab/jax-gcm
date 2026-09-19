@@ -107,16 +107,14 @@ tests if finer-grained coverage is wanted:
 
 ## Tests gated on a GPU
 
-- ``test_echam_model_default_statistics`` (in ``jcm/model_test.py``) is
-  the T63L47 hybrid-coordinate climatology regression — grey radiation,
-  deliberately not the ``physics=echam`` RRTMGP production composition.
-  ``echam_physics(grey) + UpperSponge`` on T63L47 hybrid coords +
-  real terrain, resumed from a saved 5-day spun-up state in
-  ``jcm/data/test/echam_t63l47/spinup_state.nc``, integrated 5 more
-  days; asserts the global-mean trajectory falls inside the saved
-  ``mean ± 3σ`` band. Skipped unless
-  ``JCM_RUN_GPU_INTEGRATION_TESTS=1`` is set, since T63L47 is too
-  heavy for CPU CI. Stats and spun-up state are regenerated together by
-  ``jcm.data.test.echam_t63l47.generate_default_stats.generate()`` —
-  the bands describe the five days following the saved state, so the
-  two files are only meaningful as a pair.
+- ``test_release_matrix_default_statistics`` (in ``jcm/model_test.py``) is
+  the fast climatology regression, one sub-test per member of
+  ``tools/release_validation/matrix.yaml`` — including the ECHAM 1M/2M
+  members at T63 and T106 and both JAM members — each composed through that
+  member's validated preset. Bands live in
+  ``jcm/data/test/release_matrix/``; the init state each member resumes from
+  is hosted on the data mirror. Skipped unless
+  ``JCM_RUN_GPU_INTEGRATION_TESTS=1``. Bands and state are regenerated
+  together by
+  ``jcm.data.test.release_matrix.generate_stats.generate('<member>')`` — they
+  describe the same window, so they are only meaningful as a pair.

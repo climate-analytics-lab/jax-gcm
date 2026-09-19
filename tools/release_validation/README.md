@@ -33,8 +33,13 @@ member, on a GPU:
 CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
 ```
 
-then upload the resulting `<member>_fixture.msgpack` additively under that
-member's `init_states/` prefix (see `docs/source/design/data_mirror.md`).
+then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
+name carries a digest of its own contents — additively under that member's
+`init_states/` prefix (see `docs/source/design/data_mirror.md`). Upload it
+under exactly the name `generate` produced: the band file records that path,
+and `jcm.data.remote.fetch` resolves cache-first without revalidating, so a
+stable name could not be republished without leaving already-warm caches
+pairing an old state with new bands.
 
 Both are built through the member's **validated preset**, the same recipe this
 directory's `matrix.yaml` names, so the regression covers what the project
