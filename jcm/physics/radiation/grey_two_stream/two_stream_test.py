@@ -6,7 +6,9 @@ coefficients, layer properties, flux calculations, and heating rates.
 Date: 2025-01-10
 """
 
+import jax
 import jax.numpy as jnp
+import pytest
 from jcm.physics.radiation.grey_two_stream.two_stream import (
     two_stream_coefficients,
     layer_reflectance_transmittance,
@@ -16,6 +18,7 @@ from jcm.physics.radiation.grey_two_stream.two_stream import (
 )
 from jcm.physics.radiation.radiation_types import OpticalProperties
 from jcm.physics.radiation.grey_two_stream.planck import planck_bands_lw
+from jcm.testing import check_gradients
 
 
 def test_two_stream_coefficients():
@@ -463,3 +466,189 @@ def test_shortwave_toa_net_flux():
             rel_error = jnp.abs(surf_up_band - expected_up) / (expected_up + 1e-10)
             assert rel_error < 0.01, \
                 f"Band {band}: Surface up {surf_up_band:.2f} W/m² doesn't match expected {expected_up:.2f} W/m²"
+
+class TestTwoStreamGradients:
+    """The conservative-scattering limit, and the eigenvalue's conditioning.
+
+    ``layer_reflectance_transmittance`` builds the Eddington eigenvalue from
+    ``gamma1`` and ``gamma2``, and both degenerate as the single-scattering
+    albedo approaches 1 — which is not an exotic corner but exactly where
+    shortwave liquid-cloud optics sits (``ssa ~ 0.9999``). Two distinct
+    failures live there and these tests fence both:
+
+    * ``gamma1**2 - gamma2**2`` is a catastrophic cancellation as ``ssa -> 1``
+      (the two squares agree to four digits at ``ssa = 0.9999``), and feeding
+      the round-off that survives into ``sqrt`` — whose derivative is
+      ``1/(2*sqrt(x))`` — amplifies it. The scheme now forms the same
+      quantity factored, ``3*(1 - ssa)*(1 - ssa*g)``, which has no
+      cancellation and is exactly 0 at the limit.
+    * ``gamma1`` itself is 0 at ``ssa = g = 1``, where ``gamma2`` is 0 too, so
+      the ratio ``gamma2/gamma1`` the layer albedo needs is 0/0.
+    """
+
+    NLEV = 6
+
+    def _layer(self, ssa_value, g_value=0.85, tau_value=0.3):
+        """Build (tau, ssa, g) profiles at one operating point."""
+        return (jnp.full((self.NLEV,), tau_value),
+                jnp.full((self.NLEV,), ssa_value),
+                jnp.full((self.NLEV,), g_value))
+
+    @staticmethod
+    def _sum_of_squares(tau, ssa, g, mu0=0.5):
+        """Reduce all four layer coefficients to one differentiable scalar."""
+        R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(
+            tau, ssa, g, mu0)
+        return jnp.sum(R_dif ** 2 + T_dif ** 2 + R_dir ** 2 + T_dir ** 2)
+
+    @pytest.mark.parametrize(
+        "ssa, g",
+        [(1.0, 0.85),      # conservative scattering, realistic asymmetry
+         (1.0, 1.0),       # gamma1 == gamma2 == 0: the 0/0 in the layer albedo
+         (0.999999, 0.85),
+         (0.0, 0.0)],      # pure absorption, the longwave case
+    )
+    def test_gradients_are_finite_at_the_scattering_limits(self, ssa, g):
+        """No limit of (ssa, g) may return a non-finite derivative.
+
+        ``ssa = g = 1`` returned NaN for both ``ssa`` and ``g`` before the
+        double-``where`` on ``gamma2/gamma1``. A ``maximum(gamma1**2, 1e-30)``
+        floor does not fix it: the quotient's VJP squares the denominator, and
+        ``1e-60`` underflows to 0 in float32, so the guard becomes the 0/0.
+        """
+        tau, ssa_p, g_p = self._layer(ssa, g)
+        grads = jax.grad(self._sum_of_squares, argnums=(0, 1, 2))(
+            tau, ssa_p, g_p)
+        for name, grad in zip(("tau", "ssa", "g"), grads):
+            assert jnp.all(jnp.isfinite(grad)), (
+                f"d/d{name} is not finite at ssa={ssa}, g={g}: {grad}")
+
+    def test_conservative_limit_derivative_is_not_a_cancellation_artefact(self):
+        """At ``ssa = 1`` exactly the derivative must be O(1), not O(1e5).
+
+        The eigenvalue is 0 there, so no two-sided derivative of ``sqrt``
+        exists and the honest reported value is the one the guarded branch
+        gives. What the subtracted form reported instead was the *round-off*
+        of ``gamma1**2 - gamma2**2`` divided by its own square root: 5.0e5,
+        five orders of magnitude of pure noise entering every upstream cloud
+        gradient. A bound well below that, and well above the ~2 the guarded
+        form gives, separates the two without pinning a float32 value.
+        """
+        tau, ssa, g = self._layer(1.0, 0.85)
+        d_ssa = jax.grad(self._sum_of_squares, argnums=1)(tau, ssa, g)
+        assert float(jnp.max(jnp.abs(d_ssa))) < 1.0e2
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_layer_coefficients_match_a_central_difference(self, seed):
+        """AD against the secant at a realistic scattering cloud layer.
+
+        ``ssa = 0.93`` and ``g = 0.85``: a water cloud in the shortwave, well
+        clear of the ``ssa -> 1`` limit above and of the ``ssa > 0.001``
+        pure-absorption switch, and at an optical depth far below the
+        ``lambda_tau >= 88`` asymptotic branch.
+        """
+        tau, ssa, g = self._layer(0.93, 0.85, tau_value=2.4)
+        check_gradients(
+            lambda t, s, a: layer_reflectance_transmittance(t, s, a, 0.5),
+            (tau, ssa, g), rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_longwave_fluxes_match_a_central_difference(self, seed):
+        """AD against the secant through the two flux recurrences."""
+        n_bands = 3
+        optics = OpticalProperties(
+            optical_depth=jnp.linspace(0.12, 0.9, self.NLEV)[:, None]
+            * jnp.ones((1, n_bands)),
+            single_scatter_albedo=jnp.zeros((self.NLEV, n_bands)),
+            asymmetry_factor=jnp.zeros((self.NLEV, n_bands)),
+        )
+        lw_bands = ((10, 350), (350, 500), (500, 2500))
+        planck_layer = planck_bands_lw(
+            jnp.linspace(245.0, 291.0, self.NLEV), lw_bands)
+        planck_interface = planck_bands_lw(
+            jnp.linspace(243.0, 293.0, self.NLEV + 1), lw_bands)
+        surface_planck = planck_bands_lw(jnp.array([292.0]), lw_bands)[0]
+
+        def f(tau, planck_l, planck_i, sfc_planck, emissivity):
+            return longwave_fluxes(
+                optics._replace(optical_depth=tau), planck_l, planck_i,
+                emissivity, sfc_planck, n_bands)
+
+        check_gradients(
+            f, (optics.optical_depth, planck_layer, planck_interface,
+                surface_planck, jnp.array(0.98)),
+            rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_shortwave_fluxes_match_a_central_difference(self, seed):
+        """AD against the secant through the shortwave two-stream solve."""
+        n_bands = 2
+        tau = jnp.linspace(0.08, 0.6, self.NLEV)[:, None] * jnp.ones((1, n_bands))
+        ssa = jnp.full((self.NLEV, n_bands), 0.93)
+        asym = jnp.full((self.NLEV, n_bands), 0.85)
+
+        def f(tau, ssa, asym, toa_flux, albedo):
+            return shortwave_fluxes(
+                OpticalProperties(optical_depth=tau,
+                                  single_scatter_albedo=ssa,
+                                  asymmetry_factor=asym),
+                0.62, toa_flux, albedo, n_bands)
+
+        check_gradients(
+            f, (tau, ssa, asym, jnp.array([620.0, 480.0]),
+                jnp.array([0.13, 0.19])),
+            rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_heating_rate_matches_a_central_difference(self, seed):
+        """``flux_to_heating_rate`` is broadcasting-native over trailing axes.
+
+        Checked as a single ``(nlev+1,)`` column and as a ``(nlev+1, 4)``
+        block, because the routine reduces only over axis 0 and so is one of
+        the few pieces here that genuinely broadcasts.
+        """
+        up = jnp.linspace(100.0, 300.0, self.NLEV + 1)
+        down = jnp.linspace(400.0, 200.0, self.NLEV + 1)
+        p_half = jnp.linspace(101000.0, 9000.0, self.NLEV + 1)
+        check_gradients(flux_to_heating_rate, (up, down, p_half),
+                        rtol=1e-3, seed=seed)
+
+        spread = jnp.array([0.85, 1.0, 1.15, 1.3])
+        check_gradients(
+            flux_to_heating_rate,
+            (up[:, None] * spread, down[:, None] * spread,
+             p_half[:, None] * jnp.ones(4)),
+            rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("tau", [0.1, 1.0, 10.0, 30.0, 50.0, 60.0, 200.0])
+    @pytest.mark.parametrize("ssa, g", [(0.0, 0.0), (0.93, 0.85)])
+    def test_both_ad_modes_survive_an_optically_thick_layer(self, tau, ssa, g):
+        """Thick layers must not return NaN in *either* AD mode.
+
+        Two separate failures used to bracket the ``lambda_tau >= 88``
+        asymptotic switch, and each showed up in only one mode, so a check of
+        one alone would have missed the other:
+
+        * above it, ``exp(lambda_tau)`` was still evaluated on the discarded
+          branch and overflowed, so reverse mode formed ``0 * inf = NaN``;
+        * below it, the layer albedo was a quotient whose denominator reached
+          1e38, and the quotient rule squares the denominator — which
+          overflows float32 for any ``lambda_tau`` above about 44, i.e. for
+          every optically thick longwave layer in the lower troposphere.
+
+        ``tau = 30`` and ``tau = 50`` sit in the second window, ``tau = 60``
+        and ``200`` in the first.
+        """
+        tau_p, ssa_p, g_p = self._layer(ssa, g, tau_value=tau)
+        _, tangents = jax.jvp(
+            lambda t: layer_reflectance_transmittance(t, ssa_p, g_p, None),
+            (tau_p,), (jnp.ones_like(tau_p),))
+        for name, t in zip(("R_dif", "T_dif", "R_dir", "T_dir"), tangents):
+            assert jnp.all(jnp.isfinite(t)), f"jvp of {name} is not finite"
+
+        grad = jax.grad(
+            lambda t: jnp.sum(
+                layer_reflectance_transmittance(t, ssa_p, g_p, None)[0]
+                + layer_reflectance_transmittance(t, ssa_p, g_p, None)[1])
+        )(tau_p)
+        assert jnp.all(jnp.isfinite(grad)), "vjp is not finite"
