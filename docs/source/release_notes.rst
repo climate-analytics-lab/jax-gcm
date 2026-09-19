@@ -19,8 +19,9 @@ Unreleased — dust emission reads a real soil wetness and carries a tuning scal
   model gives, because saltation samples the far tail of the 10 m wind
   distribution and jcm's tail is thinner. A single global multiplier on that
   vector, ``NDUSCALE_JCM_T63_SCALE`` (exposed per run as
-  ``physics.jam_dust_nduscale_scale``), is calibrated to **0.5** at T63;
-  T106 and ne30 keep HAM's untuned value (#810). The annual D < 10 µm
+  ``physics.jam_dust_nduscale_scale``), is calibrated to **0.5** at T63, where
+  a full ``echam-jam-t63-l47`` year emits 829 Tg/yr; T106 and ne30 keep HAM's
+  untuned value (#810). The annual D < 10 µm
   emission also becomes a release-validation gate on any T63 run of 300 days
   or more (``DUST_EMISSION_TG_PER_YR``, 250-1500 Tg/yr) (#808).
 

@@ -160,12 +160,12 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: native HAMMOZ source fields (#810).
 #:
 #: 0.5 is calibrated from 30-day T63L47 April members driven by jcm's own
-#: winds: HAM's published vector emits 5.7 Tg/yr there, 0.65 gives 295 and
-#: 0.45 gives 1839, so 0.5 puts the annual D < 10 µm budget near the middle of
-#: the target range in ``docs/source/science/aerosol.md``. The sensitivity is
-#: steep — a factor 2 in the threshold is a factor ~300 in emission on this
-#: wind distribution — which is why the number is measured rather than
-#: inherited.
+#: winds — HAM's published vector emits 5.7 Tg/yr there, 0.65 gives 295 and
+#: 0.45 gives 1839 — and confirmed by a full year at this value, which emits
+#: 829 Tg/yr of D < 10 µm dust against the target range in
+#: ``docs/source/science/aerosol.md``. The sensitivity is steep: a factor 2 in
+#: the threshold is a factor ~300 in emission on this wind distribution, which
+#: is why the number is measured rather than inherited.
 NDUSCALE_JCM_T63_SCALE = 0.5
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,

@@ -580,6 +580,11 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   thin. That steepness is the reason the scalar is fitted to a run rather than
   inherited, and the reason it is one scalar and not eight.
 
+  A full ``echam-jam-t63-l47`` year at 0.5 confirms it: **829 Tg/yr** of
+  D < 10 µm dust, with a further 73.1 % of the emitted spectrum discarded
+  above 10 µm, a dust burden of 6.0 mg/m² and a dust lifetime of 1.36 days.
+  That is the number the release band is scored against.
+
   The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
   0.80, 1024 at 0.65 and 2540 at 0.50 annually, with April/annual running 1.05
@@ -597,12 +602,18 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``vertical_diffusion.wind_10m`` through ``run.snapshot_variables`` rather
   than as a chunk mean.
 
-- Whether HAM's nudged/free-running split of ``nduscale_reg`` is needed in jcm
-  is likewise unmeasured, so both vectors are kept. ``nudging/era5.yaml``
-  relaxes winds only and excludes the two lowest levels, so it does not set
-  the surface-layer wind the emission reads; the distinction stands until a
-  nudged/free pair at fixed ``nduscale`` separates by more than the
-  run-to-run spread of two free members.
+- HAM's nudged/free-running split of ``nduscale_reg`` earns its keep in jcm
+  too, which is why both vectors are carried. Holding the threshold fixed and
+  changing only the nudging, a 30-day member relaxed toward ERA5 emits
+  549 Tg/yr against 1158 free-running — while two free members differing only
+  in start date give 1158 and 1085, a 6 % spread. The nudging signal is eight
+  times that spread, and it acts through the wind the emission reads: the
+  nudged member's 10 m wind over the source cells is weaker throughout
+  (mean 3.60 m/s against 3.97, 18.1 % of samples above 4.93 m/s against
+  27.5 %), even though ``nudging/era5.yaml`` relaxes winds only and excludes
+  the two lowest levels. HAM's nudged vector is 0.905x its free-running one,
+  i.e. a lower threshold and more emission — the same sign as this deficit,
+  and of comparable size on the curve above.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/dust.py`` — ``DustEmissions``,
