@@ -53,6 +53,12 @@ ordinary operating point:
    `(1.38e-23 * 250)**2 ~ 1e-41`, is below float32's smallest normal, so
    `dB/dT` overflows to `inf` at *every* temperature. A floor such as
    `jnp.maximum(den**2, 1e-30)` does not help: the VJP squares the floor too.
+   The same arithmetic sets a hard bound on **any** float32 denominator:
+   `den**-2` is `inf` for every `den` below `2**-63 ~ 1.08e-19` (XLA evaluates
+   it as `1/(den*den)` and flushes the subnormal square to zero), so a `where`
+   that makes a denominator merely *positive* has not made it safe to divide
+   by — a zero numerator over it still gives `0 * inf = nan`. A guard floor
+   sized in float64 (`1e-30`, `1e-154`) is therefore not a guard at all here.
 
 The house idiom is the **double `where`**: make the *argument* safe before the
 singular operation, then mask the result, so the singular function is never
@@ -66,7 +72,11 @@ y = jnp.where(x > 0.0, jnp.sqrt(safe_x), 0.0)       # sqrt' is only ever taken a
 For (3) apply it to `r2 = u**2 + v**2` and mask the norm to zero; for (4) fold
 the constants so that the differentiated denominator is the O(1)–O(1000)
 physical variable itself (`HC_OVER_K / T`), or divide through by the largest
-exponential so every intermediate stays in `[0, 1]`.
+exponential so every intermediate stays in `[0, 1]`. Where a small denominator
+is the physics rather than an artefact of the units — the liquid/ice split
+`qc / (qc + qi)` in `clouds/echam_1m.py` — put the `where`'s threshold above
+the `1.08e-19` bound instead, and justify it by the scheme's own physical
+floors rather than by the check it quiets.
 
 Check with `jcm.testing.check_gradients(f, args, rtol=...)`. It compares
 `jvp` and `vjp` against a central difference whose step is *relative* to each
