@@ -5,7 +5,7 @@ that can be composed with other terms to build a full physics package. Terms
 communicate through a ``diagnostics`` dict that flows forward through the term
 list, replacing the physics-package-specific PhysicsData structs.
 
-See docs/design/composable_physics.md for the full design.
+See docs/source/design/composable_physics.md for the full design.
 
 """
 

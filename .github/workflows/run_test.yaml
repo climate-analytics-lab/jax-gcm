@@ -5,11 +5,13 @@ name: Run Unit Tests via Pytest
 # ~35-minute jobs (push -> fast tests, pull_request -> slow tests), and over
 # half the commits on a docs-heavy branch touch no testable code at all.
 #
-# docs/ carries one stdlib-only suite (docs/science_pointers_test.py, the
-# model-description rot guard), which run_docs.yaml runs on the doc paths
-# this filter skips, and ruff still lints EVERYTHING on every push via
-# run_linter.yaml — including the Python under .claude/skills — so a syntax
-# error in a skill script is still caught in ~30 s.
+# This paths-ignore stays safe because run_docs.yaml covers everything it
+# skips: it runs the one stdlib-only suite docs/ carries
+# (docs/science_pointers_test.py, the model-description rot guard) AND a
+# strict full-tree `sphinx-build -W --keep-going` on every docs/** change
+# (#829). ruff also lints EVERYTHING on every push via run_linter.yaml —
+# including the Python under .claude/skills — so a syntax error in a skill
+# script is still caught in ~30 s.
 #
 # Note the two events filter differently. `push` matches the files in the
 # pushed commits; `pull_request` matches the whole PR diff. So a docs commit
