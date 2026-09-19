@@ -542,21 +542,67 @@ class TestModelUnit(unittest.TestCase):
         # point, which cannot absorb the few-percent cross-process
         # nondeterminism XLA autotuning introduces at that underflow tail —
         # runs are bit-identical *in-process* but drift across the
-        # generation↔test process boundary. Where std==0, fall back to a
-        # relative+absolute tolerance; every physically meaningful level has
-        # std>0 and keeps the strict ±3σ test unchanged. See #744.
+        # generation↔test process boundary. Where the band carries no
+        # information, fall back to a relative+absolute tolerance; every
+        # physically meaningful level keeps the strict ±3σ test. See #744.
         rtol, atol = 0.25, 1e-8
+        # A band narrower than the computation's own noise fails for reasons
+        # that have nothing to do with physics, and ``std`` gets there long
+        # before it reaches exactly 0 — so the guard above is necessary but
+        # not sufficient. Two further things are done to the stored ``std``
+        # before it becomes a band, both of them measured rather than
+        # guessed (see ``generate_default_stats.generate`` for the numbers
+        # and for the cheaper alternatives that were tried and rejected):
+        #
+        # 1. Take the ``std`` of a small vertical neighbourhood rather than
+        #    of the level alone. ``std`` is the spread of five snapshots of a
+        #    field that is still trending, so it collapses wherever the trend
+        #    turns over — ``u_wind`` near sigma 0.24 falls to 5.1e-3 m/s
+        #    between neighbours at 1.4e-2-4.4e-2 — and a level whose estimate
+        #    happens to land in such a crossing is not more precisely known
+        #    than its neighbours, it is less. Adjacent model levels sample the
+        #    same physical variability, so the window maximum is the more
+        #    robust estimator of it.
+        # 2. Treat ``std`` at or below float32 resolution as degenerate, not
+        #    just ``std == 0``. ``pressure_full`` on the near-pure-``a``
+        #    levels stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of a float32 ULP —
+        #    which is the same "no information" case as an exact zero and
+        #    gets the same #744 fallback. 1e-6 is ~8 ULP, three orders below
+        #    the smallest physically meaningful ratio in these bands
+        #    (``u_wind``'s pinched level, at 1.6e-3).
+        #
+        # Finally the half-width is floored at ``<var>.noise``, the measured
+        # peak-to-peak spread of this same five-day window across independent
+        # repeats in separate processes. The floor is applied to the
+        # half-width and not folded into ``std``, so that it can only widen a
+        # band: folding it in would *narrow* the ``std == 0`` levels, whose
+        # fallback is deliberately much wider than their reproducibility.
+        rel_eps = 1e-6  # ~8 float32 ULP
+        noise_tol = 3
         for var in default_echam_t63l47_stat_vars:
             mean = default_stats[f"{var}.mean"]
             std = default_stats[f"{var}.std"]
-            half_width = xr.where(std > 0, tol * std, rtol * abs(mean) + atol)
+            assert f"{var}.noise" in default_stats, (
+                f"{var}.noise missing from default_statistics.nc — the "
+                "fixture predates the reproducibility floor. Regenerate it "
+                "with jcm.data.test.echam_t63l47.generate_default_stats."
+                "generate() on a GPU."
+            )
+            noise = default_stats[f"{var}.noise"]
+            if "level" in std.dims:
+                std = std.rolling(level=5, center=True, min_periods=1).max()
+            half_width = xr.where(
+                std > rel_eps * abs(mean), tol * std, rtol * abs(mean) + atol,
+            )
+            half_width = np.maximum(half_width, noise_tol * noise)
             lower = mean - half_width
             upper = mean + half_width
             assert ((lower <= pred_ds_mean[var]).all()) & (
                 (pred_ds_mean[var] <= upper).all()
             ), (
-                f"{var} fell outside the climatology band (±3σ, with a "
-                "relative+absolute floor where σ underflowed to 0); "
+                f"{var} fell outside the climatology band (±3σ, floored at "
+                "3× the measured run-to-run reproducibility and at a "
+                "relative+absolute tolerance where σ underflowed to 0); "
                 "regenerate jcm/data/test/echam_t63l47/default_statistics.nc "
                 "(and spinup_state.nc) if the deviation is intentional."
             )

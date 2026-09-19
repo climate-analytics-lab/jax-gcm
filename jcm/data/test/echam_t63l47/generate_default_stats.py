@@ -178,17 +178,144 @@ def run_default_echam_t63l47_model(save_interval=1.0, total_time=5.0):
     return model, predictions
 
 
-def generate():
+def stage2_global_mean():
+    """Global mean of the stats window, exactly as the regression compares it.
+
+    ``(time, lon, lat)``-mean of every variable in
+    :data:`default_echam_t63l47_stat_vars`, i.e. the quantity
+    ``test_echam_model_default_statistics`` checks against the stored band.
+    """
+    _, predictions = run_default_echam_t63l47_model(
+        save_interval=1.0, total_time=5.0,
+    )
+    _block_until_ready(predictions)
+    pred_ds = predictions.to_xarray()
+    means = pred_ds.mean(dim={"time", "lon", "lat"})
+    present = [v for v in default_echam_t63l47_stat_vars if v in means]
+    return means[present]
+
+
+def write_stage2_global_mean(path):
+    """Subprocess entry point for one reproducibility repeat.
+
+    Kept module-level so :func:`generate` can invoke it with
+    ``python -c`` in a *separate process*; see the ``.noise`` discussion
+    in :func:`generate`.
+    """
+    stage2_global_mean().to_netcdf(path)
+
+
+def _measure_reproducibility(in_process_mean, n_repeats, tmp_dir):
+    """Peak-to-peak spread of the stats window over independent repeats.
+
+    Returns a ``Dataset`` of per-variable, per-level ``max - min`` across
+    ``n_repeats + 1`` runs of the *same* five days: the one already run in
+    this process plus ``n_repeats`` run in fresh subprocesses.
+
+    Separate processes are the point. Two runs in one process agree to
+    ~3e-3 m/s in ``u_wind``; a run in a different process disagrees by
+    ~4e-2 m/s, an order of magnitude more, and it is the larger number the
+    band has to survive. Repeating in-process would measure the wrong
+    thing and produce a floor that is too small by 10x.
+    """
+    import subprocess
+    import sys
+
+    import xarray as xr
+
+    members = [in_process_mean]
+    for i in range(n_repeats):
+        out = Path(tmp_dir) / f"repeat_{i}.nc"
+        print(f"  reproducibility repeat {i + 1}/{n_repeats} …", flush=True)
+        subprocess.run(
+            [sys.executable, "-c",
+             "from jcm.data.test.echam_t63l47.generate_default_stats "
+             "import write_stage2_global_mean as w; "
+             f"w({str(out)!r})"],
+            check=True,
+        )
+        members.append(xr.open_dataset(out).load())
+
+    stacked = xr.concat(members, dim="_repeat")
+    return stacked.max(dim="_repeat") - stacked.min(dim="_repeat")
+
+
+def generate(n_reproducibility_repeats=3):
     """One-off generation of ``spinup_state.nc`` + ``default_statistics.nc``.
 
-    Stage 1 spins up for 5 days from the balanced-isothermal init,
-    saves the final state. Stage 2 resumes for 5 more days with daily
-    averages and saves global-mean ``mean`` / ``std`` per level.
+    Stage 1 spins up for 5 days from the balanced-isothermal init and
+    saves the final state. Stage 2 resumes for 5 more days of daily
+    snapshots and saves the global-mean ``mean`` / ``std`` per level.
+    Stage 3 repeats stage 2 in fresh subprocesses and saves ``noise``,
+    the peak-to-peak spread of the result across those repeats.
 
-    Run on a GPU; takes ~30 minutes wall-clock at GPU speeds.
+    Why ``noise`` exists
+    --------------------
+    ``std`` is the temporal spread of five daily snapshots of a field
+    that is still trending, so it measures the trend, not the
+    reproducibility of the measurement — and wherever the trend turns
+    over, it collapses. Two real examples in these bands: ``u_wind``
+    near sigma 0.24, where sigma falls to 5.1e-3 m/s while its
+    neighbours sit at 1.4e-2 - 4.4e-2, and ``pressure_full`` on the
+    near-pure-``a`` levels, where sigma is 4.9e-4 Pa — one float32 ULP
+    at 7405.9 Pa. A +/-3 sigma band there is narrower than the noise
+    floor of the computation, so the test fails on a new GPU, a new XLA
+    version or simply a different process, and the failure is
+    indistinguishable from the physics regression the test exists to
+    catch.
+
+    The floor therefore has to be the *measured* reproducibility, per
+    variable and per level. Cheaper scales were tried against four
+    independent runs of these same five days and none of them works:
+
+    * ``rel * |mean|`` fails for ``u_wind`` and ``v_wind``, whose
+      global-mean profile passes through zero — the floor vanishes
+      exactly where the band is pinched. Sizing it for those variables
+      instead needs ``rel ~ 2e-2``, which on ``temperature`` is a
+      +/-5.5 K band and on ``pressure_full`` a +/-600 Pa one.
+    * a fraction of the column-maximum sigma blinds any variable with a
+      large vertical dynamic range: for ``specific_humidity`` it sets
+      the stratospheric floor from a tropospheric sigma, widening those
+      bands 10-30x and hiding any stratospheric moisture error.
+
+    The measured spread has none of those failure modes because it is
+    taken where the band is used.
+
+    ``noise`` is one of three things the regression does to a stored
+    ``std`` before treating it as a band, and on these fixtures it is
+    the weakest of them: repeats spawned from one parent process agree
+    far more closely than runs launched differently do, so it sizes the
+    *within-harness* floor only. The other two live in
+    ``model_test.test_echam_model_default_statistics``: the band uses
+    the ``std`` of a small vertical neighbourhood rather than of the
+    single level, which is what actually absorbs a trend-crossing pinch
+    such as ``u_wind``'s, and it treats a ``std`` at or below float32
+    resolution as carrying no information, which is what catches
+    ``pressure_full``'s one-ULP levels. Measured against an independent
+    reproduction of these five days, the three together take the worst
+    excursion from 2.29 band half-widths to 0.43, widening the typical
+    band by 1.0-1.4x (3.1x for ``specific_humidity``, whose vertical
+    ``std`` profile is steepest).
+
+    Run on a GPU. Stage 1 and each stage-2 run take ~90 s, so the
+    default three repeats put the whole call at roughly 8 minutes.
+
+    Give the card room for two processes. This one keeps its device pool
+    while each repeat runs beside it, so stage 3 wants headroom for
+    ~10 GB twice over; on an otherwise-busy A100 XLA logs
+    ``CUDA_ERROR_OUT_OF_MEMORY`` and retries into a smaller allocation,
+    and on a fuller card it would fail outright rather than retry.
+
+    Args:
+        n_reproducibility_repeats: Stage-2 repeats used to size
+            ``noise``. Each runs in its own process; 0 skips stage 3 and
+            writes no ``noise``, which the regression test then rejects.
+
     """
     import jax
     import sys
+    import tempfile
+
     import xarray as xr
 
     from jcm.initial_states import balanced_isothermal_state
@@ -261,6 +388,23 @@ def generate():
     pred_mean = daily_global.mean(dim="time")
     pred_std = daily_global.std(dim="time")
 
+    # Stage 3: how far apart do independent repeats of stage 2 land?
+    # That spread, not the five-snapshot ``std``, is what the band must
+    # never be narrower than — see this function's docstring.
+    noise = None
+    if n_reproducibility_repeats:
+        print(
+            f"Stage 3: {n_reproducibility_repeats} independent repeats of "
+            "stage 2 for the band floor …",
+        )
+        present = [v for v in default_echam_t63l47_stat_vars if v in pred_ds]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            noise = _measure_reproducibility(
+                pred_ds[present].mean(dim={"time", "lon", "lat"}),
+                n_reproducibility_repeats,
+                tmp_dir,
+            )
+
     out = {}
     missing = []
     for var in default_echam_t63l47_stat_vars:
@@ -269,6 +413,8 @@ def generate():
             continue
         out[f"{var}.mean"] = pred_mean[var]
         out[f"{var}.std"] = pred_std[var]
+        if noise is not None:
+            out[f"{var}.noise"] = noise[var]
     if missing:
         print(f"  WARNING: missing vars: {missing}")
 
