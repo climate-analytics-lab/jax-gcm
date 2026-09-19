@@ -497,14 +497,31 @@ def _freeze(tangent, args, fixed_inputs):
     sigma < 0.2 stratosphere mask (``fsg`` has an entry at exactly 0.2) and
     reports a jump instead of a gradient.
 
-    This is about the *domain* of the direction, never about convergence: a
-    leaf belongs here only because differentiating with respect to it is
-    meaningless, and freezing one to quiet a disagreement would hide exactly
-    the defect this module exists to find. Freezing also removes the leaf from
-    the reverse projection, since that contracts against this same tangent.
+    **A frozen leaf's gradient is not checked at all.** Not loosely, not
+    through its siblings: the reverse projection contracts against this same
+    tangent, so zeroing it removes the leaf from *both* sides of the
+    comparison, and a ``stop_gradient`` on it — or any other way of losing its
+    gradient — leaves the check green. Freezing is therefore never a way to
+    make a check converge; the only admissible justification is that no
+    two-sided derivative exists along the leaf, because it selects a code path
+    or is grid geometry no caller differentiates with respect to. Since a name
+    may reach a whole subtree (``_match_leaves``), that justification has to
+    hold for every leaf the name matches — naming an interior node to freeze
+    the one selector inside it silently stops checking its nine siblings too.
+
+    Freezing every differentiable leaf leaves the zero direction, along which
+    both sides are 0 and any gradient whatever agrees, so that is rejected.
     """
     names = _leaf_names(args)
     frozen = {i for wanted in fixed_inputs for i in _match_leaves(wanted, names)}
+    live = {i for i, x in enumerate(jax.tree.leaves(args))
+            if _is_differentiable(x)} - frozen
+    if not live:
+        raise ValueError(
+            f"fixed_inputs {list(fixed_inputs)} freezes every differentiable "
+            f"input leaf, leaving the zero direction: both the derivative and "
+            f"its reference would be 0 and any gradient at all would agree. "
+            f"The leaves are {names}")
     leaves, treedef = jax.tree_util.tree_flatten(tangent)
     return jax.tree_util.tree_unflatten(
         treedef,
@@ -582,17 +599,24 @@ def check_gradients(f, args, *, rtol=None, atol=0.0, steps=DEFAULT_STEPS,
             legitimately insensitive to at a given operating point is the
             caller's knowledge, not this function's.
         fixed_inputs: names of input leaves to hold fixed, because they are
-            structural rather than differentiable inputs — see ``_freeze``. The
-            justification is always that differentiating with respect to the
-            leaf is meaningless, never that the check converges better without
-            it.
+            structural rather than differentiable inputs — see ``_freeze``. A
+            frozen leaf is removed from the tangent *and* from the reverse
+            projection that contracts against it, so **its gradient is not
+            checked at all** and a ``stop_gradient`` on it would pass. The
+            only admissible justification is therefore that the leaf selects a
+            code path, or is grid geometry no caller differentiates with
+            respect to — never that the check converges better without it. A
+            name that reaches an interior node freezes that whole subtree, so
+            prefer the specific leaf (``"speedy_coords/fsg"``, not
+            ``"speedy_coords"``).
 
     Raises:
         AssertionError: if the gradients disagree, if a ``live_inputs`` leaf is
             dead, or if ``reference`` is ``"difference"`` and no step in
             ``steps`` yields a self-consistent reference.
         ValueError: if a ``live_inputs`` or ``fixed_inputs`` name matches no
-            input leaf.
+            input leaf, or if ``fixed_inputs`` freezes every differentiable
+            leaf, which would leave nothing to check.
 
     """
     if reference not in ("difference", "adjoint"):

@@ -317,6 +317,28 @@ class TestCheckGradients(unittest.TestCase):
             check_gradients(f, args, rtol=1e-3)
         check_gradients(f, args, rtol=1e-3, fixed_inputs=["[1]"])
 
+    def test_freezing_every_differentiable_leaf_is_rejected(self):
+        """The zero direction: both the derivative and its reference are 0, so
+        any gradient whatever agrees and the check asserts nothing. Reachable
+        by naming an interior node that happens to cover the whole argument
+        tuple, which is why it is caught rather than left to the caller.
+        """
+        with self.assertRaises(ValueError) as caught:
+            check_gradients(_smooth, self.args, rtol=1e-3,
+                            fixed_inputs=["[0]", "[1]"])
+        self.assertIn("every differentiable", str(caught.exception))
+
+    def test_a_fixed_input_is_not_checked_at_all(self):
+        """Freezing takes the leaf out of the reverse projection as well as the
+        tangent, so nothing about its gradient is asserted. This is the cost
+        that makes "it selects a code path" the only admissible reason — the
+        same stop_gradient that fails the check live passes once frozen.
+        """
+        f = lambda x, y: jnp.sum(x**2) + jnp.sum(jnp.sin(jax.lax.stop_gradient(y)))
+        with self.assertRaises(AssertionError):
+            check_gradients(f, self.args, rtol=1e-2)
+        check_gradients(f, self.args, rtol=1e-2, fixed_inputs=["[1]"])
+
     def test_a_fixed_input_that_does_not_exist_is_rejected(self):
         with self.assertRaises(ValueError):
             check_gradients(_smooth, self.args, rtol=1e-3,
