@@ -123,10 +123,10 @@ the documentation arrived at gas optics 1000x high.
 .. code-block:: python
 
    # v2 docstrings said ppbv
-   chem = ChemistryData(ozone_vmr=ozone_ppbv, ...)
+   chem = ChemistryData(ozone_vmr=ozone_ppbv)          # ... plus the other fields
 
    # v3: divide any value that followed the old ppbv documentation by 1000
-   chem = ChemistryData(ozone_vmr=ozone_ppbv / 1000.0, ...)
+   chem = ChemistryData(ozone_vmr=ozone_ppbv / 1000.0)
 
 Use the explicit ``ozone_mole_fraction()`` / ``methane_mole_fraction()``
 helpers where a mol/mol value is wanted, rather than writing the ``1e-6``
@@ -282,11 +282,12 @@ every module:
    from jcm.constants import grav                 # value bound at import
    from jcm.constants import physical_constants   # stale singleton reference
    _MW_AIR = c.m_air * 1000.0                     # derived at import time
-   def f(..., gravity=c.grav): ...                # default evaluated at import
+   def f(x, gravity=c.grav): ...                  # default evaluated at import
 
    # correct: read through the module on every use
    import jcm.constants as c
-   def f(..., gravity=None):
+
+   def f(x, gravity=None):
        gravity = c.grav if gravity is None else gravity
 
 Override before the model is built. A constant read inside a jitted term is
@@ -512,14 +513,14 @@ convention yourself, per leaf:
    from jcm.checkpoint import load_checkpoint
 
    # a pre-#824 ECHAM donor: its stored mass mixing ratios are 1000x small
-   load_checkpoint(path, model, unstamped_scale={
+   load_checkpoint(model, path, unstamped_scale={
        "tracers.specific_humidity": 1000.0,
        "tracers.qc": 1000.0,
        "tracers.qi": 1000.0,
    })
 
    # or, having checked the file is already in the current convention:
-   load_checkpoint(path, model, unstamped_scale={})
+   load_checkpoint(model, path, unstamped_scale={})
 
 and, for a *fresh start from* a saved state, from the CLI through the ``init``
 group:

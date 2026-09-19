@@ -328,7 +328,7 @@ individual term parameters):
 
    def run_model(initial_state):
        model = Model(coords=get_speedy_coords())
-       return model.run(initial_state=initial_state, ...)
+       return model.run(initial_state=initial_state, total_time=1.0)
 
    # Gradients with respect to initial conditions
    sensitivity = jax.grad(run_model)
