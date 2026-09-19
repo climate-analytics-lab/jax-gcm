@@ -1465,7 +1465,7 @@ class TestColumnSolveGradients:
                "projections are O(1e4) and cancel to O(1e3) across the six "
                "tendencies, and the tridiagonal scan in matrix_solver.py:319 "
                "is contracted in opposite orders by the two AD modes. Both "
-               "the difference and the adjoint identity are clean under x64.")
+               "the difference and the adjoint identity are clean under x64. (#843)")
     def test_no_float32_difference_reference_exists(self):
         """Record the float32 conditioning as a defect, not as a tolerance.
 

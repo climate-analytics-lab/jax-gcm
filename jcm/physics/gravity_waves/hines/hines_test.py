@@ -266,7 +266,7 @@ class TestHinesGradients:
                "sqrt of a sum that is exactly 0 there, so displacing the "
                "column produces a jump and the secant grows as jump/eps at "
                "every rung (measured D doubling from 4.6e6 to 1.8e7 over the "
-               "last two rungs). The gradients themselves stay finite.")
+               "last two rungs). The gradients themselves stay finite. (#843)")
     def test_calm_column_has_no_two_sided_derivative(self):
         """Record the calm column as a degenerate point, not a tolerance."""
         column = _make_column(nlev=30, u_scale=0.0, v_scale=0.0)

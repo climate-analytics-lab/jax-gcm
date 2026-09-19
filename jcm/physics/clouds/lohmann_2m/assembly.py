@@ -446,6 +446,10 @@ def update_in_cloud_water(
         # The floor must be a pure divide-by-zero guard: a realistic prid^3 is
         # ~1e-13 m^3, so ``eps`` (~1e-7) would clamp every cell and force the
         # candidate to zero. ``d_epsilon`` (1e-30) sits below any physical value.
+        # Below ice_radius_mean ~ 3e-7 m the float32 derivative of this quotient
+        # is inf (den**-2 overflows) and the ICNC gradient is NaN; the forward
+        # candidate is unphysical there too, so the floor is a science choice
+        # tracked in #846 rather than a numerics guard.
         icnc_candidate = 0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, params.d_epsilon)
     elif params.nic_cirrus == 2:
         # min(pnicex, pap*1e6)

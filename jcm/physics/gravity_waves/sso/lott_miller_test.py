@@ -250,7 +250,7 @@ class TestSSOGradients:
                ":699-700/717/737. Not fixed here: each is a separate "
                "double-where and the forward result has to be shown "
                "unchanged for every one. Tracked for the gradient-smoothing "
-               "follow-up.")
+               "follow-up. (#843)")
     def test_calm_column_wind_gradient_is_finite(self):
         """Record the exactly-calm column as an open NaN, not a tolerance."""
         column = _make_alps_column(nlev=30)
@@ -275,7 +275,7 @@ class TestSSOGradients:
                "itself and not the other. Not fixed here; tracked for the "
                "gradient-smoothing follow-up. 1e-8 is included because the "
                "reverse pass is NaN there too once every input is displaced "
-               "together, even though d/d(orography_std) alone is finite.")
+               "together, even though d/d(orography_std) alone is finite. (#843)")
     @pytest.mark.parametrize("orography_std", [1.0e-8, 1.0e-6, 1.0e-5])
     def test_gradient_at_the_orography_floor_is_finite(self, orography_std):
         """Record the band around ``_MIN_OROG_STD`` as an open NaN."""
