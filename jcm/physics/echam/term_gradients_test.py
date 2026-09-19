@@ -174,12 +174,26 @@ _TERM_NAMES = (
     "lott_miller_sso",
 )
 
-_PLANCK_DEFECT = (
-    "jcm/physics/radiation/grey_two_stream/planck.py:42 — "
-    "hc_kt = (H_PLANCK * C_LIGHT) / (K_BOLTZMANN * temperature) needs "
-    "(K_BOLTZMANN*T)**-2 ~ 8.4e40 to differentiate, which overflows float32, "
-    "so every derivative through planck_bands_lw is nan (forward) / inf "
-    "(reverse). Folding the constants into (H*C/K)/T fixes it."
+_CONDENSATE_CLIP_KINK = (
+    "jcm/physics/radiation/grey_two_stream/radiation_scheme.py:266-267 — "
+    "cloud_water = jnp.maximum(cloud_water, 0.0), and the same for cloud_ice, "
+    "applied to the condensate this scheme reads straight from the state "
+    "tracers (cloud_data.py:311, radiation_cloud_fields, ECHAM's cover-then-"
+    "radiation order). The seeded deck leaves that tracer at exactly 0 in most "
+    "layers, so the clip sits ON the operating point: the plus and minus "
+    "displacements are clipped in disjoint sets of layers, the two one-sided "
+    "secants therefore measure different physics and stay O(1) apart at every "
+    "rung, and the cloud optics' fractional dependence on the condensate path "
+    "makes the central secant grow rather than converge as the step shrinks. "
+    "Bisecting the direction one input leaf at a time puts the whole gap on "
+    "one leaf: at the stable point state/tracers/qi alone gives D-=-1549, "
+    "D+=0 against the full direction's -1606/-101, and at the convecting one "
+    "state/tracers/qc alone gives 2070/-9.1 against 1243/-584. Freezing both "
+    "drops the remaining gap an order of magnitude without restoring a "
+    "reference — a one_sided of 0.3 to 0.5 survives on the cloud-fraction and "
+    "aerosol leaves, and below eps ~ 1e-5 the projection is float32 noise. "
+    "Not a lost gradient: every derivative here is finite in both modes, and "
+    "the clip is the physics (negative condensate must not radiate). (#843)"
 )
 
 # The environment a column scheme actually reads. ECHAM hands ``cucall`` and
@@ -198,15 +212,7 @@ _PBL_HEIGHT_DEFECT = (
     "vertical_diffusion/pbl_height is a staircase whose derivative is "
     "identically zero. It is not only a diagnostic: it sets the mixing length "
     "at turbulence_coefficients.py:108-111, so the diffusion's dependence on "
-    "the PBL depth is invisible to a gradient."
-)
-
-_MICROPHYSICS_DEFECT = (
-    "jcm/physics/clouds/echam_1m.py:1405 — on a column carrying condensate in "
-    "some levels and none in others, the sweep hands "
-    "qc_end = qc_interim + dt*micro_tend.dqcdt.T a derivative of +inf against "
-    "one of -inf, so both modes come back nan with a finite forward pass. "
-    "Every output leaf's cotangent lands on clouds/qc and clouds/qi."
+    "the PBL depth is invisible to a gradient. (#843)"
 )
 
 
@@ -244,8 +250,9 @@ class _Check:
 # Cells that are not the default. Keyed by (term, operating point); a term name
 # alone applies to both points.
 _CHECKS: dict = {
-    "grey_two_stream_radiation": _Check(
-        xfail_reference=_PLANCK_DEFECT, xfail_finiteness=_PLANCK_DEFECT),
+    # Finiteness holds at both points; only the two-sided reference is missing,
+    # and for a reason that is the operating point rather than the scheme.
+    "grey_two_stream_radiation": _Check(xfail_reference=_CONDENSATE_CLIP_KINK),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
@@ -276,11 +283,23 @@ _CHECKS: dict = {
     "echam_1m_microphysics": _Check(
         reference="adjoint", adjoint_rtol=2.0e-2, live_inputs=_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
+    # The convecting column needs a far looser adjoint tolerance than the
+    # stable one (5.0e-5) for a reason that is entirely float32. Its saturation
+    # adjustment runs at 95 % relative humidity, where ``q - qs`` and the
+    # pass-2 ``q_p1 - qs_p1 - 0.01*qs_p1`` are each a difference of two nearly
+    # equal numbers, and the Rotstayn rain evaporation below the deck compounds
+    # it: the per-level derivatives in the lowest ten layers land 50 % apart
+    # from their float64 values, and the projection's summands reach 2.9e3
+    # against a total of 5.2e2. jvp and vjp are the same double sum contracted
+    # in opposite orders, so they split — measured 8.43 % here, while in
+    # float64 the identity holds to 6.8e-11 and the two modes agree to every
+    # digit. It is reduction order, not an asymmetry: there is no
+    # ``custom_jvp``, ``custom_vjp`` or ``stop_gradient`` in the scheme for one
+    # to come from, and the gap does not move when the phase-partition floor
+    # that this column's condensate tail sits on is swept from 1e-18 to 1e-9.
     ("echam_1m_microphysics", "convecting"): _Check(
-        reference="adjoint", adjoint_rtol=2.0e-2, live_inputs=_ENVIRONMENT,
-        skip_outputs=("u_wind", "v_wind", "wbf"),
-        xfail_reference=_MICROPHYSICS_DEFECT,
-        xfail_finiteness=_MICROPHYSICS_DEFECT),
+        reference="adjoint", adjoint_rtol=1.2e-1, live_inputs=_ENVIRONMENT,
+        skip_outputs=("u_wind", "v_wind", "wbf")),
     # Hines returns a structurally zero moisture tendency — it moves momentum
     # and returns the dissipated energy as heat, nothing else — so there is
     # nothing for the liveness guard to find in that field.
@@ -590,7 +609,6 @@ def test_term_gradients_against_a_reference(term_name, point_name):
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_PLANCK_DEFECT)
 @pytest.mark.parametrize("point_name", sorted(_POINTS))
 def test_package_tendency_is_finite_per_state_field(point_name):
     """The composed package's tendency, differentiated one state field at a time.
@@ -602,9 +620,12 @@ def test_package_tendency_is_finite_per_state_field(point_name):
     derivative is reported against the field that produced it.
 
     It is the cheap counterpart of ``gradient_finiteness_test``'s two-step
-    rollout, which differentiates only ``solar_constant`` — a scalar that
-    reaches the Planck denominator through no path at all on the first step,
-    which is why that test stays green while every state field here does not.
+    rollout, and a strictly wider direction than it: that test differentiates
+    only ``solar_constant``, a single scalar whose path through the package on
+    the first step touches almost none of it, while this one walks every
+    prognostic field. Both the defects that used to surface here — the Planck
+    denominator's float32 overflow and the 1M phase partition's ``0 * inf`` —
+    were found through this direction and are fixed at their source.
     """
     replay = _replay(point_name)
     grid = lambda x: x.reshape(x.shape[0], 1, 1) if x.ndim == 2 else x.reshape(1, 1)

@@ -1303,7 +1303,7 @@ class TestColumnSweepStateGradients:
                "as the pair is displaced, and the secant grows as jump/eps "
                "at every rung instead of converging. Not a wrong gradient: "
                "every state partial matches a difference to 1e-8 once the "
-               "column is off the switches.")
+               "column is off the switches. (#843)")
     def test_clear_sky_column_has_no_two_sided_derivative(self):
         """Record the zero-condensate operating point as a defect, not a tolerance.
 
