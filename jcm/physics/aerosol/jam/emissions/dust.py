@@ -76,9 +76,19 @@ CD = ROA / GRAV_CGS
 #: spectrum instead of the silt (type 10) one — a hard step, see module docstring.
 HIGH_WIND_MS = 10.0
 
-#: MAM4 emission windows, dry diameter [µm]. HAM stops at an 8-bin M7 product;
-#: these edges are MAM4's own convention and mass above ``SUPERCOARSE_UM`` is
-#: discarded ("neglect the super-coarse mode", Stier et al. 2005 §2.3.4).
+#: MAM4 emission windows, dry diameter [µm]. The 10 µm edge is MAM4's own
+#: coarse-mode convention, not HAM's: ``mo_ham_m7_emissions::ham_m7_dust_emis``
+#: sums BGC-dust tracer 1 into M7's insoluble accumulation mode and tracers
+#: 2-4 into its insoluble coarse mode (``min_ai``/``max_ai`` = 1,
+#: ``min_ci``/``max_ci`` = 2, 4), so HAM's emitted mass is everything below its
+#: tracer-4 edge — 15.887 µm on the ``Dmin`` 0.2 µm, ``Dstep`` ln-grid of
+#: ``mo_ham_dust``. Tracers 5-8 (the "super-coarse mode", up to 1300 µm) are
+#: computed and printed but never enter the aerosol. Mass above
+#: ``SUPERCOARSE_UM`` is therefore discarded here for the same reason HAM
+#: discards its tracers 5-8, but at a lower edge; the 10-15.887 µm slice
+#: between the two conventions is 47 % of HAM's window in a jcm T63 year, and
+#: ``docs/source/science/aerosol.md`` uses it to convert HAM's published
+#: budget for comparison.
 ACCUM_UM = (0.1, 1.0)
 COARSE_UM = (1.0, 10.0)
 SUPERCOARSE_UM = 10.0
@@ -162,8 +172,9 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: 0.5 is calibrated from 30-day T63L47 April members driven by jcm's own
 #: winds — HAM's published vector emits 5.7 Tg/yr there, 0.65 gives 295 and
 #: 0.45 gives 1839 — and confirmed by a full year at this value, which emits
-#: 829 Tg/yr of D < 10 µm dust against the target range in
-#: ``docs/source/science/aerosol.md``. The sensitivity is steep: a factor 2 in
+#: 829 Tg/yr of D < 10 µm dust — 29 % above the 642 Tg/yr that the parent
+#: model's own budget becomes in this port's size window, and inside the
+#: release band; the derivation is in ``docs/source/science/aerosol.md``. The sensitivity is steep: a factor 2 in
 #: the threshold is a factor ~300 in emission on this wind distribution, which
 #: is why the number is measured rather than inherited.
 NDUSCALE_JCM_T63_SCALE = 0.5

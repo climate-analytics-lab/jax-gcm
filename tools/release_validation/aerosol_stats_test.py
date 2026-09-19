@@ -1095,6 +1095,18 @@ class TestDustEmissionBand:
         rows = dict((name, ok) for name, _v, _lim, ok in A.physics_gates(stats))
         assert rows["dust_emission_tg_per_yr"]
 
+    def test_the_band_brackets_the_documented_anchors(self):
+        # The band exists to sit around the parent model's budget converted to
+        # this port's sub-10 um window (642 Tg/yr present-day, 485
+        # pre-industrial) and to admit the calibrated T63 year (829). If any
+        # of those moves outside, the band and the science register have
+        # drifted apart.
+        for anchor in (485.0, 642.0, 829.0):
+            days, series = self._series(anchor)
+            rows = dict((name, ok) for name, _v, _lim, ok
+                        in A.physics_gates(A.summarize(days, series)))
+            assert rows["dust_emission_tg_per_yr"], anchor
+
     def test_dust_that_vanished_fails(self):
         days, series = self._series(5.0)
         rows = dict((name, ok) for name, _v, _lim, ok

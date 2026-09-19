@@ -23,7 +23,9 @@ Unreleased — dust emission reads a real soil wetness and carries a tuning scal
   a full ``echam-jam-t63-l47`` year emits 829 Tg/yr; T106 and ne30 keep HAM's
   untuned value (#810). The annual D < 10 µm
   emission also becomes a release-validation gate on any T63 run of 300 days
-  or more (``DUST_EMISSION_TG_PER_YR``, 250-1500 Tg/yr) (#808).
+  or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr, around the 642 Tg/yr
+  that the parent model's published budget becomes once converted to this
+  port's sub-10 µm window) (#808).
 
 Unreleased — checkpoints carry a schema stamp and migrate by field name
 ------------------------------------------------------------------------

@@ -134,19 +134,20 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 
 #: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
 #: jcm actually emits (coarser mass is discarded and published separately as
-#: ``dust_supercoarse_flux``). Derivation and provenance are in
-#: ``docs/source/science/aerosol.md``; in short, HAM2's own present-day total
-#: over the whole emitted spectrum (1221 Tg/yr, Krätschmer et al. 2022 with
-#: ECHAM6.3-HAM2.3, the parent of this port), less the super-coarse remainder
-#: this port measures, puts the comparable target in the mid-hundreds. The
-#: upper end is deliberately well above that: HAM's own 1221 Tg/yr may itself
-#: already be the mode-borne (roughly sub-10 µm) mass rather than the whole
-#: spectrum, and Kok et al. (2021) constrain observed PM10 emission to 1.7
-#: (1.0-2.7) × 10³ Tg/yr — both readings are in the science register, and the
-#: band admits either. It is NOT a tuning target: it is the check that dust
-#: has neither vanished (HAM's untuned threshold gave jcm 5 Tg/yr, #808) nor
-#: run away.
-DUST_EMISSION_TG_PER_YR = (250.0, 1500.0)
+#: ``dust_supercoarse_flux``). The anchor is the parent model converted to
+#: this window: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer et
+#: al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
+#: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
+#: slice this port does not carry, so the comparable target is 642 Tg/yr
+#: present-day and 485 pre-industrial. The band spans those and the 829 Tg/yr
+#: a calibrated T63 year emits, which is far wider than the 6 % run-to-run
+#: spread and deliberately so; the top is held below Kok et al. (2021)'s
+#: PM20 constraint of 1750 (1330-2200) Tg/yr, since a sub-10 µm budget cannot
+#: exceed a sub-20 µm total. The derivation is in
+#: ``docs/source/science/aerosol.md``. It is NOT a tuning target: it is the
+#: check that dust has neither vanished (HAM's untuned threshold gives jcm
+#: 5.7 Tg/yr, #808) nor run away.
+DUST_EMISSION_TG_PER_YR = (400.0, 1300.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
 #: the HAMMOZ source maps exist only at T63), so it is scored only there.

@@ -470,9 +470,15 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   across textures. We integrate the **online** spectrum over MAM4's windows
   instead. The window edges (0.1 / 1 / 10 µm) are MAM4's convention, so HAM's
   8-bin structure is deliberately *not* reproduced — only the underlying
-  191-class spectrum is. The ≥ 10 µm remainder is discarded, as HAM discards its
-  super-coarse mode, and nothing is renormalised; it is published per column as
-  ``dust_supercoarse_flux`` because it is large (0.11-0.75 of the total).
+  191-class spectrum is. The ≥ 10 µm remainder is discarded and nothing is
+  renormalised; it is published per column as ``dust_supercoarse_flux``
+  because it is large (0.11-0.75 of the total). HAM discards a remainder too,
+  but at a **different edge**: ``ham_m7_dust_emissions`` puts tracer 1 into
+  the insoluble accumulation mode and tracers 2-4 into the insoluble coarse
+  mode, so everything below its tracer-4 edge of 15.887 µm is emitted and
+  tracers 5-8 (to 1300 µm) never reach the aerosol. The 10-15.887 µm slice
+  between the two conventions is what a budget comparison has to account for;
+  it is measured under **The one scalar jcm calibrates** below.
 - `data` (snow) — HAM multiplies by ``1 − cvs`` with ECHAM's ``physc`` snow-cover
   formula (a ``tanh`` in snow depth with orographic-σ damping, a canopy-snow
   substitute and ``cvs = 1`` on glaciers). jcm has no prognostic snow depth
@@ -553,19 +559,41 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   moves. It applies at T63 only — T106 and ne30 keep HAM's untuned ``0.86``,
   since their source fields are themselves interpolated from T63 (#810).
 
-  The **target** the scalar is set against is the present-day D < 10 µm
-  emission, for which the literature gives: ECHAM6.3-HAM2.3 itself, the model
-  this scheme is ported from, 1221 Tg/yr present-day and 923 pre-industrial at
-  T63 (Krätschmer et al. 2022, Clim. Past 18, 67); the AeroCom phase-I median
-  1123 Tg/yr across 15 models, spread ~500-4400 (Huneeus et al. 2011, ACP 11,
-  7781); and an observationally-constrained 1700 (1000-2700) Tg/yr for PM10
-  dust (Kok et al. 2021, ACP 21, 8127). HAM's own number is published as an
-  8-bin total that includes a super-coarse mode this port discards, so it and
-  the PM10 constraints bracket rather than agree; the release gate
-  (``DUST_EMISSION_TG_PER_YR``) is deliberately wide at 250-1500 Tg/yr, which
-  admits both readings, and the scheme publishes the discarded fraction per
-  column as ``dust_supercoarse_flux`` so the comparison can be made either
-  way.
+  The **target** is the parent model's own budget, converted to this port's
+  size window. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
+  pre-industrial at T63 (Krätschmer et al. 2022, Clim. Past 18, 67, §3.1 and
+  Table 2). That number is the mass that reaches the aerosol — the paper's
+  emissions go "either into the insoluble accumulation mode (mmr 0.37 µm) or
+  the insoluble coarse mode (mmr 1.75 µm)" and "emissions into the
+  super-coarse mode are neglected" — which in the code is
+  ``ham_m7_dust_emissions`` summing BGC-dust tracer 1 and tracers 2-4, i.e.
+  every class below **15.887 µm**. (HAM's own ``flux_a10`` budget diagnostic
+  selects the same four tracers: it keeps those whose ``dpk`` is under 10, and
+  ``dpk`` is the geometric-mean *radius* of the tracer's bin, so its "< 10 µm"
+  label is the one place HAM's published figure is loosely named.) The
+  conversion to this port's D < 10 µm window is therefore a single slice: over
+  the full T63 year, re-running the emission with the coarse window widened to
+  15.887 µm puts **47.4 %** of HAM's window in 10-15.887 µm (49.7 % over
+  N Africa, 48.1 % Middle East, 37.2 % Asia, 35.7 % N America). The
+  HAM-equivalent D < 10 µm target is thus **1221 × 0.526 = 642 Tg/yr**
+  present-day, and 485 pre-industrial.
+
+  Two further points of reference, neither of them a like-for-like target.
+  AeroCom phase I gives a median of 1123 Tg/yr across 15 models with a spread
+  of roughly 500-4400 (Huneeus et al. 2011, ACP 11, 7781), but its members use
+  different upper size cut-offs, so it measures inter-model spread rather than
+  a value to hit. Kok et al. (2021, ACP 21, 8169) constrain global emission
+  observationally at 1750 (1330-2200) Tg/yr for **PM20**, dust with
+  *geometric* diameter below 20 µm — a strictly wider window than this one, so
+  it bounds a D < 10 µm budget from above rather than pinning it.
+
+  The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-1300 Tg/yr** around
+  that 642: wide enough for the parent model's own pre-industrial value (485)
+  and for a T63 year that is 29 % above its present-day point (the 829 Tg/yr
+  measured here), far wider than the 6 % run-to-run spread, and capped below
+  Kok's PM20 lower bound, since a sub-10 µm budget cannot exceed a PM20 total.
+  It is a release check that dust has not vanished or run away, not a tuning
+  target — which is why it is also exempt from the regression tier.
 
   The value is **0.5**, calibrated on 30-day T63L47 April members started from
   an ERA5 state and driven by the model's own instantaneous 10 m winds:
