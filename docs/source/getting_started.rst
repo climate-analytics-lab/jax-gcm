@@ -127,7 +127,10 @@ so the two doors agree input-for-input. For a JAM (prognostic-aerosol) package
 it supplies the surface bundle, ozone, and the emission / DMS / dust / oxidant
 set (dust is five products: ``dust_file`` plus ``dust_preferential_file``,
 ``dust_soil_types_file``, ``dust_regions_file`` and ``dust_roughness_file`` —
-the first four are mandatory together, so setting only ``dust_file`` raises);
+the first four are mandatory together, so setting only ``dust_file`` raises;
+the dust scheme additionally reads the relative soil wetness ``soilw_rel``
+from the *surface* bundle, and logs that its saturation cut-off is inert when
+the bundle predates that channel);
 a non-JAM package gets surface + ozone only. Reach for it when composing
 your *own* model, as below. It supplies only the forcing: a validated
 end-to-end setup such as ``t63-echam-jam`` also pins the radiation scheme,

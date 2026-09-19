@@ -444,8 +444,9 @@ mixture: ``1 − psrc`` of it keeps its mapped Zobler/East-Asian textures with t
 unmapped remainder as type 1 (coarse), and ``psrc`` becomes soil type 10
 (100 % silt, α = 1e-5). Emission needs ``u* ≥ 21·nduscale/feff`` cm/s and
 ``pot_source > r_dust_lai``; the surviving flux is multiplied by ``pot_source``
-again, by ``1 − snow_cover``, and zeroed where the relative soil wetness exceeds
-0.99.
+again, by ``1 − snow_cover``, and zeroed where the relative soil wetness
+``forcing.soilw_rel`` (soil water as a fraction of that soil's field capacity,
+ECHAM's ``ws/wsmx``) exceeds 0.99.
 
 The emitted spectrum is integrated onto MAM4's emission windows — accumulation
 ``0.1 ≤ D < 1 µm``, coarse ``1 ≤ D < 10 µm``, everything coarser discarded — with
@@ -479,10 +480,27 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``snowc_am`` is zero on permanent ice where ECHAM sets ``cvs = 1``, which is
   harmless because ``pot_source`` is zero there.
 - `data` (soil moisture) — the ``ws/wsmx > 0.99`` cut-off is unconditional in
-  every HAM preset, but jcm carries SPEEDY's vegetation-weighted availability
-  index ``soilw_am``, not ECHAM's ``ws/wsmx``. It is wired so the term is
-  structurally complete, and is close to inert because ``soilw_am`` is capped at
-  field capacity by construction (#787).
+  every HAM preset, and jcm feeds it ``forcing.soilw_rel``: ERA5's 0-7 cm
+  volumetric water content divided by the HTESSEL field capacity of that
+  cell's own soil type (Balsamo et al. 2009), i.e. soil water as a fraction of
+  field capacity — what ECHAM's ``ws/wsmx`` means. Normalising each texture by
+  its own capacity is what makes 1 mean "saturated" on sand as well as on
+  clay; one global constant would read a saturated desert sand
+  (θ_cap = 0.244) as 0.70 and never fire the cut-off in the cells that emit.
+  Two differences from ECHAM remain, stated rather than hidden: the layer is
+  the 0-7 cm one that governs saltation rather than ECHAM's whole root-zone
+  bucket, and the field is a **monthly climatology** where ECHAM's is
+  prognostic, which averages away individual saturation events — over the T63
+  cells that pass the vegetation gate the cut-off fires on 0.77 % of
+  cell-months on the climatology against 2.19 % on individual ERA5 samples of
+  the same decade. A forcing file that carries no such channel leaves the
+  cut-off inert and logs that it has. ECHAM's own ``wsmx`` and an ECHAM ``ws``
+  exist at T63 (``T63GR15_jan_surf.nc``, ``ic_land_soil_T63GR15_*.nc``) and
+  agree with this field on magnitude over the source cells (mean 0.238 against
+  0.245 in January, spatial correlation 0.46), but that ``ws`` is a single
+  initial condition with no time axis, and both files exist only at T63. ERA5
+  is used instead because it carries the seasonal cycle and derives on every
+  published grid (#787).
 - `data` (resolution) — the HAMMOZ inputs exist only at T63. The T106 products
   are derived from them by nearest neighbour (conservative regridding cannot
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
@@ -519,7 +537,83 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 - ``nduscale_reg`` is HAM's only global tuning knob and it scales the
   *threshold*, so a larger value emits **less**. The default is the T63
   free-running vector ``(1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05)``;
-  ``DustParameters.preset(3)`` selects Stier et al. (2005) instead.
+  ``DustParameters.preset(3)`` selects Stier et al. (2005) instead. HAM tunes
+  that vector twice — ``(0.95, 1.25)`` for nudged simulations against
+  ``(1.05, 1.45)`` free-running — and jcm carries both, selected by
+  ``physics.jam_dust_nudged``. ``null`` (the shipped value) means "follow the
+  run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
+  ``nudging.enabled``, because the nudging term is appended after physics is
+  composed and the dust term cannot otherwise see it. An explicit ``true`` or
+  ``false`` wins.
+- **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
+  whole ``ndust = 4`` T63 vector, and is exposed per run as
+  ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
+  because HAM's eight regional parameters cannot be identified against a
+  single global budget: the regional *ratios* stay HAM's and only the level
+  moves. It applies at T63 only — T106 and ne30 keep HAM's untuned ``0.86``,
+  since their source fields are themselves interpolated from T63 (#810).
+
+  The **target** the scalar is set against is the present-day D < 10 µm
+  emission, for which the literature gives: ECHAM6.3-HAM2.3 itself, the model
+  this scheme is ported from, 1221 Tg/yr present-day and 923 pre-industrial at
+  T63 (Krätschmer et al. 2022, Clim. Past 18, 67); the AeroCom phase-I median
+  1123 Tg/yr across 15 models, spread ~500-4400 (Huneeus et al. 2011, ACP 11,
+  7781); and an observationally-constrained 1700 (1000-2700) Tg/yr for PM10
+  dust (Kok et al. 2021, ACP 21, 8127). HAM's own number is published as an
+  8-bin total that includes a super-coarse mode this port discards, so it and
+  the PM10 constraints bracket rather than agree; the release gate
+  (``DUST_EMISSION_TG_PER_YR``) is deliberately wide at 250-1500 Tg/yr, which
+  admits both readings, and the scheme publishes the discarded fraction per
+  column as ``dust_supercoarse_flux`` so the comparison can be made either
+  way.
+
+  The value is **0.5**, calibrated on 30-day T63L47 April members started from
+  an ERA5 state and driven by the model's own instantaneous 10 m winds:
+
+  | ``nduscale_scale`` | 1.00 | 0.65 | **0.50** | 0.45 |
+  |---|---|---|---|---|
+  | April D < 10 µm, Tg/yr | 5.7 | 294.6 | **1158.4** | 1838.6 |
+  | discarded ≥ 10 µm | 77.1 % | 75.2 % | 72.6 % | 71.1 % |
+
+  A factor 2 in the threshold is a factor ~300 in emission here, because
+  saltation samples the far tail of the wind distribution and jcm's tail is
+  thin. That steepness is the reason the scalar is fitted to a run rather than
+  inherited, and the reason it is one scalar and not eight.
+
+  A full ``echam-jam-t63-l47`` year at 0.5 confirms it: **829 Tg/yr** of
+  D < 10 µm dust, with a further 73.1 % of the emitted spectrum discarded
+  above 10 µm, a dust burden of 6.0 mg/m² and a dust lifetime of 1.36 days.
+  That is the number the release band is scored against.
+
+  The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
+  T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
+  0.80, 1024 at 0.65 and 2540 at 0.50 annually, with April/annual running 1.05
+  to 1.33. Two things follow from the pair of curves. HAM's published
+  threshold is ~10x short of the parent model's own 1221 Tg/yr **even on a
+  perfect wind field**, so the retune is required by the threshold and not
+  only by a host-model wind bias. And jcm needs a lower multiplier than ERA5's
+  winds would, because its wind tail is thinner: over the same T63 April
+  source cells the two agree on the mean (3.98 m/s against 4.00) and diverge
+  in the tail, 0.69 % of cell-samples above 7.62 m/s against ERA5's 4.41 %,
+  and 0.003 % against 0.332 % above 10.52 m/s (the saltation onsets at
+  ``nduscale`` 1.05 and 1.45). Both tables are instantaneous samples over the
+  cells that pass the vegetation gate; a time-mean wind cannot resolve an
+  exceedance frequency at all, which is why the calibration run saves
+  ``vertical_diffusion.wind_10m`` through ``run.snapshot_variables`` rather
+  than as a chunk mean.
+
+- HAM's nudged/free-running split of ``nduscale_reg`` earns its keep in jcm
+  too, which is why both vectors are carried. Holding the threshold fixed and
+  changing only the nudging, a 30-day member relaxed toward ERA5 emits
+  549 Tg/yr against 1158 free-running — while two free members differing only
+  in start date give 1158 and 1085, a 6 % spread. The nudging signal is eight
+  times that spread, and it acts through the wind the emission reads: the
+  nudged member's 10 m wind over the source cells is weaker throughout
+  (mean 3.60 m/s against 3.97, 18.1 % of samples above 4.93 m/s against
+  27.5 %), even though ``nudging/era5.yaml`` relaxes winds only and excludes
+  the two lowest levels. HAM's nudged vector is 0.905x its free-running one,
+  i.e. a lower threshold and more emission — the same sign as this deficit,
+  and of comparable size on the curve above.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/dust.py`` — ``DustEmissions``,
@@ -527,9 +621,13 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``soil_size_distributions``, ``emission_weight_matrix``, ``SOIL_TABLE``,
   ``MIXTURE_ROWS``, ``DUST_SUPERCOARSE_KEY``.
 - ``jcm/forcing.py`` — ``read_dust_source``, ``read_dust_preferential``,
-  ``read_dust_soil_types``, ``read_dust_regions``, ``read_dust_roughness``.
+  ``read_dust_soil_types``, ``read_dust_regions``, ``read_dust_roughness``,
+  and the ``soilw_rel`` channel.
 - ``jcm/forcing_assembly.py`` — ``_attach_dust``.
-- ``jcm/data/mirror/dust.py`` — ``build_dust_product``.
+- ``jcm/data/mirror/dust.py`` — ``build_dust_product``;
+  ``jcm/data/mirror/bundles.py`` — ``translate_land``, ``HTESSEL_THETA_CAP``.
+- ``tools/release_validation/aerosol_stats.py`` —
+  ``DUST_EMISSION_TG_PER_YR``, the release band on the annual budget.
 
 **Validation evidence.** ``dust_test.py`` pins ``u*t`` at eight diameters
 against MB95 (1091.08 cm/s at 0.2 µm to 66.30 at 1262 µm, minimum 20.4502 at
