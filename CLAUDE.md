@@ -392,7 +392,9 @@ from dinosaur import primitive_equations
 ### Testing
 - Test files: `module_name_test.py` in the same directory as the module
 - Mark slow tests (>1 min) with `@pytest.mark.slow`
-- Include gradient checks (`check_vjp`, `check_jvp`) for JAX functions
+- Include gradient checks (`jcm.testing.check_gradients`, AD against a
+  relative-step central difference; see `JAX_gotchas.md` for the
+  NaN-gradient traps it catches) for JAX functions
 - PRs should include tests for new functionality and bug fixes
 
 ## Documentation
