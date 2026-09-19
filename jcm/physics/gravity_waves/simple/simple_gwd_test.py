@@ -10,6 +10,7 @@ from .simple_gwd import (
     simple_gwd
 )
 from jcm.constants import grav, cpd, rd
+from jcm.testing import check_gradients
 
 
 def test_simple_gwd_smoke():
@@ -369,6 +370,94 @@ class TestGravityWaveDrag:
         grad = grad_fn(u)
         assert grad.shape == u.shape
         assert jnp.all(jnp.isfinite(grad))
+
+
+class TestGradients:
+    """AD against a central difference, per issue #820.
+
+    The scheme is built almost entirely out of Euclidean norms and hard
+    switches, so these checks exist mainly to fence the norms: ``_safe_hypot``
+    replaced four bare ``sqrt(x**2 + y**2)`` whose derivative is ``0/0`` at the
+    origin, and the origin is where a calm column and every wave-free level sit.
+    """
+
+    @staticmethod
+    def _column(nlev=24, u0=18.0, v0=7.0):
+        """Build a sheared mid-latitude column, well away from calm."""
+        height = jnp.linspace(0.0, 30000.0, nlev)[::-1]
+        pressure = 100000.0 * jnp.exp(-height / 8000.0)
+        temperature = 288.0 - 0.0065 * height
+        air_density = pressure / (rd * temperature)
+        jet = jnp.exp(-((height - 10000.0) / 7000.0) ** 2)
+        u_wind = u0 * (0.4 + jet)
+        v_wind = v0 * (0.3 + 0.5 * jet)
+        return u_wind, v_wind, temperature, pressure, height, air_density
+
+    @staticmethod
+    def _outputs(tend, state):
+        """Collect the differentiable outputs worth projecting.
+
+        ``breaking_level`` is a cast boolean mask, piecewise constant in every
+        input, so a finite difference would report its staircase rather than a
+        derivative; it is left out deliberately. Everything else is continuous.
+        """
+        return (tend.dudt, tend.dvdt, tend.dtedt,
+                state.tau_x, state.tau_y, state.wave_stress,
+                state.deposited_momentum)
+
+    def test_gradient_check_column(self):
+        """One ``(nlev,)`` column: AD matches the central difference."""
+        u_wind, v_wind, temperature, pressure, height, air_density = self._column()
+
+        def f(u, v, temp, h_std):
+            return self._outputs(*simple_gwd(
+                u, v, temp, pressure, height, air_density, h_std, 1800.0))
+
+        # Height, pressure and density are held out of the direction rather
+        # than frozen with ``fixed_inputs``: in the composable term they are
+        # moist-air diagnostics derived from temperature and surface pressure,
+        # so perturbing them independently of ``temp`` would displace the column
+        # off its own hydrostatic profile — a state the scheme is never handed.
+        check_gradients(
+            f, (u_wind, v_wind, temperature, jnp.asarray(420.0)), rtol=2e-3)
+
+    def test_gradient_check_block(self):
+        """A ``(nlev, ncols)`` block, vmapped exactly as ``SimpleGwd`` does."""
+        columns = [self._column(u0=u0, v0=v0)
+                   for u0, v0 in ((18.0, 7.0), (-12.0, 4.0), (25.0, -9.0))]
+        stack = lambda i: jnp.stack([col[i] for col in columns], axis=1)
+        u_wind, v_wind, temperature = stack(0), stack(1), stack(2)
+        pressure, height, air_density = stack(3), stack(4), stack(5)
+        h_std = jnp.array([420.0, 180.0, 900.0])
+
+        def f(u, v, temp, hs):
+            tend, state = jax.vmap(
+                simple_gwd, in_axes=(1, 1, 1, 1, 1, 1, 0, None),
+                out_axes=(0, 0),
+            )(u, v, temp, pressure, height, air_density, hs, 1800.0)
+            return self._outputs(tend, state)
+
+        check_gradients(f, (u_wind, v_wind, temperature, h_std), rtol=2e-3)
+
+    def test_gradients_are_finite_on_a_calm_column(self):
+        """A calm column sits exactly on the cone tip of every wind norm.
+
+        Before ``_safe_hypot`` this returned NaN for every input, and because
+        the surface norm feeds the whole column's flux, a single calm column in
+        a batch took the rest of the batch's gradient with it.
+        """
+        _, _, temperature, pressure, height, air_density = self._column()
+        calm = jnp.zeros_like(temperature)
+
+        def loss(u, v, temp, h_std):
+            tend, state = simple_gwd(
+                u, v, temp, pressure, height, air_density, h_std, 1800.0)
+            return sum(jnp.sum(x ** 2) for x in self._outputs(tend, state))
+
+        grads = jax.grad(loss, argnums=(0, 1, 2, 3))(
+            calm, calm, temperature, jnp.asarray(420.0))
+        for g in grads:
+            assert jnp.all(jnp.isfinite(g))
 
 
 if __name__ == "__main__":

@@ -94,6 +94,30 @@ class SimpleGwdTendencies(NamedTuple):
     dtedt: jnp.ndarray            # Temperature tendency from dissipation (K/s)
 
 
+def _safe_hypot(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(x**2 + y**2)`` whose derivative is finite at the origin.
+
+    The Euclidean norm is a cone at ``(0, 0)``: ``d|v|/dx = x/|v|`` is ``0/0``
+    there, so a bare ``jnp.sqrt`` returns the correct forward value 0 and a NaN
+    derivative. Both places this is used sit *exactly* on the origin in ordinary
+    operation — a calm surface column has ``u = v = 0``, and the momentum flux
+    is identically zero at every level a wave never reaches — so the NaN is the
+    common case, not an edge case, and one calm column poisons the gradient of
+    the whole batch through the reduction that follows.
+
+    The safe-denominator double-``where`` feeds ``jnp.sqrt`` a 1.0 in exactly
+    the cells the outer ``where`` discards, so the differentiated branch is
+    evaluated away from the cone tip and the forward result is bit-identical:
+    ``where`` selects the literal 0 there, which is what ``sqrt(0)`` returns.
+    The derivative reported at the origin is then 0 — no two-sided derivative
+    exists at a cone tip, and 0 is the value the surrounding physics wants,
+    since a vanishing flux exerts no drag however it is approached.
+    """
+    square = x**2 + y**2
+    positive = square > 0.0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, square, 1.0)), 0.0)
+
+
 @jax.jit
 def brunt_vaisala_frequency(
     temperature: jnp.ndarray,
@@ -160,8 +184,10 @@ def orographic_source(
         Tuple of (tau_x, tau_y): Surface momentum fluxes (N/m²)
 
     """
-    # Surface wind speed
-    wind_speed = jnp.sqrt(u_sfc**2 + v_sfc**2)
+    # Surface wind speed. The 1 m/s floor below keeps the *forward* division by
+    # ``wind_speed`` finite but does nothing for the derivative: ``maximum``
+    # passes a zero cotangent back into the norm, and 0 * NaN is still NaN.
+    wind_speed = _safe_hypot(u_sfc, v_sfc)
     wind_speed = jnp.maximum(wind_speed, 1.0)  # Minimum wind speed
     
     # Froude number
@@ -216,7 +242,10 @@ def wave_breaking_criterion(
     # Calculate wave amplitude from momentum flux
     # tau = rho * u' * w' ~ rho * c * a²
     # where c is phase speed and a is amplitude
-    tau_mag = jnp.sqrt(tau_x**2 + tau_y**2)
+    # Identically zero at every level the critical-level filter has stopped the
+    # wave at, which is most of the column, so the norm is evaluated at its cone
+    # tip as a matter of course.
+    tau_mag = _safe_hypot(tau_x, tau_y)
     
     # Intrinsic phase speed (simplified)
     # Use a more realistic value based on typical gravity wave parameters
@@ -396,9 +425,12 @@ def simple_gwd(
     state = SimpleGwdState(
         tau_x=tau_x,
         tau_y=tau_y,
-        wave_stress=jnp.sqrt(tau_x**2 + tau_y**2),
+        # Both diagnostics are norms of fields that are exactly zero wherever
+        # the wave has been filtered out or no breaking was diagnosed, i.e. over
+        # most of a typical column; see ``_safe_hypot``.
+        wave_stress=_safe_hypot(tau_x, tau_y),
         breaking_level=breaking_mask.astype(jnp.float32),
-        deposited_momentum=jnp.sqrt(deposited[0]**2 + deposited[1]**2)
+        deposited_momentum=_safe_hypot(deposited[0], deposited[1])
     )
     
     return tendencies, state
