@@ -260,7 +260,7 @@ class TestHinesGradients:
                 f"v_scale={v_scale}")
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="an identically calm column has no launch spectrum: the "
                "azimuthal root-mean-square winds at hines.py:253-258 are "
                "sqrt of a sum that is exactly 0 there, so displacing the "

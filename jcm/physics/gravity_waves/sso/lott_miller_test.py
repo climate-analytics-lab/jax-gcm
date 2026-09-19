@@ -240,7 +240,7 @@ class TestSSOGradients:
                 f"d/d{name} is not finite for {label}")
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="an exactly calm column (u = v = 0 at every level) returns a "
                "NaN gradient with respect to both wind components. Any "
                "non-zero wind is finite — 1e-4 m/s already is — so this is a "
@@ -266,7 +266,7 @@ class TestSSOGradients:
             assert jnp.all(jnp.isfinite(grad)), f"d/d{name} is not finite"
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="d/d(orography_std) is NaN for orography_std in roughly "
                "[1e-6, 1e-5] — at and just above ``_MIN_OROG_STD`` "
                "(lott_miller.py:111), the floor ``_safe_denom`` stops "

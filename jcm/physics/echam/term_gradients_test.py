@@ -557,6 +557,13 @@ def _cases(attribute):
     so, instead of quietly staying disabled. The two tests take their xfails
     from different fields, because a term can lose its reference while its
     derivatives stay perfectly finite.
+
+    ``raises=AssertionError`` narrows it to the failure the reason describes.
+    ``check_gradients`` raises ``ValueError`` for a ``live_inputs`` or
+    ``fixed_inputs`` name that matches no leaf, and several of these cells
+    carry both a name list and an xfail; without the constraint, renaming a
+    state field would convert that loud error into a green xfail and the
+    strictness that is meant to fire on a fix never would.
     """
     cases = []
     for term_name in _TERM_NAMES:
@@ -564,7 +571,8 @@ def _cases(attribute):
             reason = getattr(_check_for(term_name, point_name), attribute)
             cases.append(pytest.param(
                 term_name, point_name, id=f"{term_name}-{point_name}",
-                marks=([pytest.mark.xfail(strict=True, reason=reason)]
+                marks=([pytest.mark.xfail(strict=True, reason=reason,
+                                          raises=AssertionError)]
                        if reason else [])))
     return cases
 

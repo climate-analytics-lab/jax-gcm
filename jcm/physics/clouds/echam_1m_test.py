@@ -1295,7 +1295,7 @@ class TestColumnSweepStateGradients:
             assert np.all(np.isfinite(np.asarray(leaf))), "reverse-mode gradient"
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="a clear layer sits exactly on three switches at once — "
                "echam_1m.py:1241/1245 `cloud_fraction > config.epsilon`, "
                ":444 `qc_in_cloud > 0.0` and :536 `qi_in_cloud > 0.0` — so "

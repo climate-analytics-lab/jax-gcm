@@ -1460,7 +1460,7 @@ class TestColumnSolveGradients:
         )
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=True, raises=AssertionError,
         reason="no float32 central difference resolves this operator: the "
                "projections are O(1e4) and cancel to O(1e3) across the six "
                "tendencies, and the tridiagonal scans in matrix_solver.py:408/433 "
