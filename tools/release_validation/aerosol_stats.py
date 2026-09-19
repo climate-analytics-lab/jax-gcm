@@ -139,14 +139,13 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 #: al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
 #: slice this port does not carry, so the comparable target is 642 Tg/yr
-#: present-day and 485 pre-industrial. The band spans those and the 829 Tg/yr
-#: a calibrated T63 year emits, which is far wider than the 6 % run-to-run
-#: spread and deliberately so; the top is held below Kok et al. (2021)'s
-#: PM20 constraint of 1750 (1330-2200) Tg/yr, since a sub-10 µm budget cannot
-#: exceed a sub-20 µm total. The derivation is in
-#: ``docs/source/science/aerosol.md``. It is NOT a tuning target: it is the
-#: check that dust has neither vanished (HAM's untuned threshold gives jcm
-#: 5.7 Tg/yr, #808) nor run away.
+#: present-day and 485 pre-industrial. The band is a factor ~1.6 below and ~2
+#: above that: it spans both converted values and the 829 Tg/yr a calibrated
+#: T63 year emits, and is far wider than the 6 % run-to-run spread, so it
+#: cannot act as a tuning target. The derivation and the literature it is
+#: read against are in ``docs/source/science/aerosol.md``. It is the check
+#: that dust has neither vanished (HAM's untuned threshold gives jcm 5.7
+#: Tg/yr, #808) nor run away (the same model's LGM run emits 5159).
 DUST_EMISSION_TG_PER_YR = (400.0, 1300.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:

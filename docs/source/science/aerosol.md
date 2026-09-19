@@ -582,18 +582,23 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   AeroCom phase I gives a median of 1123 Tg/yr across 15 models with a spread
   of roughly 500-4400 (Huneeus et al. 2011, ACP 11, 7781), but its members use
   different upper size cut-offs, so it measures inter-model spread rather than
-  a value to hit. Kok et al. (2021, ACP 21, 8169) constrain global emission
-  observationally at 1750 (1330-2200) Tg/yr for **PM20**, dust with
-  *geometric* diameter below 20 µm — a strictly wider window than this one, so
-  it bounds a D < 10 µm budget from above rather than pinning it.
+  a value to hit. Kok et al. (2021, ACP 21, 8169, Table 1, "All source
+  regions") put the AeroCom ensemble at 1.7 (1.2-3.1) × 10³ Tg/yr and their
+  own observationally-constrained inverse model at **4.7 (3.4-9.1) × 10³
+  Tg/yr** for dust with *geometric* diameter ≤ 20 µm. Their window is twice
+  this one's and their central value is seven times HAM's converted budget,
+  which is their point: models, this one included, carry far less coarse dust
+  than the observations support. It is a statement about the size range being
+  compared, not a bound this port can be scored against.
 
-  The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-1300 Tg/yr** around
-  that 642: wide enough for the parent model's own pre-industrial value (485)
-  and for a T63 year that is 29 % above its present-day point (the 829 Tg/yr
-  measured here), far wider than the 6 % run-to-run spread, and capped below
-  Kok's PM20 lower bound, since a sub-10 µm budget cannot exceed a PM20 total.
-  It is a release check that dust has not vanished or run away, not a tuning
-  target — which is why it is also exempt from the regression tier.
+  The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-1300 Tg/yr**, roughly
+  a factor of 1.6 below and 2 above that 642. It spans the parent model's own
+  pre-industrial value (485) and a T63 year 29 % above its present-day point
+  (the 829 Tg/yr measured here), and is far wider than the 6 % run-to-run
+  spread, so it cannot function as a tuning target — which is also why it is
+  exempt from the regression tier. It is the check that dust has neither
+  vanished (HAM's untuned threshold gives 5.7 Tg/yr here) nor run away (the
+  same parent model's last-glacial-maximum run emits 5159 Tg/yr).
 
   The value is **0.5**, calibrated on 30-day T63L47 April members started from
   an ERA5 state and driven by the model's own instantaneous 10 m winds:
