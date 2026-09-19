@@ -283,6 +283,21 @@ def _uneven_window_reason(days: np.ndarray,
     return None
 
 
+def covered_days(days: np.ndarray,
+                 window_start: float | None = None) -> float:
+    """Days of simulation a record actually covers, first window included.
+
+    ``days[-1] - days[0]`` is the distance between chunk LABELS, which drops
+    the first window: a complete 300-day run written in 30-day chunks is
+    labelled 30…300 and spans only 270 by that measure. For a threshold that
+    decides whether a year is long enough to annualise, that difference
+    decides whether the gate runs at all.
+    """
+    if np.asarray(days).size == 0:
+        return 0.0
+    return float(np.sum(chunk_durations(days, window_start)))
+
+
 def chunk_day(path, index: int | None = None) -> float | None:
     """Return the END day a chunk file is labelled with (``*_day<N>*.nc``).
 
@@ -710,7 +725,8 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # year written as twelve 30-day chunks and a final 5-day one would
     # otherwise give those five days a month's weight, and dust is seasonal
     # enough for that to move the annual total across the band.
-    if ("emi_du" in series and span_days >= MIN_DUST_WINDOW_DAYS
+    if ("emi_du" in series
+            and covered_days(days, window_start) >= MIN_DUST_WINDOW_DAYS
             and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))
             and _uneven_window_reason(days, window_start) is None):
         stats["dust_emission_tg_per_yr"] = (
@@ -865,9 +881,10 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                      "the band is a T63 calibration (#808/#810) and this "
                      "output is on another grid, where nduscale_reg keeps "
                      "HAM's untuned value"))
-    elif span < MIN_DUST_WINDOW_DAYS:
+    elif covered_days(days, window_start) < MIN_DUST_WINDOW_DAYS:
         rows.append(("dust_emission_tg_per_yr",
-                     f"window spans {span:.0f} days; dust emission is "
+                     f"window spans {covered_days(days, window_start):.0f} "
+                     "days; dust emission is "
                      f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
                      "days measures the season, not the year"))
     elif not np.all(np.isfinite(series["emi_du"])):

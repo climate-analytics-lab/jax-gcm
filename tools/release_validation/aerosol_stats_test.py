@@ -1158,6 +1158,17 @@ class TestDustEmissionBand:
             "dust_emission_tg_per_yr"]
         assert "missing" in reason and "day 105" in reason
 
+    def test_a_300_day_run_in_30_day_chunks_is_scored(self):
+        # Labels 30..300 are 270 days apart but cover 300; measuring the gap
+        # between labels would let a complete 300-day run slip past the gate
+        # as "unscored", which does not fail the command.
+        days = np.array([30.0 * (i + 1) for i in range(10)])
+        flux = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": np.full(10, flux), "nlat": np.full(10, 96.0)}
+        stats = A.summarize(days, series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                 rel=1e-6)
+
     def test_a_short_final_chunk_is_still_scored(self):
         # run/longrun.yaml's twelve 30-day chunks plus a 5-day tail is a
         # legitimate record, not a hole.
