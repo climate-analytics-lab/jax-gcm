@@ -314,6 +314,19 @@ class SnowAndMoistureTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(calm_diags[DUST_SALTATION_GATE_KEY]), 0.0)
 
+        # Fully snow-covered: windy and erodible, but it would emit nothing
+        # however dry the soil, so it must stay OUT of the denominator — the
+        # gate is the flux computed without the cut-off, not the u* pre-gate.
+        snowy, snow_diags = term(*_inputs(u10=9.0, wetness=0.3, snow=1.0))
+        np.testing.assert_allclose(_total_mass(snowy), 0.0)
+        np.testing.assert_allclose(
+            np.asarray(snow_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
+        # No erodible source: likewise outside the denominator.
+        _, bare_diags = term(*_inputs(u10=9.0, wetness=0.3, source=0.0))
+        np.testing.assert_allclose(
+            np.asarray(bare_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
     def test_damp_soil_still_emits_with_fecan_off(self):
         for ndust in (3, 4):
             term = DustEmissions(params=DustParameters.preset(ndust))

@@ -645,10 +645,14 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # a window long enough to mean the year rather than a season, and only on
     # the grid the band was calibrated for — an unscored statistic is dropped
     # here and explained in :func:`unscored_gates`, exactly like the drifts.
+    # Every chunk must contribute: ``nanmean`` over a series with a missing
+    # chunk would annualise the chunks that happen to be present, so a year
+    # whose emission diagnostic vanished half-way — a mixed-version rerun, a
+    # corrupted file — could still score inside the band.
     if ("emi_du" in series and span_days >= MIN_DUST_WINDOW_DAYS
-            and _is_t63(series)):
+            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))):
         stats["dust_emission_tg_per_yr"] = (
-            float(np.nanmean(series["emi_du"]))
+            float(np.mean(series["emi_du"]))
             * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
 
     if "so4_above_500hPa" in series and "burden_so4" in series:
@@ -803,6 +807,12 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
                      f"window spans {span:.0f} days; dust emission is "
                      f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
                      "days measures the season, not the year"))
+    elif not np.all(np.isfinite(series["emi_du"])):
+        missing = int(np.sum(~np.isfinite(np.asarray(series["emi_du"]))))
+        rows.append(("dust_emission_tg_per_yr",
+                     f"{missing} of {len(series['emi_du'])} chunks carry no "
+                     "finite emi_du, and an annual budget averaged over the "
+                     "rest would not be this run's year"))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))

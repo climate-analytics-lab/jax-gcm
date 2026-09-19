@@ -1130,3 +1130,13 @@ class TestDustEmissionBand:
         assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
         assert "emi_du" in dict(A.unscored_gates(days, series))[
             "dust_emission_tg_per_yr"]
+
+    def test_a_year_missing_chunks_is_unscored_not_averaged_over_the_rest(self):
+        # A year whose emission diagnostic vanished part-way must not be
+        # scored from the chunks that survived: that is a different year.
+        days, series = self._series(450.0)
+        series["emi_du"][10:20] = np.nan
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+        assert "10 of 74" in reason

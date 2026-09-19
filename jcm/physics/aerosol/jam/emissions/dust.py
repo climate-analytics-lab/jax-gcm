@@ -92,11 +92,15 @@ DUST_SUPERCOARSE_KEY = "dust_supercoarse_flux"
 #: Per-column relative soil wetness the saturation cut-off actually read
 #: (ECHAM ``ws/wsmx``; 0 where the forcing supplies none).
 DUST_WETNESS_KEY = "dust_soil_wetness"
-#: Per-column 1/0 flag: every emission condition *except* the wetness cut-off
-#: is satisfied (wind over threshold, erodible source, drag partition alive).
-#: Published alongside the wetness so the cut-off's firing frequency is
-#: measurable as a conditional one — ``mean(wetness > w0 | gate)`` — rather
-#: than being diluted by the ocean and the forests, where it is meaningless.
+#: Per-column 1/0 flag: the column would emit if the soil were dry. It is the
+#: emitted mass recomputed with the wetness cut-off removed and everything else
+#: in place — the ``u*`` pre-gate, the per-class thresholds, the snow cover and
+#: the erodible fraction — rather than the cheap ``u*`` pre-gate alone, which
+#: is true in columns that emit nothing whatever the wetness (snow-covered, or
+#: over the pre-gate but under every class threshold) and would dilute the
+#: statistic. Published alongside the wetness so the cut-off's firing frequency
+#: is measurable as a conditional one, ``mean(wetness > w0 | gate)``, instead of
+#: being averaged over the ocean and the forests where it is meaningless.
 DUST_SALTATION_GATE_KEY = "dust_saltation_gate"
 
 #: The 17×14 soil table of ``mo_ham_dust.f90::set_dust_data``: four
@@ -703,7 +707,8 @@ class DustEmissions(PhysicsTerm):
         # g cm⁻² s⁻¹ -> kg m⁻² s⁻¹ is ×1e4 (area) ×1e-3 (mass); the snow factor
         # and the potential-source multiplier are both unconditional, and a
         # saturated soil emits nothing in every preset.
-        scale = jnp.where(mask & (wetness <= p.w0), 10.0 * (1.0 - snow) * pot, 0.0)
+        dry_scale = jnp.where(mask, 10.0 * (1.0 - snow) * pot, 0.0)
+        scale = jnp.where(wetness <= p.w0, dry_scale, 0.0)
         mass_acc = moments[0] * scale
         num_acc = moments[1] * scale
         mass_cor = moments[2] * scale
@@ -734,7 +739,8 @@ class DustEmissions(PhysicsTerm):
                            from_model_level),
                        DUST_SUPERCOARSE_KEY: mass_all - mass_acc - mass_cor,
                        DUST_WETNESS_KEY: wetness,
-                       DUST_SALTATION_GATE_KEY: mask.astype(wetness.dtype)}
+                       DUST_SALTATION_GATE_KEY: (
+                           moments[4] * dry_scale > 0.0).astype(wetness.dtype)}
         return tendency, diagnostics
 
 
