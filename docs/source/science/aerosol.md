@@ -551,8 +551,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   because HAM's eight regional parameters cannot be identified against a
   single global budget: the regional *ratios* stay HAM's and only the level
   moves. It applies at T63 only — T106 and ne30 keep HAM's untuned ``0.86``,
-  since their source fields are themselves interpolated from T63 (#810). The
-  shipped value is 1.0, i.e. HAM's vector as published.
+  since their source fields are themselves interpolated from T63 (#810).
 
   The **target** the scalar is set against is the present-day D < 10 µm
   emission, for which the literature gives: ECHAM6.3-HAM2.3 itself, the model
@@ -568,37 +567,36 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   column as ``dust_supercoarse_flux`` so the comparison can be made either
   way.
 
-  The scalar is **steep**, which is why it is worth measuring rather than
-  reasoning about. Driving this exact scheme offline with ERA5 6-hourly 10 m
-  winds regridded to T63 — every other input the model's own — the annual
-  D < 10 µm budget is:
+  The value is **0.5**, calibrated on 30-day T63L47 April members started from
+  an ERA5 state and driven by the model's own instantaneous 10 m winds:
 
-  | ``nduscale_scale`` | 1.00 | 0.80 | 0.65 | 0.50 |
-  |---|---|---|---|---|
-  | Tg/yr (ERA5 winds, 2005) | 125 | 421 | 1024 | 2540 |
+  | ``nduscale_scale`` | 1.00 | 0.65 | 0.45 |
+  |---|---|---|---|
+  | April D < 10 µm, Tg/yr | 5.7 | 294.6 | 1838.6 |
+  | discarded ≥ 10 µm | 77.1 % | 75.2 % | 71.1 % |
 
-  A factor 2 in the threshold is a factor ~20 in emission, because saltation
-  samples the far tail of the wind distribution. The same table gives the
-  seasonal factor a 30-day April window needs to become an annual budget:
-  April/annual runs 1.05 to 1.33 across that range.
+  A factor 2 in the threshold is a factor ~300 in emission here, because
+  saltation samples the far tail of the wind distribution and jcm's tail is
+  thin. That steepness is the reason the scalar is fitted to a run rather than
+  inherited, and the reason it is one scalar and not eight.
 
-  One consequence is firm without any model run: on a *perfect* wind field
-  HAM's published threshold emits ~10x less than the parent model's own
-  1221 Tg/yr, so the retune is required by the threshold alone and not only by
-  a host-model wind bias. Reaching 1000-1200 Tg/yr on ERA5 winds takes 0.65,
-  and a weaker wind tail would need a lower threshold for the same budget — so
-  0.65 bounds the T63 scalar from above *provided* jcm's instantaneous tail is
-  no stronger than ERA5's, which is the comparison below.
-- The scalar ships at HAM's 1.0 because jcm's *instantaneous* 10 m wind tail
-  over the source cells is not yet measured. Emission is an exceedance
-  frequency in the far tail, and a time-mean wind cannot resolve one — what
-  exists today is 5-day means. The reference to measure against is ERA5 on the
-  same T63 cells, 6-hourly and instantaneous: over the 1009 April source cells
-  mean 4.00 m/s, p50 3.67, p90 6.48, p99 9.39, max 14.33, with 11.8 % of
-  cell-frames above 6.24 m/s and 4.4 % above 7.62 m/s (the saltation onsets at
-  ``nduscale`` 0.86 and 1.05). The run that settles it saves
-  ``vertical_diffusion.wind_10m`` through ``run.snapshot_variables``, the
-  interval-instantaneous snapshot stream, rather than as a chunk mean.
+  The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
+  T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
+  0.80, 1024 at 0.65 and 2540 at 0.50 annually, with April/annual running 1.05
+  to 1.33. Two things follow from the pair of curves. HAM's published
+  threshold is ~10x short of the parent model's own 1221 Tg/yr **even on a
+  perfect wind field**, so the retune is required by the threshold and not
+  only by a host-model wind bias. And jcm needs a lower multiplier than ERA5's
+  winds would, because its wind tail is thinner: over the same T63 April
+  source cells the two agree on the mean (3.98 m/s against 4.00) and diverge
+  in the tail, 0.69 % of cell-samples above 7.62 m/s against ERA5's 4.41 %,
+  and 0.003 % against 0.332 % above 10.52 m/s (the saltation onsets at
+  ``nduscale`` 1.05 and 1.45). Both tables are instantaneous samples over the
+  cells that pass the vegetation gate; a time-mean wind cannot resolve an
+  exceedance frequency at all, which is why the calibration run saves
+  ``vertical_diffusion.wind_10m`` through ``run.snapshot_variables`` rather
+  than as a chunk mean.
+
 - Whether HAM's nudged/free-running split of ``nduscale_reg`` is needed in jcm
   is likewise unmeasured, so both vectors are kept. ``nudging/era5.yaml``
   relaxes winds only and excludes the two lowest levels, so it does not set

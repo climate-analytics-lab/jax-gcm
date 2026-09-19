@@ -155,13 +155,14 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
 #: native HAMMOZ source fields (#810).
 #:
-#: The shipped value is 1.0 — HAM's vector unchanged — so the scheme's
-#: behaviour is HAM's until a jcm T63 emission budget is measured against the
-#: target range documented in ``docs/source/science/aerosol.md``. The
-#: sensitivity is steep: driving the same scheme with ERA5 10 m winds, the
-#: annual D < 10 µm budget runs 125 Tg/yr at 1.0, 421 at 0.80, 1024 at 0.65 and
-#: 2540 at 0.50, so the value is worth measuring rather than guessing.
-NDUSCALE_JCM_T63_SCALE = 1.0
+#: 0.5 is calibrated from 30-day T63L47 April members driven by jcm's own
+#: winds: HAM's published vector emits 5.7 Tg/yr there, 0.65 gives 295 and
+#: 0.45 gives 1839, so 0.5 puts the annual D < 10 µm budget near the middle of
+#: the target range in ``docs/source/science/aerosol.md``. The sensitivity is
+#: steep — a factor 2 in the threshold is a factor ~300 in emission on this
+#: wind distribution — which is why the number is measured rather than
+#: inherited.
+NDUSCALE_JCM_T63_SCALE = 0.5
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,

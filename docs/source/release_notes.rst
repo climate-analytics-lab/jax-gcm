@@ -13,10 +13,16 @@ Unreleased — dust emission reads a real soil wetness and carries a tuning scal
   (#787). The channel is additive: a forcing file that lacks it leaves the
   cut-off inert and logs a warning naming the fallback, so existing bundles
   still run, and the mirror's surface bundles gain it on their next build.
-  Dust also gains one global multiplier on HAM's T63 regional threshold
-  vector (``physics.jam_dust_nduscale_scale``, shipped at HAM's value) and the
-  annual D < 10 µm emission becomes a release-validation gate on any T63 run
-  of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 250-1500 Tg/yr) (#808).
+  **Behaviour change:** dust emission at T63 is retuned. HAM's ECHAM5-tuned
+  threshold vector emits 5.7 Tg/yr of D < 10 µm dust on jcm's wind
+  distribution, two orders of magnitude below the 1000-1200 Tg/yr its parent
+  model gives, because saltation samples the far tail of the 10 m wind
+  distribution and jcm's tail is thinner. A single global multiplier on that
+  vector, ``NDUSCALE_JCM_T63_SCALE`` (exposed per run as
+  ``physics.jam_dust_nduscale_scale``), is calibrated to **0.5** at T63;
+  T106 and ne30 keep HAM's untuned value (#810). The annual D < 10 µm
+  emission also becomes a release-validation gate on any T63 run of 300 days
+  or more (``DUST_EMISSION_TG_PER_YR``, 250-1500 Tg/yr) (#808).
 
 Unreleased — checkpoints carry a schema stamp and migrate by field name
 ------------------------------------------------------------------------

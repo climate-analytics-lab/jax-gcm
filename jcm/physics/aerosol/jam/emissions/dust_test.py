@@ -393,7 +393,10 @@ class PreferentialSourceTest(unittest.TestCase):
         np.testing.assert_allclose(_total_mass(tend), 0.0)
 
     def test_high_wind_switches_the_emitted_spectrum_to_clay(self):
-        term = DustEmissions()
+        # The reference fractions are transcribed from the Fortran at HAM's
+        # own threshold vector, so the term is built with jcm's calibration
+        # scalar switched off: this pins the PORT, not the tuning.
+        term = DustEmissions(nduscale_scale=1.0)
         below, _ = term(*_inputs(psrc=1.0, u10=HIGH_WIND_MS - 1e-6))
         above, _ = term(*_inputs(psrc=1.0, u10=HIGH_WIND_MS + 1e-6))
 
@@ -554,7 +557,8 @@ class RegionTuningTest(unittest.TestCase):
         nudged.cache_coords(coords)
         np.testing.assert_allclose(
             np.asarray(nudged.params.get_value().nduscale_reg),
-            [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            np.array([0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            * NDUSCALE_JCM_T63_SCALE, rtol=1e-6)
         # A lower threshold multiplier means MORE emission, so the nudged
         # preset is not a no-op.
         self.assertTrue(np.all(
@@ -593,7 +597,9 @@ class EmittedSizeTest(unittest.TestCase):
     def test_mass_and_number_are_consistent_with_the_effective_diameter(self):
         from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-        term = DustEmissions()
+        # Hand-computed against MAM4's own emission windows at HAM's
+        # threshold vector, so jcm's calibration scalar is switched off here.
+        term = DustEmissions(nduscale_scale=1.0)
         tend, _ = term(*_inputs(soil={"type2": 1.0}, u10=13.8))
         rho_dz = 1.2 * 100.0
         density = MAM4_SPEC.species_props("du").density
