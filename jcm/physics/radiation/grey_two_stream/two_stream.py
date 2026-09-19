@@ -153,6 +153,12 @@ def layer_reflectance_transmittance(
     # Ensure denominator is never zero
     denom = jnp.where(jnp.abs(denom) < 1e-10, 1e-10, denom)
 
+    # These two lines and the asymptotic branch below use gamma2, and
+    # gamma2/gamma1, where the homogeneous-layer two-stream solution has
+    # Gamma = gamma2 / (gamma1 + lambda). That is why a conservative layer
+    # reflects nothing here and why R_dif steps at the large_tau switch; the
+    # forward correction is tracked in #848. This module keeps the formula as
+    # written and only makes its derivative finite in float32.
     R_dif_normal = gamma2 * (1.0 - exp_minus_sq) / denom
     T_dif_normal = (1.0 - R_dif_normal * gamma2 / gamma1_safe) * exp_minus_safe
     
