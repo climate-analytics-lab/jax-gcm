@@ -62,9 +62,11 @@ about that leaf, and a ``stop_gradient`` on it would leave the check green.
 ``_tangent`` therefore scales each input leaf's direction **by** that leaf's
 primal RMS, which turns the ladder into one of *relative* steps: rung ``eps``
 moves every leaf by a fraction ``eps`` of its own magnitude, resolvable in
-float32 whatever that magnitude is, and every leaf contributes to the projection
-on comparable terms. Both scalings read only the primal, never either
-derivative, so neither can launder a wrong gradient into agreement.
+float32 across the whole range such a field can hold — the two ends where the
+scaled draw leaves that range are derived in ``_tangent`` — and every leaf
+contributes to the projection on comparable terms. Both scalings read only the
+primal, never either derivative, so neither can launder a wrong gradient into
+agreement.
 
 The scale is the RMS and not the standard deviation, though the RMS of an
 offset-dominated field — a temperature in kelvin, a dry static energy — is
@@ -81,9 +83,12 @@ answer is that no central difference exists there.
 The checks stay in float32: enabling x64 mid-suite is what issue #729's
 ``conftest`` pinning exists to prevent, and the arguments these tests build are
 float32, so ``jcm.utils.convert_back`` would quietly drop every perturbation to
-a float32 leaf if the default float type were promoted underneath it. The one
-place float64 appears is ``_inner_prod``, which reduces already-computed float32
-arrays on the host; nothing JAX traces is promoted by it.
+a float32 leaf if the default float type were promoted underneath it. float64
+appears in exactly two places, both host-side reductions over already-computed
+arrays: ``_inner_prod``'s contraction and ``_scaled_direction``'s RMS. Both
+reduce *squares* or products of terms spanning the schemes' whole dynamic range,
+which is precisely what float32 cannot accumulate; nothing JAX traces is
+promoted by either.
 """
 
 import dataclasses
@@ -208,8 +213,22 @@ def _is_differentiable(leaf):
 def _scaled_direction(tree, seed, scale_from_rms):
     """Per-leaf normal direction, weighted by a function of the leaf's primal RMS.
 
-    The RMS is taken in float32 whatever the leaf's dtype, so the weight a leaf
-    gets does not depend on the precision it happens to be stored in.
+    The RMS is reduced on the host in **float64**, whatever the leaf's dtype,
+    for the same reason ``_inner_prod`` contracts there: the quantity is a mean
+    of *squares*, so the accumulator needs twice the leaf's dynamic range, and
+    a float32 square underflows to zero for values below sqrt(2**-126) ~
+    1.08e-19 and overflows to infinity above ~1.8e19. Squaring in float32 put
+    both ends of that window inside the range of ordinary model fields: a
+    spectral-ringing condensate tail at 4e-30 kg/kg (the state
+    ``clouds/echam_1m.py`` is written for) measured an RMS of exactly 0 and
+    fell through to the unit scale below, taking an O(1e-3) *absolute* step —
+    1e26 times its own magnitude — while an RMS at or above 1.8e19 produced a
+    non-finite tangent and a cotangent of ``1/inf = 0`` that dropped the leaf
+    from the projection. Neither showed up as a failure; both reported on a
+    state the model never reaches. In float64 the square underflows only below
+    ~1.5e-162, so the ``> 1e-30`` test below is the binding one and means what
+    it says. This is a host-side reduction over an already-computed array, not
+    ``jax_enable_x64``: nothing JAX traces is promoted by it.
 
     A leaf whose RMS is ~0 has no magnitude to be relative to, and its primal
     says nothing about the scale ``f`` is sensitive on — an identically-zero
@@ -222,10 +241,8 @@ def _scaled_direction(tree, seed, scale_from_rms):
     An *empty* leaf — ``ForcingData`` carries a zero-length ozone climatology
     whenever none is loaded, which is every ECHAM fixture — is that same case
     and takes the same 1.0, but it is read off ``size`` rather than from a mean
-    over no elements: ``jnp.mean`` of an empty array is NaN, and although NaN
-    fails the ``> 1e-30`` test and so lands on 1.0 anyway, computing it at all
-    aborts the whole check under ``jax_debug_nans`` — the flag a caller reaches
-    for the moment one of these checks reports a non-finite gradient.
+    over no elements, which is a NaN (and a warning) that would then have to be
+    relied on to fail the ``> 1e-30`` test.
     """
     leaves, treedef = jax.tree_util.tree_flatten(tree)
     names = _leaf_names(tree)
@@ -235,8 +252,8 @@ def _scaled_direction(tree, seed, scale_from_rms):
         if not _is_differentiable(leaf):
             out.append(np.zeros(jnp.shape(leaf), dtype=jax.dtypes.float0))
             continue
-        values = jnp.asarray(leaf, jnp.float32)
-        rms = float(jnp.sqrt(jnp.mean(values**2))) if values.size else 0.0
+        values = np.asarray(leaf, np.float64)
+        rms = float(np.sqrt(np.mean(values**2))) if values.size else 0.0
         scale = scale_from_rms(rms) if rms > 1e-30 else 1.0
         out.append(_normal(name, jnp.shape(leaf), dtype, seed) * scale)
     return jax.tree_util.tree_unflatten(treedef, out)
@@ -276,6 +293,22 @@ def _tangent(primal, seed):
     the same direction; a scaling applied to only one of them would show up as
     a spurious disagreement.
 
+    The RMS is computed in float64 but the tangent is an array of the *leaf's*
+    dtype, so the product ``draw * rms`` has to land in float32's **normal**
+    range, |value| in roughly ``[1.2e-38, 3.4e38]``. Within it — and with the
+    ``> 1e-30`` fallback in ``_scaled_direction`` cutting in first at the
+    bottom — the realised displacement is the rung, measured at 1.06e-3 at the
+    top rung and 1.03e-6 at the bottom for leaves from 1e-30 to 1e38.
+    Above it, ``draw * rms`` overflows to infinity and the whole check is
+    non-finite, which is loud. Below it there is no graceful denormal tail:
+    XLA flushes float32 denormals to zero, so entries drop to exactly 0 and
+    the leaf goes unperturbed — silent, and the reason the reciprocal scaling
+    in ``_cotangent`` (which reaches the bottom of that window from the *top*
+    of the leaf range) is worth stating as a limit rather than left implicit.
+    Both ends sit outside what a float32 model field can hold at all, so
+    neither is guarded; what mattered was that squaring in float32 used to
+    pull them in to 1.08e-19 and 1.8e19, where real fields do live.
+
     """
     return _scaled_direction(primal, seed, lambda rms: rms)
 
@@ -286,6 +319,12 @@ def _cotangent(primal, seed):
     Without the scaling a single O(1e3) leaf dominates the projection and a
     gradient zeroed on an O(1e-5) leaf moves it by nothing. The scale is the
     inverse of the leaf's primal RMS, which is independent of both derivatives.
+
+    Being a reciprocal, this one runs ``_tangent``'s float32 window backwards:
+    an output leaf whose RMS is at or above ~1e38 gets a scale below float32's
+    smallest normal, XLA flushes it to zero, and the leaf silently leaves the
+    projection. No float32 field reaches that, and the ``> 1e-30`` fallback
+    stops a near-zero leaf from asking for an infinite one at the other end.
 
     """
     return _scaled_direction(primal, seed, lambda rms: 1.0 / rms)

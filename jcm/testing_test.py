@@ -231,6 +231,51 @@ class TestCheckGradients(unittest.TestCase):
         self.assertFalse(
             np.array_equal(big + DEFAULT_STEPS[-1] * scaled, big))
 
+    def test_the_step_is_the_rung_at_both_ends_of_the_float32_range(self):
+        """The RMS is a mean of *squares*, so it needs twice the leaf's dynamic
+        range and cannot be taken in float32: a squared 1.0e-25 underflows to
+        zero, which reads as "no magnitude" and falls through to the unit
+        scale, and a squared 1.0e+25 overflows to infinity.
+
+        Both ends are inside the range of ordinary model fields, which is what
+        makes this more than an arithmetic curiosity — a spectral-ringing
+        condensate tail at 4e-30 kg/kg is the state ``echam_1m`` is written
+        for, and it was being displaced by ~1e22 times its own value.
+        """
+        top = DEFAULT_STEPS[0]
+        for magnitude in (1e-25, 1e25):
+            leaf = jnp.full((64,), magnitude)
+            tangent = _tangent((leaf,), 0)[0]
+            self.assertTrue(np.all(np.isfinite(np.asarray(tangent))), magnitude)
+            displaced = np.asarray(leaf + top * tangent, np.float64)
+            relative = float(np.sqrt(np.mean((displaced / magnitude - 1.0)**2)))
+            # The draw is standard normal, so its own RMS is ~1 over 64 samples.
+            self.assertAlmostEqual(relative / top, 1.0, delta=0.5, msg=magnitude)
+
+    def test_a_gradient_lost_at_either_end_of_that_range_is_caught(self):
+        """The same discrimination as the O(1e5) input above, at both extremes:
+        a leaf is only checked at all while its own perturbation is the rung,
+        so these two are the cases a float32 RMS could not reach. With the
+        scale fallen back to 1.0 a 1e-25 leaf moved by 1e22 times its value,
+        and a 1e25 leaf got an infinite tangent; either way the *correct*
+        gradient was rejected as having no usable reference, and no wrong one
+        could be told apart from it.
+        """
+        x = jnp.linspace(0.5, 2.0, 16)
+        tail, big = jnp.full((16,), 1e-25), jnp.full((16,), 1e25)
+
+        def lost(x_in, extreme, weight):
+            return (jnp.sum(x_in**2)
+                    + jnp.sum(jnp.sin(weight * jax.lax.stop_gradient(extreme))))
+
+        for extreme, weight in ((tail, 1e25), (big, 1e-25)):
+            # Live, the same function is an ordinary smooth check.
+            check_gradients(lambda a, b, w=weight: jnp.sum(a**2)
+                            + jnp.sum(jnp.sin(w * b)), (x, extreme), rtol=1e-3)
+            with self.assertRaises(AssertionError):
+                check_gradients(lambda a, b, w=weight: lost(a, b, w),
+                                (x, extreme), rtol=1e-3)
+
     def test_a_zero_leaf_falls_back_to_an_absolute_step(self):
         """An identically-zero leaf — a cloud-water field a fixture never fills
         — has no magnitude to be relative to, and its primal says nothing about
