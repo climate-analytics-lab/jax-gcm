@@ -502,6 +502,7 @@ class TestModelUnit(unittest.TestCase):
                   "echam-jam-t63-l95": "mam4_jax"}
 
         checked = 0
+        not_local = []
         for member in members():
             bands_file = band_path(member)
             if not bands_file.exists():
@@ -525,13 +526,19 @@ class TestModelUnit(unittest.TestCase):
                 )
                 self.assertTrue(stat_vars, f"{bands_file} carries no bands")
 
-                # A missing state is not a skip: the mirror fetch raises with
-                # the prefetch instructions an internet-less node needs, and
-                # swallowing that would turn a broken fixture into a silent
-                # pass. ``JCM_FIXTURE_STATE_DIR`` points this at locally
-                # generated states, which is how a regenerated fixture is
-                # checked before it is published.
-                state = resolve_state(member)
+                # The state path comes from the band file, digest and all,
+                # so these bands are always checked against the state they
+                # were generated against. A mirror fetch that fails raises —
+                # its message names the prefetch command — rather than being
+                # swallowed into a pass. ``JCM_FIXTURE_STATE_DIR`` points
+                # this at locally generated states instead, and returns None
+                # for a member absent from that directory, since states are
+                # generated one member at a time and the point of the
+                # override is to validate the pair before publishing it.
+                state = resolve_state(bands.attrs["init_state"])
+                if state is None:
+                    not_local.append(member)
+                    continue
                 # Each member's window runs in its own interpreter. JAX never
                 # returns pool memory, so walking the whole matrix in one
                 # process starves whichever member comes last — reproducibly
@@ -543,19 +550,28 @@ class TestModelUnit(unittest.TestCase):
                         member, state, tmp)
 
                 tol = 3  # tolerance in standard deviations
-                # Degenerate-band guard (#744), widened. ``std == 0`` is the
-                # wrong threshold for "this band carries no information": a
-                # band only has to be narrower than float32 can resolve to
-                # fail for reasons with no physical content, and ``std``
-                # reaches that while still strictly positive. The case that
-                # forced this was ``pressure_full`` on a hybrid grid's
-                # near-pure-``a`` levels, where the stored std was 0.55 of a
-                # float32 ULP and an independent run on identical code sat
-                # exactly at the band edge — a pass by equality alone. Any
-                # ``std`` at or below float32 resolution therefore takes the
-                # same relative+absolute fallback an exact zero already did.
-                # 1e-6 is ~8 ULP, orders below any meaningful std/|mean|.
-                rtol, atol, rel_eps = 0.25, 1e-8, 1e-6
+                # #744's degenerate-band fallback, scoped to ``std`` being
+                # *exactly* zero: there the band carries no information at all
+                # — the specific/relative-humidity tail is physically
+                # negligible (~1e-24…1e-37 kg kg-1) and a hybrid grid's upper
+                # ``pressure_full`` levels are pure a-coefficient constants —
+                # so a relative+absolute tolerance stands in for it. It must
+                # not be extended to merely *small* ``std``: doing that is a
+                # far worse bug than the one it would fix, handing seven
+                # ``pressure_full`` levels of these fixtures half-widths of
+                # 400-2800 Pa, wide enough to pass a gross pressure error.
+                rtol, atol = 0.25, 1e-8
+                # A strictly positive ``std`` can still be finer than float32
+                # resolves, and then the band is narrower than the arithmetic
+                # underneath it: ``pressure_full`` near the pure-a levels
+                # stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of a ULP — giving a
+                # three-ULP band that an independent run, in another process
+                # on identical code, sat exactly three ULP from. That is a
+                # pass by equality, one ULP from red. Floor such a band at a
+                # few ULP of its own magnitude instead: 1e-6 (~8 ULP) lifts
+                # that level to 7.4e-3 Pa and leaves every informative band
+                # untouched (it widens nothing else in these fixtures).
+                ulp_floor = 1e-6
                 # Second floor, on the half-width: ``<var>.noise`` is the
                 # measured peak-to-peak spread of this same window across
                 # independent repeats in separate processes, i.e. what the
@@ -574,8 +590,8 @@ class TestModelUnit(unittest.TestCase):
                         "predates the reproducibility floor; regenerate it",
                     )
                     half_width = xr.where(
-                        std > rel_eps * abs(mean),
-                        tol * std,
+                        std > 0,
+                        np.maximum(tol * std, ulp_floor * abs(mean)),
                         rtol * abs(mean) + atol,
                     )
                     half_width = np.maximum(
@@ -593,10 +609,14 @@ class TestModelUnit(unittest.TestCase):
                         f"({member!r}) if the deviation is intentional."
                     )
                 checked += 1
+        if not_local:
+            print(
+                f"\nJCM_FIXTURE_STATE_DIR held no state for: "
+                f"{', '.join(not_local)} (checked {checked} member(s))")
         if not checked:
             pytest.skip(
-                "no matrix member had both a band file and its optional "
-                "extras available",
+                "no matrix member had a band file, its optional extras and "
+                "its init state available",
             )
 
 

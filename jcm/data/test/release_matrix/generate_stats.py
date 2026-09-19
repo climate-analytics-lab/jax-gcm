@@ -140,41 +140,64 @@ def band_path(member: str) -> Path:
     return _HERE / f"{member}_statistics.nc"
 
 
-def state_mirror_path(member: str) -> str:
-    """Mirror path of ``member``'s init state, as ``fetch`` takes it."""
-    return f"bundles/{MEMBER_BUNDLE[member]}/init_states/{member}_fixture.msgpack"
+def state_digest(path) -> str:
+    """Short content digest used to version a published state file."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
 
 
-def resolve_state(member: str) -> str:
-    """Local path to ``member``'s init state, fetching it if necessary.
+def state_mirror_path(member: str, digest: str) -> str:
+    """Mirror path of ``member``'s init state, as ``fetch`` takes it.
 
-    Normally the mirror, resolved cache-first, so a warm cache needs no
-    network and a cold one on an internet-less node fails with the prefetch
-    instructions rather than a bare error.
+    The content digest is in the **filename**, not merely recorded beside it,
+    because a stable name cannot be republished safely:
+    :func:`jcm.data.remote.fetch` resolves cache-first and never revalidates a
+    hit, so any host that had already fetched the old state would keep using
+    it against newly committed bands — a mismatched pair failing for as long
+    as that cache survived, with nothing to indicate why. A new state is a new
+    path, so a stale cache entry simply goes unused.
 
-    ``JCM_FIXTURE_STATE_DIR`` overrides that with a directory of freshly
-    generated states. This exists because regenerating a fixture and
-    publishing it are necessarily two steps — the state has to be validated
-    against its own bands *before* anyone uploads it, and without the override
-    that check could only be done after publishing, which is the wrong order.
-    It is deliberately not a silent fallback: a member missing from the
-    override directory raises rather than quietly reaching for the mirror,
-    since the whole point of setting it is to test the local files.
+    The band file records the exact path it was generated against; nothing
+    reconstructs this name in order to read a state back.
+    """
+    return (f"bundles/{MEMBER_BUNDLE[member]}/init_states/"
+            f"{member}_fixture_{digest}.msgpack")
+
+
+def resolve_state(mirror_path: str) -> str | None:
+    """Local path to the state at ``mirror_path``, fetching it if necessary.
+
+    ``mirror_path`` comes from the band file's own ``init_state`` attribute,
+    so a fixture is always read against the state it was generated against.
+
+    Normally the mirror, resolved cache-first: a warm cache needs no network,
+    and a cold one on an internet-less node raises ``fetch``'s message naming
+    the prefetch command rather than a bare error.
+
+    ``JCM_FIXTURE_STATE_DIR`` overrides that with a directory of locally
+    generated states, because regenerating a fixture and publishing it are
+    necessarily two steps and the pair has to be checkable in between.
+    Generating states one member at a time is the documented workflow, so a
+    member absent from the override directory returns ``None`` — the caller
+    skips it, naming it — rather than raising and making one freshly generated
+    member unverifiable until all seven had been gathered. Nothing falls back
+    to the mirror while the override is set: mixing a published state into a
+    run meant to validate local ones is how the wrong pair gets blessed.
     """
     import os
 
     override = os.environ.get("JCM_FIXTURE_STATE_DIR")
     if override:
-        local = Path(override) / Path(state_mirror_path(member)).name
-        if not local.exists():
-            raise FileNotFoundError(
-                f"JCM_FIXTURE_STATE_DIR={override} is set but {local} does "
-                f"not exist. Generate {member}'s state there first, or unset "
-                "the variable to use the published state.")
-        return str(local)
+        local = Path(override) / Path(mirror_path).name
+        return str(local) if local.exists() else None
 
     from jcm.data.remote import fetch
-    return fetch(state_mirror_path(member))
+    return fetch(mirror_path)
 
 
 def _load_member(member: str, init_overrides: dict, days: float):
@@ -336,11 +359,14 @@ def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
     the current checkpoint schema, so the stats window — and the regression
     test — can resume it with no migration escape hatch.
     """
-    out_path = out_dir / Path(state_mirror_path(member)).name
     print(f"  {SPIN_UP_DAYS:g}-day spin-up from the preset's own init …",
           flush=True)
+    tmp_path = out_dir / f"{member}_fixture.partial"
     _run_worker(
-        f"write_spinup_state as w; w({member!r}, {str(out_path)!r})")
+        f"write_spinup_state as w; w({member!r}, {str(tmp_path)!r})")
+    out_path = out_dir / Path(
+        state_mirror_path(member, state_digest(tmp_path))).name
+    tmp_path.replace(out_path)
     return str(out_path), (
         f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
         f"({members()[member]})")
@@ -378,7 +404,18 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
     if write_state:
         state_path, provenance = _prepare_state(member, out_dir)
     else:
-        state_path = str(out_dir / Path(state_mirror_path(member)).name)
+        # Reuse the one state this module has already written for the
+        # member. The name carries a content digest, so glob rather than
+        # reconstruct it, and refuse an ambiguous directory instead of
+        # picking one arbitrarily — the bands would then describe a state
+        # nobody could identify afterwards.
+        found = sorted(out_dir.glob(f"{member}_fixture_*.msgpack"))
+        if len(found) != 1:
+            raise FileNotFoundError(
+                f"write_state=False needs exactly one "
+                f"{member}_fixture_*.msgpack in {out_dir}; found "
+                f"{[f.name for f in found]}")
+        state_path = str(found[0])
         # Still a spin-up state — ``write_state=False`` only ever reuses one
         # this module wrote — so describe it as such rather than as an opaque
         # "reused file", which would leave the fixture unable to say where its
@@ -416,7 +453,11 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
     stats_ds = xr.Dataset(out)
     stats_ds.attrs["member"] = member
     stats_ds.attrs["preset"] = members()[member]
-    stats_ds.attrs["init_state"] = state_mirror_path(member)
+    # The exact path this fixture was generated against, digest and all, so
+    # the regression reads back the state these bands describe rather than
+    # whatever currently sits at a reconstructed name.
+    stats_ds.attrs["init_state"] = state_mirror_path(
+        member, Path(state_path).stem.rsplit("_", 1)[-1])
     stats_ds.attrs["init_state_provenance"] = provenance
     stats_ds.attrs["stats_days"] = STATS_DAYS
     if member in PRE_DUST_RETUNE:
