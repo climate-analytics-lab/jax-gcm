@@ -11,6 +11,7 @@ from .echam_1m import (
     cloud_microphysics_column_sweep,
 )
 from jcm.constants import tmelt
+from jcm.testing import check_gradients
 
 
 class TestAutoconversion:
@@ -1097,3 +1098,144 @@ class TestCloudFractionWriteBack1M:
         assert np.all(cf_out[5] > 0.0), (
             "a cell still holding condensate lost its cover"
         )
+
+
+class TestColumnSweepStateGradients:
+    """AD against a central difference in the *state* directions (issue #820).
+
+    ``TestColumnSweepParameterGradients`` above pins the tunable-parameter
+    derivatives; this class pins the derivative with respect to the column
+    state, which is what a data-assimilation or hybrid-ML gradient actually
+    travels along.
+
+    The result is that the sweep's derivative is right and the *operating
+    point* is what decides whether a difference can see it. Measured under
+    ``jax_enable_x64`` (outside the suite, which pins float32 for issue
+    #729), every one of the six state directions agrees with a converged
+    central difference to 1e-8 on the column built below, and jvp and vjp
+    agree to 6e-16. On a column with exactly zero condensate the same
+    comparison has no reference at all — see
+    ``test_clear_sky_column_has_no_two_sided_derivative``.
+    """
+
+    @staticmethod
+    def _cloudy_column(nlev=16):
+        """Build a column that is off every condensate and cover switch.
+
+        Three thresholds in the sweep are exact: ``cloud_fraction >
+        config.epsilon`` gates the in-cloud conversion, ``qc_in_cloud > 0``
+        gates KK2000 autoconversion and ``qi_in_cloud > 0`` gates ice
+        autoconversion. A fixture with ``qc = qi = 0`` and ``cf = 0`` in its
+        clear layers — which is how the parameter-gradient fixtures above are
+        built, because they only need the cloudy layers — puts every clear
+        layer exactly on all three at once, and there the scheme has no
+        two-sided derivative to compare against. That is a property of the
+        point, not of the scheme, so this fixture carries a thin but non-zero
+        condensate and cover in every layer: the state a running column is
+        actually in once the sweep has deposited anything at all.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(248.0, 294.0, nlev)
+        p = jnp.linspace(2.2e4, 1.0e5, nlev)
+        q = 0.93 * jax.vmap(saturation_specific_humidity)(p, T)
+        qc = jnp.full(nlev, 3.1e-5).at[10].set(1.4e-3).at[11].set(9.0e-4)
+        qi = jnp.full(nlev, 7.2e-6).at[3].set(4.1e-5).at[4].set(2.6e-5)
+        cf = jnp.full(nlev, 0.13).at[3:5].set(0.55).at[10:12].set(0.72)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 480.0)
+        nd = jnp.full(nlev, 9.4e7)
+        return T, q, p, qc, qi, cf, rho, dz, nd
+
+    @staticmethod
+    def _sweep_fn(column):
+        """Return f(T, q, qc, qi, cf, ndrop) -> (tendencies, state)."""
+        _, _, p, _, _, _, rho, dz, _ = column
+        cfg = MicrophysicsParameters.default()
+
+        def f(T, q, qc, qi, cf, ndrop):
+            return cloud_microphysics_column_sweep(
+                T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg)
+
+        return f
+
+    # The adjoint identity is exact in exact arithmetic and holds to 6e-16
+    # here under x64, so the float32 gap is round-off through the 16-level
+    # ``lax.scan`` — the same double sum contracted in opposite orders by the
+    # two AD modes — and nothing about the derivative. Measured at 1e-4 to
+    # 3e-3 across these seeds; 5e-3 leaves a small margin. It is a statement
+    # about float32, which is why it is stated rather than quietly defaulted.
+    ADJOINT_RTOL = 5e-3
+
+    @pytest.mark.parametrize("seed", [0, 7])
+    def test_state_gradients_match_a_central_difference(self, seed):
+        """One ``(nlev,)`` column, off every switch: AD matches the secant."""
+        column = self._cloudy_column()
+        T, q, _, qc, qi, cf, _, _, nd = column
+        check_gradients(
+            self._sweep_fn(column), (T, q, qc, qi, cf, nd),
+            rtol=1e-2, seed=seed, adjoint_rtol=self.ADJOINT_RTOL)
+
+    def test_block_of_columns_carries_live_gradients(self):
+        """A ``(nlev, ncols)`` block, vmapped as the ECHAM term calls it.
+
+        ``reference="adjoint"``: the three columns' projections are of one
+        magnitude and cancel to a fraction of it, so in float32 the secant is
+        left without significant digits well before the ladder reaches a
+        resolvable step — the same reason the TTE-TKE block check uses the
+        adjoint reference. The per-column difference is checked above.
+        """
+        column = self._cloudy_column()
+        T, q, p, qc, qi, cf, rho, dz, nd = column
+        cfg = MicrophysicsParameters.default()
+        stack = lambda a: jnp.stack(  # noqa: E731
+            [a * (1.0 + 0.07 * k) for k in range(3)], axis=1)
+
+        def f(T_b, q_b, qc_b, qi_b, cf_b, nd_b):
+            tend, st = jax.vmap(
+                lambda *a: cloud_microphysics_column_sweep(
+                    a[0], a[1], p, a[2], a[3], a[4], rho, dz, a[5],
+                    dt=1800.0, config=cfg),
+                in_axes=1, out_axes=0,
+            )(T_b, q_b, qc_b, qi_b, cf_b, nd_b)
+            # ``dqrdt``/``dqsdt`` and the melting/freezing diagnostics are
+            # structurally ``jnp.zeros`` in this scheme (rain and snow live
+            # in the falling flux, not in state), and the adjoint reference
+            # asserts every output it is given is live — so name the outputs
+            # that actually carry a derivative rather than hand it constants.
+            return (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt,
+                    st.rain_flux, st.snow_flux, st.rain_source,
+                    st.snow_source, st.rain_evap_flux, st.qc_in_cloud,
+                    st.qi_in_cloud, st.autoconv_rate, st.accretion_rate,
+                    st.precip_rain, st.precip_snow)
+
+        cf_block = jnp.stack(
+            [cf, jnp.clip(cf * 1.2, 0.0, 1.0), jnp.clip(cf * 0.8, 0.0, 1.0)],
+            axis=1)
+        check_gradients(
+            f, (stack(T), stack(q), stack(qc), stack(qi), cf_block, stack(nd)),
+            reference="adjoint", adjoint_rtol=self.ADJOINT_RTOL,
+            live_inputs=["[0]", "[1]", "[2]", "[3]", "[4]", "[5]"])
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="a clear layer sits exactly on three switches at once — "
+               "echam_1m.py:1216/1220 `cloud_fraction > config.epsilon`, "
+               ":426 `qc_in_cloud > 0.0` and :518 `qi_in_cloud > 0.0` — so "
+               "the in-cloud condensate jumps from 0 to O(dqc/dcf) as soon "
+               "as the pair is displaced, and the secant grows as jump/eps "
+               "at every rung instead of converging. Not a wrong gradient: "
+               "every state partial matches a difference to 1e-8 once the "
+               "column is off the switches.")
+    def test_clear_sky_column_has_no_two_sided_derivative(self):
+        """Record the zero-condensate operating point as a defect, not a tolerance.
+
+        Uses ``TestColumnSweepParameterGradients._precipitating_column``
+        unchanged, because that is how the repo's own fixtures are built and
+        the point of this test is that such a column is a *degenerate* place
+        to differentiate, not that the fixture is wrong for its own purpose.
+        """
+        column = TestColumnSweepParameterGradients._precipitating_column()
+        T, q, _, qc, qi, cf, _, _, nd = column
+        check_gradients(
+            self._sweep_fn(column), (T, q, qc, qi, cf, nd),
+            rtol=1e-2, adjoint_rtol=self.ADJOINT_RTOL)
