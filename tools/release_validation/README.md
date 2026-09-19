@@ -13,6 +13,42 @@ release or merging `dev` → `main`.
 | echam-jam-t63-{l47,l95} | `echam-jam` | T63 | RRTMGP + JAM |
 | scm | full ECHAM+JAM physics | 1 column L47 | `scm_check.py` |
 
+## The fast regression fixtures
+
+The year-long runs above are the release gate; they are far too slow to catch
+an accidental change during development. The same matrix therefore also backs
+a **fast** regression — a few minutes per member — in
+`jcm/model_test.py::test_release_matrix_default_statistics`, gated behind
+`JCM_RUN_GPU_INTEGRATION_TESTS=1`.
+
+Each member's fixture is a pair: the **bands** (`<member>_statistics.nc`,
+committed under `jcm/data/test/release_matrix/`, a few KB so a change shows up
+as a reviewable diff) and the **init state** it resumes from (hosted on the
+data mirror under `bundles/<grid>_<levels>/init_states/`, since it is tens of
+MB). The bands describe the window that follows that exact state, so the two
+are only meaningful together and are regenerated together — one command per
+member, on a GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+```
+
+then upload the resulting `<member>_fixture.msgpack` additively under that
+member's `init_states/` prefix (see `docs/source/design/data_mirror.md`).
+
+Both are built through the member's **validated preset**, the same recipe this
+directory's `matrix.yaml` names, so the regression covers what the project
+claims to support rather than a composition invented for the test.
+
+Two things to know before reading a failure:
+
+- These are **regression** bands, not a climatology. They come from a short
+  window after a short spin-up from the preset's own init, because the
+  equilibrated states on the mirror are unreadable by current jcm (#762). A
+  failure means "something changed", not "the physics is wrong".
+- The **JAM members' bands are pre-dust-retune** and must be regenerated once
+  #787/#808 lands; the band file says so in its own `provisional` attribute.
+
 ## Workflow
 
 ```bash

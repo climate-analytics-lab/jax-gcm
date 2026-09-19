@@ -149,6 +149,45 @@ terrain = bundle_file("t63", "terrain.nc")     # cached HF download
 Fetch once on a node with internet; compute nodes then hit the cache.
 `registry.json` at the dataset root records sha256 + size for every file.
 
+## Hosted initial states
+
+`bundles/<grid>_<levels>/init_states/` holds model states rather than
+boundary conditions: `jcm.checkpoint.save_checkpoint` msgpack files a run can
+warm-start from with `init=from_state init.file=hf://...`. They are hosted
+rather than committed because they are tens of MB and are regenerated
+whenever the physics they describe moves.
+
+Two kinds live there today:
+
+- **Equilibrated states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
+  **unreadable by current jcm** and are kept only as provenance: they predate
+  the checkpoint schema stamp, so they carry no field names, *and* they are
+  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
+  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
+  refuses a structural difference it cannot name rather than guessing, which
+  is the correct behaviour and not a bug to work around. Replacing them is
+  issue #762.
+- **Regression-fixture states**, `<member>_fixture.msgpack`, one per
+  supported-matrix member, written by
+  `jcm.data.test.release_matrix.generate_stats` and consumed by the
+  GPU-gated regression in `jcm/model_test.py`. Their *bands* stay in the
+  repo (a few KB, so a change is reviewable as a diff); only the state is
+  hosted. A member's band file and its state are a matched pair — the bands
+  describe the window that follows that exact state — so they are regenerated
+  together, one command per member:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+  ```
+
+  and the resulting state is uploaded additively under the member's
+  `init_states/` prefix.
+
+`jcm.data.remote.fetch` resolves these cache-first like any other mirror file,
+so a warm cache needs no network and a cold cache on an internet-less node
+fails with the prefetch instructions rather than a bare error.
+
 ## Rebuilding the mirror
 
 The builders live in `jcm/data/mirror/` and run on NCAR Glade, where all

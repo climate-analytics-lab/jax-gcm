@@ -1,0 +1,370 @@
+"""Climatology-band fixtures for the supported-configuration matrix.
+
+One band file per member of ``tools/release_validation/matrix.yaml``, built
+through that member's *validated preset* (``jcm/config/configuration/*.yaml``,
+the same recipes ``tools/benchmark.py`` and the release-validation launcher
+use) rather than a composition assembled here. A fixture that hand-rolls its
+physics tests something nobody runs; going through the preset means the
+regression covers exactly what the project claims to support.
+
+What is where
+-------------
+* **Bands** — ``<member>_statistics.nc`` in this directory, a few KB each and
+  checked in, so a change in what the model produces shows up as a reviewable
+  diff.
+* **Initial states** — *not* in git. Each member resumes from a stamped
+  checkpoint on the Hugging Face data mirror under
+  ``bundles/<grid>_<levels>/init_states/``, fetched cache-first by
+  :func:`jcm.data.remote.fetch`. They are tens of MB and would otherwise be
+  re-committed in full on every regeneration.
+
+Each member's band file and its init state are a matched pair: the bands
+describe the window that *follows* that exact state, so regenerating one
+without the other compares a trajectory against bands drawn from a different
+starting point.
+
+Regenerating
+------------
+One command per member, on a GPU::
+
+    CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+
+``generate`` writes the band file and, unless ``write_state=False``, the
+member's init state to ``out_dir`` for upload to the mirror (see
+``docs/source/design/data_mirror.md`` for the publish path — uploads are
+deliberately explicit and additive).
+
+Where each member starts
+------------------------
+Every member spins up for ``SPIN_UP_DAYS`` from its **preset's own init**, and
+the bands cover the ``STATS_DAYS`` that follow. The mirror does host older
+equilibrated year-2 states from the #638 campaign, and starting from those
+would give better-conditioned bands than any short spin-up, but current jcm
+cannot read them: they are unstamped *and* structurally stale, storing 118
+physics-carry arrays where an ECHAM T63L47 model now expects 146 (51 vs 56 for
+SPEEDY). An unstamped file carries no field names, so #834 refuses the
+structural difference rather than guessing at it — correctly. Re-equilibrating
+them is #762's deliverable, not this module's.
+
+Consequence, and it is a real limitation rather than a detail: a five-day
+window out of a from-cold transient gives bands that are narrow, fast-moving
+and unrepresentative of the model's climate. They are a *regression* signal —
+"this member still produces what it produced" — and not a climatology. Treat a
+failure as "something changed", not as "the physics is wrong".
+
+The JAM members carry a further caveat: their bands describe the aerosol
+climate before the in-flight dust retune (#787/#808) and must be regenerated
+when it lands. That is recorded in the band file's own ``provisional``
+attribute, not just here.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+_HERE = Path(__file__).parent
+# Resolved from this file rather than the cwd: ``generate`` spawns its
+# reproducibility repeats as subprocesses, and a fixture set that silently
+# depends on where it was launched from is exactly the drift this module
+# exists to remove.
+_MATRIX = _HERE.parents[3] / "tools" / "release_validation" / "matrix.yaml"
+
+#: Variables a band file carries when the member produces them. The list is the
+#: union across packages — SPEEDY and ECHAM name their scheme outputs
+#: differently — and is intersected with what the run actually emits, so one
+#: list serves every member and a member that gains a scheme picks it up on the
+#: next regeneration. The band file records the names it ended up with, and the
+#: test reads them back from the file rather than re-deriving them here.
+CANDIDATE_STAT_VARS = (
+    # Prognostic state, every package.
+    "u_wind",
+    "v_wind",
+    "temperature",
+    "specific_humidity",
+    "normalized_surface_pressure",
+    # Moist-air diagnostics (MoistAirColumnState; ECHAM compositions).
+    "pressure_full",
+    "air_density",
+    "layer_thickness",
+    "relative_humidity",
+    # ECHAM scheme outputs.
+    "radiation.toa_lw_up",
+    "radiation.surface_sw_down",
+    "clouds.cloud_fraction",
+    "clouds.precip_rain",
+    "convection.precip_conv",
+    # SPEEDY scheme outputs.
+    "longwave_rad.ftop",
+    "shortwave_rad.ftop",
+    "humidity.rh",
+    "condensation.precls",
+    "convection.precnv",
+)
+
+#: ``member -> bundle``: where on the mirror this member's init state lives.
+MEMBER_BUNDLE = {
+    "speedy-t31": "t31_l8",
+    "echam-1m-t63": "t63_l47",
+    "echam-2m-t63": "t63_l47",
+    "echam-1m-t106": "t106_l47",
+    "echam-2m-t106": "t106_l47",
+    "echam-jam-t63-l47": "t63_l47",
+    "echam-jam-t63-l95": "t63_l95",
+}
+
+#: Members whose bands describe an aerosol climate the in-flight dust retune
+#: (#787/#808) will move, and which therefore have to be regenerated when it
+#: lands. Recorded in the band file so the fixture itself says so.
+PRE_DUST_RETUNE = ("echam-jam-t63-l47", "echam-jam-t63-l95")
+
+SPIN_UP_DAYS = 5.0
+STATS_DAYS = 5.0
+SAVE_INTERVAL_DAYS = 1.0
+
+
+def members() -> dict[str, str]:
+    """``member -> preset`` from the release-validation matrix.
+
+    Read from ``matrix.yaml`` rather than duplicated here so the fixture set
+    and the validation matrix cannot drift apart.
+    """
+    import yaml
+
+    with open(_MATRIX) as f:
+        matrix = yaml.safe_load(f)
+    return {name: spec["preset"] for name, spec in matrix["members"].items()}
+
+
+def band_path(member: str) -> Path:
+    """In-repo band file for ``member``."""
+    return _HERE / f"{member}_statistics.nc"
+
+
+def state_mirror_path(member: str) -> str:
+    """Mirror path of ``member``'s init state, as ``fetch`` takes it."""
+    return f"bundles/{MEMBER_BUNDLE[member]}/init_states/{member}_fixture.msgpack"
+
+
+def resolve_state(member: str) -> str:
+    """Local path to ``member``'s init state, fetching it if necessary.
+
+    Normally the mirror, resolved cache-first, so a warm cache needs no
+    network and a cold one on an internet-less node fails with the prefetch
+    instructions rather than a bare error.
+
+    ``JCM_FIXTURE_STATE_DIR`` overrides that with a directory of freshly
+    generated states. This exists because regenerating a fixture and
+    publishing it are necessarily two steps — the state has to be validated
+    against its own bands *before* anyone uploads it, and without the override
+    that check could only be done after publishing, which is the wrong order.
+    It is deliberately not a silent fallback: a member missing from the
+    override directory raises rather than quietly reaching for the mirror,
+    since the whole point of setting it is to test the local files.
+    """
+    import os
+
+    override = os.environ.get("JCM_FIXTURE_STATE_DIR")
+    if override:
+        local = Path(override) / Path(state_mirror_path(member)).name
+        if not local.exists():
+            raise FileNotFoundError(
+                f"JCM_FIXTURE_STATE_DIR={override} is set but {local} does "
+                f"not exist. Generate {member}'s state there first, or unset "
+                "the variable to use the published state.")
+        return str(local)
+
+    from jcm.data.remote import fetch
+    return fetch(state_mirror_path(member))
+
+
+def _load_member(member: str, init_overrides: dict, days: float):
+    """Compose ``member``'s preset for a ``days``-long daily-snapshot run.
+
+    Daily *snapshots* rather than interval averages: ``output_averages=True``
+    on hybrid coords trips a shape-broadcast bug in
+    ``compute_diagnostic_state_hybrid``, and the mean of daily snapshots is a
+    close approximation of the true mean for the slow-varying global
+    statistics these bands compare.
+    """
+    from jcm.configurations import load
+
+    presets = members()
+    if member not in presets:
+        raise ValueError(
+            f"Unknown matrix member {member!r}. Known: {sorted(presets)}")
+    overrides = {
+        "run.total_time": days,
+        "run.save_interval": SAVE_INTERVAL_DAYS,
+        "run.output_averages": False,
+        **init_overrides,
+    }
+    return load(presets[member], **overrides)
+
+
+def _from_state_overrides(file_path: str) -> dict:
+    """``init=from_state`` overrides for ``file_path``.
+
+    No ``unstamped_scale``: the states this module writes are stamped, and a
+    stamped file needs no unit assertion — offering one is rejected as misuse,
+    correctly, since the file already records its own convention.
+    """
+    return {"init": "from_state", "init.file": file_path}
+
+
+def _global_mean(predictions):
+    """``(time, lon, lat)``-mean of the candidate variables a run produced."""
+    ds = predictions.to_xarray()
+    means = ds.mean(dim={"time", "lon", "lat"})
+    present = [v for v in CANDIDATE_STAT_VARS if v in means]
+    return means[present]
+
+
+def stats_window_global_mean(member: str, state_path: str):
+    """Run ``member``'s stats window from ``state_path`` and reduce it.
+
+    The quantity the regression compares, for one run — also the subprocess
+    entry point for a reproducibility repeat.
+    """
+    exp = _load_member(
+        member, _from_state_overrides(state_path), STATS_DAYS)
+    predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
+    return _global_mean(predictions)
+
+
+def write_stats_window_global_mean(member: str, state_path: str, out: str):
+    """Subprocess entry point for one reproducibility repeat."""
+    stats_window_global_mean(member, state_path).to_netcdf(out)
+
+
+def _measure_noise(in_process_mean, member, state_path, n_repeats, tmp_dir):
+    """Peak-to-peak spread of the stats window over independent repeats.
+
+    Separate processes deliberately: the point is to bound what the band must
+    absorb when nothing about the model has changed, and a repeat inside this
+    process shares every cached compilation and allocation decision with the
+    run that produced the bands, so it would measure far less than a fresh
+    process does.
+
+    All repeats run the same source tree, so this bounds run-to-run
+    reproducibility and says nothing about a code change — which is the
+    intent. A code change moving a band is the signal, not the noise.
+    """
+    import subprocess
+    import sys
+
+    import xarray as xr
+
+    members_ = [in_process_mean]
+    for i in range(n_repeats):
+        out = Path(tmp_dir) / f"repeat_{i}.nc"
+        print(f"  reproducibility repeat {i + 1}/{n_repeats} …", flush=True)
+        subprocess.run(
+            [sys.executable, "-c",
+             "from jcm.data.test.release_matrix.generate_stats import "
+             "write_stats_window_global_mean as w; "
+             f"w({member!r}, {state_path!r}, {str(out)!r})"],
+            check=True,
+        )
+        members_.append(xr.open_dataset(out).load())
+    stacked = xr.concat(members_, dim="_repeat")
+    return stacked.max(dim="_repeat") - stacked.min(dim="_repeat")
+
+
+def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
+    """Produce ``member``'s fixture init state; return ``(path, provenance)``.
+
+    Spun up for ``SPIN_UP_DAYS`` from the preset's own init and written with
+    the current checkpoint schema, so the stats window — and the regression
+    test — can resume it with no migration escape hatch.
+    """
+    from jcm.checkpoint import save_checkpoint
+
+    out_path = out_dir / Path(state_mirror_path(member)).name
+    print(f"  {SPIN_UP_DAYS:g}-day spin-up from the preset's own init …",
+          flush=True)
+    exp = _load_member(member, {}, SPIN_UP_DAYS)
+    exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
+    save_checkpoint(exp.model, out_path, elapsed_days=SPIN_UP_DAYS)
+    return str(out_path), (
+        f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
+        f"({members()[member]})")
+
+
+def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
+             write_state=True):
+    """Generate ``member``'s fixture: its init state and its bands.
+
+    Args:
+        member: A ``tools/release_validation/matrix.yaml`` member name.
+        out_dir: Where the state file is written for upload. Defaults to the
+            current directory; keep it off ``/data`` for the larger grids.
+        n_reproducibility_repeats: Stats-window repeats, in their own
+            processes, used to size ``<var>.noise``. 0 writes no ``noise``,
+            which the regression test then rejects.
+        write_state: When False, reuse the state already at ``out_dir`` rather
+            than producing one — for re-deriving bands without re-migrating or
+            re-spinning.
+
+    Returns:
+        ``(state_path, band_path)``.
+
+    """
+    import tempfile
+
+    import jax
+    import xarray as xr
+
+    print(f"member {member}: backend {jax.default_backend()} "
+          f"on {jax.devices()}", flush=True)
+    out_dir = Path(out_dir or ".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if write_state:
+        state_path, provenance = _prepare_state(member, out_dir)
+    else:
+        state_path = str(out_dir / Path(state_mirror_path(member)).name)
+        provenance = "state reused from a previous generate() call"
+    print(f"  state: {state_path}", flush=True)
+
+    print(f"  stats window: {STATS_DAYS:g} days of daily snapshots …",
+          flush=True)
+    exp = _load_member(
+        member, _from_state_overrides(state_path), STATS_DAYS)
+    predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
+    ds = predictions.to_xarray()
+    daily_global = ds.mean(dim={"lon", "lat"})
+    present = [v for v in CANDIDATE_STAT_VARS if v in ds]
+    pred_mean = daily_global.mean(dim="time")[present]
+    pred_std = daily_global.std(dim="time")[present]
+
+    noise = None
+    if n_reproducibility_repeats:
+        print(f"  {n_reproducibility_repeats} reproducibility repeats …",
+              flush=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            noise = _measure_noise(
+                ds[present].mean(dim={"time", "lon", "lat"}),
+                member, state_path, n_reproducibility_repeats, tmp)
+
+    out = {}
+    for var in present:
+        out[f"{var}.mean"] = pred_mean[var]
+        out[f"{var}.std"] = pred_std[var]
+        if noise is not None:
+            out[f"{var}.noise"] = noise[var]
+    stats_ds = xr.Dataset(out)
+    stats_ds.attrs["member"] = member
+    stats_ds.attrs["preset"] = members()[member]
+    stats_ds.attrs["init_state"] = state_mirror_path(member)
+    stats_ds.attrs["init_state_provenance"] = provenance
+    stats_ds.attrs["stats_days"] = STATS_DAYS
+    if member in PRE_DUST_RETUNE:
+        stats_ds.attrs["provisional"] = (
+            "PRE-DUST-RETUNE: these bands describe the aerosol climate before "
+            "the dust retune (#787/#808) and must be regenerated when it "
+            "lands; the equilibrated JAM state is #762's deliverable")
+    bands = band_path(member)
+    stats_ds.to_netcdf(bands)
+    print(f"  wrote {bands} ({bands.stat().st_size} bytes) "
+          f"with {len(present)} variables", flush=True)
+    return state_path, str(bands)

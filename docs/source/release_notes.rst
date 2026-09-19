@@ -1,6 +1,31 @@
 Release Notes
 =============
 
+Unreleased — climatology regression fixtures follow the supported matrix
+-------------------------------------------------------------------------
+
+- The GPU-gated climatology regression is now
+  ``test_release_matrix_default_statistics``, one sub-test per member of
+  ``tools/release_validation/matrix.yaml``, each built through that member's
+  **validated preset** rather than a composition written for the test.
+  Per-member bands live in ``jcm/data/test/release_matrix/`` (a few KB, so a
+  change is reviewable as a diff); the init state each member resumes from is
+  hosted on the data mirror under ``bundles/<grid>_<levels>/init_states/`` and
+  fetched cache-first. A member's bands and its state are regenerated together
+  by ``jcm.data.test.release_matrix.generate_stats.generate(<member>)`` — they
+  describe the same window and are only meaningful as a pair. Set
+  ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
+  publishing them.
+- Band widths are now floored so a regression band can never be narrower than
+  the computation's own noise. The ``std == 0`` degeneracy guard becomes
+  ``std <= 1e-6 * |mean|`` (~8 float32 ULP) — a band at float32 resolution
+  carries no more information than one at exactly zero — and each band is
+  additionally floored at ``3 x <var>.noise``, the measured peak-to-peak
+  spread of the same window across independent repeats in separate processes,
+  which ``generate`` records in the fixture. Without this a band could fail on
+  a new GPU or XLA version indistinguishably from a real physics regression.
+
+
 Unreleased — checkpoints carry a schema stamp and migrate by field name
 ------------------------------------------------------------------------
 

@@ -459,142 +459,137 @@ class TestModelUnit(unittest.TestCase):
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
     @pytest.mark.slow
-    def test_echam_model_default_statistics(self):
-        """Run ``echam_physics(grey)`` on T63L47 + real terrain from a
-        spun-up state and assert each variable's global mean falls in its
-        stored climatology band (mean ± 3·std).
+    def test_release_matrix_default_statistics(self):
+        """Every supported-matrix member still produces what it produced.
 
-        Mirrors :meth:`test_speedy_model_default_statistics` on the
-        T63L47 hybrid grid: real ECHAM terrain + forcing,
-        ``echam_physics(grey) + UpperSponge``, started from a saved
-        5-day spun-up state and integrated 5 more days of daily
-        snapshots. Grey radiation is deliberately not the
-        ``physics=echam`` production composition (that composes RRTMGP);
-        what this regresses is the hybrid-coordinate dynamics–physics
-        coupling, and the saved bands describe the grey composition
-        alone — see the module docstring of
-        ``jcm.data.test.echam_t63l47.generate_default_stats``.
+        One sub-test per member of ``tools/release_validation/matrix.yaml``,
+        each built through that member's validated preset, resumed from its
+        init state on the data mirror and integrated for the stats window,
+        asserting every stored variable's global mean falls inside its band.
 
-        T63L47 is too heavy for CPU CI; the test is gated behind
-        ``JCM_RUN_GPU_INTEGRATION_TESTS=1`` and skipped otherwise.
+        These are **regression** bands, not a climatology: they are drawn
+        from a short window following a short spin-up, so a failure means
+        "something changed", not "the physics is wrong". See
+        ``jcm.data.test.release_matrix.generate_stats``, which regenerates a
+        member's band file and its init state together — the bands describe
+        the window that follows that exact state, so the two are only
+        meaningful as a pair.
 
-        Stats and the spun-up state live in
-        ``jcm/data/test/echam_t63l47/`` and are regenerated **together**
-        by
-        ``jcm.data.test.echam_t63l47.generate_default_stats.generate()``
-        when the physics changes intentionally — the bands describe the
-        five days that follow the saved state, so regenerating either
-        file alone compares a trajectory against bands drawn from a
-        different starting point.
+        Too heavy for CPU CI, so gated behind
+        ``JCM_RUN_GPU_INTEGRATION_TESTS=1``.
         """
+        import importlib.util
         import os
-        from pathlib import Path
 
         import xarray as xr
 
         if os.environ.get("JCM_RUN_GPU_INTEGRATION_TESTS") != "1":
             pytest.skip(
-                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; T63L47 is "
-                "too heavy for CPU CI",
+                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; the matrix "
+                "members are too heavy for CPU CI",
             )
 
-        bc_dir = Path("jcm/data/bc/t63")
-        stats_dir = Path("jcm/data/test/echam_t63l47")
-        for fname in ("terrain.nc", "forcing.nc"):
-            if not (bc_dir / fname).exists():
-                pytest.skip(
-                    f"{bc_dir / fname} missing; run "
-                    "utils/convert_echam_bc.py to generate it",
+        from jcm.data.test.release_matrix.generate_stats import (
+            band_path,
+            members,
+            resolve_state,
+            stats_window_global_mean,
+        )
+
+        #: Optional extras a member needs before it can even be composed.
+        extras = {"echam-jam-t63-l47": "mam4_jax",
+                  "echam-jam-t63-l95": "mam4_jax"}
+
+        checked = 0
+        for member in members():
+            bands_file = band_path(member)
+            if not bands_file.exists():
+                # A member whose fixture has not been generated yet is passed
+                # over rather than failed — the set is filled in member by
+                # member, each needing its own GPU run. The whole test skips
+                # if that leaves nothing checked, so an empty fixture set can
+                # never be mistaken for a pass.
+                continue
+            extra = extras.get(member)
+            if extra and importlib.util.find_spec(extra) is None:
+                continue
+            with self.subTest(member=member):
+                bands = xr.open_dataset(bands_file)
+                # The band file names the variables it carries; deriving the
+                # list here instead would let a regenerated fixture and the
+                # assertion drift apart silently.
+                stat_vars = sorted(
+                    v[: -len(".mean")] for v in bands.data_vars
+                    if v.endswith(".mean")
                 )
-        if not (stats_dir / "spinup_state.nc").exists():
+                self.assertTrue(stat_vars, f"{bands_file} carries no bands")
+
+                # A missing state is not a skip: the mirror fetch raises with
+                # the prefetch instructions an internet-less node needs, and
+                # swallowing that would turn a broken fixture into a silent
+                # pass. ``JCM_FIXTURE_STATE_DIR`` points this at locally
+                # generated states, which is how a regenerated fixture is
+                # checked before it is published.
+                state = resolve_state(member)
+                pred = stats_window_global_mean(member, state)
+
+                tol = 3  # tolerance in standard deviations
+                # Degenerate-band guard (#744), widened. ``std == 0`` is the
+                # wrong threshold for "this band carries no information": a
+                # band only has to be narrower than float32 can resolve to
+                # fail for reasons with no physical content, and ``std``
+                # reaches that while still strictly positive. The case that
+                # forced this was ``pressure_full`` on a hybrid grid's
+                # near-pure-``a`` levels, where the stored std was 0.55 of a
+                # float32 ULP and an independent run on identical code sat
+                # exactly at the band edge — a pass by equality alone. Any
+                # ``std`` at or below float32 resolution therefore takes the
+                # same relative+absolute fallback an exact zero already did.
+                # 1e-6 is ~8 ULP, orders below any meaningful std/|mean|.
+                rtol, atol, rel_eps = 0.25, 1e-8, 1e-6
+                # Second floor, on the half-width: ``<var>.noise`` is the
+                # measured peak-to-peak spread of this same window across
+                # independent repeats in separate processes, i.e. what the
+                # band must absorb with no physics having changed. Applied to
+                # the half-width rather than folded into ``std`` so it can
+                # only widen a band — folding it in would narrow the
+                # degenerate levels, whose fallback is deliberately far wider
+                # than their reproducibility.
+                noise_tol = 3
+                for var in stat_vars:
+                    mean = bands[f"{var}.mean"]
+                    std = bands[f"{var}.std"]
+                    self.assertIn(
+                        f"{var}.noise", bands,
+                        f"{var}.noise missing from {bands_file} — the fixture "
+                        "predates the reproducibility floor; regenerate it",
+                    )
+                    half_width = xr.where(
+                        std > rel_eps * abs(mean),
+                        tol * std,
+                        rtol * abs(mean) + atol,
+                    )
+                    half_width = np.maximum(
+                        half_width, noise_tol * bands[f"{var}.noise"])
+                    lower, upper = mean - half_width, mean + half_width
+                    assert ((lower <= pred[var]).all()) & (
+                        (pred[var] <= upper).all()
+                    ), (
+                        f"{member}: {var} fell outside its band (±3σ, floored "
+                        "at 3× the measured run-to-run reproducibility and at "
+                        "a relative+absolute tolerance where σ is below "
+                        "float32 resolution). Regenerate this member's band "
+                        "file AND its init state together with "
+                        "jcm.data.test.release_matrix.generate_stats.generate"
+                        f"({member!r}) if the deviation is intentional."
+                    )
+                checked += 1
+        if not checked:
             pytest.skip(
-                f"{stats_dir / 'spinup_state.nc'} missing; run "
-                "jcm.data.test.echam_t63l47.generate_default_stats.generate() "
-                "on a GPU to create it",
+                "no matrix member had both a band file and its optional "
+                "extras available",
             )
 
-        from jcm.data.test.echam_t63l47.generate_default_stats import (
-            default_echam_t63l47_stat_vars,
-            run_default_echam_t63l47_model,
-        )
-
-        default_stats = xr.open_dataset(stats_dir / "default_statistics.nc")
-
-        # Resume from the saved spun-up state and integrate 5 more days
-        # of daily *snapshots*. ``output_averages=True`` on hybrid coords
-        # trips a shape-broadcast bug in
-        # ``compute_diagnostic_state_hybrid`` that the existing T63L47
-        # tests don't exercise; the mean of 5 daily snapshots is a close
-        # approximation of the true 5-day mean for the slow-varying
-        # global statistics the assertion uses.
-        _, predictions = run_default_echam_t63l47_model(
-            save_interval=1.0, total_time=5.0,
-        )
-        pred_ds = predictions.to_xarray()
-        pred_ds_mean = pred_ds.mean(dim={"time", "lon", "lat"})
-
-        tol = 3  # tolerance in standard deviations
-        # Degenerate-band guard. At the top of the atmosphere several stored
-        # bands have a temporal std that underflows to *exactly* 0.0 in float32:
-        # the specific/relative-humidity tail is physically negligible
-        # (~1e-24…1e-37 kg kg⁻¹) and the upper ``pressure_full`` levels are the
-        # pure a-coefficient constants. A ±3σ band there collapses to a single
-        # point, which cannot absorb the few-percent cross-process
-        # nondeterminism XLA autotuning introduces at that underflow tail —
-        # runs are bit-identical *in-process* but drift across the
-        # generation↔test process boundary. Where the band carries no
-        # information, fall back to a relative+absolute tolerance; every
-        # physically meaningful level keeps the strict ±3σ test. See #744.
-        rtol, atol = 0.25, 1e-8
-        # ``std == 0`` is the wrong threshold for "this band carries no
-        # information". A band only has to be narrower than float32 can
-        # resolve to fail for reasons with no physical content, and ``std``
-        # reaches that while still strictly positive: ``pressure_full`` on
-        # the near-pure-``a`` levels stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of
-        # a float32 ULP — giving a three-ULP half-width that an independent
-        # run, in a separate process on identical code, sat exactly three ULP
-        # from. That is a pass by equality alone, one ULP from red. So treat
-        # any ``std`` at or below float32 resolution as the same degenerate
-        # case an exact zero already is, and give it the same #744 fallback.
-        # 1e-6 is ~8 ULP, three orders below the smallest physically
-        # meaningful ``std``/|mean| ratio in these bands (``u_wind``, at
-        # 1.6e-3), so no informative band is caught by it.
-        rel_eps = 1e-6  # ~8 float32 ULP
-        # Second floor, applied to the half-width: ``<var>.noise`` is the
-        # measured peak-to-peak spread of this same five-day window across
-        # independent repeats in separate processes, i.e. a direct bound on
-        # what the band must absorb with no physics having changed. It is
-        # applied to the half-width rather than folded into ``std`` so that it
-        # can only widen a band — folding it in would *narrow* the degenerate
-        # levels, whose fallback is deliberately far wider than their
-        # reproducibility. It binds on ``clouds.cloud_fraction``, taking the
-        # worst same-code excursion there from 0.23 to 0.065 of a band.
-        noise_tol = 3
-        for var in default_echam_t63l47_stat_vars:
-            mean = default_stats[f"{var}.mean"]
-            std = default_stats[f"{var}.std"]
-            assert f"{var}.noise" in default_stats, (
-                f"{var}.noise missing from default_statistics.nc — the "
-                "fixture predates the reproducibility floor. Regenerate it "
-                "with jcm.data.test.echam_t63l47.generate_default_stats."
-                "generate() on a GPU."
-            )
-            noise = default_stats[f"{var}.noise"]
-            half_width = xr.where(
-                std > rel_eps * abs(mean), tol * std, rtol * abs(mean) + atol,
-            )
-            half_width = np.maximum(half_width, noise_tol * noise)
-            lower = mean - half_width
-            upper = mean + half_width
-            assert ((lower <= pred_ds_mean[var]).all()) & (
-                (pred_ds_mean[var] <= upper).all()
-            ), (
-                f"{var} fell outside the climatology band (±3σ, floored at "
-                "3× the measured run-to-run reproducibility and at a "
-                "relative+absolute tolerance where σ underflowed to 0); "
-                "regenerate jcm/data/test/echam_t63l47/default_statistics.nc "
-                "(and spinup_state.nc) if the deviation is intentional."
-            )
 
 
 class TestModelRepr(unittest.TestCase):
