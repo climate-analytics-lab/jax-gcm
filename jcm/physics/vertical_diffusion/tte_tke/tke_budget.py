@@ -211,7 +211,22 @@ def echam_tke_source_update(
     """
     zzb = mixing_length * (c_m * shear_squared - c_h * buoy_freq_squared)
     zdisl = (mixing_length / c_d) / dt          # m/s
-    sqrt_prev = jnp.sqrt(jnp.maximum(prev_tke, 0.0))
+    # ``sqrt(maximum(x, 0))`` is the one floor shape that does *not* protect
+    # the derivative: at ``prev_tke == 0`` the two arguments of ``maximum``
+    # tie, JAX splits the derivative evenly between them (0.5 each) and
+    # multiplies it by ``sqrt'(0) = inf``, so the whole column's gradient with
+    # respect to TKE comes back non-finite. A *positive* floor would be safe —
+    # below it ``maximum`` passes a zero derivative — but 0 is the physically
+    # right floor here, so the guard has to be the double-``where`` instead.
+    # A cold-started or fully-decayed column sits exactly at TKE = 0, and
+    # ``lohmann_2m`` hands this scheme's companions a literal zeros array, so
+    # this is an operating point the model reaches rather than an edge case.
+    # Forward-identical: ``sqrt(max(0, 0)) == 0`` is what the outer ``where``
+    # selects. The derivative reported at 0 is then 0 rather than ``+inf``,
+    # which is the only finite choice available at a square-root's endpoint.
+    positive_tke = prev_tke > 0.0
+    sqrt_prev = jnp.where(
+        positive_tke, jnp.sqrt(jnp.where(positive_tke, prev_tke, 1.0)), 0.0)
     arg = (zzb * dt + 2.0 * sqrt_prev) / zdisl
     zktest = 1.0 + arg
     # When net source is negative enough that zktest < 1, the implicit
