@@ -277,6 +277,28 @@ def _run_worker(call: str) -> None:
     )
 
 
+def stats_window_global_mean_isolated(member: str, state_path: str,
+                                      tmp_dir) -> "object":
+    """One stats window in a fresh interpreter, reduced as the bands are.
+
+    The regression compares ``(time, lon, lat)``-mean values, and this returns
+    exactly that — but computed in a child process, for the same reason
+    :func:`_run_worker` exists. A single process that walks the whole matrix
+    accumulates a device pool JAX never gives back, and the members are not
+    equal: T63 L95 with JAM is several times the footprint of T31 L8, so it is
+    always the last member that dies of the memory the earlier ones are still
+    holding. Running each member's window in its own process makes the test
+    independent of how many members precede it, and of their order.
+    """
+    import xarray as xr
+
+    out = Path(tmp_dir) / f"{member}_window.nc"
+    _run_worker(
+        "write_stats_window_global_mean as w; "
+        f"w({member!r}, {state_path!r}, {str(out)!r})")
+    return xr.open_dataset(out).load().mean(dim="time")
+
+
 def _stats_windows(member, state_path, n_runs, tmp_dir):
     """Run the stats window ``n_runs`` times, each in a fresh process.
 

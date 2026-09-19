@@ -480,6 +480,7 @@ class TestModelUnit(unittest.TestCase):
         """
         import importlib.util
         import os
+        import tempfile
 
         import xarray as xr
 
@@ -493,7 +494,7 @@ class TestModelUnit(unittest.TestCase):
             band_path,
             members,
             resolve_state,
-            stats_window_global_mean,
+            stats_window_global_mean_isolated,
         )
 
         #: Optional extras a member needs before it can even be composed.
@@ -531,7 +532,15 @@ class TestModelUnit(unittest.TestCase):
                 # generated states, which is how a regenerated fixture is
                 # checked before it is published.
                 state = resolve_state(member)
-                pred = stats_window_global_mean(member, state)
+                # Each member's window runs in its own interpreter. JAX never
+                # returns pool memory, so walking the whole matrix in one
+                # process starves whichever member comes last — reproducibly
+                # the T63 L95 JAM one, several times the footprint of the
+                # rest, which failed here with RESOURCE_EXHAUSTED while the
+                # six lighter members ahead of it passed.
+                with tempfile.TemporaryDirectory() as tmp:
+                    pred = stats_window_global_mean_isolated(
+                        member, state, tmp)
 
                 tol = 3  # tolerance in standard deviations
                 # Degenerate-band guard (#744), widened. ``std == 0`` is the
