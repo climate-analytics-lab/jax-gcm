@@ -251,51 +251,39 @@ def generate(n_reproducibility_repeats=3):
 
     Why ``noise`` exists
     --------------------
-    ``std`` is the temporal spread of five daily snapshots of a field
-    that is still trending, so it measures the trend, not the
-    reproducibility of the measurement — and wherever the trend turns
-    over, it collapses. Two real examples in these bands: ``u_wind``
-    near sigma 0.24, where sigma falls to 5.1e-3 m/s while its
-    neighbours sit at 1.4e-2 - 4.4e-2, and ``pressure_full`` on the
-    near-pure-``a`` levels, where sigma is 4.9e-4 Pa — one float32 ULP
-    at 7405.9 Pa. A +/-3 sigma band there is narrower than the noise
-    floor of the computation, so the test fails on a new GPU, a new XLA
-    version or simply a different process, and the failure is
-    indistinguishable from the physics regression the test exists to
-    catch.
+    ``std`` is the temporal spread of five daily snapshots, which is a
+    statement about the five days, not about how precisely the number
+    can be reproduced. Nothing in it bounds what an identical rerun in a
+    different process will differ by, and the regression needs exactly
+    that bound: a band narrower than the computation's own noise fails
+    on a new GPU or a new XLA version, and the failure looks precisely
+    like the physics regression the test exists to catch.
 
-    The floor therefore has to be the *measured* reproducibility, per
-    variable and per level. Cheaper scales were tried against four
-    independent runs of these same five days and none of them works:
+    ``noise`` measures the bound directly, per variable and per level,
+    by rerunning the same five days and taking the peak-to-peak spread.
+    Cheaper surrogates were tried against independent runs and both fail
+    on these variables:
 
-    * ``rel * |mean|`` fails for ``u_wind`` and ``v_wind``, whose
-      global-mean profile passes through zero — the floor vanishes
-      exactly where the band is pinched. Sizing it for those variables
-      instead needs ``rel ~ 2e-2``, which on ``temperature`` is a
-      +/-5.5 K band and on ``pressure_full`` a +/-600 Pa one.
+    * ``rel * |mean|`` vanishes where ``u_wind`` and ``v_wind`` have a
+      global-mean profile through zero. Sizing it for them instead needs
+      ``rel ~ 2e-2``, which on ``temperature`` is a +/-5.5 K band.
     * a fraction of the column-maximum sigma blinds any variable with a
       large vertical dynamic range: for ``specific_humidity`` it sets
       the stratospheric floor from a tropospheric sigma, widening those
       bands 10-30x and hiding any stratospheric moisture error.
 
-    The measured spread has none of those failure modes because it is
-    taken where the band is used.
+    On these fixtures ``noise`` binds on ``clouds.cloud_fraction``,
+    taking its worst same-code excursion from 0.23 to 0.065 of a band.
+    The other half of the guard lives in
+    ``model_test.test_echam_model_default_statistics``, which treats a
+    ``std`` at or below float32 resolution as carrying no information —
+    that is what catches ``pressure_full``'s one-ULP levels, whose band
+    was otherwise passing by exact equality.
 
-    ``noise`` is one of three things the regression does to a stored
-    ``std`` before treating it as a band, and on these fixtures it is
-    the weakest of them: repeats spawned from one parent process agree
-    far more closely than runs launched differently do, so it sizes the
-    *within-harness* floor only. The other two live in
-    ``model_test.test_echam_model_default_statistics``: the band uses
-    the ``std`` of a small vertical neighbourhood rather than of the
-    single level, which is what actually absorbs a trend-crossing pinch
-    such as ``u_wind``'s, and it treats a ``std`` at or below float32
-    resolution as carrying no information, which is what catches
-    ``pressure_full``'s one-ULP levels. Measured against an independent
-    reproduction of these five days, the three together take the worst
-    excursion from 2.29 band half-widths to 0.43, widening the typical
-    band by 1.0-1.4x (3.1x for ``specific_humidity``, whose vertical
-    ``std`` profile is steepest).
+    Note what ``noise`` does *not* cover: every repeat here runs the
+    same source tree, so it bounds run-to-run reproducibility and says
+    nothing about a code change. That is the intended scope — a code
+    change moving a band is the signal, not the noise.
 
     Run on a GPU. Stage 1 and each stage-2 run take ~90 s, so the
     default three repeats put the whole call at roughly 8 minutes.
