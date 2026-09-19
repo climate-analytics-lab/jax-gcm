@@ -118,7 +118,10 @@ def iptop_for(deep_convection, nlev):
     SPEEDY's convection initialises ``iptop`` to the ``nlev + 1`` sentinel and
     lowers it to a cloud top only where it triggers, so those are the two kinds
     of value a real column presents. The scheme branches on
-    ``icnv = nlev - iptop > 0``, so the cloud top itself is arbitrary.
+    ``icnv = nlev - iptop > 0``, so the cloud top itself is arbitrary -- as
+    long as it stays below ``nlev``, which the straddle test asserts, since a
+    short sounding would otherwise turn the deep-convection cases into silent
+    duplicates of their base case and drop the redshc coverage with it.
 
     Public because ``tools/regenerate_speedy_vdiff_reference.py`` hands the same
     ``icnv`` to the Fortran; deriving it twice is how the reference and the port
@@ -437,10 +440,14 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         ``drh > drh0`` (stable diffusion). The variants straddle each gate, so
         the thresholds are pinned and not just the fluxes they admit.
 
-        The tolerance is float32: ``dmse`` is a difference of O(3e5) dry static
-        energies, so it loses about two decimal digits to cancellation and the
-        worst component here agrees with the double-precision Fortran to 2e-5
-        relative. A shut gate must give *exactly* zero, which ``atol`` covers.
+        The tolerance is float32, and what sets it is step 4: its
+        ``se0 - se[k]`` is 330 J/kg out of dry static energies of 3.1e5, so it
+        loses about three decimal digits to cancellation, and the stratocumulus
+        temperature tendency -- which is step 4 alone, the shallow heat flux
+        being off at ``dmse < 0`` -- agrees with the double-precision Fortran to
+        1.98e-5 relative. The ``dmse`` path is milder (trade-cumulus
+        temperature, 3.9e-6) and every moisture tendency milder still (8.6e-7).
+        A shut gate must give *exactly* zero, which ``atol`` covers.
         """
         for name, sounding, rh_overrides, deep in MOISTURE_GATE_CASES:
             with self.subTest(case=name):
@@ -478,14 +485,21 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
         fsg = np.asarray(speedy_coords.fsg)
         rhgrad = float(parameters.vertical_diffusion.rhgrad)
+        # A deep-convection case is only a deep-convection case while the
+        # cloud top iptop_for picks sits below kx; see that function.
+        self.assertGreater(kx - iptop_for(True, kx), 0,
+                           "the deep-convection cases no longer set icnv > 0, "
+                           "so they duplicate their base case and redshc is "
+                           "uncovered")
         interfaces, sigma_shut, strat_only = self._step3_interfaces()
         self.assertTrue(interfaces, "step 3 has no active interfaces to check")
-        # The port's one deliberate divergence from vdifsc is here: the Fortran
-        # hard-codes the range as ``do k = 3, kx-2``, and the port replaces the
-        # upper bound with the sigma<0.2 stratosphere mask so it scales with
-        # nlev. On this 8-level table the two coincide -- the mask excludes
-        # nothing ``hsg > 0.5`` does not already exclude -- which is why no case
-        # above can see the substitution. State that rather than leave it
+        # The port's one deliberate divergence from vdifsc is here. The Fortran
+        # hard-codes the range as ``do k = 3, kx-2``; the port keeps the
+        # numeric upper bound and replaces the ``k = 3`` start -- the
+        # upper-atmosphere end of the range, and numerically its lower bound --
+        # with ``1`` plus the sigma<0.2 stratosphere mask, so the range scales
+        # with nlev. On this 8-level table the two coincide, which is why no
+        # case above can see the substitution. State that rather than leave it
         # implicit: at an nlev where they part company these cases stop being a
         # Fortran comparison at the interfaces concerned, and that should
         # surface here rather than as a silent change of behaviour.
@@ -494,10 +508,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
                          "sigma condition keeps, so the cases here no longer "
                          "pin step 3 against the Fortran range")
         # And the other direction: the port's index range starts at 1, which the
-        # Fortran's ``do k = 3, kx-2`` (0-based: k >= 2) excludes outright. Only
-        # ``hsg[2] = 0.14`` keeps interface 1 shut on this table, so an nlev that
-        # opened it would put the port outside the Fortran's range with nothing
-        # else noticing.
+        # Fortran's ``do k = 3, kx-2`` (0-based: k >= 2) excludes outright. Here
+        # interface 1 is shut twice over -- ``hsg[2] = 0.14`` and
+        # ``fsg[1] = 0.095 < 0.2`` -- so it takes an nlev where *both* open to
+        # put the port outside the Fortran's range.
         self.assertGreaterEqual(min(interfaces), 2,
                                 "step 3 now diffuses across an interface below "
                                 "vdifsc's own k >= 3 lower bound")
@@ -630,11 +644,19 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
 
     def test_moisture_branch_input_sensitivities(self):
         """The tendencies depend on the inputs the scheme actually reads."""
-        # The table below is read at the default zero smoothing widths. Turning
-        # either on -- which is what they are for -- makes fsg live in both
-        # soundings and qa live in stratocumulus, so say that here rather than
-        # let an intended improvement surface as "fsg: gradient liveness
-        # changed".
+        # The table below is read at the default zero smoothing widths.
+        # ``rh_gate_smoothing > 0`` -- which is what it is for -- makes fsg live
+        # in both soundings, so say that here rather than let an intended
+        # improvement surface as "fsg: gradient liveness changed".
+        #
+        # ``mse_gate_smoothing`` does not move this table at any usable width.
+        # It reaches fsg not at all, and it revives qa in stratocumulus only
+        # once the width approaches dmse = -32 kJ/kg itself: measured
+        # sum|d qa| is exactly 0 at w = 100 J/kg, 7e-18 at 1000 and 4e-7 at
+        # 5000, because sigmoid(dmse/w) and softplus(dmse/w) saturate to
+        # float32 zero far above that. So a contributor who turns it on and
+        # sees this table unchanged is seeing the right answer, not a crossfade
+        # that failed to wire up.
         self.assertEqual(
             (float(parameters.vertical_diffusion.mse_gate_smoothing),
              float(parameters.vertical_diffusion.rh_gate_smoothing)), (0.0, 0.0),

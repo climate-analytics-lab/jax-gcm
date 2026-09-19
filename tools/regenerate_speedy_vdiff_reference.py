@@ -84,10 +84,11 @@ end module
 """
 
 # Reads the cases this script writes out, one per record, and prints the
-# tendencies. The unlimited-repeat edit descriptor keeps each tendency on one
-# line whatever kx is; a fixed count would revert the format past its width and
-# split the record, which the parser below would read as a new tendency. fsg and dhs are derived from the half levels exactly as
-# compute_speedy_vertical_coords does.
+# tendencies; fsg and dhs are derived from the half levels exactly as
+# compute_speedy_vertical_coords does. The unlimited-repeat edit descriptor
+# keeps each tendency on one line whatever kx is; a fixed count would revert
+# the format past its width and split the record, which the parser below would
+# read as a new tendency.
 DRIVER = """\
 program vdif_reference
     use types, only: p
