@@ -861,7 +861,31 @@ class AerocomDiagnostics(PhysicsTerm):
             else:
                 nlev = temperature.shape[0]
                 tke = tke.reshape(-1, nlev).T if tke.shape[0] != nlev                     else tke.reshape(nlev, -1)
-                w_act = 0.7 * jnp.sqrt(jnp.maximum(2.0 * tke, 0.0))
+                # Double-``where`` around the root, for the same reason
+                # ``tke_budget.py::echam_tke_source_update`` carries one:
+                # ``sqrt(maximum(x, 0))`` is the one floor shape that does
+                # not protect the derivative. At TKE = 0 the two arguments
+                # of ``maximum`` tie, JAX splits the derivative 0.5/0.5
+                # between them, and multiplying that by ``sqrt'(0) = inf``
+                # returns ``+inf`` in reverse mode and ``nan`` in forward
+                # mode — for every column of the group, since the whole
+                # dict is differentiated together. A *positive* floor would
+                # be safe (below it ``maximum`` passes a zero derivative),
+                # but 0 is the physically right floor for a turbulent
+                # kinetic energy, so the guard is the double-``where``.
+                # A laminar layer, a cold start and a zero-initialised
+                # vdiff carry all sit exactly at TKE = 0, so this is an
+                # ordinary state rather than a corner.
+                #
+                # Forward-identical — ``sqrt(max(0, 0)) == 0`` is what the
+                # outer ``where`` selects — and the derivative reported at 0
+                # becomes 0, the only finite choice at a square root's
+                # endpoint.
+                positive_tke = tke > 0.0
+                w_act = 0.7 * jnp.where(
+                    positive_tke,
+                    jnp.sqrt(2.0 * jnp.where(positive_tke, tke, 1.0)),
+                    0.0)
                 cf = clouds.cloud_fraction
                 cloudy = cf > THRES_CLD
                 # Lowest cloudy level, TOA-first: flip, argmax, unflip.
