@@ -239,15 +239,19 @@ def write_stats_window_global_mean(member: str, state_path: str, out: str):
 def _measure_noise(in_process_mean, member, state_path, n_repeats, tmp_dir):
     """Peak-to-peak spread of the stats window over independent repeats.
 
-    Separate processes deliberately: the point is to bound what the band must
-    absorb when nothing about the model has changed, and a repeat inside this
-    process shares every cached compilation and allocation decision with the
-    run that produced the bands, so it would measure far less than a fresh
-    process does.
+    Separate processes because that is the configuration the floor has to
+    cover: the regression test runs in its own process, never inside the one
+    that wrote the bands, so a repeat taken in-process would be measuring a
+    situation that never arises. No claim is made about how much larger a
+    cross-process spread is than an in-process one.
 
     All repeats run the same source tree, so this bounds run-to-run
     reproducibility and says nothing about a code change — which is the
-    intent. A code change moving a band is the signal, not the noise.
+    intent. A code change moving a band is the signal, not the noise. Pin
+    ``PYTHONPATH`` when measuring anything like this from a scratch
+    directory: ``sys.path[0]`` for ``python /path/script.py`` is the script's
+    own directory, so ``jcm`` can silently resolve through an editable
+    install to a different checkout.
     """
     import subprocess
     import sys

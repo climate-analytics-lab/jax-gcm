@@ -212,11 +212,13 @@ def _measure_reproducibility(in_process_mean, n_repeats, tmp_dir):
     ``n_repeats + 1`` runs of the *same* five days: the one already run in
     this process plus ``n_repeats`` run in fresh subprocesses.
 
-    Separate processes are the point. Two runs in one process agree to
-    ~3e-3 m/s in ``u_wind``; a run in a different process disagrees by
-    ~4e-2 m/s, an order of magnitude more, and it is the larger number the
-    band has to survive. Repeating in-process would measure the wrong
-    thing and produce a floor that is too small by 10x.
+    Separate processes because that is the configuration the floor has to
+    cover: the regression test runs in its own process, never inside the
+    one that wrote the bands, so an in-process repeat would be measuring a
+    situation that never occurs. No claim is made here about how much
+    larger a cross-process spread is than an in-process one — an earlier
+    revision of this file asserted an order of magnitude, on a measurement
+    that turned out to be comparing two different checkouts.
     """
     import subprocess
     import sys
