@@ -81,7 +81,9 @@ answer is that no central difference exists there.
 The checks stay in float32: enabling x64 mid-suite is what issue #729's
 ``conftest`` pinning exists to prevent, and the arguments these tests build are
 float32, so ``jcm.utils.convert_back`` would quietly drop every perturbation to
-a float32 leaf if the default float type were promoted underneath it.
+a float32 leaf if the default float type were promoted underneath it. The one
+place float64 appears is ``_inner_prod``, which reduces already-computed float32
+arrays on the host; nothing JAX traces is promoted by it.
 """
 
 import dataclasses

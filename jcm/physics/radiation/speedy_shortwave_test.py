@@ -642,7 +642,15 @@ class TestShortWaveRadiation(unittest.TestCase):
         
         # Zonal averaging is smooth in its arguments, so the difference is
         # well conditioned here: measured agreement 1.2e-9.
-        check_gradients(f, (physics_data_floats, state_floats, forcing_floats, terrain_floats), rtol=1e-4)
+        #
+        # The sigma grid is held fixed: it is a structural descriptor, not an
+        # input anything differentiates with respect to, and the ozone and
+        # stratospheric-heating profiles are built by interpolating onto masks
+        # and reference sigmas derived from it. Displacing it moves those
+        # selections rather than the fields, which at the tight rtol this smooth
+        # function earns shows up as an 0.8% AD-vs-difference gap.
+        check_gradients(f, (physics_data_floats, state_floats, forcing_floats, terrain_floats), rtol=1e-4,
+                        fixed_inputs=["speedy_coords"])
 
     def test_get_shortwave_rad_fluxes_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float
@@ -680,8 +688,19 @@ class TestShortWaveRadiation(unittest.TestCase):
     def test_clouds_gradient_check_realistic_values(self):
         from jcm.utils import convert_back, convert_to_float
 
-        qa = 0.5 * 1000. * jnp.array([0., 0.00035438, 0.00347954, 0.00472337, 0.00700214,0.01416442,0.01782708, 0.0216505])
         qsat = 1000. * jnp.array([0., 0.00037303, 0.00366268, 0.00787228, 0.01167024, 0.01490992, 0.01876534, 0.02279])
+        # qa is set from a relative humidity that increases monotonically
+        # downwards rather than from one fraction of qsat applied to the whole
+        # column. A single fraction leaves rh constant over most of the column
+        # and puts two levels exactly on the critical humidity rhcl1 = 0.3, and
+        # the cover diagnosis reduces over that profile twice: cloudc is a
+        # ``max`` over reference sigmas of ``relu(rh - rhcl1)`` and icltop an
+        # argmax of rh over the free troposphere. A tie in the max and a relu
+        # sitting on its hinge both leave automatic differentiation taking one
+        # branch while a central difference returns the mean of the two — a
+        # stable ~1.6% offset that no step size removes.
+        rh_profile = jnp.linspace(0.35, 0.85, 8)
+        qa = rh_profile * qsat
         # qsat's top entry is a placeholder zero, so a bare qa/qsat leaves a NaN
         # in rh that get_clouds passes straight through to its output and that
         # finite differencing then turns into a NaN reference gradient. q = 0
@@ -743,7 +762,19 @@ class TestShortWaveRadiation(unittest.TestCase):
         # icltop is held fixed by f above (an integer cloud-top index has no
         # meaningful derivative); the residual is float32 differencing of
         # cloudc, which get_clouds clips at 1. Measured agreement 7.5e-7.
-        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3)
+        #
+        # Two leaves are held fixed because no two-sided derivative exists along
+        # them here, not because the check converges better without them:
+        #   * speedy_coords is the structural sigma grid, and the cover
+        #     diagnosis selects reference sigmas and a stratosphere mask from
+        #     it rather than evaluating a function of it.
+        #   * cover_smoothing is 0 at the default, and every smoothing helper
+        #     branches on ``width > 0`` (smoothing.py::_safe_width). The two
+        #     branches agree in value at 0 but not in slope, and a negative
+        #     width is outside the parameter's domain, so the point is the
+        #     hinge of the scheme's own smoothing switch.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3,
+                        fixed_inputs=["speedy_coords", "cover_smoothing"])
 
 class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma

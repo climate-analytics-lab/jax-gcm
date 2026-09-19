@@ -239,7 +239,14 @@ class TestLongwave(unittest.TestCase):
         # self-consistency: st4a carries where-branches whose distance from
         # this point depends on the direction, so no fixed step is safe.
         # Measured agreement here is 7.1e-4.
-        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
+        #
+        # The sigma grid is held fixed for the same reason as in the upward
+        # check below: it is structural, and this scheme selects layers with
+        # ``stratosphere_mask(fsg)`` whose sigma < 0.2 boundary the 8-level
+        # grid sits exactly on, so displacing fsg moves whole layers between
+        # treatments instead of moving a field.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords"])
 
 
     def test_upward_longwave_rad_fluxes_gradient_check(self):
@@ -280,7 +287,16 @@ class TestLongwave(unittest.TestCase):
         
         # Same branch structure as the downward check on a smaller output
         # tree; measured agreement 9.9e-4.
-        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2)
+        #
+        # The sigma grid is held fixed. It is a structural descriptor, not an
+        # input anything differentiates with respect to, and this scheme builds
+        # ``stratosphere_mask(fsg)`` from it — a mask whose sigma < 0.2 boundary
+        # the 8-level grid sits exactly on (fsg[2] = 0.2). Displacing fsg
+        # therefore moves a whole layer between the stratospheric and
+        # tropospheric blackbody treatments, jumping ftop and dfabs by ~4.8 and
+        # leaving the secant reporting jump/eps at every rung above 4e-6.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords"])
 
 
 

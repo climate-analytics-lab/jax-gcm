@@ -307,7 +307,32 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
     def test_surface_fluxes_gradient_check_test1(self):
         from jcm.utils import convert_back, convert_to_float
 
-        args = build_inputs()
+        # A warm surface under a lapse-rate atmosphere, not build_inputs'
+        # isothermal default over a barely-warmer sea. Two reasons, both about
+        # where the scheme's branches sit:
+        #
+        #  * the near-surface extrapolation is
+        #    ``t1 = ta[-1] + dt1_fac * (ta[-1] - ta_ref)`` applied only where
+        #    the layer is unstable, i.e. ``dt1_fac * relu(ta[-1] - ta_ref)``,
+        #    and ta constant in the vertical makes ta_ref *equal* ta[-1] — the
+        #    operating point is exactly on that hinge, and since the step is a
+        #    fraction of each leaf's own magnitude (jcm.testing) temperature is
+        #    the dominant direction, so the one-sided secants differ by a
+        #    factor of four at every rung and no reference exists at all.
+        #  * ``_stability_factor`` is kinked where the surface-to-air excess
+        #    changes sign (slope 1 above, ``astab`` = 0.5 below, with
+        #    lscasym), and a near-neutral surface leaves a large share of the
+        #    4608 columns within a step of it.
+        #
+        # Neither branch can be avoided outright: over a grid this size an
+        # O(eps) fraction of columns sits within any step of the stability
+        # kink, which biases the central secant by O(eps) at every rung. That
+        # residual is what rtol below is set from.
+        fsg = SpeedyCoords.from_coordinate_system(
+            get_speedy_coords(layers=KX, nodal_shape=XY)).fsg
+        args = build_inputs(
+            ta=288.0 - 50.0 * (1.0 - fsg)[:, jnp.newaxis, jnp.newaxis],
+            sst=294.0, stl_am=292.0)
         state, physics_data = args["state"], args["physics_data"]
         parameters, forcing, terrain = (
             args["parameters"], args["forcing"], args["terrain"])
@@ -323,10 +348,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         float_args = tuple(convert_to_float(x) for x in
                            (state, physics_data, parameters, forcing, terrain))
-        # Measured agreement 4.1e-4, against the rtol=1 the fixed-step pair
-        # needed: the bulk-flux stability functions are smooth once the step
-        # stays off the Richardson-number branches.
-        check_gradients(f, float_args, rtol=5e-3)
+        # rtol is set from the stability kink described above rather than from
+        # the precision of the difference: measured over seeds 0-7 the gap
+        # between AD and the best-converged rung runs 0.03% to 1.4%, and does
+        # not shrink with the step because the biasing columns are the ones
+        # inside the step. 2e-2 covers that with headroom while still catching
+        # any error large enough to matter — a sign flip, a missing term, a
+        # factor. live_inputs then holds the per-leaf line the projection
+        # cannot: it is a sum over leaves, and a dead one of them is invisible
+        # in it.
+        check_gradients(f, float_args, rtol=2e-2,
+                        live_inputs=["temperature", "specific_humidity",
+                                     "u_wind", "v_wind",
+                                     "sea_surface_temperature", "stl_am"])
 
     def test_surface_fluxes_drag_test_gradient_check(self):
         phi0 = 500. * jnp.ones(XY)

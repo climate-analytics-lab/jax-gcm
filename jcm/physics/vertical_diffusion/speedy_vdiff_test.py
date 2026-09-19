@@ -109,11 +109,21 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         # kink converges — stably, at every step — to the *mean* of the two
         # one-sided derivatives, which is not what AD computes. The one-sided
         # secants stay a factor ~4000 apart however far the step comes down.
-        # An earlier rtol here passed only because one direction happened to
-        # land near the mean; the adjoint identity plus a live, finite gradient
-        # is what is actually verifiable.
+        # The adjoint identity plus a live, finite gradient is what is
+        # actually verifiable.
+        #
+        # live_inputs names the three leaves the temperature tendency is built
+        # from, checked one at a time on the reverse gradient. The projection
+        # cannot do it: contracted over the whole tree, qsat contributes
+        # +5.7e-5 of it and se only +4.2e-9, so a stop_gradient on se would
+        # move the projection by parts in ten thousand and pass. se also earns
+        # the check on its own account — it is a dry static energy, O(3e5) at
+        # any realistic operating point, and the schemes only ever take
+        # differences of it (see jcm/testing.py on why the step is relative).
         args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats)
-        check_gradients(f, args, reference="adjoint")
+        check_gradients(f, args, reference="adjoint",
+                        live_inputs=["convection/se", "humidity/qsat",
+                                     "specific_humidity"])
 
         # Two of the three tendency components are dead here, for different
         # reasons, and both are asserted rather than left to pass silently
