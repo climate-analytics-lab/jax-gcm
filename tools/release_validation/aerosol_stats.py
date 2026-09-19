@@ -160,9 +160,15 @@ _N_SIGMA = 3.0
 _REL_TOLERANCE = 0.15
 
 #: Statistics the regression tier does NOT score: each has an absolute physics
-#: gate of its own, and their references are ~1e-3, so a 15 % relative
-#: tolerance would be tighter than the gate and fail every real run.
-_GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_")
+#: gate of its own, and scoring them twice would replace that gate with a
+#: tighter one. For the drift, budget and dynamics residuals the references
+#: are ~1e-3, so a 15 % relative tolerance is tighter than the gate and would
+#: fail every real run. ``dust_emission_tg_per_yr`` is exempt for the opposite
+#: reason: its band is deliberately six times wide (#808), because the target
+#: itself is uncertain, and comparing to one reference run at 15 % would turn
+#: a non-tuning release gate into a tuning target.
+_GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
+                   "dust_emission_tg_per_yr")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and

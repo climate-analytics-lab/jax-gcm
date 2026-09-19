@@ -1131,6 +1131,17 @@ class TestDustEmissionBand:
         assert "emi_du" in dict(A.unscored_gates(days, series))[
             "dust_emission_tg_per_yr"]
 
+    def test_the_band_is_not_also_a_regression_target(self):
+        # The band is deliberately wide because the target is uncertain;
+        # scoring it against one reference at 15 % would quietly replace it
+        # with a tuning target six times tighter.
+        days, series = self._series(450.0)
+        stats = A.summarize(days, series)
+        reference = dict(stats, dust_emission_tg_per_yr=1200.0)
+        names = [name for name, _v, _lim, _ok
+                 in A.compare_to_reference(stats, reference, series)]
+        assert "dust_emission_tg_per_yr" not in names
+
     def test_a_year_missing_chunks_is_unscored_not_averaged_over_the_rest(self):
         # A year whose emission diagnostic vanished part-way must not be
         # scored from the chunks that survived: that is a different year.

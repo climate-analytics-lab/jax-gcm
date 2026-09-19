@@ -124,6 +124,10 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
         "stl": _on_year_axis(interp_to(land["stl"], lats, lons)),
         "soilw_am": _on_year_axis(
             interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0)),
+        # The dust saturation cut-off reads this one, not soilw_am: an AMIP
+        # year without it would silently run with the cut-off inert (#787).
+        "soilw_rel": _on_year_axis(
+            interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0)),
         "snowc": _on_year_axis(
             interp_to(land["snowc"], lats, lons).clip(0.0, 1.0)),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
