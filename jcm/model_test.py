@@ -458,169 +458,6 @@ class TestModelUnit(unittest.TestCase):
             upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
 
-    @pytest.mark.slow
-    def test_release_matrix_default_statistics(self):
-        """Every supported-matrix member still produces what it produced.
-
-        One sub-test per member of ``tools/release_validation/matrix.yaml``,
-        each built through that member's validated preset, resumed from its
-        init state on the data mirror and integrated for the stats window,
-        asserting every stored variable's global mean falls inside its band.
-
-        These are **regression** bands, not a climatology: they are drawn
-        from a short window following a short spin-up, so a failure means
-        "something changed", not "the physics is wrong". See
-        ``jcm.data.test.release_matrix.generate_stats``, which regenerates a
-        member's band file and its init state together — the bands describe
-        the window that follows that exact state, so the two are only
-        meaningful as a pair.
-
-        Too heavy for CPU CI, so gated behind
-        ``JCM_RUN_GPU_INTEGRATION_TESTS=1``.
-        """
-        import importlib.util
-        import os
-        import tempfile
-
-        import xarray as xr
-
-        if os.environ.get("JCM_RUN_GPU_INTEGRATION_TESTS") != "1":
-            pytest.skip(
-                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; the matrix "
-                "members are too heavy for CPU CI",
-            )
-
-        from jcm.data.test.release_matrix.generate_stats import (
-            band_path,
-            members,
-            resolve_state,
-            stats_window_global_mean_isolated,
-        )
-
-        #: Optional extras a member needs before it can even be composed.
-        extras = {"echam-jam-t63-l47": "mam4_jax",
-                  "echam-jam-t63-l95": "mam4_jax"}
-
-        checked = 0
-        not_local = []
-        for member in members():
-            bands_file = band_path(member)
-            if not bands_file.exists():
-                # A member whose fixture has not been generated yet is passed
-                # over rather than failed — the set is filled in member by
-                # member, each needing its own GPU run. The whole test skips
-                # if that leaves nothing checked, so an empty fixture set can
-                # never be mistaken for a pass.
-                continue
-            extra = extras.get(member)
-            if extra and importlib.util.find_spec(extra) is None:
-                continue
-            with self.subTest(member=member):
-                bands = xr.open_dataset(bands_file)
-                # The band file names the variables it carries; deriving the
-                # list here instead would let a regenerated fixture and the
-                # assertion drift apart silently.
-                stat_vars = sorted(
-                    v[: -len(".mean")] for v in bands.data_vars
-                    if v.endswith(".mean")
-                )
-                self.assertTrue(stat_vars, f"{bands_file} carries no bands")
-
-                # The state path comes from the band file, digest and all,
-                # so these bands are always checked against the state they
-                # were generated against. A mirror fetch that fails raises —
-                # its message names the prefetch command — rather than being
-                # swallowed into a pass. ``JCM_FIXTURE_STATE_DIR`` points
-                # this at locally generated states instead, and returns None
-                # for a member absent from that directory, since states are
-                # generated one member at a time and the point of the
-                # override is to validate the pair before publishing it.
-                state = resolve_state(bands.attrs["init_state"])
-                if state is None:
-                    not_local.append(member)
-                    continue
-                # Each member's window runs in its own interpreter. JAX never
-                # returns pool memory, so walking the whole matrix in one
-                # process starves whichever member comes last — reproducibly
-                # the T63 L95 JAM one, several times the footprint of the
-                # rest, which failed here with RESOURCE_EXHAUSTED while the
-                # six lighter members ahead of it passed.
-                with tempfile.TemporaryDirectory() as tmp:
-                    pred = stats_window_global_mean_isolated(
-                        member, state, tmp)
-
-                tol = 3  # tolerance in standard deviations
-                # #744's degenerate-band fallback, scoped to ``std`` being
-                # *exactly* zero: there the band carries no information at all
-                # — the specific/relative-humidity tail is physically
-                # negligible (~1e-24…1e-37 kg kg-1) and a hybrid grid's upper
-                # ``pressure_full`` levels are pure a-coefficient constants —
-                # so a relative+absolute tolerance stands in for it. It must
-                # not be extended to merely *small* ``std``: doing that is a
-                # far worse bug than the one it would fix, handing seven
-                # ``pressure_full`` levels of these fixtures half-widths of
-                # 400-2800 Pa, wide enough to pass a gross pressure error.
-                rtol, atol = 0.25, 1e-8
-                # A strictly positive ``std`` can still be finer than float32
-                # resolves, and then the band is narrower than the arithmetic
-                # underneath it: ``pressure_full`` near the pure-a levels
-                # stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of a ULP — giving a
-                # three-ULP band that an independent run, in another process
-                # on identical code, sat exactly three ULP from. That is a
-                # pass by equality, one ULP from red. Floor such a band at a
-                # few ULP of its own magnitude instead: 1e-6 (~8 ULP) lifts
-                # that level to 7.4e-3 Pa and leaves every informative band
-                # untouched (it widens nothing else in these fixtures).
-                ulp_floor = 1e-6
-                # Second floor, on the half-width: ``<var>.noise`` is the
-                # measured peak-to-peak spread of this same window across
-                # independent repeats in separate processes, i.e. what the
-                # band must absorb with no physics having changed. Applied to
-                # the half-width rather than folded into ``std`` so it can
-                # only widen a band — folding it in would narrow the
-                # degenerate levels, whose fallback is deliberately far wider
-                # than their reproducibility.
-                noise_tol = 3
-                for var in stat_vars:
-                    mean = bands[f"{var}.mean"]
-                    std = bands[f"{var}.std"]
-                    self.assertIn(
-                        f"{var}.noise", bands,
-                        f"{var}.noise missing from {bands_file} — the fixture "
-                        "predates the reproducibility floor; regenerate it",
-                    )
-                    half_width = xr.where(
-                        std > 0,
-                        np.maximum(tol * std, ulp_floor * abs(mean)),
-                        rtol * abs(mean) + atol,
-                    )
-                    half_width = np.maximum(
-                        half_width, noise_tol * bands[f"{var}.noise"])
-                    lower, upper = mean - half_width, mean + half_width
-                    assert ((lower <= pred[var]).all()) & (
-                        (pred[var] <= upper).all()
-                    ), (
-                        f"{member}: {var} fell outside its band (±3σ, floored "
-                        "at 3× the measured run-to-run reproducibility and at "
-                        "a relative+absolute tolerance where σ is below "
-                        "float32 resolution). Regenerate this member's band "
-                        "file AND its init state together with "
-                        "jcm.data.test.release_matrix.generate_stats.generate"
-                        f"({member!r}) if the deviation is intentional."
-                    )
-                checked += 1
-        if not_local:
-            print(
-                f"\nJCM_FIXTURE_STATE_DIR held no state for: "
-                f"{', '.join(not_local)} (checked {checked} member(s))")
-        if not checked:
-            pytest.skip(
-                "no matrix member had a band file, its optional extras and "
-                "its init state available",
-            )
-
-
-
 class TestModelRepr(unittest.TestCase):
     def test_repr_summarizes_model(self):
         # One line naming backend, grid, levels, dt and physics terms (#322).
@@ -1668,3 +1505,197 @@ class TestObserversUnderJit(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(implicit.observations[0]["temperature"]),
             np.asarray(explicit.observations[0]["temperature"]))
+
+
+class TestReleaseMatrixStatistics(unittest.TestCase):
+    """The supported-matrix climatology regression.
+
+    Its own TestCase rather than a method on ``TestModelUnit``: it shares
+    nothing with that class's ``setUp``, which imports SPEEDY symbols for
+    other tests, and it is a different kind of test — an integration run per
+    supported configuration rather than a unit check on ``Model``.
+    """
+
+    @pytest.mark.slow
+    def test_release_matrix_default_statistics(self):
+        """Every supported-matrix member still produces what it produced.
+
+        One sub-test per member of ``tools/release_validation/matrix.yaml``,
+        each built through that member's validated preset, resumed from its
+        init state on the data mirror and integrated for the stats window,
+        asserting every stored variable's global mean falls inside its band.
+
+        These are **regression** bands, not a climatology: they are drawn
+        from a short window following a short spin-up, so a failure means
+        "something changed", not "the physics is wrong". See
+        ``jcm.data.test.release_matrix.generate_stats``, which regenerates a
+        member's band file and its init state together — the bands describe
+        the window that follows that exact state, so the two are only
+        meaningful as a pair.
+
+        Too heavy for CPU CI, so gated behind
+        ``JCM_RUN_GPU_INTEGRATION_TESTS=1``.
+        """
+        import importlib.util
+        import os
+        import tempfile
+
+        import xarray as xr
+
+        if os.environ.get("JCM_RUN_GPU_INTEGRATION_TESTS") != "1":
+            pytest.skip(
+                "set JCM_RUN_GPU_INTEGRATION_TESTS=1 to run; the matrix "
+                "members are too heavy for CPU CI",
+            )
+
+        # The workers inherit the environment as the operator set it;
+        # ``_run_worker`` adds only ``XLA_PYTHON_CLIENT_PREALLOCATE=false``.
+        # This process needs no device of its own — it reads band files and
+        # spawns one worker per member — and the session-wide preallocation
+        # guard in the root ``conftest.py`` is what keeps it from holding the
+        # card anyway. That guard has to live there because merely *importing*
+        # this module initialises a CUDA backend: measured at 61,214 MiB of an
+        # 80 GB A100 before any test body runs, against 428 MiB with the guard
+        # in place. No pin applied from inside a test body can be early
+        # enough, which is why this does not try.
+        worker_env = dict(os.environ)
+
+        from jcm.data.test.release_matrix.generate_stats import (
+            band_path,
+            members,
+            resolve_state,
+            stats_window_global_mean_isolated,
+        )
+
+        #: Optional extras a member needs before it can even be composed.
+        extras = {"echam-jam-t63-l47": "mam4_jax",
+                  "echam-jam-t63-l95": "mam4_jax"}
+
+        checked = 0
+        not_local = []
+        for member in members():
+            bands_file = band_path(member)
+            if not bands_file.exists():
+                # A member whose fixture has not been generated yet is passed
+                # over rather than failed — the set is filled in member by
+                # member, each needing its own GPU run. The whole test skips
+                # if that leaves nothing checked, so an empty fixture set can
+                # never be mistaken for a pass.
+                continue
+            extra = extras.get(member)
+            if extra and importlib.util.find_spec(extra) is None:
+                continue
+            with self.subTest(member=member):
+                bands = xr.open_dataset(bands_file)
+                # The band file names the variables it carries; deriving the
+                # list here instead would let a regenerated fixture and the
+                # assertion drift apart silently.
+                stat_vars = sorted(
+                    v[: -len(".mean")] for v in bands.data_vars
+                    if v.endswith(".mean")
+                )
+                self.assertTrue(stat_vars, f"{bands_file} carries no bands")
+
+                # The state path comes from the band file, digest and all,
+                # so these bands are always checked against the state they
+                # were generated against. A mirror fetch that fails raises —
+                # its message names the prefetch command — rather than being
+                # swallowed into a pass. ``JCM_FIXTURE_STATE_DIR`` points
+                # this at locally generated states instead, and returns None
+                # for a member absent from that directory, since states are
+                # generated one member at a time and the point of the
+                # override is to validate the pair before publishing it.
+                # A member whose state is deliberately not published yet is
+                # a declared gap, not a pass: skip it, with the reason the
+                # band file itself carries. Every other member's 404 stays a
+                # hard failure — a missing state must never read as success.
+                if bands.attrs.get("hosted_state") == "pending":
+                    self.skipTest(
+                        f"{member}: init state not published — "
+                        f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
+                state = resolve_state(bands.attrs["init_state"])
+                if state is None:
+                    not_local.append(member)
+                    continue
+                # Each member's window runs in its own interpreter. JAX never
+                # returns pool memory, so walking the whole matrix in one
+                # process starves whichever member comes last — reproducibly
+                # the T63 L95 JAM one, several times the footprint of the
+                # rest, which failed here with RESOURCE_EXHAUSTED while the
+                # six lighter members ahead of it passed.
+                with tempfile.TemporaryDirectory() as tmp:
+                    pred = stats_window_global_mean_isolated(
+                        member, state, tmp, env=worker_env)
+
+                tol = 3  # tolerance in standard deviations
+                # #744's degenerate-band fallback, scoped to ``std`` being
+                # *exactly* zero: there the band carries no information at all
+                # — the specific/relative-humidity tail is physically
+                # negligible (~1e-24…1e-37 kg kg-1) and a hybrid grid's upper
+                # ``pressure_full`` levels are pure a-coefficient constants —
+                # so a relative+absolute tolerance stands in for it. It must
+                # not be extended to merely *small* ``std``: doing that is a
+                # far worse bug than the one it would fix, handing seven
+                # ``pressure_full`` levels of these fixtures half-widths of
+                # 400-2800 Pa, wide enough to pass a gross pressure error.
+                rtol, atol = 0.25, 1e-8
+                # A strictly positive ``std`` can still be finer than float32
+                # resolves, and then the band is narrower than the arithmetic
+                # underneath it: ``pressure_full`` near the pure-a levels
+                # stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of a ULP — giving a
+                # three-ULP band that an independent run, in another process
+                # on identical code, sat exactly three ULP from. That is a
+                # pass by equality, one ULP from red. Floor such a band at a
+                # few ULP of its own magnitude instead: 1e-6 (~8 ULP) lifts
+                # that level to 7.4e-3 Pa and leaves every informative band
+                # untouched (it widens nothing else in these fixtures).
+                ulp_floor = 1e-6
+                # Second floor, on the half-width: ``<var>.noise`` is the
+                # measured peak-to-peak spread of this same window across
+                # independent repeats in separate processes, i.e. what the
+                # band must absorb with no physics having changed. Applied to
+                # the half-width rather than folded into ``std`` so it can
+                # only widen a band — folding it in would narrow the
+                # degenerate levels, whose fallback is deliberately far wider
+                # than their reproducibility.
+                noise_tol = 3
+                for var in stat_vars:
+                    mean = bands[f"{var}.mean"]
+                    std = bands[f"{var}.std"]
+                    self.assertIn(
+                        f"{var}.noise", bands,
+                        f"{var}.noise missing from {bands_file} — the fixture "
+                        "predates the reproducibility floor; regenerate it",
+                    )
+                    half_width = xr.where(
+                        std > 0,
+                        np.maximum(tol * std, ulp_floor * abs(mean)),
+                        rtol * abs(mean) + atol,
+                    )
+                    half_width = np.maximum(
+                        half_width, noise_tol * bands[f"{var}.noise"])
+                    lower, upper = mean - half_width, mean + half_width
+                    assert ((lower <= pred[var]).all()) & (
+                        (pred[var] <= upper).all()
+                    ), (
+                        f"{member}: {var} fell outside its band (±3σ, floored "
+                        "at 3× the measured run-to-run reproducibility and at "
+                        "a relative+absolute tolerance where σ is below "
+                        "float32 resolution). Regenerate this member's band "
+                        "file AND its init state together with "
+                        "jcm.data.test.release_matrix.generate_stats.generate"
+                        f"({member!r}) if the deviation is intentional."
+                    )
+                checked += 1
+        if not_local:
+            print(
+                f"\nJCM_FIXTURE_STATE_DIR held no state for: "
+                f"{', '.join(not_local)} (checked {checked} member(s))")
+        if not checked:
+            pytest.skip(
+                "no matrix member had a band file, its optional extras and "
+                "its init state available",
+            )
+
+
+

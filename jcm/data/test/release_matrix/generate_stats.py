@@ -117,6 +117,29 @@ MEMBER_BUNDLE = {
 #: lands. Recorded in the band file so the fixture itself says so.
 PRE_DUST_RETUNE = ("echam-jam-t63-l47", "echam-jam-t63-l95")
 
+#: Members whose init state is deliberately NOT published yet, and why.
+#:
+#: A fixture in this state is a real gap, not a passing test: the regression
+#: skips the member and says so. It is recorded in the band file rather than
+#: only here so the *fixture* carries its own status — a checkout with an
+#: older band file skips for the reason that band file was written with,
+#: instead of inheriting a judgement from whatever this module says today.
+#:
+#: Publishing is not a silent transition either way. Until a member's state
+#: is on the mirror, hosting a fixture that fetches it would turn the whole
+#: GPU gate red for as long as it takes; once published, the entry is removed
+#: and a 404 for that member goes back to being a hard failure.
+HELD_STATES = {
+    "echam-jam-t63-l47": (
+        "pre-dust-retune: regenerate and publish once the dust retune "
+        "(#787/#808, tracked for #840) lands, since it moves this member's "
+        "aerosol climate"),
+    "echam-jam-t63-l95": (
+        "pre-dust-retune: regenerate and publish once the dust retune "
+        "(#787/#808, tracked for #840) lands, since it moves this member's "
+        "aerosol climate"),
+}
+
 SPIN_UP_DAYS = 5.0
 STATS_DAYS = 5.0
 SAVE_INTERVAL_DAYS = 1.0
@@ -278,7 +301,7 @@ def write_spinup_state(member: str, out_path: str):
     save_checkpoint(exp.model, out_path, elapsed_days=SPIN_UP_DAYS)
 
 
-def _run_worker(call: str) -> None:
+def _run_worker(call: str, env=None) -> None:
     """Run one module entry point in a fresh interpreter.
 
     Every stage that integrates the model goes through here, so the
@@ -288,20 +311,45 @@ def _run_worker(call: str) -> None:
     and the generation died in the first repeat. Keeping the parent free of
     device memory also makes the ensemble homogeneous — every member of it is
     produced the same way, rather than one in-process and the rest not.
+
+    The child always gets ``XLA_PYTHON_CLIENT_PREALLOCATE=false``: the default
+    claims 75 % of the card up front, which on a shared box is antisocial and,
+    when the parent has done the same, leaves the child a quarter of a card to
+    run a model in.
+
+    ``env`` is the environment handed to the child, defaulting to this
+    process's. A caller that has pinned *itself* to CPU — as the regression
+    test does, needing no device of its own — passes the environment it
+    captured beforehand, so the child still reaches the accelerator.
+
+    Raises:
+        RuntimeError: the worker exited non-zero, carrying the tail of its
+            stderr. Without that the failure surfaces as a bare
+            ``CalledProcessError`` naming only the command, and the reason —
+            an out-of-memory, a missing input — dies with the child.
+
     """
+    import os
     import subprocess
     import sys
 
-    subprocess.run(
+    child_env = dict(os.environ if env is None else env)
+    child_env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    result = subprocess.run(
         [sys.executable, "-c",
          "from jcm.data.test.release_matrix.generate_stats import "
          f"{call}"],
-        check=True,
+        env=child_env, stderr=subprocess.PIPE, text=True,
     )
+    if result.returncode:
+        tail = "\n".join((result.stderr or "").strip().splitlines()[-25:])
+        raise RuntimeError(
+            f"fixture worker exited {result.returncode} running {call!r}\n"
+            f"--- last 25 lines of its stderr ---\n{tail}")
 
 
 def stats_window_global_mean_isolated(member: str, state_path: str,
-                                      tmp_dir) -> "object":
+                                      tmp_dir, env=None) -> "object":
     """One stats window in a fresh interpreter, reduced as the bands are.
 
     The regression compares ``(time, lon, lat)``-mean values, and this returns
@@ -318,7 +366,7 @@ def stats_window_global_mean_isolated(member: str, state_path: str,
     out = Path(tmp_dir) / f"{member}_window.nc"
     _run_worker(
         "write_stats_window_global_mean as w; "
-        f"w({member!r}, {state_path!r}, {str(out)!r})")
+        f"w({member!r}, {state_path!r}, {str(out)!r})", env=env)
     return xr.open_dataset(out).load().mean(dim="time")
 
 
@@ -460,6 +508,10 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
         member, Path(state_path).stem.rsplit("_", 1)[-1])
     stats_ds.attrs["init_state_provenance"] = provenance
     stats_ds.attrs["stats_days"] = STATS_DAYS
+    held = HELD_STATES.get(member)
+    stats_ds.attrs["hosted_state"] = "pending" if held else "published"
+    if held:
+        stats_ds.attrs["hosted_state_reason"] = held
     if member in PRE_DUST_RETUNE:
         stats_ds.attrs["provisional"] = (
             "PRE-DUST-RETUNE: these bands describe the aerosol climate before "

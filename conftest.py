@@ -38,6 +38,18 @@ def pytest_configure(config):
     ``jax_enable_x64`` — or builds a quiet ``Model`` — would otherwise define
     the baseline meant to detect it.
     """
+    # Never preallocate the GPU for a test session. XLA's default is to claim
+    # 75 % of the card at backend initialisation, and merely *importing* a
+    # test module that reaches jcm is enough to trigger that — measured at
+    # 61,214 MiB of an 80 GB A100 for a process whose test then does no device
+    # work at all. On a shared box that locks out colleagues; worse, it
+    # starves this session's own subprocesses, which is how the T106 members
+    # of the release-matrix regression came to fail under pytest while passing
+    # when run directly. Read at backend init rather than at jax import, so
+    # setting it here — before collection imports anything — takes effect.
+    # ``setdefault`` leaves an operator's explicit choice alone.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
     global _X64_BASELINE
     import jax
     _X64_BASELINE = bool(jax.config.read("jax_enable_x64"))
