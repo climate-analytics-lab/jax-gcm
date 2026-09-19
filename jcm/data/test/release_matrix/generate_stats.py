@@ -232,12 +232,53 @@ def stats_window_global_mean(member: str, state_path: str):
 
 
 def write_stats_window_global_mean(member: str, state_path: str, out: str):
-    """Subprocess entry point for one reproducibility repeat."""
-    stats_window_global_mean(member, state_path).to_netcdf(out)
+    """Subprocess entry point for one stats window.
+
+    Writes the *daily* global mean, keeping the time axis, because the run
+    that seeds the bands needs the per-day values for ``std`` while the
+    reproducibility ensemble needs only their mean. One worker serves both.
+    """
+    exp = _load_member(
+        member, _from_state_overrides(state_path), STATS_DAYS)
+    predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
+    ds = predictions.to_xarray()
+    present = [v for v in CANDIDATE_STAT_VARS if v in ds]
+    ds[present].mean(dim={"lon", "lat"}).to_netcdf(out)
 
 
-def _measure_noise(in_process_mean, member, state_path, n_repeats, tmp_dir):
-    """Peak-to-peak spread of the stats window over independent repeats.
+def write_spinup_state(member: str, out_path: str):
+    """Subprocess entry point for the spin-up stage."""
+    from jcm.checkpoint import save_checkpoint
+
+    exp = _load_member(member, {}, SPIN_UP_DAYS)
+    exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
+    save_checkpoint(exp.model, out_path, elapsed_days=SPIN_UP_DAYS)
+
+
+def _run_worker(call: str) -> None:
+    """Run one module entry point in a fresh interpreter.
+
+    Every stage that integrates the model goes through here, so the
+    orchestrating process never holds a device pool of its own. That is not
+    tidiness: JAX does not return pool memory, so a parent that had just run
+    a T63 L95 JAM spin-up left too little of an 80 GB card for its own child
+    and the generation died in the first repeat. Keeping the parent free of
+    device memory also makes the ensemble homogeneous — every member of it is
+    produced the same way, rather than one in-process and the rest not.
+    """
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [sys.executable, "-c",
+         "from jcm.data.test.release_matrix.generate_stats import "
+         f"{call}"],
+        check=True,
+    )
+
+
+def _stats_windows(member, state_path, n_runs, tmp_dir):
+    """Run the stats window ``n_runs`` times, each in a fresh process.
 
     Separate processes because that is the configuration the floor has to
     cover: the regression test runs in its own process, never inside the one
@@ -253,25 +294,17 @@ def _measure_noise(in_process_mean, member, state_path, n_repeats, tmp_dir):
     own directory, so ``jcm`` can silently resolve through an editable
     install to a different checkout.
     """
-    import subprocess
-    import sys
-
     import xarray as xr
 
-    members_ = [in_process_mean]
-    for i in range(n_repeats):
-        out = Path(tmp_dir) / f"repeat_{i}.nc"
-        print(f"  reproducibility repeat {i + 1}/{n_repeats} …", flush=True)
-        subprocess.run(
-            [sys.executable, "-c",
-             "from jcm.data.test.release_matrix.generate_stats import "
-             "write_stats_window_global_mean as w; "
-             f"w({member!r}, {state_path!r}, {str(out)!r})"],
-            check=True,
-        )
-        members_.append(xr.open_dataset(out).load())
-    stacked = xr.concat(members_, dim="_repeat")
-    return stacked.max(dim="_repeat") - stacked.min(dim="_repeat")
+    runs = []
+    for i in range(n_runs):
+        out = Path(tmp_dir) / f"window_{i}.nc"
+        print(f"  stats window {i + 1}/{n_runs} …", flush=True)
+        _run_worker(
+            "write_stats_window_global_mean as w; "
+            f"w({member!r}, {state_path!r}, {str(out)!r})")
+        runs.append(xr.open_dataset(out).load())
+    return runs
 
 
 def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
@@ -281,14 +314,11 @@ def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
     the current checkpoint schema, so the stats window — and the regression
     test — can resume it with no migration escape hatch.
     """
-    from jcm.checkpoint import save_checkpoint
-
     out_path = out_dir / Path(state_mirror_path(member)).name
     print(f"  {SPIN_UP_DAYS:g}-day spin-up from the preset's own init …",
           flush=True)
-    exp = _load_member(member, {}, SPIN_UP_DAYS)
-    exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
-    save_checkpoint(exp.model, out_path, elapsed_days=SPIN_UP_DAYS)
+    _run_worker(
+        f"write_spinup_state as w; w({member!r}, {str(out_path)!r})")
     return str(out_path), (
         f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
         f"({members()[member]})")
@@ -327,28 +357,33 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
         state_path, provenance = _prepare_state(member, out_dir)
     else:
         state_path = str(out_dir / Path(state_mirror_path(member)).name)
-        provenance = "state reused from a previous generate() call"
+        # Still a spin-up state — ``write_state=False`` only ever reuses one
+        # this module wrote — so describe it as such rather than as an opaque
+        # "reused file", which would leave the fixture unable to say where its
+        # own initial condition came from.
+        provenance = (
+            f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
+            f"({members()[member]}); state reused from an earlier generate() "
+            "call rather than re-spun")
     print(f"  state: {state_path}", flush=True)
 
-    print(f"  stats window: {STATS_DAYS:g} days of daily snapshots …",
-          flush=True)
-    exp = _load_member(
-        member, _from_state_overrides(state_path), STATS_DAYS)
-    predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
-    ds = predictions.to_xarray()
-    daily_global = ds.mean(dim={"lon", "lat"})
-    present = [v for v in CANDIDATE_STAT_VARS if v in ds]
-    pred_mean = daily_global.mean(dim="time")[present]
-    pred_std = daily_global.std(dim="time")[present]
+    # One window seeds the bands; the rest size ``noise``. All of them run
+    # in their own process, including the first — see :func:`_run_worker`.
+    n_runs = 1 + n_reproducibility_repeats
+    print(f"  {n_runs} x {STATS_DAYS:g}-day stats window …", flush=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        runs = _stats_windows(member, state_path, n_runs, tmp)
+
+    daily_global = runs[0]
+    present = list(daily_global.data_vars)
+    pred_mean = daily_global.mean(dim="time")
+    pred_std = daily_global.std(dim="time")
 
     noise = None
     if n_reproducibility_repeats:
-        print(f"  {n_reproducibility_repeats} reproducibility repeats …",
-              flush=True)
-        with tempfile.TemporaryDirectory() as tmp:
-            noise = _measure_noise(
-                ds[present].mean(dim={"time", "lon", "lat"}),
-                member, state_path, n_reproducibility_repeats, tmp)
+        stacked = xr.concat([r.mean(dim="time") for r in runs],
+                            dim="_repeat")
+        noise = stacked.max(dim="_repeat") - stacked.min(dim="_repeat")
 
     out = {}
     for var in present:
