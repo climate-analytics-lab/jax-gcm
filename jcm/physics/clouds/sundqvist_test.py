@@ -8,6 +8,7 @@ from .sundqvist import (
     condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
 )
 from jcm.constants import tmelt, eps, alhc, cpd
+from jcm.testing import check_gradients
 
 
 
@@ -516,3 +517,53 @@ class TestCondensationToCloudWater:
 
         assert jnp.max(dqidt) > 0.0, \
             f"dqi/dt should be > 0 for cold supersaturated column, got {float(jnp.max(dqidt)):.6e}"
+
+
+class TestSundqvistGradients:
+    """AD against a central difference for cover and condensation (#820).
+
+    Both are green. The operating points are chosen off the scheme's exact
+    switches: the relative humidity profile crosses the critical value
+    smoothly rather than sitting on it, so the ``relu(rh - rhc)`` hinge and
+    the ``argmax`` over reference sigmas at ``sundqvist.py:287/298`` are not
+    straddled — a fixture placed exactly there would report the kink, which
+    belongs to the point and not to the formula.
+    """
+
+    NLEV = 14
+
+    def _column(self):
+        """Return (temperature, humidity, pressure) for a moist column."""
+        temperature = jnp.linspace(232.0, 295.0, self.NLEV)
+        pressure = jnp.linspace(2.0e4, 1.0e5, self.NLEV)
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        return temperature, 0.82 * qs, pressure, qs
+
+    def test_cloud_fraction_gradients_match_a_central_difference(self):
+        """Single column: ``calculate_cloud_fraction`` is vmapped by callers."""
+        temperature, humidity, pressure, _ = self._column()
+        config = CloudParameters.default()
+        check_gradients(
+            lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5, config),
+            (temperature, humidity, pressure), rtol=1e-3)
+
+    def test_condensation_gradients_column_and_block_agree(self):
+        """``condensation_evaporation`` is elementwise, so both shapes check.
+
+        Supersaturated at 1.06x, well clear of the ``q == qs`` switch.
+        """
+        temperature, _, pressure, qs = self._column()
+        config = CloudParameters.default()
+        cloud_water = jnp.full(self.NLEV, 3.0e-4)
+        cloud_ice = jnp.full(self.NLEV, 5.0e-5)
+        cloud_fraction = jnp.full(self.NLEV, 0.6)
+        f = lambda t, q, qc, qi, cf, p: condensation_evaporation(  # noqa: E731
+            t, q, qc, qi, cf, p, 1800.0, config)
+
+        args = (temperature, 1.06 * qs, cloud_water, cloud_ice,
+                cloud_fraction, pressure)
+        check_gradients(f, args, rtol=1e-3)
+
+        stack = lambda a: jnp.stack(  # noqa: E731
+            [a * (1.0 + 0.03 * k) for k in range(3)], axis=1)
+        check_gradients(f, tuple(stack(a) for a in args), rtol=1e-3)

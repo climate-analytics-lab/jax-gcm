@@ -8,6 +8,7 @@ import numpy as np
 
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
 from jcm.physics.aerosol.spa import spa_activated_cdnc
+from jcm.testing import check_gradients
 
 
 # Lin et al. (2025) reference values — used as the AerosolParameters
@@ -142,3 +143,33 @@ class TestSpaActivatedCdnc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpaGradients(unittest.TestCase):
+    """AD against a central difference for the SPA activation floor (#820).
+
+    Green in both configurations. ``cap_smoothing=0.0`` is a hard ``min``, so
+    its derivative is one-sided wherever the cap binds; the CCN values below
+    are chosen so the fit rather than the cap is what responds, which is what
+    makes the hard-min case checkable at all. The smoothed configuration is
+    checked alongside it because that is the one a gradient-based calibration
+    would use, and the two must both be sound.
+    """
+
+    def _args(self):
+        """Return (Nccn [cm^-3], cloud fraction, prefactor, exponent)."""
+        return (jnp.array([50.0, 200.0, 800.0]),
+                jnp.array([0.2, 0.6, 0.95]),
+                jnp.array(LIN2025_PREFACTOR),
+                jnp.array(LIN2025_EXPONENT))
+
+    def test_hard_min_gradients_match_a_central_difference(self):
+        """``cap_smoothing = 0``: the production default."""
+        check_gradients(spa_activated_cdnc, self._args(), rtol=1e-3)
+
+    def test_smoothed_cap_gradients_match_a_central_difference(self):
+        """A positive smoothing width replaces the hinge with a hyperbola."""
+        check_gradients(
+            lambda n, cf, a, b: spa_activated_cdnc(n, cf, a, b,
+                                                   cap_smoothing=1.0e7),
+            self._args(), rtol=1e-3)
