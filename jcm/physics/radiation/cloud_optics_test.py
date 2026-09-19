@@ -6,6 +6,7 @@ and asymmetry parameters for both water and ice clouds.
 Date: 2025-01-10
 """
 
+import jax
 import pytest
 import jax.numpy as jnp
 from jcm.physics.radiation.cloud_optics import (
@@ -13,6 +14,7 @@ from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice
 )
+from jcm.testing import check_gradients
 
 
 def test_effective_radius_liquid():
@@ -284,3 +286,88 @@ def test_cloud_optics_scattering_properties():
     cloudy_levels = cloud_water_path + cloud_ice_path > 0
     if jnp.any(cloudy_levels):
         assert jnp.any(sw_optics.asymmetry_factor > 0)
+
+class TestCloudOpticsGradients:
+    """AD against a central difference through ``cloud_optics`` (#820).
+
+    Green wherever a two-sided derivative exists. Which is not everywhere:
+    **zero condensate is a discontinuity of this function, by construction.**
+    A layer with ``cloud_water_path == cloud_ice_path == 0`` gets the
+    clear-sky fill values ``ssa = 1`` and ``g = 0``
+    (``cloud_optics.py:617/629``), while the limit of the tau-weighted
+    combination as the paths go to zero is the condensate's own ``ssa`` and
+    ``g`` — about 0.9999 and 0.80 for the ice deck in
+    ``test_cloud_optics_integration``. Crossing zero therefore jumps ``g`` by
+    0.8, not by an epsilon, and a central difference across it reports
+    ``jump/eps``. ``tau`` itself is continuous there but kinked, by the
+    ``jnp.maximum(tau, 0.0)`` floors at ``:357`` and ``:436``.
+
+    Neither is a defect: every consumer weights ``ssa`` and ``g`` by ``tau``,
+    which is zero in exactly those layers, so the jump is inert. So the
+    comparisons below are made on profiles that are cloudy at **every**
+    level, and the all-clear and mixed clear/cloudy columns are checked for
+    finiteness instead — which is the property that matters for a column
+    that evolves clear mid-rollout.
+
+    The ``sqrt(12/r_eff)`` and ``sqrt(35/r_eff)`` size factors
+    (``:497``/``:555``) are safe at zero condensate for a reason worth
+    stating: ``effective_radius_ice`` double-``where``s its ``iwc**0.216``
+    and returns a finite 83.8 um at zero IWC, and the liquid radius does not
+    depend on the water path at all, so neither square root ever meets a zero
+    denominator.
+    """
+
+    NLEV = 12
+
+    @staticmethod
+    def _layer_thickness(nlev=NLEV):
+        return jnp.full(nlev, 500.0)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("scale", [1.0, 1.0e-5], ids=["thick", "small"])
+    def test_gradients_match_a_central_difference(self, scale, seed):
+        """Cloudy at every level, at deck and at near-threshold amounts.
+
+        The ``small`` case is 1e-5 of the ``thick`` one — in-cloud paths of
+        O(1e-7) kg/m2, far below anything a radiation call cares about but
+        still strictly positive, so it probes the approach to the zero
+        boundary without sitting on it.
+        """
+        cloud_water_path = scale * jnp.linspace(0.01, 0.09, self.NLEV)
+        cloud_ice_path = scale * jnp.linspace(0.002, 0.03, self.NLEV)
+        check_gradients(
+            cloud_optics,
+            (cloud_water_path, cloud_ice_path, self._layer_thickness(),
+             jnp.array(1.2)),
+            rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("kind", ["clear", "decks"])
+    def test_gradients_are_finite_at_zero_condensate(self, kind):
+        """No input may return a non-finite gradient at zero condensate.
+
+        ``clear`` is an entirely cloud-free column; ``decks`` is the mixed
+        profile a real column has, with exact zeros above, between and below
+        two decks. Both put layers on the ``tau == 0`` boundary where the
+        ``ssa``/``g`` safe-denominator guards (``:616-630``) select their
+        clear-sky branch, and the assertion is that the discarded branch does
+        not leak a ``0 * inf`` back through the ``jnp.where``.
+        """
+        if kind == "clear":
+            cloud_water_path = jnp.zeros(self.NLEV)
+            cloud_ice_path = jnp.zeros(self.NLEV)
+        else:
+            cloud_water_path = jnp.zeros(self.NLEV).at[8:11].set(0.08)
+            cloud_ice_path = jnp.zeros(self.NLEV).at[2:5].set(0.03)
+        args = (cloud_water_path, cloud_ice_path, self._layer_thickness(),
+                jnp.array(1.2))
+
+        def total(*a):
+            return sum(jnp.sum(leaf ** 2)
+                       for leaf in jax.tree.leaves(cloud_optics(*a)))
+
+        gradients = jax.grad(total, argnums=(0, 1, 2, 3))(*args)
+        names = ("cloud_water_path", "cloud_ice_path", "layer_thickness",
+                 "cdnc_factor")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite in a {kind} column: {gradient}")
