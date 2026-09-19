@@ -122,11 +122,14 @@ the documentation arrived at gas optics 1000x high.
 
 .. code-block:: python
 
-   # v2 docstrings said ppbv
-   chem = ChemistryData(ozone_vmr=ozone_ppbv)          # ... plus the other fields
+   # v2 docstrings said ppbv, so a caller following them passed a ppbv value
+   ozone_vmr = ozone_ppbv
 
    # v3: divide any value that followed the old ppbv documentation by 1000
-   chem = ChemistryData(ozone_vmr=ozone_ppbv / 1000.0)
+   ozone_vmr = ozone_ppbv / 1000.0
+
+   # on a struct you already hold, that is one replace:
+   chem = chem.replace(ozone_vmr=chem.ozone_vmr / 1000.0)
 
 Use the explicit ``ozone_mole_fraction()`` / ``methane_mole_fraction()``
 helpers where a mol/mol value is wanted, rather than writing the ``1e-6``
@@ -644,7 +647,12 @@ deliberate behaviour change, not a side effect. Opt out with:
 
 .. code-block:: python
 
-   DinosaurDycore(..., sl_options={"mass_fixer": False})
+   from jcm.dycore.dinosaur import DinosaurDycore
+
+   dycore = DinosaurDycore(
+       coords=coords, terrain=terrain, dt_seconds=1800.0,
+       sl_options={"mass_fixer": False},
+   )
 
 Per-species ``budget_mass_<sp>`` / ``budget_ptend_<sp>`` / ``budget_dyn_<sp>``
 diagnostics and one greppable log line per species per chunk make the residual
