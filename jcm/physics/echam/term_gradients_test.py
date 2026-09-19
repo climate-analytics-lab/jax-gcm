@@ -215,6 +215,28 @@ _PBL_HEIGHT_DEFECT = (
     "the PBL depth is invisible to a gradient. (#843)"
 )
 
+_ONE_MOMENT_SATURATION_CANCELLATION = (
+    "no float32 adjoint identity holds on the convecting column. The "
+    "saturation adjustment runs at 95 % relative humidity, where `q - qs` and "
+    "the pass-2 `q_p1 - qs_p1 - 0.01*qs_p1` are each a difference of two "
+    "nearly equal numbers, and the Rotstayn rain evaporation below the deck "
+    "compounds it: the per-level derivatives in the lowest ten layers land "
+    "50 % from their float64 values and the projection's summands reach 2.9e3 "
+    "against a total of 5.2e2. jvp and vjp are that same double sum "
+    "contracted in opposite orders, so they split — 4.5 % in the checked "
+    "direction and 0.19 % to 37 % over seeds 0-5, against 1.3e-6 with the "
+    "inputs promoted to float64. It is reduction order and not an asymmetry: "
+    "there is no `custom_jvp`, `custom_vjp` or `stop_gradient` in the scheme "
+    "for one to come from, and the gap does not move when the phase-partition "
+    "floor this column's condensate tail sits on is swept from 1e-18 to 1e-9. "
+    "Recorded rather than absorbed into `adjoint_rtol`: with no difference "
+    "reference on this cell the adjoint identity is the only quantitative "
+    "check left, and a tolerance loose enough to pass it — the 1.2e-1 this "
+    "cell used to carry — could not detect a 10 % gradient error, nor did it "
+    "hold at seeds 4 and 5. The stable column of the same term sits at 3.6e-4 "
+    "and keeps a real tolerance. (#843)"
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class _Check:
@@ -263,14 +285,20 @@ _CHECKS: dict = {
     # and not float32 noise. The adjoint identity and per-leaf input liveness
     # are what remain meaningful, and both hold.
     #
-    # ``adjoint_rtol`` is relaxed for all three because each projection is a
-    # long float32 reduction with heavy cancellation: TTE-TKE's tridiagonal
-    # ``lax.scan``, the 1M scheme's top-to-bottom flux ``lax.scan``, and the
-    # Hines ``lax.scan`` over the wave spectrum. In float64 the same jvp and
-    # vjp projections agree to 1.6e-13, 2.1e-16 and 9.9e-12 respectively, so
-    # the float32 spread is reduction order, not a jvp/vjp asymmetry — and
-    # there is no ``custom_jvp``, ``custom_vjp`` or ``stop_gradient`` anywhere
-    # in the three schemes for one to come from.
+    # ``adjoint_rtol`` is relaxed because each projection is a long float32
+    # reduction with heavy cancellation: TTE-TKE's tridiagonal ``lax.scan``,
+    # the 1M scheme's top-to-bottom flux ``lax.scan``, and the Hines
+    # ``lax.scan`` over the wave spectrum. Each relaxation is sized to the
+    # spread actually measured over seeds 0-5 rather than to what passes —
+    # at most 3.0e-5 for TTE-TKE, 1.2e-5 for Hines and 3.6e-4 for the 1M
+    # scheme's stable column — so the tolerances below keep 30x to 80x of
+    # headroom and still detect a tenth-of-a-percent asymmetry. In float64
+    # the same jvp and vjp projections agree to 1.6e-13 (TTE-TKE) and 1.9e-15
+    # (Hines), so the float32 spread is reduction order, not a jvp/vjp
+    # asymmetry — and there is no ``custom_jvp``, ``custom_vjp`` or
+    # ``stop_gradient`` anywhere in the three schemes for one to come from.
+    # The 1M scheme's two operating points part company here: the convecting
+    # one reaches 37 % and is recorded as a defect rather than absorbed.
     "tte_tke_vertical_diffusion": _Check(
         reference="adjoint", adjoint_rtol=1.0e-3,
         live_inputs=("[0]/u_wind",), xfail_reference=_PBL_HEIGHT_DEFECT),
@@ -281,30 +309,21 @@ _CHECKS: dict = {
     # diagnostic set is scheme-independent — echam_1m.py:1418). There is
     # nothing for the liveness guard to find in any of the three.
     "echam_1m_microphysics": _Check(
-        reference="adjoint", adjoint_rtol=2.0e-2, live_inputs=_ENVIRONMENT,
+        reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
-    # The convecting column needs a far looser adjoint tolerance than the
-    # stable one (5.0e-5) for a reason that is entirely float32. Its saturation
-    # adjustment runs at 95 % relative humidity, where ``q - qs`` and the
-    # pass-2 ``q_p1 - qs_p1 - 0.01*qs_p1`` are each a difference of two nearly
-    # equal numbers, and the Rotstayn rain evaporation below the deck compounds
-    # it: the per-level derivatives in the lowest ten layers land 50 % apart
-    # from their float64 values, and the projection's summands reach 2.9e3
-    # against a total of 5.2e2. jvp and vjp are the same double sum contracted
-    # in opposite orders, so they split — measured 8.43 % here, while in
-    # float64 the identity holds to 6.8e-11 and the two modes agree to every
-    # digit. It is reduction order, not an asymmetry: there is no
-    # ``custom_jvp``, ``custom_vjp`` or ``stop_gradient`` in the scheme for one
-    # to come from, and the gap does not move when the phase-partition floor
-    # that this column's condensate tail sits on is swept from 1e-18 to 1e-9.
+    # The convecting column keeps the default adjoint tolerance and fails it;
+    # see ``_ONE_MOMENT_SATURATION_CANCELLATION`` for why that is recorded
+    # rather than absorbed. Everything else about the cell is the term entry
+    # above.
     ("echam_1m_microphysics", "convecting"): _Check(
-        reference="adjoint", adjoint_rtol=1.2e-1, live_inputs=_ENVIRONMENT,
-        skip_outputs=("u_wind", "v_wind", "wbf")),
+        reference="adjoint", live_inputs=_ENVIRONMENT,
+        skip_outputs=("u_wind", "v_wind", "wbf"),
+        xfail_reference=_ONE_MOMENT_SATURATION_CANCELLATION),
     # Hines returns a structurally zero moisture tendency — it moves momentum
     # and returns the dissipated energy as heat, nothing else — so there is
     # nothing for the liveness guard to find in that field.
     "hines_gwd": _Check(
-        reference="adjoint", adjoint_rtol=5.0e-2, outputs="tendency",
+        reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
         skip_outputs=("specific_humidity",),
         live_inputs=("[0]/u_wind", "[0]/temperature")),
 
