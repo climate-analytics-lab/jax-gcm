@@ -617,9 +617,9 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
   0.80, 1024 at 0.65 and 2540 at 0.50 annually, with April/annual running 1.05
   to 1.33. Two things follow from the pair of curves. HAM's published
-  threshold is ~10x short of the parent model's own 1221 Tg/yr **even on a
-  perfect wind field**, so the retune is required by the threshold and not
-  only by a host-model wind bias. And jcm needs a lower multiplier than ERA5's
+  threshold is ~5x short of the 642 Tg/yr that is the parent model's own
+  budget in this size window **even on a perfect wind field**, so the retune
+  is required by the threshold and not only by a host-model wind bias. And jcm needs a lower multiplier than ERA5's
   winds would, because its wind tail is thinner: over the same T63 April
   source cells the two agree on the mean (3.98 m/s against 4.00) and diverge
   in the tail, 0.69 % of cell-samples above 7.62 m/s against ERA5's 4.41 %,
