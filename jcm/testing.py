@@ -66,6 +66,18 @@ float32 whatever that magnitude is, and every leaf contributes to the projection
 on comparable terms. Both scalings read only the primal, never either
 derivative, so neither can launder a wrong gradient into agreement.
 
+The scale is the RMS and not the standard deviation, though the RMS of an
+offset-dominated field — a temperature in kelvin, a dry static energy — is
+essentially its offset and so gives a step much larger than the field's own
+structure. The standard deviation would size the step to that structure, but it
+is *zero* for the uniform fields these fixtures are built from
+(``PhysicsData.ones()``), which is exactly the ``se`` case this scaling exists
+for: a uniform 3.1e5 would fall back to the absolute step and stay invisible.
+Resolvability has to win, and the price is paid at the callers — a step that is
+a fraction of 300 K rather than of the few kelvin a column varies by reaches
+branch boundaries that a smaller step would not, and where it does the honest
+answer is that no central difference exists there.
+
 The checks stay in float32: enabling x64 mid-suite is what issue #729's
 ``conftest`` pinning exists to prevent, and the arguments these tests build are
 float32, so ``jcm.utils.convert_back`` would quietly drop every perturbation to
@@ -271,6 +283,18 @@ def _cotangent(primal, seed):
 def _inner_prod(xs, ys):
     """Sum of elementwise products over the differentiable leaves of two trees.
 
+    The *contraction* is done in numpy float64 while the two trees stay float32:
+    a per-leaf tangent scaled to that leaf's own RMS spans the schemes' whole
+    dynamic range (an O(1e5) dry static energy beside an O(1e-5) tendency), so
+    individual terms of this sum are far larger than the total and a float32
+    accumulation loses several digits to cancellation. That showed up as jvp and
+    vjp — the same double sum contracted in two different orders, and equal
+    exactly in exact arithmetic — disagreeing by 1.2e-4 where float64
+    accumulation puts them 1e-5 apart. This is a host-side reduction over
+    already-computed float32 arrays, not ``jax_enable_x64``: every function
+    evaluation and every derivative stays in float32, so issue #729's conftest
+    pinning is untouched.
+
     Inlined rather than taken from ``jax._src.public_test_util``: this module is
     importable at runtime, and a private JAX path would make ``import
     jcm.testing`` a JAX-upgrade hazard.
@@ -278,8 +302,8 @@ def _inner_prod(xs, ys):
     total = 0.0
     for x, y in zip(jax.tree.leaves(xs), jax.tree.leaves(ys)):
         if _is_differentiable(x) and _is_differentiable(y):
-            total += float(jnp.vdot(jnp.asarray(x, jnp.float32).ravel(),
-                                    jnp.asarray(y, jnp.float32).ravel()))
+            total += float(np.dot(np.asarray(x, np.float64).ravel(),
+                                  np.asarray(y, np.float64).ravel()))
     return total
 
 
@@ -390,6 +414,54 @@ def _finite_difference(f, args, tangent, cotangent, steps, rtol, atol):
         "compare the gradient against.\n" + report)
 
 
+def _match_leaves(wanted, names):
+    """Resolve ``wanted`` to leaf indices, raising if it names none.
+
+    A name matches any leaf whose path contains it as a whole run of segments,
+    so ``"[1]/convection/se"``, ``"convection/se"`` and ``"se"`` all reach that
+    leaf and an interior name like ``"speedy_coords"`` reaches every leaf of
+    that subtree. Naming nothing raises, so a renamed field fails loudly rather
+    than quietly checking — or freezing — nothing.
+    """
+    segments = wanted.split("/")
+    matched = [i for i, n in enumerate(names)
+               if any(n.split("/")[j:j + len(segments)] == segments
+                      for j in range(len(n.split("/"))))]
+    if not matched:
+        raise ValueError(f"no input leaf named {wanted!r}; the leaves are {names}")
+    return matched
+
+
+def _freeze(tangent, args, fixed_inputs):
+    """Zero the tangent on leaves the caller declares are not inputs.
+
+    A *structural* leaf is one the model never differentiates with respect to
+    and whose value selects a code path rather than scaling a result: the
+    SPEEDY sigma-grid metrics (``speedy_coords``), from which the schemes build
+    masks they document as compile-time constants — ``stratosphere_mask(fsg)``,
+    ``hsg[k+1] > 0.5`` — and the smoothing widths, which sit at exactly 0 by
+    default behind ``jnp.where(w > 0.0, smooth, hard)`` guards where a negative
+    width is out of domain. Perturbing either crosses the selector, so no
+    two-sided derivative exists along it and the whole direction is wasted:
+    with the sigma grid free, ``speedy_longwave``'s check straddles the
+    sigma < 0.2 stratosphere mask (``fsg`` has an entry at exactly 0.2) and
+    reports a jump instead of a gradient.
+
+    This is about the *domain* of the direction, never about convergence: a
+    leaf belongs here only because differentiating with respect to it is
+    meaningless, and freezing one to quiet a disagreement would hide exactly
+    the defect this module exists to find. Freezing also removes the leaf from
+    the reverse projection, since that contracts against this same tangent.
+    """
+    names = _leaf_names(args)
+    frozen = {i for wanted in fixed_inputs for i in _match_leaves(wanted, names)}
+    leaves, treedef = jax.tree_util.tree_flatten(tangent)
+    return jax.tree_util.tree_unflatten(
+        treedef,
+        [jnp.zeros_like(x) if (i in frozen and _is_differentiable(x)) else x
+         for i, x in enumerate(leaves)])
+
+
 def _check_live_inputs(live_inputs, args, gradients):
     """Assert each named input leaf carries a finite, non-zero reverse gradient.
 
@@ -401,20 +473,14 @@ def _check_live_inputs(live_inputs, args, gradients):
     explicit per-leaf assertion, and it is the only input-side check available
     under ``reference="adjoint"``, where no difference is taken at all.
 
-    A name matches a leaf by its full path (``"[1]/convection/se"``) or by a
-    trailing run of path segments (``"convection/se"``, ``"se"``), and every
-    matching leaf must be live. A name that matches nothing raises, so a
-    renamed field fails loudly rather than quietly checking nothing.
+    Names are matched by ``_match_leaves``, and every matching leaf must be
+    live.
     """
     names = _leaf_names(args)
     arg_leaves, grad_leaves = jax.tree.leaves(args), jax.tree.leaves(gradients)
     for wanted in live_inputs:
-        matched = [(n, a, g) for n, a, g in zip(names, arg_leaves, grad_leaves)
-                   if n == wanted or n.endswith("/" + wanted)]
-        if not matched:
-            raise ValueError(
-                f"no input leaf named {wanted!r}; the leaves are {names}")
-        for name, arg, grad in matched:
+        for i in _match_leaves(wanted, names):
+            name, arg, grad = names[i], arg_leaves[i], grad_leaves[i]
             if not _is_differentiable(arg):
                 raise ValueError(
                     f"{name} is not a floating-point leaf, so it cannot carry "
@@ -428,7 +494,7 @@ def _check_live_inputs(live_inputs, args, gradients):
 
 def check_gradients(f, args, *, rtol=None, atol=0.0, steps=DEFAULT_STEPS,
                     seed=0, reference="difference", adjoint_rtol=1e-4,
-                    live_inputs=()):
+                    live_inputs=(), fixed_inputs=()):
     """Check ``f``'s jvp and vjp at ``args`` in one random direction.
 
     Args:
@@ -465,12 +531,18 @@ def check_gradients(f, args, *, rtol=None, atol=0.0, steps=DEFAULT_STEPS,
             through the projection. Opt-in, because which inputs a scheme is
             legitimately insensitive to at a given operating point is the
             caller's knowledge, not this function's.
+        fixed_inputs: names of input leaves to hold fixed, because they are
+            structural rather than differentiable inputs — see ``_freeze``. The
+            justification is always that differentiating with respect to the
+            leaf is meaningless, never that the check converges better without
+            it.
 
     Raises:
         AssertionError: if the gradients disagree, if a ``live_inputs`` leaf is
             dead, or if ``reference`` is ``"difference"`` and no step in
             ``steps`` yields a self-consistent reference.
-        ValueError: if a ``live_inputs`` name matches no input leaf.
+        ValueError: if a ``live_inputs`` or ``fixed_inputs`` name matches no
+            input leaf.
 
     """
     if reference not in ("difference", "adjoint"):
@@ -481,6 +553,8 @@ def check_gradients(f, args, *, rtol=None, atol=0.0, steps=DEFAULT_STEPS,
     # One tangent object for both AD and the secant, so they are taken along
     # exactly the same — per-leaf relative — direction.
     tangent = _tangent(args, seed)
+    if fixed_inputs:
+        tangent = _freeze(tangent, args, fixed_inputs)
     primal_out, vjp_fun = jax.vjp(f, *args)
     _, jvp_out = jax.jvp(f, args, tangent)
     cotangent = _cotangent(primal_out, seed + 1)

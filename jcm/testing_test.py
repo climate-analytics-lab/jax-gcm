@@ -8,8 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import tree_math
 
-from jcm.testing import (DEFAULT_STEPS, _check_unique, _leaf_names, _tangent,
-                         check_gradients, random_direction)
+from jcm.testing import (DEFAULT_STEPS, _check_unique, _freeze, _leaf_names,
+                         _tangent, check_gradients, random_direction)
 
 
 @tree_math.struct
@@ -243,6 +243,35 @@ class TestCheckGradients(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_gradients(_smooth, self.args, rtol=1e-3,
                             live_inputs=["geopotential"])
+
+    def test_a_fixed_input_is_not_perturbed(self):
+        """A structural leaf — a grid descriptor that selects a branch rather
+        than scaling a result — has no two-sided derivative, and holding it
+        fixed must take it out of AD and the difference together.
+        """
+        # y only ever enters through a step, so any direction that moves it has
+        # no usable difference; holding it fixed leaves a smooth function of x.
+        f = lambda x, y: jnp.sum(x**2) + jnp.sum(jnp.where(y > 1.0, 3.0, 0.0))
+        args = (jnp.linspace(0.5, 2.0, 8), jnp.ones((8,)))
+        with self.assertRaises(AssertionError):
+            check_gradients(f, args, rtol=1e-3)
+        check_gradients(f, args, rtol=1e-3, fixed_inputs=["[1]"])
+
+    def test_a_fixed_input_that_does_not_exist_is_rejected(self):
+        with self.assertRaises(ValueError):
+            check_gradients(_smooth, self.args, rtol=1e-3,
+                            fixed_inputs=["speedy_coords"])
+
+    def test_an_interior_name_reaches_a_whole_subtree(self):
+        """``fixed_inputs=["speedy_coords"]`` has to reach every leaf of that
+        struct, not just one that happens to be called exactly that.
+        """
+        tree = (_Outer(inner=_Inner(a=jnp.ones(4), b=jnp.ones(4)),
+                       tail=jnp.ones(4)),)
+        frozen = _freeze(_tangent(tree, 0), tree, ["inner"])
+        np.testing.assert_array_equal(frozen[0].inner.a, np.zeros(4))
+        np.testing.assert_array_equal(frozen[0].inner.b, np.zeros(4))
+        self.assertTrue(np.any(np.asarray(frozen[0].tail) != 0))
 
     def test_live_inputs_names_a_leaf_by_its_field_name(self):
         f = lambda s: jnp.sum(s.inner.a**2) + jnp.sum(jnp.sin(s.tail))
