@@ -570,10 +570,10 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   The value is **0.5**, calibrated on 30-day T63L47 April members started from
   an ERA5 state and driven by the model's own instantaneous 10 m winds:
 
-  | ``nduscale_scale`` | 1.00 | 0.65 | 0.45 |
-  |---|---|---|---|
-  | April D < 10 µm, Tg/yr | 5.7 | 294.6 | 1838.6 |
-  | discarded ≥ 10 µm | 77.1 % | 75.2 % | 71.1 % |
+  | ``nduscale_scale`` | 1.00 | 0.65 | **0.50** | 0.45 |
+  |---|---|---|---|---|
+  | April D < 10 µm, Tg/yr | 5.7 | 294.6 | **1158.4** | 1838.6 |
+  | discarded ≥ 10 µm | 77.1 % | 75.2 % | 72.6 % | 71.1 % |
 
   A factor 2 in the threshold is a factor ~300 in emission here, because
   saltation samples the far tail of the wind distribution and jcm's tail is
