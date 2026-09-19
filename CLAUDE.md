@@ -140,6 +140,13 @@ section (or configuration selection page) in the same PR. State what the code
 never a fix narrative or a before/after. A reviewer should be able to read the
 science doc and the diff together and find them consistent.
 
+A ``#NNN`` on these pages asserts the gap is **open**. Pointer and toctree rot
+fails the PR that causes it; whether a cited issue is still open is checked out
+of band instead — closing a cited issue gets you a comment and an assigned
+follow-up, and a daily sweep catches the rest — so a pull request never fails
+for something no commit did. ``JCM_CHECK_TRACKED_GAPS=1`` runs that check
+locally. See ``docs/source/design/science_register_enforcement.md``.
+
 ## Project Overview
 
 JAX-GCM (`jcm`) is a fully differentiable General Circulation Model (GCM) for atmospheric simulation, written entirely in JAX. It combines the Dinosaur spectral dynamical core with JAX implementations of ICON /ECHAM and SPEEDY atmospheric physics parameterizations. The model supports gradient-based optimization, data assimilation, and hybrid physics-ML workflows.
