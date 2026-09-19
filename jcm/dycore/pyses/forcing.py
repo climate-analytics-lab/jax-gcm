@@ -49,7 +49,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     Args:
         forcing_file: jcm-canonical forcing netCDF: monthly ``sst`` /
             ``icec`` / ``stl`` / ``soilw_am`` / ``snowc`` shaped
-            ``(lon, lat, time)`` plus static ``alb`` ``(lon, lat)``.
+            ``(lon, lat, time)`` plus static ``alb`` ``(lon, lat)``, and the
+            optional ``soilw_rel`` relative soil wetness (#787).
         dycore: A :class:`~jcm.dycore.pyses.dycore.PysesCamSEDycore` (only
             its ``colmap`` column coordinates are read).
         validate: Run the host-side physical-range sanity check jcm applies
@@ -123,6 +124,12 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     # Fraction fields pick up interpolation noise at coast/ice edges; clip.
     fields["sice_am"] = np.clip(fields["sice_am"], 0.0, 1.0)
     fields["snowc_am"] = np.clip(fields["snowc_am"], 0.0, 20000.0)
+    # Relative soil wetness, the dust saturation cut-off's field (#787).
+    # Optional on this door as on the spectral one: a bundle built before the
+    # channel existed simply leaves it out, and DustEmissions warns that the
+    # cut-off is inert rather than reading a fabricated dry soil.
+    if "soilw_rel" in ds.data_vars:
+        fields["soilw_rel"] = np.clip(monthly_to_columns("soilw_rel"), 0.0, 1.0)
 
     alb0 = np.clip(
         interp_grid_to_points(
@@ -144,6 +151,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         stl_am=ts(fields["stl_am"]),
         soilw_am=ts(fields["soilw_am"]),
         snowc_am=ts(fields["snowc_am"]),
+        soilw_rel=(ts(fields["soilw_rel"]) if "soilw_rel" in fields else None),
     )
     return attach_jam_forcing(
         forcing, col_lon, col_lat, nlev=dycore.nlev,
