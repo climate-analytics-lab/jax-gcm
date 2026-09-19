@@ -1216,6 +1216,84 @@ class TestColumnSweepStateGradients:
             reference="adjoint", adjoint_rtol=self.ADJOINT_RTOL,
             live_inputs=["[0]", "[1]", "[2]", "[3]", "[4]", "[5]"])
 
+    @staticmethod
+    def _ringing_tail_column(nlev=24):
+        """Build a phase-split deck whose tail decays through 1e-30 kg/kg.
+
+        Two things have to hold at once for the partition in
+        ``_saturation_adjustment_layer`` to be tested, and this is the shape a
+        running column actually has them in. A Gaussian deck does not stop at
+        the edge of the cloud: it decays continuously, so the layers outside it
+        carry 1e-20, 1e-25, 1e-30 kg/kg — physically nothing, numerically a
+        positive number, and the *denominator* of the phase split. And the deck
+        is split at the freezing level, so those same layers hold **exactly**
+        zero of the other phase — the *numerator*. The fixtures above miss it
+        in both directions: their clear layers hold exactly zero of both
+        phases, and ``_cloudy_column`` holds a uniform 7.2e-6 of each.
+
+        The widths are chosen so the ice deck's cold-side tail sweeps the whole
+        range, crossing 1e-19 around level 6 and reaching 1e-26 by level 3.
+        """
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        T = jnp.linspace(200.0, 300.0, nlev)
+        p = jnp.linspace(2.0e4, 1.0e5, nlev)
+        q = 0.94 * jax.vmap(saturation_specific_humidity)(p, T)
+        level = jnp.arange(nlev, dtype=jnp.float32)
+        deck = jnp.exp(-((level - 17.0) / 2.0) ** 2)
+        warm = T > tmelt
+        qc = jnp.where(warm, 3.0e-4 * deck, 0.0)
+        qi = jnp.where(warm, 0.0, 4.0e-5 * deck)
+        # Broad enough to keep every tail layer above ``cqtmin``: a cell the
+        # cloud scheme calls cloud-free has its condensate force-evaporated
+        # before the adjustment runs, which would empty the denominator this
+        # fixture exists to supply.
+        cf = jnp.clip(0.7 * jnp.exp(-((level - 17.0) / 8.0) ** 2), 1e-6, 1.0)
+        rho = p / (287.0 * T)
+        dz = jnp.full(nlev, 500.0)
+        nd = jnp.full(nlev, 9.0e7)
+        return T, q, p, qc, qi, cf, rho, dz, nd
+
+    def test_a_condensate_tail_does_not_poison_the_derivative(self):
+        """A 1e-30 kg/kg condensate tail keeps every partial finite.
+
+        The sharp probe is the **zero** direction: ``jvp`` with a zero tangent
+        contracts every local partial against 0, so it returns 0 for any
+        function whose partials are finite and ``nan`` for one that holds an
+        ``inf``, whatever the operating point's own values are. That is the
+        whole failure mode — ``qc / (qc + qi)`` at a total small enough that
+        float32 squares it to zero returns a perfectly good 0 forward and an
+        ``inf`` partial that the zero numerator turns into ``nan``. The
+        per-leaf directions after it are the practical statement: each input
+        on its own, in both modes.
+        """
+        column = self._ringing_tail_column()
+        T, q, _, qc, qi, cf, _, _, nd = column
+        f = self._sweep_fn(column)
+        args = (T, q, qc, qi, cf, nd)
+
+        primal, vjp_fun = jax.vjp(f, *args)
+        for leaf in jax.tree.leaves(primal):
+            assert np.all(np.isfinite(np.asarray(leaf))), "forward pass"
+
+        _, zero_direction = jax.jvp(f, args, tuple(jnp.zeros_like(a) for a in args))
+        for leaf in jax.tree.leaves(zero_direction):
+            assert np.all(np.isfinite(np.asarray(leaf))), (
+                "a zero perturbation produced a non-finite derivative, so some "
+                "local partial is infinite on this column")
+
+        for index in range(len(args)):
+            direction = tuple(
+                jnp.ones_like(a) if k == index else jnp.zeros_like(a)
+                for k, a in enumerate(args))
+            _, forward = jax.jvp(f, args, direction)
+            for leaf in jax.tree.leaves(forward):
+                assert np.all(np.isfinite(np.asarray(leaf))), (
+                    f"forward-mode derivative along argument {index}")
+
+        reverse = vjp_fun(jax.tree.map(jnp.ones_like, primal))
+        for leaf in jax.tree.leaves(reverse):
+            assert np.all(np.isfinite(np.asarray(leaf))), "reverse-mode gradient"
+
     @pytest.mark.xfail(
         strict=True,
         reason="a clear layer sits exactly on three switches at once — "
