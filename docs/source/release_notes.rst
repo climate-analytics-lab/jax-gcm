@@ -1,6 +1,23 @@
 Release Notes
 =============
 
+Unreleased — dust emission reads a real soil wetness and carries a tuning scalar
+--------------------------------------------------------------------------------
+
+- The Tegen/HAMMOZ dust scheme's ``ws/wsmx > 0.99`` saturation cut-off now
+  reads ``forcing.soilw_rel`` — a new, optional forcing channel holding soil
+  water as a fraction of that cell's own field capacity (ERA5 ``swvl1`` over
+  the HTESSEL capacity of its soil type) — rather than SPEEDY's
+  vegetation-weighted root-zone availability index, which is a different
+  quantity and fired the cut-off 2.7x more often over the T63 source cells
+  (#787). The channel is additive: a forcing file that lacks it leaves the
+  cut-off inert and logs a warning naming the fallback, so existing bundles
+  still run, and the mirror's surface bundles gain it on their next build.
+  Dust also gains one global multiplier on HAM's T63 regional threshold
+  vector (``physics.jam_dust_nduscale_scale``, shipped at HAM's value) and the
+  annual D < 10 µm emission becomes a release-validation gate on any T63 run
+  of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 250-1500 Tg/yr) (#808).
+
 Unreleased — checkpoints carry a schema stamp and migrate by field name
 ------------------------------------------------------------------------
 

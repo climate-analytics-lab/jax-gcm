@@ -500,12 +500,29 @@ class RegionTuningTest(unittest.TestCase):
         np.testing.assert_allclose(scaled / scaled[0], ham / ham[0])
 
     def test_the_calibrated_default_applies_at_t63_only(self):
-        # T106/ne30 keep HAM's untuned value: the tuning is a T63 calibration
-        # and the source maps only exist there (#810).
-        np.testing.assert_allclose(
-            float(DustParameters.preset(4, 106).nduscale_reg[0]), 0.86)
-        np.testing.assert_allclose(
-            float(DustParameters.preset(4, None).nduscale_reg[0]), 0.86)
+        # T106/ne30 keep HAM's untuned value: the calibration is a T63 one and
+        # the source maps only exist there (#810). The calibrated scalar is
+        # patched rather than read, so this pins the ROUTING of the default
+        # whatever value the module currently ships.
+        import unittest.mock
+
+        import jcm.physics.aerosol.jam.emissions.dust as dust_module
+
+        with unittest.mock.patch.object(dust_module,
+                                        "NDUSCALE_JCM_T63_SCALE", 0.5):
+            np.testing.assert_allclose(
+                np.asarray(DustParameters.preset(4, 63).nduscale_reg),
+                np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+                * 0.5)
+            np.testing.assert_allclose(
+                float(DustParameters.preset(4, 106).nduscale_reg[0]), 0.86)
+            np.testing.assert_allclose(
+                float(DustParameters.preset(4, None).nduscale_reg[0]), 0.86)
+            # ndust=3 takes its resolution polynomial, untouched by the
+            # ndust=4 calibration (the polynomial hits 0.86 at T63 to ~3e-7).
+            np.testing.assert_allclose(
+                float(DustParameters.preset(3, 63).nduscale_reg[0]), 0.86,
+                rtol=2e-6)
         # An EXPLICIT multiplier still applies anywhere, so a sweep is
         # expressible at any resolution.
         np.testing.assert_allclose(

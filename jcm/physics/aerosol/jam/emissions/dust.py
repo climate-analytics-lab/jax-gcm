@@ -144,15 +144,23 @@ MIXTURE_ROWS = ((1, 1), (2, 2), (3, 3), (4, 4), (6, 6),
                 (10, 10), (10, 11))
 _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 
-#: Global multiplier on HAM's ``ndust = 4`` T63 regional threshold vector,
-#: fitted for jcm's own 10 m wind distribution (#808). HAM's values were tuned
-#: in ECHAM5; ``nduscale_reg`` scales the saltation THRESHOLD, and emission
-#: lives in the far tail of the wind distribution, so it is exactly the
-#: parameter that absorbs a difference in host-model wind climate. One scalar,
-#: because HAM's eight regional parameters cannot be identified against a
-#: single global budget — the regional RATIOS stay HAM's. Provenance and the
-#: target budget are in ``docs/source/science/aerosol.md``; the value applies
-#: at T63 only (#810).
+#: Global multiplier on HAM's ``ndust = 4`` T63 regional threshold vector —
+#: the single degree of freedom through which jcm calibrates its dust budget
+#: (#808). HAM's values were tuned inside ECHAM5; ``nduscale_reg`` scales the
+#: saltation THRESHOLD and emission lives in the far tail of the wind
+#: distribution, so this is exactly the parameter that absorbs a difference in
+#: host-model wind climate — a *smaller* value emits MORE. One scalar, because
+#: HAM's eight regional parameters cannot be identified against a single global
+#: budget: the regional RATIOS stay HAM's and only the level moves. It applies
+#: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
+#: native HAMMOZ source fields (#810).
+#:
+#: The shipped value is 1.0 — HAM's vector unchanged — so the scheme's
+#: behaviour is HAM's until a jcm T63 emission budget is measured against the
+#: target range documented in ``docs/source/science/aerosol.md``. The
+#: sensitivity is steep: driving the same scheme with ERA5 10 m winds, the
+#: annual D < 10 µm budget runs 125 Tg/yr at 1.0, 421 at 0.80, 1024 at 0.65 and
+#: 2540 at 0.50, so the value is worth measuring rather than guessing.
 NDUSCALE_JCM_T63_SCALE = 1.0
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
@@ -333,9 +341,9 @@ class DustParameters:
                 high = 1.25 if nudged else 1.45
                 low = 0.95 if nudged else 1.05
                 scale[:] = [low, high, high, low, low, low, high, low]
-                # The one grid/preset combination jcm has calibrated against
-                # a dust budget of its own (#808); everything else keeps
-                # HAM's number untouched (#810).
+                # The one grid/preset combination that carries a jcm
+                # calibration scalar at all (#808); every other resolution and
+                # preset keeps HAM's number untouched (#810).
                 calibrated = NDUSCALE_JCM_T63_SCALE
             else:
                 scale[:] = 0.86
