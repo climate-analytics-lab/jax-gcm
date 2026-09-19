@@ -143,15 +143,25 @@ class CliTest(unittest.TestCase):
 
     def test_stale_exit_codes(self):
         with mock.patch.object(tg, "stale_citations", return_value=[]):
-            self.assertEqual(tg._main(["p", "stale"]), 0)
+            self.assertEqual(tg._main(["p", "stale"]), tg.CLEAN)
         with mock.patch.object(tg, "stale_citations", return_value=["#1 is closed"]):
-            self.assertEqual(tg._main(["p", "stale"]), 1)
+            self.assertEqual(tg._main(["p", "stale"]), tg.STALE)
 
-    def test_stale_reports_no_verdict_on_an_outage(self):
-        """Exit 0, so a GitHub incident cannot file a documentation issue."""
+    def test_an_outage_is_distinguishable_from_a_clean_register(self):
+        """The three states must have three exit codes.
+
+        Conflating "clean" with "could not tell" is not a harmless default: a
+        caller that treats an outage as good news acts on it, and the sweep's
+        action on a clean register is to CLOSE the open stale-register report.
+        An hour of GitHub being unreachable would have retracted a still-valid
+        one.
+        """
         with mock.patch.object(tg, "stale_citations",
                                side_effect=tg.ApiUnavailable("429")):
-            self.assertEqual(tg._main(["p", "stale"]), 0)
+            self.assertEqual(tg._main(["p", "stale"]), tg.NO_VERDICT)
+        self.assertEqual(
+            len({tg.CLEAN, tg.STALE, tg.NO_VERDICT, tg.USAGE}), 4,
+            "each outcome needs its own exit code")
 
     def test_usage(self):
         self.assertEqual(tg._main(["p"]), 2)
@@ -207,6 +217,18 @@ class RepoWiringTest(unittest.TestCase):
             for step in jspec["steps"]:
                 with self.subTest(job=job, step=step.get("name")):
                     self.assertNotIn("GITHUB_TOKEN", step.get("env", {}) or {})
+
+    def test_sweep_distinguishes_an_outage_from_a_clean_register(self):
+        """Three states must survive into the workflow, not just the script.
+
+        The sweep ACTS on "clean" by closing the open stale-register report,
+        so a workflow that folded "no verdict" into it would retract a valid
+        report whenever the Issues API had a bad hour.
+        """
+        wf = self._workflow("science_register.yaml")
+        self.assertIn("state=unknown", wf)
+        self.assertIn('[ "$STATE" = "unknown" ]', wf)
+        self.assertIn('[ "$STATE" = "clean" ]', wf)
 
     def test_issue_state_check_is_opt_in(self):
         """Without the env var the rot guard must skip, not query GitHub."""

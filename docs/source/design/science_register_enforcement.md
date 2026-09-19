@@ -44,6 +44,13 @@ of numbers that never existed. Neither trigger can fail a pull request.
 hook and the sweep cannot disagree about what counts as a citation. Running
 the check locally is opt-in: `JCM_CHECK_TRACKED_GAPS=1`.
 
+The sweep reports **three** states, not two: clean, stale, and no verdict. The
+distinction is load-bearing because the sweep *acts* on a clean register by
+closing the open report, so folding "the API was unreachable" into "clean"
+would retract a still-valid report whenever GitHub had a bad hour. `stale`
+exits 0, 1 and 3 for the three, and the workflow does nothing at all on the
+third.
+
 ## Why not the obvious alternatives
 
 **Let a page cite a closed issue** — a `#791 (closed)` marker, or a snooze

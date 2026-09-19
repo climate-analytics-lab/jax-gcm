@@ -128,24 +128,36 @@ def stale_citations(*, token: str | None = None) -> list[str]:
     return stale
 
 
+#: ``stale`` exit codes. Three, not two: "the register is clean" and "I could
+#: not find out" are different answers, and a caller that conflates them will
+#: act on an outage as though it were good news — closing a still-valid report,
+#: in the sweep's case.
+CLEAN, STALE, NO_VERDICT, USAGE = 0, 1, 3, 2
+
+
 def _main(argv: list[str]) -> int:
-    """``cites <number>`` or ``stale`` — the entry points the workflows call."""
+    """``cites <number>`` or ``stale`` — the entry points the workflows call.
+
+    ``cites`` exits 0 when the register cites the number and 1 when it does
+    not. ``stale`` exits :data:`CLEAN`, :data:`STALE` or :data:`NO_VERDICT`.
+    """
     if len(argv) == 3 and argv[1] == "cites":
         pages = pages_citing(argv[2])
         print("\n".join(pages))
-        return 0 if pages else 1
+        return CLEAN if pages else 1
     if len(argv) == 2 and argv[1] == "stale":
         try:
             stale = stale_citations()
         except ApiUnavailable as e:
-            # Exit 0: an outage is not a documentation defect, and the sweep
-            # must not file an issue about GitHub being briefly unreachable.
+            # An outage is not a documentation defect. It is also not a clean
+            # register: the caller must be able to tell the two apart, and do
+            # nothing rather than act on either.
             print(f"Issues API unavailable ({e}); no verdict.")
-            return 0
+            return NO_VERDICT
         print("\n".join(stale))
-        return 1 if stale else 0
+        return STALE if stale else CLEAN
     print(__doc__)
-    return 2
+    return USAGE
 
 
 if __name__ == "__main__":

@@ -136,19 +136,24 @@ jobs:
         id: sweep
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Exits 0 on a GitHub outage too: an API incident is not a
-        # documentation defect and must not file an issue.
+        # THREE states, not two. "clean" and "could not find out" are different
+        # answers, and the next step ACTS on clean by closing the open report —
+        # so conflating them would let an hour of GitHub being unreachable
+        # retract a still-valid one. Exit codes: 0 clean, 1 stale, 3 no verdict.
         run: |
-          if stale=$(python docs/tracked_gaps.py stale); then
-            echo "stale=false" >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo "stale=true"
-              echo "report<<EOF"
-              echo "$stale"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-          fi
+          rc=0
+          report=$(python docs/tracked_gaps.py stale) || rc=$?
+          case "$rc" in
+            0) echo "state=clean"   >> "$GITHUB_OUTPUT" ;;
+            1) echo "state=stale"   >> "$GITHUB_OUTPUT"
+               {
+                 echo "report<<REPORT_EOF"
+                 echo "$report"
+                 echo "REPORT_EOF"
+               } >> "$GITHUB_OUTPUT" ;;
+            *) echo "state=unknown" >> "$GITHUB_OUTPUT"
+               echo "No verdict: $report" ;;
+          esac
 
       # One issue, kept current — not a comment a morning. A stale register
       # can take a while to fix, and a daily nag on the same thread is how a
@@ -160,9 +165,16 @@ jobs:
         if: always() && steps.sweep.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          STALE: ${{ steps.sweep.outputs.stale }}
+          STATE: ${{ steps.sweep.outputs.state }}
           REPORT: ${{ steps.sweep.outputs.report }}
         run: |
+          # An outage decides nothing: leave whatever report is open exactly
+          # as it is, and file none.
+          if [ "$STATE" = "unknown" ]; then
+            echo "Issues API gave no verdict; leaving the report untouched."
+            exit 0
+          fi
+
           title="Science register: tracked-gap citations are stale"
           # Exact title match client-side, not `--search "... in:title"`: the
           # title contains a colon, which the search grammar reads as a
@@ -170,7 +182,7 @@ jobs:
           existing=$(gh issue list --state open --limit 200 --json number,title \
             | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
 
-          if [ "$STALE" != "true" ]; then
+          if [ "$STATE" = "clean" ]; then
             if [ -n "$existing" ]; then
               gh issue close "$existing" --comment \
                 "The register is clean again — every cited issue is open. Closed by the daily sweep."
