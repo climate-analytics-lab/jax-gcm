@@ -129,6 +129,21 @@ class TestRandomDirection(unittest.TestCase):
         f = lambda x, i: jnp.sum(x**2) + jnp.sum(i).astype(x.dtype)
         check_gradients(f, (jnp.linspace(0.5, 2.0, 4), jnp.arange(4)), rtol=1e-3)
 
+    def test_an_empty_leaf_costs_no_nan(self):
+        """An empty leaf has no RMS, and must not reach one through ``mean``.
+
+        ``ForcingData`` carries a zero-length ozone climatology whenever none
+        is loaded, so every ECHAM fixture hands ``check_gradients`` an empty
+        leaf. A mean over no elements is NaN, which would abort the check
+        under ``jax_debug_nans`` — exactly the flag a caller turns on to chase
+        the non-finite gradient a check has just reported.
+        """
+        with jax.debug_nans(True):
+            tangent = _tangent({"empty": jnp.zeros((0,)),
+                                "full": jnp.full((4,), 2.0)}, 0)
+        self.assertEqual(tangent["empty"].shape, (0,))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tangent["full"]))))
+
 
 def _smooth(x, y):
     return jnp.sum(jnp.sin(x) * y**2), jnp.cos(x) @ y

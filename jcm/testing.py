@@ -218,6 +218,14 @@ def _scaled_direction(tree, seed, scale_from_rms):
     1.0, which for a tangent is the plain absolute step (and at 0 the
     perturbation *is* the whole value, so it is trivially resolvable) and for a
     cotangent is an unweighted contribution to the projection.
+
+    An *empty* leaf — ``ForcingData`` carries a zero-length ozone climatology
+    whenever none is loaded, which is every ECHAM fixture — is that same case
+    and takes the same 1.0, but it is read off ``size`` rather than from a mean
+    over no elements: ``jnp.mean`` of an empty array is NaN, and although NaN
+    fails the ``> 1e-30`` test and so lands on 1.0 anyway, computing it at all
+    aborts the whole check under ``jax_debug_nans`` — the flag a caller reaches
+    for the moment one of these checks reports a non-finite gradient.
     """
     leaves, treedef = jax.tree_util.tree_flatten(tree)
     names = _leaf_names(tree)
@@ -227,7 +235,8 @@ def _scaled_direction(tree, seed, scale_from_rms):
         if not _is_differentiable(leaf):
             out.append(np.zeros(jnp.shape(leaf), dtype=jax.dtypes.float0))
             continue
-        rms = float(jnp.sqrt(jnp.mean(jnp.asarray(leaf, jnp.float32)**2)))
+        values = jnp.asarray(leaf, jnp.float32)
+        rms = float(jnp.sqrt(jnp.mean(values**2))) if values.size else 0.0
         scale = scale_from_rms(rms) if rms > 1e-30 else 1.0
         out.append(_normal(name, jnp.shape(leaf), dtype, seed) * scale)
     return jax.tree_util.tree_unflatten(treedef, out)
