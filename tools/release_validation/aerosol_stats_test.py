@@ -1131,6 +1131,19 @@ class TestDustEmissionBand:
         assert "emi_du" in dict(A.unscored_gates(days, series))[
             "dust_emission_tg_per_yr"]
 
+    def test_uneven_chunks_are_weighted_by_their_own_window(self):
+        # run/longrun.yaml writes twelve 30-day chunks and a final 5-day one.
+        # A seasonal quantity whose last five days are quiet must not have
+        # them counted as a full month: the unweighted mean of this series is
+        # 1073 Tg/yr, the time mean 1183.
+        days = np.array([30.0 * (i + 1) for i in range(12)] + [365.0])
+        per_chunk = np.array([1200.0] * 12 + [0.0])
+        flux = per_chunk * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": flux, "nlat": np.full(13, 96.0)}
+        got = A.summarize(days, series)["dust_emission_tg_per_yr"]
+        assert got == pytest.approx(1200.0 * 360.0 / 365.0, rel=1e-6)
+        assert got != pytest.approx(float(np.mean(per_chunk)), rel=1e-3)
+
     def test_the_band_is_not_also_a_regression_target(self):
         # The band is deliberately wide because the target is uncertain;
         # scoring it against one reference at 15 % would quietly replace it

@@ -213,23 +213,41 @@ def chunk_centres(days: np.ndarray, start: float | None = None) -> np.ndarray:
     trapezoid over most of the run, which mis-weights the first flux sample by
     an order of magnitude and fabricates a closure error.
     """
+    return 0.5 * (_window_starts(days, start) + np.asarray(days, dtype=float))
+
+
+def _window_starts(days: np.ndarray, start: float | None) -> np.ndarray:
+    """Start day of each averaging window: its predecessor's label.
+
+    The first window starts at ``start``. ``None`` means infer it: a record
+    whose chunks are uniformly spaced but whose first label exceeds that
+    spacing evidently does not begin at day 0 — a resumed run writing into a
+    fresh output directory, or early chunks deleted to save disk — so its
+    first window starts one cadence before its first label. The last chunk may
+    legitimately be short, so it is left out of the uniformity test; a record
+    too short or too irregular to judge keeps day 0, which is exact for a run
+    start and only ever an approximation where no caller knows better.
+    """
     days = np.asarray(days, dtype=float)
     if start is None:
         start = 0.0
-        # A record whose chunks are uniformly spaced but whose first label
-        # exceeds that spacing evidently does not begin at day 0 — a resumed
-        # run writing into a fresh output directory, or early chunks deleted
-        # to save disk — so its first window starts one cadence before its
-        # first label. The last chunk may legitimately be short, so it is
-        # left out of the uniformity test; a record too short or too
-        # irregular to judge keeps day 0, which is exact for a run start and
-        # only ever an approximation where no caller knows better.
         gaps = np.diff(days)
         if gaps.size >= 3 and np.allclose(gaps[:-1], gaps[0]) \
                 and days[0] > gaps[0] * (1 + 1e-9):
             start = days[0] - gaps[0]
-    starts = np.concatenate([[float(start)], days[:-1]])
-    return 0.5 * (starts + days)
+    return np.concatenate([[float(start)], days[:-1]])
+
+
+def chunk_durations(days: np.ndarray, start: float | None = None
+                    ) -> np.ndarray:
+    """Length [days] of each averaging window whose labels are ``days``.
+
+    A time mean over chunks of unequal length weights by these rather than
+    counting them equally: ``run/longrun.yaml`` writes twelve 30-day chunks
+    and a final 5-day one, and for a strongly seasonal quantity the short tail
+    chunk carrying a full month's weight moves the annual mean.
+    """
+    return np.asarray(days, dtype=float) - _window_starts(days, start)
 
 
 def chunk_day(path, index: int | None = None) -> float | None:
@@ -655,10 +673,15 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     # chunk would annualise the chunks that happen to be present, so a year
     # whose emission diagnostic vanished half-way — a mixed-version rerun, a
     # corrupted file — could still score inside the band.
+    # Weighted by each chunk's own averaging window, not counted equally: a
+    # year written as twelve 30-day chunks and a final 5-day one would
+    # otherwise give those five days a month's weight, and dust is seasonal
+    # enough for that to move the annual total across the band.
     if ("emi_du" in series and span_days >= MIN_DUST_WINDOW_DAYS
             and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))):
         stats["dust_emission_tg_per_yr"] = (
-            float(np.mean(series["emi_du"]))
+            float(np.average(series["emi_du"],
+                             weights=chunk_durations(days, window_start)))
             * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
 
     if "so4_above_500hPa" in series and "burden_so4" in series:
