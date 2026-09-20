@@ -52,10 +52,12 @@ and unrepresentative of the model's climate. They are a *regression* signal —
 "this member still produces what it produced" — and not a climatology. Treat a
 failure as "something changed", not as "the physics is wrong".
 
-The JAM members carry a further caveat: their bands describe the aerosol
-climate before the in-flight dust retune (#787/#808) and must be regenerated
-when it lands. That is recorded in the band file's own ``provisional``
-attribute, not just here.
+The JAM members' bands describe the aerosol climate on the dust retune
+(#787/#808/#840): the ECHAM-like relative-soil-wetness saltation gate and the
+``nduscale_reg`` recalibration for jcm's wind climate. They were regenerated
+against that code and the rebuilt forcing bundle (which carries the
+``soilw_rel`` channel the gate reads), so a failure is a regression, not the
+known-provisional state the pre-#840 bands were.
 """
 
 from __future__ import annotations
@@ -112,10 +114,11 @@ MEMBER_BUNDLE = {
     "echam-jam-t63-l95": "t63_l95",
 }
 
-#: Members whose bands describe an aerosol climate the in-flight dust retune
-#: (#787/#808) will move, and which therefore have to be regenerated when it
-#: lands. Recorded in the band file so the fixture itself says so.
-PRE_DUST_RETUNE = ("echam-jam-t63-l47", "echam-jam-t63-l95")
+#: Members whose bands describe an aerosol climate a not-yet-landed dust retune
+#: would move, and which therefore carry a ``provisional`` marker until it does.
+#: Empty since the retune (#787/#808/#840) landed and the JAM bands were
+#: regenerated against it; kept as the hook a future in-flight retune uses.
+PRE_DUST_RETUNE: tuple[str, ...] = ()
 
 #: Members whose init state is deliberately NOT published yet, and why.
 #:
@@ -129,16 +132,12 @@ PRE_DUST_RETUNE = ("echam-jam-t63-l47", "echam-jam-t63-l95")
 #: is on the mirror, hosting a fixture that fetches it would turn the whole
 #: GPU gate red for as long as it takes; once published, the entry is removed
 #: and a 404 for that member goes back to being a hard failure.
-HELD_STATES = {
-    "echam-jam-t63-l47": (
-        "pre-dust-retune: regenerate and publish once the dust retune "
-        "(#787/#808, tracked for #840) lands, since it moves this member's "
-        "aerosol climate"),
-    "echam-jam-t63-l95": (
-        "pre-dust-retune: regenerate and publish once the dust retune "
-        "(#787/#808, tracked for #840) lands, since it moves this member's "
-        "aerosol climate"),
-}
+#: Empty: every matrix member's init state is published on the mirror. The JAM
+#: pair was held pre-#840 because the dust retune (#787/#808/#840) was about to
+#: move their aerosol climate; it landed and they were regenerated and published
+#: against it, so their 404-is-a-hard-failure contract is back in force like
+#: every other member's. Kept as the declared-gap hook for a future member.
+HELD_STATES: dict[str, str] = {}
 
 SPIN_UP_DAYS = 5.0
 STATS_DAYS = 5.0
