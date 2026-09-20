@@ -39,6 +39,12 @@ jam_dust_preset: 4
 # ``nudging.enabled``; set true/false to pin it.
 jam_dust_nudged: null
 
+# Global multiplier on that regional vector — jcm's single dust-emission
+# calibration knob (#808). It scales the saltation THRESHOLD, so a SMALLER
+# value emits MORE. ``null`` takes the calibrated default, which exists at
+# T63 ndust=4 only; every other grid keeps HAM's untuned value (#810).
+jam_dust_nduscale_scale: null
+
 # Explicit cloud-borne aerosol phase (#602). true (default) carries and cycles
 # the mc_*/nc_* mirror tracers: ARG activation transfer + resuspension,
 # in-droplet wet removal, dry deposition, and the aqueous sulfate split. false

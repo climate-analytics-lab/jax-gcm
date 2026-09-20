@@ -1070,3 +1070,142 @@ class TestAnchorGates:
         stats = A.summarize(days, series)
         assert all(ok for *_r, ok in A.physics_gates(stats))    # drift/closure fine
         assert not all(ok for *_r, ok in A.anchor_gates(stats))  # anchor is not
+
+
+class TestDustEmissionBand:
+    """The release gate on the annual dust budget (#808).
+
+    Dust vanishing is the failure this exists to catch: HAM's untuned
+    threshold gave jcm 5 Tg/yr against a mid-hundreds target, and every other
+    statistic in this module was happy about it — the burden was stationary,
+    the ledger closed, the drift was zero.
+    """
+
+    def _series(self, tg_per_yr, n=74, nlat=96):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        return days, {"emi_du": np.full(n, flux),
+                      "nlat": np.full(n, float(nlat))}
+
+    def test_a_budget_in_band_passes(self):
+        days, series = self._series(450.0)
+        stats = A.summarize(days, series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                 rel=1e-6)
+        rows = dict((name, ok) for name, _v, _lim, ok in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]
+
+    def test_the_band_brackets_the_documented_anchors(self):
+        # The band exists to sit around the parent model's budget converted to
+        # this port's sub-10 um window (642 Tg/yr present-day, 485
+        # pre-industrial) and to admit the calibrated T63 year (829). If any
+        # of those moves outside, the band and the science register have
+        # drifted apart.
+        for anchor in (485.0, 642.0, 829.0):
+            days, series = self._series(anchor)
+            rows = dict((name, ok) for name, _v, _lim, ok
+                        in A.physics_gates(A.summarize(days, series)))
+            assert rows["dust_emission_tg_per_yr"], anchor
+
+    def test_dust_that_vanished_fails(self):
+        days, series = self._series(5.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(A.summarize(days, series)))
+        assert rows["dust_emission_tg_per_yr"] is False
+
+    def test_dust_that_ran_away_fails(self):
+        days, series = self._series(4000.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(A.summarize(days, series)))
+        assert rows["dust_emission_tg_per_yr"] is False
+
+    def test_a_partial_year_is_unscored_not_failed(self):
+        # 30 days of a dust season annualises to nonsense either way.
+        days, series = self._series(5.0, n=6)
+        stats = A.summarize(days, series)
+        assert "dust_emission_tg_per_yr" not in stats
+        reasons = dict(A.unscored_gates(days, series))
+        assert "seasonal" in reasons["dust_emission_tg_per_yr"]
+
+    def test_another_grid_is_unscored_not_failed(self):
+        # T106 keeps HAM's untuned nduscale_reg (#810), so the T63 band must
+        # not be applied to it.
+        days, series = self._series(450.0, nlat=160)
+        stats = A.summarize(days, series)
+        assert "dust_emission_tg_per_yr" not in stats
+        assert "T63" in dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+
+    def test_a_run_without_the_emission_diagnostic_is_unscored(self):
+        days = np.arange(5.0, 5.0 * 74 + 5.0, 5.0)
+        series = {"nlat": np.full(74, 96.0)}
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        assert "emi_du" in dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+
+    def test_uneven_chunks_are_weighted_by_their_own_window(self):
+        # run/longrun.yaml writes twelve 30-day chunks and a final 5-day one.
+        # A seasonal quantity whose last five days are quiet must not have
+        # them counted as a full month: the unweighted mean of this series is
+        # 1073 Tg/yr, the time mean 1183.
+        days = np.array([30.0 * (i + 1) for i in range(12)] + [365.0])
+        per_chunk = np.array([1200.0] * 12 + [0.0])
+        flux = per_chunk * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": flux, "nlat": np.full(13, 96.0)}
+        got = A.summarize(days, series)["dust_emission_tg_per_yr"]
+        assert got == pytest.approx(1200.0 * 360.0 / 365.0, rel=1e-6)
+        assert got != pytest.approx(float(np.mean(per_chunk)), rel=1e-3)
+
+    def test_a_deleted_interior_chunk_is_unscored_not_reweighted(self):
+        # A missing file leaves no NaN: the next chunk still averages only
+        # its own five days, but its window would span ten. Weighting it
+        # twice over is exactly the silent bias the finiteness check cannot
+        # see, so the gate declines to score the record at all.
+        days, series = self._series(450.0)
+        keep = days != 100.0
+        days = days[keep]
+        series = {k: v[keep] for k, v in series.items()}
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+        assert "missing" in reason and "day 105" in reason
+
+    def test_a_300_day_run_in_30_day_chunks_is_scored(self):
+        # Labels 30..300 are 270 days apart but cover 300; measuring the gap
+        # between labels would let a complete 300-day run slip past the gate
+        # as "unscored", which does not fail the command.
+        days = np.array([30.0 * (i + 1) for i in range(10)])
+        flux = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": np.full(10, flux), "nlat": np.full(10, 96.0)}
+        stats = A.summarize(days, series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                 rel=1e-6)
+
+    def test_a_short_final_chunk_is_still_scored(self):
+        # run/longrun.yaml's twelve 30-day chunks plus a 5-day tail is a
+        # legitimate record, not a hole.
+        days = np.array([30.0 * (i + 1) for i in range(12)] + [365.0])
+        flux = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        series = {"emi_du": np.full(13, flux), "nlat": np.full(13, 96.0)}
+        assert "dust_emission_tg_per_yr" in A.summarize(days, series)
+
+    def test_the_band_is_not_also_a_regression_target(self):
+        # The band is deliberately wide because the target is uncertain;
+        # scoring it against one reference at 15 % would quietly replace it
+        # with a tuning target six times tighter.
+        days, series = self._series(450.0)
+        stats = A.summarize(days, series)
+        reference = dict(stats, dust_emission_tg_per_yr=1200.0)
+        names = [name for name, _v, _lim, _ok
+                 in A.compare_to_reference(stats, reference, series)]
+        assert "dust_emission_tg_per_yr" not in names
+
+    def test_a_year_missing_chunks_is_unscored_not_averaged_over_the_rest(self):
+        # A year whose emission diagnostic vanished part-way must not be
+        # scored from the chunks that survived: that is a different year.
+        days, series = self._series(450.0)
+        series["emi_du"][10:20] = np.nan
+        assert "dust_emission_tg_per_yr" not in A.summarize(days, series)
+        reason = dict(A.unscored_gates(days, series))[
+            "dust_emission_tg_per_yr"]
+        assert "10 of 74" in reason

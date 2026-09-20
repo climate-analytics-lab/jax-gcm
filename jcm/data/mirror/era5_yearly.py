@@ -210,8 +210,8 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
     """One year of all-ERA5 boundary forcing on a Gaussian grid.
 
     ``clim_path`` is the 2005–2014 land climatology (``era5`` stage):
-    it supplies the invariants (``cvh``/``cvl``), the fixed ice-sheet
-    mask and the background albedo. ``sstice_path`` is the year's
+    it supplies the invariants (``cvh``/``cvl``/``slt``), the fixed
+    ice-sheet mask and the background albedo. ``sstice_path`` is the year's
     ``build_sstice_year`` output; ``land`` the year's
     ``build_land_year`` output (built on the fly when omitted).
     """
@@ -219,7 +219,7 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
     sstice = xr.open_dataset(sstice_path)
     if land is None:
         land = build_land_year(year)
-    land = xr.merge([land, clim[["cvh", "cvl"]]])
+    land = xr.merge([land, clim[["cvh", "cvl", "slt"]]])
     times = sstice.time.values
 
     # Ocean fields: nearest-ocean fill under the (static) NaN land mask
@@ -243,6 +243,9 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
                          lats, lons),
         "soilw_am": interp_to(
             _blend_to_month_starts(tl["soilw_am"], times),
+            lats, lons).clip(0.0, 1.0),
+        "soilw_rel": interp_to(
+            _blend_to_month_starts(tl["soilw_rel"], times),
             lats, lons).clip(0.0, 1.0),
         "snowc": interp_to(
             _blend_to_month_starts(tl["snowc"], times),

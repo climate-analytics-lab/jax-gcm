@@ -1,25 +1,50 @@
 Release Notes
 =============
 
-Unreleased — ``set_constants`` reaches the JAM and tropopause modules
----------------------------------------------------------------------
+v3.0.0 (unreleased)
+-------------------
 
-- ``jcm.constants.set_constants(...)`` now propagates into the JAM aerosol
-  activation, sedimentation, dry-deposition, ice-nucleation and
-  aqueous-chemistry schemes, the TTE-TKE vertical-diffusion closure, the
-  emissions preparation step and the WMO-tropopause diagnostic. All of these
-  captured constants at import time — as a value import, as a reference to the
-  singleton object, or by evaluating ``c.<name>`` in a module-level constant or
-  a default argument — and so silently kept Earth values while the rest of the
-  model used the override (#772). A run with a non-default ``grav``, ``cpd``,
-  ``m_air``, ``r_universal`` or ``ak`` composing any of those terms therefore
-  **changes results**: it was computing with a mixed constant set before.
-  Overrides must still be applied before the model is built (a constant read
-  inside a jitted term is fixed when that term is traced), and constants
-  internal to ``mam4-jax`` remain outside jcm's control.
+v3.0 is a deliberate major release. It makes **online interactive aerosol**
+(JAM/MAM4) a working configuration end to end, adds the pySES CAM-SE
+dynamical-core backend alongside a semi-Lagrangian-only Dinosaur backend, and
+settles a set of unit, API and output contracts that were inconsistent in the
+2.x line. Several of those corrections change the climate a configuration
+produces.
 
-Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
-------------------------------------------------------------------------
+**Read the** :doc:`v2-to-v3 migration guide <v2_to_v3>` **before upgrading.** It carries the before/after
+snippets, the checkpoint-compatibility rules, the support matrix and the list
+of accepted limitations; this page is the change list.
+
+Breaking changes
+^^^^^^^^^^^^^^^^
+
+Every item here requires a change to code, a config, a saved file, or a reader
+of the output. :doc:`v2_to_v3` has the migration for each.
+
+Checkpoints carry a schema stamp and migrate by field name
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``save_checkpoint`` now writes a ``schema_version`` stamp, the ``jcm``
+  version and every state array under its pytree name, and
+  ``load_checkpoint`` matches those names against the destination model: a
+  physics-carry field a newer jcm added is seeded from the freshly
+  bootstrapped carry, one it removed is dropped, both logged at INFO, so an
+  upgrade that touches a diagnostic struct no longer invalidates a restart
+  (#731). A grid, level-count, precision or physics-composition difference is
+  still refused, naming the file and the leaf, as is a changed field set under
+  a carry slot a term declares prognostic (``PhysicsTerm.prognostic_carry_slots``
+  — JAM's cloud-borne aerosol phase, which nothing recomputes). **Breaking:** a checkpoint
+  written before this release carries no stamp and is refused, because it does
+  not record which unit convention its dycore state uses (#824 changed what a
+  stored mass mixing ratio means, and #666 changed what a gridpoint humidity
+  means, differently per physics package) — start from a fresh initial state,
+  or assert the file's convention explicitly with
+  ``load_checkpoint(..., unstamped_scale=...)`` / ``init.unstamped_scale``.
+  The policy, its evidence and the rule for bumping the schema are in
+  :doc:`design/checkpoint_compatibility`.
+
+jcm configures no logging; ``Model(log_level=...)`` removed
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 - **Breaking:** ``Model(log_level=...)`` is gone. It applied a level to the
   ``jcm`` logger, so building a model reconfigured logging for the whole
@@ -62,65 +87,8 @@ Unreleased — jcm configures no logging; ``Model(log_level=...)`` removed
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
 
-Unreleased — positivity corrections are an explicit water-budget source
--------------------------------------------------------------------------
-
-- The final physics-interface positivity cap remains in place for water vapor,
-  cloud liquid/ice, rain and snow. When summed operator-split sinks overdraw a
-  layer, this safety cap can create a small artificial water source; this is an
-  accepted known limitation for this release, not a conservative
-  redistribution scheme. ``water_positivity_correction`` diagnostics now
-  report the exact stop-gradient ``applied - raw`` tendency for specific
-  humidity and every water field declared by the active composition, plus
-  their total. ECHAM-family compositions, which publish
-  ``pressure_thickness``, additionally report
-  ``column_water_source`` in kg m\ :sup:`-2`\  s\ :sup:`-1`; SPEEDY does not
-  claim a pressure-weighted source because it has no pressure-thickness
-  diagnostic (#806).
-- Full-model and single-column drivers now return and integrate the same
-  verified tendency, and the cross-step humidity carry records that applied
-  value. For release monitoring, cumulative positivity correction should be
-  negligible relative to cumulative precipitation, with an informational
-  target below 0.1%. This target is not yet a runtime failure threshold;
-  conservative vertical redistribution is deferred to a separately validated
-  physics change.
-- Explicit SCM humidity nudging retains a separate non-negativity guard for
-  aggressive ``dt/tau`` configurations. Because nudging is user-configured
-  outside the physics tendency, any truncation there is not included in the
-  physics positivity-correction diagnostics.
-- The existing ``thermo_run`` and Tiedtke qc/qi floors remain as guards on the
-  provisional inter-term state consumed by downstream microphysics. They can
-  influence those downstream tendencies but do not directly update the
-  prognostic state, so they are intentionally outside the reported interface
-  correction; the diagnostics quantify the final positivity cap only.
-
-Unreleased — moist dynamics: condensate loading and one tracer contract
-------------------------------------------------------------------------
-
-- The hybrid dynamical core's virtual temperature now carries condensate
-  loading as well as moisture,
-  ``Tv = T (1 + (Rv/Rd - 1) q - sum(q_condensate))``, and the geopotential
-  handed to physics is built from that same virtual temperature. This matches
-  ECHAM6 (``dyn.f90::ztv`` and ``physc.f90::ztvm1``). The condensate set is
-  whatever the active composition declares out of ``qc``/``qi``/``qr``/``qs``;
-  including prognostic rain and snow is a deliberate departure from ECHAM6,
-  which carries no prognostic precipitation. Pure-sigma (SPEEDY)
-  configurations keep a dry dynamics — only their physics geopotential
-  changes.
-- **Breaking for dycore-native saved state:** every mass mixing-ratio tracer
-  (cloud condensate, aerosol mass, gas mass) now crosses the Dinosaur boundary
-  as the dimensionless kg/kg value rather than being nondimensionalised as
-  g/kg, the same contract specific humidity received above. The dynamics reads
-  condensate directly for the loading term, so a scaled store would suppress
-  it by 1000x. Values in a checkpoint written before this release are 1000x
-  smaller than the new convention; multiply them by 1000, or start from a
-  gridpoint ``PhysicsState``, which is unaffected. Tracers declaring
-  ``nondimensionalize=False`` (number concentrations, VMRs) are unchanged.
-  The rescale is behaviourally neutral on its own — transport, filters and the
-  modal round trip are all linear in the tracer.
-
-Unreleased — specific humidity has one kg/kg contract
-------------------------------------------------------
+Specific humidity has one kg/kg contract
+""""""""""""""""""""""""""""""""""""""""
 
 - **Breaking for direct SPEEDY-state and output consumers:**
   ``PhysicsState.specific_humidity`` is now kg/kg for every dycore and physics
@@ -143,19 +111,8 @@ Unreleased — specific humidity has one kg/kg contract
   magnitude does: a near-surface ``specific_humidity`` above 0.1 is g/kg, and
   is impossible in kg/kg.
 
-Unreleased — public model clock conversion
-------------------------------------------
-
-- :meth:`jcm.model.Model.date_from_sim_time` is now the public, JIT-safe way
-  to convert elapsed simulation seconds into the same :class:`jcm.date.DateData`
-  used by forcing and physics. It documents the stop-gradient boundary,
-  nearest-second date rounding and day rollover, and the independently
-  timestep-derived ``model_step``. ``Model._date_from_sim_time`` remains a
-  compatibility alias for the 2.1 release and is planned for removal
-  afterwards (#758).
-
-Unreleased — ChemistryData uses ppmv consistently
---------------------------------------------------
+``ChemistryData`` uses ppmv consistently
+""""""""""""""""""""""""""""""""""""""""
 
 - **Breaking for direct simple-chemistry callers:** ``ChemistryData``,
   ``ChemistryState``, ``ChemistryTendencies`` and ``ChemistryParameters`` now
@@ -167,55 +124,25 @@ Unreleased — ChemistryData uses ppmv consistently
   ``ozone_mole_fraction()`` / ``methane_mole_fraction()`` helpers make the
   conversion to gas-optics mol/mol explicit (#749).
 
-Unreleased — delegated timesteps have one effective value
-----------------------------------------------------------
+Delegated timesteps have one effective value
+""""""""""""""""""""""""""""""""""""""""""""
 
 - Runner and profiling paths now resolve an explicit ``run.time_step`` in
   minutes or, when it is ``null``, adopt the built model/dycore timestep.
-  A pySES configuration owns its timestep in ``dycore.dt_seconds``; an
-  explicit ``run.time_step`` must repeat that value or model construction
-  raises. Prescribed-state runs, single-column runs, chunk budget tolerances
+  A pySES configuration owns its timestep in ``dycore.dt_seconds``: on that
+  Hydra path an explicit ``run.time_step`` is ignored with a warning rather
+  than forwarded, so it cannot veto the group that owns the step (the Python
+  API is the strict door — ``Model(dycore=..., time_step=...)`` raises on a
+  disagreement). Prescribed-state runs, single-column runs, chunk budget
+  tolerances
   and term profiles therefore use the same number of seconds as the model
   instead of raising on ``None``, silently falling back to 900 seconds, or
   reporting against a conflicting config value (#801).
 
-Unreleased — public state and transformed-output contracts
------------------------------------------------------------
+Packaged config-tree contract; the ``experiment`` group is renamed
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-- ``Model.initial_state()`` and ``Model.initial_physics_carry()`` return fresh
-  dycore/carry pytrees for external steppers. ``bootstrap_state()`` now returns
-  the pair it installs, ``dycore_state`` and ``physics_carry`` expose the
-  resumable pair read-only, and checkpoint restore replaces both atomically
-  (#755).
-- ``ModelPredictions.with_context(model)`` reattaches the static coordinates,
-  physics, dycore and observer metadata intentionally omitted at JAX pytree
-  boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
-  custom drivers; re-derived live parameters are labelled so they cannot be
-  mistaken for trace-time provenance (#756).
-
-Unreleased — RCE initial state seeds a mixed sub-cloud layer
-------------------------------------------------------------
-
-- ``jcm.rce.rce_initial_state`` now seeds a dry-adiabatic, well-mixed
-  sub-cloud layer below ``mixed_layer_top_m`` (default 800 m). This changes
-  results for any RCE case composing ``TiedtkeConvection``: ECHAM's ``cubase``
-  trigger finds no cloud base at all in a sounding running at ``lapse_rate``
-  to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
-  profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
-
-Unreleased — dinosaur pinned to a release
------------------------------------------
-
-- ``requirements.txt`` requires ``dinosaur>=1.5.0`` instead of the
-  semi-Lagrangian development branch, so jcm can be published to PyPI again.
-  1.5.0 also fixes the hybrid-coordinate temperature equation
-  (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
-  runs made with earlier dinosaur builds; sigma-level runs are unchanged.
-
-Unreleased — packaged config tree contract; ``experiment`` group renamed
-------------------------------------------------------------------------
-
-- **``jcm/config`` is now a documented public, packaged Hydra config tree**
+- ``jcm/config`` **is now a documented public, packaged Hydra config tree**
   (#757). A downstream Hydra app reaches every jcm group through
   ``hydra.searchpath: [pkg://jcm.config]`` and can re-root a whole validated
   configuration under one of its own nodes with ``+configuration@<node>=<name>``.
@@ -236,8 +163,8 @@ Unreleased — packaged config tree contract; ``experiment`` group renamed
   particular composes ``+experiment@atmosphere=<name>`` and must update in the
   same release cycle.
 
-Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
------------------------------------------------------------------
+MACv2-SP removed from JAM; namespaced aerosol output
+""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 - **MACv2-SP and JAM are now mutually exclusive aerosol sources** (#640).
   ``echam_physics(aerosol_module="jam")`` no longer also composes MACv2-SP
@@ -251,7 +178,7 @@ Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
 - **Activation fallback.** In the JAM path the 2M scheme falls back, where
   ARG's ``activated_cdnc`` is empty, to its own ECHAM-HAM minimum-CDNC floor
   (``cdnc_min_fixed`` = 40 cm⁻³, or the dynamic max-radius floor; #674) rather
-  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp``+2M path's
+  than the MACv2-SP SPA floor. The SPA floor remains the ``macv2sp`` + 2M path's
   Twomey link.
 - **Breaking: aerosol output variables are renamed into explicit namespaces.**
   MACv2-SP's ``aerosol.*`` output moves to ``macsp.*`` with CF/AeroCom names
@@ -265,8 +192,8 @@ Unreleased — MACv2-SP removed from JAM; namespaced aerosol output
   output keys move. ``tools/aerocom_cmor.py`` and
   ``tools/release_validation/health.py`` are updated for the new names.
 
-Unreleased — one vertical direction in the output, and CF metadata
-------------------------------------------------------------------
+One vertical direction in the output, and CF metadata
+"""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 - **Breaking: interface variables are now written surface-first**, the same
   direction as the full-level fields (#710). Previously an output file ran its
@@ -323,82 +250,8 @@ Unreleased — one vertical direction in the output, and CF metadata
   diagnostics and the convection diagnostics now reach the file with units
   and CF standard names instead of empty attributes.
 
-Unreleased — provenance records the parameters
-----------------------------------------------
-
-- **Every output now records the physics parameter values the run
-  actually used** (#732). The composed Hydra config that #591 stamped is
-  not the same thing: each scheme's ``params`` block is deliberately
-  absent from the shipped yamls so unspecified fields fall back to
-  ``Parameters.default()`` in code, meaning the config recorded the
-  *overrides* and said nothing about the effective values, and a model
-  built in Python or one whose parameters a calibration loop replaced
-  had no config behind it at all. ``jcm_prov_params`` (with
-  ``jcm_prov_params_sha``) now carries them, read off the *built*
-  physics, keyed as ``<term>.<variable>.<field>``
-  (``tiedtke_convection.params.entrpen``). Read it with
-  ``jcm.provenance.read_params(ds.attrs)``, or off the predictions object
-  as ``predictions.params``. Everything else about a run stays where it
-  was: the term composition, dycore and resolution are already in the
-  config record this sits beside.
-- Both kinds of parameter variable are covered. An ``nnx.Param`` is
-  recorded in full, including tuned arrays such as the MACv2-SP plume
-  shapes. A plain ``nnx.Variable`` is recorded where it is knob-shaped
-  (scalars, 0-d arrays, structs of those), because a parameter block
-  holding a bool cannot be a ``Param`` — ``SpeedySurfaceFlux.surface_params``,
-  ``EchamSurface.params`` and every Held-Suarez tuning constant are plain
-  Variables — while the coordinate caches terms also hold as Variables
-  stay out. Arrays over 64 elements (embedded NN weights) are summarized
-  by shape, dtype and hash; values captured under ``jit``/``grad`` read
-  ``"<traced>"``.
-- **The record is captured at trace time, not from the live module.**
-  ``Model._run_from_state`` is jitted with ``self`` static, so parameters
-  are constants inside the compiled executable and changing one in place
-  afterwards does not reach the computation. Reading the module at the
-  handoff would therefore stamp a trajectory with values that never ran.
-  Where the live values disagree with the compiled ones, the record
-  reports the compiled ones and both a log warning and a
-  ``live_parameters_differ_from_compiled`` key say so: that disagreement
-  means an in-place parameter change did nothing to the run. Rebuild the
-  ``Model`` to change parameters; making the mutation take effect (or
-  fail loudly) is tracked in #735.
-- The record travels on the predictions object, so it reaches every
-  output stream that object produces (trajectory, snapshots and the
-  per-observer datasets), including a bare
-  ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
-  Hydra runners, and a later run cannot retroactively change an earlier
-  one's record.
-- **``jcm_prov_run_hash`` values change**, because the parameters are now
-  folded into the hash. They have to be: every member of a parameter
-  sweep shares one code state, config and input set, so without them a
-  sweep produced a single run hash for every member.
-
-Unreleased — transient AMIP forcing
------------------------------------
-
-- **Historical (AMIP-style) runs from config** (#610): yearly transient
-  bundles on the data mirror (``bundles/<grid>/forcing_amip/<year>.nc``
-  with PCMDI-AMIP mid-month SST/sea-ice, ERA5 land climatology and
-  CR-CMIP global-mean GHGs; matching ``emissions_amip`` and
-  ``ozone_amip`` files), a ``forcing=amip`` preset
-  (``forcing.years=[first,last]`` expands ``{year}`` patterns and
-  concatenates along time), a ``run.start_date`` key so the model
-  calendar lands on the forcing dates, and a ``by_date_interp``
-  time-alignment mode that linearly interpolates between samples —
-  required for the AMIP boundary (``tosbcs``) convention to reconstruct
-  observed monthly means. Plain ``by_date`` series stay
-  piecewise-constant.
-- **ERA5 nudging and initial conditions from config** (#610):
-  ``nudging=era5`` relaxes winds (optionally temperature) toward
-  WeatherBench2's public cloud ERA5, windowed to the run dates,
-  regridded to the model grid and cached locally (``jcm.data.era5``,
-  ``pip install jcm[era5]``); ``init=era5`` starts from the ERA5 state
-  at ``run.start_date``. Nudging is masked off above the WB2 stores'
-  50 hPa top and below ``nudging.pbl_levels``. Prefetch CLI:
-  ``python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>``.
-
-Unreleased — issue-backlog tidy-up
-----------------------------------
+SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 - **SPEEDY surface fluxes are published as flat 2D maps** (#645, #328,
   #390). ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` carried land,
@@ -407,8 +260,8 @@ Unreleased — issue-backlog tidy-up
   reached the atmosphere, and ``hfluxn`` had no channel for it at all —
   ``hfluxn[:, :, 2]`` clamped to the sea value instead of raising, which a
   coupled run consumed as its grid-mean heat flux. Each of these is now a
-  single 2D variable holding the grid mean: **``surface_flux.shf.2``
-  becomes ``surface_flux.shf``**, and the per-surface ``.0``/``.1``
+  single 2D variable holding the grid mean: ``surface_flux.shf.2``
+  **becomes** ``surface_flux.shf``, and the per-surface ``.0``/``.1``
   variables are gone. ``hfluxn`` gains the grid mean it never had. The
   merged values themselves are unchanged.
 
@@ -455,7 +308,7 @@ Unreleased — issue-backlog tidy-up
   ``<output>.nc.provenance.json`` sidecar holds the fully composed
   Hydra config, and one log line at startup summarises SHAs / precision
   / ozone source.
-- **Betts-Miller default shallow flavor is now ``SHALLOWER``** (was
+- **Betts-Miller default shallow flavor is now** ``SHALLOWER`` (was
   Isca's nominal ``SIMP``, which zeroes the shallow branch and is always
   overridden in practice — #524). Runs using the default Betts-Miller
   configuration will now do non-precipitating shallow adjustment. The
@@ -481,8 +334,237 @@ Unreleased — issue-backlog tidy-up
   ``__repr__`` (#322); the JAX-gotchas guide is part of the Sphinx docs
   (#157).
 
-Unreleased — boundary-condition and emissions data mirror
----------------------------------------------------------
+
+New capabilities
+^^^^^^^^^^^^^^^^
+
+Headline capabilities of the 3.0 line, then the individual mechanisms.
+
+Interactive aerosol (JAM)
+"""""""""""""""""""""""""
+
+- **End-to-end online aerosol.** Prescribed CEDS/biomass emissions plus
+  interactive sea salt (Gong 2003), Tegen/HAMMOZ dust and DMS; the MAM4-JAX
+  modal microphysics core (``pip install jcm[mam4]``); gas-phase and aqueous
+  sulfur chemistry; ARG droplet activation; heterogeneous ice nucleation on
+  dust and BC; dry deposition, sedimentation, and in-cloud and below-cloud wet
+  scavenging keyed to the two-moment scheme's process-time ledger.
+- **Dust emission** follows Tegen et al. (2002) as HAM2 configures it
+  (``ndust = 4``), with the saltation threshold gated on relative soil
+  wetness: ``forcing.soilw_rel`` carries soil water as a fraction of each
+  cell's own field capacity (ERA5 ``swvl1`` over the HTESSEL capacity of its
+  soil type), the quantity ECHAM's ``ws/wsmx > 0.99`` cut-off is defined
+  against. The channel is optional — a forcing file without it leaves the
+  cut-off inert and says so in the log — and the mirror's surface bundles
+  carry it (#787). Because the flux lives in the far tail of the 10 m wind
+  distribution, HAM's threshold vector is scaled for jcm's own winds by a
+  single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
+  ``physics.jam_dust_nduscale_scale``), set to **0.5** at T63; the regional
+  ratios stay HAM's, and T106 and ne30 take the Fortran's uniform default
+  since their inputs are interpolated from T63. A full
+  ``echam-jam-t63-l47`` year emits 829 Tg/yr of D < 10 µm dust, against the
+  642 Tg/yr that the parent model's published budget becomes once converted
+  to this window; the annual budget is a release-validation gate on any T63
+  run of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr)
+  (#808).
+- **Aerosol direct radiative effect from the modal population**: per-band Mie
+  optics integrated over each mode's lognormal size distribution and fed to
+  RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
+  direct effect. ``jam_optics=False`` makes the aerosol radiatively passive,
+  which is a clean A/B control rather than a disabled feature.
+- **JAM is composed through** ``physics=echam-jam*``, which is factory-built
+  (``builder: echam_physics``) because the aerosol chain splits around the
+  cloud term. It requires the two-moment cloud scheme; JAM with the one-moment
+  scheme is rejected at compose time.
+
+Dynamical cores and grids
+"""""""""""""""""""""""""
+
+- **New pySES CAM-SE backend** (:class:`jcm.dycore.pyses.PysesCamSEDycore`,
+  ``pip install jcm[pyses]``): spectral elements on the cubed sphere, float64
+  dynamics driving float32 column physics, coupled through a pg2
+  finite-volume physics grid, with multi-GPU element sharding and a
+  frontogenesis physics-fields provider. Selected from Hydra with
+  ``dycore=pyses_ne30l{47,95}`` or the ``+configuration=ma-ne30-l{47,95}``
+  presets. See :doc:`design/pyses_cam_se_dycore`.
+- **Semi-Lagrangian transport is the Dinosaur backend's only transport.**
+  Every extra tracer rides nodally with a Bermejo-Staniforth quasi-monotone
+  limiter, so aerosol non-negativity is structural in transport rather than
+  imposed afterwards. There is no Eulerian option and no ``+advection``
+  switch. ``diffusion.tracer_positivity`` survives, defaulting to ``auto``
+  (on for JAM), but only as a mass-conserving hole-filler at the
+  dynamics-to-physics boundary — see
+  :doc:`design/dinosaur_sl_jam_configuration`.
+- **ECHAM6 middle-atmosphere L95 vertical table** (lid ~0.01 hPa) with
+  T63/T106/T119 grid presets and matching ECHAM hyperdiffusion profiles, plus
+  an ``ne30`` L95 dycore preset.
+- **The Hydra** ``dycore`` **group selects the backend**, dispatched by
+  ``jcm.runners.build_model``; a whole pySES run is one command.
+
+Diagnostics and output
+""""""""""""""""""""""
+
+- **AeroCom phase-4 diagnostic suite** with CMOR post-processing
+  (``tools/aerocom_cmor.py``), and the CALIPSO and MODIS satellite simulators
+  alongside CloudSat, including COSP joint histograms (``clmodis`` tau/Reff,
+  LWP+IWP/Reff, the lidar scattering-ratio CFAD and ISCCP).
+- **Virtual observation operators** — stations, tracks and solar-time swaths —
+  sampled every model timestep, each producing its own output dataset. See
+  :doc:`design/observers`.
+- **Per-species, per-mode and per-wavelength aerosol optics**, microphysical
+  process-rate and emission-flux diagnostics, and per-species aerosol
+  mass-budget terms (``budget_mass_*`` / ``budget_ptend_*`` / ``budget_dyn_*``)
+  that make the transport residual visible.
+- ``tools/jam_burden_report.py`` reports column burdens against climatological
+  anchors for any dycore and grid, with inferred per-species lifetimes from an
+  emissions file.
+
+Radiation, clouds and gravity waves
+"""""""""""""""""""""""""""""""""""
+
+- **Climatological ozone is the default** (``forcing.ozone_file: auto``). The
+  analytic profile it replaces carried roughly 7.6x the climatological
+  *tropospheric* ozone column and biased clear-sky OLR about 12 W/m² low. It
+  is still selectable as ``forcing.ozone_file=analytic``; ``auto`` raises on a
+  hybrid grid it cannot resolve rather than substituting it silently, and
+  falls back with a warning only on sigma grids. T63 is the only grid whose
+  climatology is packaged with the wheel; the others come from the data-mirror
+  bundle.
+- **New** ``radiation.total_cloud_cover`` **diagnostic**: cover as the McICA
+  sub-columns see it, under the same overlap rule the flux solve integrates.
+  It is identically zero under the grey two-stream scheme, and the NN emulator
+  publishes the analytic expectation of that draw rather than sampling it.
+  This is *not* the same number as ``jcm.analysis.total_cloud_cover``, the
+  maximum-random-overlap post-processing function the release-validation gate
+  scores — see :doc:`design/cloud_cover_gate`.
+- **CAM spectral frontal gravity-wave drag**, selectable with
+  ``gw_scheme="frontal"`` or ``gw_scheme="both"`` to run it alongside Hines.
+- **Per-level precipitation flux profiles** and a CloudSat COSP warm-rain
+  hook.
+
+Mechanisms
+""""""""""
+
+The individual public mechanisms behind the capabilities above.
+
+JAM optics: a per-mode backend seam
+"""""""""""""""""""""""""""""""""""
+
+- ``JamOpticsTerm`` exposes the one genuinely optical step as a hook, so an
+  out-of-tree Mie pathway is a subclass implementing ``_mode_optics`` rather
+  than a fork of the whole term (#791). ``_map_bands`` and ``_build_mie_lut``
+  are overridable alongside it, for a backend whose per-band intermediates
+  are large or that never reads the built lookup table. ``ModeOpticsInputs``
+  carries both normalisations — a column number per area and a total volume,
+  with the ``col_factor`` that converts between them — because backends
+  disagree about which one they predict. The hook returns optical depths
+  rather than ``(k_ext, ssa, g)``, which keeps the base class from dividing
+  by a possibly-zero number or volume. Compose one with
+  ``echam_physics(aerosol_module="jam").replace("aerosol_optics", ...)``.
+  The default pathway is untouched and its answers are unchanged; see
+  :doc:`design/jam_optics_mode_seam`.
+
+Public state and transformed-output contracts
+"""""""""""""""""""""""""""""""""""""""""""""
+
+- ``Model.initial_state()`` and ``Model.initial_physics_carry()`` return fresh
+  dycore/carry pytrees for external steppers. ``bootstrap_state()`` now returns
+  the pair it installs, ``dycore_state`` and ``physics_carry`` expose the
+  resumable pair read-only, and checkpoint restore replaces both atomically
+  (#755).
+- ``ModelPredictions.with_context(model)`` reattaches the static coordinates,
+  physics, dycore and observer metadata intentionally omitted at JAX pytree
+  boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
+  custom drivers; re-derived live parameters are labelled so they cannot be
+  mistaken for trace-time provenance (#756).
+
+Public model clock conversion
+"""""""""""""""""""""""""""""
+
+- :meth:`jcm.model.Model.date_from_sim_time` is now the public, JIT-safe way
+  to convert elapsed simulation seconds into the same :class:`jcm.date.DateData`
+  used by forcing and physics. It documents the stop-gradient boundary,
+  nearest-second date rounding and day rollover, and the independently
+  timestep-derived ``model_step``. ``Model._date_from_sim_time`` remains a
+  compatibility alias in 3.0 and is planned for removal in a later release
+  (#758).
+
+Provenance records the parameters
+"""""""""""""""""""""""""""""""""
+
+- **Every output now records the physics parameter values the run
+  actually used** (#732). The composed Hydra config that #591 stamped is
+  not the same thing: each scheme's ``params`` block is deliberately
+  absent from the shipped yamls so unspecified fields fall back to
+  ``Parameters.default()`` in code, meaning the config recorded the
+  *overrides* and said nothing about the effective values, and a model
+  built in Python or one whose parameters a calibration loop replaced
+  had no config behind it at all. ``jcm_prov_params`` (with
+  ``jcm_prov_params_sha``) now carries them, read off the *built*
+  physics, keyed as ``<term>.<variable>.<field>``
+  (``tiedtke_convection.params.entrpen``). Read it with
+  ``jcm.provenance.read_params(ds.attrs)``, or off the predictions object
+  as ``predictions.params``. Everything else about a run stays where it
+  was: the term composition, dycore and resolution are already in the
+  config record this sits beside.
+- Both kinds of parameter variable are covered. An ``nnx.Param`` is
+  recorded in full, including tuned arrays such as the MACv2-SP plume
+  shapes. A plain ``nnx.Variable`` is recorded where it is knob-shaped
+  (scalars, 0-d arrays, structs of those), because a parameter block
+  holding a bool cannot be a ``Param`` — ``SpeedySurfaceFlux.surface_params``,
+  ``EchamSurface.params`` and every Held-Suarez tuning constant are plain
+  Variables — while the coordinate caches terms also hold as Variables
+  stay out. Arrays over 64 elements (embedded NN weights) are summarized
+  by shape, dtype and hash; values captured under ``jit``/``grad`` read
+  ``"<traced>"``.
+- **The record is captured at trace time, not from the live module.**
+  ``Model._run_from_state`` is jitted with ``self`` static, so parameters
+  are constants inside the compiled executable and changing one in place
+  afterwards does not reach the computation. Reading the module at the
+  handoff would therefore stamp a trajectory with values that never ran.
+  Where the live values disagree with the compiled ones, the record
+  reports the compiled ones and both a log warning and a
+  ``live_parameters_differ_from_compiled`` key say so: that disagreement
+  means an in-place parameter change did nothing to the run. Rebuild the
+  ``Model`` to change parameters; making the mutation take effect (or
+  fail loudly) is tracked in #735.
+- The record travels on the predictions object, so it reaches every
+  output stream that object produces (trajectory, snapshots and the
+  per-observer datasets), including a bare
+  ``model.run(...).to_xarray().to_netcdf(...)`` that never touches the
+  Hydra runners, and a later run cannot retroactively change an earlier
+  one's record.
+- ``jcm_prov_run_hash`` **values change**, because the parameters are now
+  folded into the hash. They have to be: every member of a parameter
+  sweep shares one code state, config and input set, so without them a
+  sweep produced a single run hash for every member.
+
+Transient AMIP forcing, ERA5 nudging and ERA5 initial states
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- **Historical (AMIP-style) runs from config** (#610): yearly transient
+  bundles on the data mirror (``bundles/<grid>/forcing_amip/<year>.nc``
+  with PCMDI-AMIP mid-month SST/sea-ice, ERA5 land climatology and
+  CR-CMIP global-mean GHGs; matching ``emissions_amip`` and
+  ``ozone_amip`` files), a ``forcing=amip`` preset
+  (``forcing.years=[first,last]`` expands ``{year}`` patterns and
+  concatenates along time), a ``run.start_date`` key so the model
+  calendar lands on the forcing dates, and a ``by_date_interp``
+  time-alignment mode that linearly interpolates between samples —
+  required for the AMIP boundary (``tosbcs``) convention to reconstruct
+  observed monthly means. Plain ``by_date`` series stay
+  piecewise-constant.
+- **ERA5 nudging and initial conditions from config** (#610):
+  ``nudging=era5`` relaxes winds (optionally temperature) toward
+  WeatherBench2's public cloud ERA5, windowed to the run dates,
+  regridded to the model grid and cached locally (``jcm.data.era5``,
+  ``pip install jcm[era5]``); ``init=era5`` starts from the ERA5 state
+  at ``run.start_date``. Nudging is masked off above the WB2 stores'
+  50 hPa top and below ``nudging.pbl_levels``. Prefetch CLI:
+  ``python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>``.
+
+Boundary-condition and emissions data mirror
+""""""""""""""""""""""""""""""""""""""""""""
 
 All boundary conditions and emissions now come from the Hugging Face
 dataset ``climate-analytics-lab/jax-gcm-data`` (issue #515), buildable
@@ -520,6 +602,195 @@ corrections, listed here because they change climate:
   ``bundles/ne30pg3/terrain.nc`` (CESM ``LANDFRAC`` land fraction, exact
   GLL orography), and the pySES ``build_terrain`` now rejects any
   terrain file averaging >0.9 land as a placeholder (#596).
+
+
+Corrected physics
+^^^^^^^^^^^^^^^^^
+
+Fixes that change the climate of a configuration you did not otherwise touch.
+:doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
+was measured.
+
+Moist dynamics: condensate loading and one tracer contract
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The hybrid dynamical core's virtual temperature now carries condensate
+  loading as well as moisture,
+  ``Tv = T (1 + (Rv/Rd - 1) q - sum(q_condensate))``, and the geopotential
+  handed to physics is built from that same virtual temperature. This matches
+  ECHAM6 (``dyn.f90::ztv`` and ``physc.f90::ztvm1``). The condensate set is
+  whatever the active composition declares out of ``qc``/``qi``/``qr``/``qs``;
+  including prognostic rain and snow is a deliberate departure from ECHAM6,
+  which carries no prognostic precipitation. Pure-sigma (SPEEDY)
+  configurations keep a dry dynamics — only their physics geopotential
+  changes.
+- **Breaking for dycore-native saved state:** every mass mixing-ratio tracer
+  (cloud condensate, aerosol mass, gas mass) now crosses the Dinosaur boundary
+  as the dimensionless kg/kg value rather than being nondimensionalised as
+  g/kg, the same contract specific humidity received above. The dynamics reads
+  condensate directly for the loading term, so a scaled store would suppress
+  it by 1000x. Values in a checkpoint written before this release are 1000x
+  smaller than the new convention; multiply them by 1000, or start from a
+  gridpoint ``PhysicsState``, which is unaffected. Tracers declaring
+  ``nondimensionalize=False`` (number concentrations, VMRs) are unchanged.
+  The rescale is behaviourally neutral on its own — transport, filters and the
+  modal round trip are all linear in the tracer.
+
+``set_constants`` reaches the JAM and tropopause modules
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``jcm.constants.set_constants(...)`` now propagates into the JAM aerosol
+  activation, sedimentation, dry-deposition, ice-nucleation and
+  aqueous-chemistry schemes, the TTE-TKE vertical-diffusion closure, the
+  emissions preparation step and the WMO-tropopause diagnostic. All of these
+  captured constants at import time — as a value import, as a reference to the
+  singleton object, or by evaluating ``c.<name>`` in a module-level constant or
+  a default argument — and so silently kept Earth values while the rest of the
+  model used the override (#772). A run with a non-default ``grav``, ``cpd``,
+  ``m_air``, ``r_universal`` or ``ak`` composing any of those terms therefore
+  **changes results**: it was computing with a mixed constant set before.
+  Overrides must still be applied before the model is built (a constant read
+  inside a jitted term is fixed when that term is traced), and constants
+  internal to ``mam4-jax`` remain outside jcm's control.
+
+RCE initial state seeds a mixed sub-cloud layer
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``jcm.rce.rce_initial_state`` now seeds a dry-adiabatic, well-mixed
+  sub-cloud layer below ``mixed_layer_top_m`` (default 800 m). This changes
+  results for any RCE case composing ``TiedtkeConvection``: ECHAM's ``cubase``
+  trigger finds no cloud base at all in a sounding running at ``lapse_rate``
+  to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
+  profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
+
+
+Known limitations
+^^^^^^^^^^^^^^^^^
+
+Behaviour that ships as documented rather than fixed. Each is an accepted
+limitation recorded against the release tracker (#831); :ref:`the migration
+guide <v3-support-matrix>` carries the full list with the evidence behind each
+verdict.
+
+Positivity corrections are an explicit water-budget source
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The final physics-interface positivity cap remains in place for water vapor,
+  cloud liquid/ice, rain and snow. When summed operator-split sinks overdraw a
+  layer, this safety cap can create a small artificial water source; this is an
+  accepted known limitation for this release, not a conservative
+  redistribution scheme. ``water_positivity_correction`` diagnostics now
+  report the exact stop-gradient ``applied - raw`` tendency for specific
+  humidity and every water field declared by the active composition, plus
+  their total. ECHAM-family compositions, which publish
+  ``pressure_thickness``, additionally report
+  ``column_water_source`` in kg m\ :sup:`-2`\  s\ :sup:`-1`; SPEEDY does not
+  claim a pressure-weighted source because it has no pressure-thickness
+  diagnostic (#806).
+- Full-model and single-column drivers now return and integrate the same
+  verified tendency, and the cross-step humidity carry records that applied
+  value. For release monitoring, cumulative positivity correction should be
+  negligible relative to cumulative precipitation, with an informational
+  target below 0.1%. This target is not yet a runtime failure threshold;
+  conservative vertical redistribution is deferred to a separately validated
+  physics change.
+- Explicit SCM humidity nudging retains a separate non-negativity guard for
+  aggressive ``dt/tau`` configurations. Because nudging is user-configured
+  outside the physics tendency, any truncation there is not included in the
+  physics positivity-correction diagnostics.
+- The existing ``thermo_run`` and Tiedtke qc/qi floors remain as guards on the
+  provisional inter-term state consumed by downstream microphysics. They can
+  influence those downstream tendencies but do not directly update the
+  prognostic state, so they are intentionally outside the reported interface
+  correction; the diagnostics quantify the final positivity cap only.
+
+Accepted limitations (proposed)
+"""""""""""""""""""""""""""""""
+
+- **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
+  cannot run on that backend. Model construction **raises** rather than
+  substituting zero; the reference's own ``cu_lmfmid=false`` switch is the
+  escape hatch, and its spelling depends on whether the physics group is
+  term-list or factory-built. A run with the trigger off has no elevated
+  convection above a stable layer at all (#698).
+- **Only four PhysicsTerms are verified layout-agnostic.** The dynamic audit
+  classifies all 62 shipped terms but behaviourally compares grid against
+  column hosts for ``AerocomDiagnostics``, ``MoistAirColumnState``,
+  ``NudgingTerm`` and ``UpperSponge`` only. The composability claim is
+  narrower than it reads (#626).
+- **Native HAMMOZ dust inputs exist only at T63.** T106 is a
+  nearest-neighbour refinement, and there is no ne30 product at all — so a
+  shipped ne30 configuration has the dust term composed but inert. Both the
+  inputs and the emission calibration are T63 quantities, which is the
+  resolution every shipped JAM configuration runs at; online aerosol on the
+  cubed sphere is separate work. See :doc:`science/boundary_conditions`.
+- **The release-validation matrix has three gaps**: the T106 members' multi-GPU
+  mesh configurations have never been run for a full year, ``echam-jam`` at
+  L95 needs L95 oxidant and ozone inputs staged, and the single-column
+  JAM check (``scm_check.py``) composes grey radiation against the matrix's own
+  RRTMGP-for-ECHAM pairing policy (#638).
+
+Calibration and capability gaps
+"""""""""""""""""""""""""""""""
+
+- **The aerosol configuration is validated for stability and wiring, not
+  calibrated.** Shortwave cloud forcing is too strong (SW CRE −56 against an
+  observed −45 W/m²), LW CRE is low because the ice is too thin, and OLR runs
+  about 15 W/m² low (an upstream residual, ``jax-rrtmgp#19``). Aerosol
+  lifetimes are mixed: BC and sea salt are in the observed range while
+  sulfate is long, i.e. wet scavenging is too weak. See
+  :doc:`design/dinosaur_sl_jam_configuration` for the current numbers.
+- **Cloud-borne aerosol is closed as a cycle but not as a full process set**
+  (#602 is closed). Interstitial and cloud-borne mass and number exchange on
+  activation and evaporation, wet and dry deposition drain the in-droplet
+  phase, and aqueous sulfate is produced into the cloud-borne modes. Still
+  outstanding: convective processing of the cloud-borne phase (CAM's
+  ``aero_convproc`` analogue), no resolved-scale advection of the carry (a
+  trade CAM makes too), no cloud-borne sedimentation, and in-droplet mass is
+  invisible to the interstitial-only aerosol optics.
+- **Aerosol-convection coupling trails by one step.** The two physics-side
+  tracer transport terms read the previous step's published profiles, so
+  aerosol transport lags the convection driving it by one ``dt``.
+- **Middle-atmosphere memory.** T63L95 fits one 40 GB A100; T106L95 does not
+  and needs a 4-GPU mesh there. ne30L95 does not fit a single 80 GB A100
+  either and needs a memory reduction rather than a faster backend (#595).
+- **Betts-Miller is a Python-only entry point.** It is the default convection
+  of the single-column RCE layer (``jcm.rce``), which no ``physics=`` or
+  ``+configuration=`` group composes, and its coverage is the ``rce_test.py`` /
+  ``betts_miller_test.py`` unit suites rather than the release-validation
+  matrix.
+
+:ref:`The migration guide <v3-support-matrix>` carries the support matrix and
+the evidence behind each accepted-limitation verdict.
+
+
+Dependencies
+^^^^^^^^^^^^
+
+
+dinosaur is pinned to a release
+"""""""""""""""""""""""""""""""
+
+- ``requirements.txt`` requires ``dinosaur>=1.5.0`` instead of the
+  semi-Lagrangian development branch, so jcm can be published to PyPI again.
+  1.5.0 also fixes the hybrid-coordinate temperature equation
+  (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
+  runs made with earlier dinosaur builds; sigma-level runs are unchanged.
+
+Other floors that are floors for a reason:
+
+- ``flax>=0.12.1``. That release added ``nnx.Variable.get_value()``, which jcm
+  reads every parameter through; on exactly 0.12.0 the lookup falls through to
+  the wrapped object and a ``Model`` fails to build.
+- ``pyses>=0.1.3.1`` for the optional CAM-SE backend. Earlier builds lower the
+  spectral-element contractions to per-gridpoint GEMMs on GPU (1.4x slower,
+  1.8x the device memory at ne30L47) and carry an upstream
+  tracer-hyperviscosity bug active on the ``quasi_uniform`` path every
+  canonical ne30 configuration selects. **ne30 results produced with an older
+  pyses should be treated as provisional** (#599).
+- The ``cosp`` extra still installs ``jax-cosp`` from a VCS URL, so
+  ``pip install jcm[cosp]`` needs git and cannot be resolved from PyPI alone.
+  The core install and every other extra are PyPI-resolvable.
 
 v2.0.0b1
 --------

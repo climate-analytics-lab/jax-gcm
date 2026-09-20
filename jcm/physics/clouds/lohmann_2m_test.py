@@ -2533,3 +2533,31 @@ class TestScavengingLedger2M:
                   "incloud_snow_formation", "incloud_riming",
                   "process_cloud_fraction", "condensate_evaporation_rate"):
             assert getattr(zeros, f).shape == (nlev, ncols)
+
+
+class TestSpaConfigurationHandover:
+    """SPA tuning is applied post-compose, so ``replace`` must carry it."""
+
+    def test_replace_preserves_the_spa_tuning(self):
+        """Losing it would silently revert a 2000x prefactor to 1.0.
+
+        ``echam_physics`` configures SPA from the aerosol module after the
+        package is composed, so a 2M term swapped in afterwards has never seen
+        those values and would fall back to the (1.0, 0.5, 0.0) constructor
+        defaults — changing the droplet number the whole cloud scheme keys off,
+        with no error to say so.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        cat = Lohmann2MMicrophysics.category
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        before = [t for t in physics.terms if t.category == cat][0]
+        after = [t for t in physics.replace(cat, Lohmann2MMicrophysics()).terms
+                 if t.category == cat][0]
+
+        # Guard against passing because both sides sit on the default.
+        assert float(before._spa_prefactor.get_value()) != 1.0
+        for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
+            assert (float(getattr(after, name).get_value())
+                    == float(getattr(before, name).get_value())), name

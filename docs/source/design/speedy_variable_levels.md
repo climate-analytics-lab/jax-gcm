@@ -302,7 +302,8 @@ Two decisive tests isolate it:
 1. **Dynamics alone is stable.** Running the dry dynamical core with **no
    physics** at T21 nlev=32, dt=30 min stays finite and bounded for 90+ model
    hours (max |u| ≈ 60–80 m/s). So it is **not** a dynamics CFL / semi-implicit
-   vertical-operator problem — the IMEX-RK SIL3 dycore handles the thin layers.
+   vertical-operator problem — the semi-implicit dycore handles the thin
+   layers.
 2. **Halving the step cures it.** T21 nlev=32 at dt=15 min is stable (bounded
    T≈315 K, |u|≈80 m/s over a day). So it is a forward-Euler **timestep**
    instability in the operator-split physics tendency.

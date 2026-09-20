@@ -115,9 +115,12 @@ user-facing behaviour is incomplete until the docs say so:
    ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
    implementation-specific details and gotchas belong in the PR description.
    Do **not** create ad-hoc top-level ``*.md`` files in the repo root.
- - **User-facing behaviour changes** (new/changed defaults, new mechanisms like
-   timestep resolution, new CLI/config knobs) must be reflected in
-   ``README.md`` and/or ``docs/source/getting_started.rst`` in the same PR.
+ - **The user guides are curated, not a changelog.** When a PR adds a **major**
+   new feature, *consider* an entry in ``docs/source/getting_started.rst`` (if it
+   is something a new user needs on day one) or ``docs/source/advanced_features.rst``
+   (if it is a capability an experienced user reaches for later). For ordinary
+   knobs, changed defaults and fixes, leave both alone — those belong in the
+   design doc, the release notes and the docstring.
    Keep both **lean**: they orient a new user, they are not a reference. Add
    only what someone needs in order to do the new thing, and nothing else. A new
    public function is **not** by itself such a change — ``docs/source/api.rst``
@@ -126,6 +129,19 @@ user-facing behaviour is incomplete until the docs say so:
    (or ``docs/source/science/`` for a science choice), never in the guide.
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
+ - **The strict Sphinx build is the gate.** Before pushing anything that touches
+   ``docs/`` — or a public docstring, which ``api.rst`` autodocs into the tree —
+   run exactly what CI runs:
+
+   ```bash
+   sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+   ```
+
+   It must end in ``build succeeded`` with zero warnings. ``.github/workflows/
+   run_docs.yaml`` builds the full tree this way on every ``docs/**`` change
+   (#829), so a malformed ``Args:`` block or an unmatched ``inline literal`` is
+   a CI failure, not a cosmetic nit. Fix warnings at the source: ``conf.py``
+   carries no ``suppress_warnings`` on purpose.
 
 ## The model description is a living document
 ``docs/source/science/`` is the by-process model description: every consequential
@@ -407,10 +423,24 @@ from dinosaur import primitive_equations
 Built with Sphinx + Furo theme:
 
 ```bash
-cd docs && make html
+(cd docs && make html)                                      # convenient loop
+sphinx-build -W --keep-going -b html docs/source /tmp/docs   # THE GATE
 ```
 
+Both run from the repository root — the subshell keeps `make html` from
+leaving the shell in `docs/`, where the gate's `docs/source` path would not
+resolve.
+
+The second command is what `.github/workflows/run_docs.yaml` runs on every
+`docs/**` change: the full tree with warnings as errors (#829). It must end in
+`build succeeded` with zero warnings before you push. See "Documentation lives
+with the change" above and `docs/source/developer.rst` for the details.
+
 Auto-generated physics variable translation docs come from `jcm/physics/speedy/units_table.csv` via `docs/generate_docs.py`.
+
+`api.rst` autosummarises `jcm` recursively; co-located `*_test.py` and
+`conftest.py` modules are filtered out of that walk by
+`docs/source/_templates/autosummary/module.rst`.
 
 ## Architecture Notes
 

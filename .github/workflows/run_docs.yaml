@@ -1,23 +1,45 @@
 name: Validate documentation generation
 
+# Three gates on the documentation, in increasing cost:
+#   1. validate-docs          — the SPEEDY translation page still generates.
+#   2. science-register-guard — the living model description's pointers still
+#                               resolve (stdlib only, seconds).
+#   3. strict-sphinx-build    — the WHOLE tree builds with warnings as errors.
+#
 # The SPEEDY variable-translation page is generated at Sphinx build time from
 # jcm/physics/speedy/units_table.csv (see docs/source/conf.py); it is no longer
 # committed back to the repo by CI (which bypassed the PR rule — issue #394).
-# This job only *validates* that generation succeeds for changes that affect it,
-# without write permission and without committing anything.
+# Job 1 only *validates* that generation succeeds, without write permission and
+# without committing anything.
 
 on:
   pull_request:
+    # Every path that can change a rendered page (#829). The previous filter
+    # listed only conf.py, index.rst and docs/source/science/**, so an edit to
+    # design.rst, release_notes.rst or api.rst triggered neither this workflow
+    # nor run_test.yaml (which ignores docs/**) and could merge unbuilt.
+    #
+    # Only `pull_request` is listed, as before. A PR is the merge gate, so no
+    # docs-only change reaches dev without this build; adding `push` would
+    # double the cost of every docs branch for no extra coverage.
     paths:
+      # The whole docs tree — conf.py, the science pages and the templates.
+      - 'docs/**'
+      # Pulled into the tree from the repo root by docs/source/jax_gotchas.md
+      # (``{include} ../../JAX_gotchas.md``), so editing it edits a page.
+      # README.md is deliberately absent: nothing under docs/source includes it.
+      - 'JAX_gotchas.md'
+      # The source of the generated SPEEDY translation page.
       - 'jcm/physics/speedy/units_table.csv'
-      - 'docs/generate_docs.py'
-      - 'docs/source/conf.py'
-      - 'docs/source/science/**'
-      - 'docs/source/science.rst'
-      - 'docs/source/index.rst'
-      - 'docs/science_pointers_test.py'
-      - 'docs/tracked_gaps.py'
-      - 'docs/tracked_gaps_test.py'
+      - '.github/workflows/run_docs.yaml'
+      # NOTE deliberately NOT triggered by jcm/**/*.py, even though autosummary
+      # renders those docstrings: that would run this workflow on nearly every
+      # code PR for a gate the code already has (run_test.yaml covers the
+      # modules and run_linter.yaml's ruff pydocstyle rules cover docstring
+      # shape). A docstring edit that breaks the strict build therefore
+      # surfaces on the next docs-touching PR rather than immediately — an
+      # accepted trade, and the release checklist in #831 runs this build
+      # explicitly against the release candidate.
   workflow_dispatch:
 
 permissions:
@@ -76,23 +98,37 @@ jobs:
           pip install pyyaml
           cd docs && python tracked_gaps_test.py -v
 
-      # Malformed MyST or a broken {doc} reference in a science page passes
-      # the pointer guard but breaks the published docs; this build rejects
-      # it. Failure is scoped to warnings ORIGINATING from the science pages
-      # — a clean-environment build of the whole tree emits pre-existing
-      # warnings elsewhere (autosummary importing *_test modules that need
-      # optional extras, legacy docstring formatting) that this doc-path job
-      # is not the place to gate. Needs the package: conf.py imports jcm.
-      - name: Install jcm + Sphinx toolchain
-        run: |
-          pip install -e .
-          pip install sphinx furo myst-parser
+  # The whole tree, warnings as errors. This replaces the build that used to
+  # hang off the rot-guard job, which grepped the log for warnings ORIGINATING
+  # in docs/source/science and left everything else advisory — so malformed
+  # docstrings and a broken inline literal in release_notes.rst sat on dev
+  # until the release review found them (#829). `--keep-going` reports every
+  # problem in one run instead of stopping at the first, which is what makes a
+  # strict gate cheap to clear.
+  #
+  # Run exactly this locally before pushing a docs change:
+  #   sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+  strict-sphinx-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
 
-      - name: Build the docs; fail on science-page warnings
-        run: |
-          set -o pipefail
-          sphinx-build -b html docs/source /tmp/docs-html 2>&1 | tee /tmp/sphinx-build.log
-          if grep -E "source/science[./].*(WARNING|ERROR)|WARNING.*source/science[./]" /tmp/sphinx-build.log; then
-            echo "::error::warnings originate from docs/source/science — fix the page(s) above"
-            exit 1
-          fi
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      # Needs the package: conf.py imports jcm and api.rst autosummarises it.
+      # sphinx, furo and myst-parser are all in requirements.txt, so `-e .`
+      # installs the toolchain too. The optional pyses extra is deliberately
+      # NOT installed: the API tree no longer walks the co-located *_test
+      # modules that need it (see docs/source/_templates/autosummary/module.rst),
+      # so this job also proves every *documented* module imports on the core
+      # dependency set alone.
+      - name: Install jcm + Sphinx toolchain
+        run: pip install -e .
+
+      - name: Build the full tree with warnings as errors
+        run: sphinx-build -W --keep-going -b html docs/source /tmp/docs-html

@@ -6,8 +6,9 @@ in the cross-step physics carry — never in dycore tracers. The 30-day
 controlled A/B (2026-08-13, figures on #602) settled it: Eulerian-spectral
 advection rang the episodic mirrors ~90%-of-cells negative (global-mean
 mass net-negative) at 2.2x the carry cost, and even against the fair
-semi-Lagrangian baseline (quasi-monotone nodal transport, unreleased
-dinosaur#135) the carry agreed to 3-8% with r(zonal)=0.997 at 2.1x less
+semi-Lagrangian baseline (quasi-monotone nodal transport, neuralgcm/
+dinosaur#135, released in dinosaur 1.4.0) the carry agreed to 3-8% with
+r(zonal)=0.997 at 2.1x less
 cost. A tracers-storage escape hatch was initially retained for an
 FV-dycore re-check and then REMOVED by decision: pySES is the CAM-SE
 dycore, CAM itself keeps ``qqcw`` in pbuf rather than advecting it, and
@@ -129,6 +130,12 @@ class CloudBorneCarryStore(PhysicsTerm):
         "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
+    # The cloud-borne phase is stored here and nowhere else (#602), so a
+    # checkpoint restore must never seed it from a fresh carry or drop it
+    # to absorb a field-set change: either would silently invent or
+    # destroy aerosol mass. See
+    # docs/source/design/checkpoint_compatibility.md.
+    prognostic_carry_slots: ClassVar[tuple[str, ...]] = (CARRY_KEY,)
 
     def __init__(
         self,
