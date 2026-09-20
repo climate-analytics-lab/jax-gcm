@@ -75,10 +75,12 @@ switch 1-2 days late; that is shared by every monthly climatology in the model
 and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
 produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
-refinements of it, stamped as such in their file attributes (#810) — the T106
+refinements of it, stamped as such in their file attributes — the T106
 dynamics therefore gains resolution that the dust source does not, and the
 ``ndust = 3`` tuning polynomial the refined map feeds is itself only fitted up
-to T63 (#808, and see {doc}`aerosol`).
+to T63 (see {doc}`aerosol`). No shipped JAM configuration composes dust
+above T63, so this bounds an unsupported combination rather than one the
+model offers.
 
 Two consequences of the T63-only inputs reach the **cubed-sphere** configurations
 in particular. First, the mirror publishes these five products at T63 and T106
@@ -94,7 +96,7 @@ indices that the integrality check at load then refuses
 native one — a nearest-neighbour refinement of T63, then a column sample of
 that — which is a stronger version of the same T106 caveat, not a different
 one. Native HAMMOZ inputs, or the 0.5-degree originals the T63 files were made
-from, would close both (#810).
+from, would close both.
 
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is

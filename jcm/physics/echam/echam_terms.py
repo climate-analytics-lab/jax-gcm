@@ -84,6 +84,7 @@ def echam_physics(
     jam_ice_scheme: str = "niemand",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
+    jam_dust_nduscale_scale: float | None = None,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
     jam_convective_transport: bool = True,
@@ -192,6 +193,10 @@ def echam_physics(
             (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
             The shipped config leaves this ``null``, which the runner fills
             from ``cfg.nudging.enabled``.
+        jam_dust_nduscale_scale: global multiplier on that regional vector —
+            jcm's single dust-emission calibration knob (#808). ``null``
+            takes the calibrated default, which exists at T63 ``ndust = 4``
+            only.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
@@ -456,6 +461,7 @@ def echam_physics(
             ice_scheme=jam_ice_scheme,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
+            dust_nduscale_scale=jam_dust_nduscale_scale,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
             convective_transport=jam_convective_transport,
