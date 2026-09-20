@@ -78,7 +78,7 @@ produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
 refinements of it, stamped as such in their file attributes — the T106
 dynamics therefore gains resolution that the dust source does not, and the
 ``ndust = 3`` tuning polynomial the refined map feeds is itself only fitted up
-to T63 (#808, and see {doc}`aerosol`).
+to T63 (#852, and see {doc}`aerosol`).
 
 Two consequences of the T63-only inputs reach the **cubed-sphere** configurations
 in particular. First, the mirror publishes these five products at T63 and T106

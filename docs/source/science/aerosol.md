@@ -506,13 +506,13 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   0.245 in January, spatial correlation 0.46), but that ``ws`` is a single
   initial condition with no time axis, and both files exist only at T63. ERA5
   is used instead because it carries the seasonal cycle and derives on every
-  published grid (#787).
+  published grid.
 - `data` (resolution) — the HAMMOZ inputs exist only at T63. The T106 products
   are derived from them by nearest neighbour (conservative regridding cannot
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#808 for the tuning). The
+  ne30 configurations too (#852 for the tuning above T63). The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
   ``CASE DEFAULT`` 0.86. There are no ne30 dust products on the data mirror at
