@@ -720,8 +720,10 @@ Accepted limitations (proposed)
   narrower than it reads (#626).
 - **Native HAMMOZ dust inputs exist only at T63.** T106 is a
   nearest-neighbour refinement, and there is no ne30 product at all — so a
-  shipped ne30 configuration has the dust term composed but inert (#810; the
-  calibration half is #808). See :doc:`science/boundary_conditions`.
+  shipped ne30 configuration has the dust term composed but inert. Both the
+  inputs and the emission calibration are T63 quantities, which is the
+  resolution every shipped JAM configuration runs at; online aerosol on the
+  cubed sphere is separate work. See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has three gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, ``echam-jam`` at
   L95 needs L95 oxidant and ozone inputs staged, and the single-column

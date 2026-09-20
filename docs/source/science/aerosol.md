@@ -512,10 +512,12 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#852 for the tuning above T63). The
+  ne30 configurations too. The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
-  ``CASE DEFAULT`` 0.86. There are no ne30 dust products on the data mirror at
+  ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this
+  bounds what an unsupported composition would do rather than describing
+  one the model ships. There are no ne30 dust products on the data mirror at
   all, so a shipped ne30 configuration runs with the dust emission term composed
   but inert — see {doc}`boundary_conditions` for what that means for the inputs
   and for the column sampling a hand-supplied file gets.
@@ -562,8 +564,9 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
   because HAM's eight regional parameters cannot be identified against a
   single global budget: the regional *ratios* stay HAM's and only the level
-  moves. It applies at T63 only — T106 and ne30 keep HAM's untuned ``0.86``,
-  since their source fields are themselves interpolated from T63.
+  moves. It applies at T63, which is every resolution the model ships JAM
+  at; a composition built at another resolution keeps HAM's untuned
+  ``0.86``, since its source fields are interpolated from T63 anyway.
 
   The **target** is the parent model's own budget, converted to this port's
   size window. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
