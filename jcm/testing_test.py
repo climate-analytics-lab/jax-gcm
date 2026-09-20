@@ -151,14 +151,30 @@ def _smooth(x, y):
 
 class TestCheckGradients(unittest.TestCase):
 
+    # Tolerance for the positive smooth-function checks, which compare AD
+    # against a float32 central difference. ``self.args`` holds a sub-unit leaf
+    # (``x`` spans 0.1-1.0, RMS 0.63), and ``check_gradients`` displaces each
+    # leaf by a fraction of its own RMS, so that leaf moves by only ~0.63*eps —
+    # a smaller absolute step than the unit-scale direction the harness took
+    # before it went relative. The float32 secant's relative error is
+    # ~ulp(f)/(2*eps*RMS*|f'|), which for a sub-unit leaf floors the reference
+    # near 2e-3; rtol=1e-3 sat just under that floor and its pass/fail was
+    # decided by float32 rounding order (it passed on one platform and failed
+    # on CI by ~1.4e-3). 5e-3 clears the floor with margin on every seed while
+    # still catching any gradient error >= 1 % — a wrong gradient disagrees by
+    # O(1), as ``test_a_wrong_gradient_is_caught`` confirms. Real physics
+    # callers keep rtol=1e-3: their leaves are >= O(1), where the relative step
+    # scales the displacement UP and the secant is correspondingly cleaner.
+    SMOOTH_RTOL = 5e-3
+
     def setUp(self):
         self.args = (jnp.linspace(0.1, 1.0, 6), jnp.linspace(-1.0, 2.0, 6))
 
     def test_smooth_function_passes(self):
-        check_gradients(_smooth, self.args, rtol=1e-3)
+        check_gradients(_smooth, self.args, rtol=self.SMOOTH_RTOL)
 
     def test_a_second_direction_also_passes(self):
-        check_gradients(_smooth, self.args, rtol=1e-3, seed=11)
+        check_gradients(_smooth, self.args, rtol=self.SMOOTH_RTOL, seed=11)
 
     def test_a_wrong_gradient_is_caught(self):
         @jax.custom_jvp
@@ -296,7 +312,8 @@ class TestCheckGradients(unittest.TestCase):
             check_gradients(f, self.args, rtol=1e-3, live_inputs=["[1]"])
 
     def test_a_live_named_input_passes(self):
-        check_gradients(_smooth, self.args, rtol=1e-3, live_inputs=["[0]", "[1]"])
+        check_gradients(_smooth, self.args, rtol=self.SMOOTH_RTOL,
+                        live_inputs=["[0]", "[1]"])
 
     def test_a_named_input_that_does_not_exist_is_rejected(self):
         """A renamed field must fail loudly, not silently check nothing."""
