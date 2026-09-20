@@ -112,7 +112,7 @@ MOISTURE_GATE_CASES = (
     ("stratocumulus_sigma_gate_shut", STRATOCUMULUS, {3: 0.10}, False),
 )
 
-def iptop_for(deep_convection, nlev):
+def _iptop_for(deep_convection, nlev):
     """Return the cloud-top index a column with or without deep convection has.
 
     SPEEDY's convection initialises ``iptop`` to the ``nlev + 1`` sentinel and
@@ -123,9 +123,9 @@ def iptop_for(deep_convection, nlev):
     short sounding would otherwise turn the deep-convection cases into silent
     duplicates of their base case and drop the redshc coverage with it.
 
-    Public because ``tools/regenerate_speedy_vdiff_reference.py`` hands the same
-    ``icnv`` to the Fortran; deriving it twice is how the reference and the port
-    would come to be given different inputs.
+    Whatever regenerates the reference below must hand the Fortran the ``icnv``
+    this yields, not a stand-in for its sign: deriving it twice is how the
+    reference and the port come to be given different inputs.
     """
     return 3 if deep_convection else nlev + 1
 
@@ -148,11 +148,24 @@ def _with_rh_overrides(sounding, rh_overrides):
 # compiled unmodified in double precision against stub modules supplying
 # cp = 1004.64 and alhc = 2501.0 -- jcm's values, not SPEEDY's own cp = 1004.0
 # -- so that only the formulation, and not the choice of constants, is being
-# compared. Regenerate with
-# ``python tools/regenerate_speedy_vdiff_reference.py``; compiling the file
-# rather than transcribing it also keeps details a transcription silently
-# "fixes", such as its single-precision ``segrad = 0.1`` literal widening to
-# 0.10000000149 rather than 0.1 (worth 1e-7 in the step-4 tendencies).
+# compared.
+#
+# To regenerate: fetch ``source/vertical_diffusion.f90`` at commit
+# f0a358e9914a4de32836c1e126a37b37bd454fda, whose sha256 is
+# 5992f6a73bd3bade11c374cec5bd8078a99277d40b30c35122f7a622e87aa809. Check that
+# digest: pinning is what stops a later upstream edit re-pinning this test to a
+# *different* scheme while looking like a constants refresh. Then compile it
+# **unmodified** against four stub modules cut down to the names it
+# imports -- ``types`` (``p = kind(1.0d0)``), ``params``
+# (``ix = il = 1, kx = 8``), ``physical_constants`` (``cp``, ``alhc``,
+# ``sigh(0:kx)``) and ``geometry`` (``fsg``, ``dhs``) -- filling ``sigh`` from
+# the SPEEDY half-level table and deriving ``fsg``/``dhs`` from it exactly as
+# :func:`compute_speedy_vertical_coords` does. Drive it with each case's five
+# arrays and ``icnv = kx - _iptop_for(...)``.
+#
+# Compile it rather than transcribe it: a transcription silently "fixes"
+# details such as its single-precision ``segrad = 0.1`` literal, which widens
+# to 0.10000000149 rather than 0.1 and is worth 1e-7 in the step-4 tendencies.
 #
 # Note that the *inputs* are constants-independent but these expected
 # tendencies are not: they scale with the live ``c.cpd`` through fshcse/fvdise
@@ -387,10 +400,10 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
     def _sounding_inputs(self, sounding, rh_overrides, deep_convection):
         """Assemble the scheme's arguments from a sounding literal.
 
-        See :func:`iptop_for` for the two ``iptop`` values a real column
+        See :func:`_iptop_for` for the two ``iptop`` values a real column
         presents.
         """
-        iptop = iptop_for(deep_convection, kx)
+        iptop = _iptop_for(deep_convection, kx)
         rh, qa = _with_rh_overrides(sounding, rh_overrides)
 
         def col(values):
@@ -486,8 +499,8 @@ class Test_VerticalDiffusion_Unit(unittest.TestCase):
         fsg = np.asarray(speedy_coords.fsg)
         rhgrad = float(parameters.vertical_diffusion.rhgrad)
         # A deep-convection case is only a deep-convection case while the
-        # cloud top iptop_for picks sits below kx; see that function.
-        self.assertGreater(kx - iptop_for(True, kx), 0,
+        # cloud top _iptop_for picks sits below kx; see that function.
+        self.assertGreater(kx - _iptop_for(True, kx), 0,
                            "the deep-convection cases no longer set icnv > 0, "
                            "so they duplicate their base case and redshc is "
                            "uncovered")
