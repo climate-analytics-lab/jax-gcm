@@ -512,7 +512,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#810 for the native fields, #808 for the tuning). The
+  ne30 configurations too (#808 for the tuning). The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
   ``CASE DEFAULT`` 0.86. There are no ne30 dust products on the data mirror at
@@ -563,7 +563,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   because HAM's eight regional parameters cannot be identified against a
   single global budget: the regional *ratios* stay HAM's and only the level
   moves. It applies at T63 only — T106 and ne30 keep HAM's untuned ``0.86``,
-  since their source fields are themselves interpolated from T63 (#810).
+  since their source fields are themselves interpolated from T63.
 
   The **target** is the parent model's own budget, converted to this port's
   size window. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
