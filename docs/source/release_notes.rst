@@ -349,6 +349,24 @@ Interactive aerosol (JAM)
   sulfur chemistry; ARG droplet activation; heterogeneous ice nucleation on
   dust and BC; dry deposition, sedimentation, and in-cloud and below-cloud wet
   scavenging keyed to the two-moment scheme's process-time ledger.
+- **Dust emission** follows Tegen et al. (2002) as HAM2 configures it
+  (``ndust = 4``), with the saltation threshold gated on relative soil
+  wetness: ``forcing.soilw_rel`` carries soil water as a fraction of each
+  cell's own field capacity (ERA5 ``swvl1`` over the HTESSEL capacity of its
+  soil type), the quantity ECHAM's ``ws/wsmx > 0.99`` cut-off is defined
+  against. The channel is optional — a forcing file without it leaves the
+  cut-off inert and says so in the log — and the mirror's surface bundles
+  carry it (#787). Because the flux lives in the far tail of the 10 m wind
+  distribution, HAM's threshold vector is scaled for jcm's own winds by a
+  single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
+  ``physics.jam_dust_nduscale_scale``), set to **0.5** at T63; the regional
+  ratios stay HAM's, and T106 and ne30 take the Fortran's uniform default
+  since their inputs are interpolated from T63. A full
+  ``echam-jam-t63-l47`` year emits 829 Tg/yr of D < 10 µm dust, against the
+  642 Tg/yr that the parent model's published budget becomes once converted
+  to this window; the annual budget is a release-validation gate on any T63
+  run of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr)
+  (#808).
 - **Aerosol direct radiative effect from the modal population**: per-band Mie
   optics integrated over each mode's lognormal size distribution and fed to
   RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
@@ -644,33 +662,6 @@ RCE initial state seeds a mixed sub-cloud layer
   trigger finds no cloud base at all in a sounding running at ``lapse_rate``
   to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
   profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
-
-Dust emission reads a real soil wetness and carries a tuning scalar
-"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-
-
-- The Tegen/HAMMOZ dust scheme's ``ws/wsmx > 0.99`` saturation cut-off now
-  reads ``forcing.soilw_rel`` — a new, optional forcing channel holding soil
-  water as a fraction of that cell's own field capacity (ERA5 ``swvl1`` over
-  the HTESSEL capacity of its soil type) — rather than SPEEDY's
-  vegetation-weighted root-zone availability index, which is a different
-  quantity and fired the cut-off 2.7x more often over the T63 source cells
-  (#787). The channel is additive: a forcing file that lacks it leaves the
-  cut-off inert and logs a warning naming the fallback, so existing bundles
-  still run, and the mirror's surface bundles gain it on their next build.
-  **Behaviour change:** dust emission at T63 is retuned. HAM's ECHAM5-tuned
-  threshold vector emits 5.7 Tg/yr of D < 10 µm dust on jcm's wind
-  distribution, two orders of magnitude below the 642 Tg/yr its parent
-  model's own budget becomes in this port's sub-10 µm window, because saltation samples the far tail of the 10 m wind
-  distribution and jcm's tail is thinner. A single global multiplier on that
-  vector, ``NDUSCALE_JCM_T63_SCALE`` (exposed per run as
-  ``physics.jam_dust_nduscale_scale``), is calibrated to **0.5** at T63, where
-  a full ``echam-jam-t63-l47`` year emits 829 Tg/yr; T106 and ne30 keep HAM's
-  untuned value (#810). The annual D < 10 µm
-  emission also becomes a release-validation gate on any T63 run of 300 days
-  or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr, around the 642 Tg/yr
-  that the parent model's published budget becomes once converted to this
-  port's sub-10 µm window) (#808).
 
 
 Known limitations
