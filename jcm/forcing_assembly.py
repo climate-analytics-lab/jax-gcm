@@ -648,7 +648,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
                 f"forcing.emissions_file {path!r} has no emissions variables: "
                 "expected ``emis_<sector>_<species>`` (bulk) or "
                 "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
-                "contract in docs/design/jam.md."
+                "contract in docs/source/design/jam.md."
             )
         if a:
             _merge_disjoint_emissions(anthro, anthro_src, a, path)

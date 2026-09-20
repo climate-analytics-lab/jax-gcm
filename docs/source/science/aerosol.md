@@ -67,8 +67,8 @@ documented fallback when the GPL extra is unavailable. The core's cloudy ``amicp
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
 lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
-observations, SO4 is somewhat long (wet scavenging too weak), and the sea-salt
-source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
+observations and sea salt is in range, while SO4 is somewhat long (wet
+scavenging too weak). See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
 
@@ -512,7 +512,13 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#810 for the native fields, #808 for the tuning).
+  ne30 configurations too (#810 for the native fields, #808 for the tuning). The
+  regional ``ndust = 4`` vector is likewise set only at T63; every other
+  resolution, the cubed sphere included, takes the Fortran's uniform
+  ``CASE DEFAULT`` 0.86. There are no ne30 dust products on the data mirror at
+  all, so a shipped ne30 configuration runs with the dust emission term composed
+  but inert — see {doc}`boundary_conditions` for what that means for the inputs
+  and for the column sampling a hand-supplied file gets.
 
 **Status & known limitations.**
 - The **``U10 = 10 m/s`` texture switch is a hard step**: above it the

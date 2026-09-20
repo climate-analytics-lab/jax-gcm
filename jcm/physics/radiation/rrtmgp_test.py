@@ -1182,8 +1182,16 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         frac0 = effect0 / np.asarray(r0.toa_lw_up)
         frac2 = (np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)) \
             / np.asarray(r2.toa_lw_up)
+        # The fraction is ~-0.0067 of a ~250 W/m2 flux and is recovered from
+        # a float32 reconstruction, F2 - F2*(1 - f): one ulp of that flux
+        # (~1.5e-5 W/m2) moves the recovered fraction by ulp(F)/F ~ 6e-8,
+        # which is rtol 1e-5 of the fraction itself. The tolerance therefore
+        # has to admit several ulps of the flux path, whose rounding order
+        # belongs to jax-rrtmgp and changed between 0.3.0 and 0.4.0 (#849);
+        # 1e-4 admits ~15 ulps and still fails a hold that drifts with the
+        # 4 K perturbation (a fraction moving with the flux changes by O(1e-2)).
         np.testing.assert_allclose(
-            frac2, frac0, rtol=1e-5, atol=1e-9,
+            frac2, frac0, rtol=1e-4, atol=1e-9,
             err_msg="the held aerosol fraction changed on a skipped step",
         )
 
