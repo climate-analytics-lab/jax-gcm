@@ -242,6 +242,10 @@ Two behaviours worth knowing before your first bundle run:
 - **Dust needs five products, not one**, and the first four are mandatory
   together — setting only ``dust_file`` raises. See
   :doc:`science/boundary_conditions` for what each one carries.
+- **Dust's saturation gate reads the surface bundle's relative soil
+  wetness** (``soilw_rel``, an ECHAM-like ws/wsmx). A bundle built before that
+  channel existed leaves the gate inert, logged rather than silent — rebuild
+  the bundle to get the intended gating.
 
 :doc:`design/data_mirror` describes the mirror and the caching;
 :doc:`running_at_scale` covers the ``auto`` defaults and ``hf://`` paths from

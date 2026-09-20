@@ -349,6 +349,24 @@ Interactive aerosol (JAM)
   sulfur chemistry; ARG droplet activation; heterogeneous ice nucleation on
   dust and BC; dry deposition, sedimentation, and in-cloud and below-cloud wet
   scavenging keyed to the two-moment scheme's process-time ledger.
+- **Dust emission** follows Tegen et al. (2002) as HAM2 configures it
+  (``ndust = 4``), with the saltation threshold gated on relative soil
+  wetness: ``forcing.soilw_rel`` carries soil water as a fraction of each
+  cell's own field capacity (ERA5 ``swvl1`` over the HTESSEL capacity of its
+  soil type), the quantity ECHAM's ``ws/wsmx > 0.99`` cut-off is defined
+  against. The channel is optional — a forcing file without it leaves the
+  cut-off inert and says so in the log — and the mirror's surface bundles
+  carry it (#787). Because the flux lives in the far tail of the 10 m wind
+  distribution, HAM's threshold vector is scaled for jcm's own winds by a
+  single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
+  ``physics.jam_dust_nduscale_scale``), set to **0.5** at T63; the regional
+  ratios stay HAM's, and T106 and ne30 take the Fortran's uniform default
+  since their inputs are interpolated from T63. A full
+  ``echam-jam-t63-l47`` year emits 829 Tg/yr of D < 10 µm dust, against the
+  642 Tg/yr that the parent model's published budget becomes once converted
+  to this window; the annual budget is a release-validation gate on any T63
+  run of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr)
+  (#808).
 - **Aerosol direct radiative effect from the modal population**: per-band Mie
   optics integrated over each mode's lognormal size distribution and fed to
   RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
@@ -702,8 +720,10 @@ Accepted limitations (proposed)
   narrower than it reads (#626).
 - **Native HAMMOZ dust inputs exist only at T63.** T106 is a
   nearest-neighbour refinement, and there is no ne30 product at all — so a
-  shipped ne30 configuration has the dust term composed but inert (#810; the
-  calibration half is #808). See :doc:`science/boundary_conditions`.
+  shipped ne30 configuration has the dust term composed but inert. Both the
+  inputs and the emission calibration are T63 quantities, which is the
+  resolution every shipped JAM configuration runs at; online aerosol on the
+  cubed sphere is separate work. See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has three gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, ``echam-jam`` at
   L95 needs L95 oxidant and ozone inputs staged, and the single-column

@@ -10,7 +10,7 @@ Regridding always starts from the highest-resolution product available.
 | BB4CMIP7 biomass (DRES 2-0) | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/DRES/DRES-CMIP-BB4CMIP7-2-0` | native (~0.25°) |
 | AMIP SST + sea ice | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10` (`tos`, `tosbcs`, `siconc`) | 1°, 1870–2022 |
 | Ozone (CMIP7) | `.../input4MIPs_raw/input4MIPs/CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0` (`vmro3`) | 1.9×2.5°, 66 plev to ~1e-4 hPa |
-| ERA5 land climatology | `/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc` (`stl1`, `swvl1`, `sd`, `skt`, `fal`) | 0.25° monthly means |
+| ERA5 land climatology | `/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc` (`stl1`, `swvl1`, `swvl2`, `swvl3`, `sd`, `skt`, `fal`) plus the invariants `/glade/campaign/collections/rda/data/d633000/e5.oper.invariant/197901` (`lsm`, `cvl`, `cvh`, `slt` — `slt` is the soil-type code that selects each cell's HTESSEL field capacity for `soilw_rel`, #787) | 0.25° monthly means + invariant |
 | Dust potential sources (HAMMOZ/Tegen) | `/glade/u/home/duncanwp/dust_potential_sources_T63.nc` (`pot_source`, 12 monthly records) | T63 Gaussian |
 | Dust preferential sources (paleolakes) | `/glade/u/home/duncanwp/dust_preferential_sources_T63.nc` (`source`) | T63 Gaussian |
 | Dust soil textures | `/glade/u/home/duncanwp/soil_type_all_T63.nc` (`type2/3/4/6` global Zobler + `type13..17` East-Asian) | T63 Gaussian |

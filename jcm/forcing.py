@@ -68,6 +68,10 @@ def _validate_bc_fields(ds) -> None:
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
         "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
+        # Relative soil wetness ws/wsmx — a fraction by construction, so
+        # anything outside [0, 1] means it was written as a volumetric content
+        # or a water depth instead (#787).
+        "soilw_rel": (0.0, 1.0),
         "snowc":    (0.0, 20000.0),  # mm snow depth (we clip > 20000 to 0 anyway, but reject negatives)
     }
     for name, (lo, hi) in HARD_RANGES.items():
@@ -284,6 +288,25 @@ class ForcingData:
     # the physics path. Default ``None`` for runs without nudging.
     nudging_target: Any = None
 
+    # Relative soil wetness in [0, 1] — ECHAM's ``ws/wsmx`` semantics: soil
+    # water as a fraction of the soil's own field capacity, so 1 means a
+    # saturated soil on any texture. Built from ERA5's 0-7 cm volumetric
+    # content divided by the HTESSEL field capacity of that cell's soil type
+    # (``jcm.data.mirror.bundles.translate_land``), which is the layer and the
+    # normalisation the saltation threshold is defined against.
+    #
+    # Deliberately ``None`` by default rather than a zeros field: zero means
+    # "bone dry, never saturated", which is exactly the answer a *missing*
+    # field would otherwise fake, and :class:`DustEmissions` must be able to
+    # tell the two apart so it can warn. Forcing files written before #787 do
+    # not carry it and leave it ``None``.
+    #
+    # Distinct from ``soilw_am``, which is SPEEDY's vegetation-weighted
+    # root-zone *availability index* (capped at field capacity by
+    # construction, blending the 7-28 cm layer) and stays the field SPEEDY's
+    # land evaporation reads.
+    soilw_rel: Any = None
+
     # Prescribed natural-aerosol emission surface fields (or TimeSeries
     # thereof), read from the forcing file when present and ``None`` otherwise
     # — the JAM emission terms fall back to zero on a ``None`` field, so DMS /
@@ -335,6 +358,7 @@ class ForcingData:
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
+              soilw_rel=None,
               co2_vmr=None,
               aerosol_year_weight=None,aerosol_ann_cycle=None,
               solar=None,
@@ -353,6 +377,9 @@ class ForcingData:
             sice_am=sice_am if sice_am is not None else jnp.zeros((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.zeros((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.zeros((nodal_shape)),
+            # No zeros default: absence has to stay distinguishable from a dry
+            # soil (see the field's declaration).
+            soilw_rel=soilw_rel,
             stl_am=stl_am if stl_am is not None else jnp.full(nodal_shape, T_default),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.full(nodal_shape, T_default),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
@@ -371,6 +398,7 @@ class ForcingData:
     def ones(cls,nodal_shape,
              alb0=None,sice_am=None,snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
+             soilw_rel=None,
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
@@ -383,6 +411,10 @@ class ForcingData:
             sice_am=sice_am if sice_am is not None else jnp.ones((nodal_shape)),
             snowc_am=snowc_am if snowc_am is not None else jnp.ones((nodal_shape)),
             soilw_am=soilw_am if soilw_am is not None else jnp.ones((nodal_shape)),
+            # Left absent unless asked for: an all-ones relative wetness is a
+            # globally saturated soil, which would silently switch dust
+            # emission off in every test built from ``ones``.
+            soilw_rel=soilw_rel,
             stl_am =stl_am if stl_am is not None else jnp.ones((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
@@ -590,6 +622,12 @@ class ForcingData:
             "soilw_am": ("lon", "lat", "time"),
             "snowc":    ("lon", "lat", "time"),
         }
+        # Optional (#787): only bundles built with the relative-wetness
+        # derivation carry it, but when it IS there its axis order is checked
+        # like any other field — a (time, lon, lat) file would otherwise be
+        # silently transposed by the TimeSeries wrapper.
+        if "soilw_rel" in ds.data_vars:
+            expected_structure["soilw_rel"] = ("lon", "lat", "time")
 
         validate_ds(ds, expected_structure)
         # Sanity-check the loaded BC values once on the host before
@@ -666,6 +704,12 @@ class ForcingData:
         # soil moisture
         soilw_am = _ts(ds["soilw_am"])
 
+        # Relative soil wetness (ws/wsmx), optional: bundles built before #787
+        # carry only ``soilw_am``. Absent stays ``None`` so the consumer can
+        # warn rather than read a fabricated dry soil.
+        soilw_rel = (_ts(ds["soilw_rel"]) if "soilw_rel" in ds.data_vars
+                     else None)
+
         stl_am = _ts(ds["stl"])
 
         # Prescribed SSTs
@@ -693,12 +737,14 @@ class ForcingData:
             nodal_shape=alb0.shape,
             alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
+            soilw_rel=soilw_rel,
             co2_vmr=co2_vmr, ch4_vmr=ch4_vmr, n2o_vmr=n2o_vmr,
         )
 
     def copy(self,alb0=None,
              sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
+             soilw_rel=None,
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
@@ -724,6 +770,7 @@ class ForcingData:
             sice_am=sice_am if sice_am is not None else self.sice_am,
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
+            soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
             stl_am =stl_am if stl_am is not None else self.stl_am,
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else self.sea_surface_temperature,
             co2_vmr=co2_vmr if co2_vmr is not None else self.co2_vmr,
