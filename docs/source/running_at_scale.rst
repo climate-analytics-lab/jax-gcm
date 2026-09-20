@@ -135,16 +135,16 @@ Prefix       Meaning
 
 Two consequences worth committing to memory:
 
-* **Every ``run`` group exposes the same complete key schema.**
+* **Every** ``run`` **group exposes the same complete key schema.**
   ``run/default.yaml`` is the base schema and the others
   (``longrun``, ``smoke``, ``pyses_year``) inherit it via
   ``defaults: [default, _self_]``, overriding only what they change. So any run
   key sets with a plain override on any group —
   ``run=longrun run.checkpoint_path=/scratch/x.ckpt`` composes even though the
   ``longrun`` yaml never mentions ``checkpoint_path``. The rule is simply:
-  **``run.<key>=<value>`` always works.**
+  ``run.<key>=<value>`` **always works.**
 
-* **Reserve ``+``/``++`` for keys outside a group's schema.** A per-scheme
+* **Reserve** ``+``/``++`` **for keys outside a group's schema.** A per-scheme
   physics parameter block, for instance, is intentionally absent from
   ``physics/echam.yaml`` (each field falls back to the scheme's
   ``Parameters.default()``), so overriding one field needs the append prefix::
@@ -158,7 +158,7 @@ Two consequences worth committing to memory:
      python -m jcm.main +constants.grav=9.80665 +constants.rearth=6.4e6
 
   Constants are applied process-globally before the model is built; see
-  :ref:`overriding-constants` in the getting-started guide for the semantics and
+  :ref:`overriding-constants` in :doc:`advanced_features` for the semantics and
   caveats.
 
 Online-aerosol (JAM) inputs default to ``auto``
@@ -194,6 +194,84 @@ offline)::
 See :doc:`design/data_mirror` for the full bundle catalogue. The Python door
 onto the same bundles is :meth:`jcm.forcing.ForcingData.from_bundles` (in the
 getting-started guide).
+
+Ozone: ``auto`` raises rather than approximating
+-------------------------------------------------
+
+``forcing.ozone_file`` also defaults to ``auto``, and it is the one input
+that **refuses to degrade quietly**. On a hybrid grid, when neither the
+packaged climatology nor a mirror bundle resolves, the run raises instead of
+falling back to the analytic profile: that profile carries roughly 7.6x the
+climatological *tropospheric* ozone column and biases clear-sky OLR about
+12 W/m² low, so a run that silently used it would not be a valid radiation
+benchmark. Ask for it deliberately with ``forcing.ozone_file=analytic``.
+
+The error distinguishes the two causes: a missing product (build one with
+``jcm.data.bc.interpolate_ozone``) and a cold Hugging Face cache (warm it on
+a networked node). A **sigma** grid, for which no ozone product exists at
+all, still falls back — with a warning. Whichever path a run took is
+recorded in its provenance as ``ozone_source``, so a later audit does not
+depend on having kept the console log.
+
+Choosing the time step
+----------------------
+
+``run.time_step`` (minutes) is optional, and the same rule resolves it in
+both doors:
+
+* An explicit value always wins. If an explicitly-constructed dycore is also
+  in play, the two must agree — a mismatch raises, because the dycore bakes
+  its step into its integrator at construction and physics, dates and saves
+  would otherwise advance by a different ``dt`` than the dynamics. (The pySES
+  backend is the documented exception: there the dycore group owns the step
+  and a conflicting ``run.time_step`` is ignored with a warning.)
+* With an explicit dycore and no ``time_step``, the Model adopts the dycore's
+  ``dt_seconds`` — whoever builds the dycore owns the step.
+* Otherwise the active physics is consulted through
+  :py:meth:`jcm.physics_interface.Physics.stable_time_step_minutes`. Physics
+  with no grid-dependent stability limit (ECHAM, Held-Suarez) takes the
+  12-minute default — the validated ECHAM L47/L95 production step, which is
+  also what ``run/default.yaml`` sets. SPEEDY reports its own limit instead:
+  capped at the historical 30-minute plateau, and shortened only for
+  high-level or high-truncation grids where its explicit surface drag would
+  otherwise go unstable, so standard 7/8-level SPEEDY stays at exactly 30
+  minutes. See :doc:`design/speedy_variable_levels` for that analysis.
+
+What a default run prints
+-------------------------
+
+Under the CLI jcm *is* the application, so it configures logging: Hydra's
+``job_logging`` installs the console and file handlers, and ``run.log_level``
+sets the level for the whole ``jcm`` hierarchy. It defaults to ``WARNING``,
+accepts a level name or a number, and refuses anything else rather than
+quietly running at a verbosity you did not choose. It applies in every run
+mode, from the start of the run.
+
+**A default run is quieter than it was before v3.0.** ``run.log_level`` used
+to be applied only by ``Model.__init__``, so it did nothing at all in
+``run.mode=prescribed`` and ``run.mode=scm``, nothing before the model was
+built in ``full``, and nothing for the several modules that logged to the
+root logger directly. Now every jcm INFO message obeys it. Pass
+``run.log_level=INFO`` (as ``run=longrun``, ``run=smoke`` and
+``run=pyses_year`` already do) to get them back. Two are worth knowing about,
+because they report what the run resolved your request *to*:
+
+* ``run.mode=scm`` logs the grid cell the requested ``column.lat_deg`` /
+  ``lon_deg`` landed on. It stays INFO rather than becoming a warning because
+  a global state file — which is what jcm writes — always resolves the
+  request to a cell that contains it: longitude is matched on the circle, so
+  a westward ``lon_deg`` such as ``-120`` is the 120W you meant, and a
+  ``lat_deg`` outside [-90, 90], or either value non-finite, is refused
+  outright. A *regional* or single-column state file can still resolve to a
+  distant column, and at the ``WARNING`` default nothing says so — see
+  issue #818.
+* ``run.mode=prescribed`` / ``scm`` log which tracers the state file actually
+  contributed. (The complementary message — tracers the physics declared and
+  the file does *not* carry — is a warning, so it stays audible.)
+
+Nothing needed for a restart audit depends on the console log: the resolved
+ozone source is in the provenance record, and the CLI still prints the output
+path it wrote.
 
 Emulated radiation
 ------------------

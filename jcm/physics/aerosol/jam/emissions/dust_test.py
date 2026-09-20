@@ -19,8 +19,11 @@ from jcm.physics.aerosol.jam.emissions.dust import (
     CD,
     COARSE_UM,
     DSTEP,
+    DUST_SALTATION_GATE_KEY,
     DUST_SUPERCOARSE_KEY,
+    DUST_WETNESS_KEY,
     HIGH_WIND_MS,
+    NDUSCALE_JCM_T63_SCALE,
     MIXTURE_ROWS,
     NCLASS,
     SOIL_TYPE_VARS,
@@ -91,7 +94,7 @@ def _inputs(nlev=3, ncols=2, u10=9.0, source=1.0, soil=None, psrc=0.0,
     forcing = types.SimpleNamespace(
         dust_source=bc(source), dust_preferential=bc(psrc),
         dust_soil_types=fractions, dust_regions=bc(regions),
-        snowc_am=bc(snow), soilw_am=bc(wetness))
+        snowc_am=bc(snow), soilw_rel=bc(wetness))
     return state, diagnostics, forcing, None
 
 
@@ -272,6 +275,58 @@ class SnowAndMoistureTest(unittest.TestCase):
             np.testing.assert_allclose(_total_mass(wet), 0.0,
                                        err_msg=f"ndust={ndust}")
 
+    def test_missing_wetness_channel_warns_and_leaves_the_cutoff_inert(self):
+        # A forcing built before #787 carries no soilw_rel. The cut-off then
+        # has nothing to read: it must say so rather than quietly substituting
+        # soilw_am, which is a different quantity (#787).
+        import logging
+        state, diagnostics, forcing, terrain = _inputs()
+        del forcing.soilw_rel
+        with self.assertLogs(
+                "jcm.physics.aerosol.jam.emissions.dust",
+                level=logging.WARNING) as logs:
+            tend, diags = DustEmissions()(state, diagnostics, forcing, terrain)
+        self.assertIn("soilw_rel", "".join(logs.output))
+        self.assertIn("INERT", "".join(logs.output))
+        self.assertTrue(np.all(_total_mass(tend) > 0.0))
+        np.testing.assert_allclose(np.asarray(diags[DUST_WETNESS_KEY]), 0.0)
+
+    def test_gate_diagnostics_report_what_the_cutoff_saw(self):
+        # The (wetness, saltation-gate) pair is what makes the cut-off's
+        # firing frequency measurable as a CONDITIONAL one: the gate marks
+        # the cells that would emit but for the soil moisture.
+        term = DustEmissions()
+        emitting, diags = term(*_inputs(u10=9.0, wetness=0.3))
+        np.testing.assert_allclose(np.asarray(diags[DUST_WETNESS_KEY]), 0.3)
+        np.testing.assert_allclose(
+            np.asarray(diags[DUST_SALTATION_GATE_KEY]), 1.0)
+        self.assertTrue(np.all(_total_mass(emitting) > 0.0))
+
+        # Saturated: the cell stays in the denominator (wind and source are
+        # ready) while its flux is zero — that is the cut-off firing.
+        wet, wet_diags = term(*_inputs(u10=9.0, wetness=1.0))
+        np.testing.assert_allclose(
+            np.asarray(wet_diags[DUST_SALTATION_GATE_KEY]), 1.0)
+        np.testing.assert_allclose(_total_mass(wet), 0.0)
+
+        # Calm: no saltation at all, so the cell is outside the denominator.
+        _, calm_diags = term(*_inputs(u10=1.0, wetness=1.0))
+        np.testing.assert_allclose(
+            np.asarray(calm_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
+        # Fully snow-covered: windy and erodible, but it would emit nothing
+        # however dry the soil, so it must stay OUT of the denominator — the
+        # gate is the flux computed without the cut-off, not the u* pre-gate.
+        snowy, snow_diags = term(*_inputs(u10=9.0, wetness=0.3, snow=1.0))
+        np.testing.assert_allclose(_total_mass(snowy), 0.0)
+        np.testing.assert_allclose(
+            np.asarray(snow_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
+        # No erodible source: likewise outside the denominator.
+        _, bare_diags = term(*_inputs(u10=9.0, wetness=0.3, source=0.0))
+        np.testing.assert_allclose(
+            np.asarray(bare_diags[DUST_SALTATION_GATE_KEY]), 0.0)
+
     def test_damp_soil_still_emits_with_fecan_off(self):
         for ndust in (3, 4):
             term = DustEmissions(params=DustParameters.preset(ndust))
@@ -286,7 +341,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def loss(wetness):
             state, diagnostics, forcing, terrain = _inputs(u10=9.0)
-            forcing.soilw_am = jnp.full((2,), wetness)
+            forcing.soilw_rel = jnp.full((2,), wetness)
             tend, _ = DustEmissions(params=params)(
                 state, diagnostics, forcing, terrain)
             return jnp.sum(tend.tracers[mass_name("du", "cor")])
@@ -297,7 +352,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def by_table(table):
             state, diagnostics, forcing, terrain = _inputs(u10=9.0)
-            forcing.soilw_am = jnp.full((2,), 0.1)
+            forcing.soilw_rel = jnp.full((2,), 0.1)
             term = DustEmissions(params=params.replace(soil_table=table))
             tend, _ = term(state, diagnostics, forcing, terrain)
             return jnp.sum(tend.tracers[mass_name("du", "cor")])
@@ -312,7 +367,7 @@ class SnowAndMoistureTest(unittest.TestCase):
 
         def flux(table):
             state, diagnostics, forcing, terrain = _inputs(psrc=1.0, u10=25.0)
-            forcing.soilw_am = jnp.full((2,), 0.30)
+            forcing.soilw_rel = jnp.full((2,), 0.30)
             tend, _ = DustEmissions(params=base.replace(soil_table=table))(
                 state, diagnostics, forcing, terrain)
             return float(_total_mass(tend)[0])
@@ -351,7 +406,10 @@ class PreferentialSourceTest(unittest.TestCase):
         np.testing.assert_allclose(_total_mass(tend), 0.0)
 
     def test_high_wind_switches_the_emitted_spectrum_to_clay(self):
-        term = DustEmissions()
+        # The reference fractions are transcribed from the Fortran at HAM's
+        # own threshold vector, so the term is built with jcm's calibration
+        # scalar switched off: this pins the PORT, not the tuning.
+        term = DustEmissions(nduscale_scale=1.0)
         below, _ = term(*_inputs(psrc=1.0, u10=HIGH_WIND_MS - 1e-6))
         above, _ = term(*_inputs(psrc=1.0, u10=HIGH_WIND_MS + 1e-6))
 
@@ -412,10 +470,12 @@ class RegionTuningTest(unittest.TestCase):
     def test_free_running_t63_vector(self):
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg),
-            [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63, nudged=True).nduscale_reg),
-            [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            np.array([0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            * NDUSCALE_JCM_T63_SCALE)
         # The ndust=3 resolution polynomial, clamped to 0.86 above T63.
         for nn, expected in ((21, 0.740), (42, 0.8360), (63, 0.86), (106, 0.86)):
             np.testing.assert_allclose(
@@ -432,7 +492,8 @@ class RegionTuningTest(unittest.TestCase):
 
         term = DustEmissions()
         np.testing.assert_allclose(
-            np.asarray(term.params.get_value().nduscale_reg)[1], 1.45)
+            np.asarray(term.params.get_value().nduscale_reg)[1],
+            1.45 * NDUSCALE_JCM_T63_SCALE)
         term.cache_coords(get_coords(vertical_coords=get_echam_levels(47),
                                      spectral_truncation=106))
         np.testing.assert_allclose(
@@ -441,7 +502,49 @@ class RegionTuningTest(unittest.TestCase):
                                      spectral_truncation=63))
         np.testing.assert_allclose(
             np.asarray(term.params.get_value().nduscale_reg),
-            [1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * NDUSCALE_JCM_T63_SCALE)
+
+    def test_the_global_multiplier_preserves_hams_regional_ratios(self):
+        # One scalar is jcm's whole dust calibration: eight regional
+        # parameters cannot be identified against a single global budget, so
+        # the RATIOS stay HAM's and only the level moves (#808).
+        ham = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+        scaled = np.asarray(
+            DustParameters.preset(4, 63, nduscale_scale=0.5).nduscale_reg)
+        np.testing.assert_allclose(scaled, ham * 0.5)
+        np.testing.assert_allclose(scaled / scaled[0], ham / ham[0])
+
+    def test_the_calibrated_default_applies_at_t63_only(self):
+        # T106/ne30 keep HAM's untuned value: the calibration is a T63 one and
+        # the source maps only exist there (#810). The calibrated scalar is
+        # patched rather than read, so this pins the ROUTING of the default
+        # whatever value the module currently ships.
+        import unittest.mock
+
+        import jcm.physics.aerosol.jam.emissions.dust as dust_module
+
+        with unittest.mock.patch.object(dust_module,
+                                        "NDUSCALE_JCM_T63_SCALE", 0.5):
+            np.testing.assert_allclose(
+                np.asarray(DustParameters.preset(4, 63).nduscale_reg),
+                np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+                * 0.5)
+            np.testing.assert_allclose(
+                float(DustParameters.preset(4, 106).nduscale_reg[0]), 0.86)
+            np.testing.assert_allclose(
+                float(DustParameters.preset(4, None).nduscale_reg[0]), 0.86)
+            # ndust=3 takes its resolution polynomial, untouched by the
+            # ndust=4 calibration (the polynomial hits 0.86 at T63 to ~3e-7).
+            np.testing.assert_allclose(
+                float(DustParameters.preset(3, 63).nduscale_reg[0]), 0.86,
+                rtol=2e-6)
+        # An EXPLICIT multiplier still applies anywhere, so a sweep is
+        # expressible at any resolution.
+        np.testing.assert_allclose(
+            float(DustParameters.preset(4, 106,
+                                        nduscale_scale=0.5).nduscale_reg[0]),
+            0.43)
 
     def test_a_non_spectral_grid_takes_hams_default(self):
         # The pySES CAM-SE grid has no total_wavenumbers; HAM tunes
@@ -467,7 +570,8 @@ class RegionTuningTest(unittest.TestCase):
         nudged.cache_coords(coords)
         np.testing.assert_allclose(
             np.asarray(nudged.params.get_value().nduscale_reg),
-            [0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            np.array([0.95, 1.25, 1.25, 0.95, 0.95, 0.95, 1.25, 0.95])
+            * NDUSCALE_JCM_T63_SCALE, rtol=1e-6)
         # A lower threshold multiplier means MORE emission, so the nudged
         # preset is not a no-op.
         self.assertTrue(np.all(
@@ -506,7 +610,9 @@ class EmittedSizeTest(unittest.TestCase):
     def test_mass_and_number_are_consistent_with_the_effective_diameter(self):
         from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-        term = DustEmissions()
+        # Hand-computed against MAM4's own emission windows at HAM's
+        # threshold vector, so jcm's calibration scalar is switched off here.
+        term = DustEmissions(nduscale_scale=1.0)
         tend, _ = term(*_inputs(soil={"type2": 1.0}, u10=13.8))
         rho_dz = 1.2 * 100.0
         density = MAM4_SPEC.species_props("du").density

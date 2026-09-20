@@ -124,6 +124,34 @@ _POSITIVE_RESIDUAL_CAVEAT = (
 #: over a few chunks swamps the flux integral it is compared against.
 MIN_WINDOW_DAYS = 90.0
 
+#: Shortest window on which the annual dust-emission budget is scored. Dust
+#: emission is strongly seasonal, so annualising a partial year measures the
+#: season rather than the year. A scored member has to cover most of one.
+MIN_DUST_WINDOW_DAYS = 300.0
+
+#: Earth's surface area [m²] — turns a global-mean flux into a global total.
+EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
+
+#: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
+#: jcm actually emits (coarser mass is discarded and published separately as
+#: ``dust_supercoarse_flux``). The anchor is the parent model converted to
+#: this window: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer et
+#: al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
+#: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
+#: slice this port does not carry, so the comparable target is 642 Tg/yr
+#: present-day and 485 pre-industrial. The band is a factor ~1.6 below and ~2
+#: above that: it spans both converted values and the 829 Tg/yr a calibrated
+#: T63 year emits, and is far wider than the 6 % run-to-run spread, so it
+#: cannot act as a tuning target. The derivation and the literature it is
+#: read against are in ``docs/source/science/aerosol.md``. It is the check
+#: that dust has neither vanished (HAM's untuned threshold gives jcm 5.7
+#: Tg/yr, #808) nor run away (the same model's LGM run emits 5159).
+DUST_EMISSION_TG_PER_YR = (400.0, 1300.0)
+
+#: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
+#: the HAMMOZ source maps exist only at T63), so it is scored only there.
+_T63_NLAT = 96
+
 #: Regression tolerance: whichever of a 3-sigma excursion and a 15 % relative
 #: change is larger. 3 sigma alone is far too tight for a well-sampled mean
 #: (sigma is ~1 % of the annual mean); 15 % alone would let a slow bias
@@ -132,9 +160,15 @@ _N_SIGMA = 3.0
 _REL_TOLERANCE = 0.15
 
 #: Statistics the regression tier does NOT score: each has an absolute physics
-#: gate of its own, and their references are ~1e-3, so a 15 % relative
-#: tolerance would be tighter than the gate and fail every real run.
-_GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_")
+#: gate of its own, and scoring them twice would replace that gate with a
+#: tighter one. For the drift, budget and dynamics residuals the references
+#: are ~1e-3, so a 15 % relative tolerance is tighter than the gate and would
+#: fail every real run. ``dust_emission_tg_per_yr`` is exempt for the opposite
+#: reason: its band is deliberately six times wide (#808), because the target
+#: itself is uncertain, and comparing to one reference run at 15 % would turn
+#: a non-tuning release gate into a tuning target.
+_GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
+                   "dust_emission_tg_per_yr")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and
@@ -179,23 +213,89 @@ def chunk_centres(days: np.ndarray, start: float | None = None) -> np.ndarray:
     trapezoid over most of the run, which mis-weights the first flux sample by
     an order of magnitude and fabricates a closure error.
     """
+    return 0.5 * (_window_starts(days, start) + np.asarray(days, dtype=float))
+
+
+def _window_starts(days: np.ndarray, start: float | None) -> np.ndarray:
+    """Start day of each averaging window: its predecessor's label.
+
+    The first window starts at ``start``. ``None`` means infer it: a record
+    whose chunks are uniformly spaced but whose first label exceeds that
+    spacing evidently does not begin at day 0 — a resumed run writing into a
+    fresh output directory, or early chunks deleted to save disk — so its
+    first window starts one cadence before its first label. The last chunk may
+    legitimately be short, so it is left out of the uniformity test; a record
+    too short or too irregular to judge keeps day 0, which is exact for a run
+    start and only ever an approximation where no caller knows better.
+    """
     days = np.asarray(days, dtype=float)
     if start is None:
         start = 0.0
-        # A record whose chunks are uniformly spaced but whose first label
-        # exceeds that spacing evidently does not begin at day 0 — a resumed
-        # run writing into a fresh output directory, or early chunks deleted
-        # to save disk — so its first window starts one cadence before its
-        # first label. The last chunk may legitimately be short, so it is
-        # left out of the uniformity test; a record too short or too
-        # irregular to judge keeps day 0, which is exact for a run start and
-        # only ever an approximation where no caller knows better.
         gaps = np.diff(days)
         if gaps.size >= 3 and np.allclose(gaps[:-1], gaps[0]) \
                 and days[0] > gaps[0] * (1 + 1e-9):
             start = days[0] - gaps[0]
-    starts = np.concatenate([[float(start)], days[:-1]])
-    return 0.5 * (starts + days)
+    return np.concatenate([[float(start)], days[:-1]])
+
+
+def chunk_durations(days: np.ndarray, start: float | None = None
+                    ) -> np.ndarray:
+    """Length [days] of each averaging window whose labels are ``days``.
+
+    A time mean over chunks of unequal length weights by these rather than
+    counting them equally: ``run/longrun.yaml`` writes twelve 30-day chunks
+    and a final 5-day one, and for a strongly seasonal quantity the short tail
+    chunk carrying a full month's weight moves the annual mean.
+    """
+    return np.asarray(days, dtype=float) - _window_starts(days, start)
+
+
+def _uneven_window_reason(days: np.ndarray,
+                          window_start: float | None) -> str | None:
+    """Why this record's averaging windows cannot be duration-weighted.
+
+    Duration weighting assumes each chunk's value averages the window between
+    its own label and its predecessor's. A *deleted* interior chunk breaks
+    that silently: the next file still averages only its own cadence, but its
+    window now spans the gap, so it would be weighted twice over. No NaN
+    appears, so the finiteness check cannot see it. jcm writes a fixed
+    ``chunk_days`` with at most a short final chunk, so an interior window
+    that is not the common cadence — or a final one longer than it — means a
+    missing file, and the annual budget is reported unscored rather than
+    computed from a record with a hole in it.
+    """
+    durations = chunk_durations(days, window_start)
+    if durations.size < 3:
+        return None
+    cadence = float(np.median(durations[:-1]))
+    if cadence <= 0.0:
+        return "chunk labels are not increasing, so no averaging window " \
+               "can be derived"
+    odd = ~np.isclose(durations[:-1], cadence, rtol=1e-6)
+    if odd.any() or durations[-1] > cadence * (1.0 + 1e-6):
+        where = float(days[int(np.argmax(odd))]) if odd.any() else float(
+            days[-1])
+        return (f"the chunk cadence is {cadence:.0f} days but the window "
+                f"ending on day {where:.0f} spans "
+                f"{float(durations[int(np.argmax(odd)) if odd.any() else -1]):.0f}"
+                " — a chunk file is missing, and the budget of a record with "
+                "a hole in it is not this run's year")
+    return None
+
+
+def covered_days(days: np.ndarray,
+                 window_start: float | None = None) -> float:
+    """Days of simulation a record actually covers, first window included.
+
+    ``days[-1] - days[0]`` is the distance between chunk LABELS, which drops
+    the first window: a complete 300-day run written in 30-day chunks is
+    labelled 30…300 and spans only 270 by that measure. For a threshold that
+    decides whether a year is long enough to annualise, that difference
+    decides whether the gate runs at all.
+    """
+    if np.asarray(days).size == 0:
+        return 0.0
+    return float(np.sum(chunk_durations(days, window_start)))
 
 
 def chunk_day(path, index: int | None = None) -> float | None:
@@ -355,6 +455,11 @@ def chunk_reduction(ds: xr.Dataset) -> dict[str, float]:
             if name.startswith(f"{prefix}_") and ds[var].ndim <= 3:
                 out[name] = float(global_mean(tmean(ds[var]), weights))
 
+    # Grid size, so the dust band — a T63 calibration — knows whether it
+    # applies to this member at all rather than failing a T106 run for a
+    # number that was never tuned there (#810).
+    out["nlat"] = float(ds.sizes.get("lat", 0))
+
     aod_key = _optional_key(ds, _AOD_KEYS)
     if aod_key:
         out["aod_550"] = float(global_mean(tmean(ds[aod_key]), weights))
@@ -457,6 +562,17 @@ def regression_tolerance(reference: float, sigma: float,
     value. See the design doc.
     """
     return max(_N_SIGMA * sigma, _REL_TOLERANCE * abs(reference), floor)
+
+
+def _is_t63(series: dict[str, np.ndarray]) -> bool:
+    """Was every scored chunk written on the T63 grid the dust band assumes?
+
+    Unknown (output without the ``nlat`` reduction) counts as NOT T63: a band
+    applied to an unidentified grid would be scoring a number it cannot
+    attribute.
+    """
+    nlat = series.get("nlat")
+    return nlat is not None and bool(np.all(nlat == _T63_NLAT))
 
 
 def _budget_residual(days, series, species,
@@ -595,6 +711,29 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
     if residuals:
         stats["budget_residual_max"] = max(residuals.values(), key=abs)
 
+    # Annual D < 10 µm dust emission [Tg/yr]. ``emi_du`` is a global-MEAN
+    # flux, so the total is that times the Earth's area; the mass above
+    # 10 µm never enters a tracer and is not in this number. Emitted only for
+    # a window long enough to mean the year rather than a season, and only on
+    # the grid the band was calibrated for — an unscored statistic is dropped
+    # here and explained in :func:`unscored_gates`, exactly like the drifts.
+    # Every chunk must contribute: ``nanmean`` over a series with a missing
+    # chunk would annualise the chunks that happen to be present, so a year
+    # whose emission diagnostic vanished half-way — a mixed-version rerun, a
+    # corrupted file — could still score inside the band.
+    # Weighted by each chunk's own averaging window, not counted equally: a
+    # year written as twelve 30-day chunks and a final 5-day one would
+    # otherwise give those five days a month's weight, and dust is seasonal
+    # enough for that to move the annual total across the band.
+    if ("emi_du" in series
+            and covered_days(days, window_start) >= MIN_DUST_WINDOW_DAYS
+            and _is_t63(series) and np.all(np.isfinite(series["emi_du"]))
+            and _uneven_window_reason(days, window_start) is None):
+        stats["dust_emission_tg_per_yr"] = (
+            float(np.average(series["emi_du"],
+                             weights=chunk_durations(days, window_start)))
+            * EARTH_AREA_M2 * 86400.0 * 365.0 / 1e9)
+
     if "so4_above_500hPa" in series and "burden_so4" in series:
         aloft = float(np.nanmean(series["so4_above_500hPa"]))
         total = float(np.nanmean(series["burden_so4"]))
@@ -730,6 +869,33 @@ def unscored_gates(days: np.ndarray, series: dict[str, np.ndarray],
             rows.append((f"burden_{species}_mg_m2", reason))
         elif span < MIN_WINDOW_DAYS:
             rows.append((name, short_slope))
+
+    # The dust budget: say which of the three preconditions is missing, so a
+    # silently unscored release blocker (#808) cannot look like a pass.
+    if "emi_du" not in series:
+        rows.append(("dust_emission_tg_per_yr",
+                     "the run publishes no emi_du flux, so no dust was "
+                     "emitted or the emission diagnostic is absent"))
+    elif not _is_t63(series):
+        rows.append(("dust_emission_tg_per_yr",
+                     "the band is a T63 calibration (#808/#810) and this "
+                     "output is on another grid, where nduscale_reg keeps "
+                     "HAM's untuned value"))
+    elif covered_days(days, window_start) < MIN_DUST_WINDOW_DAYS:
+        rows.append(("dust_emission_tg_per_yr",
+                     f"window spans {covered_days(days, window_start):.0f} "
+                     "days; dust emission is "
+                     f"seasonal, so annualising below {MIN_DUST_WINDOW_DAYS:.0f} "
+                     "days measures the season, not the year"))
+    elif not np.all(np.isfinite(series["emi_du"])):
+        missing = int(np.sum(~np.isfinite(np.asarray(series["emi_du"]))))
+        rows.append(("dust_emission_tg_per_yr",
+                     f"{missing} of {len(series['emi_du'])} chunks carry no "
+                     "finite emi_du, and an annual budget averaged over the "
+                     "rest would not be this run's year"))
+    elif _uneven_window_reason(days, window_start) is not None:
+        rows.append(("dust_emission_tg_per_yr",
+                     _uneven_window_reason(days, window_start)))
 
     if span < MIN_WINDOW_DAYS:
         rows.append(("budget_residual_max", short_budget))
@@ -868,6 +1034,12 @@ def physics_gates(stats: dict[str, float]) -> list[tuple[str, float, str, bool]]
             ok = np.isfinite(value) and value < DYN_RESIDUAL_PER_STEP
             rows.append((key, value,
                          f"x < {DYN_RESIDUAL_PER_STEP:.1%}/step", bool(ok)))
+    if "dust_emission_tg_per_yr" in stats:
+        value = stats["dust_emission_tg_per_yr"]
+        lo, hi = DUST_EMISSION_TG_PER_YR
+        ok = np.isfinite(value) and lo <= value <= hi
+        rows.append(("dust_emission_tg_per_yr", value,
+                     f"{lo:g} <= x <= {hi:g} Tg/yr", bool(ok)))
     if "budget_residual_max" in stats:
         value = stats["budget_residual_max"]
         ok = np.isfinite(value) and abs(value) < BUDGET_RESIDUAL_LIMIT

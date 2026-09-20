@@ -34,5 +34,5 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp>=0.3.0  # 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
+jax-rrtmgp>=0.4.0  # 0.4.0 vectorizes the minor-gas absorbers — 2x radiation solve on A100 (jax-rrtmgp#27/#31), 1.59x whole-model on t63-echam-rrtmgp f64 — and adds the opt-in gpt_chunk knob (jax-rrtmgp#32); 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
 huggingface_hub
