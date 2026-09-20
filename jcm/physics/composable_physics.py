@@ -15,7 +15,7 @@ The threaded ``diagnostics`` dict serves a dual role:
   terms read but the user never sees. ``data_struct_to_dict`` filters them
   out of the user-facing output.
 
-See docs/design/composable_physics.md for the full design.
+See docs/source/design/composable_physics.md for the full design.
 """
 
 from __future__ import annotations

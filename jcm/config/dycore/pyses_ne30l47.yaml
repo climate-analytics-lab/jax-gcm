@@ -29,9 +29,20 @@
 # pressure velocity internally but does not publish it — #698), so ECHAM's
 # ``lmfmid`` mid-level convection trigger (``cubasmc``, #697) cannot run on
 # this backend. Model construction will refuse to build an ECHAM package
-# here until you turn that trigger off with the reference's own switch:
+# here until you turn that trigger off with the reference's own switch. The
+# spelling depends on the shape of the physics group you compose, because
+# ``cu_lmfmid`` reaches the term by a different route in each:
 #
+#   # term-list presets (physics=echam, echam-rrtmgp-2m, ...)
 #   +physics.terms.tiedtke_convection.params.cu_lmfmid=false
+#
+#   # factory-built presets (physics=echam-jam*, i.e. builder: echam_physics)
+#   +physics.cu_lmfmid=false
+#
+# The wrong one of the two does not silently fall back: a ``terms`` node on a
+# factory-built group is rejected, and the scalar is not a key of a term-list
+# group. The packaged ``+configuration=ma-ne30-l{47,95}`` presets already set
+# the right one, so prefer those.
 #
 # That is a real capability gap, not a formality: elevated convection above
 # a stable layer is simply absent from such a run. Prefer fixing #698.

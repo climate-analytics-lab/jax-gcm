@@ -512,8 +512,9 @@ class TestCalendarDurations(unittest.TestCase):
 class TestOperatorSplitPhysics(unittest.TestCase):
     """Operator-split physics (issue #471).
 
-    The op-split path calls physics exactly once per ``dt`` outside the
-    IMEX-RK stages and applies the tendency as a forward-Euler add.
+    The op-split path calls physics exactly once per ``dt``, outside the
+    dycore's own integration stages, and applies the tendency as a
+    forward-Euler add.
     These tests verify the path is wired correctly, exists as a JAX
     pytree, and produces finite atmospheric state in both snapshot and
     averaged modes.

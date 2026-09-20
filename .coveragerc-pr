@@ -82,7 +82,7 @@ omit =
     # ``DinosaurDycore`` itself is main-path code that ``Model.run``
     # routes through every step, but the branches outside the
     # SPEEDY/ECHAM default path — level-dependent diffusion at L47,
-    # the IMEX-RK + nudging composition — only fire under
+    # the semi-Lagrangian transport + nudging composition — only fire under
     # GPU-gated slow tests (``test_release_matrix_default_statistics``,
     # the nudging-shrinks-winds suite) that the CPU CI skips. Fast
     # tests exercise both branches; PR coverage matches the existing

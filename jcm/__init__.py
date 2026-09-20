@@ -19,7 +19,7 @@ from jcm.utils import (
 # knob lives in ``runners._apply_log_level`` instead. Enforced by
 # ``model_test.TestModelLogging``.
 
-__version__ = "2.1.0b0"
+__version__ = "3.0.0rc1"
 
 __all__ = [
     "Model",
