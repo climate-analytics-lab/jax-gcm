@@ -237,6 +237,44 @@ _ONE_MOMENT_SATURATION_CANCELLATION = (
     "and keeps a real tolerance. (#843)"
 )
 
+_CHEMISTRY_RELAXATION_KINK = (
+    "jcm/physics/chemistry/simple_chemistry.py:313-314 — the term splits its net "
+    "ozone relaxation rate into ozone_production = jnp.maximum(ozone_tendency, "
+    "0.0) and ozone_loss = jnp.maximum(-ozone_tendency, 0.0), a corner at "
+    "ozone_tendency == 0. On the replay's first step the term relaxes toward "
+    "target = fixed_ozone_distribution(state) while current_ozone is the "
+    "climatology EchamBoundaryConditions seeded from that SAME distribution, so "
+    "ozone_tendency = (target - current)/tau is bit-identically 0 at every level "
+    "and the operating point sits exactly on that corner (ozone_production == 0, "
+    "ozone_loss rms 2.5e-13). Perturbing temperature (which moves target through "
+    "the height profile) or current_ozone lifts the tendency off zero into "
+    "production on one side and loss on the other, so the two one-sided secants "
+    "measure the two arms of the split — D- ~ +5e7, D+ ~ -4e7 — and stay O(1) "
+    "apart at every rung while the central secant sits stably at their mean; no "
+    "central difference exists. Both operating points sit on it for the same "
+    "reason. Not a lost gradient: both AD modes are finite (the finiteness case "
+    "passes) and the production/loss split is the physics. (#843)"
+)
+
+_COVER_PHASE_JUMP = (
+    "jcm/physics/clouds/sundqvist.py:216-219 — _qs_cover picks the saturation "
+    "vapour pressure with a hard phase switch, es = jnp.where(lo2, es_ice, "
+    "es_water) with lo2 = (T < t_ice) | (T < tmelt & cloud_ice > 5e-6), ECHAM "
+    "mo_cover's ice-memory convention (a deliberate discontinuity, not a "
+    "smoothable one like the softplus/sigmoid/softmax the rest of the scheme "
+    "uses). es_ice and es_water differ below freezing, so qs — and the "
+    "diagnostic RH and cloud fraction built on it — jump where a level crosses "
+    "t_ice = 238.15 K. On the stable marine-stratocumulus column a level sits "
+    "beside that boundary and the RMS-relative temperature step (RMS ~ 250 K, so "
+    "~0.1 K at the top rung) straddles it: the central secant grows as jump/eps, "
+    "doubling as the step halves (-1.5e3 at eps 5e-4 to -1.6e4 at eps 8e-6), and "
+    "clears the boundary only below eps ~ 4e-6 where the projection is float32 "
+    "noise. Forcing es_water, or a smooth phase blend, restores a usable "
+    "reference — confirming the switch is the sole cause. The convecting column "
+    "does not cross it at a sensitive level and keeps its difference reference. "
+    "Both AD modes are finite (the finiteness case passes). (#843)"
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class _Check:
@@ -275,6 +313,18 @@ _CHECKS: dict = {
     # Finiteness holds at both points; only the two-sided reference is missing,
     # and for a reason that is the operating point rather than the scheme.
     "grey_two_stream_radiation": _Check(xfail_reference=_CONDENSATE_CLIP_KINK),
+
+    # The chemistry relaxes ozone toward a target it also seeds the current
+    # field from, so on the replay's first step the net rate is zero and the
+    # production/loss split sits exactly on its corner at both points; finiteness
+    # holds, the two-sided reference does not. See ``_CHEMISTRY_RELAXATION_KINK``.
+    "simple_chemistry": _Check(xfail_reference=_CHEMISTRY_RELAXATION_KINK),
+
+    # Only the stable marine-stratocumulus column places a level beside the
+    # ice/water phase boundary that _qs_cover switches across; the convecting
+    # column keeps its difference reference. See ``_COVER_PHASE_JUMP``.
+    ("sundqvist_cloud_fraction", "stable"): _Check(
+        xfail_reference=_COVER_PHASE_JUMP),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
