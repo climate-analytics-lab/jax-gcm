@@ -245,6 +245,45 @@ Documentation is built with Sphinx. To build locally:
 
 Then open ``docs/build/html/index.html`` in your browser.
 
+The strict build is the gate
+""""""""""""""""""""""""""""
+
+``make html`` is the convenient loop, but CI
+(``.github/workflows/run_docs.yaml``) builds the **whole** tree with warnings
+as errors, and that is what a documentation change has to clear. Run the
+identical command before pushing, **from the repository root** (the path is
+``docs/source``, so this fails if you are still inside ``docs/`` from the
+``make html`` above):
+
+.. code-block:: console
+
+   $ cd <repo root>
+   $ sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+
+``-W`` turns every warning into an error; ``--keep-going`` reports all of them
+in one pass instead of stopping at the first, so a page with several problems
+takes one run to fix rather than several. The build must end in
+``build succeeded`` with no warnings at all.
+
+Two things to know when a warning does appear:
+
+- **Fix it at the source, not with a suppression.** ``conf.py`` deliberately
+  sets no ``suppress_warnings``; a blanket entry there would silently disarm
+  the gate for everyone.
+- **Docstrings are part of the tree.** ``api.rst`` autosummarises ``jcm``
+  recursively, so a malformed ``Args:`` block in a documented module fails the
+  docs build even though the code imports fine. Co-located ``*_test.py``
+  modules and ``conftest.py`` are filtered out of that walk by
+  ``docs/source/_templates/autosummary/module.rst`` — tests are not public API,
+  and the pyses backend's tests need an optional extra the docs environment
+  does not install.
+
+Because the docs workflow is not triggered by ``jcm/**/*.py`` (see the comment
+in ``run_docs.yaml``), a docstring change that breaks the strict build surfaces
+on the next documentation PR rather than on the code PR that introduced it.
+Running the command above after editing a public docstring avoids handing that
+to someone else.
+
 Communication
 -------------
 

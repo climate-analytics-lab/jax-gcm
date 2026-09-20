@@ -395,7 +395,8 @@ class Model:
                 ``None``, a default :class:`DinosaurDycore` is constructed
                 from ``coords`` and ``terrain`` for convenience. Backend-
                 specific knobs (diffusion, nudging-as-PhysicsTerm targets,
-                IMEX stepper details) belong to the dycore's own constructor
+                stepper options such as the semi-Lagrangian off-centering)
+                belong to the dycore's own constructor
                 — wire them there, then pass the dycore in.
             coords: CoordinateSystem. Required when ``dycore`` is ``None``.
                 To enable SPMD parallelization, pass ``spmd_mesh`` to the

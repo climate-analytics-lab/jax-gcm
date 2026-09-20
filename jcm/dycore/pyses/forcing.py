@@ -58,7 +58,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         emissions_file: Optional path (or list of paths) to jcm-contract
             emissions netCDF(s) (``emis_<sector>_<species>`` and/or
             ``aero_emis_<tracer>`` on a regular ``(lon, lat)`` grid — see
-            ``docs/design/jam.md``). Fields are bilinearly sampled onto the
+            ``docs/source/design/jam.md``). Fields are bilinearly sampled onto the
             columns; grids need not match the met forcing file's.
         dms_file: Optional seawater-DMS climatology
             (``DMS_sea (time, lat, lon)``; :func:`jcm.forcing.read_dms_seawater`).
