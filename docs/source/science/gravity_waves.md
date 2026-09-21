@@ -34,7 +34,9 @@ plus two upper-boundary dissipation terms:
   supplied terrain, so its drag pattern is wind-driven, not an orographic
   response (Lott-Miller is the scheme that reads ``terrain.orostd``). It carries
   no blocked-flow/form-drag branch (that is Lott-Miller's job), so it is pure
-  saturated wave drag.
+  saturated wave drag, bounded by the same ECHAM ``mo_ssodrag`` overshoot guard
+  as the Lott-Miller port (``rover = 0.25``: one step removes at most a quarter
+  of the local wind speed, so drag can never reverse the flow).
 
 Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
 (``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on

@@ -208,6 +208,43 @@ class TestGravityWaveDrag:
         depo = jnp.abs(tendencies.dudt)
         assert jnp.all(depo[height > 10500] < 1e-9)
 
+    def test_extreme_drag_cannot_reverse_wind_in_one_step(self):
+        """The ECHAM overshoot guard bounds the increment at extreme drag.
+
+        The sharpest deposition is a high-altitude critical level: a strong
+        launch stress (40 m/s low-level flow over 500 m orography, ~1.4 Pa)
+        surviving to ~32 km is absorbed across one thin layer where the density
+        is ~1e-2 kg/m^3, and the unbounded acceleration there (~0.06 m/s^2)
+        would remove ~110 m/s from a 40 m/s wind in an 1800 s step. The guard
+        (``mo_ssodrag``'s ``rover = 0.25`` cap, as in the Lott-Miller port)
+        limits ``|dU/dt|`` to ``0.25 |U| / dt`` for every dt: the applied
+        increment removes at most a quarter of the local wind speed, the wind
+        never changes sign, and kinetic energy still strictly decreases.
+        """
+        config = SimpleGwdParameters.default()
+        height, pressure, temperature, air_density = _sheared_column(
+            nlev=40, top=40000.0)
+        # Westerly to 32 km, reversed above -> critical level in thin air.
+        u_wind = jnp.where(height < 32000, 40.0, -40.0)
+        v_wind = jnp.zeros_like(height)
+
+        for dt in (900.0, 1800.0, 3600.0):
+            tendencies, _ = simple_gwd(
+                u_wind, v_wind, temperature, pressure, height, air_density,
+                500.0, dt, config)
+
+            speed = jnp.abs(u_wind)
+            increment = jnp.abs(tendencies.dudt) * dt
+            frac = increment / speed
+            assert jnp.all(frac <= 0.25 * (1 + 1e-5))
+            # The guard genuinely engaged (the unbounded increment is ~3x the
+            # wind), the post-step wind keeps its sign, drag still acts, and
+            # energy is still lost.
+            assert jnp.max(frac) > 0.249
+            u_after = u_wind + dt * tendencies.dudt
+            assert jnp.all(u_after * u_wind > 0)
+            assert jnp.sum(u_wind * tendencies.dudt) < 0.0
+
     def test_calm_column_is_zero(self):
         """A wind-free column launches nothing and stays exactly zero."""
         config = SimpleGwdParameters.default()

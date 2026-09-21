@@ -258,8 +258,8 @@ def simple_gwd(
         height: Geopotential height (m) [nlev]
         air_density: Air density (kg/m³) [nlev]
         h_std: Standard deviation of sub-grid orography (m)
-        dt: Time step (s) — unused; the drag is applied as a tendency, not an
-            increment, but kept in the signature for interface symmetry.
+        dt: Time step (s). Consumed by the ECHAM overshoot guard, which caps
+            the drag so a single physics step cannot reverse the wind.
         config: GW parameters
 
     Returns:
@@ -268,8 +268,6 @@ def simple_gwd(
     """
     if config is None:
         config = SimpleGwdParameters.default()
-
-    del dt  # tendency scheme; no explicit time integration here
 
     # Brunt-Väisälä frequency (floored at N² = 1e-8, so N >= 1e-4 s⁻¹ and every
     # division by ``n_bv`` below is finite in value and derivative).
@@ -328,7 +326,30 @@ def simple_gwd(
     dudt = -dtau_x_dz / rho
     dvdt = -dtau_y_dz / rho
 
-    # Mechanical heating: KE lost to drag reappears as heat, dT/dt = -Ẋ·U / cp.
+    # ECHAM overshoot guard (mo_ssodrag lines 423-429, as in the Lott-Miller
+    # port ``sso/lott_miller.py``): cap the drag acceleration at
+    # ``rover * |U| / dt`` so one physics step removes at most a quarter of the
+    # local wind speed and can never overshoot zero or reverse the flow. The
+    # saturated acceleration scales as ``k G U³ / (N H)`` — cubic in wind — so
+    # at e.g. 100 m/s and dt = 1800 s the unbounded tendency (~0.13 m/s²) would
+    # apply a −225 m/s increment; a critical-level flux drop over a thin layer
+    # is sharper still. Floors sit *inside* the sqrt so the derivative is
+    # finite at the (common) zero-drag / calm state (issue #558), and the
+    # division lives inside ``where`` with a floored denominator so the
+    # untaken branch stays poison-free.
+    rover = 0.25
+    zforc = jnp.sqrt(jnp.maximum(dudt ** 2 + dvdt ** 2, 1.0e-30))
+    ztend = jnp.sqrt(jnp.maximum(u_wind ** 2 + v_wind ** 2, 1.0e-30)) / dt
+    factor = jnp.where(zforc >= rover * ztend,
+                       rover * ztend / jnp.maximum(zforc, 1e-30),
+                       1.0)
+    dudt = dudt * factor
+    dvdt = dvdt * factor
+
+    # Mechanical heating: KE lost to drag reappears as heat, dT/dt = -Ẋ·U / cp,
+    # computed from the *limited* tendencies so heat matches the momentum
+    # actually removed (mo_ssodrag computes dissipation from the final
+    # increments the same way).
     dtedt = -(u_wind * dudt + v_wind * dvdt) / c.cpd
 
     # Apply drag only inside the [zmin, zmax] window.
