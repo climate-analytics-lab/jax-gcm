@@ -24,10 +24,17 @@ plus two upper-boundary dissipation terms:
   a faithful JAX port of CAM's spectral non-orographic scheme with a
   frontogenesis-triggered source. See {doc}`../design/frontal_gravity_wave_drag`.
 - **Simple GWD fallback** (``jcm/physics/gravity_waves/simple/simple_gwd.py::SimpleGwd``):
-  a single-wave breaking scheme whose source is a **synthetic uniform 200 m
+  a single monochromatic mountain wave following McFarlane (1987) / Palmer et
+  al. (1986). A linear launch stress ``tau = rho_s k G N |U| h^2`` is set
+  opposite the low-level wind and propagated upward, capped by the saturation
+  stress ``tau_sat = rho k G U_proj^3 / N`` (marginal overturning) and absorbed
+  where the wind reverses relative to the launch direction; the flux
+  convergence is the deposited drag. Its source is a **synthetic uniform 200 m
   sub-grid orography in every column, ocean included** — it ignores the
   supplied terrain, so its drag pattern is wind-driven, not an orographic
-  response (Lott-Miller is the scheme that reads ``terrain.orostd``).
+  response (Lott-Miller is the scheme that reads ``terrain.orostd``). It carries
+  no blocked-flow/form-drag branch (that is Lott-Miller's job), so it is pure
+  saturated wave drag.
 
 Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
 (``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on

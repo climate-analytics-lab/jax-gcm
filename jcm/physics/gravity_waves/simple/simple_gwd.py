@@ -1,16 +1,16 @@
-"""Gravity wave drag parameterization for ECHAM physics
+"""Simple single-wave mountain-wave drag (the fallback GWD scheme).
 
-This module implements the orographic and non-orographic gravity wave drag
-parameterizations. The scheme accounts for momentum deposition from breaking
-gravity waves that are not resolved by the model grid.
+A cheap single monochromatic gravity-wave drag: a linear mountain-wave stress
+launched at the surface opposite the low-level wind, propagated upward under the
+McFarlane (1987) / Palmer et al. (1986) saturation hypothesis, and absorbed at
+critical levels. It is a deliberately minimal stand-in for the full Hines +
+Lott-Miller stack (``gravity_waves/{hines,sso}``), kept for aquaplanet tests;
+the blocked-flow/form-drag physics is Lott-Miller's job, not this scheme's.
 
-Based on ICON's mo_gwd_wms.f90 and mo_ssodrag.f90
-
-Features:
-- Orographic gravity wave drag (mountain waves)
-- Non-orographic gravity wave sources
-- Wave breaking and momentum deposition
-- Critical level filtering
+References:
+- McFarlane, N. M. (1987), *J. Atmos. Sci.* 44, 1775-1800 (saturated orographic
+  gravity-wave drag).
+- Palmer, T. N., Shutts, G. J., Swinbank, R. (1986), *QJRMS* 112, 1001-1039.
 
 """
 
@@ -18,7 +18,6 @@ import jax.numpy as jnp
 import jax
 from jax import lax
 from typing import NamedTuple, Tuple, Optional
-# from functools import partial  # No longer needed
 import tree_math
 
 import jcm.constants as c
@@ -26,53 +25,44 @@ import jcm.constants as c
 
 @tree_math.struct
 class SimpleGwdParameters:
-    """Parameters for gravity wave drag scheme"""
-    
-    # Orographic drag parameters
-    gkdrag: float           # Surface drag coefficient
-    gkwake: float           # Wake drag coefficient
-    grcrit: float           # Critical Froude number
-    gssec: float            # Security parameter for Richardson number
-    gtsec: float            # Security parameter for Brunt-Vaisala frequency
-    
-    # Non-orographic parameters
-    ruwmax: float           # Launch momentum flux for non-orographic waves (N/m²)
-    nslope: float           # Slope of wave spectrum
-    
-    # Wave breaking parameters
-    ric: float              # Critical Richardson number
-    efmin: float            # Minimum efficiency
-    efmax: float            # Maximum efficiency
-    
-    # Numerical parameters
-    zmin: float             # Minimum height for GWD (m)
-    zmax: float             # Maximum height for GWD (m)
-    
-    # Tuning parameters
-    gwdrag_cd: float        # Drag coefficient multiplier
-    gwdrag_ef: float        # Efficiency factor
+    """Parameters for the simple monochromatic mountain-wave drag scheme.
+
+    The scheme is a single-wave orographic drag with McFarlane (1987)
+    saturation, so the tunables are the linear-wave stress efficiency, the
+    representative horizontal wavenumber that turns the wave amplitude into a
+    stress, the blocked-flow Froude taper, a launch multiplier and the height
+    window over which drag is applied. (The Richardson-number/amplitude
+    breaking knobs of the earlier placeholder are gone: saturation of the flux
+    during upward propagation now decides where momentum is deposited, so those
+    parameters had nothing to act on.)
+    """
+
+    gkdrag: float           # Linear-wave stress efficiency G (dimensionless)
+    kwave: float            # Representative horizontal wavenumber k (m^-1)
+    gwdrag_cd: float        # Launch-stress multiplier
+    zmin: float             # No drag below this height (m)
+    zmax: float             # No drag above this height (m)
 
     @classmethod
-    def default(cls, gkdrag=0.5, gkwake=0.5, grcrit=0.25, gssec=0.0001,
-                 gtsec=0.0001, ruwmax=1.0, nslope=1.0, ric=0.25,
-                 efmin=0.0, efmax=0.1, zmin=1000.0, zmax=100000.0,
-                 gwdrag_cd=1.0, gwdrag_ef=0.05) -> 'SimpleGwdParameters':
-        """Return default gravity wave parameters"""
+    def default(cls, gkdrag=0.1, kwave=1.0e-4,
+                gwdrag_cd=1.0, zmin=1000.0, zmax=100000.0
+                ) -> 'SimpleGwdParameters':
+        """Return default gravity wave parameters.
+
+        ``kwave = 1e-4 m^-1`` is a ~63 km representative sub-grid mountain-wave
+        horizontal wavelength; with the surface density it is the ``rho_s k``
+        factor the earlier stress formula was missing (which is why that formula
+        produced ~10^2 Pa launch stresses). ``gkdrag = 0.1`` is the stress
+        efficiency G; together they put the default launch stress for a 300 m
+        sub-grid peak in a 10 m/s wind at ~0.1 Pa, the order of real sub-grid
+        orographic drag.
+        """
         return cls(
             gkdrag=jnp.array(gkdrag),
-            gkwake=jnp.array(gkwake),
-            grcrit=jnp.array(grcrit),
-            gssec=jnp.array(gssec),
-            gtsec=jnp.array(gtsec),
-            ruwmax=jnp.array(ruwmax),
-            nslope=jnp.array(nslope),
-            ric=jnp.array(ric),
-            efmin=jnp.array(efmin),
-            efmax=jnp.array(efmax),
+            kwave=jnp.array(kwave),
+            gwdrag_cd=jnp.array(gwdrag_cd),
             zmin=jnp.array(zmin),
             zmax=jnp.array(zmax),
-            gwdrag_cd=jnp.array(gwdrag_cd),
-            gwdrag_ef=jnp.array(gwdrag_ef)
         )
 
 
@@ -168,137 +158,57 @@ def orographic_source(
     u_sfc: jnp.ndarray,
     v_sfc: jnp.ndarray,
     n_sfc: jnp.ndarray,
+    rho_sfc: jnp.ndarray,
     h_std: jnp.ndarray,
     config: SimpleGwdParameters
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate orographic gravity wave source
-    
+    """Calculate the orographic gravity-wave source stress.
+
+    Linear (hydrostatic, non-rotating) mountain-wave surface stress,
+    ``tau = rho_s * k * G * N * |U| * h^2`` (McFarlane 1987 eq. 3 / Palmer et
+    al. 1986), directed *opposite* the low-level wind so that its convergence
+    aloft decelerates the flow. The ``rho_s * k`` factor is what makes this a
+    stress (Pa): dropping it — as the earlier code did — leaves ``N |U| h^2``,
+    which has units m^2 s^-2 and is ~10^3-10^4x too large.
+
+    There is deliberately no blocked-flow (low-Froude) reduction here: blocking
+    and its form drag are the job of the Lott-Miller SSO scheme
+    (``gravity_waves/sso``). This simple single-wave scheme is the pure
+    McFarlane picture — full linear launch stress, then saturation aloft — so
+    that the saturation cap in :func:`simple_gwd`, not a launch taper, sets the
+    deposition. (The earlier ``min(1, grcrit/Fr)`` taper suppressed exactly the
+    high-Froude *linear* regime it should have left alone, and shrank the launch
+    so far below the saturation stress that the wave never broke.)
+
     Args:
         u_sfc: Surface zonal wind (m/s)
         v_sfc: Surface meridional wind (m/s)
         n_sfc: Surface Brunt-Väisälä frequency (s⁻¹)
+        rho_sfc: Surface air density (kg/m³)
         h_std: Standard deviation of orography (m)
         config: GW parameters
-        
+
     Returns:
         Tuple of (tau_x, tau_y): Surface momentum fluxes (N/m²)
 
     """
-    # Surface wind speed. The 1 m/s floor below keeps the *forward* division by
-    # ``wind_speed`` finite but does nothing for the derivative: ``maximum``
-    # passes a zero cotangent back into the norm, and 0 * NaN is still NaN.
+    # Surface wind speed. The 1 m/s floor keeps the division by ``wind_speed``
+    # finite in both value and derivative; ``_safe_hypot`` handles the calm
+    # cone-tip so a zero-wind column does not poison the batch gradient.
     wind_speed = _safe_hypot(u_sfc, v_sfc)
     wind_speed = jnp.maximum(wind_speed, 1.0)  # Minimum wind speed
-    
-    # Froude number
-    froude = wind_speed / (n_sfc * h_std + 1e-10)
-    
-    # Wave momentum flux (simplified parameterization)
-    # Based on linear mountain wave theory
-    flux_magnitude = config.gkdrag * n_sfc * wind_speed * h_std**2
-    
-    # Apply Froude number dependence
-    # Flux is reduced for high Froude numbers (flow over mountain)
-    froude_factor = jnp.minimum(1.0, config.grcrit / (froude + 0.1))
-    flux_magnitude = flux_magnitude * froude_factor
-    
-    # Project onto wind direction
+
+    # Linear mountain-wave stress magnitude (Pa).
+    flux_magnitude = (
+        rho_sfc * config.kwave * config.gkdrag
+        * n_sfc * wind_speed * h_std**2
+    )
+
+    # Project onto wind direction (stress opposes it).
     tau_x = -flux_magnitude * u_sfc / wind_speed
     tau_y = -flux_magnitude * v_sfc / wind_speed
-    
+
     return tau_x, tau_y
-
-
-@jax.jit
-def wave_breaking_criterion(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    n2: jnp.ndarray,
-    height: jnp.ndarray,
-    tau_x: jnp.ndarray,
-    tau_y: jnp.ndarray,
-    rho: jnp.ndarray,
-    config: SimpleGwdParameters
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Determine wave breaking and momentum deposition
-    
-    Uses saturation hypothesis - waves break when amplitude exceeds
-    critical threshold based on Richardson number criterion.
-    
-    Args:
-        u, v: Wind components (m/s) [nlev]
-        n2: Brunt-Väisälä frequency squared (s⁻²) [nlev]
-        height: Height (m) [nlev]
-        tau_x, tau_y: Momentum fluxes (N/m²) [nlev]
-        rho: Air density (kg/m³) [nlev]
-        config: Parameters
-        
-    Returns:
-        Tuple of (breaking_mask, deposited_momentum)
-
-    """
-    nlev = u.shape[0]
-    
-    # Calculate wave amplitude from momentum flux
-    # tau = rho * u' * w' ~ rho * c * a²
-    # where c is phase speed and a is amplitude
-    # Identically zero at every level the critical-level filter has stopped the
-    # wave at, which is most of the column, so the norm is evaluated at its cone
-    # tip as a matter of course.
-    tau_mag = _safe_hypot(tau_x, tau_y)
-    
-    # Intrinsic phase speed (simplified)
-    # Use a more realistic value based on typical gravity wave parameters
-    c_phase = 20.0  # Typical phase speed ~ 20 m/s
-    c_phase = jnp.ones_like(height) * c_phase
-    
-    # Wave amplitude
-    amplitude = jnp.sqrt(jnp.abs(tau_mag) / (rho * c_phase + 1e-10))
-    
-    # Vertical shear
-    du_dz = jnp.zeros(nlev)
-    dv_dz = jnp.zeros(nlev)
-    
-    # Calculate shear (central differences)
-    du_dz = du_dz.at[1:-1].set(
-        (u[2:] - u[:-2]) / (height[2:] - height[:-2])
-    )
-    dv_dz = dv_dz.at[1:-1].set(
-        (v[2:] - v[:-2]) / (height[2:] - height[:-2])
-    )
-    
-    # Richardson number
-    shear2 = du_dz**2 + dv_dz**2 + 1e-10
-    richardson = n2 / shear2
-    
-    # Wave breaking criterion
-    # Waves break when Ri < Ri_crit or amplitude exceeds threshold
-    breaking_ri = richardson < config.ric
-    breaking_amp = amplitude > 0.1 * jnp.sqrt(height)  # Amplitude threshold
-    
-    breaking_mask = breaking_ri | breaking_amp
-    
-    # Momentum deposition rate
-    # Deposit all momentum flux divergence where breaking occurs
-    dtau_x_dz = jnp.zeros(nlev)
-    dtau_y_dz = jnp.zeros(nlev)
-    
-    # Flux divergence (upward decrease in flux = momentum deposition)
-    # Use backward differences to ensure proper flux divergence
-    dtau_x_dz = dtau_x_dz.at[1:].set(
-        (tau_x[1:] - tau_x[:-1]) / (height[1:] - height[:-1])
-    )
-    dtau_y_dz = dtau_y_dz.at[1:].set(
-        (tau_y[1:] - tau_y[:-1]) / (height[1:] - height[:-1])
-    )
-    
-    # Apply breaking mask
-    deposited_x = jnp.where(breaking_mask, -dtau_x_dz / rho, 0.0)
-    deposited_y = jnp.where(breaking_mask, -dtau_y_dz / rho, 0.0)
-    
-    deposited_momentum = jnp.stack([deposited_x, deposited_y])
-    
-    return breaking_mask, deposited_momentum
 
 
 @jax.jit
@@ -313,8 +223,33 @@ def simple_gwd(
     dt: float,
     config: Optional[SimpleGwdParameters] = None
 ) -> Tuple[SimpleGwdTendencies, SimpleGwdState]:
-    """Calculate gravity wave drag tendencies
-    
+    """Calculate gravity-wave drag tendencies for a single column.
+
+    A single monochromatic mountain wave is launched at the surface with the
+    linear stress of :func:`orographic_source` (directed opposite the low-level
+    wind) and propagated upward under two hypotheses:
+
+    - **Critical-level absorption.** The wave carries momentum flux along the
+      launch direction. Where the wind component *along that direction* reverses
+      (``U · û_launch <= 0``) the intrinsic phase speed matches the flow, the
+      wave is absorbed and its remaining flux drops to zero. The earlier code
+      tested ``u · τ < 0``; because ``τ`` is *antiparallel* to the launch wind,
+      that condition is satisfied at every level where the wind still blows in
+      the launch direction — i.e. everywhere the wave is *not* at a critical
+      level — so the whole flux was absorbed one level above the source and no
+      momentum was ever deposited (issue #842).
+
+    - **McFarlane (1987) saturation.** As the wave climbs into thinner air its
+      amplitude grows; the flux cannot exceed the saturation stress
+      ``τ_sat = ρ k G U_proj³ / N`` (marginal overturning, streamline slope 1).
+      The propagated flux is the running minimum of the launch stress and
+      ``τ_sat`` from the surface up, so it can only decrease with height. Its
+      convergence ``-∂τ/∂z / ρ`` is the drag, deposited along the launch
+      direction — decelerating the flow wherever the wave breaks or is absorbed.
+
+    The vertical axis is the physics-internal top-first frame: index ``-1`` is
+    the surface (the launch level), index ``0`` the model top.
+
     Args:
         u_wind: Zonal wind (m/s) [nlev]
         v_wind: Meridional wind (m/s) [nlev]
@@ -323,116 +258,102 @@ def simple_gwd(
         height: Geopotential height (m) [nlev]
         air_density: Air density (kg/m³) [nlev]
         h_std: Standard deviation of sub-grid orography (m)
-        dt: Time step (s)
+        dt: Time step (s) — unused; the drag is applied as a tendency, not an
+            increment, but kept in the signature for interface symmetry.
         config: GW parameters
-        
+
     Returns:
         Tuple of (tendencies, state)
 
     """
     if config is None:
         config = SimpleGwdParameters.default()
-    
-    nlev = u_wind.shape[0]
-    
-    # Calculate Brunt-Väisälä frequency
+
+    del dt  # tendency scheme; no explicit time integration here
+
+    # Brunt-Väisälä frequency (floored at N² = 1e-8, so N >= 1e-4 s⁻¹ and every
+    # division by ``n_bv`` below is finite in value and derivative).
     n2 = brunt_vaisala_frequency(temperature, pressure, height)
     n_bv = jnp.sqrt(n2)
-    
-    # Air density
     rho = air_density
-    
-    # Initialize momentum fluxes
-    tau_x = jnp.zeros(nlev)
-    tau_y = jnp.zeros(nlev)
-    
-    # Orographic source at surface
+
+    # Launch stress at the surface (index -1), opposite the low-level wind.
+    u_sfc, v_sfc = u_wind[-1], v_wind[-1]
     tau_x_oro, tau_y_oro = orographic_source(
-        u_wind[-1], v_wind[-1], n_bv[-1], h_std, config
+        u_sfc, v_sfc, n_bv[-1], rho[-1], h_std, config
     )
-    
-    # Set surface flux
-    tau_x = tau_x.at[-1].set(tau_x_oro * config.gwdrag_cd)
-    tau_y = tau_y.at[-1].set(tau_y_oro * config.gwdrag_cd)
-    
-    # Propagate waves upward and check for breaking
-    def propagate_level(carry, level_idx):
-        tau_x_curr, tau_y_curr = carry
-        
-        # Get values at current level
-        idx = nlev - 1 - level_idx  # Start from surface
-        
-        # Skip if above maximum height
-        skip = height[idx] > config.zmax
-        
-        # Check for critical level (wind reversal)
-        u_dot_tau = u_wind[idx] * tau_x_curr[idx] + v_wind[idx] * tau_y_curr[idx]
-        critical_level = (idx > 0) & (u_dot_tau < 0)
-        
-        # Apply critical level filtering
-        tau_x_new = jnp.where(critical_level | skip, 0.0, tau_x_curr[idx])
-        tau_y_new = jnp.where(critical_level | skip, 0.0, tau_y_curr[idx])
-        
-        # Update flux at level above
-        # Use lax.cond to handle the conditional update
-        tau_x_curr = lax.cond(
-            idx > 0,
-            lambda x: x.at[idx-1].set(tau_x_new),
-            lambda x: x,
-            tau_x_curr
-        )
-        tau_y_curr = lax.cond(
-            idx > 0,
-            lambda y: y.at[idx-1].set(tau_y_new),
-            lambda y: y,
-            tau_y_curr
-        )
-        
-        return (tau_x_curr, tau_y_curr), None
-    
-    # Propagate from surface upward
-    (tau_x, tau_y), _ = lax.scan(
-        propagate_level, (tau_x, tau_y), jnp.arange(nlev-1)
-    )
-    
-    # Check for wave breaking and calculate deposition
-    breaking_mask, deposited = wave_breaking_criterion(
-        u_wind, v_wind, n2, height, tau_x, tau_y, rho, config
-    )
-    
-    # Calculate tendencies
-    # Note: deposited is already the acceleration (m/s²)
-    dudt = deposited[0]
-    dvdt = deposited[1]
-    
-    # Temperature tendency from dissipation (mechanical heating)
-    # KE dissipation: dT/dt = -(u*du/dt + v*dv/dt) / cp
+    launch_mag = _safe_hypot(tau_x_oro, tau_y_oro) * config.gwdrag_cd
+
+    # Unit launch direction = the low-level *wind* direction (τ points opposite
+    # it). ``_safe_hypot`` + floor keep the calm cone-tip finite; on a calm
+    # column ``launch_mag`` is zero, so the direction it multiplies is moot.
+    launch_speed = jnp.maximum(_safe_hypot(u_sfc, v_sfc), 1e-10)
+    dir_x = u_sfc / launch_speed
+    dir_y = v_sfc / launch_speed
+
+    # Wind projected onto the launch direction. A non-positive projection is a
+    # critical level: the saturation stress there is zero, so the running
+    # minimum below drives the flux to zero and holds it there above.
+    proj = u_wind * dir_x + v_wind * dir_y
+    up = jnp.maximum(proj, 0.0)
+    tau_sat = rho * config.kwave * config.gkdrag * up ** 3 / n_bv
+
+    # Propagate the flux magnitude upward (surface -> top = decreasing index):
+    # a cumulative minimum of [launch_mag, τ_sat(surface), τ_sat(surface-1), …].
+    # Seeding with ``launch_mag`` caps the profile at what was actually launched
+    # (a weak wave that never reaches τ_sat propagates conserved, zero drag),
+    # while ``τ_sat`` clamps it wherever the wave saturates or is absorbed.
+    sat_surface_first = tau_sat[::-1]
+    seq = jnp.concatenate([launch_mag[jnp.newaxis], sat_surface_first])
+    mag_surface_first = lax.cummin(seq)[1:]
+    tau_mag = mag_surface_first[::-1]  # back to top-first
+
+    # Signed flux profile along the launch direction (τ = -|τ| û_launch).
+    tau_x = -tau_mag * dir_x
+    tau_y = -tau_mag * dir_y
+
+    # Drag = flux convergence, du/dt = -(1/ρ) ∂τ/∂z, with ∂τ/∂z estimated
+    # one-sidedly from each level and the level *above* it (lower index in the
+    # top-first frame). This upwind assignment — the wave travels upward, so its
+    # lost momentum is deposited on the source side of each interface — puts the
+    # drag on the level where the wind is still aligned with the launch. A
+    # centred difference instead smears a critical-level flux drop onto the
+    # reversed-wind level above it, where a launch-opposing force *adds* kinetic
+    # energy; the one-sided form keeps the column integral of U·(dU/dt) ≤ 0.
+    dz_up = height[:-1] - height[1:]              # h[k-1] - h[k] > 0
+    dtau_x_dz = jnp.concatenate(
+        [jnp.zeros((1,)), (tau_x[:-1] - tau_x[1:]) / dz_up])
+    dtau_y_dz = jnp.concatenate(
+        [jnp.zeros((1,)), (tau_y[:-1] - tau_y[1:]) / dz_up])
+    dudt = -dtau_x_dz / rho
+    dvdt = -dtau_y_dz / rho
+
+    # Mechanical heating: KE lost to drag reappears as heat, dT/dt = -Ẋ·U / cp.
     dtedt = -(u_wind * dudt + v_wind * dvdt) / c.cpd
-    
-    # Only apply GWD above minimum height
-    height_mask = height > config.zmin
+
+    # Apply drag only inside the [zmin, zmax] window.
+    height_mask = (height >= config.zmin) & (height <= config.zmax)
     dudt = jnp.where(height_mask, dudt, 0.0)
     dvdt = jnp.where(height_mask, dvdt, 0.0)
     dtedt = jnp.where(height_mask, dtedt, 0.0)
-    
-    # Create output structures
-    tendencies = SimpleGwdTendencies(
-        dudt=dudt,
-        dvdt=dvdt,
-        dtedt=dtedt
-    )
-    
+
+    tendencies = SimpleGwdTendencies(dudt=dudt, dvdt=dvdt, dtedt=dtedt)
+
+    # Diagnostic: levels where the flux has been reduced below the launch value
+    # (saturation or critical-level absorption), i.e. where momentum is
+    # deposited. Piecewise-constant, so it is excluded from the gradient checks.
+    breaking_level = (tau_mag < launch_mag).astype(jnp.float32)
+
     state = SimpleGwdState(
         tau_x=tau_x,
         tau_y=tau_y,
-        # Both diagnostics are norms of fields that are exactly zero wherever
-        # the wave has been filtered out or no breaking was diagnosed, i.e. over
-        # most of a typical column; see ``_safe_hypot``.
+        # Norms of fields that are exactly zero over most of a typical column
+        # (above a critical level, or on a calm column); see ``_safe_hypot``.
         wave_stress=_safe_hypot(tau_x, tau_y),
-        breaking_level=breaking_mask.astype(jnp.float32),
-        deposited_momentum=_safe_hypot(deposited[0], deposited[1])
+        breaking_level=breaking_level,
+        deposited_momentum=_safe_hypot(dudt, dvdt),
     )
-    
+
     return tendencies, state
 
 # ---------------------------------------------------------------------------
