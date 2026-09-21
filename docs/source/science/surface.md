@@ -12,7 +12,12 @@ enhancement. The sea tile blends open water and sea ice the way SPEEDY's
 ocean/ice coupler does (``sea_model.f90``): the bulk formulae see one
 ice-weighted sea-surface temperature ``tsea = (1 − sice)·SST + sice·T_ice``,
 with the ice surface at the saline freezing point (``273.2 − 1.8 K``, jcm
-carrying no separate ice temperature) and ``sice = forcing.sice_am``. The
+carrying no separate ice temperature) and ``sice = forcing.sice_am`` — in the
+SPEEDY convention the ice fraction *of the sea part* of the cell, entering the
+sea tile unnormalised exactly as reference ``forcing.f90`` uses it for the sea
+albedo, with the ``fmask`` merge supplying the sea-area weighting once (the
+ECHAM multi-tile path below instead reads the field under ECHAM's box-tiling
+convention, ``clip(sice, 0, 1 − land)``). The
 colder, humidity-poor ice surface suppresses the sensible and latent exchange
 over ice relative to open water; the sensible flux is linear in ``tsea`` so the
 temperature blend equals a flux blend, while for evaporation and the stability

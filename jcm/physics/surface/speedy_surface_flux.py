@@ -40,6 +40,22 @@ blending ``tsea`` is exactly equivalent to area-weighting the water and ice
 sensible fluxes; for evaporation (non-linear through ``qsat``) and the
 stability factor, blending the temperature is SPEEDY's chosen approximation.
 
+In the SPEEDY convention ``sice_am`` is the ice fraction **of the sea part**
+of the cell, not a grid-box tile fraction, so it enters the sea-tile blend
+directly: the ``fmask`` land/sea merge afterwards is the only place the sea
+area weighting appears, and normalising by ``1 - fmask`` here would divide
+the sea area out twice. Reference SPEEDY applies the same unnormalised
+structure to the sea albedo (``forcing.f90``: ``alb_s = albsea +
+sice_am*(albice - albsea)``, merged with the land albedo by ``fmask_l``
+afterwards — ported verbatim in ``jcm/physics/forcing/speedy_forcing.py``)
+and to the coupler's SST blend (``sea_model.f90`` above). The packaged
+SPEEDY climatology carries the same convention: coastal cells reach
+``icec = 1`` where ``lsm = 0.99``, which a grid-box tile fraction (bounded
+by ``1 - lsm``) could never do. The ECHAM multi-tile path
+(``surface/echam/``, TTE-TKE vdiff) instead reads the field under ECHAM's
+box-tiling convention (``clip(sice, 0, 1 - land)``, tiles summing to 1) —
+that is that scheme's own convention, not this one's.
+
 Near-surface extrapolation
 --------------------------
 The bulk formulae need air properties at the surface layer (sigma = 0.99),

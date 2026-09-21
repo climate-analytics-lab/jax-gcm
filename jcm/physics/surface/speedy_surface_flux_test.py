@@ -536,6 +536,37 @@ class TestSeaIceFluxes(unittest.TestCase):
         self.assertTrue(jnp.allclose(
             physics_data.surface_flux.tsfc, expected, atol=1e-3))
 
+    def test_mixed_cell_ice_is_a_fraction_of_the_sea_part(self):
+        """In coastal cells ``sice_am`` weights the sea tile, not the grid box.
+
+        SPEEDY's ``sice_am`` is the ice fraction of the *sea part* of the
+        cell: reference ``forcing.f90`` builds the sea albedo from it
+        unnormalised and merges with land by ``fmask`` afterwards, and the
+        packaged climatology reaches ``icec = 1`` in ``lsm = 0.99`` cells —
+        impossible for a grid-box tile fraction, which is bounded by
+        ``1 - lsm``. So the sea-tile temperature must depend on ``sice``
+        alone, independent of ``fmask``: with sice = 1 the whole sea part
+        is at the freezing point whatever the land fraction, and with
+        sice = 0.5 it sits at the SST/freezing midpoint. A blend that
+        renormalised by ``1 - fmask`` (reading sice as a grid-box
+        fraction) would fail every mixed-cell case here.
+        """
+        sst, stl = 300.0, 288.0
+        for fmask in (0.25, 0.5):
+            for sice in (0.5, 1.0):
+                with self.subTest(fmask=fmask, sice=sice):
+                    args = build_inputs(ta=280.0, rh=0.7, ua=5.0, va=2.0,
+                                        sst=sst, rlds=350.0, stl_am=stl,
+                                        fmask=fmask, sice=sice)
+                    _, physics_data = get_surface_fluxes(**args)
+                    tsea = sst + sice * (min(sst, self.SSTFR) - sst)
+                    expected = tsea + fmask * (stl - tsea)
+                    self.assertTrue(
+                        jnp.allclose(physics_data.surface_flux.tsfc,
+                                     expected, atol=1e-3),
+                        f"tsfc {float(jnp.mean(physics_data.surface_flux.tsfc))}"
+                        f" != {expected} (sea-part-relative convention)")
+
     def test_partial_ice_gradient_is_finite(self):
         """Reverse-mode gradients (incl. w.r.t. sice_am) stay finite over ice."""
         args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0, va=2.0,
