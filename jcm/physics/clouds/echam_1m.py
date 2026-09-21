@@ -34,6 +34,24 @@ from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
 _BEHENG_CCRAUT_DEFAULT = 15.0
 _KK2000_QC_THRESHOLD_DEFAULT = 1.0e-5
 
+# The smallest denominator a float32 quotient can be *differentiated* at.
+# Both AD modes multiply the denominator's tangent/cotangent by ``den**-2``,
+# which XLA evaluates as ``1/(den*den)``; with subnormals flushed to zero on
+# the CPU backend that reciprocal is ``inf`` for every ``den`` below
+# ``2**-63 = 1.08e-19`` (measured exactly there), and the numerator's own zero
+# then turns ``0 * inf`` into ``nan`` while the forward quotient is a perfectly
+# good 0. So a denominator that a ``where`` has made merely *positive* is not
+# yet safe to divide by: it has to clear this bound.
+#
+# This is a property of float32, not of any physical scale, so it is a module
+# constant rather than a tunable — and distinct from ``MicrophysicsParameters``
+# ``d_epsilon`` (1e-30), which floors the *dead* branch of a ``where`` where
+# only strict positivity matters and nothing is ever divided by it. A tenfold
+# margin above the measured bound; condensate below it is eleven orders under
+# ``ccwmin`` and six under ``cqtmin``, i.e. no cloud by any of this scheme's
+# own definitions.
+_MIN_DIFFERENTIABLE_DENOMINATOR = 1.0e-18
+
 
 @tree_math.struct
 class MicrophysicsParameters:
@@ -655,16 +673,22 @@ def _saturation_adjustment_layer(
     cond_total = cond1 + cond2
 
     # ---- Partition between liquid / ice ----
-    # The guard threshold is ``d_epsilon``, NOT ``> 0``. The double-where
-    # protects the unselected branch, but the division VJP on the SELECTED
-    # branch computes ``-g * qc / (safe_total * safe_total)``, and for
-    # 0 < total_cloud < ~1e-154 (spectral-ringing condensate tails reach
-    # 1e-287 in real JW columns) the squared denominator underflows to 0,
-    # giving 0/0 = NaN in the reverse pass while the forward is perfectly
-    # finite. Any total below ``d_epsilon`` is physically no cloud at all,
-    # and treating it as the cloud-free branch changes the increments by
-    # at most O(total_cloud) ~ 1e-30 kg/kg.
-    has_cloud = total_cloud > config.d_epsilon
+    # The guard threshold is ``_MIN_DIFFERENTIABLE_DENOMINATOR``, NOT ``> 0``
+    # and not ``d_epsilon``. The double-``where`` below protects the unselected
+    # branch, but ``safe_total`` is what the SELECTED branch actually divides
+    # by, and both AD modes weight that denominator's perturbation by
+    # ``safe_total**-2``. A spectral-ringing condensate tail — 4e-30 kg/kg of
+    # ice in a nominally clear layer is an ordinary state of a running column,
+    # and the one this sweep's term-level gradient check lands on — squares to
+    # nothing in float32, so that factor is ``inf``; the liquid numerator is
+    # exactly 0 there, and ``0 * inf`` is ``nan`` in every output the scan
+    # touches from that level down, off a finite forward pass. The threshold
+    # has to clear the float32 bound for that reason and not a physical one
+    # (see the constant), and a total below it is no cloud at all by this
+    # scheme's own thresholds, so routing it to the cloud-free branch moves
+    # the increments by at most O(total_cloud) ~ 1e-18 kg/kg and the
+    # temperature by ~1e-15 K.
+    has_cloud = total_cloud > _MIN_DIFFERENTIABLE_DENOMINATOR
     safe_total = jnp.where(has_cloud, total_cloud, 1.0)
     qc_frac = jnp.where(has_cloud, qc / safe_total, 0.0)
     qi_frac = jnp.where(has_cloud, qi / safe_total, 0.0)

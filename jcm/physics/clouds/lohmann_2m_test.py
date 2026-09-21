@@ -11,6 +11,7 @@ as the full ECHAM6 sequence is wired into the orchestrator — see #341.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from math import pi
 
 from .cloud_utils import (
@@ -36,6 +37,7 @@ from .lohmann_2m import (
 )
 from .lohmann_2m_params import CloudParams2M
 from jcm.constants import rhow, alhs, alhc, rv
+from jcm.testing import check_gradients
 
 # Parameters are no longer module-level exports of lohmann_2m_params: the
 # scheme reads everything from a threaded ``CloudParams2M`` struct. Tests
@@ -2561,3 +2563,125 @@ class TestSpaConfigurationHandover:
         for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
             assert (float(getattr(after, name).get_value())
                     == float(getattr(before, name).get_value())), name
+
+
+class TestSchemeGradients2M:
+    """AD against a central difference through the whole 2M column (#820).
+
+    ``cloud_microphysics_2m`` is 175 ``where`` and 131 ``max``/``min`` deep and
+    had no scheme-level gradient check at all. It comes out clean: on a column
+    carrying condensate and cover in every layer, AD matches a converged
+    secant, and in float64 (outside the suite, which pins float32 for #729)
+    jvp and vjp agree to 1e-16 with the difference converging to them.
+
+    The operating point matters more than anything else here. The scheme
+    switches on exact zeros — ``qc``, ``qi``, the number concentrations and the
+    cloud cover each gate a ``where`` — so a fixture that zeroes them in its
+    clear layers, as the conservation fixtures above reasonably do, sits on
+    every one of those switches at once and has no two-sided derivative to
+    compare against. That is the point, not the scheme; this fixture is off
+    them.
+    """
+
+    NLEV = 16
+
+    def _column(self):
+        """Build a mixed-phase column with condensate and cover at every level."""
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        temperature = jnp.linspace(232.0, 298.0, self.NLEV)
+        pressure = jnp.linspace(2.0e4, 1.0e5, self.NLEV)
+        air_density = pressure / (287.0 * temperature)
+        humidity = 0.93 * jax.vmap(saturation_specific_humidity)(
+            pressure, temperature)
+        qc = jnp.full(self.NLEV, 3.1e-5).at[9:13].set(1.1e-3)
+        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(2.3e-4)
+        cloud_fraction = (jnp.full(self.NLEV, 0.14)
+                          .at[3:7].set(0.55).at[9:13].set(0.65))
+        # Number concentrations proportional to mass, so the two never
+        # disagree about whether a layer holds condensate.
+        qnc = 5.1e7 * qc / 1.1e-3
+        qni = 1.1e4 * qi / 2.3e-4
+        return dict(
+            temperature=temperature, humidity=humidity, pressure=pressure,
+            qc=qc, qi=qi, qnc=qnc, qni=qni, cloud_fraction=cloud_fraction,
+            air_density=air_density,
+            layer_thickness=jnp.full(self.NLEV, 500.0),
+            tke=jnp.full(self.NLEV, 0.12),
+            activated_cdnc=jnp.full(self.NLEV, 5.2e7),
+            ice_nuclei=jnp.zeros(self.NLEV),
+            ice_nuclei_deposition=jnp.zeros(self.NLEV),
+        )
+
+    def _scheme_fn(self, column):
+        """Return f(T, q, qc, qi, qnc, qni, cf, rho) -> tendencies + precip."""
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+
+        def f(temperature, humidity, qc, qi, qnc, qni, cloud_fraction,
+              air_density):
+            out = cloud_microphysics_2m(
+                temperature, humidity, column["pressure"], qc, qi, qnc, qni,
+                cloud_fraction, air_density, column["layer_thickness"],
+                column["tke"], column["activated_cdnc"],
+                column["ice_nuclei"], column["ice_nuclei_deposition"],
+                1800.0, _P)
+            tend = out[0]
+            return (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt,
+                    tend.dqncdt, tend.dqnidt, out[1], out[2])
+
+        return f
+
+    @pytest.mark.parametrize("seed", [0, 3])
+    def test_column_gradients_match_a_central_difference(self, seed):
+        """One column, off every condensate switch.
+
+        ``adjoint_rtol=1e-3`` rather than the 1e-4 default, with its
+        derivation: the identity holds to 1e-16 under x64, so the float32 gap
+        — measured at 1.5e-7 to 2.4e-4 over four direction seeds here — is
+        round-off through the column ``lax.scan``, the same double sum
+        contracted in opposite orders by the two AD modes.
+        """
+        column = self._column()
+        args = tuple(column[k] for k in (
+            "temperature", "humidity", "qc", "qi", "qnc", "qni",
+            "cloud_fraction", "air_density"))
+        check_gradients(self._scheme_fn(column), args,
+                        rtol=1e-2, seed=seed, adjoint_rtol=1e-3)
+
+    def test_gradients_are_finite_at_degenerate_operating_points(self):
+        """Zero TKE, a clear column and zero droplet number stay finite.
+
+        ``scheme.py:302`` computes the updraft velocity as
+        ``sqrt(maximum(2*tke, 0.0))``, whose derivative at ``tke = 0`` would be
+        ``0.5 * inf``; the ECHAM term hands the scheme a literal zeros array
+        whenever no vertical-diffusion diagnostic is present, so that is the
+        default state. It is inert today only because the updraft velocity
+        reaches nothing differentiable — ``deposition_freezing.py:210`` uses it
+        solely inside a comparison — which is exactly why this fence is worth
+        having: it fails the day that changes.
+        """
+        base = self._column()
+        keys = ("temperature", "humidity", "qc", "qi", "qnc", "qni",
+                "cloud_fraction", "air_density")
+
+        def finite_for(overrides):
+            column = dict(base)
+            column.update(overrides)
+            f = self._scheme_fn(column)
+            args = tuple(column[k] for k in keys)
+            grads = jax.grad(
+                lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+                argnums=tuple(range(len(args))),
+            )(*args)
+            return {k: bool(jnp.all(jnp.isfinite(g)))
+                    for k, g in zip(keys, grads)}
+
+        zeros = jnp.zeros(self.NLEV)
+        for label, overrides in (
+            ("zero TKE", {"tke": zeros}),
+            ("clear column", {"qc": zeros, "qi": zeros, "qnc": zeros,
+                              "qni": zeros, "cloud_fraction": zeros}),
+            ("zero number concentration", {"qnc": zeros, "qni": zeros}),
+            ("zero activated CDNC", {"activated_cdnc": zeros}),
+        ):
+            for name, ok in finite_for(overrides).items():
+                assert ok, f"d/d{name} is not finite with {label}"

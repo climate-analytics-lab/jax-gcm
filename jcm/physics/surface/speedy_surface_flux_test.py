@@ -13,6 +13,7 @@ from jax.test_util import check_vjp, check_jvp
 
 from jcm.testing import check_gradients
 
+import jcm.constants as c
 from jcm.constants import grav
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
@@ -20,7 +21,8 @@ from jcm.physics.speedy.physics_data import (
     ConvectionData, HumidityData, LWRadiationData, PhysicsData,
     SurfaceFluxData, SWRadiationData,
 )
-from jcm.physics.speedy.speedy_coords import SpeedyCoords, get_speedy_coords
+from jcm.physics.speedy.speedy_coords import (
+    SpeedyCoords, compute_speedy_vertical_coords, get_speedy_coords)
 from jcm.physics.speedy.test_utils import convert_to_speedy_latitudes
 from jcm.physics.surface.speedy_surface_flux import (
     get_orog_land_sfc_drag, get_surface_fluxes)
@@ -78,6 +80,69 @@ def build_inputs(
     return dict(state=state, physics_data=physics_data,
                 parameters=Parameters.default(),
                 forcing=forcing_cls(XY, **forcing_kwargs), terrain=terrain)
+
+
+def build_block_inputs(latitudes_deg, *, ta, qa=5.0, rh=0.8, phi=5000.0,
+                       phi0=500.0, fmask=0.5, psa=1.0, ua=1.0, va=1.0,
+                       sst=290.0, rsds=400.0, rlds=400.0, stl_am=288.0,
+                       soilw_am=0.5):
+    """``build_inputs`` on a block of ``len(latitudes_deg)`` columns.
+
+    The gradient checks want a handful of columns at chosen latitudes, not a
+    T30 grid: a check run over 4608 columns at once fails as soon as *any* of
+    them straddles a branch, so what it reports is a property of the grid
+    rather than of the scheme (``jcm/testing.py``, and the same argument
+    ``term_gradients_test`` makes for one column). Latitude is the only thing
+    that distinguishes columns here — every other field in ``build_inputs`` is
+    a scalar broadcast — and it enters the fluxes through ``coa`` in the land
+    daily-cycle term, so naming the latitudes is naming the whole block.
+
+    Built directly rather than through ``get_speedy_coords``, which takes a
+    spectral truncation and so cannot produce a grid this small;
+    ``SpeedyCoords.single_column_coords`` and ``TerrainData.single_column``
+    are the same construction at ``n = 1``.
+    """
+    from jcm.terrain import TerrainData
+
+    n = len(latitudes_deg)
+    xy, zxy = (1, n), (KX, 1, n)
+    radang = jnp.asarray(jnp.deg2rad(jnp.asarray(latitudes_deg)), jnp.float32)
+    hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = compute_speedy_vertical_coords(KX)
+    speedy_coords = SpeedyCoords(
+        hsg=hsg, fsg=fsg, dhs=dhs, sigl=sigl, grdsig=grdsig, grdscp=grdscp,
+        wvi=wvi, radang=radang, sia=jnp.sin(radang), coa=jnp.cos(radang))
+
+    # ``single_column`` derives the SSO descriptors from the orography the same
+    # way ``from_coords`` does; every field is horizontally uniform, so
+    # widening (1, 1) to (1, n) is the whole difference.
+    terrain = jax.tree.map(
+        lambda x: jnp.broadcast_to(x, xy) if jnp.ndim(x) == 2 else x,
+        TerrainData.single_column(orog=phi0 / grav, fmask=fmask,
+                                  lfluxland=True))
+
+    ta_field = jnp.broadcast_to(jnp.reshape(jnp.asarray(ta), (KX, 1, 1)), zxy)
+    state = PhysicsState.zeros(
+        zxy, ua * jnp.ones(zxy), va * jnp.ones(zxy), ta_field,
+        qa * jnp.ones(zxy), phi * jnp.ones(zxy), psa * jnp.ones(xy))
+
+    physics_data = PhysicsData.zeros(
+        xy, KX,
+        convection=ConvectionData.zeros(xy, KX),
+        humidity=HumidityData.zeros(xy, KX, rh=rh * jnp.ones(zxy)),
+        surface_flux=SurfaceFluxData.zeros(xy, rlds=rlds * jnp.ones(xy)),
+        shortwave_rad=SWRadiationData.zeros(xy, KX, rsds=rsds * jnp.ones(xy)),
+        longwave_rad=LWRadiationData.zeros(xy, KX),
+        speedy_coords=speedy_coords,
+    )
+
+    forcing = ForcingData.zeros(
+        xy, sea_surface_temperature=sst * jnp.ones(xy),
+        soilw_am=soilw_am * jnp.ones(xy),
+        stl_am=stl_am * jnp.ones(xy))
+
+    return dict(state=state, physics_data=physics_data,
+                parameters=Parameters.default(),
+                forcing=forcing, terrain=terrain)
 
 
 # Reference [max, min, mean] of every published surface-flux field — all of
@@ -307,7 +372,42 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
     def test_surface_fluxes_gradient_check_test1(self):
         from jcm.utils import convert_back, convert_to_float
 
-        args = build_inputs()
+        # Eight columns, not the T30 grid, and an operating point placed away
+        # from the two hinges the scheme carries here:
+        #
+        #  * the near-surface extrapolation is
+        #    ``t1 = ta[-1] + dt1_fac * (ta[-1] - ta_ref)`` applied only where
+        #    the layer is unstable, i.e. ``dt1_fac * relu(ta[-1] - ta_ref)``,
+        #    and ta constant in the vertical makes ta_ref *equal* ta[-1] — the
+        #    isothermal ``build_inputs`` default is exactly on that hinge, and
+        #    since the step is a fraction of each leaf's own magnitude
+        #    (jcm.testing) temperature is the dominant direction, so the
+        #    one-sided secants differ by a factor of four at every rung and no
+        #    reference exists at all. A 50 K lapse over the column clears it.
+        #  * ``_stability_factor`` is piecewise linear in the surface-to-air
+        #    excess with breaks at 0 and at ``+dtheta`` above and
+        #    ``-dtheta/astab`` below (3 K and -6 K at the defaults, with
+        #    ``lscasym``). Its stable branch is therefore 6 K wide and -3 K is
+        #    the middle of it: 3 K from either break, which is ten top-rung
+        #    displacements of a ~290 K leaf. ``stl_am`` is set per column so
+        #    that the land daily-cycle term ``ctday*sqrt(coa)*rsds`` — the only
+        #    thing latitude changes here — lands every column on that same
+        #    -3 K, and ``sst`` puts the sea branch there too.
+        #
+        # Eight columns rather than 4608 because a check over a whole grid
+        # fails as soon as any one column straddles a branch, so its tolerance
+        # ends up paying for the fixture rather than measuring the scheme:
+        # on the grid the gap ran to 1.3 % and needed rtol=2e-2, while this
+        # block holds 5e-3 — see ``build_block_inputs``.
+        fsg = compute_speedy_vertical_coords(KX)[1]
+        ta = 288.0 - 50.0 * (1.0 - fsg)
+        latitudes = jnp.linspace(20.0, 45.0, 8)
+        t2_sea = float(ta[-1]) + 5000.0 / c.cpd
+        excess = -3.0
+        args = build_block_inputs(
+            latitudes, ta=ta, sst=t2_sea + excess,
+            stl_am=(t2_sea - 500.0 / c.cpd + excess
+                    - 0.01 * jnp.sqrt(jnp.cos(jnp.deg2rad(latitudes))) * 400.0))
         state, physics_data = args["state"], args["physics_data"]
         parameters, forcing, terrain = (
             args["parameters"], args["forcing"], args["terrain"])
@@ -323,10 +423,19 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
         float_args = tuple(convert_to_float(x) for x in
                            (state, physics_data, parameters, forcing, terrain))
-        # Measured agreement 4.1e-4, against the rtol=1 the fixed-step pair
-        # needed: the bulk-flux stability functions are smooth once the step
-        # stays off the Richardson-number branches.
-        check_gradients(f, float_args, rtol=5e-3)
+        # 5e-3 is what the difference actually reaches on this block: over
+        # seeds 0-9 it holds at every seed but 7, where the ladder reports no
+        # usable rung at all rather than a loose one — an honest straddle in
+        # that particular direction, not a tolerance to be widened. The
+        # residual it does allow is float32 cancellation in the projection
+        # itself: the published fluxes carry both signs, so a total near 12
+        # is assembled from summands in the hundreds. live_inputs then holds
+        # the per-leaf line the projection cannot: it is a sum over leaves,
+        # and a dead one of them is invisible in it.
+        check_gradients(f, float_args, rtol=5e-3,
+                        live_inputs=["temperature", "specific_humidity",
+                                     "u_wind", "v_wind",
+                                     "sea_surface_temperature", "stl_am"])
 
     def test_surface_fluxes_drag_test_gradient_check(self):
         phi0 = 500. * jnp.ones(XY)

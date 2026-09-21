@@ -74,9 +74,34 @@ def layer_reflectance_transmittance(
     # Get two-stream coefficients
     gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(ssa, g, mu0)
     
-    # Calculate lambda (eigenvalue)
-    lambda_val = jnp.sqrt(gamma1**2 - gamma2**2)
-    
+    # Calculate lambda (eigenvalue).
+    #
+    # Factored rather than written as ``gamma1**2 - gamma2**2``. For the
+    # Eddington coefficients above the two forms are algebraically the same
+    # quantity — ``(gamma1 - gamma2)(gamma1 + gamma2) = 2(1 - ssa) *
+    # 1.5(1 - ssa*g)`` — but the subtraction is a catastrophic cancellation
+    # exactly where shortwave cloud optics lives. A liquid cloud has
+    # ``ssa ~ 0.9999``, where the two squares agree to four digits and their
+    # float32 difference is mostly round-off; feeding that into ``sqrt``,
+    # whose derivative is ``1/(2*sqrt(x))``, amplifies the round-off instead
+    # of the signal. Measured at ``ssa = 1 - 1e-6``: the subtracted form
+    # reports ``d/d(ssa) ~ 6.4e3`` against a true value near 3.4e2, and at
+    # ``ssa = 1`` it reports 5e5 for a derivative that does not exist. The
+    # factored form has no cancellation at all and is exactly 0 at ssa = 1.
+    #
+    # The double-``where`` then keeps the endpoint differentiable: the
+    # conservative-scattering limit ``ssa = 1`` sits at the square root's
+    # zero, where no finite derivative exists, so the masked branch is fed a
+    # 1.0 and the outer ``where`` selects the literal 0 the physical branch
+    # would have produced.
+    lambda_sq = 3.0 * (1.0 - ssa) * (1.0 - ssa * g)
+    lambda_positive = lambda_sq > 0.0
+    lambda_val = jnp.where(
+        lambda_positive,
+        jnp.sqrt(jnp.where(lambda_positive, lambda_sq, 1.0)),
+        0.0,
+    )
+
     # For normal optical depths, calculate exponentials
     lambda_tau = lambda_val * tau
     
@@ -84,27 +109,70 @@ def layer_reflectance_transmittance(
     # Use 88 as threshold since exp(90) = inf, so be conservative
     large_tau = lambda_tau >= 88
     
-    # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
-    # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
-    
-    # For large optical depths, avoid NaN by using safe values
-    # Use finite values instead of inf for subsequent calculations
-    exp_plus_safe = jnp.where(large_tau, 1.0, jnp.exp(lambda_tau))
-    exp_minus_safe = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
-    
-    denom = exp_plus_safe - gamma2**2 / gamma1**2 * exp_minus_safe
+    # For large optical depths, avoid NaN by using safe values.
+    #
+    # The exponent is clamped *inside* the ``where`` as well as outside it.
+    # Masking only the result still evaluates the exponential on the
+    # discarded branch, and reverse mode then forms ``0 * inf = NaN`` for the
+    # branch that was taken — an optically thick longwave layer (tau ~ 60,
+    # ordinary in the lower troposphere here) returned a NaN gradient for the
+    # whole column that way.
+    lambda_tau_safe = jnp.where(large_tau, 0.0, lambda_tau)
+    exp_minus_safe = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau_safe))
+
+    # ``exp(-2*lambda_tau)``, which is what the layer albedo depends on once
+    # the solution below is written in its scaled form. Kept as its own
+    # exponential rather than ``exp_minus_safe**2`` so it stays accurate deep
+    # into [0, 1]; the growing ``exp(+lambda_tau)`` the unscaled form needed
+    # does not appear at all now.
+    exp_minus_sq = jnp.where(large_tau, 0.0, jnp.exp(-2.0 * lambda_tau_safe))
+
+    # ``gamma1`` is ``(7 - ssa*(4 + 3g))/4``, which is exactly 0 at
+    # ``ssa = g = 1`` — conservative scattering with a perfectly forward
+    # phase function — and ``gamma2`` vanishes there too, so ``gamma2/gamma1``
+    # is 0/0. A ``maximum(gamma1**2, tiny)`` floor is *not* enough here: the
+    # quotient's VJP forms ``-numerator / denominator**2``, and squaring a
+    # floor small enough to be invisible in the forward pass underflows to 0
+    # in float32, turning the guard itself into the 0/0. The double-``where``
+    # is the form that holds: the masked branch divides by 1.0 and the outer
+    # ``where`` selects the limit of ``gamma2/gamma1`` along the physical
+    # path ``ssa -> 1``, which is 0. Away from that point both the value and
+    # its derivative are unchanged.
+    gamma1_nonzero = gamma1 != 0.0
+    gamma1_safe = jnp.where(gamma1_nonzero, gamma1, 1.0)
+    ratio_sq = jnp.where(gamma1_nonzero, gamma2**2 / gamma1_safe**2, 0.0)
+    # Numerator and denominator are both divided through by
+    # ``exp(+lambda_tau)``, which is algebraically exact and leaves every
+    # intermediate inside [0, 1]. Written as a ratio of the raw exponentials
+    # instead, the quotient rule forms ``denominator**2`` — and
+    # ``exp(lambda_tau)`` already reaches 1e38 just below the ``large_tau``
+    # cut-off, so that square overflows float32 for any ``lambda_tau``
+    # above ~44 and forward mode returned NaN across the whole optically
+    # thick part of a longwave column. Same value, no 1e38 intermediates.
+    denom = 1.0 - ratio_sq * exp_minus_sq
     # Ensure denominator is never zero
     denom = jnp.where(jnp.abs(denom) < 1e-10, 1e-10, denom)
-    
-    R_dif_normal = gamma2 * (exp_plus_safe - exp_minus_safe) / denom
-    T_dif_normal = (1.0 - R_dif_normal * gamma2 / gamma1) * exp_minus_safe
+
+    # These two lines and the asymptotic branch below use gamma2, and
+    # gamma2/gamma1, where the homogeneous-layer two-stream solution has
+    # Gamma = gamma2 / (gamma1 + lambda). That is why a conservative layer
+    # reflects nothing here and why R_dif steps at the large_tau switch; the
+    # forward correction is tracked in #848. This module keeps the formula as
+    # written and only makes its derivative finite in float32.
+    R_dif_normal = gamma2 * (1.0 - exp_minus_sq) / denom
+    T_dif_normal = (1.0 - R_dif_normal * gamma2 / gamma1_safe) * exp_minus_safe
     
     # For large optical depths, use asymptotic behavior
     # Pure absorption case: R=0, T=0
     # Scattering case: R approaches gamma2/gamma1 (but clipped to physical bounds)
+    # ``gamma1_safe`` rather than ``gamma1``: the outer ``where`` discards
+    # this branch for ``ssa <= 0.001``, but both branches are evaluated, so a
+    # ``gamma1`` of 0 would make the ratio NaN and ``where``'s VJP would
+    # return ``0 * NaN = NaN`` for the taken branch as well. The forward
+    # value is unchanged wherever ``gamma1`` is non-zero.
     R_dif_asymptotic = jnp.where(
         ssa > 0.001,  # If there's significant scattering
-        jnp.clip(gamma2 / gamma1, 0.0, 1.0),
+        jnp.clip(gamma2 / gamma1_safe, 0.0, 1.0),
         0.0  # Pure absorption case
     )
     T_dif_asymptotic = 0.0  # No transmission for large tau

@@ -1426,6 +1426,42 @@ from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
+# Hard limit on the convective T tendency: 5 K/hr. See the call site in
+# ``TiedtkeConvection.__call__`` for why this stopgap exists and why the
+# rescale is homogeneous over the whole column ledger.
+_DTDT_MAX = 5.0 / 3600.0  # K/s
+
+
+def _tendency_cap_scale(dtedt, dtdt_max=_DTDT_MAX):
+    """Per-column factor that holds ``|dtedt|`` at or below ``dtdt_max``.
+
+    ``dtedt`` is ``(ncols, nlev)`` — the vmapped column scheme's output
+    layout — and the returned ``(ncols, 1)`` factor is the tightest per-level
+    ratio, broadcast back over the levels.
+
+    The safe-denominator double-``where`` is what keeps this differentiable.
+    Only the levels that actually exceed the limit divide by their own
+    magnitude; every other level — which on most of the grid means
+    ``dtedt == 0``, i.e. no convection at all — divides the constant
+    ``dtdt_max`` by itself. Dividing by the magnitude *everywhere* and masking
+    afterwards is finite in the forward pass but not in either derivative: at
+    ``dtedt == 0`` the quotient's partial is ``-dtdt_max/|dtedt|**2``, which
+    overflows float32 to ``inf``, and the mask that discards the branch then
+    forms ``0 * inf = nan``. That NaN propagates out of every jvp and vjp of
+    the term while the forward pass stays clean — the same cotangent-poison
+    class as issue #558, and the reason the untaken branch has to be
+    NaN-free rather than merely unselected.
+
+    Where a level is genuinely over the limit the factor is exactly
+    ``dtdt_max/|dtedt|``; everywhere else it is exactly 1.
+    """
+    magnitude = jnp.abs(dtedt)
+    over_limit = magnitude > dtdt_max
+    safe_magnitude = jnp.where(over_limit, magnitude, dtdt_max)
+    level_scale = jnp.where(over_limit, dtdt_max / safe_magnitude, 1.0)
+    return jnp.min(level_scale, axis=1, keepdims=True)
+
+
 class TiedtkeConvection(PhysicsTerm):
     """Tiedtke-Nordeng mass-flux convection as a composable PhysicsTerm.
 
@@ -1685,26 +1721,19 @@ class TiedtkeConvection(PhysicsTerm):
         # proportional scale keeps the local energy/water pairing intact;
         # column conservation is still broken wherever the cap fires, which
         # is inherent to any such guard.
-        _DTDT_MAX = 5.0 / 3600.0  # K/s
-        # Per-COLUMN scale: the tightest per-level factor applies to the
-        # WHOLE convective ledger — tendencies AND the precip/detrainment
-        # diagnostics. The previous per-level scaling left precip_conv
-        # unscaled, so every capped burst opened the composed column
-        # water budget by the scaled-away amount (caught by the composed
-        # closure test once the unconditional Nordeng rescale made
+        # Per-COLUMN scale (``_DTDT_MAX``): the tightest per-level factor
+        # applies to the WHOLE convective ledger — tendencies AND the
+        # precip/detrainment diagnostics. A per-level scaling would leave
+        # precip_conv unscaled, so every capped burst would open the composed
+        # column water budget by the scaled-away amount (caught by the
+        # composed closure test once the unconditional Nordeng rescale made
         # capped bursts routine at pulse peaks). A homogeneous column
         # rescale is exactly how ECHAM's own zmfub1 amplitude scaling
         # acts, so proportionality inside the ledger is preserved and
         # column conservation is exact by linearity. The cap itself
         # remains the documented stopgap for the unported mo_cuadjust
         # per-level limits.
-        cap_scale = jnp.min(
-            jnp.clip(
-                _DTDT_MAX / jnp.maximum(jnp.abs(tendencies_all.dtedt), 1e-30),
-                0.0, 1.0,
-            ),
-            axis=1, keepdims=True,
-        )
+        cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
         tendency = PhysicsTendency(

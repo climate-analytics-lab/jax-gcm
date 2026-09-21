@@ -15,6 +15,7 @@ import numpy as np
 
 import jcm.constants as c
 from jcm.physics import thermodynamics as thermo
+from jcm.testing import check_gradients
 
 
 class TestSaturationVaporPressure(unittest.TestCase):
@@ -203,3 +204,59 @@ class TestGridMeanToInCloud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestThermodynamicsGradients(unittest.TestCase):
+    """AD against a central difference (#820).
+
+    These are regression fences on functions every ECHAM scheme calls: all
+    four are green, and pinning them means a later guard added upstream
+    cannot silently break them.
+
+    The operating points sit strictly inside the mixed-phase ramp rather than
+    on ``t_min = 238.15`` or on ``c.tmelt``. ``mixed_phase_weight`` is a
+    ``clip``, so its derivative at either end of the ramp is one-sided; a
+    fixture placed exactly there would be testing the kink, which is a
+    property of the point and not a defect in the formula.
+    """
+
+    def _profile(self):
+        """Return (temperature, pressure) spanning the mixed-phase range."""
+        return (jnp.linspace(235.0, 300.0, 12),
+                jnp.linspace(2.0e4, 1.0e5, 12))
+
+    def test_saturation_specific_humidity_column_and_block(self):
+        """Broadcasting-native: a column and a 3-column block both check out.
+
+        ``rtol=1e-2`` on the block. The consistency search settles on a coarse
+        rung there (5e-4) because the block's three columns project with
+        opposite signs and cancel, and at that rung the secant's own
+        truncation leaves it ~0.6% from the AD value; the single column
+        reaches 1e-3 at a finer rung.
+        """
+        temperature, pressure = self._profile()
+        check_gradients(thermo.saturation_specific_humidity,
+                        (temperature, pressure), rtol=1e-3)
+
+        stack = lambda a, s: jnp.stack(  # noqa: E731
+            [a * (1.0 + s * k) for k in range(3)], axis=1)
+        check_gradients(
+            thermo.saturation_specific_humidity,
+            (stack(temperature, 0.01), stack(pressure, 0.0)), rtol=1e-2)
+
+    def test_saturation_specific_humidity_and_derivative(self):
+        """The paired value/derivative form agrees with a secant too."""
+        temperature, pressure = self._profile()
+        check_gradients(thermo.saturation_specific_humidity_and_derivative,
+                        (temperature, pressure), rtol=1e-3)
+
+    def test_mixed_phase_weight_inside_the_ramp(self):
+        """Strictly between t_min and tmelt, where the clip is inactive."""
+        check_gradients(thermo.mixed_phase_weight,
+                        (jnp.linspace(241.0, 270.0, 12),), rtol=1e-3)
+
+    def test_grid_mean_to_in_cloud(self):
+        """Cloud fractions well above the eps guard."""
+        check_gradients(
+            thermo.grid_mean_to_in_cloud,
+            (jnp.full(8, 1.0e-4), jnp.linspace(0.12, 0.9, 8)), rtol=1e-3)

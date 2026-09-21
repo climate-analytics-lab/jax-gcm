@@ -7,6 +7,8 @@ import jax.numpy as jnp
 import jax
 from unittest import TestCase
 
+from jcm.testing import check_gradients
+
 from .simple_chemistry import (
     ChemistryData,
     ChemistryParameters,
@@ -238,3 +240,27 @@ class TestJAXCompatibility(TestCase):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class TestSimpleChemistryGradients(TestCase):
+    """AD against a central difference for the chemistry tendencies (#820).
+
+    Green. The scheme hard-unpacks ``nlev, ncols = pressure.shape``, so it is
+    not broadcasting-native and there is one shape to check rather than two.
+    """
+
+    def test_gradients_match_a_central_difference(self):
+        """A 10-level, 4-column block at realistic ozone and methane."""
+        nlev, ncols = 10, 4
+        pressure = (jnp.linspace(100000.0, 10000.0, nlev)[:, None]
+                    * jnp.ones((1, ncols)))
+        config = ChemistryParameters.default()
+        check_gradients(
+            lambda p, ps, t, o3, ch4: simple_chemistry(
+                p, ps, t, o3, ch4, 3600.0, config),
+            (pressure,
+             jnp.ones(ncols) * 1.0e5,
+             jnp.ones((nlev, ncols)) * 250.0,
+             jnp.ones((nlev, ncols)) * 5.0,
+             jnp.ones((nlev, ncols)) * 1.8),
+            rtol=1e-3)
