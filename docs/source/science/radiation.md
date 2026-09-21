@@ -37,8 +37,16 @@ identical rearrangement ``R = gamma2 S/(gamma1 S + 1 + e^2)``,
 its denominator cannot cancel to zero, it never divides by ``gamma1`` or
 ``gamma1 + lambda`` (both zero at ``ssa = g = 1``), and it contains no growing
 exponential — one expression is valid and differentiable at every optical
-depth, including the conservative limit where ``S -> 2*tau``. Longwave gas
-layers (``ssa = 0``) reduce to pure absorption ``R = 0``, ``T = exp(-lambda*tau)``.
+depth. For ``lambda*tau < 0.1`` it is evaluated as an even Taylor series in
+``(lambda*tau)^2``: R and T are even functions of ``lambda``, hence smooth in
+``lambda^2 = 3(1-ssa)(1-ssa*g)``, and the series carries the true endpoint
+derivative through autodiff at the conservative limit (where the closed value
+is ``R = gamma1*tau/(1+gamma1*tau)``). Longwave gas layers (``ssa = 0``) keep
+the Eddington coefficients ``gamma1 = 7/4``, ``gamma2 = -1/4``,
+``lambda = sqrt(3)``: the closure yields a small *negative* reflectance
+(``Gamma ~ -0.07``), clipped to ``R = 0`` as an approximation artefact, and a
+diffuse transmittance ``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)`` — within 0.5%
+of, but not exactly, ``exp(-sqrt(3)*tau)``.
 
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per

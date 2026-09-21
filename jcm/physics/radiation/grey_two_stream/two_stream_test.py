@@ -483,12 +483,15 @@ class TestTwoStreamGradients:
       ``1/(2*sqrt(x))`` — amplifies it. The scheme now forms the same
       quantity factored, ``3*(1 - ssa)*(1 - ssa*g)``, which has no
       cancellation and is exactly 0 at the limit.
-    * ``S = (1 - exp(-2*lambda*tau))/lambda`` is 0/0 as ``lambda -> 0`` (the
-      conservative limit) but has the finite value ``2*tau`` there, taken with
-      a double-``where``. The reflectance/transmittance are written so that
-      ``gamma1`` and ``gamma1 + lambda`` only ever multiply in — never divide
-      — so the ``gamma2/gamma1`` 0/0 at ``ssa = g = 1`` that earlier forms
-      needed no longer arises.
+    * ``lambda`` itself has a square-root cusp at ``ssa = 1``, but R and T are
+      *even* in ``lambda`` and hence smooth functions of the smooth
+      ``lambda**2 = 3(1-ssa)(1-ssa*g)`` — a genuine two-sided derivative
+      exists at the endpoint. The scheme evaluates an even Taylor series in
+      ``(lambda*tau)**2`` for ``lambda*tau < 0.1`` so autodiff receives that
+      derivative rather than a guard's zero. The reflectance/transmittance
+      are also written so ``gamma1`` and ``gamma1 + lambda`` only ever
+      multiply in — never divide — so the ``gamma2/gamma1`` 0/0 at
+      ``ssa = g = 1`` that earlier forms needed no longer arises.
     """
 
     NLEV = 6
@@ -517,10 +520,9 @@ class TestTwoStreamGradients:
         """No limit of (ssa, g) may return a non-finite derivative.
 
         ``ssa = g = 1`` is the sharpest corner: ``gamma1``, ``gamma2`` and
-        ``lambda`` all vanish. The reflectance/transmittance form
-        (``gamma2 S/(gamma1 S + 1 + e^2)`` and ``2 e/(...)``) divides only by a
-        denominator bounded below by 1, so nothing there is singular; the one
-        0/0 is ``S`` at ``lambda = 0``, held finite by its double-``where``.
+        ``lambda`` all vanish. Both branches divide only by denominators
+        bounded below by 1, and near the limit the series branch is a
+        polynomial in the smooth ``lambda**2`` — nothing there is singular.
         """
         tau, ssa_p, g_p = self._layer(ssa, g)
         grads = jax.grad(self._sum_of_squares, argnums=(0, 1, 2))(
@@ -529,20 +531,49 @@ class TestTwoStreamGradients:
             assert jnp.all(jnp.isfinite(grad)), (
                 f"d/d{name} is not finite at ssa={ssa}, g={g}: {grad}")
 
-    def test_conservative_limit_derivative_is_not_a_cancellation_artefact(self):
-        """At ``ssa = 1`` exactly the derivative must be O(1), not O(1e5).
+    def test_conservative_limit_derivative_is_the_true_endpoint_derivative(self):
+        """At ``ssa = 1`` autodiff must return the real derivative, not a
+        guard's substitute and not cancellation noise.
 
-        The eigenvalue is 0 there, so no two-sided derivative of ``sqrt``
-        exists and the honest reported value is the one the guarded branch
-        gives. What the subtracted form reported instead was the *round-off*
-        of ``gamma1**2 - gamma2**2`` divided by its own square root: 5.0e5,
-        five orders of magnitude of pure noise entering every upstream cloud
-        gradient. A bound well below that, and well above the ~2 the guarded
-        form gives, separates the two without pinning a float32 value.
+        R and T are even functions of ``lambda``, hence smooth functions of
+        ``lambda**2 = 3(1-ssa)(1-ssa*g)``: the endpoint derivative exists
+        two-sided and has a closed form. At ``x2 = (lambda*tau)**2 = 0``,
+        with ``D = 1 + gamma1*tau``, ``dgamma1/dssa = -(4+3g)/4``,
+        ``dgamma2/dssa = (4-3g)/4`` and ``dx2/dssa = -3(1-g)*tau**2``:
+
+            dT/dssa = -[dgamma1*tau + (1/2 + gamma1*tau/6)*dx2] / D**2
+            dR/dssa = [dN*D - gamma1*tau*dD] / D**2,
+              dN = dgamma2*tau + gamma1*tau*dx2/6,  dD = -the bracket above.
+
+        Two historical failure modes bracketed this value: the subtracted
+        eigenvalue form reported 5e5 of pure ``sqrt``-of-round-off noise, and
+        a double-``where`` that pinned ``lambda``/``S`` at their limit values
+        dropped the ``dx2`` channel and reported 0.4597 for a true 0.4789
+        (dT/dssa at tau=0.3, g=0.85 — PR #856 review). The even-series branch
+        must reproduce the closed form.
         """
-        tau, ssa, g = self._layer(1.0, 0.85)
-        d_ssa = jax.grad(self._sum_of_squares, argnums=1)(tau, ssa, g)
-        assert float(jnp.max(jnp.abs(d_ssa))) < 1.0e2
+        tau_v, g_v = 0.3, 0.85
+        tau, ssa, g = self._layer(1.0, g_v, tau_value=tau_v)
+
+        def r_and_t(s):
+            r, t, _, _ = layer_reflectance_transmittance(tau, s, g, None)
+            return r[0], t[0]
+
+        d_r = jax.grad(lambda s: r_and_t(s)[0])(ssa)[0]
+        d_t = jax.grad(lambda s: r_and_t(s)[1])(ssa)[0]
+
+        g1 = 3.0 * (1.0 - g_v) / 4.0
+        dg1 = -(4.0 + 3.0 * g_v) / 4.0
+        dg2 = (4.0 - 3.0 * g_v) / 4.0
+        dx2 = -3.0 * (1.0 - g_v) * tau_v**2
+        big_d = 1.0 + g1 * tau_v
+        d_denom = dg1 * tau_v + (0.5 + g1 * tau_v / 6.0) * dx2
+        dt_exact = -d_denom / big_d**2
+        dn = dg2 * tau_v + g1 * tau_v * dx2 / 6.0
+        dr_exact = (dn * big_d - g1 * tau_v * d_denom) / big_d**2
+
+        assert float(d_t) == pytest.approx(dt_exact, rel=1e-4)
+        assert float(d_r) == pytest.approx(dr_exact, rel=1e-4)
 
     @pytest.mark.parametrize("seed", [0, 4])
     def test_layer_coefficients_match_a_central_difference(self, seed):

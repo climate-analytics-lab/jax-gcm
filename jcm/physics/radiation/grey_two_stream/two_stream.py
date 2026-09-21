@@ -89,11 +89,13 @@ def layer_reflectance_transmittance(
     # ``ssa = 1`` it reports 5e5 for a derivative that does not exist. The
     # factored form has no cancellation at all and is exactly 0 at ssa = 1.
     #
-    # The double-``where`` then keeps the endpoint differentiable: the
-    # conservative-scattering limit ``ssa = 1`` sits at the square root's
-    # zero, where no finite derivative exists, so the masked branch is fed a
-    # 1.0 and the outer ``where`` selects the literal 0 the physical branch
-    # would have produced.
+    # The double-``where`` guards the square root itself: at ``ssa = 1`` the
+    # masked branch is fed a 1.0 and the outer ``where`` selects the literal 0
+    # the physical branch would have produced. ``lambda_val`` feeds only the
+    # exponential branch below, which is never selected near ``ssa = 1``; the
+    # layer solution there is evaluated as an even series in ``lambda_sq``, so
+    # the endpoint derivative flows through the smooth ``lambda_sq`` rather
+    # than through this cusped square root.
     lambda_sq = 3.0 * (1.0 - ssa) * (1.0 - ssa * g)
     lambda_positive = lambda_sq > 0.0
     lambda_val = jnp.where(
@@ -139,32 +141,58 @@ def layer_reflectance_transmittance(
     #     both exponentials -> 0 and ``S -> 1/lambda``, giving R -> Gamma and
     #     T -> 0 continuously: the semi-infinite albedo is recovered exactly
     #     with no branch to disagree with.
-    exp_minus = jnp.exp(-lambda_tau)              # e
-    exp_minus_sq = jnp.exp(-2.0 * lambda_tau)     # e^2
+    # Near the conservative limit the same solution is evaluated as an even
+    # Taylor series in ``x2 = (lambda*tau)**2`` instead of via the
+    # exponentials. R and T are *even* functions of ``lambda`` — substituting
+    # ``lambda -> -lambda`` and multiplying numerator and denominator by
+    # ``exp(-2*lambda*tau)`` reproduces them — so they are smooth functions of
+    # ``lambda**2 = 3(1-ssa)(1-ssa*g)`` and therefore genuinely two-sided
+    # differentiable in ``ssa`` and ``g`` at ``ssa = 1``, even though
+    # ``lambda`` itself has a square-root cusp there. A guard that pins
+    # ``lambda`` (and ``S``) at their limit *values* loses that channel:
+    # autodiff then reported ``dT/dssa = 0.4597`` at ``(ssa=1, g=0.85,
+    # tau=0.3)`` against the true 0.4789 (PR #856 review) — a silently biased
+    # endpoint derivative for any optimizer pushing ssa toward 1. In the
+    # hyperbolic form ``R = gamma2*(sinh x/lambda) / (cosh x +
+    # gamma1*(sinh x/lambda))``, ``T = 1/(cosh x + gamma1*(sinh x/lambda))``
+    # (multiply the expressions below through by ``exp(x)/2``), both
+    # ``cosh x`` and ``sinh(x)/lambda = tau*sinh(x)/x`` are analytic in
+    # ``x2``, so truncated series in ``x2`` route AD through the smooth
+    # ``lambda_sq`` and carry the exact endpoint derivative. The series is
+    # used for ``x2 < 1e-2`` (``lambda*tau < 0.1``), where its truncation
+    # error is O(x2**4/4e4) ~ 2.5e-13 relative — below even float64 noise at
+    # the switch, so the forward value is seamless across it; the exponential
+    # branch's ``lambda_tau`` is masked to 1 inside the series region so its
+    # AD stays finite on the discarded branch.
+    x2 = lambda_sq * tau * tau            # (lambda*tau)**2, smooth in ssa, g
+    use_series = x2 < 1e-2
 
-    # ``S = (1 - e^2)/lambda`` is finite as lambda -> 0 (the
-    # conservative-scattering limit): ``1 - e^2 = 1 - exp(-2 lambda tau)`` is
-    # ``~ 2 lambda tau`` there, so ``S -> 2 tau``. Formed as
-    # ``tau * (1 - e^2)/(lambda*tau)`` so the whole limit rides on the ratio
-    # ``(1 - e^2)/lambda_tau``, which tends to 2. The double-``where`` keeps
-    # both the value and its derivative finite at ``lambda_tau = 0``: the
-    # masked branch divides by 1.0 and the outer ``where`` selects the literal
-    # limit 2 that L'Hopital gives, while away from 0 the expression is exact.
-    lt_positive = lambda_tau > 0.0
-    lt_safe = jnp.where(lt_positive, lambda_tau, 1.0)
-    s_over_tau = jnp.where(lt_positive, (1.0 - exp_minus_sq) / lt_safe, 2.0)
-    scaled_path = tau * s_over_tau
+    x2_sq = x2 * x2
+    sinhc = 1.0 + x2 / 6.0 + x2_sq / 120.0 + x2_sq * x2 / 5040.0  # sinh(x)/x
+    cosh_x = 1.0 + x2 / 2.0 + x2_sq / 24.0 + x2_sq * x2 / 720.0
+    denom_series = cosh_x + gamma1 * tau * sinhc    # >= 1: every term >= 0
+    R_series = gamma2 * tau * sinhc / denom_series
+    T_series = 1.0 / denom_series
 
-    denom = gamma1 * scaled_path + 1.0 + exp_minus_sq
-    R_dif = gamma2 * scaled_path / denom
-    T_dif = 2.0 * exp_minus / denom
+    lambda_tau_safe = jnp.where(use_series, 1.0, lambda_tau)
+    exp_minus = jnp.exp(-lambda_tau_safe)           # e
+    exp_minus_sq = jnp.exp(-2.0 * lambda_tau_safe)  # e^2
+    scaled_path = tau * (1.0 - exp_minus_sq) / lambda_tau_safe   # S
+    denom = gamma1 * scaled_path + 1.0 + exp_minus_sq            # >= 1
+    R_exp = gamma2 * scaled_path / denom
+    T_exp = 2.0 * exp_minus / denom
 
-    # Physical bounds. R + T <= 1 already holds by construction
-    # (``R + T - 1 = (gamma2 - gamma1) S / denom`` and ``gamma1 >= gamma2``
-    # since ``gamma1 - gamma2 = 2(1 - ssa) >= 0``), so the upper clip never
-    # acts. The lower clip removes the small negative reflectance the Eddington
-    # closure produces for weakly scattering layers, where ``gamma2 < 0`` for
-    # ``ssa < 1/(4 - 3g)`` — an approximation artefact, not a physical value.
+    R_dif = jnp.where(use_series, R_series, R_exp)
+    T_dif = jnp.where(use_series, T_series, T_exp)
+
+    # Physical bounds. R + T <= 1 already holds by construction on both
+    # branches (exponential: ``R + T - 1 = (gamma2 - gamma1) S / denom``;
+    # series: ``((gamma2 - gamma1) tau sinhc + (1 - cosh x)) / denom`` — both
+    # non-positive since ``gamma1 - gamma2 = 2(1 - ssa) >= 0`` and
+    # ``cosh x >= 1``), so the upper clip never acts. The lower clip removes
+    # the small negative reflectance the Eddington closure produces for weakly
+    # scattering layers, where ``gamma2 < 0`` for ``ssa < 1/(4 - 3g)`` — an
+    # approximation artefact, not a physical value.
     R_dif = jnp.clip(R_dif, 0.0, 1.0)
     T_dif = jnp.clip(T_dif, 0.0, 1.0)
     
