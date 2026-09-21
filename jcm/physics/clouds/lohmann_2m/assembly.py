@@ -464,18 +464,27 @@ def update_in_cloud_water(
         # forward derivative forms ``1/r**6``, which overflows float32 below
         # r ~ 3e-7 m (den**-2 = inf), poisoning the jvp/vjp with 0*inf = NaN
         # exactly on the small-radius nucleating cells this branch exists for.
-        # The radius is floored at ``cirrus_min_ice_radius`` (also the reference
-        # radius) and the inversion is evaluated as ``prefactor * ratio**3``
-        # with ``ratio = r_ref / r_safe`` in (0, 1], so every intermediate and
-        # its square stay well inside float32 range.
-        r_ref = params.cirrus_min_ice_radius
-        r_safe = jnp.maximum(ice_radius_mean, r_ref)
-        size_ratio = r_ref / r_safe
+        # Both radii are therefore scaled by a STATIC (Python-literal, hence
+        # gradient-free) reference length before the floor and the cube: the
+        # only division whose denominator carries a gradient is by
+        # ``r_safe_scaled**3 >= (cirrus_min_ice_radius/_R_SCALE_M)**3 ~ 1e-3``,
+        # whose squared reciprocal (~1e6) is far inside float32 range. The
+        # scale must NOT be ``cirrus_min_ice_radius`` itself: that is a
+        # differentiable CloudParams2M leaf, and dividing by its cube (1e-21)
+        # puts ``(r_ref**3)**-2 ~ 1e42`` = inf on the parameter's own vjp/jvp
+        # — NaN via 0*inf on capped cells, inf even at physical radii.
+        # ``1/_R_SCALE_M**3`` is a compile-time constant (1e18), so it
+        # contributes no gradient path at all.
+        _R_SCALE_M = 1.0e-6  # static scale [m]; ~1 um, the crystal-size order
+        r_safe_scaled = jnp.maximum(
+            ice_radius_mean / _R_SCALE_M,
+            params.cirrus_min_ice_radius / _R_SCALE_M,
+        )
         prefactor = (
             0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud
-            / r_ref**3
+            / _R_SCALE_M**3
         )
-        icnc_candidate = jnp.minimum(prefactor * size_ratio**3, params.icemax)
+        icnc_candidate = jnp.minimum(prefactor / r_safe_scaled**3, params.icemax)
     elif params.nic_cirrus == 2:
         # min(pnicex, pap*1e6)
         icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)

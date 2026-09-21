@@ -95,9 +95,10 @@ class CloudParams2M:
     # Minimum volume-mean ice-crystal radius [m] for the nic_cirrus==1
     # ICNC diagnosis (assembly.update_in_cloud_water). A crystal cannot be
     # smaller than the coarse-mode aerosol it nucleates on, so ~100 nm is a
-    # physical lower bound; here it doubles as the reference radius that
-    # non-dimensionalises the ``1/r^3`` inversion so no float32 intermediate
-    # overflows on the small-radius nucleating-cirrus cells (#846).
+    # physical lower bound. A differentiable leaf like every tunable; the
+    # float32-safe non-dimensionalisation of the ``1/r^3`` inversion uses a
+    # separate STATIC scale in assembly.py precisely so this leaf's own
+    # gradient never divides by its tiny cube (#846).
     cirrus_min_ice_radius: jnp.ndarray  # [m]
 
     # Reference droplet/crystal mass parameters

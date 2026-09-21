@@ -1117,9 +1117,15 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         which overflows float32 below r ~ 3e-7 m, so the jvp was NaN **even
         for a zero tangent** (0*inf) on exactly the small-crystal cells this
         branch diagnoses. The fix floors the radius at
-        ``cirrus_min_ice_radius`` and evaluates the inversion in the
-        non-dimensional ``prefactor * (r_ref/r_safe)**3`` form. Swept in both
-        float32 and float64 over [1e-8, 1e-5] m, spanning the overflow region.
+        ``cirrus_min_ice_radius`` and scales both radii by a STATIC 1 um
+        reference before the cube, so no gradient path — including the one
+        through the parameter leaf itself — touches a tiny denominator.
+        Swept in both float32 and float64 over [1e-8, 1e-5] m, spanning the
+        overflow region. The reverse-mode sweep also differentiates the FULL
+        ``CloudParams2M`` pytree: with ``cirrus_min_ice_radius`` doubling as
+        the scale, dividing by ``r_ref**3`` (1e-21) put ``(r_ref**3)**-2 ~
+        1e42`` = inf on the parameter's own vjp — NaN via 0*inf on capped
+        cells and -inf even at physical radii (Codex review on #857).
         """
         jax.config.update("jax_enable_x64", x64)
         try:
@@ -1142,6 +1148,11 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
                 )
                 return update_in_cloud_water(**args)[1]
 
+            def icnc_of_params(params, ice_radius_mean):
+                args = dict(base)
+                args.update(params=params, ice_radius_mean=ice_radius_mean)
+                return jnp.sum(update_in_cloud_water(**args)[1] ** 2)
+
             for r in (1e-8, 1e-7, 3e-7, 1e-6, 3e-6, 1e-5):
                 rad = _full(n, r).astype(dtype)
                 argtuple = (rad, base["air_density"], base["cloud_ice_in_cloud"])
@@ -1158,6 +1169,14 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
                 )(*argtuple)
                 for g in grads:
                     assert jnp.all(jnp.isfinite(g)), (r, x64, g)
+                # Reverse mode w.r.t. EVERY CloudParams2M leaf — the repo
+                # convention is that params are differentiable, so the
+                # parameter pytree must be gradient-clean too. This is what
+                # caught the ``/ r_ref**3`` overflow the first fix introduced.
+                pgrads = jax.grad(icnc_of_params)(base["params"], rad)
+                for name, g in vars(pgrads).items():
+                    if hasattr(g, "dtype"):
+                        assert jnp.all(jnp.isfinite(g)), (r, x64, name, g)
 
             # AD matches a central difference at a physical operating point
             # where the candidate is below icemax (the cap is inactive, so
@@ -1167,6 +1186,39 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
             check_gradients(icnc_only, phys, rtol=1e-2, seed=0)
         finally:
             jax.config.update("jax_enable_x64", False)
+
+    def test_nic_cirrus_1_min_radius_parameter_gradient_is_live_and_correct(self):
+        """#846/#857: d ICNC / d cirrus_min_ice_radius, where the floor binds.
+
+        The floor and the ``icemax`` cap can both make the parameter's
+        gradient legitimately zero (radius above the floor, or candidate
+        capped), so finiteness alone would pass with the leaf severed. This
+        fixture makes it LIVE: ``qi`` small enough (1e-11 kg/kg) that the
+        candidate at ``r_safe = r_ref`` (~3e6 /m^3) sits below ``icemax``
+        while the radius (1e-8 m) sits below the floor — there
+        ``N = C rho qi / r_ref^3`` exactly, so ``dN/dr_ref = -3N/r_ref``.
+        Float32, checked against both the analytic form and ``check_gradients``.
+        """
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        inputs["temp_prev"] = _full(n, 220.0)
+        inputs["ice_radius_mean"] = _full(n, 1e-8)
+        inputs["cloud_ice_in_cloud"] = _full(n, 1e-11)
+
+        def icnc_of_ref(r_ref):
+            args = dict(inputs)
+            args["params"] = _P.replace(cirrus_min_ice_radius=r_ref)
+            return update_in_cloud_water(**args)[1]
+
+        r0 = _P.cirrus_min_ice_radius
+        icnc = icnc_of_ref(r0)
+        assert jnp.all(icnc < _P.icemax)          # cap inactive
+        assert jnp.all(icnc > _P.icemin)          # floor-diagnosed, not icemin
+        grad = jax.grad(lambda r: jnp.sum(icnc_of_ref(r)))(r0)
+        expected = -3.0 * jnp.sum(icnc) / r0
+        assert jnp.isfinite(grad)
+        assert jnp.isclose(grad, expected, rtol=1e-4), (grad, expected)
+        check_gradients(icnc_of_ref, (r0,), rtol=1e-2, seed=0)
 
     def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
         n = 3

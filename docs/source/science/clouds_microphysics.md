@@ -83,10 +83,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   *radius* was rejected as the physical bound: at ~100 nm the mass inversion
   still yields ~1e11–1e12 m⁻³ (far above realistic cirrus, ~1e3–1e6 m⁻³, and
   above ``icemax``). The 100 nm value survives only as ``cirrus_min_ice_radius``,
-  the coarse-mode-aerosol lower bound that floors the radius and
-  non-dimensionalises the inversion so the float32 ``1/r³`` derivative stays
-  finite (`differentiability`; the bare ``C/r³`` form's ``1/r⁶`` gradient
-  overflowed float32 below r ≈ 3e-7 m).
+  the coarse-mode-aerosol lower bound (a differentiable parameter leaf) that
+  floors the radius; the inversion itself is non-dimensionalised by a *static*
+  1 µm scale so no gradient path — through the state **or** the parameter —
+  divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
+  ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
+  parameter itself as the scale put the same overflow on its own gradient).
 - The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
   radius (#717) — live on the release-validated ``t63-echam-1m`` /
   ``t106-echam-1m`` configurations; 2M paths use microphysical radii.
