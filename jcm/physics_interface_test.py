@@ -660,3 +660,32 @@ class TestComposablePressureThickness(unittest.TestCase):
             np.full((nlon, nlat), float(p0)),
             rtol=1e-6,
         )
+
+    def test_thickness_matches_float32_physics_under_x64(self):
+        # The cached hybrid coefficients are float64. Under jax_enable_x64 with
+        # a float32 physics state (the pySES CAM-SE backend) Δp must still come
+        # back at the physics working dtype, or it would promote the water-field
+        # tendencies verify emits to float64 while T/u/v stay float32 -- a
+        # mixed-dtype tendency and cross-step carry.
+        import jax
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        x64 = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            coords = get_speedy_coords()
+            physics = speedy_physics()
+            physics.cache_coords(coords)
+            nlev, nlon, nlat = coords.nodal_shape
+            state = PhysicsState.zeros(
+                (nlev, nlon, nlat),
+                normalized_surface_pressure=jnp.ones(
+                    (nlon, nlat), dtype=jnp.float32
+                ),
+                temperature=jnp.full((nlev, nlon, nlat), 280.0, jnp.float32),
+            )
+            dp = physics.pressure_thickness(state)
+            self.assertEqual(dp.dtype, jnp.float32)
+        finally:
+            jax.config.update("jax_enable_x64", x64)

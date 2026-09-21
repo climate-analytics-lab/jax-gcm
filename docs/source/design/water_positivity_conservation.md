@@ -29,8 +29,9 @@ received the redistributed water.
 Where the layer masses `Δp` are available — the gridpoint driver
 `compute_physics_step_gridpoint` obtains them from
 `ComposablePhysics.pressure_thickness(state)`, built from the hybrid `(a, b)`
-coefficients and the surface pressure exactly as the `moist_air_state`
-diagnostic builds its `pressure_thickness` — the water-mass fields' cap is made
+coefficients and the surface pressure with the same hydrostatic formula the
+`moist_air_state` diagnostic uses for its `pressure_thickness` (with `abs()` so
+the weight is orientation-independent) — the water-mass fields' cap is made
 column-conservative:
 
 1. Apply the per-cell cap as before; `added = capped − raw ≥ 0` is the
@@ -51,6 +52,19 @@ The removed fraction of each layer's post-cap water is
 round-off. Each water species is conserved **independently** — the vdiff
 redistribution conserves each phase separately, and borrowing across phases
 would silently change the latent-heat partitioning.
+
+The reallocation borrows from *every* layer that still holds water, in
+proportion to how much it holds — not specifically from the layers that
+received the redistributed water, because those are not identifiable from the
+summed tendency. In the case the fix targets — a donor overdrawn by the vdiff
+redistribution **plus** a co-located cloud/convection sink — this means the
+borrowed water may come from a layer other than the true receiver. The column
+water path is conserved exactly; what is accepted in exchange is that the
+compensating removal can be *vertically misplaced* relative to where the cap
+added it. That trade (exact column conservation, at the cost of the vertical
+distribution of a small correction) is the best available given the interface
+sees only the summed tendency, and it is strictly better than the bare cap,
+which conserves nothing.
 
 Two limiting cases fall out for free and are the reason this is the right
 shape:
