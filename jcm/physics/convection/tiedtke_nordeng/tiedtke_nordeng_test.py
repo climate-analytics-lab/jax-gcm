@@ -128,7 +128,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, *extra,
+        moisture_supply, *extra, **_kwargs,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -215,6 +215,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -295,6 +296,81 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     )
 
 
+def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
+    """The sub-cloud cover's taper weight is the UNFLOORED Δp/g.
+
+    ``moist_air_state`` floors ``layer_thickness`` at 10 m and documents it
+    as unusable for mass weighting, so the wrapper must hand the scheme
+    ``pressure_thickness / g`` when that diagnostic is present (the composed
+    model always has it), falling back to ρ·Δz only for hand-built stacks
+    without it — where the thickness is unfloored by construction.
+    """
+    import jcm.constants as c
+
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, use_updraft_cover=False,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            # Probe: ride the received taper weight out on dqdt (dtedt is
+            # zero, so cap_scale == 1 and it passes through unscaled).
+            dtedt=zeros, dqdt=layer_mass, dudt=zeros, dvdt=zeros,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_conv=jnp.zeros(()), dqc_dt=zeros, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    # Deliberately inconsistent: a floored-looking thickness whose ρ·Δz
+    # product does NOT equal Δp/g, so the probe distinguishes the sources.
+    pressure_thickness = (
+        jnp.arange(nlev * ncols, dtype=float).reshape(shape) + 1.0
+    ) * 100.0
+    diagnostics = {
+        "_dt_seconds": 60.0,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 10.0,
+        "air_density": jnp.ones(shape),
+        "pressure_thickness": pressure_thickness,
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+
+    tendency, _ = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(
+        tendency.specific_humidity, pressure_thickness / c.grav,
+    )
+
+    # Hand-built stack without the diagnostic: the ρ·Δz fallback.
+    diagnostics_no_dp = {
+        k: v for k, v in diagnostics.items() if k != "pressure_thickness"
+    }
+    tendency2, _ = TiedtkeConvection()(
+        state, diagnostics_no_dp, forcing=None, terrain=terrain,
+    )
+    assert jnp.allclose(
+        tendency2.specific_humidity,
+        diagnostics["air_density"] * diagnostics["layer_thickness"],
+    )
+
+
 def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch):
     """The convection diagnostic exposes the *applied* (post-cap) T/q rates.
 
@@ -316,7 +392,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, *extra,
+        moisture_supply, *extra, **_kwargs,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
