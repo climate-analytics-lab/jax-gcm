@@ -724,6 +724,7 @@ def _tiedtke_convection_toa_first(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    layer_mass: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
@@ -1222,6 +1223,7 @@ def _tiedtke_convection_toa_first(
             updraft_state, downdraft_state,
             cloud_base, ktop, dt, config,
             ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
+            layer_mass=layer_mass,
         )
         
         # qc/qi tendencies come from the cudtdq ledger's detrained
@@ -1358,6 +1360,7 @@ def tiedtke_nordeng_convection(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    layer_mass: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run the Tiedtke-Nordeng scheme in either vertical ordering.
@@ -1393,6 +1396,7 @@ def tiedtke_nordeng_convection(
         dt, config, land_fraction, moisture_supply,
         to_toa(moisture_tend_profile), thvsig,
         to_toa(omega), to_toa(qte_dynamics),
+        to_toa(layer_mass),
         use_updraft_cover,
     )
 
@@ -1710,9 +1714,22 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             qte_dynamics = jnp.zeros_like(state.specific_humidity)
 
+        # Unfloored per-layer air mass Δp/g for the sub-cloud rain-evaporation
+        # cover's taper. ``layer_thickness`` carries moist_air_state's 10 m
+        # floor and is documented there as unusable for mass weighting, so the
+        # taper reads the true half-level ``pressure_thickness`` diagnostic
+        # instead. The ρ·Δz fallback serves hand-built diagnostics dicts
+        # (unit tests, custom stacks) whose thickness is unfloored by
+        # construction — mirroring the ``thermo_run`` fallback above.
+        pressure_thickness = diagnostics.get("pressure_thickness")
+        if pressure_thickness is None:
+            layer_mass = air_density * layer_thickness
+        else:
+            layer_mass = pressure_thickness / c.grav
+
         # ``use_updraft_cover`` is a static Python bool (a trace-time code-path
         # selector), so it is closed over here rather than threaded as a
-        # vmapped argument — the ``in_axes`` tuple stays aligned with the 17
+        # vmapped argument — the ``in_axes`` tuple stays aligned with the 18
         # mapped/broadcast array arguments.
         _use_updraft_cover = self._updraft_precip_cover
 
@@ -1722,7 +1739,7 @@ class TiedtkeConvection(PhysicsTerm):
 
         column_fn = jax.vmap(
             _column_scheme,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -1731,6 +1748,7 @@ class TiedtkeConvection(PhysicsTerm):
             state.u_wind, state.v_wind, qc, qi,
             dt, params, land_fraction, moisture_supply,
             moisture_tend_profile, thvsig, omega, qte_dynamics,
+            layer_mass,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied

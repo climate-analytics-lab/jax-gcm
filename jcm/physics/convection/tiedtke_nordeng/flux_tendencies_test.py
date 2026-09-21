@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+    calculate_tendencies,
     convective_precip_fluxes,
     updraft_area_cover,
 )
@@ -215,6 +216,86 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
         # No plume ⇒ no rain shaft ⇒ the assumed updraft speed is inert.
         self.assertEqual(float(g0[0]), 0.0)
+
+
+class TestTaperWeightPlumbing(unittest.TestCase):
+    """``calculate_tendencies`` feeds the cover the unfloored layer mass."""
+
+    def _run(self, layer_mass, layer_thickness):
+        import jcm.constants as c
+        from jcm.physics.convection.tiedtke_nordeng.downdraft import (
+            DowndraftState,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters,
+        )
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            UpdatedraftState,
+        )
+
+        temperature = jnp.array([278.0, 282.0, 286.0, 290.0, 294.0])
+        humidity = jnp.full((5,), 1.0e-3)
+        pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        rho = pressure / (c.rd * temperature)
+        zeros = jnp.zeros((5,))
+        updraft = UpdatedraftState(
+            tu=jnp.array([0.0, 282.0, 286.0, 0.0, 0.0]),
+            qu=zeros, lu=zeros,
+            mfu=jnp.array([0.0, 0.05, 0.05, 0.0, 0.0]),
+            entr=zeros, detr=zeros, buoy=zeros,
+            pdmfup=jnp.array([0.0, 2.0e-3, 2.0e-3, 0.0, 0.0]),
+            plude=zeros,
+        )
+        downdraft = DowndraftState(
+            td=temperature, qd=zeros, mfd=zeros, pdmfdp=zeros,
+            lfs=0, active=False,
+        )
+        return calculate_tendencies(
+            temperature, humidity, zeros, zeros, pressure, rho,
+            layer_thickness, updraft, downdraft, kbase=2, ktop=1,
+            dt=1800.0, config=ConvectionParameters.default(),
+            ktype=jnp.array(1), use_updraft_cover=True,
+            layer_mass=layer_mass,
+        )
+
+    def test_layer_mass_wins_over_the_thickness_product(self):
+        # The taper weight must be the SUPPLIED unfloored Δp/g, not
+        # ρ·layer_thickness: with a deliberately wrong (floored-style)
+        # thickness, supplying the true mass must still give the same
+        # precipitation as the internally consistent column ...
+        import jcm.constants as c
+
+        temperature = jnp.array([278.0, 282.0, 286.0, 290.0, 294.0])
+        pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        rho = pressure / (c.rd * temperature)
+        mass_true = jnp.full((5,), 2.0e4) / c.grav
+        dz_true = mass_true / rho
+        a = self._run(mass_true, dz_true)
+        b = self._run(mass_true, jnp.full((5,), 10.0))
+        np.testing.assert_allclose(
+            float(a.precip_conv), float(b.precip_conv), rtol=1e-12)
+        # ... and the fallback (layer_mass=None) reproduces ρ·Δz exactly,
+        # which coincides with the truth only when Δz is unfloored.
+        fb = self._run(None, dz_true)
+        np.testing.assert_allclose(
+            float(a.precip_conv), float(fb.precip_conv), rtol=1e-12)
+
+    def test_a_different_layer_mass_changes_the_sub_cloud_cover(self):
+        # Sanity that the weight is live: a non-uniform mass profile below
+        # cloud base changes the taper, the cover, and hence the surface
+        # precipitation after sub-cloud evaporation.
+        import jcm.constants as c
+
+        temperature = jnp.array([278.0, 282.0, 286.0, 290.0, 294.0])
+        pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        rho = pressure / (c.rd * temperature)
+        mass_true = jnp.full((5,), 2.0e4) / c.grav
+        dz_true = mass_true / rho
+        a = self._run(mass_true, dz_true)
+        skewed = mass_true * jnp.array([1.0, 1.0, 1.0, 3.0, 3.0])
+        s = self._run(skewed, dz_true)
+        self.assertNotAlmostEqual(
+            float(a.precip_conv), float(s.precip_conv), places=9)
 
 
 if __name__ == "__main__":

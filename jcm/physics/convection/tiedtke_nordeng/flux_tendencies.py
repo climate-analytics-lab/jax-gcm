@@ -65,12 +65,13 @@ def updraft_area_cover(
     pressure ratio equals the ratio of the air mass below the two
     interfaces. ``layer_weight`` must therefore be proportional to the TRUE
     half-level thickness ``Δp = p_half(k+1) − p_half(k)`` of each layer —
-    e.g. ``ρ·Δz`` from the moist-air diagnostics — NOT the dual-grid
-    centre-to-centre spacing the cudtdq ledger divides by: the cumulative
-    sum here turns any per-layer thickness error into a systematic bias in
-    ``p_s − p_half`` on every stretched (hybrid) grid. Levels are
-    top-first; the cloud base is the lowest level (largest index) with a
-    non-zero flux.
+    the moist-air ``pressure_thickness`` diagnostic (unfloored ``Δp``) —
+    NOT the dual-grid centre-to-centre spacing the cudtdq ledger divides
+    by, and not ``ρ·layer_thickness`` where that thickness carries the
+    moist-air 10 m floor: the cumulative sum here turns any per-layer
+    thickness error into a systematic bias in ``p_s − p_half`` on every
+    stretched (hybrid) grid. Levels are top-first; the cloud base is the
+    lowest level (largest index) with a non-zero flux.
 
     ``density`` is left to the caller: the sub-cloud evaporation inside the
     convection scheme has the updraft temperature available and passes the
@@ -196,8 +197,8 @@ def convective_precip_fluxes(
             ``lham`` branch (``mo_cufluxdts.f90:416-417``); when ``False``
             it is ECHAM's non-HAM constant ``zcucov = 0.05`` (line 419).
         updraft_layer_mass: TRUE per-layer air mass ∝ half-level
-            ``Δp = p_half(k+1) − p_half(k)`` (e.g. ``ρ·Δz`` [kg/m²]), the
-            taper weight for the cover's sub-cloud ``p_s − p_half``
+            ``Δp = p_half(k+1) − p_half(k)`` (unfloored ``Δp/g`` [kg/m²]),
+            the taper weight for the cover's sub-cloud ``p_s − p_half``
             reconstruction. This is deliberately a SEPARATE argument from
             ``dp_lev``: the ledger's ``dp_lev`` is the dual-grid
             centre-to-centre spacing (last value duplicated), whose cumsum
@@ -369,6 +370,7 @@ def calculate_tendencies(
     config: ConvectionParameters,
     ktype: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
+    layer_mass: jnp.ndarray | None = None,
 ) -> ConvectionTendencies:
     """Calculate final tendencies from convective fluxes
 
@@ -391,6 +393,14 @@ def calculate_tendencies(
         use_updraft_cover: Route the sub-cloud rain evaporation through the
             updraft-area cover instead of ECHAM's non-HAM ``zcucov = 0.05``
             (jax-gcm#812).
+        layer_mass: UNFLOORED per-layer air mass ``Δp/g`` [kg/m²], the
+            taper weight for that cover — the model path derives it from
+            the moist-air ``pressure_thickness`` diagnostic. ``None`` falls
+            back to ``rho·layer_thickness``, which is exact only when the
+            supplied ``layer_thickness`` is itself unfloored (direct
+            column callers that build their own columns); the composed
+            model's ``layer_thickness`` carries a 10 m floor and MUST NOT
+            reach the taper through that product.
 
     Returns:
         ConvectionTendencies with all tendency terms
@@ -504,15 +514,20 @@ def calculate_tendencies(
         ktype=ktype,
         updraft_velocity=config.cu_updraft_velocity,
         use_updraft_cover=use_updraft_cover,
-        # Taper weight for the updraft-area cover: the TRUE layer mass
-        # ρ·Δz = Δp/g (moist_air_state builds Δz as Δp/(ρg); its 10 m floor
-        # never binds on the supported level sets — 65 m minimum on
-        # L47/L95). Deliberately NOT dp_lev: that is the dual-grid
+        # Taper weight for the updraft-area cover: the UNFLOORED layer mass
+        # Δp/g threaded from the moist-air ``pressure_thickness`` diagnostic
+        # (``layer_mass``). Deliberately NOT dp_lev — the dual-grid
         # centre-to-centre ledger spacing (last value duplicated), whose
-        # cumsum mis-states p_s − p_half wherever adjacent layer
-        # thicknesses differ — i.e. on every hybrid grid. Same weight the
-        # JAM wet deposition passes, so the two covers agree.
-        updraft_layer_mass=rho * layer_thickness,
+        # cumsum mis-states p_s − p_half wherever adjacent layer thicknesses
+        # differ (every hybrid grid) — and deliberately not
+        # ``rho·layer_thickness`` on the model path: moist_air_state floors
+        # ``layer_thickness`` at 10 m and documents it as unusable for mass
+        # weighting, so on grids with thinner hydrostatic layers the product
+        # overstates Δp/g. The ρ·Δz fallback serves only direct column
+        # callers whose hand-built thickness is unfloored.
+        updraft_layer_mass=(
+            layer_mass if layer_mass is not None else rho * layer_thickness
+        ),
     )
     plude = updraft_state.plude
 
