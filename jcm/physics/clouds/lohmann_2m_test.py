@@ -1127,6 +1127,10 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         1e42`` = inf on the parameter's own vjp — NaN via 0*inf on capped
         cells and -inf even at physical radii (Codex review on #857).
         """
+        # Snapshot-and-restore rather than assume-False: the flag is
+        # process-global and mam4_jax flips it on at import, so a worker that
+        # ran a JAM/MAM4 test first legitimately enters with x64=True.
+        prior_x64 = jax.config.read("jax_enable_x64")
         jax.config.update("jax_enable_x64", x64)
         try:
             n = 3
@@ -1185,7 +1189,7 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
                     base["air_density"], base["cloud_ice_in_cloud"])
             check_gradients(icnc_only, phys, rtol=1e-2, seed=0)
         finally:
-            jax.config.update("jax_enable_x64", False)
+            jax.config.update("jax_enable_x64", prior_x64)
 
     def test_nic_cirrus_1_min_radius_parameter_gradient_is_live_and_correct(self):
         """#846/#857: d ICNC / d cirrus_min_ice_radius, where the floor binds.
