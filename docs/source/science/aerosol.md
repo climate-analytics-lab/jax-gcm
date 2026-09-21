@@ -512,7 +512,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#808 for the tuning). The
+  ne30 configurations too. The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
   ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this
