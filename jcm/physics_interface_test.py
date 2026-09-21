@@ -401,13 +401,15 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
                 msg=f"{name}: the interface broke column conservation")
             np.testing.assert_allclose(np.asarray(out), np.asarray(moved))
 
-    def test_water_tracers_are_capped_despite_the_redistribution(self):
-        """Pins today's behaviour for the retained water fields.
+    def test_water_tracers_capped_by_the_geometry_free_fallback(self):
+        """Pins the bare per-cell cap of the standalone entry point.
 
-        Not a claim that it is right: vdiff redistributes q/qc/qi, so the
-        cap can clamp an overdrawn donor layer and create water mass — the
-        same defect removed here for aerosol. Kept because the moist
-        physics requires q >= 0; tracked in #806.
+        :func:`verify_tendencies` has no layer masses, so it applies only the
+        per-cell positivity cap — the documented geometry-free fallback for
+        unit tests and hosts that do not expose their vertical geometry. The
+        column-conservative treatment that removes the cap's spurious water
+        source (#806) lives on the gridpoint driver, where Δp is available, and
+        is covered by ``TestWaterConservativeLimiter``.
         """
         from jcm.physics_interface import PhysicsTendency, verify_tendencies
         shape = (4, 8, 8)
@@ -434,4 +436,227 @@ class TestVerifyTracerNonNegativity(unittest.TestCase):
         result = verify_tendencies(state, tend, time_step=1800.0)
         self.assertTrue(
             jnp.allclose(result.tracers["signed_diag"], tend.tracers["signed_diag"])
+        )
+
+
+class TestWaterConservativeLimiter(unittest.TestCase):
+    """#806: the water-mass positivity cap is column-conservative given Δp.
+
+    The mechanism: vertical diffusion redistributes q/qc/qi (a conservative
+    donor/receiver transfer), and a co-located sink can overdraw the donor
+    layer. The bare per-cell cap clamps the donor at ``-q/dt`` while the
+    receiver keeps its gain — creating column water. With the layer masses the
+    limiter removes exactly that spurious column source again, so column water
+    is conserved to round-off while every layer stays non-negative.
+    """
+
+    def setUp(self):
+        import jax
+        # f64 so the conservation closure can be asserted to round-off; the
+        # session-level fixture restores the flag after the test.
+        self._x64 = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+
+    def tearDown(self):
+        import jax
+        jax.config.update("jax_enable_x64", self._x64)
+
+    def _scenario(self):
+        """Two-level column with an overdrawn donor.
+
+        vdiff exports qc donor->receiver and a co-located sink overdraws the
+        donor, so the summed donor tendency drives qc0 < 0.
+        """
+        dt = 100.0
+        dp = jnp.array([10_000.0, 30_000.0], dtype=jnp.float64).reshape(2, 1, 1)
+        qc = jnp.array([1.0e-3, 5.0e-3], dtype=jnp.float64).reshape(2, 1, 1)
+        redistribution = 2.0e-5      # conservative donor export rate
+        sink = 2.0e-5                # genuine microphysics sink on the donor
+        donor = -redistribution - sink
+        receiver = redistribution * dp[0, 0, 0] / dp[1, 0, 0]  # mass-conserving
+        raw = jnp.array(
+            [float(donor), float(receiver)], dtype=jnp.float64,
+        ).reshape(2, 1, 1)
+        state = PhysicsState.zeros((2, 1, 1), tracers={"qc": qc})
+        tend = PhysicsTendency.zeros((2, 1, 1), tracers={"qc": raw})
+        return state, tend, dp, dt
+
+    def test_bare_cap_reproduces_the_mass_creation(self):
+        # Reproduce the defect: without Δp the fallback cap creates column
+        # water in the overdrawn donor layer.
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        state, tend, dp, dt = self._scenario()
+        applied, _ = _verify_tendencies_with_water_corrections(state, tend, dt)
+        raw_col = float(jnp.sum(tend.tracers["qc"] * dp))
+        bare_col = float(jnp.sum(applied.tracers["qc"] * dp))
+        self.assertGreater(bare_col - raw_col, 1.0e-4)
+
+    def test_column_water_conserved_with_thickness(self):
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        state, tend, dp, dt = self._scenario()
+        applied, corrections = _verify_tendencies_with_water_corrections(
+            state, tend, dt, pressure_thickness=dp,
+        )
+        raw_col = float(jnp.sum(tend.tracers["qc"] * dp))
+        conserved_col = float(jnp.sum(applied.tracers["qc"] * dp))
+        # Column water tendency preserved to f64.
+        self.assertAlmostEqual(conserved_col, raw_col, places=12)
+        # Non-negativity preserved (the load-bearing property the cap exists
+        # for): every layer's next-step value is >= 0.
+        qnext = state.tracers["qc"] + dt * applied.tracers["qc"]
+        self.assertTrue(bool(jnp.all(qnext >= -1.0e-18)))
+        # The net (post-reallocation) ledger source integrates to ~0: the cap's
+        # source was reallocated, not invented.
+        net_source = float(jnp.sum(corrections["qc"] * dp))
+        self.assertAlmostEqual(net_source, 0.0, places=12)
+
+    def test_specific_humidity_is_conserved_too(self):
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        dt = 100.0
+        dp = jnp.array([10_000.0, 30_000.0], dtype=jnp.float64).reshape(2, 1, 1)
+        q = jnp.array([2.0e-3, 8.0e-3], dtype=jnp.float64).reshape(2, 1, 1)
+        raw = jnp.array([-1.0e-4, 2.0e-5], dtype=jnp.float64).reshape(2, 1, 1)
+        state = PhysicsState.zeros((2, 1, 1), specific_humidity=q)
+        tend = PhysicsTendency.zeros((2, 1, 1), specific_humidity=raw)
+        applied, _ = _verify_tendencies_with_water_corrections(
+            state, tend, dt, pressure_thickness=dp,
+        )
+        raw_col = float(jnp.sum(tend.specific_humidity * dp))
+        conserved_col = float(jnp.sum(applied.specific_humidity * dp))
+        self.assertAlmostEqual(conserved_col, raw_col, places=12)
+        qnext = state.specific_humidity + dt * applied.specific_humidity
+        self.assertTrue(bool(jnp.all(qnext >= -1.0e-18)))
+
+    def test_pure_sink_matches_bare_cap(self):
+        # A genuine column-emptying sink leaves no water to borrow, so the
+        # conservative path must equal the bare cap (and the ledger keeps the
+        # full correction #824 recorded for the truly-unrecoverable case).
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        dt = 100.0
+        dp = jnp.array([10_000.0, 30_000.0], dtype=jnp.float64).reshape(2, 1, 1)
+        qc = jnp.array([1.0e-3, 2.0e-3], dtype=jnp.float64).reshape(2, 1, 1)
+        raw = jnp.array([-1.0, -1.0], dtype=jnp.float64).reshape(2, 1, 1)
+        state = PhysicsState.zeros((2, 1, 1), tracers={"qc": qc})
+        tend = PhysicsTendency.zeros((2, 1, 1), tracers={"qc": raw})
+        bare, _ = _verify_tendencies_with_water_corrections(state, tend, dt)
+        conserved, _ = _verify_tendencies_with_water_corrections(
+            state, tend, dt, pressure_thickness=dp,
+        )
+        np.testing.assert_allclose(
+            np.asarray(conserved.tracers["qc"]),
+            np.asarray(bare.tracers["qc"]),
+        )
+
+    def test_broadcasting_native_columns_agree(self):
+        # Vertical on axis 0, horizontal broadcast: a single (2, 1) column and
+        # a (2, ncols) block of identical columns must agree per column.
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        dt = 100.0
+        dp_col = jnp.array([10_000.0, 30_000.0], dtype=jnp.float64).reshape(2, 1)
+        qc_col = jnp.array([1.0e-3, 5.0e-3], dtype=jnp.float64).reshape(2, 1)
+        raw_col = jnp.array([-4.0e-5, 6.6667e-6], dtype=jnp.float64).reshape(2, 1)
+
+        col_state = PhysicsState.zeros((2, 1), tracers={"qc": qc_col})
+        col_tend = PhysicsTendency.zeros((2, 1), tracers={"qc": raw_col})
+        col_applied, _ = _verify_tendencies_with_water_corrections(
+            col_state, col_tend, dt, pressure_thickness=dp_col,
+        )
+
+        ncols = 4
+        tile = lambda x: jnp.broadcast_to(x, (2, ncols))
+        blk_state = PhysicsState.zeros((2, ncols), tracers={"qc": tile(qc_col)})
+        blk_tend = PhysicsTendency.zeros(
+            (2, ncols), tracers={"qc": tile(raw_col)},
+        )
+        blk_applied, _ = _verify_tendencies_with_water_corrections(
+            blk_state, blk_tend, dt, pressure_thickness=tile(dp_col),
+        )
+        for c in range(ncols):
+            np.testing.assert_allclose(
+                np.asarray(blk_applied.tracers["qc"][:, c]),
+                np.asarray(col_applied.tracers["qc"][:, 0]),
+            )
+
+    def test_gradient_is_identity_and_poison_free(self):
+        # The whole positivity+conservation projection is a primal-only
+        # correction with a straight-through (identity) gradient to the
+        # producing tendency; the reallocation's division sits under
+        # stop_gradient, so a dry column (0/0 guard) cannot poison the graph
+        # (#558/#559).
+        import jax
+        from jcm.physics_interface import (
+            _verify_tendencies_with_water_corrections,
+        )
+        from jcm.testing import check_gradients
+        state, tend, dp, dt = self._scenario()
+
+        def applied_qc(raw_qc):
+            t = PhysicsTendency.zeros((2, 1, 1), tracers={"qc": raw_qc})
+            out, _ = _verify_tendencies_with_water_corrections(
+                state, t, dt, pressure_thickness=dp,
+            )
+            return out.tracers["qc"]
+
+        jac = jax.jacobian(lambda r: jnp.sum(applied_qc(r)))(
+            tend.tracers["qc"]
+        )
+        self.assertTrue(bool(jnp.all(jnp.isfinite(jac))))
+        np.testing.assert_allclose(
+            np.asarray(jac), np.ones_like(np.asarray(jac)),
+        )
+        check_gradients((lambda r: applied_qc(r)), (tend.tracers["qc"],),
+                        reference="adjoint")
+
+        # Dry column: removable water is zero; the gradient must stay finite.
+        dry = PhysicsState.zeros((2, 1, 1), tracers={"qc": jnp.zeros((2, 1, 1))})
+
+        def dry_sum(raw_qc):
+            t = PhysicsTendency.zeros((2, 1, 1), tracers={"qc": raw_qc})
+            out, _ = _verify_tendencies_with_water_corrections(
+                dry, t, dt, pressure_thickness=dp,
+            )
+            return jnp.sum(out.tracers["qc"])
+
+        grad_dry = jax.grad(dry_sum)(
+            jnp.array([-1.0, -1.0], dtype=jnp.float64).reshape(2, 1, 1)
+        )
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad_dry))))
+
+
+class TestComposablePressureThickness(unittest.TestCase):
+    """The Δp weights the conservative limiter consumes (#806)."""
+
+    def test_column_sum_recovers_surface_pressure(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.constants import p0
+
+        coords = get_speedy_coords()
+        physics = speedy_physics()
+        physics.cache_coords(coords)
+
+        nlev, nlon, nlat = coords.nodal_shape
+        state = PhysicsState.zeros(
+            (nlev, nlon, nlat),
+            normalized_surface_pressure=jnp.ones((nlon, nlat)),
+        )
+        dp = physics.pressure_thickness(state)
+        self.assertEqual(dp.shape, (nlev, nlon, nlat))
+        self.assertTrue(bool(jnp.all(dp > 0.0)))
+        # Pure-sigma column: the |Δp| stack integrates to the surface pressure
+        # (here p0, since normalized_surface_pressure == 1).
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(dp, axis=0)),
+            np.full((nlon, nlat), float(p0)),
+            rtol=1e-6,
         )

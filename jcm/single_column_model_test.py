@@ -180,8 +180,19 @@ class TestSCMEcham(unittest.TestCase):
         self.assertIn("qi_tendency", correction)
         self.assertIn("total_water_tendency", correction)
         self.assertIn("column_water_source", correction)
-        self.assertTrue(bool(jnp.all(correction["total_water_tendency"] >= 0.0)))
-        self.assertTrue(bool(jnp.all(correction["column_water_source"] >= 0.0)))
+        # Post-#806 the water cap is column-conservative: the per-cell net
+        # correction carries both signs (water removed from the receiving
+        # layers offsets the cap raised on the overdrawn donor), and the
+        # pressure-weighted column source is driven to ~0 (a small, sign-
+        # definite residual only where a column genuinely cannot supply the
+        # deficit), not the gross positive source #824 recorded.
+        self.assertTrue(
+            bool(jnp.all(jnp.isfinite(correction["total_water_tendency"])))
+        )
+        column_source = correction["column_water_source"]
+        self.assertTrue(bool(jnp.all(jnp.isfinite(column_source))))
+        self.assertTrue(bool(jnp.all(column_source >= -1.0e-9)))
+        self.assertLess(float(jnp.max(jnp.abs(column_source))), 1.0e-6)
 
     def test_radiation_step_counter_starts_at_zero(self):
         """Regression: SCM bootstrap must not advance the radiation carry.

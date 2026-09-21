@@ -25,9 +25,11 @@ from typing import Any, ClassVar
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
+from jcm import constants as physical_constants
 from jcm import profiling
 from jcm.physics_interface import (
     Physics,
@@ -185,9 +187,49 @@ class ComposablePhysics(nnx.Module, Physics):
         self._column_state_sharding, self._column_surface_sharding = (
             _flattened_column_sharding(coords)
         )
+        # Hybrid (a, b) half-level coefficients for the water-conservative
+        # positivity limiter's Δp weights (#806). Kept as static numpy config
+        # (like the shardings above) so they are not traced pytree leaves.
+        # Handles both SigmaCoordinates (a = 0, b = sigma) and
+        # HybridCoordinates (a, b in their ICON-native form), mirroring
+        # ``moist_air_state``.
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        vertical = coords.vertical
+        if isinstance(vertical, HybridCoordinates):
+            self._a_half = np.asarray(vertical.a_boundaries)
+            self._b_half = np.asarray(vertical.b_boundaries)
+        else:
+            sigma_boundaries = np.asarray(vertical.boundaries)
+            self._a_half = np.zeros_like(sigma_boundaries)
+            self._b_half = sigma_boundaries
         for term in self.terms:
             term.cache_coords(coords)
             term.cache_band_config(self.band_config)
+
+    def pressure_thickness(self, state: PhysicsState) -> jnp.ndarray | None:
+        """Layer masses |Δp| [Pa] in the state's own layout, level on axis 0.
+
+        The water-conservative positivity limiter (#806) uses these as the
+        mass weights that let it remove the cap's spurious column-integrated
+        water source. Computed from the cached hybrid coefficients and the
+        state's surface pressure exactly as ``moist_air_state`` builds its
+        ``pressure_thickness`` diagnostic; ``abs`` makes the weight independent
+        of whether the level axis runs top- or surface-first. Returns ``None``
+        before ``cache_coords`` has run (no geometry yet).
+        """
+        a_half = getattr(self, "_a_half", None)
+        if a_half is None:
+            return None
+        surface_pressure = (
+            state.normalized_surface_pressure * physical_constants.p0
+        )
+        vshape = (-1,) + (1,) * surface_pressure.ndim
+        pressure_half = (
+            a_half.reshape(vshape)
+            + self._b_half.reshape(vshape) * surface_pressure[jnp.newaxis]
+        )
+        return jnp.abs(jnp.diff(pressure_half, axis=0))
 
     def required_tracers(self) -> tuple[TracerSpec, ...]:
         """Union of TracerSpecs declared by every term.

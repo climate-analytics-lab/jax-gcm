@@ -370,6 +370,18 @@ _NON_NEGATIVE_TRACERS = frozenset({
 # their positivity caps must not be folded into a water-mass diagnostic.
 _WATER_MASS_TRACERS = frozenset({"qc", "qi", "qr", "qs"})
 
+# Water-mass fields whose positivity cap is made column-conservative when the
+# layer masses are available (#806). A bare per-cell cap raises the negative
+# half of a conservative vertical redistribution (vertical diffusion mixes
+# ``q``/``qc``/``qi``) while the receiving layers keep the gain, creating
+# column water. For these fields the cap's spurious column-integrated source is
+# removed again, spread over the layers that still hold water after the cap, so
+# the column water path is conserved to round-off without ever driving a layer
+# below zero. ``qnc``/``qni`` (numbers) and the VMR gases are excluded: they
+# are not water mass and their redistribution conservation is a separate
+# concern, so they keep the bare cap.
+_WATER_CONSERVED_FIELDS = frozenset({"specific_humidity"}) | _WATER_MASS_TRACERS
+
 # Deliberately just the membership test above: JAM aerosol and gas tracers
 # are NOT capped. Their tendency sums conservative redistributions (tracer
 # vertical diffusion, convective transport) with paired transfers (sulfur
@@ -427,43 +439,98 @@ def verify_state(state: PhysicsState) -> PhysicsState:
     )
 
 
+def _conserve_water_column(value, capped, raw, pressure_thickness, time_step):
+    """Reallocate the positivity cap's column water source within the column.
+
+    ``capped - raw`` is the mixing-ratio rate the per-cell cap ADDED to keep a
+    layer non-negative. Pressure-weighted and summed over the column it is a
+    spurious water source (#806): where a conservative vertical-diffusion
+    redistribution overdrew a donor layer, the cap invents the water the
+    receiving layers already hold. This removes exactly that column-integrated
+    source again, distributed over the water left after the cap (proportional
+    to each layer's remaining mass — the standard hole-filling choice, and the
+    only defensible one, since the individual receiving layers are not
+    identifiable from the summed tendency the interface sees). Each layer is
+    scaled toward — never below — zero, so the cap's non-negativity is
+    preserved. A column that cannot supply the whole deficit is drained to zero
+    and the bounded residual stays in the water-positivity ledger.
+
+    Vertical is axis 0 (broadcasting-native); the reduction is per column.
+    ``pressure_thickness`` is |Δp| (Pa); the 1/g mass factor cancels in the
+    ratio, so the bare Δp is the correct weight.
+    """
+    qpos = jnp.maximum(value, 0.0)
+    added = capped - raw                        # >= 0 mixing-ratio source rate
+    source = jnp.sum(added * pressure_thickness, axis=0, keepdims=True)
+    qnext = qpos + time_step * capped           # >= 0 post-cap next-step value
+    removable = jnp.sum(qnext * pressure_thickness, axis=0, keepdims=True)
+    # Safe denominator so a dry column (removable == 0) gives frac == 0 with no
+    # 0/0 in the reverse-mode graph (#558/#559 poison-free guard).
+    safe_removable = jnp.where(removable > 0.0, removable, 1.0)
+    # Fraction of each layer's post-cap water to remove — uniform across the
+    # column (proportional to mass) and bounded to [0, 1].
+    frac = jnp.where(
+        removable > 0.0,
+        jnp.clip(time_step * source / safe_removable, 0.0, 1.0),
+        0.0,
+    )
+    return capped - frac * qnext / time_step
+
+
 def _verify_tendencies_with_water_corrections(
     state: PhysicsState,
     tendencies: PhysicsTendency,
     time_step,
+    pressure_thickness: jnp.ndarray | None = None,
 ) -> tuple[PhysicsTendency, dict[str, jnp.ndarray]]:
-    """Return applied tendencies and stop-gradient water corrections."""
+    """Return applied tendencies and stop-gradient water corrections.
 
-    def _cap_negative_tend(value, tend):
-        # Straight-through estimator (maintainability review B.1 cross-
-        # cutting): the primal keeps the hard non-negativity cap, but the
-        # cotangent passes through to the producing tendency unchanged.
-        # The bare where() rerouted gradients from the physics that
-        # produced the tendency onto the STATE whenever it fired — and it
-        # fires routinely wherever precip/evaporation drives q toward 0,
-        # silently detaching those cells from any parameter being
-        # calibrated. Positivity in the forward pass is unaffected.
-        # Floor the tendency at the drain rate that empties the tracer and
-        # no further. ``max(tend, -max(value,0)/dt)`` equals the plain
-        # ``-value/dt`` cap wherever ``value >= 0``, leaves any source
-        # untouched, and on a tracer that arrives negative (aerosol is not
-        # entry-clipped) stops the sink rather than inventing mass.
+    ``pressure_thickness`` — the layer masses |Δp| in the same layout and with
+    the same level axis (0) as the tendencies — enables the column-conservative
+    reallocation for the water-mass fields (#806). Without it those fields fall
+    back to the bare per-cell positivity cap (a host that does not expose its
+    vertical geometry, or the standalone :func:`verify_tendencies` entry
+    point).
+    """
+
+    def _positivity(value, tend, conserve):
+        # Per-cell non-negativity cap: floor the tendency at the drain rate
+        # that empties the tracer and no further. ``max(tend, -max(value,0)/dt)``
+        # equals the plain ``-value/dt`` cap wherever ``value >= 0``, leaves any
+        # source untouched, and on a tracer that arrives negative (aerosol is
+        # not entry-clipped) stops the sink rather than inventing mass.
         capped = jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
-        # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
-        # tend)) is bitwise ``capped`` in the forward pass (the tend
-        # terms cancel exactly), unlike tend + stop_grad(capped - tend)
-        # whose re-association can undershoot the exact drain by an ulp
-        # and produce q < 0.
-        return jax.lax.stop_gradient(capped) + (
+        if conserve and pressure_thickness is not None:
+            result = _conserve_water_column(
+                value, capped, tend, pressure_thickness, time_step,
+            )
+        else:
+            result = capped
+        # Straight-through estimator (maintainability review B.1 cross-
+        # cutting): the primal keeps the hard cap (plus the conservative
+        # reallocation), but the cotangent passes through to the producing
+        # tendency unchanged. The bare where() rerouted gradients from the
+        # physics that produced the tendency onto the STATE whenever it fired
+        # — and it fires routinely wherever precip/evaporation drives q toward
+        # 0, silently detaching those cells from any parameter being
+        # calibrated. The exact-primal form ``stop_grad(result) + (tend -
+        # stop_grad(tend))`` is bitwise ``result`` in the forward pass (the
+        # tend terms cancel exactly), unlike ``tend + stop_grad(result - tend)``
+        # whose re-association can undershoot the drain by an ulp and produce
+        # q < 0.
+        return jax.lax.stop_gradient(result) + (
             tend - jax.lax.stop_gradient(tend)
         )
 
-    clipped_dqdt = _cap_negative_tend(
-        state.specific_humidity, tendencies.specific_humidity,
+    clipped_dqdt = _positivity(
+        state.specific_humidity, tendencies.specific_humidity, conserve=True,
     )
     clipped_tracer_tends = {
         name: (
-            _cap_negative_tend(state.tracers[name], tend)
+            _positivity(
+                state.tracers[name], tend,
+                conserve=name in _WATER_CONSERVED_FIELDS,
+            )
             if has_non_negative_tendency(name) and name in state.tracers
             else tend
         )
@@ -474,10 +541,12 @@ def _verify_tendencies_with_water_corrections(
         tracers=clipped_tracer_tends,
     )
 
-    # ``applied - raw`` is non-negative by construction for every capped
-    # field. Detaching this diagnostic is intentional: it records an
-    # artificial source in the primal water budget without creating a second
-    # optimization path around the cap's straight-through estimator.
+    # Net (post-reallocation) positivity source per water field. Detaching this
+    # diagnostic is intentional: it records the residual artificial source in
+    # the primal water budget without opening a second optimization path around
+    # the straight-through estimator. With Δp available and the column able to
+    # supply the deficit this is ~0 to round-off; the bare cap (no Δp) or a
+    # fully-drained column leaves the same gross correction #824 recorded.
     corrections = {
         "specific_humidity": jax.lax.stop_gradient(
             applied.specific_humidity - tendencies.specific_humidity
@@ -503,14 +572,17 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     on a linear sink would do for the same field.
 
     The cap is only sound for a field whose tendency is a pure sink plus
-    sources: clipping the donor half of a conservative redistribution
-    while its receivers keep their gain CREATES mass. Aerosol and gas
-    tracers are excluded for that reason. The retained water fields do
-    not strictly satisfy it either — vdiff redistributes q/qc/qi — so the
-    cap can create water mass in an overdrawn donor layer; it is kept
-    because the moist physics downstream requires q >= 0. The gridpoint
-    driver publishes the exact ``applied - raw`` correction for water fields
-    so this accepted safety tradeoff remains attributable (#806).
+    sources: clipping the donor half of a conservative redistribution while
+    its receivers keep their gain CREATES mass. Aerosol and gas tracers are
+    excluded for that reason. The retained water fields do not strictly
+    satisfy it either — vertical diffusion redistributes q/qc/qi — so through
+    the gridpoint driver (:func:`compute_physics_step_gridpoint`), where the
+    layer masses Δp are available, the water-mass fields' cap is made
+    column-conservative: the spurious column-integrated source is removed
+    again from the water left after the cap, so column water is conserved to
+    round-off while every layer stays >= 0 (#806). This standalone entry point
+    has no Δp and therefore applies only the bare per-cell cap; it is used for
+    unit tests and hosts that do not expose their vertical geometry.
 
     Args:
         state: The current ``PhysicsState`` (already passed through
@@ -622,8 +694,17 @@ def compute_physics_step_gridpoint(
         clamped_physics_state, forcing, terrain,
         prev_physics_data=physics_state_carry,
     )
+    # Layer masses Δp for the column-conservative water-positivity limiter
+    # (#806). ``None`` for a physics package that does not expose its vertical
+    # geometry (or a non-column host); the limiter then falls back to the bare
+    # per-cell cap.
+    thickness_fn = getattr(physics, "pressure_thickness", None)
+    pressure_thickness = thickness_fn(clamped_physics_state) if callable(
+        thickness_fn
+    ) else None
     physics_tendency, corrections = _verify_tendencies_with_water_corrections(
         clamped_physics_state, raw_physics_tendency, time_step,
+        pressure_thickness=pressure_thickness,
     )
     finalize = getattr(physics, "_finalize_tendency_verification", None)
     if callable(finalize):
