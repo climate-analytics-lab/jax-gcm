@@ -35,13 +35,19 @@ XY, ZXY = (IX, IL), (KX, IX, IL)
 def build_inputs(
     *, ta=288.0, qa=5.0, rh=0.8, phi=5000.0, phi0=500.0, fmask=0.5, psa=1.0,
     ua=1.0, va=1.0, sst=290.0, rsds=400.0, rlds=400.0, stl_am=288.0,
-    soilw_am=0.5, ones_forcing=False, aquaplanet=False, geopotential=None,
+    soilw_am=0.5, sice=0.0, ones_forcing=False, aquaplanet=False,
+    geopotential=None,
 ):
     """Assemble the five ``get_surface_fluxes`` arguments for a uniform column.
 
     ``aquaplanet`` selects ``TerrainData.aquaplanet`` (fmask = 0,
     ``lfluxland`` False) and drops the land forcing fields, so the sea
     branch has to produce the whole flux on its own.
+
+    ``sice`` is the sea-ice fraction; it defaults to 0 (open water) and is
+    passed explicitly even under ``ones_forcing`` — otherwise
+    ``ForcingData.ones`` would set it to 1, turning every open-water case into
+    a fully ice-covered one.
     """
     from jcm.terrain import TerrainData
 
@@ -71,7 +77,8 @@ def build_inputs(
         speedy_coords=speedy_coords,
     )
 
-    forcing_kwargs = dict(sea_surface_temperature=sst * jnp.ones(XY))
+    forcing_kwargs = dict(sea_surface_temperature=sst * jnp.ones(XY),
+                          sice_am=sice * jnp.ones(XY))
     if not aquaplanet:
         forcing_kwargs.update(soilw_am=soilw_am * jnp.ones(XY),
                               stl_am=stl_am * jnp.ones(XY))
@@ -446,6 +453,106 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
         check_jvp(get_orog_land_sfc_drag,
                   functools.partial(jax.jvp, get_orog_land_sfc_drag),
                   args=(phi0, hdrag), atol=None, rtol=1, eps=0.000001)
+
+
+class TestSeaIceFluxes(unittest.TestCase):
+    """Sea-ice weighting of the sea tile.
+
+    SPEEDY hands the atmosphere a single sea-surface temperature
+    ``tsea = (1 - sice)*SST + sice*T_ice`` with the ice surface at the saline
+    freezing point (``sea_model.f90``); the sea fluxes are evaluated once at
+    ``tsea``. These run on the aquaplanet (fmask = 0) so the published grid
+    mean is exactly the sea tile.
+    """
+
+    # Saline freezing point and surface emission constant used by the scheme.
+    SSTFR = 273.2 - 1.8
+    ESBC = 0.98 * c.sbc  # Parameters.default().mod_radcon.emisfc * sigma
+
+    def _sea(self, **kwargs):
+        # Warm ocean under a cold, sub-saturated column: open water drives a
+        # strong upward sensible/latent flux, so ice suppression is visible.
+        args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=300.0, rlds=350.0, **kwargs)
+        _, physics_data = get_surface_fluxes(**args)
+        return physics_data.surface_flux
+
+    def test_effective_temperature_blend(self):
+        """Published tsfc and rlus follow the ice-weighted freezing-point blend."""
+        sst = 300.0
+        t_ice = min(sst, self.SSTFR)
+        for sice in (0.0, 0.3, 0.5, 1.0):
+            with self.subTest(sice=sice):
+                sflux = self._sea(sice=sice)
+                tsea = sst + sice * (t_ice - sst)
+                self.assertTrue(jnp.allclose(sflux.tsfc, tsea, atol=1e-3),
+                                f"tsfc {jnp.mean(sflux.tsfc)} != {tsea}")
+                self.assertTrue(
+                    jnp.allclose(sflux.rlus, self.ESBC * tsea ** 4, rtol=1e-4),
+                    "rlus is not the emission at the blended temperature")
+
+    def test_fraction_interpolates_linearly_in_temperature(self):
+        """The blended temperature is exactly linear in the ice fraction."""
+        water, half, ice = (self._sea(sice=s) for s in (0.0, 0.5, 1.0))
+        self.assertTrue(jnp.allclose(half.tsfc, 0.5 * (water.tsfc + ice.tsfc),
+                                     rtol=1e-6))
+
+    def test_ice_suppresses_turbulent_fluxes(self):
+        """Sensible and latent fluxes fall monotonically as ice grows.
+
+        Over the capped, colder ice surface both the sensible flux (linear in
+        the surface temperature) and evaporation (through the much smaller
+        saturation humidity at the freezing point) are strongly reduced
+        relative to open water — the physical point of the fix.
+        """
+        water, half, ice = (self._sea(sice=s) for s in (0.0, 0.5, 1.0))
+        for field in ("shf", "evap"):
+            w, h, i = (jnp.mean(getattr(x, field)) for x in (water, half, ice))
+            self.assertGreater(float(w), float(h), f"{field}: water !> 50% ice")
+            self.assertGreater(float(h), float(i), f"{field}: 50% !> full ice")
+        # Open water evaporates strongly; the freezing ice tile essentially
+        # shuts moisture exchange off.
+        self.assertGreater(float(jnp.mean(water.evap)), 0.0)
+        self.assertLess(float(jnp.mean(ice.evap)),
+                        0.2 * float(jnp.mean(water.evap)))
+
+    def test_open_water_is_unchanged(self):
+        """Zero ice fraction reproduces the pure-SST sea fluxes bit-for-bit."""
+        sflux = self._sea(sice=0.0)
+        self.assertTrue(jnp.allclose(sflux.tsfc, 300.0, atol=1e-4))
+
+    def test_ice_fraction_varies_across_the_grid(self):
+        """A per-cell ice fraction is applied pointwise (broadcasting-native).
+
+        Passing a 2D ``sice`` field (uniform SST/air) must give each cell the
+        blend for its own fraction — no shape assumption collapses the map.
+        """
+        sst = 300.0
+        sice_grid = jnp.linspace(0.0, 1.0, IX * IL).reshape(XY)
+        args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=sst, rlds=350.0, sice=sice_grid)
+        _, physics_data = get_surface_fluxes(**args)
+        expected = sst + sice_grid * (min(sst, self.SSTFR) - sst)
+        self.assertTrue(jnp.allclose(
+            physics_data.surface_flux.tsfc, expected, atol=1e-3))
+
+    def test_partial_ice_gradient_is_finite(self):
+        """Reverse-mode gradients (incl. w.r.t. sice_am) stay finite over ice."""
+        args = build_inputs(aquaplanet=True, ta=280.0, rh=0.7, ua=5.0, va=2.0,
+                            sst=300.0, rlds=350.0, sice=0.5)
+        _, f_vjp = jax.vjp(
+            get_surface_fluxes, args["state"], args["physics_data"],
+            args["parameters"], args["forcing"], args["terrain"])
+        cotangent = (
+            PhysicsTendency.ones(ZXY),
+            PhysicsData.ones(XY, KX,
+                             speedy_coords=args["physics_data"].speedy_coords))
+        df_dstate, df_ddatas, df_dparams, df_dforcing, _ = f_vjp(cotangent)
+        self.assertFalse(df_dforcing.isnan().any_true(),
+                         "Gradient w.r.t. forcing (sice_am) contains NaNs")
+        self.assertFalse(df_dstate.isnan().any_true())
+        self.assertFalse(df_ddatas.isnan().any_true())
+        self.assertFalse(df_dparams.isnan().any_true())
 
 
 class TestAquaplanetSurfaceFluxes(unittest.TestCase):
