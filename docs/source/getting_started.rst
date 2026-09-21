@@ -35,7 +35,9 @@ Requirements
 ^^^^^^^^^^^^
 
 - Python ≥ 3.11
-- JAX
+- JAX ≥ 0.10, < 0.11 (validated on 0.10.2; the 0.11 line drops the
+  ``jax.experimental.hijax`` API that Flax imports, so it is capped in
+  ``requirements.txt`` — see #853)
 - Dinosaur ≥ 1.5.0 (the dynamical-core backend)
 - Flax ≥ 0.12.1
 - XArray (for I/O and data handling)
