@@ -1508,6 +1508,107 @@ class TestObserversUnderJit(unittest.TestCase):
             np.asarray(explicit.observations[0]["temperature"]))
 
 
+def _assert_within_release_bands(member, bands_file, bands, pred):
+    """Assert every band variable's global mean in ``pred`` sits in its band.
+
+    Factored out of the GPU-gated matrix walk so the assertion logic itself
+    has fast CPU coverage (``TestReleaseMatrixBandCheck``), including failure
+    modes a real GPU run cannot cheaply produce — a changed vertical grid,
+    a value outside its band, a fixture without a noise floor.
+
+    Args:
+        member: Matrix member name, for failure messages.
+        bands_file: Where ``bands`` came from, for failure messages.
+        bands: The member's band Dataset (``<var>.mean/.std/.noise``).
+        pred: Dataset of the fresh run's ``(time, lon, lat)``-mean variables.
+
+    """
+    import xarray as xr
+
+    stat_vars = sorted(
+        v[: -len(".mean")] for v in bands.data_vars if v.endswith(".mean"))
+    assert stat_vars, f"{bands_file} carries no bands"
+
+    tol = 3  # tolerance in standard deviations
+    # ``tol * std`` is the band; three floors keep a tight or degenerate
+    # ``std`` from yielding a band narrower than the arithmetic underneath
+    # it, and the widest wins. Deliberately NONE of them is a relative
+    # fraction of the mean: a 25 % fallback for ``std == 0`` was tried and
+    # was a worse bug than it fixed, handing the pure-a ``pressure_full``
+    # levels (~13 kPa constants, exactly reproducible so ``std`` is a true
+    # zero) half-widths of ~1.8 kPa — wide enough to wave a gross pressure
+    # error through — while doing nothing for the near-zero underflow
+    # variables it was meant for, since 25 % of ~1e-24 is still ~0. The
+    # three floors are:
+    #  - ``ulp_floor * |mean|`` — a few ULP of the field's own magnitude.
+    #    Covers a *positive* ``std`` finer than float32 resolves
+    #    (``pressure_full`` near the pure-a levels stores 4.9e-4 Pa at
+    #    7405.9 Pa, ~0.55 ULP) AND a ``std`` of exactly zero at a nonzero
+    #    constant (the pure-a ``pressure_full`` levels): both are
+    #    bit-reproducible, so a few ULP (1e-6 ~ 8 ULP lifts 7405.9 Pa to
+    #    7.4e-3 Pa) is the right, tight band — never a wide relative one.
+    #  - ``atol`` — an absolute floor for the near-zero/underflow tail
+    #    (specific/relative humidity, ~1e-24…1e-37 kg kg-1) where
+    #    ``ulp_floor * |mean|`` itself underflows to nothing. (These
+    #    fixtures have no ``std == 0`` cell between ~1e-8 and ~1 in
+    #    magnitude, so the ULP and absolute floors partition the degenerate
+    #    cells cleanly.)
+    #  - ``noise_tol * <var>.noise`` — ``noise`` is the measured
+    #    peak-to-peak spread of this same window across independent repeats
+    #    in separate processes, i.e. what the band must absorb with no
+    #    physics having changed. Applied to the half-width so it can only
+    #    ever widen a band.
+    ulp_floor = 1e-6
+    atol = 1e-8
+    noise_tol = 3
+    for var in stat_vars:
+        mean = bands[f"{var}.mean"]
+        std = bands[f"{var}.std"]
+        assert f"{var}.noise" in bands, (
+            f"{var}.noise missing from {bands_file} — the fixture predates "
+            "the reproducibility floor; regenerate it")
+        prediction = pred[var]
+        # Comparing two DataArrays first aligns them by coordinate label
+        # with an inner join, so a changed vertical coordinate would not
+        # fail the bands — it would drop the mismatched levels from the
+        # comparison, all the way down to a zero-length ``.all()`` that is
+        # vacuously True. A changed grid must instead fail as the loudest
+        # kind of band mismatch, so the prediction has to carry exactly the
+        # coordinates the bands were written with before any value is
+        # compared.
+        assert dict(prediction.sizes) == dict(mean.sizes), (
+            f"{member}: {var} has dimensions {dict(prediction.sizes)} where "
+            f"{bands_file} has {dict(mean.sizes)} — a changed grid cannot "
+            "be validated against these bands; regenerate the fixture with "
+            "jcm.data.test.release_matrix.generate_stats.generate"
+            f"({member!r}) if the new grid is intentional.")
+        try:
+            xr.align(mean, prediction, join="exact")
+        except ValueError as exc:
+            raise AssertionError(
+                f"{member}: {var} coordinates differ from {bands_file}'s — "
+                "a changed grid cannot be validated against these bands; "
+                "regenerate the fixture with "
+                "jcm.data.test.release_matrix.generate_stats.generate"
+                f"({member!r}) if the new grid is intentional.") from exc
+        half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
+        half_width = np.maximum(half_width, atol)
+        half_width = np.maximum(
+            half_width, noise_tol * bands[f"{var}.noise"])
+        lower, upper = mean - half_width, mean + half_width
+        assert ((lower <= prediction).all()) & (
+            (prediction <= upper).all()
+        ), (
+            f"{member}: {var} fell outside its band (±3σ, floored at 3x "
+            "the measured run-to-run reproducibility, at a few ULP of the "
+            f"field magnitude, and at an absolute {atol:g} for the "
+            "near-zero tail). Regenerate this member's band file AND its "
+            "init state together with "
+            "jcm.data.test.release_matrix.generate_stats.generate"
+            f"({member!r}) if the deviation is intentional."
+        )
+
+
 class TestReleaseMatrixStatistics(unittest.TestCase):
     """The supported-matrix climatology regression.
 
@@ -1598,14 +1699,16 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                 continue
             with self.subTest(member=member):
                 bands = xr.open_dataset(bands_file)
-                # The band file names the variables it carries; deriving the
-                # list here instead would let a regenerated fixture and the
-                # assertion drift apart silently.
-                stat_vars = sorted(
-                    v[: -len(".mean")] for v in bands.data_vars
-                    if v.endswith(".mean")
-                )
-                self.assertTrue(stat_vars, f"{bands_file} carries no bands")
+                # The band file names the variables it carries — the
+                # assertion (``_assert_within_release_bands``) reads them
+                # back from the file rather than re-deriving the list, so a
+                # regenerated fixture and the check cannot drift apart. An
+                # empty band file is also *its* failure, but catch it here,
+                # before this member's expensive GPU window is run for
+                # nothing.
+                self.assertTrue(
+                    any(v.endswith(".mean") for v in bands.data_vars),
+                    f"{bands_file} carries no bands")
 
                 # The state path comes from the band file, digest and all,
                 # so these bands are always checked against the state they
@@ -1644,64 +1747,7 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                     pred = stats_window_global_mean_isolated(
                         member, state, tmp, env=worker_env)
 
-                tol = 3  # tolerance in standard deviations
-                # ``tol * std`` is the band; three floors keep a tight or
-                # degenerate ``std`` from yielding a band narrower than the
-                # arithmetic underneath it, and the widest wins. Deliberately
-                # NONE of them is a relative fraction of the mean: a 25 %
-                # fallback for ``std == 0`` was tried and was a worse bug than
-                # it fixed, handing the pure-a ``pressure_full`` levels
-                # (~13 kPa constants, exactly reproducible so ``std`` is a true
-                # zero) half-widths of ~1.8 kPa — wide enough to wave a gross
-                # pressure error through — while doing nothing for the
-                # near-zero underflow variables it was meant for, since 25 % of
-                # ~1e-24 is still ~0. The three floors are:
-                #  - ``ulp_floor * |mean|`` — a few ULP of the field's own
-                #    magnitude. Covers a *positive* ``std`` finer than float32
-                #    resolves (``pressure_full`` near the pure-a levels stores
-                #    4.9e-4 Pa at 7405.9 Pa, ~0.55 ULP) AND a ``std`` of
-                #    exactly zero at a nonzero constant (the pure-a
-                #    ``pressure_full`` levels): both are bit-reproducible, so a
-                #    few ULP (1e-6 ~ 8 ULP lifts 7405.9 Pa to 7.4e-3 Pa) is the
-                #    right, tight band — never a wide relative one.
-                #  - ``atol`` — an absolute floor for the near-zero/underflow
-                #    tail (specific/relative humidity, ~1e-24…1e-37 kg kg-1)
-                #    where ``ulp_floor * |mean|`` itself underflows to nothing.
-                #    (These fixtures have no ``std == 0`` cell between ~1e-8 and
-                #    ~1 in magnitude, so the ULP and absolute floors partition
-                #    the degenerate cells cleanly.)
-                #  - ``noise_tol * <var>.noise`` — ``noise`` is the measured
-                #    peak-to-peak spread of this same window across independent
-                #    repeats in separate processes, i.e. what the band must
-                #    absorb with no physics having changed. Applied to the
-                #    half-width so it can only ever widen a band.
-                ulp_floor = 1e-6
-                atol = 1e-8
-                noise_tol = 3
-                for var in stat_vars:
-                    mean = bands[f"{var}.mean"]
-                    std = bands[f"{var}.std"]
-                    self.assertIn(
-                        f"{var}.noise", bands,
-                        f"{var}.noise missing from {bands_file} — the fixture "
-                        "predates the reproducibility floor; regenerate it",
-                    )
-                    half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
-                    half_width = np.maximum(half_width, atol)
-                    half_width = np.maximum(
-                        half_width, noise_tol * bands[f"{var}.noise"])
-                    lower, upper = mean - half_width, mean + half_width
-                    assert ((lower <= pred[var]).all()) & (
-                        (pred[var] <= upper).all()
-                    ), (
-                        f"{member}: {var} fell outside its band (±3σ, floored "
-                        "at 3x the measured run-to-run reproducibility, at a "
-                        "few ULP of the field magnitude, and at an absolute "
-                        f"{atol:g} for the near-zero tail). Regenerate this "
-                        "member's band file AND its init state together with "
-                        "jcm.data.test.release_matrix.generate_stats.generate"
-                        f"({member!r}) if the deviation is intentional."
-                    )
+                _assert_within_release_bands(member, bands_file, bands, pred)
                 checked += 1
         if not_local:
             print(
@@ -1712,6 +1758,75 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                 "no matrix member had a band file, its optional extras and "
                 "its init state available",
             )
+
+
+class TestReleaseMatrixBandCheck(unittest.TestCase):
+    """Fast CPU coverage of the band assertion the GPU matrix walk applies.
+
+    The GPU test is env-gated and each member costs a full model window, so
+    the assertion's *failure* modes — the ones that must never pass
+    vacuously — are exercised here on synthetic fixtures instead.
+    """
+
+    def _fixture(self):
+        import xarray as xr
+
+        level = [0.996, 0.5, 1e-5]
+        mean = xr.DataArray([288.0, 250.0, 210.0],
+                            coords={"level": level}, dims="level")
+        bands = xr.Dataset({
+            "temperature.mean": mean,
+            "temperature.std": xr.full_like(mean, 0.5),
+            "temperature.noise": xr.full_like(mean, 0.01),
+        })
+        pred = xr.Dataset({"temperature": mean.copy()})
+        return bands, pred
+
+    def test_matching_grid_inside_bands_passes(self):
+        bands, pred = self._fixture()
+        _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_value_outside_band_fails(self):
+        bands, pred = self._fixture()
+        pred["temperature"] = pred["temperature"] + 10.0
+        with self.assertRaisesRegex(AssertionError, "fell outside its band"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_disjoint_level_coordinate_fails_not_vacuously(self):
+        # Without the exact-coordinate guard, xarray's inner-join alignment
+        # would reduce this comparison to a zero-length array whose
+        # ``.all()`` is vacuously True — the values here are hundreds of
+        # kelvin outside the bands, and a changed vertical grid would have
+        # sailed through as a pass.
+        bands, pred = self._fixture()
+        pred = pred.assign_coords(level=[0.9, 0.4, 2e-5])
+        pred["temperature"] = pred["temperature"] + 1000.0
+        with self.assertRaisesRegex(AssertionError, "coordinates differ"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_partial_coordinate_overlap_fails(self):
+        # Partial overlap is the subtler variant: the comparison would
+        # silently check only the surviving levels. Values are left inside
+        # the bands to prove the guard fires on the coordinates alone.
+        bands, pred = self._fixture()
+        pred = pred.assign_coords(level=[0.996, 0.5, 2e-5])
+        with self.assertRaisesRegex(AssertionError, "coordinates differ"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_changed_level_count_fails(self):
+        import xarray as xr
+
+        bands, pred = self._fixture()
+        pred = xr.Dataset({"temperature": xr.DataArray(
+            [288.0, 210.0], coords={"level": [0.996, 1e-5]}, dims="level")})
+        with self.assertRaisesRegex(AssertionError, "has dimensions"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_missing_noise_floor_fails(self):
+        bands, pred = self._fixture()
+        bands = bands.drop_vars("temperature.noise")
+        with self.assertRaisesRegex(AssertionError, "noise missing"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
 
 
 
