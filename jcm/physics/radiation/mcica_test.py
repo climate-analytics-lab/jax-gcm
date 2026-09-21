@@ -5,14 +5,17 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.radiation.mcica import (
     column_key,
     column_total_cover,
     effective_cloud_fraction,
+    expected_total_cover,
     generate_subcolumns,
     in_cloud_path,
 )
+from jcm.physics.radiation.mcica import _alpha_from_overlap
 
 
 _NLEV = 20
@@ -228,3 +231,99 @@ def test_effective_fraction_removes_spurious_cover_from_optically_empty_layer():
     np.testing.assert_allclose(
         float(column_total_cover(effective_cloud_fraction(f2, eps=eps), 1)),
         0.6, rtol=1e-5)
+
+
+def _unrolled_expected_total_cover(cloud_fraction, layer_thickness, overlap):
+    """Evaluate the former recurrence as an independent test oracle."""
+    cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    alpha = _alpha_from_overlap(cf, layer_thickness, overlap, 2.0)
+    clear = [jnp.ones(cf.shape[1:]), 1.0 - cf[0]]
+    for k in range(1, cf.shape[0]):
+        contrib = jnp.zeros(cf.shape[1:])
+        prod_a = jnp.ones(cf.shape[1:])
+        seg_max = cf[k]
+        for s in range(k, -1, -1):
+            seg_max = jnp.maximum(seg_max, cf[s])
+            start = (1.0 - alpha[s - 1]) if s > 0 else 1.0
+            contrib = contrib + start * prod_a * clear[s] * (1.0 - seg_max)
+            if s > 0:
+                prod_a = prod_a * alpha[s - 1]
+        clear.append(contrib)
+    return 1.0 - clear[cf.shape[0]]
+
+
+@pytest.mark.parametrize("overlap", ["random", "maximum_random", "exponential"])
+@pytest.mark.parametrize("fractions", [
+    [0.0],
+    [1.0],
+    [0.0, 0.5, 0.0, 0.8, 0.0],
+    [0.4, 0.4, 0.7, 0.4, 0.7],
+    [0.1, 0.9, 0.3, 0.6, 0.2],
+])
+def test_expected_total_cover_matches_unrolled_value_and_derivatives(overlap, fractions):
+    """The scan preserves values, tangent, and cotangent at ties and gaps."""
+    cf = jnp.asarray(fractions, dtype=jnp.float32)
+    dz = jnp.linspace(200.0, 800.0, len(fractions))
+    tangent_cf = jnp.linspace(0.1, 0.3, len(fractions))
+    tangent_dz = jnp.linspace(0.2, 0.4, len(fractions))
+    reference = lambda c, d: _unrolled_expected_total_cover(c, d, overlap)
+    scanned = lambda c, d: expected_total_cover(c, d, overlap)
+    np.testing.assert_allclose(scanned(cf, dz), reference(cf, dz), rtol=2e-6, atol=2e-6)
+    old_jvp = jax.jvp(reference, (cf, dz), (tangent_cf, tangent_dz))
+    new_jvp = jax.jvp(scanned, (cf, dz), (tangent_cf, tangent_dz))
+    for actual, expected in zip(new_jvp, old_jvp):
+        np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+    old_vjp = jax.grad(lambda c, d: jnp.sum(reference(c, d)), argnums=(0, 1))(cf, dz)
+    new_vjp = jax.grad(lambda c, d: jnp.sum(scanned(c, d)), argnums=(0, 1))(cf, dz)
+    for actual, expected in zip(new_vjp, old_vjp):
+        np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.parametrize("overlap", ["random", "maximum_random", "exponential"])
+def test_expected_total_cover_multicolumn_47_levels(overlap):
+    """A realistic vertical dimension and column batch preserve values."""
+    cf = jnp.asarray(np.random.default_rng(9).uniform(size=(47, 3)), dtype=jnp.float32)
+    dz = jnp.full((47, 3), 350.0)
+    np.testing.assert_allclose(
+        expected_total_cover(cf, dz, overlap),
+        _unrolled_expected_total_cover(cf, dz, overlap),
+        rtol=2e-6, atol=2e-6,
+    )
+
+
+def test_expected_total_cover_float64_value_and_derivatives():
+    """Keep the former promotion behavior when 64-bit arrays are enabled."""
+    with jax.enable_x64():
+        cf = jnp.array([0.2, 0.6, 0.6, 0.3], dtype=jnp.float64)
+        dz = jnp.array([200.0, 400.0, 600.0, 800.0], dtype=jnp.float64)
+        reference = lambda c, d: _unrolled_expected_total_cover(c, d, "exponential")
+        scanned = lambda c, d: expected_total_cover(c, d, "exponential")
+        np.testing.assert_allclose(scanned(cf, dz), reference(cf, dz), rtol=1e-12)
+        old_grad = jax.grad(reference, argnums=(0, 1))(cf, dz)
+        new_grad = jax.grad(scanned, argnums=(0, 1))(cf, dz)
+        for actual, expected in zip(new_grad, old_grad):
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("fractions", [[0.3], [0.2, 0.6, 0.6, 0.3]])
+def test_expected_total_cover_float32_under_x64(fractions):
+    """Preserve the old result dtype and derivatives with x64 enabled."""
+    with jax.enable_x64():
+        cf = jnp.asarray(fractions, dtype=jnp.float32)
+        dz = jnp.full(cf.shape, 400.0, dtype=jnp.float32)
+        reference = lambda c, d: _unrolled_expected_total_cover(c, d, "exponential")
+        scanned = lambda c, d: expected_total_cover(c, d, "exponential")
+        old_value = reference(cf, dz)
+        new_value = scanned(cf, dz)
+        assert new_value.dtype == old_value.dtype
+        np.testing.assert_allclose(new_value, old_value, rtol=1e-6, atol=1e-6)
+        old_jvp = jax.jvp(reference, (cf, dz), (cf, dz))
+        new_jvp = jax.jvp(scanned, (cf, dz), (cf, dz))
+        for actual, expected in zip(new_jvp, old_jvp):
+            assert actual.dtype == expected.dtype
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+        old_grad = jax.grad(reference, argnums=(0, 1))(cf, dz)
+        new_grad = jax.grad(scanned, argnums=(0, 1))(cf, dz)
+        for actual, expected in zip(new_grad, old_grad):
+            assert actual.dtype == expected.dtype
+            np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
