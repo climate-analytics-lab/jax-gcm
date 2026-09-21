@@ -89,8 +89,11 @@ Accepts an already-gridpoint `PhysicsState`, runs `verify_state`
 (non-negativity clamp on tracers), calls
 `Physics.compute_tendencies(state, forcing, terrain,
 prev_physics_data=physics_state)`, applies `verify_tendencies` (caps
-negative-going tracer tendencies at `-state/dt`), and returns the
-gridpoint tendency unchanged by any backend-specific conversion.
+negative-going tracer tendencies at `-state/dt`, with a
+column-conservative reallocation for the water-mass fields so the cap
+cannot create water — see {doc}`water_positivity_conservation`), and
+returns the gridpoint tendency unchanged by any backend-specific
+conversion.
 
 Returns `(physics_tendency, new_physics_state)`. The new carry is the
 dict the physics call writes to (radiation cache, prior-step TKE,

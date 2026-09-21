@@ -48,6 +48,18 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
   the ``physics_state`` carry is threaded as an explicit JAX pytree rather than
   ECHAM's module-level globals, so the step is a pure function.
 
+**Positivity and water conservation.** Because tendencies sum against one input
+state, a layer's summed water tendency can drive it negative — a donor layer
+overdrawn by vertical diffusion's conservative q/qc/qi redistribution plus the
+co-located cloud and convection sinks. `verify_tendencies` caps each water
+field's tendency at the drain rate `-q/dt` so the moist physics never sees
+`q < 0`, and reallocates the capped amount within the column, proportional to
+the water each layer still holds, so the cap conserves column water to
+round-off instead of inventing it in the overdrawn donor. Each water species is
+conserved independently; a column that genuinely cannot supply the deficit
+leaves a bounded, ledgered residual. The engineering treatment is
+{doc}`../design/water_positivity_conservation`.
+
 **Status & known limitations.** Only Lie splitting is implemented; Strang
 splitting (``O(dt²)``, 2× physics cost) is a documented follow-up should a
 coarser-``dt`` regime expose the coupling error. At the current climate-rate
