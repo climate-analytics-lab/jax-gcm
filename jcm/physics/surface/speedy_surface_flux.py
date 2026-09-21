@@ -17,6 +17,45 @@ so every published field — including ``hfluxn``, the net heat flux into
 the surface medium — is that merged 2D map. The land and sea values stay
 intermediates of this module.
 
+Sea ice
+-------
+The sea tile itself is a mix of open water and sea ice. SPEEDY couples the
+two the way its ocean/ice model hands a single sea-surface temperature to
+the atmosphere (``sea_model.f90``): it area-weights the temperature the bulk
+formulae see by the ice fraction,
+
+    tsea = sst + sice * (t_ice - sst) = (1 - sice) * sst + sice * t_ice,
+
+and then evaluates the sea fluxes *once* at ``tsea`` — it blends the
+temperature, not the fluxes. ``suflux.f90`` therefore never mentions sea ice;
+it is already baked into the ``tsea`` it receives. jcm prescribes only the
+open-water SST and the ice fraction ``forcing.sice_am``, so the ice-surface
+temperature is taken as the SST capped at the saline freezing point
+``sstfr = 273.2 - 1.8 K`` (SPEEDY's constant; the 271.38 K ECHAM ``ctfreez``
+the TTE-TKE tiled path uses is the same number). Over ice this cold, capped
+surface — colder than the underlying water and holding far less saturation
+humidity — is what suppresses the sensible and latent exchange relative to
+open water. The sensible-heat flux is linear in the surface temperature, so
+blending ``tsea`` is exactly equivalent to area-weighting the water and ice
+sensible fluxes; for evaporation (non-linear through ``qsat``) and the
+stability factor, blending the temperature is SPEEDY's chosen approximation.
+
+In the SPEEDY convention ``sice_am`` is the ice fraction **of the sea part**
+of the cell, not a grid-box tile fraction, so it enters the sea-tile blend
+directly: the ``fmask`` land/sea merge afterwards is the only place the sea
+area weighting appears, and normalising by ``1 - fmask`` here would divide
+the sea area out twice. Reference SPEEDY applies the same unnormalised
+structure to the sea albedo (``forcing.f90``: ``alb_s = albsea +
+sice_am*(albice - albsea)``, merged with the land albedo by ``fmask_l``
+afterwards — ported verbatim in ``jcm/physics/forcing/speedy_forcing.py``)
+and to the coupler's SST blend (``sea_model.f90`` above). The packaged
+SPEEDY climatology carries the same convention: coastal cells reach
+``icec = 1`` where ``lsm = 0.99``, which a grid-box tile fraction (bounded
+by ``1 - lsm``) could never do. The ECHAM multi-tile path
+(``surface/echam/``, TTE-TKE vdiff) instead reads the field under ECHAM's
+box-tiling convention (``clip(sice, 0, 1 - land)``, tiles summing to 1) —
+that is that scheme's own convention, not this one's.
+
 Near-surface extrapolation
 --------------------------
 The bulk formulae need air properties at the surface layer (sigma = 0.99),
@@ -234,26 +273,40 @@ def _sea_fluxes(
     esbc,
     rsds,
     rlds,
-) -> SurfaceTypeFluxes:
-    """Sea fluxes, evaluated at the prescribed sea-surface temperature."""
+) -> tuple[SurfaceTypeFluxes, jnp.ndarray]:
+    """Sea fluxes and the ice-weighted temperature they are evaluated at.
+
+    The sea tile mixes open water at the prescribed SST with sea ice at the
+    saline freezing point, area-weighted by ``forcing.sice_am`` into a single
+    effective sea-surface temperature (see the module docstring). Returning
+    that temperature lets the caller publish ``tsfc``/``tskin`` over sea
+    consistently with the ``rlus`` emitted here.
+    """
     sst = forcing.sea_surface_temperature
     alb_s = physics_data.mod_radcon.alb_s
 
-    rho_wind = air.rho_wind * _stability_factor(sst, air.t2_sea, sfp)
+    # Ice-weighted effective sea-surface temperature (SPEEDY sea_model.f90).
+    # sstfr is the saline freezing point; the ice-surface temperature is the
+    # SST capped there, since jcm carries no separate ice temperature field.
+    sstfr = 273.2 - 1.8
+    sice = jnp.clip(forcing.sice_am, 0.0, 1.0)
+    tsea = sst + sice * (jnp.minimum(sst, sstfr) - sst)
+
+    rho_wind = air.rho_wind * _stability_factor(tsea, air.t2_sea, sfp)
 
     cdsdv = sfp.cds * rho_wind
     ustr = -cdsdv * air.u_bottom
     vstr = -cdsdv * air.v_bottom
 
-    shf = sfp.chs * c.cpd * rho_wind * (sst - air.t_sea)
+    shf = sfp.chs * c.cpd * rho_wind * (tsea - air.t_sea)
 
-    qsat_sea = get_qsat(sst, air.psa, 1.0)
+    qsat_sea = get_qsat(tsea, air.psa, 1.0)
     evap = sfp.chs * rho_wind * (qsat_sea - air.q_sea)
 
-    rlus = esbc * sst ** 4.0
+    rlus = esbc * tsea ** 4.0
     hfluxn = rsds * (1.0 - alb_s) + rlds - (rlus + shf + alhc * evap)
 
-    return SurfaceTypeFluxes(ustr, vstr, shf, evap, rlus, hfluxn)
+    return SurfaceTypeFluxes(ustr, vstr, shf, evap, rlus, hfluxn), tsea
 
 
 def _extrapolate_to_surface(
@@ -333,8 +386,10 @@ def get_surface_fluxes(
             ``surface_flux.rlds``, ``humidity.rh``, ``mod_radcon`` albedos and
             snow cover, and ``speedy_coords``.
         parameters: SPEEDY parameters; ``surface_flux`` and ``mod_radcon``.
-        forcing: Boundary conditions; sea-surface temperature, land surface
-            temperature ``stl_am`` and soil wetness ``soilw_am``.
+        forcing: Boundary conditions; open-water sea-surface temperature,
+            sea-ice fraction ``sice_am`` (blended into the effective sea
+            temperature), land surface temperature ``stl_am`` and soil
+            wetness ``soilw_am``.
         terrain: Orography, land fraction ``fmask``, and ``lfluxland``.
 
     Returns:
@@ -363,17 +418,20 @@ def get_surface_fluxes(
     land, tskin = jax.lax.cond(
         terrain.lfluxland, lambda _: land_fluxes(), lambda _: no_land, operand=None,
     )
-    sea = _sea_fluxes(air, sfp, forcing, physics_data, esbc, rsds, rlds)
+    sea, tsea = _sea_fluxes(air, sfp, forcing, physics_data, esbc, rsds, rlds)
 
     merged = jax.tree.map(lambda over_land, over_sea:
                           over_sea + fmask * (over_land - over_sea), land, sea)
 
-    sst = forcing.sea_surface_temperature
+    # ``tsea`` is the ice-weighted sea-surface temperature the sea fluxes were
+    # evaluated at (open water blended with sea ice); publishing tsfc/tskin
+    # from it keeps them consistent with the emitted ``rlus`` and with the
+    # temperature the longwave scheme reads back as ``tsfc``.
     surface_flux_out = physics_data.surface_flux.copy(
         ustr=merged.ustr, vstr=merged.vstr, shf=merged.shf, evap=merged.evap,
         rlus=merged.rlus, hfluxn=merged.hfluxn,
-        tsfc=sst + fmask * (forcing.stl_am - sst),
-        tskin=sst + fmask * (tskin - sst),
+        tsfc=tsea + fmask * (forcing.stl_am - tsea),
+        tskin=tsea + fmask * (tskin - tsea),
         u0=air.u_wind, v0=air.v_wind, t0=t0,
     )
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
