@@ -63,8 +63,14 @@ def updraft_area_cover(
     the plume profile (zero below cloud base), so that taper is rebuilt
     here from the layer masses: ``p_s − p_half(k) = g·Σ_{j≥k} m_j``, so the
     pressure ratio equals the ratio of the air mass below the two
-    interfaces. Levels are top-first; the cloud base is the lowest level
-    (largest index) with a non-zero flux.
+    interfaces. ``layer_weight`` must therefore be proportional to the TRUE
+    half-level thickness ``Δp = p_half(k+1) − p_half(k)`` of each layer —
+    e.g. ``ρ·Δz`` from the moist-air diagnostics — NOT the dual-grid
+    centre-to-centre spacing the cudtdq ledger divides by: the cumulative
+    sum here turns any per-layer thickness error into a systematic bias in
+    ``p_s − p_half`` on every stretched (hybrid) grid. Levels are
+    top-first; the cloud base is the lowest level (largest index) with a
+    non-zero flux.
 
     ``density`` is left to the caller: the sub-cloud evaporation inside the
     convection scheme has the updraft temperature available and passes the
@@ -144,6 +150,7 @@ def convective_precip_fluxes(
     ktype: jnp.ndarray | None = None,
     updraft_velocity: jnp.ndarray = 2.0,
     use_updraft_cover: bool = False,
+    updraft_layer_mass: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
            jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
@@ -188,6 +195,15 @@ def convective_precip_fluxes(
             footprint is the updraft area ``pmfu/(zwu·zrhou)`` — ECHAM's
             ``lham`` branch (``mo_cufluxdts.f90:416-417``); when ``False``
             it is ECHAM's non-HAM constant ``zcucov = 0.05`` (line 419).
+        updraft_layer_mass: TRUE per-layer air mass ∝ half-level
+            ``Δp = p_half(k+1) − p_half(k)`` (e.g. ``ρ·Δz`` [kg/m²]), the
+            taper weight for the cover's sub-cloud ``p_s − p_half``
+            reconstruction. This is deliberately a SEPARATE argument from
+            ``dp_lev``: the ledger's ``dp_lev`` is the dual-grid
+            centre-to-centre spacing (last value duplicated), whose cumsum
+            mis-states ``p_s − p_half(k)`` wherever adjacent layer
+            thicknesses differ (every hybrid grid). Required when
+            ``use_updraft_cover``.
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux)`` —
@@ -215,11 +231,21 @@ def convective_precip_fluxes(
     #     in for ``ptu`` — exactly ECHAM, whose ``ptu`` below the base is the
     #     environment value ``ptenh``. The cover is a per-level array here.
     if use_updraft_cover:
+        if updraft_layer_mass is None:
+            # The ledger's dp_lev is NOT a valid taper weight (see the
+            # docstring); silently substituting it would reintroduce the
+            # stretched-grid bias this argument exists to prevent.
+            raise ValueError(
+                "use_updraft_cover=True requires updraft_layer_mass — the "
+                "true per-layer air mass (∝ half-level Δp) for the "
+                "sub-cloud taper."
+            )
         t_rho = jnp.where(updraft_temperature > 1.0, updraft_temperature,
                           temperature)
         rho_updraft = pressure / (c.rd * t_rho)
         zcucov_lev = updraft_area_cover(
-            updraft_mass_flux, rho_updraft, ktype, dp_lev, updraft_velocity,
+            updraft_mass_flux, rho_updraft, ktype, updraft_layer_mass,
+            updraft_velocity,
         )
     else:
         zcucov_lev = jnp.full_like(dp_lev, 0.05)
@@ -478,6 +504,15 @@ def calculate_tendencies(
         ktype=ktype,
         updraft_velocity=config.cu_updraft_velocity,
         use_updraft_cover=use_updraft_cover,
+        # Taper weight for the updraft-area cover: the TRUE layer mass
+        # ρ·Δz = Δp/g (moist_air_state builds Δz as Δp/(ρg); its 10 m floor
+        # never binds on the supported level sets — 65 m minimum on
+        # L47/L95). Deliberately NOT dp_lev: that is the dual-grid
+        # centre-to-centre ledger spacing (last value duplicated), whose
+        # cumsum mis-states p_s − p_half wherever adjacent layer
+        # thicknesses differ — i.e. on every hybrid grid. Same weight the
+        # JAM wet deposition passes, so the two covers agree.
+        updraft_layer_mass=rho * layer_thickness,
     )
     plude = updraft_state.plude
 

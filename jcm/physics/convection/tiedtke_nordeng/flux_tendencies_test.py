@@ -67,6 +67,53 @@ class TestUpdraftAreaCover(unittest.TestCase):
             huge, self.rho, jnp.array(1), self.layer, self.w_u))
         self.assertGreater(cover[1], 1.0)
 
+    def test_taper_on_the_real_l47_grid(self):
+        # ECHAM's sub-cloud taper is a ratio of HALF-LEVEL pressure
+        # differences: zzp = (p_s - p_half(jk)) / (p_s - p_half(kcbot))
+        # (mo_cufluxdts.f90:236). Reconstructed here by cumulatively
+        # summing the layer weights, so the weights must be the true
+        # half-level Δp of the production hybrid grid — the dual-grid
+        # centre-to-centre spacing of the tendency ledger accumulates a
+        # systematic p_s - p_half error wherever adjacent thicknesses
+        # differ, which on L47 is everywhere.
+        from jcm.physics.echam.echam_levels import get_echam_levels
+
+        levels = get_echam_levels(47)
+        ps = 101325.0
+        phalf = np.asarray(levels.a_boundaries) + np.asarray(
+            levels.b_boundaries) * ps          # (48,), TOA-first
+        dp = jnp.asarray(np.diff(phalf))       # true layer Δp (47,)
+        nlev = dp.shape[0]
+
+        kbase = 40                             # ~793 hPa cloud base
+        mfu = jnp.where(jnp.arange(nlev) <= kbase, 0.0, 0.0)
+        mfu = mfu.at[35:kbase + 1].set(0.1)    # plume levels 35..40
+        rho = jnp.ones((nlev,))
+        w_u = 2.0
+
+        cover = np.asarray(updraft_area_cover(
+            mfu, rho, jnp.array(1), dp, w_u))
+
+        # Hand-computed reference straight from the half-level pressures.
+        zzp = (ps - phalf[:-1]) / (ps - phalf[kbase])
+        expected = np.where(np.arange(nlev) > kbase,
+                            0.1 * zzp / (w_u * 1.0), 0.0)
+        expected[35:kbase + 1] = 0.1 / (w_u * 1.0)
+        np.testing.assert_allclose(cover, expected, rtol=1e-5)
+
+        # The dual-grid tendency spacing (centre-to-centre full-level
+        # diffs, last value duplicated) is NOT a valid weight: on this
+        # grid it visibly distorts the sub-cloud taper.
+        pfull = 0.5 * (phalf[:-1] + phalf[1:])
+        dp_dual = np.abs(np.diff(pfull))
+        dp_dual = jnp.asarray(np.concatenate([dp_dual, dp_dual[-1:]]))
+        cover_dual = np.asarray(updraft_area_cover(
+            mfu, rho, jnp.array(1), dp_dual, w_u))
+        sub = np.arange(nlev) > kbase
+        self.assertGreater(
+            float(np.max(np.abs(cover_dual[sub] - expected[sub])
+                         / expected[sub])), 0.01)
+
     def test_broadcasting_native_column_equals_block(self):
         block_mfu = jnp.stack([self.mfu, self.mfu * 0.5], axis=1)
         block_rho = jnp.ones((4, 2))
@@ -107,6 +154,11 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
             ktype=jnp.array(1),
             updraft_velocity=2.0,
             use_updraft_cover=use_updraft_cover,
+            # Uniform column: the true layer mass Δp/g coincides with the
+            # ledger spacing here, so the cover values are unaffected by
+            # the weight choice (which only matters on stretched grids —
+            # see TestUpdraftAreaCover.test_taper_on_the_real_l47_grid).
+            updraft_layer_mass=self.dp_lev / 9.80665,
         )
 
     def test_evaporation_depletes_surface_rain_and_stays_finite(self):
@@ -145,7 +197,8 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
                 self.kbase, self.pdmfup, self.pdmfdp, self.dt,
                 updraft_temperature=tu, updraft_mass_flux=mfu,
                 ktype=jnp.array(1), updraft_velocity=w_u,
-                use_updraft_cover=True)
+                use_updraft_cover=True,
+                updraft_layer_mass=self.dp_lev / 9.80665)
             return jnp.sum(rain_sfc)
 
         grad = jax.grad(loss, argnums=(0, 1, 2))
