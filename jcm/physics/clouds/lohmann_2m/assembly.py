@@ -441,16 +441,50 @@ def update_in_cloud_water(
 
     # compute candidate ICNC depending on nic_cirrus
     if params.nic_cirrus == 1:
-        # N = rho*q_i / ((4/3)*pi*prid^3*rho_ice): crystal number from ice mass
-        # and the volume-mean radius ``prid``, which is in METRES.
-        # The floor must be a pure divide-by-zero guard: a realistic prid^3 is
-        # ~1e-13 m^3, so ``eps`` (~1e-7) would clamp every cell and force the
-        # candidate to zero. ``d_epsilon`` (1e-30) sits below any physical value.
-        # Below ice_radius_mean ~ 3e-7 m the float32 derivative of this quotient
-        # is inf (den**-2 overflows) and the ICNC gradient is NaN; the forward
-        # candidate is unphysical there too, so the floor is a science choice
-        # tracked in #846 rather than a numerics guard.
-        icnc_candidate = 0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud / jnp.maximum(ice_radius_mean**3, params.d_epsilon)
+        # N = rho*q_i / ((4/3)*pi*prid^3*rho_ice): crystal number diagnosed by
+        # inverting the ice-mass/volume-mean-radius (``prid``, METRES) relation.
+        #
+        # Physical bound (#846). The diagnosed number is capped at ``icemax``
+        # (the maximum-plausible ICNC the scheme already enforces on the ice
+        # tracer, scheme.py). This is the reference-faithful direction:
+        # ECHAM-HAM's own nic_cirrus==1 branch caps the nucleated number by the
+        # available soluble-aerosol count ``zascs``
+        # (mo_cloud_micro_2m.f90:991-999, ``MIN(candidate, zascs)``) — a cap on
+        # NUMBER, not a floor on size. jcm does not plumb the aerosol number
+        # into this scheme, so ``icemax`` (1e7 /m^3) stands in as the
+        # max-plausible-number ceiling. A bare 100 nm radius floor was rejected:
+        # it leaves the forward candidate at ~1e11-1e12 /m^3 (four orders above
+        # realistic cirrus and above ``icemax``), so it is not the physical
+        # bound; the equivalent radius-floor dual would also inject a
+        # ``qi**(1/3)`` gradient singularity at ``qi -> 0`` (the candidate is
+        # computed on every cell before the ``ll2_ic`` select), whereas the
+        # number cap keeps the candidate linear in ``qi``.
+        #
+        # Non-dimensionalisation (#846). Written as ``C/r**3`` the reverse/
+        # forward derivative forms ``1/r**6``, which overflows float32 below
+        # r ~ 3e-7 m (den**-2 = inf), poisoning the jvp/vjp with 0*inf = NaN
+        # exactly on the small-radius nucleating cells this branch exists for.
+        # Both radii are therefore scaled by a STATIC (Python-literal, hence
+        # gradient-free) reference length before the floor and the cube: the
+        # only division whose denominator carries a gradient is by
+        # ``r_safe_scaled**3 >= (cirrus_min_ice_radius/_R_SCALE_M)**3 ~ 1e-3``,
+        # whose squared reciprocal (~1e6) is far inside float32 range. The
+        # scale must NOT be ``cirrus_min_ice_radius`` itself: that is a
+        # differentiable CloudParams2M leaf, and dividing by its cube (1e-21)
+        # puts ``(r_ref**3)**-2 ~ 1e42`` = inf on the parameter's own vjp/jvp
+        # — NaN via 0*inf on capped cells, inf even at physical radii.
+        # ``1/_R_SCALE_M**3`` is a compile-time constant (1e18), so it
+        # contributes no gradient path at all.
+        _R_SCALE_M = 1.0e-6  # static scale [m]; ~1 um, the crystal-size order
+        r_safe_scaled = jnp.maximum(
+            ice_radius_mean / _R_SCALE_M,
+            params.cirrus_min_ice_radius / _R_SCALE_M,
+        )
+        prefactor = (
+            0.75 / (pi * params.rhoice) * air_density * cloud_ice_in_cloud
+            / _R_SCALE_M**3
+        )
+        icnc_candidate = jnp.minimum(prefactor / r_safe_scaled**3, params.icemax)
     elif params.nic_cirrus == 2:
         # min(pnicex, pap*1e6)
         icnc_candidate = jnp.minimum(newly_formed_ice, pressure * 1.0e6)

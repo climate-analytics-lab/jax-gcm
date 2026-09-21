@@ -92,6 +92,15 @@ class CloudParams2M:
     icemin: jnp.ndarray      # [1/m^3]
     icemax: jnp.ndarray      # [1/m^3]
 
+    # Minimum volume-mean ice-crystal radius [m] for the nic_cirrus==1
+    # ICNC diagnosis (assembly.update_in_cloud_water). A crystal cannot be
+    # smaller than the coarse-mode aerosol it nucleates on, so ~100 nm is a
+    # physical lower bound. A differentiable leaf like every tunable; the
+    # float32-safe non-dimensionalisation of the ``1/r^3`` inversion uses a
+    # separate STATIC scale in assembly.py precisely so this leaf's own
+    # gradient never divides by its tiny cube (#846).
+    cirrus_min_ice_radius: jnp.ndarray  # [m]
+
     # Reference droplet/crystal mass parameters
     mi0_rcp: jnp.ndarray     # [1/kg] reciprocal reference crystal mass
 
@@ -180,6 +189,7 @@ class CloudParams2M:
         rcd_vol_max: float = 19.0e-6,
         icemin: float = 10.0,
         icemax: float = 1.0e7,
+        cirrus_min_ice_radius: float = 1.0e-7,  # [m] ~100 nm coarse-mode aerosol size
         mi0: float = 1.0e-12,
         fall: float = 3.0,
         rhoice: float = 925.0,
@@ -255,6 +265,7 @@ class CloudParams2M:
             activation_smoothing=jnp.array(activation_smoothing),
             icemin=jnp.array(icemin),
             icemax=jnp.array(icemax),
+            cirrus_min_ice_radius=jnp.array(cirrus_min_ice_radius),
             mi0_rcp=jnp.array(1.0 / mi0),
             fall=jnp.array(fall),
             rhoice=jnp.array(rhoice),
