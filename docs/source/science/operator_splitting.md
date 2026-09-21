@@ -52,12 +52,14 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
 state, a layer's summed water tendency can drive it negative — a donor layer
 overdrawn by vertical diffusion's conservative q/qc/qi redistribution plus the
 co-located cloud and convection sinks. `verify_tendencies` caps each water
-field's tendency at the drain rate `-q/dt` so the moist physics never sees
-`q < 0`, and reallocates the capped amount within the column, proportional to
-the water each layer still holds, so the cap conserves column water to
-round-off instead of inventing it in the overdrawn donor. Each water species is
-conserved independently; a column that genuinely cannot supply the deficit
-leaves a bounded, ledgered residual. The engineering treatment is
+field's tendency at the drain rate `-q/dt` (which reproduces the sequential
+ECHAM-order atmosphere state: the donor drains to zero, the redistribution's
+receivers keep the water that genuinely left it) and, following ECHAM's
+negative-water correction (`mo_cloud.f90` section 8.4), charges the condensate
+each cap adds to the same cell's vapour with the matching phase-split latent
+heat. Total water per cell is conserved to round-off wherever the vapour can
+supply the correction; a cell whose vapour cannot keeps the remainder as a
+bounded, ledgered artificial source. The engineering treatment is
 {doc}`../design/water_positivity_conservation`.
 
 **Status & known limitations.** Only Lie splitting is implemented; Strang

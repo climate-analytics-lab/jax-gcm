@@ -24,93 +24,126 @@ The interface sees only the *summed* tendency, so it structurally cannot tell a
 genuine sink from the donor half of a transfer, nor identify which layers
 received the redistributed water.
 
-## The fix: a column-conservative hole-filling reallocation
+## Why the cap itself is the reference atmosphere update
 
-Where the layer masses `Δp` are available — the gridpoint driver
-`compute_physics_step_gridpoint` obtains them from
-`ComposablePhysics.pressure_thickness(state)`, built from the hybrid `(a, b)`
-coefficients and the surface pressure with the same hydrostatic formula the
-`moist_air_state` diagnostic uses for its `pressure_thickness` (with `abs()` so
-the weight is orientation-independent) — the water-mass fields' cap is made
-column-conservative:
+Working the sequential (ECHAM `physc`-order: vertical diffusion first, then
+the cloud chain) reference through the overdraw case shows something
+counter-intuitive: **the bare cap already reproduces the sequential
+atmosphere state.** Let the vdiff solve move `t·dt` out of a donor holding
+`q`, and a co-located sink (computed on the step-start state, each
+individually self-limiting) want `k·dt`, with `t + k > q/dt`. Sequentially,
+vdiff moves its full `t·dt` (its implicit solve saw the full `q`), and the
+sink — recomputed on what remains — takes the rest: the donor ends at zero
+and the receivers keep `t·dt`. The summed-then-capped update gives exactly
+the same: donor floored at `−q/dt` → zero, receivers keep their raw gain.
+The receivers' water is *real* — it physically left the donor — so no
+reallocation may touch it.
 
-1. Apply the per-cell cap as before; `added = capped − raw ≥ 0` is the
-   mixing-ratio rate the cap injected to hold each layer non-negative.
-2. Pressure-weight and sum it over the column: `S = Σ added·Δp` is the spurious
-   column-integrated source.
-3. Remove `S` again, distributed over the water left after the cap
-   (`qnext = max(q,0) + dt·capped`), **proportional to each layer's remaining
-   mass** — the standard mass-fixer / hole-filling choice, and the only
-   defensible one when the individual receiving layers are not identifiable.
-   Each layer is scaled toward, never below, zero.
+Two reallocation designs were tried and **rejected on evidence** before this
+was understood. Borrowing the cap's source from the column's remaining water
+(mass-fixer hole-filling) drained untouched cloud layers to zero in one step;
+borrowing only from the column's same-step gains still zeroed the receivers'
+legitimate gains. Both wiped a seeded cloud before radiation could see it —
+caught by `cre_guard_test.py` in CI on the first version of this PR, and
+reproduced per-layer with an instrumented column. The failure is structural:
+at the interface, a donor's cap correction and its receivers' gains look the
+same whether the overdraw came from the transfer or from the co-located sink,
+and in *both* cases the sequential reference keeps the receivers whole.
 
-The removed fraction of each layer's post-cap water is
-`φ = clip(dt·S / Σ qnext·Δp, 0, 1)`, uniform across the column, giving
-`qfinal = qnext·(1 − φ) ≥ 0`. When the column can supply the deficit
-(`dt·S ≤ Σ qnext·Δp`) the reallocation is exact: `Σ qfinal_tendency·Δp =
-Σ raw_tendency·Δp`, so the column water path tendency is preserved to
-round-off. Each water species is conserved **independently** — the vdiff
-redistribution conserves each phase separately, and borrowing across phases
-would silently change the latent-heat partitioning.
+What the raw sum actually gets wrong is the **sink's own removal**: it was
+computed against water the redistribution had already taken, so its product —
+precipitation, or the vapour credited by condensate evaporation — is
+over-reported by exactly the cap correction. The budget defect is a
+double-counted removal, not wrongly-placed atmosphere water.
 
-The reallocation borrows from *every* layer that still holds water, in
-proportion to how much it holds — not specifically from the layers that
-received the redistributed water, because those are not identifiable from the
-summed tendency. In the case the fix targets — a donor overdrawn by the vdiff
-redistribution **plus** a co-located cloud/convection sink — this means the
-borrowed water may come from a layer other than the true receiver. The column
-water path is conserved exactly; what is accepted in exchange is that the
-compensating removal can be *vertically misplaced* relative to where the cap
-added it. That trade (exact column conservation, at the cost of the vertical
-distribution of a small correction) is the best available given the interface
-sees only the summed tendency, and it is strictly better than the bare cap,
-which conserves nothing.
+## The fix: ECHAM's negative-water correction — charge the local vapour
 
-Two limiting cases fall out for free and are the reason this is the right
-shape:
+ECHAM repairs exactly this in `mo_cloud.f90` section 8.4 ("Corrections:
+Avoid negative cloud water/ice"): after clipping `xl`/`xi` non-negative it
+charges the clip to the same cell's vapour with the matching latent heat,
 
-- **A genuine column-emptying sink** (e.g. runaway evaporation) drains every
-  layer to zero, so there is no remaining water to borrow, `φ = 0`, and the
-  result equals the bare cap. Genuine sinks *should* be able to empty the
-  column; only the redistribution artefact is undone.
-- **A column that cannot supply the whole deficit** (`dt·S >` the remaining
-  column water — pathological) is drained to zero and the bounded residual
-  stays in the water-positivity ledger as an honest, now-tiny, non-conservation
-  that no amount of within-column reallocation can remove.
+```fortran
+zdxlcor = (zxlp1 - zxlold)/ztmst          ! the positivity correction
+pxlte = pxlte + zdxlcor
+pxite = pxite + zdxicor
+pqte  = pqte  - zdxlcor - zdxicor         ! vapour pays for it
+ptte  = ptte  + zlvdcp*zdxlcor + zlsdcp*zdxicor
+```
+
+i.e. the condensate the correction *adds* is materialised as a real
+condensation/deposition event: vapour is consumed, latent heat is released,
+and total water in the cell is unchanged. `verify_tendencies` now follows
+this pattern for the water-mass tracers (`qc`/`qr` liquid with `alhc`,
+`qi`/`qs` frozen with `alhs`, over `cpd`):
+
+1. Per-cell positivity cap on every non-negative field, unchanged.
+2. The summed condensate cap corrections of each cell are subtracted from
+   that cell's vapour tendency, bounded by the vapour the cell can still
+   supply after its own cap (`max(q,0)/dt + capped_dqdt`, scaled down
+   uniformly across both phases where the correction exceeds it), with the
+   matching phase-split latent heat added to the temperature tendency.
+3. A final exact drain-rate re-cap `max(·, −max(q,0)/dt)` guards the
+   ulp-level float undershoot of the separate roundings (a float32 P1 from
+   the Codex review of #864).
+
+In the common overdraw case — condensate evaporation double-counted against
+a redistribution — the charge removes *precisely* the phantom vapour that
+evaporation over-credited, and the heating cancels its phantom evaporative
+cooling; the repair is exact, not approximate. Where the sink's product was
+precipitation instead, the charge still closes the total (atmosphere +
+surface flux) water budget, at the cost of locally converting the
+over-report into a vapour draw — ECHAM 8.4 makes the same choice, charging
+vapour regardless of which process produced the negative. A cell whose
+vapour cannot absorb the whole correction keeps the remainder in the
+water-positivity ledger as an honest, bounded artificial source —
+`specific_humidity`'s own cap corrections likewise (they have no local
+donor; ECHAM prevents negative `q` at the producing terms instead).
+
+The correction is **cell-local**, so it needs no layer masses, no column
+reductions, and no host geometry: the standalone `verify_tendencies` and the
+gridpoint driver apply the identical treatment, and every other layer's
+tendency passes through bitwise — which is what makes the seeded-cloud
+regression structurally impossible rather than merely retested.
 
 ## Accounting and gradients
 
-The `water_positivity_correction.*` ledger (issue #824) now records the **net**
-per-field correction `applied − raw`; its pressure-weighted
-`column_water_source` is the residual, ~0 to round-off where the reallocation
-succeeds instead of the gross source the bare cap left. The whole
-positivity-plus-conservation projection is a **primal-only** correction wrapped
-in the same exact-primal straight-through estimator the cap already used
-(`stop_gradient(result) + (tend − stop_gradient(tend))`): the forward pass is
-the conserved value, the cotangent passes through to the producing tendency
-unchanged, and the reallocation's division sits entirely under
-`stop_gradient`, so a dry column (`Σ qnext·Δp = 0`, guarded with a safe
-denominator) cannot poison the reverse-mode graph (cf. #558/#559).
+The `water_positivity_correction.*` ledger (issue #824) records the **net**
+per-field correction `applied − raw`: positive on the capped condensate,
+negative on the charged vapour, so the per-cell sum over water fields is the
+sign-definite residual — ~0 wherever the vapour absorbed the whole
+correction, the honest remainder where it could not. The temperature charge
+is deliberately not part of the water ledger (it is energy, not water; it
+keeps moist static energy consistent with the materialised phase change).
+The whole positivity-plus-charge projection is a **primal-only** correction
+wrapped in the same exact-primal straight-through estimator the cap already
+used (`stop_gradient(result) + (tend − stop_gradient(tend))`): the forward
+pass is the corrected value, the cotangent passes through to the producing
+tendency unchanged, and the charge's division sits entirely under
+`stop_gradient` with a safe denominator, so a correction-free or dry cell
+cannot poison the reverse-mode graph (cf. #558/#559).
 
 ## Scope
 
-The reallocation applies to the water-mass fields
-(`_WATER_CONSERVED_FIELDS = {specific_humidity, qc, qi, qr, qs}`). Number
-concentrations (`qnc`, `qni`) and the VMR gases keep the bare per-cell cap:
-they are not water mass and their redistribution conservation is a separate
-concern. Aerosol and gas tracers are not capped at all — their removal is
-bounded where it is produced by the operator split in
-{doc}`jam_aerosol_removal`. The standalone `verify_tendencies` entry point has
-no `Δp` and therefore applies only the bare cap; it is used by unit tests and
-by any host that does not expose its vertical geometry.
+The vapour charge applies to the water-mass tracers, split by phase for the
+latent heat (`_LIQUID_WATER_TRACERS = {qc, qr}` with `alhc`,
+`_ICE_WATER_TRACERS = {qi, qs}` with `alhs`). Number concentrations (`qnc`,
+`qni`) and the VMR gases keep the bare per-cell cap: they are not water mass,
+so there is no vapour to charge. Aerosol and gas tracers are not capped at
+all — their removal is bounded where it is produced by the operator split in
+{doc}`jam_aerosol_removal`.
 
 ## Code pointers
 
-- `jcm/physics_interface.py` — `_conserve_water_column`,
-  `_verify_tendencies_with_water_corrections`, `_WATER_CONSERVED_FIELDS`,
-  `verify_tendencies`, `compute_physics_step_gridpoint`.
-- `jcm/physics/composable_physics.py` — `ComposablePhysics.pressure_thickness`
-  and the cached hybrid coefficients.
-- `jcm/physics_interface_test.py` — `TestWaterConservativeLimiter` (f64
-  column-budget closure, the bare-cap reproducer, broadcasting agreement,
-  gradient identity/poison-freedom) and `TestComposablePressureThickness`.
+- `jcm/physics_interface.py` — `_verify_tendencies_with_water_corrections`
+  (the cap, the vapour charge and the latent heat),
+  `_LIQUID_WATER_TRACERS` / `_ICE_WATER_TRACERS`, `verify_tendencies`,
+  `compute_physics_step_gridpoint`.
+- `jcm/physics_interface_test.py` — `TestWaterPositivityVapourCharge` (f64
+  per-cell and column total-water closure, the latent-heat charge by phase,
+  the sink-overdraw / seeded-cloud regression, the dry-cell residual, the f32
+  drain-rate bound, broadcasting agreement, gradient
+  identity/poison-freedom).
+- `jcm/physics/echam/cre_guard_test.py` — the end-to-end guard that a seeded
+  cloud survives the limiter and stays radiatively active.
+- Reference: ECHAM `mo_cloud.f90`, section 8.4 (loop 821), at
+  `/data/…/echam6.3.0-ham2.3-moz1.0.r7492/src/`.
