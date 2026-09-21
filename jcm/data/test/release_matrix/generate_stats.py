@@ -191,11 +191,36 @@ def state_mirror_path(member: str, digest: str) -> str:
             f"{member}_fixture_{digest}.msgpack")
 
 
+def _assert_state_digest(path, mirror_path: str) -> None:
+    """Assert the state at ``path`` is the one ``mirror_path`` names.
+
+    The mirror filename carries a content digest (see
+    :func:`state_mirror_path`), so re-hashing the resolved file and comparing
+    turns the state<->bands pairing from a naming *convention* into a checked
+    invariant. Combined with the digest being *in* the path — a new state is a
+    new filename, which ``fetch``'s cache-first resolution can never confuse
+    with an old one — this is what version-locks a fixture's bands to the exact
+    state they were generated against: a mismatched or corrupted state fails
+    loudly against the bands that expect it rather than being validated as if
+    it matched.
+    """
+    expected = Path(mirror_path).stem.rsplit("_", 1)[-1]
+    actual = state_digest(path)
+    if actual != expected:
+        raise ValueError(
+            f"state file {path} hashes to {actual!r} but the band file asks "
+            f"for {expected!r} ({mirror_path}): a mismatched state/bands pair. "
+            "Regenerate them together with "
+            "jcm.data.test.release_matrix.generate_stats.generate().")
+
+
 def resolve_state(mirror_path: str) -> str | None:
     """Local path to the state at ``mirror_path``, fetching it if necessary.
 
     ``mirror_path`` comes from the band file's own ``init_state`` attribute,
-    so a fixture is always read against the state it was generated against.
+    digest and all, and the resolved file's content is verified against that
+    digest (:func:`_assert_state_digest`), so a fixture is always read against
+    the exact state it was generated against.
 
     Normally the mirror, resolved cache-first: a warm cache needs no network,
     and a cold one on an internet-less node raises ``fetch``'s message naming
@@ -216,10 +241,15 @@ def resolve_state(mirror_path: str) -> str | None:
     override = os.environ.get("JCM_FIXTURE_STATE_DIR")
     if override:
         local = Path(override) / Path(mirror_path).name
-        return str(local) if local.exists() else None
+        if not local.exists():
+            return None
+        _assert_state_digest(local, mirror_path)
+        return str(local)
 
     from jcm.data.remote import fetch
-    return fetch(mirror_path)
+    local = fetch(mirror_path)
+    _assert_state_digest(local, mirror_path)
+    return local
 
 
 def _load_member(member: str, init_overrides: dict, days: float):
@@ -289,6 +319,18 @@ def write_stats_window_global_mean(member: str, state_path: str, out: str):
     ds = predictions.to_xarray()
     present = [v for v in CANDIDATE_STAT_VARS if v in ds]
     ds[present].mean(dim={"lon", "lat"}).to_netcdf(out)
+
+
+def report_backend() -> None:
+    """Subprocess entry point: print the accelerator the workers will use.
+
+    Run in a child so :func:`generate` itself never imports JAX and so never
+    holds a device context while the workers run — see :func:`_run_worker` for
+    why the orchestrating process must stay free of device memory.
+    """
+    import jax
+
+    print(f"  backend {jax.default_backend()} on {jax.devices()}", flush=True)
 
 
 def write_spinup_state(member: str, out_path: str):
@@ -440,11 +482,18 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
     """
     import tempfile
 
-    import jax
     import xarray as xr
 
-    print(f"member {member}: backend {jax.default_backend()} "
-          f"on {jax.devices()}", flush=True)
+    # The orchestrator must never initialise JAX. It holds no device of its own
+    # by design (see :func:`_run_worker`), and a bare ``jax.default_backend()``
+    # or ``jax.devices()`` here would grab a CUDA context — 75 % of the card up
+    # front under JAX's default preallocation — that no per-child
+    # ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` can release, starving the very
+    # workers this subprocess design exists to hand a full card (a T63 L95 JAM
+    # member is what dies first). The backend confirmation therefore runs in
+    # its own throwaway child, which frees its context on exit.
+    print(f"member {member}:", flush=True)
+    _run_worker("report_backend as w; w()")
     out_dir = Path(out_dir or ".")
     out_dir.mkdir(parents=True, exist_ok=True)
 

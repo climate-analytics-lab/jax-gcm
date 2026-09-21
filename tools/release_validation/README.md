@@ -51,8 +51,11 @@ Two things to know before reading a failure:
   window after a short spin-up from the preset's own init, because the
   equilibrated states on the mirror are unreadable by current jcm (#762). A
   failure means "something changed", not "the physics is wrong".
-- The **JAM members' bands are pre-dust-retune** and must be regenerated once
-  #787/#808 lands; the band file says so in its own `provisional` attribute.
+- The **JAM members' bands describe the post-dust-retune aerosol climate**
+  (#787/#808/#840): the relative-soil-wetness saltation gate and the
+  `nduscale_reg` recalibration for jcm's winds. They were regenerated against
+  that code and the rebuilt forcing bundle, so a failure is a regression, not
+  the known-provisional state the pre-#840 bands were.
 
 ## Workflow
 

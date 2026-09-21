@@ -1577,14 +1577,24 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
         for member in members():
             bands_file = band_path(member)
             if not bands_file.exists():
-                # A member whose fixture has not been generated yet is passed
-                # over rather than failed — the set is filled in member by
-                # member, each needing its own GPU run. The whole test skips
-                # if that leaves nothing checked, so an empty fixture set can
-                # never be mistaken for a pass.
+                # A member whose fixture has not been generated yet is a
+                # *skip*, not a failure — the set is filled in member by
+                # member, each needing its own GPU run — and not a silent
+                # pass either: recorded as a skipped subtest so the report
+                # names every member that went unvalidated. The whole test
+                # additionally skips if that leaves nothing checked at all.
+                with self.subTest(member=member):
+                    self.skipTest(f"{member}: no band file at {bands_file}")
                 continue
             extra = extras.get(member)
             if extra and importlib.util.find_spec(extra) is None:
+                # ``mam4_jax`` is an optional extra a core install legitimately
+                # lacks, so a JAM member it gates is a *skip*, not a silent
+                # pass: record it as a skipped subtest so a green matrix run
+                # cannot be mistaken for having validated all seven members.
+                with self.subTest(member=member):
+                    self.skipTest(
+                        f"{member}: optional extra {extra!r} not installed")
                 continue
             with self.subTest(member=member):
                 bands = xr.open_dataset(bands_file)
@@ -1616,8 +1626,14 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                         f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
                 state = resolve_state(bands.attrs["init_state"])
                 if state is None:
+                    # Absent from JCM_FIXTURE_STATE_DIR — expected when
+                    # validating one freshly generated member, but it must
+                    # surface as a *skipped* subtest: a bare ``continue``
+                    # here would record an empty passed subtest, and a
+                    # member that never ran must not read as validated.
                     not_local.append(member)
-                    continue
+                    self.skipTest(
+                        f"{member}: no state in JCM_FIXTURE_STATE_DIR")
                 # Each member's window runs in its own interpreter. JAX never
                 # returns pool memory, so walking the whole matrix in one
                 # process starves whichever member comes last — reproducibly
@@ -1629,36 +1645,38 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                         member, state, tmp, env=worker_env)
 
                 tol = 3  # tolerance in standard deviations
-                # #744's degenerate-band fallback, scoped to ``std`` being
-                # *exactly* zero: there the band carries no information at all
-                # — the specific/relative-humidity tail is physically
-                # negligible (~1e-24…1e-37 kg kg-1) and a hybrid grid's upper
-                # ``pressure_full`` levels are pure a-coefficient constants —
-                # so a relative+absolute tolerance stands in for it. It must
-                # not be extended to merely *small* ``std``: doing that is a
-                # far worse bug than the one it would fix, handing seven
-                # ``pressure_full`` levels of these fixtures half-widths of
-                # 400-2800 Pa, wide enough to pass a gross pressure error.
-                rtol, atol = 0.25, 1e-8
-                # A strictly positive ``std`` can still be finer than float32
-                # resolves, and then the band is narrower than the arithmetic
-                # underneath it: ``pressure_full`` near the pure-a levels
-                # stores 4.9e-4 Pa at 7405.9 Pa — 0.55 of a ULP — giving a
-                # three-ULP band that an independent run, in another process
-                # on identical code, sat exactly three ULP from. That is a
-                # pass by equality, one ULP from red. Floor such a band at a
-                # few ULP of its own magnitude instead: 1e-6 (~8 ULP) lifts
-                # that level to 7.4e-3 Pa and leaves every informative band
-                # untouched (it widens nothing else in these fixtures).
+                # ``tol * std`` is the band; three floors keep a tight or
+                # degenerate ``std`` from yielding a band narrower than the
+                # arithmetic underneath it, and the widest wins. Deliberately
+                # NONE of them is a relative fraction of the mean: a 25 %
+                # fallback for ``std == 0`` was tried and was a worse bug than
+                # it fixed, handing the pure-a ``pressure_full`` levels
+                # (~13 kPa constants, exactly reproducible so ``std`` is a true
+                # zero) half-widths of ~1.8 kPa — wide enough to wave a gross
+                # pressure error through — while doing nothing for the
+                # near-zero underflow variables it was meant for, since 25 % of
+                # ~1e-24 is still ~0. The three floors are:
+                #  - ``ulp_floor * |mean|`` — a few ULP of the field's own
+                #    magnitude. Covers a *positive* ``std`` finer than float32
+                #    resolves (``pressure_full`` near the pure-a levels stores
+                #    4.9e-4 Pa at 7405.9 Pa, ~0.55 ULP) AND a ``std`` of
+                #    exactly zero at a nonzero constant (the pure-a
+                #    ``pressure_full`` levels): both are bit-reproducible, so a
+                #    few ULP (1e-6 ~ 8 ULP lifts 7405.9 Pa to 7.4e-3 Pa) is the
+                #    right, tight band — never a wide relative one.
+                #  - ``atol`` — an absolute floor for the near-zero/underflow
+                #    tail (specific/relative humidity, ~1e-24…1e-37 kg kg-1)
+                #    where ``ulp_floor * |mean|`` itself underflows to nothing.
+                #    (These fixtures have no ``std == 0`` cell between ~1e-8 and
+                #    ~1 in magnitude, so the ULP and absolute floors partition
+                #    the degenerate cells cleanly.)
+                #  - ``noise_tol * <var>.noise`` — ``noise`` is the measured
+                #    peak-to-peak spread of this same window across independent
+                #    repeats in separate processes, i.e. what the band must
+                #    absorb with no physics having changed. Applied to the
+                #    half-width so it can only ever widen a band.
                 ulp_floor = 1e-6
-                # Second floor, on the half-width: ``<var>.noise`` is the
-                # measured peak-to-peak spread of this same window across
-                # independent repeats in separate processes, i.e. what the
-                # band must absorb with no physics having changed. Applied to
-                # the half-width rather than folded into ``std`` so it can
-                # only widen a band — folding it in would narrow the
-                # degenerate levels, whose fallback is deliberately far wider
-                # than their reproducibility.
+                atol = 1e-8
                 noise_tol = 3
                 for var in stat_vars:
                     mean = bands[f"{var}.mean"]
@@ -1668,11 +1686,8 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                         f"{var}.noise missing from {bands_file} — the fixture "
                         "predates the reproducibility floor; regenerate it",
                     )
-                    half_width = xr.where(
-                        std > 0,
-                        np.maximum(tol * std, ulp_floor * abs(mean)),
-                        rtol * abs(mean) + atol,
-                    )
+                    half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
+                    half_width = np.maximum(half_width, atol)
                     half_width = np.maximum(
                         half_width, noise_tol * bands[f"{var}.noise"])
                     lower, upper = mean - half_width, mean + half_width
@@ -1680,10 +1695,10 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                         (pred[var] <= upper).all()
                     ), (
                         f"{member}: {var} fell outside its band (±3σ, floored "
-                        "at 3× the measured run-to-run reproducibility and at "
-                        "a relative+absolute tolerance where σ is below "
-                        "float32 resolution). Regenerate this member's band "
-                        "file AND its init state together with "
+                        "at 3x the measured run-to-run reproducibility, at a "
+                        "few ULP of the field magnitude, and at an absolute "
+                        f"{atol:g} for the near-zero tail). Regenerate this "
+                        "member's band file AND its init state together with "
                         "jcm.data.test.release_matrix.generate_stats.generate"
                         f"({member!r}) if the deviation is intentional."
                     )

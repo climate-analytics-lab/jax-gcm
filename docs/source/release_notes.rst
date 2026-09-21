@@ -747,15 +747,19 @@ Regression fixtures follow the supported matrix
   ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
   publishing them.
 - Band widths are now floored so a regression band can never be narrower than
-  the computation's own noise. A ``std`` of exactly zero keeps the existing
-  relative+absolute fallback, while a **positive** ``std`` gives
-  ``max(3 * std, 1e-6 * |mean|)`` — about eight float32 ULP — so a band can
-  never be finer than the arithmetic underneath it without widening any band
-  that carries real information. Each band is additionally floored at
-  ``3 x <var>.noise``, the measured peak-to-peak spread of the same window
-  across independent repeats in separate processes, which ``generate`` records
-  in the fixture. Without these a band could fail on a new GPU or XLA version
-  indistinguishably from a real physics regression.
+  the computation's own noise. Each band is ``3 * std`` floored, widest-wins,
+  at three quantities and at no relative fraction of the mean: a few float32
+  ULP of the field magnitude (``1e-6 * |mean|``, ~8 ULP), an absolute ``1e-8``
+  for the near-zero/underflow tail (the ``1e-24``-scale humidity levels where
+  the ULP floor itself underflows), and ``3 x <var>.noise`` — the measured
+  peak-to-peak spread of the same window across independent repeats in separate
+  processes, which ``generate`` records in the fixture. The ULP floor covers
+  both a positive ``std`` finer than float32 resolves and a ``std`` of exactly
+  zero at a nonzero constant — a hybrid grid's pure-a ``pressure_full`` levels,
+  bit-reproducible and so given a few-ULP band, never the wide relative band
+  that would wave a gross pressure error through. Without these floors a band
+  could fail on a new GPU or XLA version indistinguishably from a real physics
+  regression.
 
 Calibration and capability gaps
 """""""""""""""""""""""""""""""
