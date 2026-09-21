@@ -8,6 +8,7 @@ Date: 2025-01-10
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jcm.physics.radiation.grey_two_stream.two_stream import (
     two_stream_coefficients,
@@ -473,8 +474,8 @@ class TestTwoStreamGradients:
     ``layer_reflectance_transmittance`` builds the Eddington eigenvalue from
     ``gamma1`` and ``gamma2``, and both degenerate as the single-scattering
     albedo approaches 1 — which is not an exotic corner but exactly where
-    shortwave liquid-cloud optics sits (``ssa ~ 0.9999``). Two distinct
-    failures live there and these tests fence both:
+    shortwave liquid-cloud optics sits (``ssa ~ 0.9999``). These tests fence
+    the two conditioning hazards that survive there:
 
     * ``gamma1**2 - gamma2**2`` is a catastrophic cancellation as ``ssa -> 1``
       (the two squares agree to four digits at ``ssa = 0.9999``), and feeding
@@ -482,8 +483,12 @@ class TestTwoStreamGradients:
       ``1/(2*sqrt(x))`` — amplifies it. The scheme now forms the same
       quantity factored, ``3*(1 - ssa)*(1 - ssa*g)``, which has no
       cancellation and is exactly 0 at the limit.
-    * ``gamma1`` itself is 0 at ``ssa = g = 1``, where ``gamma2`` is 0 too, so
-      the ratio ``gamma2/gamma1`` the layer albedo needs is 0/0.
+    * ``S = (1 - exp(-2*lambda*tau))/lambda`` is 0/0 as ``lambda -> 0`` (the
+      conservative limit) but has the finite value ``2*tau`` there, taken with
+      a double-``where``. The reflectance/transmittance are written so that
+      ``gamma1`` and ``gamma1 + lambda`` only ever multiply in — never divide
+      — so the ``gamma2/gamma1`` 0/0 at ``ssa = g = 1`` that earlier forms
+      needed no longer arises.
     """
 
     NLEV = 6
@@ -511,10 +516,11 @@ class TestTwoStreamGradients:
     def test_gradients_are_finite_at_the_scattering_limits(self, ssa, g):
         """No limit of (ssa, g) may return a non-finite derivative.
 
-        ``ssa = g = 1`` returned NaN for both ``ssa`` and ``g`` before the
-        double-``where`` on ``gamma2/gamma1``. A ``maximum(gamma1**2, 1e-30)``
-        floor does not fix it: the quotient's VJP squares the denominator, and
-        ``1e-60`` underflows to 0 in float32, so the guard becomes the 0/0.
+        ``ssa = g = 1`` is the sharpest corner: ``gamma1``, ``gamma2`` and
+        ``lambda`` all vanish. The reflectance/transmittance form
+        (``gamma2 S/(gamma1 S + 1 + e^2)`` and ``2 e/(...)``) divides only by a
+        denominator bounded below by 1, so nothing there is singular; the one
+        0/0 is ``S`` at ``lambda = 0``, held finite by its double-``where``.
         """
         tau, ssa_p, g_p = self._layer(ssa, g)
         grads = jax.grad(self._sum_of_squares, argnums=(0, 1, 2))(
@@ -625,19 +631,14 @@ class TestTwoStreamGradients:
     def test_both_ad_modes_survive_an_optically_thick_layer(self, tau, ssa, g):
         """Thick layers must not return NaN in *either* AD mode.
 
-        Two separate failures used to bracket the ``lambda_tau >= 88``
-        asymptotic switch, and each showed up in only one mode, so a check of
-        one alone would have missed the other:
-
-        * above it, ``exp(lambda_tau)`` was still evaluated on the discarded
-          branch and overflowed, so reverse mode formed ``0 * inf = NaN``;
-        * below it, the layer albedo was a quotient whose denominator reached
-          1e38, and the quotient rule squares the denominator — which
-          overflows float32 for any ``lambda_tau`` above about 44, i.e. for
-          every optically thick longwave layer in the lower troposphere.
-
-        ``tau = 30`` and ``tau = 50`` sit in the second window, ``tau = 60``
-        and ``200`` in the first.
+        The reflectance/transmittance uses one expression at every optical
+        depth — there is no thick-layer branch to disagree with — and forms it
+        from the decaying exponentials ``exp(-lambda*tau)`` and
+        ``exp(-2*lambda*tau)`` only. No growing ``exp(+lambda*tau)`` appears,
+        so neither an overflow on a discarded ``where`` branch (which reverse
+        mode turned into ``0 * inf``) nor a ``denominator**2`` reaching 1e38
+        (which forward mode turned into NaN across a thick longwave column) can
+        occur. This sweeps ``tau`` well past where both used to strike.
         """
         tau_p, ssa_p, g_p = self._layer(ssa, g, tau_value=tau)
         _, tangents = jax.jvp(
@@ -652,3 +653,147 @@ class TestTwoStreamGradients:
                 + layer_reflectance_transmittance(t, ssa_p, g_p, None)[1])
         )(tau_p)
         assert jnp.all(jnp.isfinite(grad)), "vjp is not finite"
+
+
+class TestLayerForwardValue:
+    """The diffuse layer albedo/transmittance is the exact homogeneous-layer
+    two-stream solution (Meador & Weaver 1980 eq. 14-15; Toon et al. 1989).
+
+    ``layer_reflectance_transmittance`` evaluates a rearrangement of that
+    solution; these tests pin the *forward* value it must reproduce, which the
+    earlier ``gamma2`` / ``gamma2/gamma1`` substitutions got wrong (#848). They
+    are the reference the gradient tests above cannot see: an AD check confirms
+    the derivative of whatever is computed, not that the right thing is.
+    """
+
+    @staticmethod
+    def _reference(tau, ssa, g):
+        """Meador-Weaver diffuse R, T for one Eddington layer, in float64.
+
+        ``Gamma = gamma2/(gamma1 + lambda)``; at ``lambda = 0`` (conservative
+        scattering) the ratio form is 0/0 and the closed limit
+        ``R = gamma1*tau/(1 + gamma1*tau)``, ``T = 1 - R`` applies.
+        """
+        g1 = (7.0 - ssa * (4.0 + 3.0 * g)) / 4.0
+        g2 = -(1.0 - ssa * (4.0 - 3.0 * g)) / 4.0
+        lam = np.sqrt(max(g1 * g1 - g2 * g2, 0.0))
+        if lam == 0.0:
+            r = g1 * tau / (1.0 + g1 * tau)
+            return r, 1.0 - r
+        gamma = g2 / (g1 + lam)
+        e2 = np.exp(-2.0 * lam * tau)
+        e = np.exp(-lam * tau)
+        denom = 1.0 - gamma * gamma * e2
+        r = gamma * (1.0 - e2) / denom
+        t = (1.0 - gamma * gamma) * e / denom
+        return max(r, 0.0), t  # the code clips the small-ssa negative-R corner
+
+    @pytest.mark.parametrize(
+        "tau, ssa, g",
+        [(10.0, 0.99, 0.85),   # ordinary shortwave water cloud
+         (2.0, 0.99, 0.85),
+         (0.3, 0.9, 0.7),      # thin scattering layer
+         (10.0, 0.5, 0.6),     # weakly scattering
+         (1.0, 0.999, 0.85),   # near-conservative
+         (5.0, 0.85, 0.85)],
+    )
+    def test_matches_meador_weaver(self, tau, ssa, g):
+        """R and T equal the exact solution, not the old ``gamma2`` proxy.
+
+        At ``ssa = 0.99, g = 0.85, tau = 10`` the pre-fix code returned
+        ``R = 0.099`` against the exact 0.446 — the defect this pins.
+        """
+        r_code, t_code, _, _ = layer_reflectance_transmittance(
+            jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), None)
+        r_ref, t_ref = self._reference(tau, ssa, g)
+        assert float(r_code[0]) == pytest.approx(r_ref, abs=1e-5, rel=1e-4)
+        assert float(t_code[0]) == pytest.approx(t_ref, abs=1e-5, rel=1e-4)
+
+    @pytest.mark.parametrize("tau", [1.0, 10.0, 50.0])
+    def test_conservative_scattering_reflects_and_conserves(self, tau):
+        """``ssa = 1``: a non-absorbing layer reflects, and ``R + T = 1``.
+
+        The pre-fix code returned ``R = 0, T = 1`` for any ``tau`` — a
+        conservative cloud that reflected nothing. The closed limit is
+        ``R = gamma1*tau/(1 + gamma1*tau)`` (0.529 at tau = 10, g = 0.85).
+        """
+        g = 0.85
+        r, t, _, _ = layer_reflectance_transmittance(
+            jnp.array([tau]), jnp.array([1.0]), jnp.array([g]), None)
+        g1 = (7.0 - (4.0 + 3.0 * g)) / 4.0
+        assert float(r[0]) == pytest.approx(g1 * tau / (1.0 + g1 * tau),
+                                            abs=1e-5, rel=1e-4)
+        assert float(r[0] + t[0]) == pytest.approx(1.0, abs=1e-5)
+        assert float(r[0]) > 0.05  # it reflects something
+
+    @pytest.mark.parametrize(
+        "ssa, g", [(0.9, 0.7), (0.99, 0.85), (0.999, 0.85)])
+    def test_semi_infinite_albedo_is_gamma(self, ssa, g):
+        """As ``tau -> inf`` the layer albedo tends to ``Gamma`` and ``T -> 0``.
+
+        This is the limit the old ``lambda_tau >= 88`` branch approximated as
+        ``clip(gamma2/gamma1)``; it is now the natural tau -> inf limit of the
+        single expression, so it needs no separate branch to reach.
+        """
+        r, t, _, _ = layer_reflectance_transmittance(
+            jnp.array([1.0e6]), jnp.array([ssa]), jnp.array([g]), None)
+        g1 = (7.0 - ssa * (4.0 + 3.0 * g)) / 4.0
+        g2 = -(1.0 - ssa * (4.0 - 3.0 * g)) / 4.0
+        gamma = g2 / (g1 + np.sqrt(g1 * g1 - g2 * g2))
+        assert float(r[0]) == pytest.approx(gamma, abs=1e-5, rel=1e-4)
+        assert float(t[0]) < 1e-6
+
+    @pytest.mark.parametrize("ssa, g", [(0.9, 0.7), (0.99, 0.85), (0.5, 0.6)])
+    @pytest.mark.parametrize("lambda_tau", [80.0, 86.0, 87.9, 88.0, 88.1, 90.0])
+    def test_continuous_across_the_old_cutoff(self, ssa, g, lambda_tau):
+        """No step in R at the retired ``lambda_tau = 88`` switch.
+
+        A ~7x jump in the layer albedo across this value was the visible symptom
+        of #848 (the two branches used different wrong forms). With one
+        expression everywhere, R at any ``lambda_tau`` near 88 equals the
+        semi-infinite limit ``Gamma`` to round-off — there is nothing to step.
+        """
+        g1 = (7.0 - ssa * (4.0 + 3.0 * g)) / 4.0
+        g2 = -(1.0 - ssa * (4.0 - 3.0 * g)) / 4.0
+        lam = np.sqrt(g1 * g1 - g2 * g2)
+        tau = lambda_tau / lam
+        r, _, _, _ = layer_reflectance_transmittance(
+            jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), None)
+        gamma = max(g2 / (g1 + lam), 0.0)
+        assert float(r[0]) == pytest.approx(gamma, abs=1e-5, rel=1e-4)
+
+    @pytest.mark.parametrize(
+        "ssa, g, tau", [(0.99, 0.85, 2.0), (0.9, 0.7, 1.0), (0.999, 0.85, 3.0)])
+    def test_adding_identity(self, ssa, g, tau):
+        """A homogeneous ``2*tau`` layer equals two ``tau`` layers combined.
+
+        ``R(2 tau) = R + T^2 R/(1 - R^2)`` for a homogeneous layer, a
+        self-contained consistency check the exact solution satisfies and the
+        old ``gamma2`` form violated by ~23%.
+        """
+        r1, t1, _, _ = layer_reflectance_transmittance(
+            jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), None)
+        r2, _, _, _ = layer_reflectance_transmittance(
+            jnp.array([2.0 * tau]), jnp.array([ssa]), jnp.array([g]), None)
+        r1, t1 = float(r1[0]), float(t1[0])
+        combined = r1 + t1 * t1 * r1 / (1.0 - r1 * r1)
+        assert float(r2[0]) == pytest.approx(combined, abs=1e-5, rel=1e-4)
+
+    def test_energy_bound_over_a_full_sweep(self):
+        """``R + T <= 1`` for every (ssa, g, tau), with no NaN.
+
+        Energy can only be conserved or absorbed, never created. The clip
+        upper-bounds R and T individually; this checks the physically stronger
+        joint bound holds *before* any per-value clip could mask a violation.
+        The tolerance is a float32 allowance: ``R + T <= 1`` is exact
+        analytically (``R + T - 1 = (gamma2 - gamma1) S/denom <= 0``), but at
+        the conservative limit where it equals 1 exactly the float32 division
+        rounds a few ulp over.
+        """
+        ssa = jnp.linspace(0.0, 1.0, 21)[:, None, None]
+        g = jnp.linspace(0.0, 0.99, 11)[None, :, None]
+        tau = jnp.array([1e-3, 0.1, 1.0, 5.0, 50.0, 500.0])[None, None, :]
+        ssa, g, tau = jnp.broadcast_arrays(ssa, g, tau)
+        r, t, _, _ = layer_reflectance_transmittance(tau, ssa, g, None)
+        assert not jnp.any(jnp.isnan(r)) and not jnp.any(jnp.isnan(t))
+        assert float(jnp.max(r + t)) <= 1.0 + 1e-4
