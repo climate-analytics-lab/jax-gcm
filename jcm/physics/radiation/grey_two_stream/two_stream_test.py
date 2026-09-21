@@ -657,7 +657,8 @@ class TestTwoStreamGradients:
              p_half[:, None] * jnp.ones(4)),
             rtol=1e-3, seed=seed)
 
-    @pytest.mark.parametrize("tau", [0.1, 1.0, 10.0, 30.0, 50.0, 60.0, 200.0])
+    @pytest.mark.parametrize(
+        "tau", [0.1, 1.0, 10.0, 30.0, 50.0, 60.0, 200.0, 1.0e4, 1.0e6])
     @pytest.mark.parametrize("ssa, g", [(0.0, 0.0), (0.93, 0.85)])
     def test_both_ad_modes_survive_an_optically_thick_layer(self, tau, ssa, g):
         """Thick layers must not return NaN in *either* AD mode.
@@ -670,20 +671,32 @@ class TestTwoStreamGradients:
         mode turned into ``0 * inf``) nor a ``denominator**2`` reaching 1e38
         (which forward mode turned into NaN across a thick longwave column) can
         occur. This sweeps ``tau`` well past where both used to strike.
+
+        ``tau = 1e6`` additionally fences the *series* branch's discarded-side
+        overflow: ``where`` evaluates both branches, and without the ``x2``
+        clamp the unused Taylor polynomial went inf/inf = NaN in float32 there
+        (``tau * x2**3`` passes 3.4e38 near ``lambda*tau ~ 1e6``), so every
+        reverse-mode gradient — w.r.t. tau, ssa and g alike — was NaN while
+        the forward value stayed (0, 0) (PR #856 review). At these depths all
+        true derivatives are exp-suppressed to ~0, so finiteness in both
+        modes, not a central-difference match against a function that is flat
+        to round-off, is the meaningful assertion.
         """
         tau_p, ssa_p, g_p = self._layer(ssa, g, tau_value=tau)
         _, tangents = jax.jvp(
-            lambda t: layer_reflectance_transmittance(t, ssa_p, g_p, None),
-            (tau_p,), (jnp.ones_like(tau_p),))
+            lambda t, s, a: layer_reflectance_transmittance(t, s, a, None),
+            (tau_p, ssa_p, g_p),
+            (jnp.ones_like(tau_p), jnp.ones_like(ssa_p), jnp.ones_like(g_p)))
         for name, t in zip(("R_dif", "T_dif", "R_dir", "T_dir"), tangents):
             assert jnp.all(jnp.isfinite(t)), f"jvp of {name} is not finite"
 
-        grad = jax.grad(
-            lambda t: jnp.sum(
-                layer_reflectance_transmittance(t, ssa_p, g_p, None)[0]
-                + layer_reflectance_transmittance(t, ssa_p, g_p, None)[1])
-        )(tau_p)
-        assert jnp.all(jnp.isfinite(grad)), "vjp is not finite"
+        grads = jax.grad(
+            lambda t, s, a: jnp.sum(
+                layer_reflectance_transmittance(t, s, a, None)[0]
+                + layer_reflectance_transmittance(t, s, a, None)[1]),
+            argnums=(0, 1, 2))(tau_p, ssa_p, g_p)
+        for name, grad in zip(("tau", "ssa", "g"), grads):
+            assert jnp.all(jnp.isfinite(grad)), f"vjp d/d{name} is not finite"
 
 
 class TestLayerForwardValue:

@@ -167,9 +167,21 @@ def layer_reflectance_transmittance(
     x2 = lambda_sq * tau * tau            # (lambda*tau)**2, smooth in ssa, g
     use_series = x2 < 1e-2
 
-    x2_sq = x2 * x2
-    sinhc = 1.0 + x2 / 6.0 + x2_sq / 120.0 + x2_sq * x2 / 5040.0  # sinh(x)/x
-    cosh_x = 1.0 + x2 / 2.0 + x2_sq / 24.0 + x2_sq * x2 / 720.0
+    # Double-``where`` on the series input, mirroring ``lambda_tau_safe`` on
+    # the opposite branch: ``where`` evaluates both branches, and at float32
+    # optical depths large enough that the polynomial's powers overflow
+    # (``tau * x2**3`` passes 3.4e38 around ``lambda*tau ~ 1e6``, e.g. a
+    # ``tau = 1e6`` longwave layer) the discarded ``R_series`` goes
+    # inf/inf = NaN, which reverse mode then hands to the *taken* branch as
+    # ``0 * NaN = NaN`` — the forward value stayed (0, 0) but d/d(tau, ssa, g)
+    # were all NaN. Clamping ``x2`` to 0 outside the series region keeps the
+    # discarded polynomial (and its derivatives) finite; inside the region the
+    # value and derivative are untouched.
+    x2_safe = jnp.where(use_series, x2, 0.0)
+    x2_sq = x2_safe * x2_safe
+    sinhc = (1.0 + x2_safe / 6.0 + x2_sq / 120.0
+             + x2_sq * x2_safe / 5040.0)             # sinh(x)/x
+    cosh_x = 1.0 + x2_safe / 2.0 + x2_sq / 24.0 + x2_sq * x2_safe / 720.0
     denom_series = cosh_x + gamma1 * tau * sinhc    # >= 1: every term >= 0
     R_series = gamma2 * tau * sinhc / denom_series
     T_series = 1.0 / denom_series
