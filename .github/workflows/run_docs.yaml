@@ -44,10 +44,6 @@ on:
 
 permissions:
   contents: read
-  # The rot guard's issue-state check reads the Issues API with the workflow
-  # token; unspecified permissions are none, and an underprivileged 403 is
-  # indistinguishable from rate limiting (which skips the check).
-  issues: read
 
 jobs:
   validate-docs:
@@ -80,12 +76,27 @@ jobs:
         with:
           python-version: '3.11'
 
+      # No Issues API token, and no `issues:` permission on this workflow:
+      # whether a cited issue is still OPEN is checked by
+      # science_register.yaml, on issue-close and on a schedule, because that
+      # verdict depends on GitHub rather than on the tree and must never
+      # decide a pull request (#836). What runs here is the part that is a
+      # pure function of the tree.
       - name: Run the science-register rot guard
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Invoked directly (unittest main), NOT via pytest: the repo-root
         # conftest.py imports jax, which is not installed at this point.
         run: python docs/science_pointers_test.py -v
+
+      - name: Test the tracked-gap helpers
+        # Hermetic: every API call is stubbed, so the module that decides what
+        # counts as stale is itself testable without asking GitHub anything.
+        # PyYAML is the one dependency, for the assertions that this job holds
+        # no Issues permission and that science_register.yaml never fires on a
+        # pull request — the policy #836 bought, which is otherwise easy to
+        # undo by accident.
+        run: |
+          pip install pyyaml
+          cd docs && python tracked_gaps_test.py -v
 
   # The whole tree, warnings as errors. This replaces the build that used to
   # hang off the rot-guard job, which grepped the log for warnings ORIGINATING
