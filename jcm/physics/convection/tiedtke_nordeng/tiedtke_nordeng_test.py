@@ -128,7 +128,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, *extra,
+        moisture_supply, *extra, **_kwargs,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -215,6 +215,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -316,7 +317,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
     def fake_convection(
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
-        moisture_supply, *extra,
+        moisture_supply, *extra, **_kwargs,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(

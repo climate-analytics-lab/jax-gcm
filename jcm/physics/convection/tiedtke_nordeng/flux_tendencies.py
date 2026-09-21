@@ -20,6 +20,85 @@ from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
 
+#: Floor on the assumed updraft velocity inside :func:`updraft_area_cover`'s
+#: division [m/s]: a slower "updraft" is not one, and a tiny epsilon there
+#: would put the guarded-division VJP in the float32 squared-underflow window
+#: (the double-where NaN class, jax-gcm#558/#559). Matches the wet-deposition
+#: port's floor so the shared cover is identical on both sides.
+_UPDRAFT_VELOCITY_FLOOR = 0.01
+#: Floor guarding the sub-cloud-taper mass-ratio denominator [Pa or kg/m²].
+_MASS_EPS = 1.0e-30
+#: A rain shaft only exists where the updraft area is positive; below this the
+#: column carries no plume there and the sub-cloud evaporation is switched off
+#: (its safe-cover substitution keeps the discarded lane's VJP finite).
+_COVER_FLOOR = 1.0e-12
+
+
+def updraft_area_cover(
+    mass_flux_up: jnp.ndarray,       # (nlev, *horiz) updraft flux, top-first [kg/m²/s]
+    density: jnp.ndarray,            # (nlev, *horiz) density in the shaft [kg/m³]
+    ktype: jnp.ndarray,             # (*horiz) convection type (3 = mid-level)
+    layer_weight: jnp.ndarray,       # (nlev, *horiz) per-layer mass ∝ Δp [kg/m² or Pa]
+    updraft_velocity: jnp.ndarray,   # assumed in-cloud updraft speed ``zwu`` [m/s]
+) -> jnp.ndarray:
+    """Fraction of the grid box occupied by the convective updraft/rain shaft.
+
+    ECHAM ``cuflx`` (``mo_cufluxdts.f90:417``) estimates the updraft area
+    from the mass flux and a prescribed updraft speed,
+    ``zcucov = pmfu / (zwu·zrhou)`` with ``zwu`` the assumed in-cloud
+    velocity (line 166, 2 m/s) and ``zrhou`` the density in the shaft.
+    ECHAM reuses this as the footprint of the sub-cloud rain evaporation
+    under the HAM submodel, and HAMMOZ ``prep_wetdep_hydro`` reuses the
+    identical quantity for the convective wet deposition — so the two
+    share one implementation here.
+
+    The mass flux ECHAM feeds this is the plume's own profile through the
+    cloud and, below cloud base, a taper that decreases linearly in
+    pressure from the cloud-base value to zero at the surface
+    (``pmfu(jk) = pmfu(kcbot)·zzp``, ``zzp = (p_s − p_half(jk)) /
+    (p_s − p_half(kcbot))``, squared for mid-level convection;
+    ``mo_cufluxdts.f90:233-239``) — the updraft draws its air from the
+    whole sub-cloud layer, so the shaft below the base keeps its footprint
+    and tapers to the surface. The supplied ``mass_flux_up`` carries only
+    the plume profile (zero below cloud base), so that taper is rebuilt
+    here from the layer masses: ``p_s − p_half(k) = g·Σ_{j≥k} m_j``, so the
+    pressure ratio equals the ratio of the air mass below the two
+    interfaces. Levels are top-first; the cloud base is the lowest level
+    (largest index) with a non-zero flux.
+
+    ``density`` is left to the caller: the sub-cloud evaporation inside the
+    convection scheme has the updraft temperature available and passes the
+    true updraft density ``zrhou = p/(rd·ptu)``, whereas the wet-deposition
+    port has only the environment density and passes that as a stand-in
+    (a few-per-cent difference over the ~2 % the assumed ``zwu`` already
+    dominates).
+
+    Not clipped: ``cuflx`` applies no clamp, and the evaporation uses the
+    raw area. Callers that need a cover *fraction* (the wet deposition)
+    clip to ``[0, 1]`` themselves. Broadcasting-native (vertical on axis 0).
+    """
+    # A negative updraft mass flux is not a plume; the Tiedtke ledger is
+    # non-negative by construction, so this only pins the contract.
+    mass_flux_up = jnp.maximum(mass_flux_up, 0.0)
+    nlev = mass_flux_up.shape[0]
+    idx = jnp.arange(nlev).reshape((nlev,) + (1,) * (mass_flux_up.ndim - 1))
+    active = mass_flux_up > 0.0
+    # Cloud base = lowest active level (largest index, top-first order);
+    # -1 where the column carries no plume, which leaves every level with a
+    # zero flux and hence zero cover.
+    kbase = jnp.max(jnp.where(active, idx, -1), axis=0)
+    take = jnp.maximum(kbase, 0)[jnp.newaxis]
+    mfu_base = jnp.take_along_axis(mass_flux_up, take, axis=0)[0]
+    # Air mass below each layer's TOP interface (the layer itself included).
+    mass_below = jnp.cumsum(layer_weight[::-1], axis=0)[::-1]
+    mass_below_base = jnp.take_along_axis(mass_below, take, axis=0)[0]
+    zzp = mass_below / jnp.maximum(mass_below_base, _MASS_EPS)
+    zzp = jnp.where(ktype == 3, zzp * zzp, zzp)
+    sub_cloud = (idx > kbase) & (kbase >= 0)
+    mfu_eff = jnp.where(sub_cloud, mfu_base * zzp, mass_flux_up)
+    w_u = jnp.maximum(updraft_velocity, _UPDRAFT_VELOCITY_FLOOR)
+    return mfu_eff / (w_u * density)
+
 
 def calculate_precipitation_rate(
     updraft_state: UpdatedraftState,
@@ -60,6 +139,11 @@ def convective_precip_fluxes(
     pdmfup: jnp.ndarray,
     pdmfdp: jnp.ndarray,
     dt: float,
+    updraft_temperature: jnp.ndarray | None = None,
+    updraft_mass_flux: jnp.ndarray | None = None,
+    ktype: jnp.ndarray | None = None,
+    updraft_velocity: jnp.ndarray = 2.0,
+    use_updraft_cover: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
            jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
@@ -91,6 +175,19 @@ def convective_precip_fluxes(
         pdmfup: Per-layer updraft precip generation [kg/m²/s] (≥ 0).
         pdmfdp: Per-layer downdraft precip sink [kg/m²/s] (≤ 0).
         dt: Time step [s].
+        updraft_temperature: Updraft temperature ``ptu`` [K] (TOA-first),
+            used to build the updraft density for the sub-cloud
+            evaporation cover; only read when ``use_updraft_cover``.
+        updraft_mass_flux: Updraft mass flux ``pmfu`` [kg/m²/s]
+            (TOA-first), the plume profile from which the updraft-area
+            cover is built; only read when ``use_updraft_cover``.
+        ktype: Convection type (1=deep, 2=shallow, 3=mid); selects the
+            mid-level sub-cloud taper squaring in the cover.
+        updraft_velocity: Assumed in-cloud updraft speed ``zwu`` [m/s].
+        use_updraft_cover: When ``True`` the sub-cloud rain-evaporation
+            footprint is the updraft area ``pmfu/(zwu·zrhou)`` — ECHAM's
+            ``lham`` branch (``mo_cufluxdts.f90:416-417``); when ``False``
+            it is ECHAM's non-HAM constant ``zcucov = 0.05`` (line 419).
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux)`` —
@@ -104,13 +201,28 @@ def convective_precip_fluxes(
     zcons1 = c.cpd / (c.alhf * c.grav * dt)
     zcons2 = 1.0 / (c.grav * dt)
     ztmelp2 = c.tmelt + 2.0
-    # Fractional precip cover for the sub-cloud evaporation: ECHAM's
-    # non-HAM branch (mo_cufluxdts.f90:419). Under ``lham`` ECHAM uses the
-    # updraft area ``pmfu/(zwu*zrhou)`` instead, the footprint the JAM
-    # convective washout already uses (wetdep_term.conv_precip_cover);
-    # sharing it here changes the convective moisture budget and is
-    # tracked as jax-gcm#812.
-    zcucov = 0.05
+    # Fractional precip cover for the sub-cloud Kessler evaporation
+    # (mo_cufluxdts.f90:414-420). ECHAM keys it on the HAM submodel:
+    #   * plain ECHAM (``.NOT.lham``): the constant ``zcucov = 0.05``;
+    #   * with HAM active (``lham``): the updraft AREA
+    #     ``pmfu/(zwu·zrhou)``, ``zrhou = p/(rd·ptu)`` the updraft density
+    #     (lines 406-407), ``zwu`` the assumed in-cloud updraft speed
+    #     (line 166) — the same footprint the JAM convective wet
+    #     deposition uses (jax-gcm#812). ``use_updraft_cover`` mirrors that
+    #     compile-time ``lham`` switch (set on ``TiedtkeConvection`` when the
+    #     JAM chain is composed). Below cloud base the plume temperature is
+    #     undefined (``tu==0`` there), so the environment temperature stands
+    #     in for ``ptu`` — exactly ECHAM, whose ``ptu`` below the base is the
+    #     environment value ``ptenh``. The cover is a per-level array here.
+    if use_updraft_cover:
+        t_rho = jnp.where(updraft_temperature > 1.0, updraft_temperature,
+                          temperature)
+        rho_updraft = pressure / (c.rd * t_rho)
+        zcucov_lev = updraft_area_cover(
+            updraft_mass_flux, rho_updraft, ktype, dp_lev, updraft_velocity,
+        )
+    else:
+        zcucov_lev = jnp.full_like(dp_lev, 0.05)
 
     from .tiedtke_nordeng import saturation_mixing_ratio
     qs_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
@@ -153,17 +265,28 @@ def convective_precip_fluxes(
     k_idx = jnp.arange(nlev)
 
     def evap_step(zpsubcl, xs):
-        k, qs_k, q_k, dp_k, cevap_k = xs
-        active = (k >= kbase) & (zpsubcl > 1e-20)
+        k, qs_k, q_k, dp_k, cevap_k, cov_k = xs
+        # A rain shaft needs a positive cover; where the column carries no
+        # plume the updraft-area cover is exactly zero and the constant
+        # cover is 0.05, so this only ever masks the empty updraft-cover
+        # lanes (below/outside the plume).
+        has_shaft = cov_k > _COVER_FLOOR
+        active = (k >= kbase) & (zpsubcl > 1e-20) & has_shaft
+        # Substitute a safe unit cover on the discarded lanes so the
+        # sqrt-division never sees a zero denominator; those lanes are
+        # masked out of ``zdrfl``/``zpsubcl`` below, so the substitution is
+        # invisible except that it keeps the VJP finite (the double-where
+        # NaN-gradient guard, jax-gcm#558/#559).
+        cov_safe = jnp.where(has_shaft, cov_k, 1.0)
         zrfl = zpsubcl
         zrnew = (
             jnp.maximum(
                 0.0,
-                jnp.sqrt(jnp.maximum(jnp.maximum(zrfl, 0.0) / zcucov, 1.0e-30))
+                jnp.sqrt(jnp.maximum(jnp.maximum(zrfl, 0.0) / cov_safe, 1.0e-30))
                 - cevap_k * dp_k * jnp.maximum(qs_k - q_k, 0.0),
             ) ** 2
-        ) * zcucov
-        zrmin = zrfl - zcucov * jnp.maximum(0.8 * qs_k - q_k, 0.0) * zcons2 * dp_k
+        ) * cov_safe
+        zrmin = zrfl - cov_safe * jnp.maximum(0.8 * qs_k - q_k, 0.0) * zcons2 * dp_k
         zrnew = jnp.maximum(zrnew, zrmin)
         zrfln = jnp.maximum(zrnew, 0.0)
         zdrfl = jnp.where(active, jnp.minimum(0.0, zrfln - zrfl), 0.0)
@@ -171,7 +294,8 @@ def convective_precip_fluxes(
         return zpsubcl_new, zdrfl
 
     zpsubcl_final, zdrfl_per_level = lax.scan(
-        evap_step, prfl + psfl, (k_idx, qs_env, humidity, dp_lev, cevapcu),
+        evap_step, prfl + psfl,
+        (k_idx, qs_env, humidity, dp_lev, cevapcu, zcucov_lev),
     )
     pdmfup_adj = pdmfup + zdrfl_per_level  # negative increments (cuflx 437)
 
@@ -216,7 +340,9 @@ def calculate_tendencies(
     kbase: int,
     ktop: int,
     dt: float,
-    config: ConvectionParameters
+    config: ConvectionParameters,
+    ktype: jnp.ndarray | None = None,
+    use_updraft_cover: bool = False,
 ) -> ConvectionTendencies:
     """Calculate final tendencies from convective fluxes
 
@@ -234,6 +360,11 @@ def calculate_tendencies(
         ktop: Cloud top level
         dt: Time step (s)
         config: Convection configuration
+        ktype: Convection type (1=deep, 2=shallow, 3=mid) — selects the
+            mid-level sub-cloud taper in the updraft-area evaporation cover.
+        use_updraft_cover: Route the sub-cloud rain evaporation through the
+            updraft-area cover instead of ECHAM's non-HAM ``zcucov = 0.05``
+            (jax-gcm#812).
 
     Returns:
         ConvectionTendencies with all tendency terms
@@ -342,6 +473,11 @@ def calculate_tendencies(
      precip_flux) = convective_precip_fluxes(
         temperature, humidity, pressure, dp_lev, kbase,
         updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
+        updraft_temperature=updraft_state.tu,
+        updraft_mass_flux=updraft_state.mfu,
+        ktype=ktype,
+        updraft_velocity=config.cu_updraft_velocity,
+        use_updraft_cover=use_updraft_cover,
     )
     plude = updraft_state.plude
 

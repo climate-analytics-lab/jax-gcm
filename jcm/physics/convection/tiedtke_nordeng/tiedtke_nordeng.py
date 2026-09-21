@@ -724,6 +724,7 @@ def _tiedtke_convection_toa_first(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -1219,7 +1220,8 @@ def _tiedtke_convection_toa_first(
         tendencies = calculate_tendencies(
             temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
             updraft_state, downdraft_state,
-            cloud_base, ktop, dt, config
+            cloud_base, ktop, dt, config,
+            ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
         )
         
         # qc/qi tendencies come from the cudtdq ledger's detrained
@@ -1356,6 +1358,7 @@ def tiedtke_nordeng_convection(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run the Tiedtke-Nordeng scheme in either vertical ordering.
 
@@ -1390,6 +1393,7 @@ def tiedtke_nordeng_convection(
         dt, config, land_fraction, moisture_supply,
         to_toa(moisture_tend_profile), thvsig,
         to_toa(omega), to_toa(qte_dynamics),
+        use_updraft_cover,
     )
 
     def back(a):
@@ -1496,8 +1500,22 @@ class TiedtkeConvection(PhysicsTerm):
 
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, params: ConvectionParameters | None = None):
+    def __init__(self, params: ConvectionParameters | None = None,
+                 updraft_precip_cover: bool = False):
         """Hold the scheme-native :class:`ConvectionParameters`.
+
+        ``updraft_precip_cover`` mirrors ECHAM's compile-time ``lham``
+        switch on the sub-cloud rain-evaporation footprint
+        (``mo_cufluxdts.f90:414-420``): with it ``True`` the evaporation
+        acts over the updraft AREA ``pmfu/(zwu·zrhou)``, the same footprint
+        the JAM convective wet deposition uses; with it ``False`` (plain
+        ECHAM) it uses the constant ``zcucov = 0.05``. ``echam_physics``
+        turns it on exactly when the JAM aerosol chain is composed
+        (``aerosol_module='jam'``) — the jcm analogue of ``lham``
+        (jax-gcm#812). It selects a code path at trace time, so it is a
+        plain Python bool held on the term, not a differentiable leaf; the
+        assumed updraft speed ``zwu`` it uses IS differentiable and lives
+        on :class:`ConvectionParameters` as ``cu_updraft_velocity``.
 
         With ECHAM's ``lmfmid`` on (the reference default, setphys.f90:71)
         the scheme runs the ``cubasmc`` mid-level trigger, which needs the
@@ -1523,6 +1541,7 @@ class TiedtkeConvection(PhysicsTerm):
         """
         params = params or ConvectionParameters.default()
         self.params = nnx.Param(params)
+        self._updraft_precip_cover = bool(updraft_precip_cover)
         if bool(params.cu_lmfmid):
             self.requires_dycore_fields = ("omega",)
 
@@ -1691,8 +1710,18 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             qte_dynamics = jnp.zeros_like(state.specific_humidity)
 
+        # ``use_updraft_cover`` is a static Python bool (a trace-time code-path
+        # selector), so it is closed over here rather than threaded as a
+        # vmapped argument — the ``in_axes`` tuple stays aligned with the 17
+        # mapped/broadcast array arguments.
+        _use_updraft_cover = self._updraft_precip_cover
+
+        def _column_scheme(*args):
+            return tiedtke_nordeng_convection(
+                *args, use_updraft_cover=_use_updraft_cover)
+
         column_fn = jax.vmap(
-            tiedtke_nordeng_convection,
+            _column_scheme,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1),
             out_axes=(0, 0),
         )
