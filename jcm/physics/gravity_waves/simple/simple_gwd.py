@@ -258,8 +258,10 @@ def simple_gwd(
         height: Geopotential height (m) [nlev]
         air_density: Air density (kg/m³) [nlev]
         h_std: Standard deviation of sub-grid orography (m)
-        dt: Time step (s). Consumed by the ECHAM overshoot guard, which caps
-            the drag so a single physics step cannot reverse the wind.
+        dt: Time step (s). Consumed by the two-stage ECHAM guard: the
+            overshoot cap bounds the drag at ``0.25 |U| / dt``, and the
+            energy-dissipation correction rescales any discrete step that
+            would gain kinetic energy back to the pre-step wind speed.
         config: GW parameters
 
     Returns:
@@ -326,17 +328,18 @@ def simple_gwd(
     dudt = -dtau_x_dz / rho
     dvdt = -dtau_y_dz / rho
 
-    # ECHAM overshoot guard (mo_ssodrag lines 423-429, as in the Lott-Miller
-    # port ``sso/lott_miller.py``): cap the drag acceleration at
-    # ``rover * |U| / dt`` so one physics step removes at most a quarter of the
-    # local wind speed and can never overshoot zero or reverse the flow. The
-    # saturated acceleration scales as ``k G U³ / (N H)`` — cubic in wind — so
-    # at e.g. 100 m/s and dt = 1800 s the unbounded tendency (~0.13 m/s²) would
-    # apply a −225 m/s increment; a critical-level flux drop over a thin layer
-    # is sharper still. Floors sit *inside* the sqrt so the derivative is
-    # finite at the (common) zero-drag / calm state (issue #558), and the
-    # division lives inside ``where`` with a floored denominator so the
-    # untaken branch stays poison-free.
+    # ECHAM overshoot guard, stage 1 of two (``mo_ssortns.f90::orodrag`` lines
+    # 401-407, as in the Lott-Miller port ``sso/lott_miller.py``): cap the drag
+    # acceleration at ``rover * |U| / dt``, where ``|U|`` is the TOTAL wind
+    # speed exactly as in the Fortran (``ztend = SQRT(pum1²+pvm1²)/ztmst``), so
+    # one physics step removes at most a quarter of the local wind speed. The
+    # saturated acceleration scales as ``k G U³ / (N H)`` — cubic in wind — and
+    # a critical-level flux drop across one thin low-density layer is sharper
+    # still (~110 m/s per 1800 s step from a 1.4 Pa launch absorbed at 32 km).
+    # Floors sit *inside* the sqrt so the derivative is finite at the (common)
+    # zero-drag / calm state (issue #558), and the division lives inside
+    # ``where`` with a floored denominator so the untaken branch stays
+    # poison-free.
     rover = 0.25
     zforc = jnp.sqrt(jnp.maximum(dudt ** 2 + dvdt ** 2, 1.0e-30))
     ztend = jnp.sqrt(jnp.maximum(u_wind ** 2 + v_wind ** 2, 1.0e-30)) / dt
@@ -346,17 +349,40 @@ def simple_gwd(
     dudt = dudt * factor
     dvdt = dvdt * factor
 
-    # Mechanical heating: KE lost to drag reappears as heat, dT/dt = -Ẋ·U / cp,
-    # computed from the *limited* tendencies so heat matches the momentum
-    # actually removed (mo_ssodrag computes dissipation from the final
-    # increments the same way).
-    dtedt = -(u_wind * dudt + v_wind * dvdt) / c.cpd
-
-    # Apply drag only inside the [zmin, zmax] window.
+    # Apply drag only inside the [zmin, zmax] window (before the energy stage,
+    # so the dissipation matches the tendencies actually returned).
     height_mask = (height >= config.zmin) & (height <= config.zmax)
     dudt = jnp.where(height_mask, dudt, 0.0)
     dvdt = jnp.where(height_mask, dvdt, 0.0)
-    dtedt = jnp.where(height_mask, dtedt, 0.0)
+
+    # Stage 2, the energy-dissipation correction (``orodrag`` lines 442-452):
+    # form the discrete update ``U* = U + dt·dU/dt`` and its kinetic-energy
+    # change. Because stage 1 caps by the *total* speed while the drag acts
+    # along the fixed launch direction, a strong crosswind can allow an
+    # increment larger than twice the launch-projected component — the step
+    # then overshoots that component through zero and *gains* energy. Exactly
+    # as the Fortran, such a step is rescaled back to the pre-step speed
+    # (``zred``), making it energy-neutral, and the heating is the discrete KE
+    # loss ``zdis/(dt·cpd)`` of the final increments. ``zdis`` is expanded
+    # algebraically (0.5(|U|²-|U*|²) = -dt·U·dU/dt - dt²/2·|dU/dt|²) to avoid
+    # the float32 cancellation of subtracting two nearly-equal squares.
+    def _zdis(du, dv):
+        return (-dt * (u_wind * du + v_wind * dv)
+                - 0.5 * dt ** 2 * (du ** 2 + dv ** 2))
+
+    zust = u_wind + dt * dudt
+    zvst = v_wind + dt * dvdt
+    old_ke = u_wind ** 2 + v_wind ** 2
+    # Denominator floor is 1e-15, NOT 1e-30: the division's reverse rule forms
+    # ``old_ke / safe_denom²``, and (1e-30)² underflows float32 to zero, so a
+    # calm column would hit 0/0 = NaN in the (discarded) branch and poison the
+    # whole batch gradient. (1e-15)² = 1e-30 stays normal.
+    safe_denom = jnp.maximum(zust ** 2 + zvst ** 2, 1e-15)
+    zred = jnp.sqrt(jnp.maximum(old_ke / safe_denom, 1.0e-30))
+    gain = _zdis(dudt, dvdt) < 0.0
+    dudt = jnp.where(gain, (zust * zred - u_wind) / dt, dudt)
+    dvdt = jnp.where(gain, (zvst * zred - v_wind) / dt, dvdt)
+    dtedt = _zdis(dudt, dvdt) / (dt * c.cpd)
 
     tendencies = SimpleGwdTendencies(dudt=dudt, dvdt=dvdt, dtedt=dtedt)
 

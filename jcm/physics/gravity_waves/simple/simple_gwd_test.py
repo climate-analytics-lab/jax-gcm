@@ -245,6 +245,48 @@ class TestGravityWaveDrag:
             assert jnp.all(u_after * u_wind > 0)
             assert jnp.sum(u_wind * tendencies.dudt) < 0.0
 
+    def test_rotated_flow_cannot_gain_energy(self):
+        """A strong crosswind cannot turn the total-speed cap into a KE source.
+
+        The overshoot cap follows the Fortran in bounding by TOTAL wind speed
+        (``mo_ssortns.f90`` line 402), while the drag acts along the fixed
+        launch direction. In a strongly veered layer below a critical level —
+        here a 10 m/s launch-projected component under a 100 m/s crosswind —
+        the cap alone would admit a ~25 m/s increment against the 10 m/s
+        component, overshooting it through zero and *adding* kinetic energy.
+        The Fortran's second stage (the energy-dissipation correction,
+        ``orodrag`` lines 442-452) rescales such a step back to the pre-step
+        speed, so per level the discrete update never gains speed and the
+        heating is never negative.
+        """
+        config = SimpleGwdParameters.default()
+        height, pressure, temperature, air_density = _sheared_column(
+            nlev=40, top=40000.0)
+
+        # Launch is westerly (surface u = 40, v = 0). The flow veers to a
+        # 10 m/s launch-projected component with a 100 m/s crosswind between
+        # 27 and 32 km, then the projected component reverses above.
+        u_wind = jnp.where(height < 27000, 40.0,
+                           jnp.where(height < 32000, 10.0, -40.0))
+        v_wind = jnp.where(height < 27000, 0.0, 100.0)
+
+        for dt in (900.0, 1800.0, 3600.0):
+            tendencies, _ = simple_gwd(
+                u_wind, v_wind, temperature, pressure, height, air_density,
+                500.0, dt, config)
+
+            assert jnp.all(jnp.isfinite(tendencies.dudt))
+            assert jnp.max(jnp.abs(tendencies.dudt)) > 1e-6
+            # Per-level discrete update never gains speed...
+            speed2_before = u_wind ** 2 + v_wind ** 2
+            u_after = u_wind + dt * tendencies.dudt
+            v_after = v_wind + dt * tendencies.dvdt
+            speed2_after = u_after ** 2 + v_after ** 2
+            assert jnp.all(speed2_after <= speed2_before * (1 + 1e-5))
+            # ...and dissipative heating is never negative (float32 noise
+            # aside on the energy-neutral rescaled levels).
+            assert jnp.all(tendencies.dtedt >= -1e-12)
+
     def test_calm_column_is_zero(self):
         """A wind-free column launches nothing and stays exactly zero."""
         config = SimpleGwdParameters.default()
@@ -323,28 +365,39 @@ class TestGravityWaveDrag:
         assert jnp.all(tendencies.dudt[above_mask] == 0)
 
     def test_energy_conservation(self):
-        """Dissipated kinetic energy reappears as heat, dT/dt = -dKE/dt / cp."""
+        """Heating equals the discrete kinetic-energy loss of the step.
+
+        As in ``mo_ssortns.f90::orodrag``, the temperature tendency is
+        ``zdis/(dt cp)`` with ``zdis = 0.5(|U|^2 - |U + dt dU/dt|^2)`` — the
+        KE actually removed by applying the returned tendencies over ``dt`` —
+        and it is never negative.
+        """
         config = SimpleGwdParameters.default()
         height, pressure, temperature, air_density = _sheared_column(
             nlev=40, top=40000.0)
 
         u_wind = jnp.ones_like(height) * 25.0
         v_wind = jnp.zeros_like(height)
+        dt = 1800.0
 
         tendencies, _ = simple_gwd(
             u_wind, v_wind, temperature, pressure, height, air_density,
-            400.0, 1800.0, config)
+            400.0, dt, config)
 
         # Kinetic energy is removed, never added.
         ke_loss = u_wind * tendencies.dudt + v_wind * tendencies.dvdt
         assert jnp.sum(ke_loss) <= 0.0
 
-        # Heating matches the dissipated KE where drag acts.
-        expected_heating = -ke_loss / cpd
+        # Heating matches the discrete KE dissipation where drag acts.
+        zdis = (-dt * (u_wind * tendencies.dudt + v_wind * tendencies.dvdt)
+                - 0.5 * dt ** 2
+                * (tendencies.dudt ** 2 + tendencies.dvdt ** 2))
+        expected_heating = zdis / (dt * cpd)
         mask = jnp.abs(ke_loss) > 1e-10
         assert jnp.any(mask)
         assert jnp.allclose(
             tendencies.dtedt[mask], expected_heating[mask], rtol=1e-3)
+        assert jnp.all(tendencies.dtedt >= 0.0)
 
     def test_jax_transformations(self):
         """Test JAX transformations"""
