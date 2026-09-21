@@ -18,51 +18,31 @@ from jcm.physics.diagnostics.wmo_tropopause import (
 from jcm.testing import check_gradients
 
 def create_test_atmosphere():
-    """Create a realistic test atmosphere profile"""
-    # Create a typical atmospheric profile
+    """Build a realistic mid-latitude sounding with a genuine WMO tropopause.
+
+    Surface-first — index 0 is the surface — the ordering the diagnostic is
+    written for (see ``find_tropopause_level``). A 6.5 K/km troposphere up to
+    11.5 km and a 1.8 K/km warming stratosphere above, so the 2 K/km WMO
+    threshold is crossed once and cleanly near 200 hPa.
+
+    The earlier fixture clamped the stratosphere to an isothermal 220 K with
+    ``jnp.maximum(temperature, T_tropopause)``, so the finder's "at least 1 K
+    of variation over 2 km" test failed at every level and it always returned
+    ``P_DEFAULT`` — a constant that satisfied the ``10000 < p < 40000``
+    assertions without a tropopause ever being found, so the forward tests
+    passed vacuously (#841).
+    """
     nlev = 40
-    
-    # Pressure levels from surface to ~10 hPa
-    pressure_levels = jnp.logspace(jnp.log10(100000), jnp.log10(1000), nlev)
-    
-    # Temperature profile with tropospheric and stratospheric regions
-    # Troposphere: decreasing with height
-    # Stratosphere: increasing with height
-    temperature = jnp.zeros(nlev)
-    
-    # Surface temperature
-    T_surface = 288.0  # K
-    
-    # Tropospheric lapse rate (6.5 K/km)
-    lapse_trop = 0.0065  # K/m
-    
-    # Tropopause at ~200 hPa
-    p_tropopause = 20000.0  # Pa
-    T_tropopause = 220.0  # K
-    
-    # Stratospheric warming rate
-    lapse_strat = -0.001  # K/m (warming with height)
-    
-    # Build temperature profile
-    for k in range(nlev):
-        p = pressure_levels[k]
-        if p > p_tropopause:
-            # Troposphere
-            # Use simple relationship: T = T_surface - lapse * height
-            # Approximate height from pressure using scale height
-            height = -7000 * jnp.log(p / 100000)  # Simple approximation
-            temperature = temperature.at[k].set(T_surface - lapse_trop * height)
-        else:
-            # Stratosphere
-            height = -7000 * jnp.log(p / 100000)
-            height_trop = -7000 * jnp.log(p_tropopause / 100000)
-            temperature = temperature.at[k].set(T_tropopause + lapse_strat * (height - height_trop))
-    
-    # Ensure monotonic decreasing with height in troposphere
-    temperature = jnp.maximum(temperature, T_tropopause)
-    
+    # Surface-first pressure column (index 0 = surface).
+    pressure_levels = jnp.logspace(jnp.log10(100000.0), jnp.log10(1000.0),
+                                   nlev)
+    height = -7500.0 * jnp.log(pressure_levels / 100000.0)
+    temperature = jnp.where(
+        height <= 11500.0,
+        288.0 - 0.0065 * height,             # troposphere, 6.5 K/km
+        213.25 + 0.0018 * (height - 11500.0),  # stratosphere, +1.8 K/km
+    )
     surface_pressure = jnp.array([100000.0])  # Pa
-    
     return temperature, pressure_levels, surface_pressure
 
 def test_compute_geopotential_height():
@@ -119,10 +99,14 @@ def test_find_tropopause_level():
     tropopause_pressure = find_tropopause_level(temperature, pressure, height, 
                                                ncctop=5, nccbot=35)
     
-    # Should find a reasonable tropopause pressure
+    # A tropopause must actually be FOUND, not the not-found fallback: assert
+    # it differs from P_DEFAULT (the vacuous old fixture returned exactly that,
+    # which still satisfied a loose 100-400 hPa band) and lands in the physical
+    # mid-latitude band around 200 hPa.
     assert tropopause_pressure.shape == (1,)
-    assert tropopause_pressure[0] > 10000  # > 100 hPa
-    assert tropopause_pressure[0] < 40000  # < 400 hPa
+    assert not jnp.allclose(tropopause_pressure, P_DEFAULT)
+    assert tropopause_pressure[0] > 15000  # > 150 hPa
+    assert tropopause_pressure[0] < 30000  # < 300 hPa
 
 def test_wmo_tropopause():
     """Test complete WMO tropopause function"""
@@ -141,9 +125,10 @@ def test_wmo_tropopause():
     # Check output shape
     assert tropopause_pressure.shape == batch_shape
     
-    # Check reasonable values
-    assert jnp.all(tropopause_pressure > 10000)  # > 100 hPa
-    assert jnp.all(tropopause_pressure < 40000)  # < 400 hPa
+    # A tropopause must actually be found (not P_DEFAULT), in the physical band.
+    assert jnp.all(tropopause_pressure != P_DEFAULT)
+    assert jnp.all(tropopause_pressure > 15000)  # > 150 hPa
+    assert jnp.all(tropopause_pressure < 30000)  # < 300 hPa
 
 def test_wmo_tropopause_with_previous():
     """Test WMO tropopause with previous values"""
