@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.forcing import ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY
+from jcm.forcing import BY_DATE, ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY
 
 # Tiny source grid and a handful of scattered "columns" inside it.
 _LON = np.arange(0.0, 360.0, 45.0)            # 8
@@ -53,7 +53,8 @@ class AttachJamForcingTest(unittest.TestCase):
         leaf = forcing.anthropogenic_emissions["emis_surface_combustion_so2"]
         self.assertIsInstance(leaf, TimeSeries)
         self.assertEqual(leaf.values.shape, (12, 1, _NCOL))
-        self.assertEqual(int(leaf.align_mode), MONTHLY_CLIMATOLOGY)
+        # Twelve real dates describe a transient year, not a climatology.
+        self.assertEqual(int(leaf.align_mode), BY_DATE)
         np.testing.assert_allclose(np.asarray(leaf.values), 2.0e-12)
         self.assertIsNone(forcing.prescribed_aerosol_emissions)
 
