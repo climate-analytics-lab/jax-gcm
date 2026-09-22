@@ -513,9 +513,39 @@ daily climatologies explicitly (the product-specific readers do this for
 known climatology formats). A monthly climatology selects civil months;
 no-leap dated inputs retain their nominal date components on ingestion.
 
+Use ``monthly_climatology`` for January-through-December records and
+``daily_climatology`` for an ordered nominal year of daily records. A daily
+365-record climatology holds February 28 on February 29; March 1 still selects
+March 1. Dated ``by_date_interp`` input instead interpolates across its actual
+bracketing dates, including a missing leap day. Unsupported transient
+360-day and Julian axes are rejected at ingestion; preprocess those explicitly
+with xarray. Dated lookup currently holds endpoint values outside its axis;
+check forcing coverage when constructing an experiment.
+
+Coupled output must use the shared public conversion instead of multiplying
+floating epoch days into nanoseconds:
+
+.. code-block:: python
+
+   from jcm.predictions import output_time_labels
+
+   # exact_times is a jax_datetime.Datetime axis shared by the components.
+   labels = output_time_labels(exact_times)
+   ocean = ocean.assign_coords(time=labels)
+
+The result is exact ``datetime64[ms]``; integer-second model labels are
+preserved, and interval midpoint labels can also represent half seconds.
+Floating days-since-epoch input is rejected. The trajectory serializer uses
+the same conversion, preventing tiny timestamp differences from expanding
+an xarray merge into two interleaved axes (#862).
+
 A saved run now includes its exact datetime and integer step count. External
 couplers must preserve the complete ``RunState`` or pass ``time`` and ``step``
 explicitly to ``restore_state``. Dycore ``sim_time`` alone is insufficient.
+``run_from_state_with_carry`` now requires ``initial_time`` and
+``initial_step`` and returns ``(RunState, ModelPredictions)``; continue with
+all four fields of ``RunState`` (``dynamics``, ``physics``, ``time``, ``step``).
+See :doc:`advanced_features` for a complete external-stepper example.
 Checkpoints predating the exact clock can only be imported as initial
 conditions (``as_initial_condition=True``), starting at the new model's
 ``start_time``. Unstamped files additionally require the unit assertion

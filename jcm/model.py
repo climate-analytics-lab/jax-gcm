@@ -1496,16 +1496,16 @@ class Model:
         :meth:`ModelPredictions.snapshot_dataset`.
 
         Two optional observer arguments, both ignored without observers.
-        ``observer_t0_days`` is the window's absolute start time in days
-        since 1970, normally read from the initial state's ``sim_time``;
-        pass it when ``run`` is called inside a JAX transformation with a
-        traced initial state, where that read cannot be made (see
-        :meth:`_observer_window_start`). ``observer_xs`` takes sampling
+        ``observer_t0_days`` is an optional consistency assertion of the
+        window's absolute start time in days since 1970. The exact
+        ``initial_time`` is authoritative. ``observer_xs`` takes sampling
         tables built by the caller with :meth:`prepare_observers`, skipping
         the host-side build entirely; since the tables are a traced
         argument of the compiled run, that is what lets a sweep over
         *different* windows reuse one compilation, where a concrete
-        ``observer_t0_days`` per window cannot.
+        window start used to build host tables per call cannot. Pass both
+        ``initial_time`` and ``initial_step`` from the complete
+        :class:`RunState`; this method returns ``(RunState, ModelPredictions)``.
         """
         if initial_time is None or initial_step is None:
             raise ValueError(

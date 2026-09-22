@@ -411,6 +411,26 @@ results and release gates are tracked in the linked issue and consolidated PR.
 
 ## Initial implementation and remaining release gates
 
+### Regression coverage
+
+The issue reports have dedicated reproductions, in addition to ordinary unit
+tests. Expected dates are built independently with NumPy/xarray or explicit
+Gregorian expectations, rather than copying the model's indexing formula.
+
+| Report or risk | Regression coverage |
+|---|---|
+| #805: monthly boundary conditions switch 1–2 days late | `forcing_datetime_regression_test.py` checks all twelve month transitions in 2005, 2000, 1900 and 2100 under JIT, including shared SST, sea-ice, dust, emissions and oxidant selection. |
+| #449: the displayed date, noleap input and seasonal clock disagree | `forcing_datetime_regression_test.py` checks nominal cftime dates and Feb-28/29/Mar-1 held versus interpolated data; `clock_calendar_regression_test.py` checks January-1 phase across decades and Gregorian century rules. |
+| #862: 600/1200-second output labels differ by 128 ns and double a coupled merge axis | `output_datetime_regression_test.py` compares the public `output_time_labels` conversion with an independent exact grid, verifies N-label xarray merges, and checks that trajectory serialization calls the shared function. Midnight and non-midnight origins are covered. |
+| Leap years and month membership | `output_datetime_regression_test.py` checks January 31, February and March 1 for 1900/2000/2100, and accumulator restart exactly at a month boundary. `datetime_integration_test.py` compares real model daily output through a January/February checkpoint seam. |
+| Clock restart and traced dates | `clock_calendar_regression_test.py` checks a non-midnight synthetic `RunState` seam and reuse of one compiled function across decades; checkpoint tests reject inconsistent exact metadata and permit a drifted backend float counter. |
+
+#214 and #450 are broader representation/design proposals, not separate
+datetime failure reports. This PR preserves their future Coordax opportunity;
+it does not claim that testing the datetime boundary completes that migration.
+
+### Implementation status
+
 The initial v3 PR implements the exact run clock and checkpoint schema,
 ``start_time`` / ``total_time`` / ``end_time``, explicit dated/climatology
 forcing, exact trajectory and auxiliary timestamps, and bounded monthly

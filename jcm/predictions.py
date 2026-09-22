@@ -33,18 +33,40 @@ _LIVE_CONTEXT_PARAMS_DESCRIPTION = (
 )
 
 
-def _exact_datetime64(values):
-    """Transfer a ``jax_datetime.Datetime`` array to exact host datetimes."""
+def output_time_labels(values) -> np.ndarray:
+    """Return exact host labels for model output and coupled datasets.
+
+    Args:
+        values: A :class:`jax_datetime.Datetime` scalar/array or a NumPy
+            ``datetime64`` scalar/array. Numeric elapsed-time values are not
+            accepted; callers must construct dates from the authoritative
+            model clock first.
+
+    Returns:
+        A NumPy ``datetime64[ms]`` array. Millisecond storage represents exact
+        whole-second model times and half-second interval midpoints without
+        the narrow year range of ``datetime64[ns]``.
+
+    """
     host = jax.device_get(values)
     if hasattr(host, "to_datetime64"):
-        return np.asarray(host.to_datetime64()).astype("datetime64[ms]")
-    array = np.asarray(host)
-    if np.issubdtype(array.dtype, np.datetime64):
-        return array.astype("datetime64[ms]")
-    raise TypeError(
-        "Prediction timestamps must be jax_datetime.Datetime or datetime64; "
-        f"got {array.dtype}."
-    )
+        array = np.asarray(host.to_datetime64())
+    else:
+        array = np.asarray(host)
+        if not np.issubdtype(array.dtype, np.datetime64):
+            raise TypeError(
+                "Prediction timestamps must be jax_datetime.Datetime or "
+                f"datetime64; got {array.dtype}."
+            )
+    if np.any(np.isnat(array)):
+        raise ValueError("Prediction timestamps may not contain NaT.")
+    labels = array.astype("datetime64[ms]")
+    if not np.array_equal(labels.astype(array.dtype), array):
+        raise ValueError(
+            "Prediction timestamps must be exactly representable at "
+            "millisecond precision."
+        )
+    return labels
 
 
 def _has_cell_method(existing: str, requested: str) -> bool:
@@ -392,7 +414,7 @@ class ModelPredictions:
         nlon, nlat = self._coords.horizontal.nodal_shape
         first = next(iter(snaps.values()))
         n = first.shape[0]
-        t = _exact_datetime64(self._snapshot_times)
+        t = output_time_labels(self._snapshot_times)
         if t.shape != (n,):
             raise ValueError(
                 f"snapshot_times must have shape ({n},); got {t.shape}.")
@@ -469,7 +491,7 @@ class ModelPredictions:
         bounds = getattr(self._predictions, "time_bounds", None)
         cell_method = getattr(self._predictions, "time_cell_method", None)
         if bounds is not None:
-            bounds = _exact_datetime64(bounds)
+            bounds = output_time_labels(bounds)
             if bounds.shape != (ds.sizes["time"], 2):
                 raise ValueError(
                     "Prediction time_bounds must have shape (time, 2); got "
@@ -541,7 +563,7 @@ class ModelPredictions:
         # protocol; delegate whenever the grid has no modal axes.
         if self._dycore is not None and not hasattr(
                 self._coords.horizontal, "modal_axes"):
-            times = _exact_datetime64(self.times)
+            times = output_time_labels(self.times)
             ds = self._dycore.to_xarray(self._predictions, times)
             # The dycore's ``to_xarray`` has already run
             # ``cf_metadata.finalize_output`` (CSV attrs and the curated
@@ -570,7 +592,7 @@ class ModelPredictions:
         # Per-physics flattening of the diagnostic struct into a dict of named fields.
         physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
-        times = _exact_datetime64(self.times)
+        times = output_time_labels(self.times)
         coords = jax.device_get(self._coords)
 
         additional_coords = {}

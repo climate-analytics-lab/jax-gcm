@@ -148,15 +148,16 @@ years to continue from the previous state:
    year_iter = iter(ds.groupby('time.year'))
 
    year, year_ds = next(year_iter)
+   model = Model(coords=coords, start_time=f'{year}-01-01')
    forcing = ForcingData.from_dataset(year_ds, coords=coords)
    preds = model.run(forcing=forcing, save_interval='1 day',
-                     total_time='365 days')
+                     end_time=f'{year + 1}-01-01')
    yearly_outputs.append(preds.to_xarray())
 
    for year, year_ds in year_iter:
        forcing = ForcingData.from_dataset(year_ds, coords=coords)
        preds = model.resume(forcing=forcing, save_interval='1 day',
-                            total_time='365 days')
+                            end_time=f'{year + 1}-01-01')
        yearly_outputs.append(preds.to_xarray())
 
    trajectory = xr.concat(yearly_outputs, dim='time')
@@ -357,20 +358,26 @@ the state retained by ``model``:
 
    state = model.initial_state()
    physics_carry = model.initial_physics_carry()
-   state, physics_carry, predictions = model.run_from_state_with_carry(
+   run_state, predictions = model.run_from_state_with_carry(
        initial_state=state,
        initial_physics_state=physics_carry,
+       initial_time=model.start_time,
+       initial_step=0,
        forcing=forcing,
        total_time=1.0,
        save_interval=1.0,
    )
 
+For the next window, pass ``run_state.dynamics``, ``run_state.physics``,
+``run_state.time`` and ``run_state.step`` together. The exact clock is part
+of the resumable state; do not reconstruct it from a floating elapsed counter.
+
 ``model.bootstrap_state()`` is the stateful alternative: it installs and
 returns a matched ``(state, physics_carry)`` pair for a later ``resume()``.
 The installed pair is available through the read-only ``model.dycore_state``
 and ``model.physics_carry`` properties. Checkpoint readers replace both values
-atomically through ``model.restore_state(...)`` so a dycore state cannot be
-paired accidentally with stale radiation or turbulence carry state.
+atomically through ``model.restore_state(state, physics_carry, time=..., step=...)``.
+The complete installed state is available as ``model.run_state``.
 
 ``ModelPredictions`` deliberately drops coordinate and physics objects when it
 crosses a JAX pytree boundary. Reattach that static context before converting a
@@ -413,12 +420,11 @@ prior-step TKE at the seam:
 elapsed clock — is :func:`jcm.checkpoint.load_checkpoint`, in
 :doc:`running_at_scale`.)
 
-**Observers need one extra argument under an outer jit**, because their
-sampling tables are built on the host from the window's start time, which is
-a tracer there. Pass a concrete ``observer_t0_days``; or, to reuse one
-compilation across *different* windows, pass tables from
-``model.prepare_observers(t0_days, save_interval, total_time)`` as
-``observer_xs``.
+**Observers prepare sampling tables on the host.** When the window's exact
+clock is traced under an outer jit, build tables first with
+``model.prepare_observers(start_time, save_interval, total_time)`` and pass
+them as ``observer_xs``. The tables and exact clock can then vary between
+windows without making their values static compilation parameters.
 
 
 Where to next
