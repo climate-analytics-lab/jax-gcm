@@ -1527,7 +1527,7 @@ class TestUpdateTendencies_2M:
         """``preffl`` is bit-identical to the ECHAM law written out in place.
 
         The law lives in the shared ``eff_liquid_droplet_radius`` helper (also
-        used by the 1M scheme, #717); this pins the 2M numbers against an
+        used by the 1M scheme); this pins the 2M numbers against an
         independent transcription of the same expression.
         """
         n = 3

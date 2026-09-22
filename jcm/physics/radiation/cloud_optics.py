@@ -243,11 +243,11 @@ _R_EFF_LIQUID_UM = 11.0
 def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
     """Fallback liquid droplet effective radius (microns).
 
-    A column constant scaled by the Twomey factor. This is a FALLBACK: the
-    2-moment scheme publishes a microphysical ``clouds.r_eff_liq`` from the
-    ECHAM Martin/Bower law and never reaches here, and every production
-    configuration runs 2M. It is live only on the 1M ``physics=echam``
-    preset, where the resulting lack of any LWC dependence is jax-gcm#717.
+    A column constant scaled by the Twomey factor. This is a FALLBACK: both the
+    2-moment and 1-moment schemes publish a microphysical ``clouds.r_eff_liq``
+    from the ECHAM Martin/Bower law and never reach here, so this fallback
+    applies only to a composition that runs radiation with no microphysics
+    publishing a droplet radius.
 
     The land/ocean contrast is deliberately NOT applied, because the two
     references mean different things by it:

@@ -89,9 +89,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
   ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
   parameter itself as the scale put the same overflow on its own gradient).
-- The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
-  radius (#717) — live on the release-validated ``t63-echam-1m`` /
-  ``t106-echam-1m`` configurations; 2M paths use microphysical radii.
+- Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
+  from the shared ECHAM Martin/Bower law
+  (``eff_liquid_droplet_radius``), so the 1M ``physics=echam`` path no longer
+  falls back to a constant droplet radius. The radiative **ice** radius remains
+  limited: mixed-phase ICNC is INP-limited (~1e3 m⁻³), pinning most warm-branch
+  ``r_eff_ice`` at the 150 µm clip (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 

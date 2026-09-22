@@ -942,10 +942,11 @@ class TestColumnSweepParameterGradients:
 
 
 class TestEcham1MPublishesEffectiveRadius:
-    """The term must publish an LWC-dependent ``clouds.r_eff_liq`` (#717).
+    """The term must publish an LWC-dependent ``clouds.r_eff_liq``.
 
-    Without it RRTMGP falls back to ``effective_radius_liquid``, a constant
-    ~11 um independent of liquid water content.
+    Regression guard for the #717 fix: without a published radius RRTMGP falls
+    back to ``effective_radius_liquid``, a constant ~11 um independent of liquid
+    water content.
     """
 
     NLEV = 8
