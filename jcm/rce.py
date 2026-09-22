@@ -117,6 +117,48 @@ class _ClearSky(PhysicsTerm):
         }
 
 
+class AerosolFree(PhysicsTerm):
+    """Aerosol-free stand-in for the ``aerosol`` term of a full physics package.
+
+    Publishes zero aerosol optics with a clean-air Twomey factor
+    (``cdnc_factor = 1``, via ``AerosolData.zeros``) and leaves every other
+    diagnostic -- in particular the cloud schemes' ``clouds`` -- untouched.
+    Use it to run the whole ``echam_physics()`` stack as an RCE column:
+    ``physics.replace("aerosol", AerosolFree())``. The default MACv2-SP term
+    is a geographic plume climatology, so an RCE column placed at a given
+    (lat, lon) inherits whatever plume happens to sit there -- at 0°N/0°E the
+    Central African biomass-burning plume (AOD 0.33 at 550 nm, SSA 0.87,
+    Ångström 2), which on its own absorbs ~100 W/m² of shortwave in the
+    lower troposphere. That is not the idealised, aerosol-free RCE
+    configuration.
+    """
+
+    name: ClassVar[str] = "aerosol_free"
+    category: ClassVar[str] = "aerosol"
+    provides: ClassVar[tuple[str, ...]] = ("aerosol",)
+
+    def __init__(self) -> None:
+        """Default to the RRTMGP band counts until ``cache_band_config`` runs."""
+        self._n_bnd_sw = 14
+        self._n_bnd_lw = 16
+
+    def cache_band_config(self, band_config) -> None:
+        """Match the aerosol band count to the radiation backend (RRTMGP / grey)."""
+        self._n_bnd_sw = len(band_config.sw_band_centers_nm)
+        self._n_bnd_lw = len(band_config.lw_band_centers_nm)
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """Return zero tendency and zeroed (clean-air) aerosol diagnostics."""
+        # Broadcasting-native: level on axis 0, any trailing horizontal shape.
+        nlev, horiz = state.temperature.shape[0], state.temperature.shape[1:]
+        return PhysicsTendency.zeros(state.temperature.shape), {
+            **diagnostics,
+            "aerosol": AerosolData.zeros(
+                horiz, nlev, n_bnd_sw=self._n_bnd_sw, n_bnd_lw=self._n_bnd_lw,
+            ),
+        }
+
+
 def _pressure_centers(vertical, surface_pressure_pa):
     """Full-level pressure [Pa] for a single column from the vertical coordinate.
 
