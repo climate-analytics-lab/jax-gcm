@@ -538,6 +538,8 @@ def cloud_optics(
     cloud_ice_path: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
+    inhomogeneity_liquid: jnp.ndarray = 1.0,
+    inhomogeneity_ice: jnp.ndarray = 1.0,
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """Calculate complete cloud optical properties.
 
@@ -546,6 +548,16 @@ def cloud_optics(
         cloud_ice_path: In-cloud ice path per layer (kg/m²) [nlev]
         layer_thickness: Geometric layer thickness (m) [nlev]
         cdnc_factor: Cloud droplet number concentration factor from aerosols
+        inhomogeneity_liquid / inhomogeneity_ice: ECHAM sub-grid cloud
+            inhomogeneity factors applied to the liquid / ice **optical depth**
+            (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
+            ``l_variable_inhoml = .FALSE.``). Default 1.0 = no reduction. They
+            multiply the optical depth only -- the effective radii (which set
+            the extinction per unit mass) and the tau-weighted ssa/asymmetry
+            are taken from the UNSCALED paths, exactly as ECHAM derives
+            ``zomg``/``zasy`` before applying ``zinhoml``. Scaling the input
+            path instead would shrink the diagnostic ice radius via the
+            Moss/Foot IWC law and partly undo the reduction (#678).
 
     Returns:
         Tuple of (sw_optics, lw_optics)
@@ -553,9 +565,11 @@ def cloud_optics(
     """
     nlev = cloud_water_path.shape[0]
 
-    # Calculate effective radii. The Moss/Foot ice formula wants the
-    # IN-CLOUD ice water content in g/m3; the caller hands in-cloud paths
-    # per layer (kg/m2), so IWC = path / dz, converted kg -> g.
+    # Effective radii from the PHYSICAL (unscaled) in-cloud paths. The Moss/Foot
+    # ice formula wants the in-cloud ice water content in g/m3; the caller hands
+    # in-cloud paths per layer (kg/m2), so IWC = path / dz, converted kg -> g.
+    # The inhomogeneity factor must not enter here -- it scales optical depth,
+    # not the crystal/droplet size (#678).
     r_eff_liq = effective_radius_liquid(cdnc_factor)
     iwc_gm3 = cloud_ice_path / jnp.maximum(layer_thickness, 1.0) * 1e3
     r_eff_ice = effective_radius_ice(iwc_gm3)
@@ -572,9 +586,11 @@ def cloud_optics(
             cloud_ice_path, r_eff_ice, band
         )
         
-        # Combine (additive optical depth)
+        # Combine (additive optical depth). ssa/asymmetry are weighted by the
+        # UNSCALED optical depths (ECHAM computes zomg/zasy before applying the
+        # inhomogeneity factor); the factor scales the final optical depth only.
         tau_total = tau_liq + tau_ice
-        
+
         # Combined single scattering albedo (weighted by tau). Safe-denominator
         # double-``where``: a cloud-free layer has ``tau_total == 0``, and a bare
         # ``.../tau_total`` there differentiates to ``inf`` so ``where``'s VJP
@@ -600,8 +616,11 @@ def cloud_optics(
             (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / denom_scat,
             0.0
         )
-        
-        return tau_total, ssa_combined, g_combined
+
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        tau_scaled = inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
+
+        return tau_scaled, ssa_combined, g_combined
     
     # Apply to all SW bands - use fixed shape
     from .constants import N_SW_BANDS
@@ -619,7 +638,8 @@ def cloud_optics(
     def calculate_lw_band(band):
         tau_liq = liquid_cloud_optics_lw(cloud_water_path, r_eff_liq, band)
         tau_ice = ice_cloud_optics_lw(cloud_ice_path, r_eff_ice, band)
-        return tau_liq + tau_ice
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        return inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
     
     # Apply to all LW bands - use fixed shape
     from .constants import N_LW_BANDS

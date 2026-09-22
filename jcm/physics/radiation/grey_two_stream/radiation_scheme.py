@@ -387,17 +387,18 @@ def radiation_scheme(
     # approximation misses, at twice the radiative-transfer cost. For
     # canonical McICA see the RRTMGP path (rrtmgp.py) — there the
     # gpoint count makes per-gpoint sub-columns effectively free.
-    # Fixed sub-grid inhomogeneity reduction of the in-cloud liquid/ice path
-    # (ECHAM ``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``, l_variable_inhoml
-    # = .FALSE.). This is the within-cloud horizontal-variability correction and
-    # is distinct from the beam-split clear/cloudy partitioning above; tau is
-    # linear in path here, so scaling the path scales tau. See
-    # ``RadiationParameters.cloud_inhomogeneity_*``.
-    in_cloud_lwp = parameters.cloud_inhomogeneity_liquid * in_cloud_path(
+    # Physical (unscaled) in-cloud paths. The ECHAM sub-grid inhomogeneity
+    # reduction (``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``,
+    # l_variable_inhoml = .FALSE.) is passed into ``cloud_optics`` and applied
+    # to the optical depth there -- NOT to the path, so the diagnostic ice
+    # radius stays derived from the physical IWC (#678). This within-cloud
+    # horizontal-variability correction is distinct from the beam-split
+    # clear/cloudy partitioning above.
+    in_cloud_lwp = in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
     )
-    in_cloud_ipath = parameters.cloud_inhomogeneity_ice * in_cloud_path(
+    in_cloud_ipath = in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
     )
@@ -407,6 +408,8 @@ def radiation_scheme(
         cloud_ice_path=in_cloud_ipath,
         layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
+        inhomogeneity_liquid=parameters.cloud_inhomogeneity_liquid,
+        inhomogeneity_ice=parameters.cloud_inhomogeneity_ice,
     )
     zero_optics_sw = OpticalProperties(
         optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),

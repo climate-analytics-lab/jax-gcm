@@ -47,6 +47,38 @@ def test_band_wavelength_within_band_limits(is_sw):
         )
 
 
+def test_inhomogeneity_scales_optical_depth_at_fixed_radius():
+    """The inhomogeneity factor multiplies τ only; the ice radius is fixed.
+
+    Regression for the #678 ordering bug: the factor must scale the optical
+    depth while the diagnostic ice effective radius keeps following the
+    Moss/Foot law on the PHYSICAL in-cloud path. For a pure-ice column that
+    makes τ exactly linear in the factor -- τ(f) == f·τ(1). Had the factor
+    instead scaled the input path, the inferred crystal would shrink
+    (r_eff ∝ IWC^0.216), raising extinction per unit mass, so τ(0.5) would be
+    strictly greater than 0.5·τ(1) and partly undo the requested reduction.
+    """
+    nlev = 4
+    cwp = jnp.zeros(nlev)                       # pure ice, exercises the ice path
+    cip = jnp.linspace(0.002, 0.03, nlev)
+    dz = jnp.full(nlev, 500.0)
+    f = 0.5
+    sw1, lw1 = cloud_optics(cwp, cip, dz, jnp.array(1.0),
+                            inhomogeneity_ice=1.0)
+    swf, lwf = cloud_optics(cwp, cip, dz, jnp.array(1.0),
+                            inhomogeneity_ice=f)
+    # Exact linear scaling proves r_eff (hence extinction per mass) is unchanged.
+    assert jnp.allclose(swf.optical_depth, f * sw1.optical_depth, rtol=1e-5)
+    assert jnp.allclose(lwf.optical_depth, f * lw1.optical_depth, rtol=1e-5)
+    # ssa / asymmetry are intensive (τ-ratios) and must not move.
+    assert jnp.allclose(swf.single_scatter_albedo,
+                        sw1.single_scatter_albedo, rtol=1e-5)
+    assert jnp.allclose(swf.asymmetry_factor, sw1.asymmetry_factor, rtol=1e-5)
+    # Default is a no-op.
+    sw_def, _ = cloud_optics(cwp, cip, dz, jnp.array(1.0))
+    assert jnp.allclose(sw_def.optical_depth, sw1.optical_depth, rtol=1e-5)
+
+
 def test_near_ir_sw_band_absorbs():
     """The near-IR SW band must carry real cloud absorption (ssa < 1).
 

@@ -52,19 +52,20 @@ from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
-# NaN guard on in-cloud condensate (kg/kg) handed to the cloud optics. A thin
-# but resolved cloud carrying large grid-mean condensate gives a huge in-cloud
-# water (grid_mean / cf), and the resulting optical depth NaNs the two-stream
-# solver. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path`` and
-# after the inhomogeneity rescaling.
+# NaN guard on the PHYSICAL in-cloud condensate (kg/kg) that sets the effective
+# radii. A thin but resolved cloud carrying large grid-mean condensate gives a
+# huge in-cloud water (grid_mean / cf), and the resulting optical depth NaNs the
+# two-stream solver. Applied in ``radiation_scheme_rrtmgp`` right after
+# ``in_cloud_path``.
 #
 # This is a one-sided clip -- the identity almost everywhere, flattening
 # everything above the threshold to the same value -- and is NOT the sub-grid
 # inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
 # ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# in-cloud path just below (see ``RadiationParameters.cloud_inhomogeneity_*``).
-# Measured on T63L47 output this clip binds in ~0.003% of cloudy cells, so it is
-# inert in practice; keep it strictly as a NaN guard (#678).
+# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
+# and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
+# T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
+# practice; keep it strictly as a NaN guard (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
@@ -610,34 +611,28 @@ def radiation_scheme_rrtmgp(
     # cloud-or-clear partitioning per g-point. ``in_cloud_path`` already
     # zeros the (essentially) clear cells (cf <= 2*eps; ECHAM mo_psrad).
     #
-    # Two distinct treatments are applied to the in-cloud condensate, in order:
+    # This is the PHYSICAL in-cloud path: it sets the diagnostic effective radii
+    # (``resolve_effective_radii``; the ice radius follows the Moss/Foot IWC
+    # law) and the physical condensate ``q_c`` used in the vapour-VMR maths, so
+    # the sub-grid inhomogeneity factor must NOT be baked in here -- that would
+    # shrink the inferred ice crystal and partly undo the reduction (#678). The
+    # inhomogeneity factor is applied to the per-gpoint optical-depth paths
+    # (``in_cloud_{lwp,ipath}_lib`` below), which is where it belongs (ECHAM
+    # ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``).
     #
-    #   1. Sub-grid inhomogeneity (ECHAM ``mo_cloud_optics.f90``,
-    #      ``ztau = ztol*zinhoml + ztoi*zinhomi`` with
-    #      ``l_variable_inhoml = .FALSE.``): a FIXED multiplicative reduction of
-    #      the liquid/ice path (0.8/0.8 at T63) correcting the plane-parallel
-    #      albedo bias of homogeneous-cloud radiative transfer. tau is linear in
-    #      path at fixed r_eff, so scaling the path scales tau identically to
-    #      ECHAM. jcm uses one factor per phase, not ECHAM's convection-type
-    #      switch (see ``RadiationParameters.cloud_inhomogeneity_*``). This is a
-    #      real physics term; it is NOT the same thing as the NaN guard below.
-    #
-    #   2. NaN guard (``_MAX_IN_CLOUD_CONDENSATE``): a *thin* but resolved cloud
-    #      (cf ~ 0.01-0.05) carrying large grid-mean condensate yields a huge
-    #      in-cloud water (grid_mean / cf) whose extreme optical depth NaNs the
-    #      two-stream solver. The cap = 10 g/kg is the high end of realistic
-    #      in-cloud water, so genuine clouds are untouched and only the
-    #      pathological inflation is clipped. It is a one-sided guard, NOT an
-    #      inhomogeneity scaling -- measured on T63L47 it binds in ~0.003% of
-    #      cloudy cells (#678).
+    # Only the NaN guard (``_MAX_IN_CLOUD_CONDENSATE``) is applied here: a *thin*
+    # but resolved cloud (cf ~ 0.01-0.05) carrying large grid-mean condensate
+    # yields a huge in-cloud water (grid_mean / cf) whose extreme optical depth
+    # NaNs the two-stream solver. The cap = 10 g/kg is the high end of realistic
+    # in-cloud water, so genuine clouds are untouched and only the pathological
+    # inflation is clipped. It is a one-sided guard, NOT an inhomogeneity
+    # scaling -- measured on T63L47 it binds in ~0.003% of cloudy cells (#678).
     cloud_water_in_cloud = jnp.minimum(
-        parameters.cloud_inhomogeneity_liquid
-        * in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
+        in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
         _MAX_IN_CLOUD_CONDENSATE,
     )
     cloud_ice_in_cloud = jnp.minimum(
-        parameters.cloud_inhomogeneity_ice
-        * in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
+        in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
         _MAX_IN_CLOUD_CONDENSATE,
     )
 
@@ -716,11 +711,20 @@ def radiation_scheme_rrtmgp(
     masks_sw_lib = lax.cond(
         needs_reversal, flip_per_gpt, identity, masks_sw,
     )
-    in_cloud_lwp_lib = lax.cond(
+    # Per-gpoint condensate paths carry the cloud optical depth (τ ∝ path at the
+    # fixed effective radius resolved from the PHYSICAL path). The ECHAM sub-grid
+    # inhomogeneity factor multiplies the optical depth (``mo_cloud_optics.f90``:
+    # ``ztau = ztol*zinhoml + ztoi*zinhomi``, ``l_variable_inhoml = .FALSE.``),
+    # so it is applied HERE -- to the τ-driving paths -- not to the physical path
+    # that set the effective radius above (#678). Default 0.8/0.8 (ECHAM nn=63
+    # ``zinhoml1``/``zinhomi``); jcm uses one factor per phase, not ECHAM's
+    # convection-type switch (see ``RadiationParameters.cloud_inhomogeneity_*``
+    # and #870).
+    in_cloud_lwp_lib = parameters.cloud_inhomogeneity_liquid * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     )
-    in_cloud_ipath_lib = lax.cond(
+    in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_ice_path,
     )
