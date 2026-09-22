@@ -117,10 +117,14 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   Martin/Bower law; radiation reads it from the carried ``clouds`` state, which
   — because the ECHAM term order runs radiation *before* microphysics — is the
   previous step's value (a one-step lag). The constant fallback therefore
-  survives only where that carry is still zero: the cold-start first step and,
-  per column, the step it first turns cloudy (``eff_liquid_droplet_radius``
-  returns exactly 0 in a clear cell), plus any composition that runs radiation
-  with no droplet-radius-publishing microphysics at all.
+  survives only where that carried radius is still zero, resolved **cell by
+  cell** (``resolve_effective_radii`` selects on ``r_eff > 0`` per level and
+  column): the cold-start first step, and thereafter any cloudy cell that was
+  clear the previous step — so a level that newly turns cloudy falls back for
+  that step even in a column already cloudy elsewhere
+  (``eff_liquid_droplet_radius`` returns exactly 0 in a clear cell). A
+  composition that runs radiation with no droplet-radius-publishing microphysics
+  uses the fallback throughout.
 - `science` — the grey two-stream backend reads a single *broadband* aerosol
   profile (``aerosol.aod_profile``/``ssa_profile``/``asy_profile`` plus a column
   ``angstrom`` it band-scales itself) rather than the per-band arrays only
