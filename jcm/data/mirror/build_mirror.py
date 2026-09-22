@@ -171,6 +171,19 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "source": "packaged", "grids": None, "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": False,
      "staged": True},
+    # The packaged surface climatologies: ``data/bc/t63/forcing.nc`` (the pySES
+    # backend's default ``forcing.file`` and the T63 regression fixtures) and
+    # the SPEEDY T30 ``data/bc/t30/clim/forcing.nc`` the getting-started guide
+    # loads. Declared here so ``align: auto`` resolves them from their recorded
+    # kind rather than from their time axis (#884).
+    {"name": "forcing_packaged", "path": "data/bc/*/forcing.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "file", "auto": False,
+     "staged": True},
+    {"name": "forcing_packaged_t30", "path": "data/bc/t30/clim/forcing.nc",
+     "source": "packaged", "grids": None, "levels": False, "coverage": None,
+     "alignment": "climatology", "key": "file", "auto": False,
+     "staged": True},
     {"name": "terrain_packaged", "path": "data/bc/*/terrain.nc",
      "source": "packaged", "grids": None, "levels": False, "coverage": None,
      "alignment": "static", "key": "terrain_file", "auto": False,

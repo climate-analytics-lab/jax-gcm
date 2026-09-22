@@ -150,18 +150,25 @@ years to continue from the previous state:
    year_iter = iter(ds.groupby('time.year'))
 
    year, year_ds = next(year_iter)
-   forcing = ForcingData.from_dataset(year_ds, coords=coords)
+   forcing = ForcingData.from_dataset(year_ds, coords=coords,
+                                      align_mode='by_date')
    preds = model.run(forcing=forcing, save_interval='1 day',
                      total_time='1 year')
    yearly_outputs.append(preds.to_xarray())
 
    for year, year_ds in year_iter:
-       forcing = ForcingData.from_dataset(year_ds, coords=coords)
+       forcing = ForcingData.from_dataset(year_ds, coords=coords,
+                                          align_mode='by_date')
        preds = model.resume(forcing=forcing, save_interval='1 day',
                             total_time='1 year')
        yearly_outputs.append(preds.to_xarray())
 
    trajectory = xr.concat(yearly_outputs, dim='time')
+
+A file's time alignment is always declared — ``wrap_year`` for a
+climatology, ``by_date`` / ``by_date_interp`` for dated samples — because a
+year of monthly data looks exactly like a climatology; ``auto`` resolves only
+the data-mirror products, whose kind the mirror manifest records.
 
 xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
@@ -189,7 +196,8 @@ that :meth:`~jcm.forcing.ForcingData.from_file` concatenates along ``time``:
        years=[1979, 1983],            # inclusive
        available=[1979, 2022],        # optional: product's source coverage
    )
-   forcing = ForcingData.from_file(files, coords=coords)
+   forcing = ForcingData.from_file(files, coords=coords,
+                                   align_mode='by_date_interp')
 
 Passing ``available`` widens the expansion by one year on each side (clipped to
 coverage) so the mid-month samples bracket the run's start/end instead of
@@ -244,7 +252,8 @@ To wire it manually against any reference dataset:
    # slices it inside ``forcing.select(date, calendar)`` like every other
    # time-varying leaf, so the nudging term never sees the date.
    target = NudgingTarget.from_dataset(ref_ds)
-   forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords)
+   forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords,
+                                   align_mode='wrap_year')
    forcing = forcing.replace(nudging_target=target)
 
    config = NudgingConfig.winds_only(

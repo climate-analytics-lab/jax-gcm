@@ -456,13 +456,17 @@ class ForcingData:
         Thin wrapper around `from_dataset`: opens `filename` with xarray
         and delegates. A list/tuple of paths (e.g. the yearly transient
         AMIP bundles, issue #610) is concatenated along ``time`` in
-        chronological order; the merged span then drives the ``auto``
-        alignment detection, so a multi-year sequence aligns ``by_date``.
+        chronological order. ``align_mode="auto"`` resolves only when
+        ``filename`` is a data-mirror or packaged product (its manifest
+        ``alignment``); for any other file it raises and the mode must be
+        given explicitly — see :func:`resolve_align` (#884).
         The ``validate`` flag forwards to `from_dataset` (default ``True``;
         pass ``False`` to bypass the BC sanity check, e.g. for synthetic
         test fixtures).
         """
         import xarray as xr
+        align_mode = resolve_align(align_mode, paths=filename,
+                                   config_key="forcing.align")
         if isinstance(filename, (list, tuple)):
             ds = xr.open_mfdataset(
                 [str(f) for f in filename], combine="by_coords",
@@ -622,15 +626,16 @@ class ForcingData:
             ds: An `xarray.Dataset` carrying the expected forcing fields.
             coords: CoordinateSystem to upscale to. If None, the dataset's
                 native nodal shape is used.
-            align_mode: "auto" (default) chooses `wrap_year` for files that
-                cover at most one calendar year and `by_date` for longer
-                spans; pass `"wrap_year"`, `"by_date"` or
-                `"by_date_interp"` to force the choice. `wrap_year` indexes
-                the time axis by fraction of year (climatology mode);
-                `by_date` aligns by absolute model date (piecewise
-                constant); `by_date_interp` additionally interpolates
-                linearly between samples — required for AMIP mid-month
-                boundary values (``tosbcs``) to reconstruct monthly means.
+            align_mode: `"wrap_year"`, `"by_date"` or `"by_date_interp"`.
+                `wrap_year` indexes the time axis by fraction of year
+                (climatology mode); `by_date` aligns by absolute model date
+                (piecewise constant); `by_date_interp` additionally
+                interpolates linearly between samples — required for AMIP
+                mid-month boundary values (``tosbcs``) to reconstruct
+                monthly means. An in-memory dataset is not a mirror product,
+                so the default `"auto"` raises (:func:`resolve_align`,
+                #884); :meth:`from_file` resolves `auto` for mirror/packaged
+                files.
 
         """
         expected_structure = {
@@ -666,7 +671,8 @@ class ForcingData:
         # mid-month steps, ``align_mode="by_date_interp"``) must keep its
         # real dates — ``interpolate_to_daily`` is a climatology transform
         # and only applies when the file actually wraps the year.
-        resolved_align_mode = _resolve_align_mode(align_mode, ds)
+        resolved_align_mode = align_mode_code(resolve_align(
+            align_mode, config_key="forcing.align"))
         is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
                                 and _is_monthly_climatology(ds))
 
@@ -692,9 +698,10 @@ class ForcingData:
             base = interpolate_to_daily(ds) if is_wrap_year_monthly else ds
             ds = upsample_forcings_ds(base, grid=coords.horizontal)
 
-        # Build the shared time axis (seconds since MODEL_EPOCH) for every
+        # Build the shared time axis (seconds since MODEL_EPOCH for a
+        # date-aligned file; informational bins for a climatology) for every
         # time-varying variable in this file.
-        time_seconds = _time_axis_seconds_from_ds(ds)
+        time_seconds = _time_seconds_for_mode(ds, resolved_align_mode)
 
         def _ts(values):
             """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
@@ -935,32 +942,108 @@ def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
     return jnp.asarray(np.asarray(delta, dtype=float))
 
 
-def _resolve_align_mode(align_mode: str, ds) -> int:
-    """Pick `WRAP_YEAR` vs `BY_DATE` from a string spec ("auto"/"wrap_year"/"by_date").
+def _wrap_year_time_seconds(n_time: int) -> jnp.ndarray:
+    """Informational ascending time axis for a ``WRAP_YEAR`` leaf.
 
-    `auto` chooses `wrap_year` when the file's time span fits in a single
-    year (climatology) and `by_date` otherwise.
+    ``WRAP_YEAR`` selects sample ``floor(tyear * n) % n`` and never reads
+    absolute times, so its axis is the ``n`` bin centres of a 365-day year
+    rather than the file's decoded dates. That keeps a climatology stamped with
+    idealised calendar dates — e.g. CF ``noleap`` year 0, or a ``360_day``
+    calendar — loadable: converting those to epoch seconds would build a
+    Gregorian ``datetime`` that does not exist.
     """
-    if align_mode == "wrap_year":
-        return WRAP_YEAR
-    if align_mode == "by_date":
-        return BY_DATE
-    if align_mode == "by_date_interp":
-        return BY_DATE_INTERP
+    return jnp.asarray((np.arange(n_time) + 0.5) * (365.0 * 86400.0 / n_time))
+
+
+def _time_seconds_for_mode(ds, mode: int) -> jnp.ndarray:
+    """Return the ``time_seconds`` axis a leaf of alignment ``mode`` needs.
+
+    Only date-aligned modes convert the file's times to epoch seconds
+    (:func:`_time_axis_seconds_from_ds`); ``WRAP_YEAR`` gets the informational
+    axis of :func:`_wrap_year_time_seconds`.
+    """
+    if mode == WRAP_YEAR:
+        return _wrap_year_time_seconds(int(ds.sizes["time"]))
+    return _time_axis_seconds_from_ds(ds)
+
+
+#: The explicit time-alignment modes a config/API may name, and their codes.
+ALIGN_MODES = {"wrap_year": WRAP_YEAR, "by_date": BY_DATE,
+               "by_date_interp": BY_DATE_INTERP}
+
+
+def resolve_align(align_mode, *, paths=None, config_key: str = "forcing.align",
+                  transient: str = "by_date") -> str:
+    """Resolve a time-alignment spec to an explicit mode name — THE one rule.
+
+    Every time-resolved forcing input (surface boundary file, ozone, emissions,
+    oxidants, prescribed surface fluxes, on both backends) resolves its
+    ``align`` spec here, so all paths share one rule (#884):
+
+    - ``wrap_year`` / ``by_date`` / ``by_date_interp`` are returned as given.
+    - ``auto`` resolves ONLY from the data mirror manifest: when ``paths`` are a
+      mirror or packaged product (:func:`jcm.data.input_resolution.
+      manifest_alignment_for_paths`), its recorded ``alignment`` decides —
+      ``climatology`` → ``wrap_year``, ``transient`` → ``transient`` (default
+      ``by_date``; a loader whose transient products are mid-month means passes
+      ``by_date_interp``).
+    - ``auto`` for anything else — a user file, an in-memory dataset — RAISES.
+      jcm does not guess whether a file is a climatology: a one-year transient
+      archive and a monthly climatology have identical time axes, and replaying
+      the former every year is a silent error.
+
+    Args:
+        align_mode: ``auto`` | ``wrap_year`` | ``by_date`` | ``by_date_interp``.
+        paths: The file(s) being read (path, ``hf://`` URL or list), or
+            ``None`` when there is no file (an in-memory dataset).
+        config_key: The knob the user sets to declare the mode, for the error.
+        transient: The mode a manifest ``transient`` product resolves to.
+
+    Returns:
+        The explicit mode name (a key of :data:`ALIGN_MODES`).
+
+    """
+    align_mode = str(align_mode)
+    if align_mode in ALIGN_MODES:
+        return align_mode
     if align_mode != "auto":
         raise ValueError(
-            f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', "
-            "'by_date', or 'by_date_interp'"
-        )
-    # Auto-detect: if the time axis spans <= ~1.05 years, treat as climatology.
-    # Reuse the calendar-aware seconds conversion so non-standard (cftime)
-    # calendars work here too.
-    import numpy as np
-    seconds = np.asarray(_time_axis_seconds_from_ds(ds))
-    if seconds.size <= 1:
-        return WRAP_YEAR
-    span_days = (seconds[-1] - seconds[0]) / 86400.0
-    return WRAP_YEAR if span_days <= 380 else BY_DATE
+            f"{config_key}={align_mode!r}: unknown time alignment; expected "
+            f"'auto' or one of {tuple(ALIGN_MODES)}.")
+    kind = None
+    if paths is not None:
+        from jcm.data import input_resolution as ir
+        kind = ir.manifest_alignment_for_paths(paths)
+    if kind == "climatology":
+        return "wrap_year"
+    if kind == "transient":
+        return transient
+    what = ("an in-memory dataset" if paths is None
+            else f"{paths!r} (not a data-mirror or packaged product)")
+    raise ValueError(
+        f"{config_key}=auto cannot resolve the time alignment of {what}: set "
+        f"{config_key} to wrap_year (a climatology replayed every model year), "
+        "by_date (aligned on its absolute timestamps) or by_date_interp "
+        "(interpolated between them) — jcm does not guess whether a file is a "
+        "climatology (#884). 'auto' resolves only data-mirror / packaged "
+        "products, whose kind the manifest records.")
+
+
+def _seconds_and_mode(ds, align_mode, config_key):
+    """``(time_seconds, mode_code)`` for a single-product reader."""
+    mode = align_mode_code(resolve_align(align_mode, config_key=config_key))
+    return _time_seconds_for_mode(ds, mode), mode
+
+
+def align_mode_code(align_mode: str) -> int:
+    """Return the ``TimeSeries.align_mode`` code of an explicit mode name."""
+    try:
+        return ALIGN_MODES[str(align_mode)]
+    except KeyError:
+        raise ValueError(
+            f"align_mode={align_mode!r} is not an explicit mode; expected one "
+            f"of {tuple(ALIGN_MODES)} (resolve 'auto' with resolve_align "
+            "first).") from None
 
 
 def _slice_time_series_leaves(forcing: ForcingData, date: DateData, calendar: str) -> ForcingData:
@@ -1074,16 +1157,20 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
 
     The fields must already be on the model horizontal grid: this does **no**
     regridding (use :mod:`jcm.data.emissions.prepare` to conservatively remap a
-    source-grid file first). Monthly data uses the same wrap-year/by-date time
-    alignment as the other forcing fields, so a 12-month climatology wraps and a
-    multi-year axis aligns by date.
+    source-grid file first). A time axis is aligned by the explicit
+    ``align_mode`` (``wrap_year`` / ``by_date`` / ``by_date_interp``); the
+    assembly resolves ``forcing.emissions_align`` to one per product with
+    :func:`resolve_align`, and ``auto`` raises here because an in-memory dataset
+    carries no manifest identity (#884).
     """
     emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
     if not emis_names:
         return None
     has_time = any("time" in ds[n].dims for n in emis_names)
-    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
-    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    mode = (align_mode_code(resolve_align(
+        align_mode, config_key="forcing.emissions_align"))
+        if has_time else BY_DATE)
+    time_seconds = _time_seconds_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in emis_names:
         da = ds[name]
@@ -1110,15 +1197,18 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     3-D (``lev, lon, lat`` volume); the non-time axes are kept in file order
     (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
     reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
-    regridding here — use :mod:`jcm.data.emissions.prepare`).
+    regridding here — use :mod:`jcm.data.emissions.prepare`). Time alignment as
+    in :func:`read_anthropogenic_emissions`.
     """
     prefix = "aero_emis_"
     names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
     if not names:
         return None
     has_time = any("time" in ds[n].dims for n in names)
-    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
-    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    mode = (align_mode_code(resolve_align(
+        align_mode, config_key="forcing.emissions_align"))
+        if has_time else BY_DATE)
+    time_seconds = _time_seconds_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in names:
         da = ds[name]
@@ -1267,7 +1357,7 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
             "'kg m-3'."
         )
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, *_seconds_and_mode(ds, align_mode, var_name)
     )
 
 
@@ -1316,7 +1406,7 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
             "Tegen scheme steps it by month start (WRAP_YEAR); a different "
             "record count means a different product.")
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, *_seconds_and_mode(ds, align_mode, var_name)
     )
 
 
@@ -1455,7 +1545,7 @@ def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
             f"{var_name}: expected {_DUST_MONTHS} monthly records, found "
             f"{ds.sizes['time']}.")
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, *_seconds_and_mode(ds, align_mode, var_name)
     )
 
 
@@ -1527,8 +1617,9 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
                 "but the model expects top→bottom (surface last). Flip the "
                 "level axis of the file."
             )
-    time_seconds = _time_axis_seconds_from_ds(ds)
-    mode = _resolve_align_mode(align_mode, ds)
+    mode = align_mode_code(resolve_align(
+        align_mode, config_key="forcing.oxidants_align"))
+    time_seconds = _time_seconds_for_mode(ds, mode)
     out: dict[str, Any] = {}
     for var, key in _OXIDANT_VAR_MAP.items():
         arr = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
@@ -1679,28 +1770,6 @@ PRESCRIBED_FLUX_FILE_VARS = {
     "stress_v": "prescribed_stress_v",
 }
 
-_PRESCRIBED_FLUX_ALIGN_MODES = ("auto", "wrap_year", "by_date", "by_date_interp")
-
-
-def has_cf_climatology_marker(ds, time_var: str = "time") -> bool:
-    """Whether ``ds``'s time coordinate declares itself a CF climatology.
-
-    CF-1.x §7.4 ("Climatological statistics") marks a climatological time axis
-    with a ``climatology`` attribute on the time coordinate naming its
-    ``climatology_bounds`` variable. It is the only in-file signal that a
-    time-stamped series is a *representative* annual cycle rather than a
-    record of one particular year: the timestamps of a Jan→Dec climatology
-    and of a Jan→Dec transient archive of one real year are otherwise
-    identical. xarray keeps the attribute in ``attrs`` on decode; ``encoding``
-    is checked as well so a reader configuration that moves CF bookkeeping
-    attributes there is still honoured.
-    """
-    if time_var not in ds.variables:
-        return False
-    var = ds[time_var]
-    return bool(var.attrs.get("climatology") or var.encoding.get("climatology"))
-
-
 def _is_datetime_axis(values) -> bool:
     """Return whether ``values`` is a decoded date axis (datetime64 or cftime).
 
@@ -1737,23 +1806,22 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
     (:func:`_drop_degenerate_time`). Grid validation/reorientation is
     :func:`_orient_to_model_grid`'s.
 
-    **Time alignment is declared, never inferred from the timestamps.** A
-    one-year transient archive (one sample per month, January to December of a
-    specific year — e.g. a coupler's history file) is indistinguishable by its
+    **Time alignment is declared, never inferred from the timestamps** (the
+    rule every forcing input shares, :func:`resolve_align`, #884). A one-year
+    transient archive (one sample per month, January to December of a specific
+    year — e.g. a coupler's history file) is indistinguishable by its
     timestamps from a monthly climatology, and replaying it every year would
-    silently recycle that year's fluxes. So:
+    silently recycle that year's fluxes. So ``align_mode`` must be explicit:
 
-    - ``align_mode="wrap_year"`` — the file is a climatology: replayed every
-      model year by month position (:func:`_wrap_year_index`).
-    - ``align_mode="by_date"`` / ``"by_date_interp"`` — aligned on the absolute
-      timestamps (piecewise constant / linearly interpolated).
-    - ``align_mode="auto"`` (default) — ``wrap_year`` only when the file itself
-      declares a CF climatology (:func:`has_cf_climatology_marker`), otherwise
-      ``by_date``. Unlike :func:`_resolve_align_mode`'s ``auto`` for the surface
-      boundary file, it never looks at the span, count, spacing or calendar
-      months of the samples.
+    - ``"wrap_year"`` — the file is a climatology: replayed every model year by
+      month position (:func:`_wrap_year_index`).
+    - ``"by_date"`` / ``"by_date_interp"`` — aligned on the absolute timestamps
+      (piecewise constant / linearly interpolated).
+    - ``"auto"`` raises for a time-resolved file: no data-mirror product
+      carries prescribed fluxes, so there is no manifest kind to resolve it
+      from. (A static file, or a length-1 time axis, needs no alignment.)
 
-    Whichever way ``wrap_year`` is selected it is then VALIDATED: WRAP_YEAR
+    A declared ``wrap_year`` is then VALIDATED: WRAP_YEAR
     picks sample ``floor(tyear * 12) % 12``, i.e. a January-anchored month
     position, so the (ascending) samples must be exactly twelve, one per
     calendar month January→December. Anything else raises rather than
@@ -1770,9 +1838,9 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
     Args:
         ds: An open ``xarray.Dataset``.
         lat_deg, lon_deg: The model grid (degrees) to validate against.
-        align_mode: ``"auto"`` | ``"wrap_year"`` | ``"by_date"`` |
-            ``"by_date_interp"`` — the vocabulary of ``forcing.align`` /
-            :func:`_resolve_align_mode`.
+        align_mode: ``"wrap_year"`` | ``"by_date"`` | ``"by_date_interp"``
+            (``"auto"`` raises for a time-resolved file) — the vocabulary of
+            ``forcing.align`` / :func:`resolve_align`.
         source: Label (file path) for error messages.
 
     Returns:
@@ -1780,10 +1848,10 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
 
     """
     align_mode = str(align_mode)
-    if align_mode not in _PRESCRIBED_FLUX_ALIGN_MODES:
+    if align_mode != "auto" and align_mode not in ALIGN_MODES:
         raise ValueError(
             f"{source}: unknown align {align_mode!r}; expected one of "
-            f"{_PRESCRIBED_FLUX_ALIGN_MODES}.")
+            f"{tuple(ALIGN_MODES)}.")
     missing = [v for v in PRESCRIBED_FLUX_FILE_VARS if v not in ds]
     if missing:
         raise ValueError(
@@ -1831,40 +1899,52 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
             f"{ds['time'].dtype}); give it CF 'units' such as 'days since "
             "2000-01-01' (and a 'calendar'). A numeric axis cannot be aligned "
             "to the model clock.")
-    raw = np.asarray(_time_axis_seconds_from_ds(ds), dtype=float)
-    if not np.all(np.isfinite(raw)):
+    # Axis hygiene on the decoded values themselves — datetime64 or cftime
+    # objects, both ordered within their calendar — so no Gregorian epoch
+    # conversion happens unless the mode is date-aligned: a climatology
+    # stamped with idealised calendar dates (CF ``noleap`` year 0, a
+    # ``360_day`` calendar) has no Gregorian equivalent, and WRAP_YEAR never
+    # reads absolute times anyway.
+    import pandas as pd
+    raw = np.asarray(ds["time"].values)
+    if bool(np.any(pd.isnull(raw))):
         raise ValueError(f"{source}: the time axis has missing (NaT) entries.")
     # Stable sort: BY_DATE's searchsorted needs ascending time, and WRAP_YEAR's
     # position 0 must be January.
     order = np.argsort(raw, kind="stable")
-    seconds = raw[order]
-    if not np.all(np.diff(seconds) > 0):
-        dup = np.asarray(ds["time"].values)[order][
-            np.flatnonzero(np.diff(seconds) <= 0)[0]]
+    ordered = raw[order]
+    not_increasing = [k for k in range(ordered.size - 1)
+                      if not ordered[k + 1] > ordered[k]]
+    if not_increasing:
         raise ValueError(
-            f"{source}: the time axis has duplicate timestamps (e.g. {dup}); "
-            "each sample must have a distinct time.")
+            f"{source}: the time axis has duplicate timestamps (e.g. "
+            f"{ordered[not_increasing[0]]}); each sample must have a distinct "
+            "time.")
 
-    if align_mode == "auto":
-        mode = WRAP_YEAR if has_cf_climatology_marker(ds) else BY_DATE
-        why = ("the time coordinate carries a CF 'climatology' attribute"
-               if mode == WRAP_YEAR else "")
-    else:
-        mode = _resolve_align_mode(align_mode, ds)  # explicit: ds unused
-        why = f"align={align_mode!r} was requested"
+    # No data-mirror product carries prescribed fluxes, so ``auto`` has no
+    # manifest kind to resolve from and raises (the shared #884 rule).
+    mode = align_mode_code(resolve_align(
+        align_mode, config_key="forcing.prescribed_surface_flux.align"))
 
     if mode == WRAP_YEAR:
+        # Calendar months straight off the decoded values (``.dt`` handles
+        # cftime calendars) — no epoch conversion.
         months = np.asarray(ds["time"].dt.month, dtype=np.int64)[order]
         if not (months.size == 12
                 and np.array_equal(months, np.arange(1, 13))):
             raise ValueError(
-                f"{source}: treated as a climatology because {why}, but its "
+                f"{source}: declared a climatology (align=wrap_year), but its "
                 f"sorted samples fall in calendar months {months.tolist()}. "
                 "Climatology replay (WRAP_YEAR) selects sample "
                 "floor(fraction_of_year * 12), so it needs exactly twelve "
                 "samples, one per month January..December. Supply such a file, "
                 "or set forcing.prescribed_surface_flux.align=by_date to align "
                 "the samples on their absolute timestamps.")
+        return order, _wrap_year_time_seconds(12), mode
+    # Date-aligned: now (and only now) put the samples on the model's epoch
+    # clock, in the sorted order.
+    seconds = np.asarray(_time_axis_seconds_from_ds(ds.isel(time=order)),
+                         dtype=float)
     return order, jnp.asarray(seconds), mode
 
 
@@ -1905,8 +1985,7 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
         f"{_d(end_seconds)}. Outside its axis a date-aligned series would "
         "silently hold its end sample. Supply fluxes covering the whole run; "
         "if the file is a monthly climatology meant to repeat every year, "
-        "set forcing.prescribed_surface_flux.align=wrap_year (or give its "
-        "time coordinate a CF 'climatology' attribute).")
+        "set forcing.prescribed_surface_flux.align=wrap_year.")
 
 
 # ``expand_yearly_files`` is re-exported from the top-of-module import of the

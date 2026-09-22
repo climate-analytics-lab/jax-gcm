@@ -446,9 +446,14 @@ def assemble_spectral_forcing(forcing_cfg, coords):
         from jcm.forcing import ForcingData
         files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
                               forcing_cfg.get("available_years", None))
+        # ``auto`` resolves from the UNFETCHED spec (an ``hf://`` URL or a
+        # packaged path names its manifest product); a user file must declare
+        # its mode (#884, :func:`jcm.forcing.resolve_align`).
+        from jcm.forcing import resolve_align
+        align = resolve_align(forcing_cfg.get("align", "auto"), paths=files,
+                              config_key="forcing.align")
         forcing = ForcingData.from_file(
-            _resolve_data_path(files), coords=coords,
-            align_mode=str(forcing_cfg.get("align", "auto")))
+            _resolve_data_path(files), coords=coords, align_mode=align)
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -501,8 +506,9 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         # records a choice rather than an omission.
         provenance.record_fact("ozone_source", "analytic (explicit)")
         return forcing
+    ozone_spec = ozone_file
     if ozone_file == "auto":
-        ozone_file = _resolve_auto_ozone(coords)
+        ozone_file = ozone_spec = _resolve_auto_ozone(coords)
         if ozone_file is None:      # sigma grid; _resolve_auto_ozone warned
             provenance.record_fact(
                 "ozone_source", "analytic (auto: no product for a sigma grid)")
@@ -520,10 +526,16 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     # latitudes silently. Dinosaur stores both in radians.
     lat_deg = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
     lon_deg = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
+    # Ozone's transient mirror product (``ozone_amip``) holds mid-month
+    # monthly means, which the ECHAM treatment interpolates linearly between.
+    from jcm.forcing import resolve_align
+    align = resolve_align(forcing_cfg.get("ozone_align", "auto"),
+                          paths=ozone_spec, config_key="forcing.ozone_align",
+                          transient="by_date_interp")
     climatology = OzoneClimatology.from_file(
         ozone_file,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
-        lat_deg=lat_deg, lon_deg=lon_deg,
+        lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
     )
     provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
     provenance.record_input(ozone_file)
@@ -566,6 +578,25 @@ def _merge_disjoint_emissions(acc, acc_src, new, path):
         )
     acc.update(new)
     acc_src.update({v: str(path) for v in new})
+
+
+def _per_product_align(spec, n_products):
+    """Expand ``forcing.emissions_align`` to one spec per emission product.
+
+    A scalar applies to every product; a list gives one mode per
+    ``emissions_file`` element, in order — the way to declare a list that mixes
+    a user transient product with a user climatology (#884: neither can be
+    inferred).
+    """
+    if ir._is_seq(spec):
+        specs = [str(v) for v in spec]
+        if len(specs) != n_products:
+            raise ValueError(
+                f"forcing.emissions_align has {len(specs)} entries but "
+                f"forcing.emissions_file has {n_products} products; give one "
+                "mode per product, or a single mode for all of them.")
+        return specs
+    return [str(spec)] * n_products
 
 
 def _attach_emissions(forcing, forcing_cfg, coords):
@@ -635,14 +666,22 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # already-merged variable, for a precise collision message (F1).
     anthro_src: dict = {}
     speciated_src: dict = {}
-    for product in _forcing_products(raw, years, available):
+    from jcm.forcing import resolve_align
+    products = list(_forcing_products(raw, years, available))
+    aligns = _per_product_align(forcing_cfg.get("emissions_align", "auto"),
+                                len(products))
+    for product, align_spec in zip(products, aligns):
         path = _resolve_data_path(product)
         if path in (None, "", "null"):
             continue
+        # Per product: a mirror product resolves ``auto`` from its manifest
+        # kind (the UNFETCHED spec names it), a user file must declare (#884).
+        align = resolve_align(align_spec, paths=product,
+                              config_key="forcing.emissions_align")
         ds = _open_forcing_dataset(path)
         try:
-            a = read_anthropogenic_emissions(ds)
-            s = read_prescribed_aerosol_emissions(ds)
+            a = read_anthropogenic_emissions(ds, align_mode=align)
+            s = read_prescribed_aerosol_emissions(ds, align_mode=align)
         finally:
             ds.close()
         if a is None and s is None:
@@ -887,6 +926,22 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     return [p for product in products for p in product]
 
 
+def oxidant_align(forcing_cfg, paths) -> str:
+    """Resolve ``forcing.oxidants_align`` for the oxidant file set ``paths``.
+
+    Shared by the spectral (:func:`_attach_oxidants`) and pySES paths so both
+    apply the same #884 rule (:func:`jcm.forcing.resolve_align`). ``paths``
+    are the RESOLVED local files: an ``auto`` spec was already fetched into
+    the Hugging Face cache (whose snapshot path still names the mirror
+    product) or points at a packaged file; any other file must declare.
+    """
+    from jcm.forcing import resolve_align
+    return resolve_align(
+        (forcing_cfg.get("oxidants_align", "auto")
+         if forcing_cfg is not None else "auto"),
+        paths=paths, config_key="forcing.oxidants_align")
+
+
 def _attach_oxidants(forcing, forcing_cfg, coords):
     """Attach the oxidant climatology from ``cfg.forcing.oxidants_file``.
 
@@ -907,8 +962,9 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     (``oxidants_file=.../{year}.nc`` with ``forcing.years``) actually loads: a
     ``{year}`` pattern expands to one file per year, which are concatenated
     along the time axis (``open_mfdataset``, by-coords) and read with ``auto``
-    alignment — a single 12-month climatology stays ``WRAP_YEAR`` while a
-    multi-year axis becomes ``BY_DATE``. The level-for-level vertical mapping
+    alignment set by ``forcing.oxidants_align`` (``auto`` resolves only a
+    data-mirror product, from its manifest kind — #884; see
+    :func:`oxidant_align`). The level-for-level vertical mapping
     is unchanged (the yearly files share the model's hybrid grid).
 
     Oxidants are handled as **one product**, unlike the per-product emissions
@@ -947,8 +1003,9 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
           if len(paths) > 1 else xr.open_dataset(paths[0]))
     ref = paths if len(paths) > 1 else paths[0]
     try:
-        mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
-                                   lon_deg=lon_deg, align_mode="auto")
+        mapping = read_oxidant_vmr(
+            ds, nlev=nlev, lat_deg=lat_deg, lon_deg=lon_deg,
+            align_mode=oxidant_align(forcing_cfg, paths))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()
@@ -1029,13 +1086,12 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
       variables dimensioned ``(lat, lon)`` (static) or with a leading
       ``time`` axis (a ``TimeSeries``) — the archived-coupler-flux door, read
       by :func:`jcm.forcing.read_prescribed_surface_fluxes` (the same reader a
-      Python caller uses). Its time alignment is the block's ``align`` key
-      (``auto`` | ``wrap_year`` | ``by_date`` | ``by_date_interp``, default
-      ``auto``): ``auto`` replays the file as a climatology only when its time
-      coordinate carries a CF ``climatology`` attribute and otherwise aligns
-      it on its absolute dates — the timestamps alone cannot tell a monthly
-      climatology from a one-year transient archive, so the choice is never
-      inferred from them.
+      Python caller uses). A time-resolved file must declare its alignment
+      with the block's ``align`` key (``wrap_year`` | ``by_date`` |
+      ``by_date_interp``): the default ``auto`` resolves only data-mirror
+      products and no mirror product carries fluxes, so it raises — the
+      timestamps alone cannot tell a monthly climatology from a one-year
+      transient archive (#884, :func:`jcm.forcing.resolve_align`).
 
     All four fields are required together: a partially prescribed surface
     is not a defined mode (the forced terms deliver nothing interactively),

@@ -182,20 +182,15 @@ archive* (fluxes of particular dates, e.g. a coupler's history file:
 monthly samples January→December of one year are exactly what a monthly
 climatology looks like, and a transient archive wrongly replayed every year
 silently recycles that year's fluxes. The alignment is therefore
-**declared, never inferred from the samples** — `align:` takes the
-`forcing.align` vocabulary:
+**declared, never inferred from the samples** — the rule every
+time-resolved forcing input shares (`jcm.forcing.resolve_align`, #884):
 
 | `align` | behaviour |
 | --- | --- |
-| `auto` (default) | `wrap_year` if the time coordinate carries a CF `climatology` attribute (CF §7.4, the in-file declaration of a climatological time axis), otherwise `by_date` |
 | `wrap_year` | replay by month position every model year |
 | `by_date` | piecewise-constant on the absolute timestamps |
 | `by_date_interp` | linear in time between the absolute timestamps |
-
-This `auto` deliberately differs from the surface boundary file's
-`forcing.align: auto`, which infers `wrap_year` from a time span of at most
-~one year: that inference is exactly the one that misreads a one-year
-transient archive, so the flux door keys only on the file's own declaration.
+| `auto` (default) | resolves only a data-mirror or packaged product, from the `alignment` the mirror manifest records; no mirror product carries fluxes, so for a flux file it raises and names the knob |
 
 Both modes validate what they are given, so a wrong declaration fails at
 load or run start rather than silently mis-phasing the fluxes:
@@ -204,7 +199,14 @@ load or run start rather than silently mis-phasing the fluxes:
   model clock), have no missing or duplicate stamps, and is sorted
   ascending with the samples reordered to match (`BY_DATE`'s
   `searchsorted` needs ascending time; `WRAP_YEAR`'s position 0 is
-  January). A length-1 time axis is a static field.
+  January). A length-1 time axis is a static field. Sorting and the
+  climatology checks work on the decoded calendar values themselves;
+  only a date-aligned axis is converted to the model's Gregorian epoch
+  clock. So a climatology stamped with idealised calendar dates (CF
+  `noleap` year 0, a `360_day` calendar) loads as `wrap_year` (every
+  forcing reader gives a `WRAP_YEAR` leaf informational time bins rather
+  than decoded dates), while declaring such an axis `by_date` fails,
+  because it has no place on the model's clock.
 - `WRAP_YEAR` selects sample `floor(fraction_of_year × 12)`, a
   January-anchored month position, so a climatology must be exactly twelve
   samples, one per calendar month January→December (month-start or
@@ -220,6 +222,15 @@ load or run start rather than silently mis-phasing the fluxes:
   names both remedies — supply covering fluxes, or declare the file a
   climatology. The check is skipped only when the window or the series is
   traced (a run inside a JAX transformation).
+
+The same `auto` rule applies to the surface boundary file (`forcing.align`)
+and the ozone / emissions / oxidant files (`forcing.ozone_align`,
+`forcing.emissions_align`, `forcing.oxidants_align`): the mirror manifest's
+recorded kind is the only thing `auto` may consult, because it is the only
+place the climatology/transient distinction is actually recorded. The
+alternative of stamping the CF `climatology` attribute on files and keying
+`auto` on it was rejected: the attribute is essentially absent from real
+forcing data, so it would still leave every user file to a guess.
 
 ## What this replaces
 

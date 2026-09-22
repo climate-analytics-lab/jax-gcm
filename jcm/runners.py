@@ -1197,6 +1197,12 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
                        "dust_regions_file", "dust_roughness_file")},
         oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
         ozone_file=_resolve_data_path(ozone_file),
+        # Time alignment follows the one #884 rule (jcm.forcing.resolve_align):
+        # ``auto`` resolves only data-mirror/packaged products.
+        align_mode=_forcing_cfg.get("align", "auto"),
+        emissions_align=_forcing_cfg.get("emissions_align", "auto"),
+        oxidants_align=_forcing_cfg.get("oxidants_align", "auto"),
+        ozone_align=_forcing_cfg.get("ozone_align", "auto"),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does
@@ -1380,11 +1386,11 @@ def _resolved_emission_value(literal, key, coords, jam, is_pyses):
 def _forcing_tracks_calendar(forcing) -> bool:
     """Report whether the RESOLVED surface forcing is date-aligned (transient).
 
-    The config keys ``forcing.years`` / ``forcing.align`` miss the common case
-    of a single multi-year netCDF under the default ``align: auto``:
-    ``ForcingData.from_file``'s span-based auto-detection resolves it to
-    ``BY_DATE`` at build time, yet the config still reads ``align: auto`` /
-    ``years: null``. So classify from what the resolution actually produced —
+    The config keys ``forcing.years`` / ``forcing.align`` miss the case of a
+    transient data-mirror product under the default ``align: auto``, which
+    resolves from the manifest to ``BY_DATE`` at build time while the config
+    still reads ``align: auto`` / ``years: null``. So classify from what the
+    resolution actually produced —
     any surface ``TimeSeries`` leaf (SST / sea-ice / snow / soil / land T) whose
     ``align_mode`` is ``BY_DATE`` / ``BY_DATE_INTERP`` means those fields track
     real calendar dates. A 12-month climatology resolves to ``WRAP_YEAR`` and is
@@ -1513,9 +1519,9 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
 
     # 5. Transient (by-date) surface forcing driving JAM off the present-day
     #    emission bundles. Transience is read off the RESOLVED forcing's surface
-    #    alignment (:func:`_forcing_tracks_calendar`) — a single multi-year
-    #    netCDF under ``align: auto`` resolves to BY_DATE while the config still
-    #    reads ``auto``/``years: null``, which keying only on those keys misses —
+    #    alignment (:func:`_forcing_tracks_calendar`) — a transient mirror
+    #    product under ``align: auto`` resolves to BY_DATE while the config
+    #    still reads ``auto``/``years: null``, which keying only on those misses —
     #    with ``years``/``align`` as OR fallbacks for a forcing-less caller.
     #    Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
     #    concern (F2); an auto that nulled is warning 3's case, not this one.

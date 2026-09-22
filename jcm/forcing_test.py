@@ -472,7 +472,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             },
             coords={'time': times},
         )
-        forcing = ForcingData.from_dataset(ds, validate=False)
+        forcing = ForcingData.from_dataset(ds, align_mode="wrap_year",
+                                           validate=False)
         self.assertAlmostEqual(float(forcing.co2_vmr), 700.0)
         self.assertAlmostEqual(float(forcing.ch4_vmr), 2.5)
         self.assertAlmostEqual(float(forcing.n2o_vmr), 0.5)
@@ -500,7 +501,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file, validate=False)
+                ForcingData.from_file(temp_file, align_mode="wrap_year",
+                                      validate=False)
             self.assertIn("Invalid nodal shape", str(context.exception))
         finally:
             os.remove(temp_file)
@@ -541,11 +543,12 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             # Synthetic zero-filled fixture — bypass the BC sanity check
             # that ``from_file`` runs on real data (would reject all-zero
             # ``stl``/``sst``).
-            forcing = ForcingData.from_file(temp_file, validate=False)
+            forcing = ForcingData.from_file(temp_file, align_mode="by_date",
+                                             validate=False)
             # Time axis preserved at full length, leading dimension.
             self.assertEqual(forcing.sst if False else forcing.sea_surface_temperature.values.shape,
                              (n_times, *valid_shape))
-            # Span > 1 year -> should auto-select BY_DATE alignment.
+            # A user file declares its alignment (#884).
             from jcm.forcing import BY_DATE
             self.assertEqual(int(forcing.sea_surface_temperature.align_mode), BY_DATE)
         finally:
@@ -575,7 +578,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file, validate=False)
+                ForcingData.from_file(temp_file, align_mode="wrap_year",
+                                      validate=False)
             self.assertIn("Missing variables", str(context.exception))
         finally:
             os.remove(temp_file)
@@ -872,7 +876,8 @@ class TestForcingNonMonthlyTimeAxis(unittest.TestCase):
         # 5 daily steps at the target grid: previously raised in
         # interpolate_to_daily ("expected 12 monthly timestamps").
         ds, coords, (nlon, nlat) = self._same_grid_dataset(5)
-        forcing = ForcingData.from_dataset(ds, coords=coords, validate=False)
+        forcing = ForcingData.from_dataset(ds, coords=coords, align_mode="by_date",
+                                           validate=False)
         self.assertEqual(forcing.alb0.shape, (nlon, nlat))
 
     def test_same_grid_multiyear_axis_loads(self):
@@ -1711,14 +1716,16 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
         return ds
 
     def test_absent_stays_none_rather_than_a_fabricated_dry_soil(self):
-        forcing = ForcingData.from_dataset(self._ds(with_wetness=False))
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=False),
+                                           align_mode="wrap_year")
         self.assertIsNone(forcing.soilw_rel)
 
     def test_read_and_sliced_to_a_bare_field(self):
         import jax_datetime as jdt
 
         from jcm.date import DateData
-        forcing = ForcingData.from_dataset(self._ds(with_wetness=True))
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=True),
+                                           align_mode="wrap_year")
         self.assertIsNotNone(forcing.soilw_rel)
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
@@ -1739,6 +1746,115 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
             _validate_bc_fields(ds)
         self.assertIn("'soilw_rel' is out of physical range",
                       str(ctx.exception))
+
+
+class TestResolveAlign(unittest.TestCase):
+    """The one time-alignment rule every forcing input shares (#884)."""
+
+    def test_explicit_modes_pass_through(self):
+        from jcm.forcing import resolve_align
+        for mode in ("wrap_year", "by_date", "by_date_interp"):
+            self.assertEqual(resolve_align(mode, paths="/me/x.nc"), mode)
+            self.assertEqual(resolve_align(mode), mode)
+
+    def test_unknown_mode_raises(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, "unknown time alignment"):
+            resolve_align("climatology", paths="/me/x.nc")
+
+    def test_auto_resolves_mirror_products_from_the_manifest(self):
+        from jcm.forcing import resolve_align
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63/forcing_pd.nc"), "wrap_year")
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63/forcing_amip/{year}.nc"), "by_date")
+        # A loader whose transient product is mid-month means asks for interp.
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63_l47/ozone_amip/{year}.nc",
+            transient="by_date_interp"), "by_date_interp")
+
+    def test_auto_raises_for_a_user_file_naming_the_knob(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, r"forcing\.ozone_align=auto.*"
+                                    r"wrap_year.*by_date.*#884"):
+            resolve_align("auto", paths="/scratch/me/ozone.nc",
+                          config_key="forcing.ozone_align")
+
+    def test_auto_raises_for_an_in_memory_dataset(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, "in-memory dataset"):
+            resolve_align("auto")
+
+    def test_from_dataset_auto_raises(self):
+        """A one-year transient SST archive is never replayed as a climatology
+        by default: an in-memory dataset has no manifest identity.
+        """
+        import pandas as pd
+        import xarray as xr
+        shape = (96, 48)
+        ds = xr.Dataset(
+            {v: (("lon", "lat", "time"), np.full((*shape, 12), 280.0))
+             for v in ("stl", "icec", "sst", "soilw_am", "snowc")},
+            coords={"time": pd.date_range("1990-01-01", periods=12,
+                                          freq="MS")})
+        ds["alb"] = (("lon", "lat"), np.full(shape, 0.1))
+        with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+            ForcingData.from_dataset(ds, validate=False)
+
+    def test_from_file_auto_resolves_the_packaged_climatology(self):
+        from importlib import resources
+
+        from jcm.forcing import WRAP_YEAR
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+        f = ForcingData.from_file(data_dir / 'forcing.nc',
+                                  coords=get_speedy_coords(layers=8, spectral_truncation=31))
+        self.assertEqual(int(f.sea_surface_temperature.align_mode), WRAP_YEAR)
+
+    def test_from_file_auto_raises_for_a_user_copy(self):
+        import shutil
+        import tempfile
+        from importlib import resources
+        from pathlib import Path
+        src = resources.files('jcm.data.bc.t30.clim') / 'forcing.nc'
+        with tempfile.TemporaryDirectory() as d:
+            dst = Path(d) / "forcing.nc"
+            shutil.copy(str(src), dst)
+            with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+                ForcingData.from_file(dst, coords=get_speedy_coords(layers=8, spectral_truncation=31))
+
+
+class TestWrapYearSkipsEpochConversion(unittest.TestCase):
+    """A WRAP_YEAR reader never converts times to Gregorian epoch seconds, so a
+    climatology stamped in an idealised calendar year 0 loads (Codex #877 P2,
+    applied to every reader that can wrap).
+    """
+
+    def test_dms_reader_year_zero_noleap(self):
+        import cftime
+        import xarray as xr
+        from jcm.forcing import WRAP_YEAR, read_dms_seawater
+        times = [cftime.DatetimeNoLeap(0, m, 15) for m in range(1, 13)]
+        ds = xr.Dataset(
+            {"DMS_sea": (("time", "lat", "lon"), np.ones((12, 3, 4)),
+                         {"units": "nanomol l-1"})},
+            coords={"time": times, "lat": [-30.0, 0.0, 30.0],
+                    "lon": [0.0, 90.0, 180.0, 270.0]})
+        ts = read_dms_seawater(ds)
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        self.assertTrue(bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0)))
+
+    def test_emissions_reader_year_zero_noleap(self):
+        import cftime
+        import xarray as xr
+        from jcm.forcing import WRAP_YEAR, read_anthropogenic_emissions
+        times = [cftime.DatetimeNoLeap(0, m, 15) for m in range(1, 13)]
+        ds = xr.Dataset(
+            {"emis_surface_combustion_bc": (("time", "lon", "lat"),
+                                            np.ones((12, 4, 3)))},
+            coords={"time": times})
+        out = read_anthropogenic_emissions(ds, align_mode="wrap_year")
+        self.assertEqual(
+            int(out["emis_surface_combustion_bc"].align_mode), WRAP_YEAR)
 
 
 if __name__ == '__main__':

@@ -11,6 +11,17 @@ kind: default
 # the exception: no ozone product exists on sigma levels, so ``auto`` warns and
 # uses the analytic profile there.
 ozone_file: auto
+# Time alignment of the ozone / emissions / oxidants files: wrap_year |
+# by_date | by_date_interp, or ``auto`` (default), which resolves ONLY a
+# data-mirror or packaged product from the kind the mirror manifest records
+# (climatology -> wrap_year; transient -> by_date, by_date_interp for ozone's
+# mid-month means) and RAISES for a user file — jcm does not guess whether a
+# file is a climatology (#884). An explicit value applies to every product of
+# that key. (``dms_file`` / the ``dust_*`` keys are climatology-only and read as
+# wrap_year.)
+ozone_align: auto
+emissions_align: auto
+oxidants_align: auto
 
 # --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
 # The four keys below default to ``auto`` (same convention as ``ozone_file``):
@@ -70,21 +81,20 @@ oxidants_file: auto
 #               stress_u: <N/m2>, stress_v: <N/m2>} — uniform maps;
 #   file: <path> — a netCDF already on the model grid with those four
 #               variables, static ``(lat, lon)`` or with a leading time axis;
-#   align: auto | wrap_year | by_date | by_date_interp  (``file`` only;
-#               default auto) — how a time axis maps to the model clock, the
-#               same vocabulary as ``forcing.align``. ``wrap_year`` replays the
-#               file as a climatology every model year and REQUIRES exactly 12
+#   align: wrap_year | by_date | by_date_interp  (REQUIRED for a ``file``
+#               with a time axis) — how it maps to the model clock, the same
+#               vocabulary as ``forcing.align``. ``wrap_year`` replays the file
+#               as a climatology every model year and REQUIRES exactly 12
 #               samples, one per month Jan..Dec. ``by_date`` aligns samples on
 #               their absolute timestamps (``by_date_interp`` interpolates
 #               between them) and the run must lie within the archive (one
 #               sample interval of slack either end) or it fails at start.
-#               ``auto`` picks wrap_year ONLY when the file's time coordinate
-#               carries a CF ``climatology`` attribute, otherwise by_date: the
-#               timestamps alone cannot tell a monthly climatology from a
-#               one-year transient archive (e.g. a coupler history file), and
-#               replaying the latter every year would silently recycle one
-#               year's fluxes — so a climatology without that attribute needs
-#               ``+forcing.prescribed_surface_flux.align=wrap_year``.
+#               The default ``auto`` resolves only data-mirror products and no
+#               mirror product carries fluxes, so it raises: the timestamps
+#               alone cannot tell a monthly climatology from a one-year
+#               transient archive (e.g. a coupler history file), and replaying
+#               the latter every year would silently recycle one year's fluxes
+#               (#884).
 # Units/signs are the surface-exchange coupling contract's
 # (docs/source/design/surface_exchange.md): sensible heat and evaporation
 # positive UP, stress positive DOWN (momentum into the surface). ``null``

@@ -442,6 +442,50 @@ plus ``aod_sw_per_band`` / ``aod_lw_per_band``). Note that
 ``jam_optics.aod_550`` is a band-centre approximation, distinct from the
 Mie-based ``od550aer`` of the ``aerocom_optics`` pass.
 
+.. _v3-align:
+
+Forcing files must declare climatology or dated
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+v2's ``align: auto`` looked at a file's time axis and treated anything
+spanning at most ~one year as a climatology, replaying it every model year. A
+year of monthly samples from one real year looks exactly like a monthly
+climatology, so a one-year transient archive was silently recycled. v3 does
+not guess (#884): ``auto`` resolves only data-mirror and packaged products,
+from the kind the mirror manifest records, and **raises for any other file**.
+
+What now errors, and the one-line fix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - v2 usage
+     - v3 fix
+   * - ``forcing.file=/my/sst_clim.nc`` (align left ``auto``)
+     - add ``forcing.align=wrap_year`` (or ``by_date`` / ``by_date_interp``
+       for dated samples)
+   * - a user ``forcing.ozone_file`` / ``emissions_file`` / ``oxidants_file``
+     - add ``forcing.ozone_align=...`` / ``forcing.emissions_align=...``
+       (scalar, or one mode per list product) / ``forcing.oxidants_align=...``
+   * - ``forcing.prescribed_surface_flux.file`` with a time axis
+     - add ``forcing.prescribed_surface_flux.align=...``
+   * - ``ForcingData.from_dataset(ds)`` with a time axis
+     - pass ``align_mode="wrap_year"`` (an in-memory dataset has no manifest
+       identity, so ``auto`` always raises)
+   * - ``ForcingData.from_file(path)`` / ``OzoneClimatology.from_file(path)``
+       / ``read_anthropogenic_emissions(ds)`` / ``read_prescribed_aerosol_emissions(ds)``
+       on a user file
+     - pass ``align_mode=...``
+
+``hf://`` mirror paths, their fetched Hugging Face cache files, and the files
+packaged under ``jcm/data/bc`` (the SPEEDY T30 and T63 climatologies) keep
+resolving under ``auto``; every shipped configuration and the ``amip`` /
+``era5`` presets are unchanged. The declared mode is also checked: a
+prescribed-flux file declared ``wrap_year`` must hold exactly twelve monthly
+samples January to December, a declared ozone climatology must have twelve
+months, and a date-aligned flux archive must cover the run window.
+
 Other config-surface changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

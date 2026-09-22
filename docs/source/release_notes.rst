@@ -163,6 +163,27 @@ Packaged config-tree contract; the ``experiment`` group is renamed
   particular composes ``+experiment@atmosphere=<name>`` and must update in the
   same release cycle.
 
+Forcing time alignment is declared, never inferred
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- **``align: auto`` no longer guesses from a file's time axis** (#884). v2
+  treated any file spanning at most ~one year as a climatology and replayed it
+  every model year, so a one-year *transient* archive (a year of monthly SST,
+  ozone, emissions or fluxes) was silently recycled. Now ``auto`` resolves
+  only a data-mirror or packaged product, from the ``alignment`` the mirror
+  manifest records (``climatology`` → ``wrap_year``, ``transient`` →
+  ``by_date``; ``by_date_interp`` for transient ozone). **For any other file
+  ``auto`` raises**, naming the knob to set. One rule covers every
+  time-resolved input on both backends: ``forcing.align`` (SST/sea-ice file),
+  the new ``forcing.ozone_align`` / ``forcing.emissions_align`` (a scalar, or
+  one mode per ``emissions_file`` product) / ``forcing.oxidants_align``,
+  ``forcing.prescribed_surface_flux.align``, and the Python readers'
+  ``align_mode`` (``ForcingData.from_dataset`` has no file identity, so its
+  ``auto`` always raises). **Fix:** declare the file's kind, e.g.
+  ``forcing.align=wrap_year`` for a climatology or ``forcing.align=by_date``
+  for dated samples. Every shipped configuration and the ``amip`` / ``era5``
+  presets resolve unchanged. See :doc:`v2_to_v3`.
+
 MACv2-SP removed from JAM; namespaced aerosol output
 """"""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -464,8 +485,7 @@ Coupling to an external surface component
   ECHAM's ``TteTkeVerticalDiffusion(couple_surface=False)`` plus an explicit
   ``PrescribedSurfaceFlux`` term). Fluxes ride
   ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file
-  whose climatology-vs-dated alignment is declared by ``align`` or a CF
-  ``climatology`` attribute, never inferred from its timestamps) or the
+  whose climatology-vs-dated alignment is declared by its ``align`` key) or the
   ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
   published contract's units and signs (#301). See
   :doc:`design/surface_exchange`.

@@ -70,8 +70,9 @@ SSO_FIELDS = ("orog", "orostd", "orosig", "orogam", "orothe",
               "oropic", "oroval")
 
 # 12 month-start timestamps: interpolate_to_daily requires pd.infer_freq
-# "MS"/"M", and align_mode='auto' then resolves to WRAP_YEAR (climatology)
-# indexing, so the year itself is arbitrary.
+# "MS"/"M". The bundle is a manifest ``climatology`` product, so align: auto
+# resolves it to WRAP_YEAR from the manifest (#884) and the year itself is
+# arbitrary.
 CLIMO_TIME = np.array([np.datetime64(f"2014-{m:02d}-01")
                        for m in range(1, 13)])
 

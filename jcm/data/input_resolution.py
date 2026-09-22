@@ -33,8 +33,10 @@ from dataclasses import dataclass
 #: onto the time-series indexing mode the readers use: a climatology wraps within
 #: the year (``WRAP_YEAR``), a transient series indexes by absolute date
 #: (``BY_DATE``), a static field has no time axis. ``AUTO`` defers the choice to
-#: the reader's span heuristic — used for an explicit path whose kind the
-#: resolver cannot know without opening it.
+#: :func:`manifest_alignment_for_paths` at read time — an explicit path is a
+#: mirror/packaged product only if it matches a manifest path template, and a
+#: user file whose alignment is ``auto`` is rejected there, never inferred from
+#: its contents (#884).
 STATIC = "static"
 WRAP_YEAR = "wrap_year"
 BY_DATE = "by_date"
@@ -349,6 +351,101 @@ def resolve_packaged(manifest, name, *, nlev=None, nlat=None, nlon=None,
 # ---------------------------------------------------------------------------
 # path fetching (hf:// resolution)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# path -> manifest product (time-alignment kind)
+# ---------------------------------------------------------------------------
+
+def _template_regex(template: str):
+    """Compile a manifest path template into a full-match regex.
+
+    ``{grid}`` / ``*`` match one path segment, ``{nlev}`` an integer and
+    ``{year}`` either a four-digit year (an expanded yearly file) or the literal
+    ``{year}`` (the unexpanded pattern a config carries).
+    """
+    import re
+    out = []
+    i = 0
+    while i < len(template):
+        for token, rx in (("{grid}", r"[^/]+"), ("{nlev}", r"\d+"),
+                          ("{year}", r"(?:\d{4}|\{year\})"), ("*", r"[^/]+")):
+            if template.startswith(token, i):
+                out.append(rx)
+                i += len(token)
+                break
+        else:
+            out.append(re.escape(template[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def _mirror_relative(path, manifest, packaged_root):
+    """Return the manifest-relative form of ``path`` (``None``: a user file).
+
+    Three spellings name a published product: an ``hf://<rel>`` URL; a local
+    file inside the Hugging Face cache snapshot of the mirror repo (what
+    :func:`jcm.data.remote.fetch` returns — ``.../datasets--<org>--<name>/
+    snapshots/<rev>/<rel>``); and a packaged file under the installed ``jcm``
+    package (``data/bc/...``). Anything else — including a copy of a mirror file
+    saved elsewhere — is a user file.
+    """
+    from pathlib import Path
+    s = str(path)
+    if s.startswith("hf://"):
+        return s[len("hf://"):]
+    repo = manifest.get("repo")
+    if repo:
+        marker = "/datasets--" + repo.replace("/", "--") + "/snapshots/"
+        idx = s.find(marker)
+        if idx >= 0:
+            rest = s[idx + len(marker):]
+            parts = rest.split("/", 1)
+            return parts[1] if len(parts) == 2 else None
+    if packaged_root is not None:
+        try:
+            return Path(s).resolve().relative_to(
+                Path(str(packaged_root)).resolve()).as_posix()
+        except ValueError:
+            return None
+    return None
+
+
+def manifest_alignment_for_paths(paths, manifest=None, *, packaged_root=None):
+    """Manifest ``alignment`` of the product ``paths`` belong to, or ``None``.
+
+    The ONLY source ``align: auto`` may consult (#884): jcm does not guess
+    whether a file is a climatology from its contents, but a mirror or packaged
+    product's kind is recorded in the manifest (``climatology`` / ``transient``
+    / ``static``). ``paths`` is one path/URL or a list (a product's yearly
+    files); every element must match the SAME product, otherwise — or for any
+    user file — ``None`` is returned and the caller requires an explicit mode.
+    ``packaged_root`` defaults to the installed ``jcm`` package directory.
+    """
+    from jcm.data import mirror_manifest as mm
+    if manifest is None:
+        manifest = mm.load_manifest()
+    if packaged_root is None:
+        # The ``jcm`` package dir, found without importing ``jcm`` (this module
+        # stays JAX-free; see the module docstring).
+        from pathlib import Path
+        packaged_root = Path(__file__).resolve().parents[1]
+    elems = list(paths) if _is_seq(paths) else [paths]
+    if not elems:
+        return None
+    kinds = set()
+    for p in elems:
+        if _is_none(p):
+            return None
+        rel = _mirror_relative(p, manifest, packaged_root)
+        if rel is None:
+            return None
+        match = [rec["alignment"] for rec in manifest["products"].values()
+                 if _template_regex(rec["path"]).match(rel)]
+        if len(set(match)) != 1:
+            return None
+        kinds.add(match[0])
+    return kinds.pop() if len(kinds) == 1 else None
+
 
 def _default_fetch(rel_path: str) -> str:
     from jcm.data.remote import fetch
