@@ -2,6 +2,7 @@
 
 Status: agreed v3 implementation scope; implementation in progress on one PR.
 Tracking issue: [#876](https://github.com/climate-analytics-lab/jax-gcm/issues/876).
+Consolidated implementation: [PR #878](https://github.com/climate-analytics-lab/jax-gcm/pull/878).
 
 Audited JCM checkout `e631ea7bb8f3f3b4774113748c120179297aca51` and
 [jax-esm PR #125](https://github.com/climate-analytics-lab/jax-esm/pull/125)

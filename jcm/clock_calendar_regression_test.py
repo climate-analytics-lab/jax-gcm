@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import pytest
 
 from jcm.date import (
     DateData,
@@ -11,7 +12,7 @@ from jcm.date import (
     parse_duration_seconds,
 )
 from jcm.dycore.base import Predictions
-from jcm.model import RunState, _op_split_trajectory
+from jcm.model import Model, RunState, _op_split_trajectory
 
 
 def _ymd(value):
@@ -63,6 +64,27 @@ def test_fixed_day_is_exactly_86400_si_seconds():
     assert parse_duration_seconds("24 hours") == 86_400
     assert parse_duration_seconds("1440 minutes") == 86_400
     assert parse_duration_seconds("86400 seconds") == 86_400
+
+
+@pytest.mark.parametrize(("year", "expected_seconds"), [
+    (1900, 86_400),
+    (2000, 172_800),
+    (2100, 86_400),
+])
+def test_end_time_resolves_gregorian_century_boundaries(
+        year, expected_seconds):
+    duration = Model._resolve_run_duration(
+        None, f"{year}-03-01", jdt.to_datetime(f"{year}-02-28"))
+    assert parse_duration_seconds(duration) == expected_seconds
+
+
+def test_end_time_resolves_nonmidnight_exact_seconds():
+    duration = Model._resolve_run_duration(
+        None,
+        "2000-03-01 01:02:03",
+        jdt.to_datetime("2000-02-28 23:59:58"),
+    )
+    assert parse_duration_seconds(duration) == 90_125
 
 
 def _trajectory(start_time, start_step, outer_steps):

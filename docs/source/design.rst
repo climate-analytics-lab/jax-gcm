@@ -387,7 +387,7 @@ The default configuration provides a working model out of the box:
 
    # Just works - sensible defaults for everything
    model = Model(coords=get_speedy_coords())
-   predictions = model.run()
+   predictions = model.run(total_time="10 days")
 
 For Experts
 ^^^^^^^^^^^
