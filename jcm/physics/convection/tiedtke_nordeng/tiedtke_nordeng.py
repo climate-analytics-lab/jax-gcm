@@ -432,10 +432,13 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     # Survival of a seed at level k: one DSE-conserving lift to level k+1,
     # the damped Newton adjustment there, then the buoyancy test WITH the
     # ``zlift`` bonus (klab == 1 below, mo_cuascent.f90:449). The lift
-    # conserves ``cp·T + φ`` with ECHAM's moist ``cp`` (the seed uses
-    # ``pcpen``, mo_cuascent.f90:641-642; the ascent step ``pcpcu``,
-    # mo_cuascent.f90:411), so the seed's heat content is carried by the
-    # source level's ``cp`` and divided by the destination level's.
+    # conserves ``cp·T + φ`` with ECHAM's moist ``cp``. ECHAM takes two
+    # half-level steps: the seed brings the full-level environment to the
+    # layer's bottom interface with the source level's ``pcpen``
+    # (mo_cuascent.f90:641-642), then the first ``cuasc`` step divides by
+    # the destination's ``pcpcu`` (mo_cuascent.f90:411). On jcm's full-level
+    # grid (#530) those collapse into one lift: heat content carried by the
+    # source level's ``cp``, converted back with the destination level's.
     dz_mid = 0.5 * (dz[:-1] + dz[1:])
     parcel_t_dry = (cp_env[:-1] * t_env[:-1] - c.grav * dz_mid) / cp_env[1:]
     parcel_t, parcel_q, parcel_l = cuadjtq_newton(

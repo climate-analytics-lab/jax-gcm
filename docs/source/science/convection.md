@@ -202,7 +202,7 @@ before the parcel is compared against it.
   behaviour, not an approximation of it**: because ``zlift`` is capped at 1 K, a
   sounding whose sub-cloud layer is stably stratified loses more parcel
   buoyancy per level than the excess can cover and never reaches its LCL. The
-  walk's moist heat capacity (see below) credits the parcel
+  walk's moist heat capacity (see the heat-capacity section above) credits the parcel
   ``≈ T·vtmpc2·Δq_env`` per level where the environment dries with height, so
   a moist 6.5 K/km surface layer can still reach its LCL; a genuinely stable
   (e.g. 4 K/km or inverted) one cannot. Convection in such

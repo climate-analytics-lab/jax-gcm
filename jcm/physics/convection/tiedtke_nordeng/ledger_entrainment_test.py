@@ -602,3 +602,69 @@ class TestShallowReclosureCflCap:
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------------------------
+# #872 — the plume DSE mixing pairs each level with the right moist cp
+# --------------------------------------------------------------------------
+class TestPlumeHeatCapacityIndexing:
+    """cuasc/cuddraf carry heat with the SOURCE level's ``pcpcu`` and convert
+    back with the DESTINATION level's (mo_cuascent.f90:388-411,
+    mo_cudescent.f90:275-284). An artificial ``cp`` gradient makes a wrong
+    or dropped index shift measurable (it moves ``tu`` by tenths of a K).
+    """
+
+    NLEV = 8
+
+    def _column(self):
+        nlev = self.NLEV
+        pressure = jnp.linspace(3.0e4, 1.0e5, nlev)
+        temperature = jnp.linspace(250.0, 300.0, nlev)
+        # Near-dry so no saturation adjustment interferes with the lift.
+        humidity = jnp.full(nlev, 1.0e-7)
+        dz = jnp.linspace(900.0, 400.0, nlev)
+        rho = pressure / (c.rd * temperature)
+        # Strongly level-dependent cp (a stand-in for a humidity lapse).
+        cp = c.cpd * (1.0 + 0.03 * jnp.linspace(0.0, 1.0, nlev) ** 2)
+        return pressure, temperature, humidity, dz, rho, cp
+
+    def test_updraft_lift_uses_source_and_destination_cp(self):
+        p, T, q, dz, rho, cp = self._column()
+        cfg = ConvectionParameters.default(
+            entrpen=0.0, entrscv=0.0, entrmid=0.0, cu_centrmax=0.0)
+        kbase = self.NLEV - 2
+        up = calculate_updraft(
+            T, q, p, dz, rho, kbase, 1, 2, jnp.array(0.05), cfg,
+            type_weights=jnp.array([0.0, 1.0, 0.0]), cp_moist=cp,
+        )
+        k = kbase - 1
+        expected = (cp[kbase] * up.tu[kbase] - c.grav * dz[k]) / cp[k]
+        np.testing.assert_allclose(float(up.tu[k]), float(expected), rtol=1e-6)
+        unshifted = up.tu[kbase] - c.grav * dz[k] / cp[k]
+        assert abs(float(up.tu[k] - unshifted)) > 0.1
+
+    def test_downdraft_descent_uses_source_and_destination_cp(self):
+        from jcm.physics.convection.tiedtke_nordeng.downdraft import downdraft_step
+        p, T, q, dz, rho, cp = self._column()
+        nlev, k = self.NLEV, 3
+        td0 = jnp.full(nlev, 285.0)
+        carry = DowndraftState(
+            td=td0, qd=jnp.full(nlev, 1.0e-7), mfd=jnp.full(nlev, -0.01),
+            pdmfdp=jnp.zeros(nlev), ud=jnp.zeros(nlev), vd=jnp.zeros(nlev),
+            lfs=jnp.array(0), active=jnp.array(True),
+        )
+        inputs = (
+            jnp.array(k), T[k], q[k], p[k], dz[k], rho[k], jnp.array(1.0),
+            jnp.array(0.0), jnp.array(1e-10), jnp.array(0.0),
+            jnp.array(nlev - 3), jnp.array(0.0), jnp.array(0.0),
+            jnp.array(0.0), cp[k], cp[k - 1],
+        )
+        (state, _), _ = downdraft_step((carry, jnp.array(1.0)), inputs)
+        # cuadjtq(kcall=2) then moistens the parcel toward saturation with
+        # DRY L/cpd (the reference table), so undo that to recover the lift.
+        td_new, qd_new = float(state.td[k]), float(state.qd[k])
+        td_lift = td_new + c.alhc / c.cpd * (qd_new - 1.0e-7)
+        expected = (cp[k - 1] * td0[k - 1] + c.grav * dz[k]) / cp[k]
+        np.testing.assert_allclose(td_lift, float(expected), rtol=1e-5)
+        unshifted = td0[k - 1] + c.grav * dz[k] / cp[k]
+        assert abs(td_lift - float(unshifted)) > 0.1
