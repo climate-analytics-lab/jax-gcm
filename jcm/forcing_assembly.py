@@ -1078,8 +1078,9 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
         import xarray as xr
 
         from jcm.forcing import (
+            BY_DATE,
+            WRAP_YEAR,
             _orient_to_model_grid,
-            _resolve_align_mode,
             _time_axis_seconds_from_ds,
             make_time_series,
         )
@@ -1114,12 +1115,18 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                 # (*time, lon, lat), coordinate-validated and lat-oriented.
                 values = _orient_to_model_grid(da, lat_deg, lon_deg, name=var)
                 if "time" in ds[var].dims:
-                    # Same auto rule as the surface climatology loaders: a
-                    # 12-step monthly file cycles WRAP_YEAR, longer records
-                    # align BY_DATE on their absolute time axis.
+                    # WRAP_YEAR is ONLY correct for a 12-step monthly
+                    # climatology (replayed by fraction-of-year); any other
+                    # cadence — a 24-hour archive, a multi-year record — must
+                    # align on its absolute timestamps, or its samples get
+                    # smeared into evenly-spaced year bins (Codex #877). Note
+                    # ``_resolve_align_mode("auto")`` keys off the span, not
+                    # the sample count, so it would pick WRAP_YEAR for any
+                    # <=380-day archive — hence the explicit count check here.
+                    n_time = ds[var].sizes["time"]
+                    align = WRAP_YEAR if n_time == 12 else BY_DATE
                     fields[var] = make_time_series(
-                        values, _time_axis_seconds_from_ds(ds),
-                        _resolve_align_mode("auto", ds))
+                        values, _time_axis_seconds_from_ds(ds), align)
                 else:
                     fields[var] = jnp.asarray(values)
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")

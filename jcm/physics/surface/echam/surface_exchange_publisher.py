@@ -14,6 +14,8 @@ value of the SAME step.
 
 from typing import ClassVar
 
+import jax.numpy as jnp
+
 import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
@@ -47,13 +49,22 @@ class EchamSurfaceExchange(PhysicsTerm):
     would be wrong as a total split (see the design doc). Per-tile fields
     stay ``None`` because ECHAM's per-tile explicit fluxes are not
     consistent with the delivered grid mean from the implicit solve.
+
+    Only the surface exchange itself is a hard dependency: ``"surface"`` and
+    ``"vertical_diffusion"`` (the delivered fluxes + 10 m wind) and
+    ``"pressure_full"``. Radiation and precipitation are read OPTIONALLY via
+    ``diagnostics.get`` so a trimmed composition that drops them — e.g. the
+    surface+vdiff single-column boundary-layer cases — still composes and
+    runs; there the radiative term of ``net_heat_flux`` and the
+    ``precipitation`` sum degrade to zero (the published struct is unused in
+    those runs). A full ECHAM package always carries radiation and the cloud
+    /convection precip, so the contract is complete in every real run.
     """
 
     name: ClassVar[str] = "echam_surface_exchange"
     category: ClassVar[str] = "surface_exchange"
     requires: ClassVar[tuple[str, ...]] = (
-        "surface", "radiation", "convection", "clouds",
-        "vertical_diffusion", "pressure_full",
+        "surface", "vertical_diffusion", "pressure_full",
     )
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
@@ -71,18 +82,34 @@ class EchamSurfaceExchange(PhysicsTerm):
         _nlev, ncols = state.temperature.shape
 
         surface = diagnostics["surface"]
-        radiation = diagnostics["radiation"]
-        clouds = diagnostics["clouds"]
-        convection = diagnostics["convection"]
         vdiff = diagnostics["vertical_diffusion"]
+        # Optional in a trimmed (surface+vdiff) composition; present in every
+        # full ECHAM package (see the class docstring).
+        radiation = diagnostics.get("radiation")
+        clouds = diagnostics.get("clouds")
+        convection = diagnostics.get("convection")
 
         shf = surface.sensible_heat_flux.reshape(ncols)
         lhf = surface.latent_heat_flux.reshape(ncols)
-        # Net downward surface radiation, both bands.
-        rad_net_down = (
-            (radiation.surface_sw_down - radiation.surface_sw_up)
-            + (radiation.surface_lw_down - radiation.surface_lw_up)
-        ).reshape(ncols)
+        # Net downward surface radiation, both bands (zero when radiation is
+        # trimmed out — the struct is unused in that case).
+        if radiation is not None:
+            rad_net_down = (
+                (radiation.surface_sw_down - radiation.surface_sw_up)
+                + (radiation.surface_lw_down - radiation.surface_lw_up)
+            ).reshape(ncols)
+        else:
+            rad_net_down = jnp.zeros(ncols)
+
+        # Total precipitation = stratiform (clouds) + convective, each read
+        # only if its term is composed.
+        precipitation = jnp.zeros(ncols)
+        if clouds is not None:
+            precipitation = (precipitation
+                             + clouds.precip_rain.reshape(ncols)
+                             + clouds.precip_snow.reshape(ncols))
+        if convection is not None:
+            precipitation = precipitation + convection.precip_conv.reshape(ncols)
 
         # Lowest-model-level thermodynamics for external bulk-flux
         # algorithms (#301 discussion). Physics-internal frame is
@@ -98,11 +125,7 @@ class EchamSurfaceExchange(PhysicsTerm):
             sensible_heat_flux=shf,
             latent_heat_flux=lhf,
             evaporation=surface.evaporation.reshape(ncols),
-            precipitation=(
-                clouds.precip_rain.reshape(ncols)
-                + clouds.precip_snow.reshape(ncols)
-                + convection.precip_conv.reshape(ncols)
-            ),
+            precipitation=precipitation,
             # momentum_flux_u/v are ALREADY the downward momentum flux into
             # the surface (positive with the wind; the delivered column
             # momentum change is their negative — verified against the

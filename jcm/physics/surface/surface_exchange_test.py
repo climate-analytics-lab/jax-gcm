@@ -475,16 +475,44 @@ class TestPrescribedFluxForcingAttach:
         assert float(f.prescribed_sensible_heat_flux.mean()) == 1.0
         assert float(f.prescribed_stress_v.mean()) == 4.0
 
-    def test_file_timeseries(self, tmp_path):
-        from jcm.forcing import TimeSeries
+    def test_file_timeseries_non_monthly_aligns_by_date(self, tmp_path):
+        from jcm.forcing import BY_DATE, TimeSeries
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
         coords = self._coords()
         p = tmp_path / "flux_t.nc"
-        self._write_flux_nc(p, coords, with_time=True)
+        self._write_flux_nc(p, coords, with_time=True)  # 2 timestamps
         f = _attach_prescribed_surface_fluxes(
             None, self._cfg({"file": str(p)}), coords)
         # A time axis becomes a TimeSeries leaf, sliced per step by select().
-        assert isinstance(f.prescribed_sensible_heat_flux, TimeSeries)
+        ts = f.prescribed_sensible_heat_flux
+        assert isinstance(ts, TimeSeries)
+        # A non-12-step archive MUST align on its absolute timestamps, not be
+        # smeared into year bins (Codex #877).
+        assert int(ts.align_mode) == BY_DATE
+
+    def test_file_monthly_climatology_wraps_year(self, tmp_path):
+        import numpy as np
+        import xarray as xr
+        from jcm.forcing import WRAP_YEAR, TimeSeries
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        t = np.array([np.datetime64("2000-01-15") + np.timedelta64(30 * i, "D")
+                      for i in range(12)])
+        varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
+        p = tmp_path / "flux_monthly.nc"
+        xr.Dataset(
+            {v: (("time", "lat", "lon"), np.zeros((12, nlat, nlon)))
+             for v in varnames},
+            coords={"time": t, "lat": lat, "lon": lon},
+        ).to_netcdf(p)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        ts = f.prescribed_sensible_heat_flux
+        assert isinstance(ts, TimeSeries)
+        assert int(ts.align_mode) == WRAP_YEAR
 
     def test_file_missing_variable_raises(self, tmp_path):
         import numpy as np

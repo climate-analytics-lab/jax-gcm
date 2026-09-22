@@ -634,6 +634,16 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         p_bot = fsg_bot * c.p0 * psa
         t_bot = state.temperature[-1]
         q_bot = state.specific_humidity[-1]  # kg/kg on the public state
+        # Gradient-safe near-surface wind speed: at exactly zero wind (the
+        # SPEEDY default initial state is at rest) ``d/dx sqrt(x)`` is
+        # infinite, so a bare ``sqrt(u0**2+v0**2)`` poisons reverse-mode with
+        # a 0*inf -> NaN the moment ``surface_exchange`` is in the
+        # differentiated output. The double-``where`` keeps the value exact
+        # and the derivative finite (zero) at the origin — the standard
+        # sqrt-at-zero JAX idiom (see JAX_gotchas.md / gradient_nan_hardening).
+        wind_sq = sf.u0 ** 2 + sf.v0 ** 2
+        wind_speed = jnp.where(
+            wind_sq > 0.0, jnp.sqrt(jnp.where(wind_sq > 0.0, wind_sq, 1.0)), 0.0)
         return SurfaceExchange(
             net_heat_flux=sf.hfluxn,
             sensible_heat_flux=sf.shf,
@@ -643,7 +653,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
                            + data.condensation.precls) * g_to_kg,
             stress_u=-sf.ustr,
             stress_v=-sf.vstr,
-            wind_speed=jnp.sqrt(sf.u0 ** 2 + sf.v0 ** 2),
+            wind_speed=wind_speed,
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
         )
