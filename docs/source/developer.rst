@@ -110,11 +110,14 @@ only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel.
 The fast suite runs under ``pytest -n auto --dist loadscope``. The suite's
 cost is XLA compilation rather than arithmetic — 87 of ~3100 tests account for
 over half its wall clock, on arrays of a few dozen elements — and those
-compiles are independent, so they parallelise well. ``loadscope`` keeps each
-class on one worker so its tests still reuse each other's compiled
-executables. The fast job also sets ``JCM_TEST_CACHE_GROWTH_MB=256``, because
-every worker retains its own executables and memory, not CPU, is what limits
-the worker count; see :doc:`design/test_suite_memory`. The slow suite stays
+compiles are independent, so they parallelise well: 67 minutes serial became
+35 measured, which is 1.91x on the 2 workers ``-n auto`` resolves to on a
+standard runner — very nearly linear, so core count is the ceiling rather than
+any inefficiency. ``loadscope`` keeps each class on one worker so its tests
+still reuse each other's compiled executables. The fast job also sets
+``JCM_TEST_CACHE_GROWTH_MB=256``, because every worker retains its own
+executables and two default-budget workers do not fit the runner; see
+:doc:`design/test_suite_memory`. The slow suite stays
 single-process for the same reason — its tests are full integrations with a
 much higher floor per worker. If
 the fast suite fails it cancels the whole run, taking the in-flight slow job

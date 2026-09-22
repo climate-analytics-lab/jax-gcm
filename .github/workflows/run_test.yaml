@@ -140,15 +140,23 @@ jobs:
       # being parallelised away. It also keeps `jcm/dycore/pyses/`'s
       # x64-for-the-life-of-the-class fixtures intact.
       #
-      # MEMORY, not CPU, is the binding constraint, and it fails silently: a
-      # worker killed by the ceiling surfaces as `worker gwN crashed` and an
-      # arbitrary set of failures (#704), never as an honest OOM. Each worker
-      # retains its own executables, and a heavy module peaks near 5 GB under
-      # the default 1 GB growth budget against this runner's 16 GB / 4 vCPU.
-      # The tighter budget makes each worker drop caches sooner, trading a
-      # little recompilation for headroom. Revisit BOTH knobs together if the
-      # runner class ever changes: `-n auto` scales workers with CPU count,
-      # and available memory does not follow it.
+      # `-n auto` resolves to 2 workers on this runner class (the log says
+      # `created: 2/2 workers`), and that is the whole ceiling: 67 min serial
+      # -> 35 min measured, i.e. 1.91x on 2 workers, near-perfect linear
+      # scaling. Nothing here is inefficient — the suite is simply limited by
+      # core count, so a larger runner class would keep buying time roughly
+      # linearly if that trade is ever worth the money.
+      #
+      # The cache budget is tightened because each worker retains its OWN
+      # executables, and a heavy module peaks near 5 GB under the default 1 GB
+      # growth budget (docs/source/design/test_suite_memory.md) — two of those
+      # do not fit the standard runner. That failure is silent: a worker
+      # killed by the ceiling surfaces as `worker gwN crashed` and an
+      # arbitrary set of failures (#704), never as an honest OOM. The tighter
+      # budget makes each worker drop caches sooner, trading a little
+      # recompilation for headroom. Revisit BOTH knobs together if the runner
+      # class changes: `-n auto` scales workers with CPU count, and memory
+      # does not follow it.
       #
       # `--durations` so the next person asking "why is this slow?" reads it
       # off the log instead of reconstructing it from line timestamps.
