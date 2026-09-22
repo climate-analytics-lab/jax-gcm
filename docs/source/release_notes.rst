@@ -738,28 +738,43 @@ Regression fixtures follow the supported matrix
   ``test_release_matrix_default_statistics``, one sub-test per member of
   ``tools/release_validation/matrix.yaml``, each built through that member's
   **validated preset** rather than a composition written for the test.
-  Per-member bands live in ``jcm/data/test/release_matrix/`` (a few KB, so a
-  change is reviewable as a diff); the init state each member resumes from is
+  Per-member bands live in ``jcm/data/test/release_matrix/`` (tens to a few
+  hundred KB, so a change is reviewable as a diff); the init state each member resumes from is
   hosted on the data mirror under ``bundles/<grid>_<levels>/init_states/`` and
   fetched cache-first. A member's bands and its state are regenerated together
   by ``jcm.data.test.release_matrix.generate_stats.generate(<member>)`` — they
   describe the same window and are only meaningful as a pair. Set
   ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
   publishing them.
-- Band widths are now floored so a regression band can never be narrower than
-  the computation's own noise. Each band is ``3 * std`` floored, widest-wins,
-  at three quantities and at no relative fraction of the mean: a few float32
-  ULP of the field magnitude (``1e-6 * |mean|``, ~8 ULP), an absolute ``1e-8``
-  for the near-zero/underflow tail (the ``1e-24``-scale humidity levels where
-  the ULP floor itself underflows), and ``3 x <var>.noise`` — the measured
-  peak-to-peak spread of the same window across independent repeats in separate
-  processes, which ``generate`` records in the fixture. The ULP floor covers
-  both a positive ``std`` finer than float32 resolves and a ``std`` of exactly
-  zero at a nonzero constant — a hybrid grid's pure-a ``pressure_full`` levels,
-  bit-reproducible and so given a few-ULP band, never the wide relative band
-  that would wave a gross pressure error through. Without these floors a band
-  could fail on a new GPU or XLA version indistinguishably from a real physics
-  regression.
+- Band widths are floored so a regression band can never be narrower than
+  the computation's own noise, and never so wide it cannot fail. Each band is
+  ``3 * std`` of the daily global means, widened (widest wins) by four
+  floors: a few float32 ULP of the field magnitude (``1e-6 * |mean|``, ~8 ULP,
+  so the bit-reproducible pure-a ``pressure_full`` levels get a few-ULP band);
+  ``1e-6 * max|mean|`` over the variable's **own** profile, for the near-zero
+  tail (humidity and condensate aloft) — scaled per variable because a single
+  absolute floor sized for humidity would be wider than every aerosol mass
+  signal (global means of 1e-10 to 3e-9 kg/kg); ``1e-30``, which pins a
+  species with no source in the window to exactly zero, so a source appearing
+  for it fails; and ``3 x <var>.noise``, the measured peak-to-peak spread of
+  the same window across independent repeats in separate processes. The JAM
+  members measure ``noise`` from six repeats, the others from three
+  (``REPRODUCIBILITY_REPEATS``).
+- Each member is banded on its defining prognostic state, not just core
+  meteorology: ``qc``/``qi`` and the MACv2-SP or JAM aerosol optical depth for
+  every ECHAM member, and for the JAM members every interstitial and
+  cloud-borne aerosol mass and the precursor gases. Number concentrations are
+  banded as mass-weighted **column integrals** (``qnc_column``,
+  ``qni_column``, and for JAM ``n_total_column`` summed over modes and both
+  phases); per-level numbers are not banded, because near-threshold
+  activation and nucleation cells make them jump between runs of identical
+  code.
+- Each band file records the environment its bands were drawn under
+  (``bands_environment``: python, jax, jax-rrtmgp, dinosaur, flax, mam4-jax,
+  ...), the one its init state was spun up under
+  (``init_state_environment``) and its ``reproducibility_repeats``. Bands must
+  be generated in a CI-parity environment: bands drawn under a different
+  jax-rrtmgp release fail a correct model across the whole column.
 
 Calibration and capability gaps
 """""""""""""""""""""""""""""""

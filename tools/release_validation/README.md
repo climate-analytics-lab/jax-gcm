@@ -22,10 +22,10 @@ a **fast** regression — a few minutes per member — in
 `JCM_RUN_GPU_INTEGRATION_TESTS=1`.
 
 Each member's fixture is a pair: the **bands** (`<member>_statistics.nc`,
-committed under `jcm/data/test/release_matrix/`, a few KB so a change shows up
-as a reviewable diff) and the **init state** it resumes from (hosted on the
-data mirror under `bundles/<grid>_<levels>/init_states/`, since it is tens of
-MB). The bands describe the window that follows that exact state, so the two
+committed under `jcm/data/test/release_matrix/`, tens to a few hundred KB so a
+change shows up as a reviewable diff) and the **init state** it resumes from
+(hosted on the data mirror under `bundles/<grid>_<levels>/init_states/`, since
+it runs from a few MB to several GB). The bands describe the window that follows that exact state, so the two
 are only meaningful together and are regenerated together — one command per
 member, on a GPU:
 

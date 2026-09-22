@@ -9,13 +9,14 @@ regression covers exactly what the project claims to support.
 
 What is where
 -------------
-* **Bands** — ``<member>_statistics.nc`` in this directory, a few KB each and
-  checked in, so a change in what the model produces shows up as a reviewable
-  diff.
+* **Bands** — ``<member>_statistics.nc`` in this directory, tens to a few
+  hundred KB each and checked in, so a change in what the model produces
+  shows up as a reviewable diff.
 * **Initial states** — *not* in git. Each member resumes from a stamped
   checkpoint on the Hugging Face data mirror under
   ``bundles/<grid>_<levels>/init_states/``, fetched cache-first by
-  :func:`jcm.data.remote.fetch`. They are tens of MB and would otherwise be
+  :func:`jcm.data.remote.fetch`. They run from a few MB to several GB and
+  would otherwise be
   re-committed in full on every regeneration.
 
 Each member's band file and its init state are a matched pair: the bands
@@ -35,6 +36,15 @@ built at import time), and the default claims 75 % of the card for this
 orchestrating process, which holds no device work of its own but would starve
 every worker it spawns. ``generate`` refuses to run without it rather than
 OOM-ing an hour in.
+
+Run it in a CI-parity environment — a fresh venv with
+``pip install -e ".[mam4]"`` and the pinned CUDA jax — never a shared or
+long-lived one: the bands are only valid under the dependencies the test later
+runs with, and bands drawn under a different jax-rrtmgp release fail a correct
+model across the whole column. Each band file records what it was drawn under
+(``bands_environment``), what its init state was spun up under
+(``init_state_environment``) and its ``reproducibility_repeats``; see
+:func:`generate`.
 
 ``generate`` writes the band file and, unless ``write_state=False``, the
 member's init state to ``out_dir`` for upload to the mirror (see
