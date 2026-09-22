@@ -79,6 +79,16 @@ def radiation_scheme_emulated(
     signature matches the other radiation schemes so it can be used
     interchangeably.
 
+    Deliberately does NOT read ``parameters.cloud_inhomogeneity``: the network
+    predicts fluxes directly, so the sub-grid inhomogeneity effect is implicit
+    in the radiation its training labels were generated from, not a runtime
+    multiplier on the output (the learned flux mapping is not linear in that
+    factor, so scaling the prediction would be wrong). The packaged checkpoint
+    predates the #678 0.8 factor, so ``echam-emulated-2m`` does not yet reflect
+    the corrected cloud optical depth and diverges from the RRTMGP backend by a
+    few W/m² for cloudy columns until the emulator is retrained against the
+    corrected radiation (#881; fold into the #743 retrain, alongside #738).
+
     Additional Args:
         emulator_weights: Trained NN weights (``EmulatorWeights``). Must be
             provided; passed through the parameters mechanism in EchamPhysics.

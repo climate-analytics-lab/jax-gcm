@@ -174,6 +174,13 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   separate in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN
   guard against thin-cloud optical-depth blow-up; it binds in ~0.003 % of cloudy
   cells and is *not* an inhomogeneity term.
+- **The NN emulator does not reflect the inhomogeneity factor yet.** The emulated
+  path predicts fluxes directly, so the inhomogeneity effect is implicit in its
+  training labels rather than a runtime knob; it deliberately does not read
+  ``cloud_inhomogeneity``. The packaged checkpoint predates the 0.8 factor, so
+  ``echam-emulated-2m`` diverges from the RRTMGP backend by a few W/m² for cloudy
+  columns until the emulator is retrained against the corrected radiation (#881,
+  folded into the #743 retrain).
 - **Thin-lid aerosol-radiation cutoff.** Online aerosol optics are zeroed above
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass
