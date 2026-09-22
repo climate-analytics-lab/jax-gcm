@@ -647,9 +647,15 @@ def radiation_scheme(
         noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up_clear),
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up_clear),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
-        # Grey two-stream has no McICA sub-columns; the radiation-view
-        # cloud-cover diagnostic is defined as 0 here (see RadiationData).
-        total_cloud_cover=jnp.zeros_like(olr),
+        # The cover the grey flux solve actually integrates: the beam-split
+        # weight ``c_col`` between the clear and cloudy two-stream calls,
+        # under the configured overlap rule (``column_total_cover``). This is
+        # the grey analogue of RRTMGP's McICA sub-column cover -- the
+        # radiation's own view of the cloud -- so consumers of
+        # ``radiation.total_cloud_cover`` (the CMIP ``clt`` mapping in
+        # ``tools/aerocom_cmor.py``, the release-validation cloud-cover
+        # report) see the cloud the grey fluxes respond to, not a clear sky.
+        total_cloud_cover=c_col,
         step=jnp.int32(0),
     )
 

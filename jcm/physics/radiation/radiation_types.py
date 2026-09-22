@@ -252,10 +252,12 @@ class RadiationData:
     noa_frac_toa_sw_up_clear: jnp.ndarray
     noa_frac_toa_lw_up_clear: jnp.ndarray
 
-    # Total (2-D) cloud cover as the radiation sees it: fraction of McICA
-    # g-point sub-columns (pooled LW+SW draws) with ≥1 cloudy layer, under
-    # the exact overlap + decorrelation the flux solve integrates. Zero on
-    # schemes without sub-columns (grey, NN emulator).
+    # Total (2-D) cloud cover as the radiation sees it. RRTMGP: fraction of
+    # McICA g-point sub-columns (pooled LW+SW draws) with ≥1 cloudy layer,
+    # under the exact overlap + decorrelation the flux solve integrates.
+    # Grey two-stream: the beam-split weight ``c_col`` its clear/cloudy
+    # calls are combined with (``mcica.column_total_cover``). NN emulator:
+    # the analytic expectation of the McICA draw (``expected_total_cover``).
     total_cloud_cover: jnp.ndarray   # McICA cloud cover [1] (ncols,)
 
     # Internal step counter incremented by the radiation term on every
