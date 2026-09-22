@@ -215,7 +215,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
-        layer_mass=None, use_updraft_cover=False,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -226,7 +226,9 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
             # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
             # zero so cap_scale == 1 and it passes through unscaled.
             precip_conv=thvsig,
-            dqc_dt=zeros, dqi_dt=zeros,
+            # Probe: the humidity the moist ``cp`` is built from rides out
+            # on the (unscaled) qc tendency.
+            dqc_dt=humidity_m1, dqi_dt=zeros,
         ), None
 
     monkeypatch.setattr(
@@ -275,6 +277,12 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     # prognostic theta_v variance (ECHAM pthvsig) — NOT the cu_thvsig
     # constant, which would give the same value in both columns.
     assert jnp.allclose(conv.precip_conv, jnp.array([0.35, 0.80]))
+    # The moist heat capacity is built from the STEP-START humidity (ECHAM
+    # ``zcpq`` uses ``pqm1``, mo_cumastr.f90:229), not the post-vdiff
+    # environment the plume sees (#872).
+    assert jnp.allclose(tendency.tracers["qc"], state.specific_humidity)
+    assert not jnp.allclose(
+        tendency.tracers["qc"], thermo_run["specific_humidity"])
 
     # Without a vdiff diagnostic (and without thermo_run): zeros profile and
     # the raw state as environment.
@@ -317,7 +325,7 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
-        layer_mass=None, use_updraft_cover=False,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
     ):
         ones = jnp.ones_like(temperature)
         zeros = jnp.zeros_like(temperature)
@@ -380,7 +388,7 @@ def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
-        layer_mass=None, use_updraft_cover=False,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -949,10 +957,12 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from jcm.constants import cpd, alhc
+            from jcm.constants import alhc
+            from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
-            # Sensible heat change
-            dH_sensible = jnp.sum(tendencies.dtedt * cpd)
+            # Sensible heat change, with the scheme's moist cp (ECHAM pcpen)
+            cp = moist_isobaric_heat_capacity(atm['humidity'])
+            dH_sensible = jnp.sum(tendencies.dtedt * cp)
             
             # Latent heat change (condensation releases heat)
             dH_latent = -jnp.sum(tendencies.dqdt * alhc)

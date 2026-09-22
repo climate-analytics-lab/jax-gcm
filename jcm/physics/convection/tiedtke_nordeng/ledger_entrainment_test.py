@@ -97,15 +97,21 @@ class TestCondensateFluxLedger:
     Setting ``tu == env T`` (zero DSE deviation flux) and ``qu == env q``
     (zero moisture deviation flux) with ``mfd = plude = pdmfup = pdmfdp = 0``
     leaves the condensate flux ``L·lu·mfu`` as the ONLY nonzero divergence,
-    so ``dtedt`` is exactly ``−Δ(zalv·lu·mfu)/(cpd·Δp/g)`` and can be
-    hand-computed.
+    so ``dtedt`` is exactly ``−Δ(zalv·lu·mfu)/(cp·Δp/g)`` and can be
+    hand-computed. ``cp`` is ECHAM's moist ``pcpen = cpd·(1 + vtmpc2·q)``
+    (``zrcpm``, mo_cufluxdts.f90:648), built here by hand from the column's
+    uniform 5 g/kg.
     """
+
+    Q = 5.0e-3
+    #: Hand-computed ECHAM ``pcpen`` for the uniform column humidity.
+    CP = c.cpd * (1.0 + c.vtmpc2 * Q)
 
     def _setup(self, T_value):
         nlev = 5
         pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
         temperature = jnp.full(nlev, T_value)
-        humidity = jnp.full(nlev, 5.0e-3)
+        humidity = jnp.full(nlev, self.Q)
         rho = pressure / (c.rd * temperature)
         dz = jnp.full(nlev, 1000.0)
         # Condensate flux lu·mfu = [0, 1e-4, 2e-4, 3e-4, 4e-4] — nonzero at
@@ -128,18 +134,21 @@ class TestCondensateFluxLedger:
 
     def test_phase_keyed_latent_heat_cold_uses_alhs(self):
         tend, cond_flux, mass = self._setup(250.0)  # below tmelt
-        # div = diff([cond_flux, 0]) ; dtedt = -alhs*div/(cpd*mass)
+        # div = diff([cond_flux, 0]) ; dtedt = -alhs*div/(cp*mass)
         div = np.diff(np.append(cond_flux, 0.0))
-        expected = -c.alhs * div / (c.cpd * mass)
+        expected = -c.alhs * div / (self.CP * mass)
         np.testing.assert_allclose(np.asarray(tend.dtedt), expected, rtol=1e-5)
         # A fixed-alhc ledger would be measurably different (~13%).
-        wrong = -c.alhc * div / (c.cpd * mass)
+        wrong = -c.alhc * div / (self.CP * mass)
         assert not np.allclose(np.asarray(tend.dtedt), wrong, rtol=1e-3)
+        # A dry-cpd conversion is off by vtmpc2·q ≈ 0.43 % (#872).
+        dry = -c.alhs * div / (c.cpd * mass)
+        assert not np.allclose(np.asarray(tend.dtedt), dry, rtol=1e-3)
 
     def test_phase_keyed_latent_heat_warm_uses_alhc(self):
         tend, cond_flux, mass = self._setup(290.0)  # above tmelt
         div = np.diff(np.append(cond_flux, 0.0))
-        expected = -c.alhc * div / (c.cpd * mass)
+        expected = -c.alhc * div / (self.CP * mass)
         np.testing.assert_allclose(np.asarray(tend.dtedt), expected, rtol=1e-5)
 
     def test_surface_layer_receives_tendency(self):
@@ -148,9 +157,68 @@ class TestCondensateFluxLedger:
         # nonzero, where the old diff-into-[:-1] left it exactly 0.
         tend, cond_flux, mass = self._setup(290.0)
         surf = float(tend.dtedt[-1])
-        expected_surf = -(-c.alhc * cond_flux[-1]) / (c.cpd * mass)
+        expected_surf = -(-c.alhc * cond_flux[-1]) / (self.CP * mass)
         assert surf != 0.0
         assert surf == pytest.approx(expected_surf, rel=1e-5)
+
+
+# --------------------------------------------------------------------------
+# #872 — the cudtdq ledger uses ECHAM's MOIST heat capacity
+# --------------------------------------------------------------------------
+class TestMoistHeatCapacityLedger:
+    """``pmfus``/``pmfds`` carry ``pcpcu·T + φ`` and ``zrcpm = 1/pcpen``.
+
+    A warm plume (``tu = T + 1 K``) with no condensate, in a column whose
+    humidity falls with height, isolates the dry-static-energy deviation
+    flux ``F_k = cp_k·(tu_k − T_k)·mfu_k``. Its divergence telescopes over
+    the column, so the enthalpy the ledger deposits, ``Σ cp_k·dT_k·m_k``,
+    vanishes to round-off with the SAME moist ``cp`` the ledger divides by
+    (mo_cufluxdts.f90:198-204, 648-656) — and is open by ``~vtmpc2·Δq``
+    when integrated with dry ``cpd``.
+    """
+
+    def _run(self):
+        nlev = 6
+        pressure = jnp.linspace(3.0e4, 1.0e5, nlev)
+        temperature = jnp.linspace(240.0, 300.0, nlev)
+        humidity = jnp.linspace(1.0e-3, 1.8e-2, nlev)
+        rho = pressure / (c.rd * temperature)
+        dz = jnp.full(nlev, 1000.0)
+        mfu = jnp.array([0.0, 0.02, 0.05, 0.08, 0.06, 0.03])
+        up = _zero_updraft(nlev)._replace(
+            tu=temperature + 1.0, qu=humidity, mfu=mfu,
+        )
+        tend = calculate_tendencies(
+            temperature, humidity, jnp.zeros(nlev), jnp.zeros(nlev),
+            pressure, rho, dz, up, _zero_downdraft(nlev), kbase=nlev - 1,
+            ktop=1, dt=1800.0, config=ConvectionParameters.default(),
+            ktype=jnp.array(1),
+        )
+        dpa = np.abs(np.diff(np.asarray(pressure)))
+        mass = np.concatenate([dpa, dpa[-1:]]) / c.grav
+        cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
+        return np.asarray(tend.dtedt, dtype=np.float64), mass, cp, np.asarray(mfu)
+
+    def test_column_enthalpy_closes_with_moist_cp(self):
+        dtedt, mass, cp, mfu = self._run()
+        moist = float(np.sum(cp * dtedt * mass))
+        scale = float(np.sum(np.abs(cp * dtedt * mass)))
+        assert scale > 0.0
+        assert abs(moist) / scale < 1e-5
+
+    def test_dry_cpd_integral_is_open(self):
+        dtedt, mass, cp, mfu = self._run()
+        dry = float(np.sum(c.cpd * dtedt * mass))
+        scale = float(np.sum(np.abs(cp * dtedt * mass)))
+        # Open by the humidity-weighted cp spread across the plume (~1 %).
+        assert abs(dry) / scale > 1e-3
+
+    def test_level_tendency_hand_computed(self):
+        dtedt, mass, cp, mfu = self._run()
+        flux = cp * 1.0 * mfu
+        div = np.diff(np.append(flux, 0.0))
+        expected = div / (cp * mass)
+        np.testing.assert_allclose(dtedt, expected, rtol=2e-5, atol=1e-12)
 
 
 # --------------------------------------------------------------------------

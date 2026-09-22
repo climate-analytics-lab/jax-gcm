@@ -260,3 +260,43 @@ class TestThermodynamicsGradients(unittest.TestCase):
         check_gradients(
             thermo.grid_mean_to_in_cloud,
             (jnp.full(8, 1.0e-4), jnp.linspace(0.12, 0.9, 8)), rtol=1e-3)
+
+
+class TestMoistIsobaricHeatCapacity:
+    """ECHAM ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))`` (mo_cumastr.f90:229)."""
+
+    def test_dry_air_is_cpd(self):
+        cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(0.0))
+        np.testing.assert_allclose(float(cp), c.cpd, rtol=1e-7)
+
+    def test_moist_extremes_hand_computed(self):
+        # vtmpc2 = cpv/cpd − 1, so cp = cpd + (cpv − cpd)·q exactly.
+        for q in (0.018, 0.035):
+            expected = c.cpd + (c.cpv - c.cpd) * q
+            cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(q))
+            np.testing.assert_allclose(float(cp), expected, rtol=1e-6)
+        # The shift the dry-cpd form missed: ~1.5 % at 18 g/kg, ~3 % at 35.
+        ratio_18 = float(thermo.moist_isobaric_heat_capacity(
+            jnp.asarray(0.018))) / c.cpd
+        ratio_35 = float(thermo.moist_isobaric_heat_capacity(
+            jnp.asarray(0.035))) / c.cpd
+        assert 1.014 < ratio_18 < 1.017
+        assert 1.028 < ratio_35 < 1.032
+
+    def test_negative_humidity_clamped(self):
+        cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(-1e-3))
+        np.testing.assert_allclose(float(cp), c.cpd, rtol=1e-7)
+
+    def test_broadcasting_native(self):
+        q = jnp.linspace(0.0, 0.02, 12).reshape(3, 4)
+        cp = thermo.moist_isobaric_heat_capacity(q)
+        assert cp.shape == q.shape
+        np.testing.assert_allclose(
+            np.asarray(cp), c.cpd * (1.0 + c.vtmpc2 * np.asarray(q)),
+            rtol=1e-6)
+
+    def test_gradient_finite_at_clamp(self):
+        g = jax.grad(lambda q: thermo.moist_isobaric_heat_capacity(q))
+        assert np.isfinite(float(g(jnp.asarray(0.0))))
+        np.testing.assert_allclose(
+            float(g(jnp.asarray(0.01))), c.cpd * c.vtmpc2, rtol=1e-6)

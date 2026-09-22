@@ -373,7 +373,7 @@ class TestRCEConvection(unittest.TestCase):
         The cudtdq ledger guarantees (with the deviation DSE fluxes
         telescoping over the column):
 
-            cp·Σ dT/dt·Δp/g  =  Σ zalv·(plude+pdmfup+pdmfdp)·… − alhf·Σ pdpmel
+            Σ cp·dT/dt·Δp/g  =  Σ zalv·(plude+pdmfup+pdmfdp)·… − alhf·Σ pdpmel
                               =  −Σ zalv·(dq/dt)·Δp/g − alhf·Σ pdpmel
 
         i.e. the column warms by exactly the latent heat of the vapour it
@@ -402,7 +402,11 @@ class TestRCEConvection(unittest.TestCase):
         dp_lev = np.concatenate([dpa, dpa[-1:]])
         mass = dp_lev / c.grav
         zalv = np.where(np.asarray(T) > c.tmelt, c.alhc, c.alhs)
-        cp_int = c.cpd * float(np.sum(np.asarray(tendencies.dtedt) * mass))
+        # The ledger converts heat to temperature with ECHAM's MOIST
+        # ``pcpen = cpd·(1 + vtmpc2·q)`` (``zrcpm``, mo_cufluxdts.f90:648),
+        # so the enthalpy it deposits is integrated with the same ``cp``.
+        cp_moist = c.cpd * (1.0 + c.vtmpc2 * np.maximum(np.asarray(q), 0.0))
+        cp_int = float(np.sum(cp_moist * np.asarray(tendencies.dtedt) * mass))
         # Every kg of vapour the column loses was condensed somewhere in
         # the plume and released its latent heat — whether it left as
         # precipitation or as detrained condensate (the qc/qi tendencies

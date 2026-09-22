@@ -33,6 +33,7 @@ from jcm.physics.convection.saturation import (  # noqa: F401
     saturation_mixing_ratio,
     saturation_vapor_pressure,
 )
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
 # Import updraft, downdraft and flux modules after they're defined
 # This avoids circular imports
@@ -158,6 +159,7 @@ def find_cloud_base(temperature: jnp.ndarray,
                    config: ConvectionParameters,
                    thvsig: jnp.ndarray | None = None,
                    layer_thickness: jnp.ndarray | None = None,
+                   cp_moist: jnp.ndarray | None = None,
                    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Find cloud base by ECHAM ``cubase``'s ``klab`` walk.
 
@@ -166,7 +168,13 @@ def find_cloud_base(temperature: jnp.ndarray,
     humidity (ECHAM seeds ``ptu = ptenh``, ``pqu = pqenh`` in ``cuini``) and
     is walked UPWARD one level at a time, conserving dry static energy::
 
-        T_u(k) = ( cp·T_u(k+1) + geoh(k+1) - geoh(k) ) / cp
+        T_u(k) = ( cp(k+1)·T_u(k+1) + geoh(k+1) - geoh(k) ) / cp(k)
+
+    ``cp`` is ECHAM's MOIST heat capacity of the environment
+    (``pcpcu = cpd·(1 + vtmpc2·q)``, mo_cuinitialize.f90:294), not dry
+    ``cpd``. Because the walk conserves ``cp·T + φ`` level by level, it
+    telescopes to the closed form ``T_u(k) = (cp(0)·T(0) + φ(0) − φ(k))/cp(k)``
+    evaluated below.
 
     At each level, in order:
 
@@ -212,14 +220,19 @@ def find_cloud_base(temperature: jnp.ndarray,
             back to ``config.cu_thvsig``.
         layer_thickness: Layer thickness (m) [nlev], used to build the
             geopotential the DSE-conserving lift needs. When ``None`` the
-            lift falls back to the Exner form, which is equivalent for a
-            constant ``cp`` and keeps older callers working.
+            lift falls back to a dry Exner form (see below).
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu``, evaluated at the step-start
+            humidity by the model wrapper. ``None`` builds it from
+            ``humidity``.
 
     Returns:
         Tuple of (cloud_base_level, cloud_base_exists)
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Work surface-first so the walk runs in its natural direction; flip back
     # at the end. ``flip`` is a no-op when the input is already surface-first.
@@ -228,11 +241,11 @@ def find_cloud_base(temperature: jnp.ndarray,
     t_env = flip(temperature)
     q_env = flip(humidity)
     p_env = flip(pressure)
+    cp_env = flip(cp_moist)
 
     # Geopotential of each level above the lowest one. ECHAM lifts the parcel
     # with ``(cp·T + geoh)`` conserved, so the walk needs a height coordinate;
-    # ``layer_thickness`` gives it directly. Without it, fall back to the
-    # equivalent Exner form.
+    # ``layer_thickness`` gives it directly.
     if layer_thickness is not None:
         dz = flip(layer_thickness)
         # Height of level k above level 0, integrating half a layer at each
@@ -240,8 +253,12 @@ def find_cloud_base(temperature: jnp.ndarray,
         geo = c.grav * jnp.concatenate(
             [jnp.zeros(1), jnp.cumsum(0.5 * (dz[:-1] + dz[1:]))],
         )
-        parcel_t_dry = t_env[0] + (geo[0] - geo) / c.cpd
+        parcel_t_dry = (cp_env[0] * t_env[0] + geo[0] - geo) / cp_env
     else:
+        # No height coordinate: a dry-adiabat Poisson lift. ECHAM has no
+        # such path (it always has ``pgeoh``); this serves only direct
+        # callers that pass no ``layer_thickness`` — the model path always
+        # supplies it and takes the moist-``cp`` DSE walk above.
         parcel_t_dry = t_env[0] * (p_env / p_env[0]) ** (c.rd / c.cpd)
 
     q_parcel = q_env[0]
@@ -305,6 +322,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
                              layer_thickness: jnp.ndarray,
                              config: ConvectionParameters,
                              thvsig: jnp.ndarray | None = None,
+                             cp_moist: jnp.ndarray | None = None,
                              ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cubasmc``: the MID-LEVEL convection trigger.
 
@@ -367,12 +385,17 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
         config: Convection configuration
         thvsig: σ(θ_v) [K] from vdiff, for the ``zlift`` in the survival
             test. ``None`` falls back to ``config.cu_thvsig``.
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] (ECHAM ``pcpen``/``pcpcu``). ``None`` builds it from
+            ``humidity``.
 
     Returns:
         Tuple of (mid_level_base, mid_level_base_exists)
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Work surface-first, as in ``find_cloud_base``; flip back at the end.
     is_surface_first = pressure[0] >= pressure[-1]
@@ -382,6 +405,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     p_env = flip(pressure)
     w_env = flip(omega)
     dz = flip(layer_thickness)
+    cp_env = flip(cp_moist)
 
     qs_env = jax.vmap(saturation_mixing_ratio)(p_env, t_env)
     # ECHAM ``pgeoh(kk)/grav``: the height of the candidate layer's TOP
@@ -407,9 +431,13 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
 
     # Survival of a seed at level k: one DSE-conserving lift to level k+1,
     # the damped Newton adjustment there, then the buoyancy test WITH the
-    # ``zlift`` bonus (klab == 1 below, mo_cuascent.f90:449).
+    # ``zlift`` bonus (klab == 1 below, mo_cuascent.f90:449). The lift
+    # conserves ``cp·T + φ`` with ECHAM's moist ``cp`` (the seed uses
+    # ``pcpen``, mo_cuascent.f90:641-642; the ascent step ``pcpcu``,
+    # mo_cuascent.f90:411), so the seed's heat content is carried by the
+    # source level's ``cp`` and divided by the destination level's.
     dz_mid = 0.5 * (dz[:-1] + dz[1:])
-    parcel_t_dry = t_env[:-1] - c.grav * dz_mid / c.cpd
+    parcel_t_dry = (cp_env[:-1] * t_env[:-1] - c.grav * dz_mid) / cp_env[1:]
     parcel_t, parcel_q, parcel_l = cuadjtq_newton(
         parcel_t_dry, q_env[:-1], p_env[1:],
     )
@@ -462,6 +490,12 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     LFC. Stratospheric layers above the EL — where the parcel cools to
     absurdly low temperatures and gives massive bogus negative buoyancy
     — are not counted.
+
+    This is jcm's trigger diagnostic, not a port: ECHAM ``cumastr`` has no
+    surface-parcel CAPE (its trigger is the ``cubase`` buoyancy walk and its
+    closure CAPE is the in-plume ``zcape``, which involves no ``cp``). The
+    textbook dry-``cpd`` Poisson lift and pseudo-adiabat therefore stay as
+    they are; ECHAM's moist ``cp`` belongs to the ported plume and ledger.
 
     Works for either input ordering:
       * TOA-first (level 0 = TOA, ICON/ECHAM convention used by the
@@ -755,6 +789,7 @@ def _tiedtke_convection_toa_first(
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
     layer_mass: jnp.ndarray | None = None,
+    humidity_m1: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
@@ -794,6 +829,12 @@ def _tiedtke_convection_toa_first(
             ``zdqcv`` drives the deep/shallow split. ``None`` (no host
             information) means the split sees no large-scale convergence
             and classifies by the surface budget alone.
+        humidity_m1: STEP-START specific humidity [kg/kg] [nlev] (ECHAM
+            ``pqm1``), from which the scheme's moist heat capacity
+            ``cp = cpd·(1 + vtmpc2·max(q, 0))`` is built — ECHAM's ``zcpq``
+            (mo_cumastr.f90:229), which uses ``pqm1`` rather than the
+            provisional ``pqen`` the plume sees. ``None`` (standalone column
+            callers with no separate step-start state) uses ``humidity``.
 
     Returns:
         Tuple of (tendencies, final_state) with fixed qc/qi transport
@@ -801,8 +842,21 @@ def _tiedtke_convection_toa_first(
     """
     if config is None:
         config = ConvectionParameters.default()
-    
+
     nlev = len(temperature)
+
+    # ECHAM's moist heat capacity ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))``
+    # (mo_cumastr.f90:229): every static-energy and latent-heat conversion
+    # in the scheme divides by it — the cloud-base and mid-level parcel
+    # lifts (``pcpcu``, cubase/cubasmc), the plume and downdraft DSE mixing
+    # (cuasc/cuddraf), the Nordeng ``zheat`` (``zcpcui``), and the cudtdq
+    # ledger (``pmfus``/``pmfds`` built with ``pcpcu``, divided by
+    # ``pcpen``). ECHAM carries it at full levels (``pcpen``) and averages to
+    # half levels (``pcpcu``, cuini); jcm's convection runs on full levels
+    # throughout (#530), so the full-level value serves both.
+    cp_moist = moist_isobaric_heat_capacity(
+        humidity if humidity_m1 is None else humidity_m1
+    )
     
     # Initialize state
     state = initialize_convection(
@@ -819,12 +873,13 @@ def _tiedtke_convection_toa_first(
     # the surface path always wins when both would fire.
     cloud_base_sfc, has_cloud_base_sfc = find_cloud_base(
         temperature, humidity, pressure, config, thvsig, layer_thickness,
+        cp_moist=cp_moist,
     )
     if omega is None:
         omega = jnp.zeros_like(temperature)
     midlev_base, has_midlev_base = find_midlevel_cloud_base(
         temperature, humidity, pressure, omega, layer_thickness, config,
-        thvsig,
+        thvsig, cp_moist=cp_moist,
     )
     use_midlev = jnp.logical_and(~has_cloud_base_sfc, has_midlev_base)
     cloud_base = jnp.where(use_midlev, midlev_base, cloud_base_sfc)
@@ -1134,6 +1189,7 @@ def _tiedtke_convection_toa_first(
             lift=cloud_base_lift(config, thvsig),
             # Environmental winds for the prognostic plume wind (cududv).
             u_wind=u_wind, v_wind=v_wind,
+            cp_moist=cp_moist,
         )
         
         # --- ECHAM depth demotion (mo_cumastr.f90:750-753) ---------------
@@ -1172,7 +1228,7 @@ def _tiedtke_convection_toa_first(
         downdraft_state = calculate_downdraft(
             temperature, humidity, pressure, layer_thickness, rho,
             updraft_state, precip_rate, cloud_base, ktop, config,
-            u_wind=u_wind, v_wind=v_wind,
+            u_wind=u_wind, v_wind=v_wind, cp_moist=cp_moist,
         )
         
         # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
@@ -1190,6 +1246,9 @@ def _tiedtke_convection_toa_first(
         # rescale of the plume fluxes is equivalent to first order and
         # avoids the second ascent pass. The downdraft arrays are rescaled
         # by the same factor, exactly as mo_cumastr.f90:945-958.
+        # The dry-adiabatic lapse inside ``zheat`` is ``g·dz/zcpcu`` with
+        # ECHAM's MOIST heat capacity (``zcpcui = 1/zcpcu``,
+        # mo_cumastr.f90:598/849), the same ``cp`` the plume is lifted with.
         in_cloud = (jnp.arange(nlev) >= jnp.minimum(ktop, cloud_base)) & (
             jnp.arange(nlev) <= jnp.maximum(ktop, cloud_base)
         )
@@ -1200,7 +1259,7 @@ def _tiedtke_convection_toa_first(
         zheat = jnp.sum(
             jnp.where(
                 in_cloud,
-                ((-dT_up + c.grav * layer_thickness / c.cpd) / temperature
+                ((-dT_up + c.grav * layer_thickness / cp_moist) / temperature
                  + c.vtmpc1 * (-dq_up))
                 * (c.grav * net_mf) * zroi,
                 0.0,
@@ -1305,7 +1364,7 @@ def _tiedtke_convection_toa_first(
             updraft_state, downdraft_state,
             cloud_base, ktop, dt, config,
             ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
-            layer_mass=layer_mass,
+            layer_mass=layer_mass, cp_moist=cp_moist,
         )
         
         # qc/qi tendencies come from the cudtdq ledger's detrained
@@ -1449,6 +1508,7 @@ def tiedtke_nordeng_convection(
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
     layer_mass: jnp.ndarray | None = None,
+    humidity_m1: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run the Tiedtke-Nordeng scheme in either vertical ordering.
@@ -1484,7 +1544,7 @@ def tiedtke_nordeng_convection(
         dt, config, land_fraction, moisture_supply,
         to_toa(moisture_tend_profile), thvsig,
         to_toa(omega), to_toa(qte_dynamics),
-        to_toa(layer_mass),
+        to_toa(layer_mass), to_toa(humidity_m1),
         use_updraft_cover,
     )
 
@@ -1817,7 +1877,7 @@ class TiedtkeConvection(PhysicsTerm):
 
         # ``use_updraft_cover`` is a static Python bool (a trace-time code-path
         # selector), so it is closed over here rather than threaded as a
-        # vmapped argument — the ``in_axes`` tuple stays aligned with the 18
+        # vmapped argument — the ``in_axes`` tuple stays aligned with the 19
         # mapped/broadcast array arguments.
         _use_updraft_cover = self._updraft_precip_cover
 
@@ -1827,7 +1887,8 @@ class TiedtkeConvection(PhysicsTerm):
 
         column_fn = jax.vmap(
             _column_scheme,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1,
+                     1),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -1837,6 +1898,11 @@ class TiedtkeConvection(PhysicsTerm):
             dt, params, land_fraction, moisture_supply,
             moisture_tend_profile, thvsig, omega, qte_dynamics,
             layer_mass,
+            # Step-start humidity (ECHAM ``pqm1``) for the moist ``cp``
+            # (``zcpq``, mo_cumastr.f90:229) — NOT the post-vdiff
+            # ``humidity_env`` the plume sees, matching ECHAM's split
+            # between ``pqm1`` (heat capacity) and ``zqp1`` (environment).
+            state.specific_humidity,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied

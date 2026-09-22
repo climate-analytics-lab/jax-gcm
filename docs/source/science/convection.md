@@ -122,6 +122,47 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 ``smooth_gradients_test.py``, ``cloud_depth_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
 
+## Heat capacity of the Tiedtke plume and ledger
+
+**What we do.** Every static-energy and latent-heat conversion the Tiedtke
+port shares with ECHAM ``cumastr`` uses the **moist** isobaric heat capacity
+``cp = cpd·(1 + vtmpc2·max(q, 0))``
+(``jcm/physics/thermodynamics.py::moist_isobaric_heat_capacity``), evaluated
+per level from the **step-start** humidity: the cloud-base and mid-level parcel
+lifts (``find_cloud_base``, ``find_midlevel_cloud_base``, the ``calculate_updraft``
+seed), the updraft and downdraft dry-static-energy mixing
+(``calculate_updraft``, ``downdraft_step``), the Nordeng ``zheat`` lapse term,
+and the ``cudtdq`` ledger — the DSE deviation fluxes ``cp·(T_plume − T)·M`` and
+the conversion of the whole heat ledger to a temperature tendency. The column
+enthalpy the ledger deposits is therefore ``Σ cp·dT·Δp/g``. Three sites keep
+dry ``cpd`` because the reference does: the ``cuadjtq`` Newton step and the
+wet-bulb adjustment (``adjustment.py``, ``saturation.py``), and the ``cuflx``
+melting constant, which applies its own ``(1 + vtmpc2·q)`` factor with the
+provisional humidity. jcm's own trigger diagnostic ``calculate_cape_cin`` has no
+ECHAM counterpart and uses the textbook dry-``cpd`` parcel.
+
+**What ECHAM does.** ``mo_cumastr.f90:229`` builds ``zcpq = cpd·(1 +
+vtmpc2·MAX(pqm1, 0))`` from the step-start humidity ``pqm1`` (not the
+provisional ``zqp1`` the plume sees) and passes it as ``pcpen``; ``cuini``
+averages it to half levels (``pcpcu``). ``cubase``/``cuasc``/``cubasmc``/
+``cuddraf`` carry plume heat as ``pcpcu·T + pgeoh``; ``cuflx`` subtracts the
+environment's ``pcpcu·ptenh + pgeoh`` (``mo_cufluxdts.f90:198-204``);
+``cudtdq`` divides by ``pcpen`` (``zrcpm``, ``mo_cufluxdts.f90:648``); ``zheat``
+uses ``zcpcui = 1/zcpcu`` (``mo_cumastr.f90:598/849``). ``cuadjtq`` reads
+``L/cp`` from tables built with ``alv/cpd`` (``mo_echam_convect_tables.f90:214``).
+
+**Why we differ.** We do not: the port matches the reference's choice at every
+site. Because ``cp`` is the **environment's** at each level, a parcel lifted
+through an environment that dries with height gains ``≈ T·vtmpc2·Δq_env``
+relative to a dry-``cpd`` lift (the heat content is carried with the lower
+level's larger ``cp`` and divided by the upper level's smaller one). That is
+the reference's thermodynamics and ECHAM's convective parameters were tuned
+with it, so it is kept rather than replaced by the parcel's own heat capacity.
+
+**Status & known limitations.** ECHAM's ``pcpcu`` lives on half levels; jcm's
+convection is full-level throughout (#530), so the full-level ``cp`` serves
+both.
+
 ## Cloud-base trigger and the sub-cloud layer
 
 **What we do.** Tiedtke's cloud base is ECHAM's ``cubase`` ``klab`` walk
@@ -159,8 +200,12 @@ before the parcel is compared against it.
 **Status & known limitations.**
 - The trigger is **strict by construction, and this is the reference's
   behaviour, not an approximation of it**: because ``zlift`` is capped at 1 K, a
-  sounding whose lapse rate runs to the surface loses more parcel buoyancy per
-  level than the excess can cover and never reaches its LCL. Convection in such
+  sounding whose sub-cloud layer is stably stratified loses more parcel
+  buoyancy per level than the excess can cover and never reaches its LCL. The
+  walk's moist heat capacity (see below) credits the parcel
+  ``≈ T·vtmpc2·Δq_env`` per level where the environment dries with height, so
+  a moist 6.5 K/km surface layer can still reach its LCL; a genuinely stable
+  (e.g. 4 K/km or inverted) one cannot. Convection in such
   a column is the job of ``cubasmc``, which needs resolved ascent and a nearly
   saturated environment.
 - It follows that **any prescribed or idealised column handed to Tiedtke assumes
