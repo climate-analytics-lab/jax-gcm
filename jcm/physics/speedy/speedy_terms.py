@@ -22,7 +22,7 @@ from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_OUTPUT_ATTRS,
     SurfaceExchange,
 )
-from jcm.physics.surface.prescribed_flux import missing_prescribed_flux_fields
+from jcm.physics.surface.prescribed_flux import check_prescribed_flux_forcing
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -547,21 +547,14 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             prescribed_stress_v=zeros,
         )
 
-    def validate_forcing(self, forcing):
-        """Fail loudly at run start if forced mode lacks its forcing fields."""
+    def validate_forcing(self, forcing, run_window=None):
+        """Fail loudly at run start if forced mode lacks its forcing fields
+        or a date-aligned archive does not cover the run window.
+        """
         if not self.prescribed_fluxes:
             return
-        missing = missing_prescribed_flux_fields(forcing)
-        if missing:
-            raise ValueError(
-                "SpeedySurfaceFlux(prescribed_fluxes=True) needs the "
-                f"prescribed surface-flux forcing fields, but {missing} "
-                "are absent from ForcingData. Supply them via "
-                "forcing.prescribed_surface_flux (CLI) or set them on "
-                "the ForcingData directly (coupler door); units/signs "
-                "follow the surface-exchange contract, "
-                "docs/source/design/surface_exchange.md."
-            )
+        check_prescribed_flux_forcing(
+            forcing, "SpeedySurfaceFlux(prescribed_fluxes=True)", run_window)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)

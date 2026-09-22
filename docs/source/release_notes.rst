@@ -463,8 +463,10 @@ Coupling to an external surface component
   exchange, entering the same tendency pathways (SPEEDY's bottom-level source;
   ECHAM's ``TteTkeVerticalDiffusion(couple_surface=False)`` plus an explicit
   ``PrescribedSurfaceFlux`` term). Fluxes ride
-  ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file)
-  or the ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
+  ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file
+  whose climatology-vs-dated alignment is declared by ``align`` or a CF
+  ``climatology`` attribute, never inferred from its timestamps) or the
+  ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
   published contract's units and signs (#301). See
   :doc:`design/surface_exchange`.
 

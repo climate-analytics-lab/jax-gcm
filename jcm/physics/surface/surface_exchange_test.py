@@ -486,16 +486,17 @@ class TestPrescribedFluxForcingAttach:
         # A time axis becomes a TimeSeries leaf, sliced per step by select().
         ts = f.prescribed_sensible_heat_flux
         assert isinstance(ts, TimeSeries)
-        # A non-12-step archive MUST align on its absolute timestamps, not be
-        # smeared into year bins (Codex #877).
         assert int(ts.align_mode) == BY_DATE
 
-    def _write_flux_nc_at(self, path, coords, times, tag_per_time=None):
+    def _write_flux_nc_at(self, path, coords, times, tag_per_time=None,
+                          cf_climatology=False):
         """Write a 4-variable flux file with an explicit ``time`` axis.
 
         ``tag_per_time`` (optional, one scalar per timestamp) fills every grid
         cell of that timestep with the scalar, so a test can detect whether the
-        loader reordered the samples correctly.
+        loader reordered the samples correctly. ``cf_climatology`` marks the
+        time coordinate as a CF climatology (``climatology`` attribute naming
+        a ``climatology_bounds`` variable, CF §7.4).
         """
         import numpy as np
         import xarray as xr
@@ -509,180 +510,248 @@ class TestPrescribedFluxForcingAttach:
         else:
             block = np.stack([np.full((nlat, nlon), float(tag))
                               for tag in tag_per_time])
-        xr.Dataset(
+        times = np.asarray(times)
+        ds = xr.Dataset(
             {v: (("time", "lat", "lon"), block.copy()) for v in varnames},
-            coords={"time": np.asarray(times), "lat": lat, "lon": lon},
-        ).to_netcdf(path)
+            coords={"time": times, "lat": lat, "lon": lon},
+        )
+        if cf_climatology:
+            ds["climatology_bounds"] = (("time", "nv"),
+                                        np.stack([times, times], axis=1))
+            ds["time"].attrs["climatology"] = "climatology_bounds"
+        ds.to_netcdf(path)
 
-    def test_file_monthly_climatology_wraps_year(self, tmp_path):
+    @staticmethod
+    def _jan_to_dec(year=2000, day=15):
         import numpy as np
-        from jcm.forcing import WRAP_YEAR, TimeSeries
+        return [np.datetime64(f"{year}-{m:02d}-{day:02d}", "ns")
+                for m in range(1, 13)]
+
+    def _load(self, tmp_path, times, name, align=None, **kw):
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
         coords = self._coords()
-        # 12 mid-month timestamps stepping through Jan..Dec (each 30-day step
-        # lands in the next distinct calendar month) → WRAP_YEAR. Verifies the
-        # progression check accepts a mid-month-dated climatology.
-        t = [np.datetime64("2000-01-15") + np.timedelta64(30 * i, "D")
-             for i in range(12)]
-        p = tmp_path / "flux_monthly.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        ts = f.prescribed_sensible_heat_flux
-        assert isinstance(ts, TimeSeries)
+        p = tmp_path / name
+        self._write_flux_nc_at(p, coords, times, **kw)
+        block = {"file": str(p)}
+        if align is not None:
+            block["align"] = align
+        return _attach_prescribed_surface_fluxes(
+            None, self._cfg(block), coords).prescribed_sensible_heat_flux
+
+    # -- the declared alignment decides; timestamps never do ----------------
+
+    def test_auto_plain_one_year_transient_archive_aligns_by_date(self,
+                                                                  tmp_path):
+        """Codex #877's case: a one-year TRANSIENT monthly archive (one sample
+        per month Jan..Dec of 2000, e.g. a coupler history file) carries no
+        climatology declaration, so ``auto`` must align it BY_DATE — its
+        timestamps are identical to a climatology's, and replaying it every
+        year would silently recycle 2000's fluxes.
+        """
+        from jcm.forcing import BY_DATE
+        for day in (1, 15):  # month-start and mid-month stamps
+            ts = self._load(tmp_path, self._jan_to_dec(day=day),
+                            f"transient_{day}.nc")
+            assert int(ts.align_mode) == BY_DATE
+
+    def test_auto_cf_climatology_marker_wraps_year(self, tmp_path):
+        from jcm.forcing import WRAP_YEAR
+        for day in (1, 15):
+            ts = self._load(tmp_path, self._jan_to_dec(day=day),
+                            f"clim_{day}.nc", cf_climatology=True)
+            assert int(ts.align_mode) == WRAP_YEAR
+
+    def test_explicit_wrap_year_wraps_unmarked_jan_dec(self, tmp_path):
+        from jcm.forcing import WRAP_YEAR
+        ts = self._load(tmp_path, self._jan_to_dec(), "clim.nc",
+                        align="wrap_year")
         assert int(ts.align_mode) == WRAP_YEAR
 
-    def test_file_real_month_starts_wrap_year(self, tmp_path):
-        """Actual calendar month-starts (Jan..Dec 1st) step one-per-month."""
-        import numpy as np
-        from jcm.forcing import WRAP_YEAR
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
-        # Jan..Dec 1st of a leap year — 12 distinct consecutive months.
-        t = (np.datetime64("2000-01", "M") + np.arange(12)).astype(
-            "datetime64[ns]")
-        p = tmp_path / "flux_month_starts.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        assert int(f.prescribed_sensible_heat_flux.align_mode) == WRAP_YEAR
+    def test_explicit_by_date_overrides_cf_marker(self, tmp_path):
+        """An explicit ``by_date`` wins even over a CF climatology marker."""
+        from jcm.forcing import BY_DATE, BY_DATE_INTERP
+        ts = self._load(tmp_path, self._jan_to_dec(), "a.nc", align="by_date",
+                        cf_climatology=True)
+        assert int(ts.align_mode) == BY_DATE
+        ts = self._load(tmp_path, self._jan_to_dec(), "b.nc",
+                        align="by_date_interp")
+        assert int(ts.align_mode) == BY_DATE_INTERP
 
-    def test_file_cross_year_month_span_aligns_by_date(self, tmp_path):
-        """A 12-consecutive-month span that is NOT Jan-anchored (Jul→Jun) must
-        align BY_DATE: WRAP_YEAR indexes by ``floor(tyear*12)%12``, i.e. sample
-        0 == January, so replaying a July-first file through it would phase the
-        fluxes six months wrong. Only a Jan→Dec file is WRAP_YEAR-faithful.
+    def test_align_with_constants_raises(self):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        with pytest.raises(ValueError, match="only to a 'file'"):
+            _attach_prescribed_surface_fluxes(
+                None, self._cfg({"align": "wrap_year", "constants": {
+                    "sensible_heat_flux": 1.0, "evaporation": 1.0,
+                    "stress_u": 1.0, "stress_v": 1.0}}), self._coords())
+
+    def test_missing_timestamp_raises(self, tmp_path):
+        import numpy as np
+        t = [np.datetime64("2000-01-15", "ns"), np.datetime64("NaT", "ns"),
+             np.datetime64("2000-03-15", "ns")]
+        with pytest.raises(ValueError, match="NaT"):
+            self._load(tmp_path, t, "nat.nc")
+
+    def test_unknown_align_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown align"):
+            self._load(tmp_path, self._jan_to_dec(), "x.nc",
+                       align="climatology")
+
+    # -- a declared climatology is VALIDATED as Jan->Dec --------------------
+
+    @pytest.mark.parametrize("label", [
+        "jul_to_jun", "every_4_weeks", "bimonthly", "12_daily", "seasonal"])
+    @pytest.mark.parametrize("how", ["explicit", "cf_marker"])
+    def test_declared_climatology_not_jan_dec_raises(self, tmp_path, label,
+                                                     how):
+        """WRAP_YEAR indexes sample ``floor(tyear*12) % 12`` (0 == January),
+        so a file declared a climatology — by ``align`` or by its CF marker —
+        must be exactly Jan..Dec, or it would replay out of phase. Each of
+        these raises instead: Jul→Jun (six months out of phase), every-4-weeks
+        (two Januaries, no December), bi-monthly over two years, 12 daily
+        samples, a 4-sample seasonal climatology.
         """
         import numpy as np
-        from jcm.forcing import BY_DATE
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
-        t = (np.datetime64("2000-07", "M") + np.arange(12)).astype(
-            "datetime64[ns]")
-        p = tmp_path / "flux_jul_jun.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
-
-    def test_file_every_four_weeks_aligns_by_date(self, tmp_path):
-        """Codex #877's case: an every-4-weeks archive has ~30-day gaps but
-        lands TWO samples in January and none in December, so it is NOT a
-        monthly climatology and must align BY_DATE — the gap-size heuristic
-        that preceded this got it wrong.
-        """
-        import numpy as np
-        from jcm.forcing import BY_DATE
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
-        # Jan 1, Jan 29, Feb 26, ... : months [1,1,2,3,4,5,6,7,8,9,10,11].
         base = np.datetime64("2000-01-01", "ns")
-        t = np.array([base + np.timedelta64(28 * 24 * i, "h")
-                      for i in range(12)])
-        p = tmp_path / "flux_4weekly.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
+        times = {
+            "jul_to_jun": (np.datetime64("2000-07", "M")
+                           + np.arange(12)).astype("datetime64[ns]"),
+            "every_4_weeks": [base + np.timedelta64(28 * i, "D")
+                              for i in range(12)],
+            "bimonthly": (np.datetime64("2000-01", "M")
+                          + 2 * np.arange(12)).astype("datetime64[ns]"),
+            "12_daily": [base + np.timedelta64(i, "D") for i in range(12)],
+            "seasonal": [np.datetime64(f"2000-{m:02d}-15", "ns")
+                         for m in (1, 4, 7, 10)],
+        }[label]
+        kw = ({"align": "wrap_year"} if how == "explicit"
+              else {"cf_climatology": True})
+        with pytest.raises(ValueError, match="January..December"):
+            self._load(tmp_path, times, f"{label}_{how}.nc", **kw)
 
-    def test_file_descending_climatology_sorted_and_wraps(self, tmp_path):
+    @pytest.mark.parametrize("label", [
+        "jul_to_jun", "every_4_weeks", "bimonthly", "12_hourly", "12_daily",
+        "12_yearly"])
+    def test_auto_unmarked_axes_align_by_date(self, tmp_path, label):
+        """Without a declaration every axis — including those earlier rounds
+        of this review worried about — aligns on its absolute dates.
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        base = np.datetime64("2000-01-01", "ns")
+        times = {
+            "jul_to_jun": (np.datetime64("2000-07", "M")
+                           + np.arange(12)).astype("datetime64[ns]"),
+            "every_4_weeks": [base + np.timedelta64(28 * i, "D")
+                              for i in range(12)],
+            "bimonthly": (np.datetime64("2000-01", "M")
+                          + 2 * np.arange(12)).astype("datetime64[ns]"),
+            "12_hourly": [base + np.timedelta64(12 * i, "h") for i in range(12)],
+            "12_daily": [base + np.timedelta64(i, "D") for i in range(12)],
+            "12_yearly": [base + np.timedelta64(365 * i, "D")
+                          for i in range(12)],
+        }[label]
+        assert int(self._load(tmp_path, times, f"{label}.nc").align_mode) \
+            == BY_DATE
+
+    # -- ordering and axis hygiene ------------------------------------------
+
+    def test_descending_climatology_sorted_and_wraps(self, tmp_path):
         """A Jan→Dec climatology stored DESCENDING (Dec first) is sorted to
         ascending time and its samples reordered to match, so WRAP_YEAR's
         January-anchored position index lands on real January data. Each month
-        is tagged with its number so a mis-order would be caught (Codex #877).
+        is tagged with its number so a mis-order would be caught.
         """
         import numpy as np
         from jcm.forcing import WRAP_YEAR
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
         months_desc = list(range(12, 0, -1))  # 12, 11, …, 1  (Dec first)
         times = [np.datetime64(f"2000-{m:02d}-15", "ns") for m in months_desc]
-        p = tmp_path / "flux_desc_clim.nc"
-        self._write_flux_nc_at(p, coords, times, tag_per_time=months_desc)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        ts = f.prescribed_sensible_heat_flux
+        ts = self._load(tmp_path, times, "desc_clim.nc",
+                        tag_per_time=months_desc, align="wrap_year")
         assert int(ts.align_mode) == WRAP_YEAR
-        tsec = np.asarray(ts.time_seconds)
-        assert bool(np.all(np.diff(tsec) >= 0)), "time axis must be ascending"
+        assert bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
         vals = np.asarray(ts.values)  # (time, lon, lat), ascending time
-        # Position 0 must be January (tag 1), position 11 December (tag 12).
-        assert float(vals[0].mean()) == 1.0
-        assert float(vals[-1].mean()) == 12.0
+        assert float(vals[0].mean()) == 1.0    # January
+        assert float(vals[-1].mean()) == 12.0  # December
 
-    def test_file_descending_non_climatology_sorted_for_by_date(self, tmp_path):
-        """Codex #877's core case: a descending (Dec→Jan / late→early) NON-
-        climatology axis routed to BY_DATE must still be sorted ascending, or
-        ``jnp.searchsorted`` selects the wrong sample. Verify the axis is
-        ascending and the tagged samples are reordered to match.
+    def test_descending_transient_sorted_for_by_date(self, tmp_path):
+        """A descending (latest-first) axis routed to BY_DATE is sorted
+        ascending (``searchsorted`` requires it) with samples reordered.
         """
         import numpy as np
         from jcm.forcing import BY_DATE
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
-        # 12 daily samples stored latest-first; tag = ascending-time index.
         days_desc = list(range(11, -1, -1))  # 11, 10, …, 0
         times = [np.datetime64("2000-06-01", "ns") + np.timedelta64(d, "D")
                  for d in days_desc]
-        p = tmp_path / "flux_desc_daily.nc"
-        self._write_flux_nc_at(p, coords, times, tag_per_time=days_desc)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        ts = f.prescribed_sensible_heat_flux
+        ts = self._load(tmp_path, times, "desc_daily.nc",
+                        tag_per_time=days_desc)
         assert int(ts.align_mode) == BY_DATE
-        tsec = np.asarray(ts.time_seconds)
-        assert bool(np.all(np.diff(tsec) >= 0)), "time axis must be ascending"
+        assert bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
         vals = np.asarray(ts.values)
-        # Earliest day (tag 0) at position 0, latest (tag 11) at position 11.
         assert float(vals[0].mean()) == 0.0
         assert float(vals[-1].mean()) == 11.0
 
-    def test_file_transient_window_aligns_by_date(self, tmp_path):
-        """A 12-sample transient window that is not a monthly climatology —
-        here bi-monthly over two years (Jan, Mar, May, … one calendar cycle
-        skipped between samples) — aligns BY_DATE, not rephased into 12 bins.
-        """
+    def test_duplicate_timestamps_raise(self, tmp_path):
         import numpy as np
-        from jcm.forcing import BY_DATE
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
-        # Every 2 months for 24 months: distinct months but NOT consecutive
-        # (absolute-month step is 2, not 1).
-        t = (np.datetime64("2000-01", "M") + 2 * np.arange(12)).astype(
-            "datetime64[ns]")
-        p = tmp_path / "flux_bimonthly.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
+        t = [np.datetime64("2000-01-15", "ns")] * 2 + [
+            np.datetime64("2000-02-15", "ns")]
+        with pytest.raises(ValueError, match="duplicate"):
+            self._load(tmp_path, t, "dup.nc")
 
-    @pytest.mark.parametrize("step_days,label", [
-        (0.5, "12-hourly"),   # sub-daily
-        (1.0, "12-daily"),    # daily
-        (365.0, "12-yearly"),  # yearly
-    ])
-    def test_file_twelve_samples_non_monthly_cadence_by_date(
-            self, tmp_path, step_days, label):
-        """A 12-SAMPLE archive that is not monthly (sub-daily / daily / yearly)
-        must align by absolute date, not be wrapped as a fake climatology
-        (Codex #877: count is not cadence).
-        """
+    def test_numeric_time_axis_raises(self, tmp_path):
+        """A time axis that does not decode to dates cannot be aligned."""
         import numpy as np
-        from jcm.forcing import BY_DATE
+        import xarray as xr
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
         coords = self._coords()
-        # Fixed-duration hour steps so the arithmetic stays on the ns clock
-        # (calendar "M"/"Y" timedeltas can't be added to datetime64[ns]).
-        base = np.datetime64("2000-01-01", "ns")
-        t = np.array([base + np.timedelta64(int(step_days * 24 * i), "h")
-                      for i in range(12)])
-        p = tmp_path / f"flux_{label}.nc"
-        self._write_flux_nc_at(p, coords, t)
-        f = _attach_prescribed_surface_fluxes(
-            None, self._cfg({"file": str(p)}), coords)
-        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE, (
-            f"{label} cadence must align BY_DATE"
-        )
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        p = tmp_path / "numeric.nc"
+        xr.Dataset(
+            {v: (("time", "lat", "lon"), np.zeros((12, nlat, nlon)))
+             for v in ("sensible_heat_flux", "evaporation", "stress_u",
+                       "stress_v")},
+            coords={"time": np.arange(1, 13), "lat": lat, "lon": lon},
+        ).to_netcdf(p)
+        with pytest.raises(ValueError, match="does not decode to dates"):
+            _attach_prescribed_surface_fluxes(
+                None, self._cfg({"file": str(p), "align": "wrap_year"}),
+                coords)
+
+    def test_single_sample_time_axis_is_static(self, tmp_path):
+        import numpy as np
+        f = self._load(tmp_path, [np.datetime64("2000-01-15", "ns")],
+                       "one.nc", tag_per_time=[7.0])
+        assert not hasattr(f, "align_mode")  # bare array, not a TimeSeries
+        assert float(np.asarray(f).mean()) == 7.0
+
+    def test_python_door_reader_matches_hydra_door(self, tmp_path):
+        """``read_prescribed_surface_fluxes`` is the Python door; the Hydra
+        door returns the same leaves for the same file and ``align``.
+        """
+        import numpy as np
+        import xarray as xr
+        from jcm.forcing import read_prescribed_surface_fluxes, WRAP_YEAR
+        from jcm.forcing_assembly import _model_latlon_deg
+        coords = self._coords()
+        p = tmp_path / "door.nc"
+        self._write_flux_nc_at(p, coords, self._jan_to_dec(),
+                               tag_per_time=list(range(1, 13)))
+        lat, lon = _model_latlon_deg(coords)
+        with xr.open_dataset(p) as ds:
+            fields = read_prescribed_surface_fluxes(
+                ds, lat, lon, align_mode="wrap_year")
+        assert set(fields) == {
+            "prescribed_sensible_heat_flux", "prescribed_evaporation",
+            "prescribed_stress_u", "prescribed_stress_v"}
+        via_cfg = self._load(tmp_path, self._jan_to_dec(), "door2.nc",
+                             tag_per_time=list(range(1, 13)),
+                             align="wrap_year")
+        py = fields["prescribed_sensible_heat_flux"]
+        assert int(py.align_mode) == int(via_cfg.align_mode) == WRAP_YEAR
+        np.testing.assert_array_equal(np.asarray(py.values),
+                                      np.asarray(via_cfg.values))
 
     def test_file_missing_variable_raises(self, tmp_path):
         import numpy as np
@@ -796,6 +865,136 @@ class TestForcedForcingValidation:
         with pytest.raises(ValueError, match="prescribed"):
             model.run_from_state_with_carry(
                 state, bare, save_interval=(1 / 24.0), total_time=(1 / 24.0))
+
+
+# ---------------------------------------------------------------------------
+# A date-aligned flux archive must cover the run window (no silent clamping)
+# ---------------------------------------------------------------------------
+
+def _monthly_seconds(year=2000, day=1):
+    import numpy as np
+    import pandas as pd
+    return np.array([
+        (pd.Timestamp(f"{year}-{m:02d}-{day:02d}")
+         - pd.Timestamp("1970-01-01")).total_seconds() for m in range(1, 13)])
+
+
+def _secs(date):
+    import pandas as pd
+    return (pd.Timestamp(date) - pd.Timestamp("1970-01-01")).total_seconds()
+
+
+class TestByDateCoverage:
+    """``by_date_coverage_error`` and its run-start wiring."""
+
+    def _ts(self, align, day=1, year=2000):
+        from jcm.forcing import make_time_series
+        t = _monthly_seconds(year, day)
+        return make_time_series(jnp.zeros((12, 2, 2)), jnp.asarray(t), align)
+
+    @pytest.mark.parametrize("day", [1, 15])
+    def test_monthly_archive_covers_its_calendar_year(self, day):
+        from jcm.forcing import BY_DATE, by_date_coverage_error
+        ts = self._ts(BY_DATE, day=day)
+        assert by_date_coverage_error(
+            ts, _secs("2000-01-01"), _secs("2000-12-31")) is None
+        # The 366-day leap year ending exactly at 2001-01-01 00:00.
+        assert by_date_coverage_error(
+            ts, _secs("2000-01-01"), _secs("2001-01-01")) is None
+
+    def test_run_past_archive_end_is_reported(self):
+        from jcm.forcing import BY_DATE, by_date_coverage_error
+        err = by_date_coverage_error(
+            self._ts(BY_DATE), _secs("2000-06-01"), _secs("2001-03-01"),
+            name="forcing.x")
+        assert err is not None and "forcing.x" in err
+        assert "align=wrap_year" in err  # names the climatology remedy
+
+    def test_run_before_archive_start_is_reported(self):
+        from jcm.forcing import BY_DATE_INTERP, by_date_coverage_error
+        assert by_date_coverage_error(
+            self._ts(BY_DATE_INTERP), _secs("1999-10-01"),
+            _secs("2000-03-01")) is not None
+
+    def test_run_in_another_year_is_reported(self):
+        """Codex #877's consequence: a one-year archive aligned BY_DATE, run in
+        a different year, fails instead of holding its December forever.
+        """
+        from jcm.forcing import BY_DATE, by_date_coverage_error
+        assert by_date_coverage_error(
+            self._ts(BY_DATE), _secs("2001-01-01"),
+            _secs("2001-02-01")) is not None
+
+    def test_wrap_year_always_covers(self):
+        from jcm.forcing import WRAP_YEAR, by_date_coverage_error
+        assert by_date_coverage_error(
+            self._ts(WRAP_YEAR), _secs("2050-01-01"),
+            _secs("2060-01-01")) is None
+
+    def _forcing_with(self, leaf):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        return default_forcing(coords.horizontal).copy(
+            prescribed_sensible_heat_flux=leaf,
+            prescribed_evaporation=leaf,
+            prescribed_stress_u=leaf,
+            prescribed_stress_v=leaf,
+        )
+
+    def test_both_forced_terms_check_coverage(self):
+        from jcm.forcing import BY_DATE
+        from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
+        from jcm.physics.surface.prescribed_flux import PrescribedSurfaceFlux
+        forcing = self._forcing_with(self._ts(BY_DATE))
+        inside = (_secs("2000-02-01"), _secs("2000-03-01"))
+        outside = (_secs("2001-02-01"), _secs("2001-03-01"))
+        for term in (PrescribedSurfaceFlux(),
+                     SpeedySurfaceFlux(prescribed_fluxes=True)):
+            term.validate_forcing(forcing, run_window=inside)
+            # No concrete window (traced sim_time): nothing to check.
+            term.validate_forcing(forcing, run_window=None)
+            with pytest.raises(ValueError, match="BY_DATE"):
+                term.validate_forcing(forcing, run_window=outside)
+        # Interactive SPEEDY surface ignores the prescribed fields entirely.
+        SpeedySurfaceFlux().validate_forcing(forcing, run_window=outside)
+
+    def _forced_model(self, start):
+        import jax_datetime as jdt
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import (
+            speedy_physics, SpeedySurfaceFlux,
+        )
+        from jcm.terrain import TerrainData
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        physics = speedy_physics().replace(
+            "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        return Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                     physics=physics, time_step=20,
+                     start_date=jdt.to_datetime(start))
+
+    def test_model_run_window_is_absolute(self):
+        model = self._forced_model("2000-03-01")
+        state = model._prepare_initial_dycore_state()
+        start, end = model._run_window_seconds(state, 10.0)
+        assert start == pytest.approx(_secs("2000-03-01"))
+        assert end == pytest.approx(_secs("2000-03-11"))
+
+    def test_model_run_outside_archive_fails_at_start(self):
+        """End to end: ``Model.run`` passes its window to validate_forcing, so
+        a BY_DATE archive of 2000 fails a 2001 run before compiling.
+        """
+        from jcm.forcing import BY_DATE, make_time_series
+        model = self._forced_model("2001-06-01")
+        nodal = model.coords.horizontal.nodal_shape
+        leaf = make_time_series(jnp.zeros((12, *nodal)),
+                                jnp.asarray(_monthly_seconds(2000)), BY_DATE)
+        forcing = default_forcing(model.coords.horizontal).copy(
+            prescribed_sensible_heat_flux=leaf, prescribed_evaporation=leaf,
+            prescribed_stress_u=leaf, prescribed_stress_v=leaf)
+        with pytest.raises(ValueError, match="run covers 2001-06-01"):
+            model.run(forcing=forcing, save_interval=(1 / 24.0),
+                      total_time=(1 / 24.0))
 
 
 # ---------------------------------------------------------------------------

@@ -325,15 +325,19 @@ class PhysicsTerm(nnx.Module):
         """
         return forcing
 
-    def validate_forcing(self, forcing: ForcingData) -> None:
-        """Raise if the run's forcing is missing a field this term requires.
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Raise if the run's forcing cannot serve this term over the run.
 
         Called once by :meth:`~jcm.physics.composable_physics.
         ComposablePhysics.validate_forcing` on the concrete run forcing
         (not the abstract shape probe), so a term configured to read an
         optional field it cannot run without — e.g. forced-mode surface
         fluxes — fails loudly at run start rather than silently applying a
-        zero. Default: no-op.
+        zero. ``run_window`` is ``(start_seconds, end_seconds)`` since
+        ``jcm.date.MODEL_EPOCH`` when the model knows it concretely (``None``
+        inside a JAX transformation with a traced initial state), so a term
+        can also check that a date-aligned series covers the run rather than
+        clamping to its end sample. Default: no-op.
         """
 
     def __add__(self, other):

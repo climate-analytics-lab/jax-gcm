@@ -161,11 +161,65 @@ this bookkeeping choice does not touch the delivered column budgets.
 - **CLI**: `forcing.prescribed_surface_flux` with either
   `constants: {sensible_heat_flux, evaporation, stress_u, stress_v}`
   (uniform maps — the smoke-test door) or `file:` (a netCDF on the model
-  grid, static or time-resolved). All four fields are required together: a
+  grid, static or time-resolved; its time alignment is the block's
+  `align` key, below). All four fields are required together: a
   partially prescribed surface is not a defined mode.
 - **Python/coupler**: set the `prescribed_*` fields on `ForcingData`
   directly (per coupling interval, the JAX-ESM pattern) and compose the
-  forced physics via the factory flag / term constructor.
+  forced physics via the factory flag / term constructor. A file is read
+  with `jcm.forcing.read_prescribed_surface_fluxes(ds, lat, lon,
+  align_mode=...)` — the reader the CLI door calls — whose result
+  `ForcingData.copy(**...)` attaches; an in-memory time series is a
+  `make_time_series(values, time_seconds, align_mode)` leaf with the mode
+  chosen explicitly.
+
+### Time alignment of a flux archive
+
+A time-resolved flux file is either a *climatology* (a representative
+annual cycle, replayed every model year: `WRAP_YEAR`) or a *transient
+archive* (fluxes of particular dates, e.g. a coupler's history file:
+`BY_DATE`). The two cannot be told apart from their timestamps: twelve
+monthly samples January→December of one year are exactly what a monthly
+climatology looks like, and a transient archive wrongly replayed every year
+silently recycles that year's fluxes. The alignment is therefore
+**declared, never inferred from the samples** — `align:` takes the
+`forcing.align` vocabulary:
+
+| `align` | behaviour |
+| --- | --- |
+| `auto` (default) | `wrap_year` if the time coordinate carries a CF `climatology` attribute (CF §7.4, the in-file declaration of a climatological time axis), otherwise `by_date` |
+| `wrap_year` | replay by month position every model year |
+| `by_date` | piecewise-constant on the absolute timestamps |
+| `by_date_interp` | linear in time between the absolute timestamps |
+
+This `auto` deliberately differs from the surface boundary file's
+`forcing.align: auto`, which infers `wrap_year` from a time span of at most
+~one year: that inference is exactly the one that misreads a one-year
+transient archive, so the flux door keys only on the file's own declaration.
+
+Both modes validate what they are given, so a wrong declaration fails at
+load or run start rather than silently mis-phasing the fluxes:
+
+- The time axis must decode to dates (numeric axes cannot be put on the
+  model clock), have no missing or duplicate stamps, and is sorted
+  ascending with the samples reordered to match (`BY_DATE`'s
+  `searchsorted` needs ascending time; `WRAP_YEAR`'s position 0 is
+  January). A length-1 time axis is a static field.
+- `WRAP_YEAR` selects sample `floor(fraction_of_year × 12)`, a
+  January-anchored month position, so a climatology must be exactly twelve
+  samples, one per calendar month January→December (month-start or
+  mid-month stamps, any year). Anything else — a July→June span, a
+  four-weekly axis, a seasonal climatology — raises.
+- `BY_DATE` selection clamps to the end samples outside its axis, so at run
+  start (`validate_forcing` of the forced-mode terms, which `Model`
+  calls with the run window) a date-aligned archive must cover the whole
+  run, with one sample interval of slack at each end (its largest sample
+  spacing: a sample may be stamped at the start or the middle of the
+  interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15 monthly
+  archive both cover their calendar year). A run outside it raises and
+  names both remedies — supply covering fluxes, or declare the file a
+  climatology. The check is skipped only when the window or the series is
+  traced (a run inside a JAX transformation).
 
 ## What this replaces
 

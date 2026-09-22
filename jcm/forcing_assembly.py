@@ -27,6 +27,7 @@ import logging
 from jcm import provenance
 from jcm.data import input_resolution as ir
 from jcm.data import mirror_manifest as mm
+from jcm.forcing import PRESCRIBED_FLUX_FILE_VARS
 from jcm.forcing import expand_yearly_files as _expand_years
 
 logger = logging.getLogger(__name__)
@@ -1015,55 +1016,6 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
 # prescribed surface fluxes (forced mode, jax-gcm#301)
 # ---------------------------------------------------------------------------
 
-#: The four flux variables a ``forcing.prescribed_surface_flux`` block must
-#: define — names, units and signs are the surface-exchange contract's
-#: (docs/source/design/surface_exchange.md): sensible heat [W/m²] and
-#: evaporation [kg/m²/s] positive up, stress [N/m²] positive down.
-_PRESCRIBED_FLUX_VARS = (
-    "sensible_heat_flux", "evaporation", "stress_u", "stress_v",
-)
-
-def _is_monthly_climatology(months) -> bool:
-    """Whether ascending-time calendar ``months`` are a Jan→Dec climatology.
-
-    WRAP_YEAR selects a sample by ``floor(tyear * 12) % 12`` — a POSITION index
-    that assumes sample 0 is January, sample 1 February, …, sample 11 December
-    (``jcm.forcing._wrap_year_index``). It is therefore faithful ONLY when the
-    12 samples are, in ascending-time order, exactly January through December of
-    a single annual cycle. That is stricter than "12 samples", "month-sized
-    gaps" or even "12 consecutive months" (Codex jax-gcm#877, several
-    iterations):
-
-    - a 12-hour / 12-day / 12-year archive has 12 samples but repeats a month;
-    - an every-4-weeks archive (Jan 1, Jan 29, Feb 26, …) has ~30-day gaps yet
-      lands two samples in January and none in December;
-    - a July→June span is 12 consecutive months but, positioned into WRAP_YEAR's
-      January-anchored bins, would be replayed six months out of phase.
-
-    So the check is exactly the semantics WRAP_YEAR needs: the calendar months,
-    in ascending-time order (the caller sorts first), equal ``[1, 2, …, 12]``.
-    This is the robust analogue of the repo's own monthly test
-    (``jcm.data.bc.interpolate.interpolate_to_daily`` gates on
-    ``pandas.infer_freq in {"MS","M"}``), but keyed on the month sequence rather
-    than a frequency alias so a mid-month-dated climatology (the 15th of each
-    month) is accepted too. The year is not constrained — only the month
-    position matters to WRAP_YEAR — so a climatology assembled from
-    representative timestamps in different years still qualifies.
-
-    Args:
-        months: 1-D integer array of calendar months (1-12) in ascending-time
-            order, or ``None`` when the axis is not datetime-typed. Anything
-            that is not exactly ``[1..12]`` returns ``False`` and the caller
-            uses ``BY_DATE``.
-
-    """
-    import numpy as np
-
-    if months is None:
-        return False
-    months = np.asarray(months)
-    return months.size == 12 and bool(np.array_equal(months, np.arange(1, 13)))
-
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
     """Attach forced-mode surface fluxes from ``cfg.forcing.prescribed_surface_flux``.
@@ -1074,12 +1026,16 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
       broadcast to uniform ``(nlon, nlat)`` maps — the constant-flux
       aquaplanet / smoke-test door;
     - ``file``: a netCDF already on the model grid carrying all four as
-      variables dimensioned ``(lat, lon)``/``(lon, lat)`` (static) or with
-      a leading ``time`` axis (attached as a ``TimeSeries``: a Jan→Dec
-      monthly climatology aligns ``WRAP_YEAR`` like the surface climatology —
-      see :func:`_is_monthly_climatology` — every other axis aligns
-      ``BY_DATE`` on its absolute timestamps) — the archived-coupler-flux
-      door.
+      variables dimensioned ``(lat, lon)`` (static) or with a leading
+      ``time`` axis (a ``TimeSeries``) — the archived-coupler-flux door, read
+      by :func:`jcm.forcing.read_prescribed_surface_fluxes` (the same reader a
+      Python caller uses). Its time alignment is the block's ``align`` key
+      (``auto`` | ``wrap_year`` | ``by_date`` | ``by_date_interp``, default
+      ``auto``): ``auto`` replays the file as a climatology only when its time
+      coordinate carries a CF ``climatology`` attribute and otherwise aligns
+      it on its absolute dates — the timestamps alone cannot tell a monthly
+      climatology from a one-year transient archive, so the choice is never
+      inferred from them.
 
     All four fields are required together: a partially prescribed surface
     is not a defined mode (the forced terms deliver nothing interactively),
@@ -1103,111 +1059,42 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
 
     import jax.numpy as jnp
 
-    nlon, nlat = coords.horizontal.nodal_shape
-    fields = {}
+    align = str(block.get("align", "auto"))
     if constants is not None:
-        missing = [v for v in _PRESCRIBED_FLUX_VARS if v not in constants]
+        if align != "auto":
+            # Constants have no time axis; an explicit align is a config
+            # mistake (probably meant for a file), not something to ignore.
+            raise ValueError(
+                "forcing.prescribed_surface_flux.align applies only to a "
+                f"'file' source; got align={align!r} with 'constants'.")
+        missing = [v for v in PRESCRIBED_FLUX_FILE_VARS if v not in constants]
         if missing:
             raise ValueError(
                 "forcing.prescribed_surface_flux.constants is missing "
-                f"{missing}; all of {_PRESCRIBED_FLUX_VARS} are required "
-                "(contract units/signs: "
+                f"{missing}; all of {tuple(PRESCRIBED_FLUX_FILE_VARS)} are "
+                "required (contract units/signs: "
                 "docs/source/design/surface_exchange.md)."
             )
-        for var in _PRESCRIBED_FLUX_VARS:
-            fields[var] = jnp.full((nlon, nlat), float(constants[var]))
+        nlon, nlat = coords.horizontal.nodal_shape
+        fields = {field: jnp.full((nlon, nlat), float(constants[var]))
+                  for var, field in PRESCRIBED_FLUX_FILE_VARS.items()}
         provenance.record_fact("prescribed_surface_flux", "constants")
     else:
-        import numpy as np
         import xarray as xr
 
-        from jcm.forcing import (
-            BY_DATE,
-            WRAP_YEAR,
-            _orient_to_model_grid,
-            _time_axis_seconds_from_ds,
-            make_time_series,
-        )
+        from jcm.forcing import read_prescribed_surface_fluxes
+
         # Validate/reorient against the model's OWN lat/lon, exactly like the
-        # other gridded forcing loaders (dms/dust/ozone): a file with the
-        # right N points but descending latitude or a shifted longitude would
-        # otherwise be consumed positionally and wire the fluxes into the
-        # wrong columns silently. ``_orient_to_model_grid`` flips a
-        # descending-latitude axis to the model's ascending convention and
-        # raises on a genuine grid mismatch, then transposes to the raveled
-        # ``(lon, lat)`` column order the physics reads.
+        # other gridded forcing loaders (dms/dust/ozone): see the reader.
         lat_deg, lon_deg = _model_latlon_deg(coords)
         path = str(_resolve_data_path(path))
         with xr.open_dataset(path) as ds:
-            missing = [v for v in _PRESCRIBED_FLUX_VARS if v not in ds]
-            if missing:
-                raise ValueError(
-                    f"prescribed_surface_flux file {path} is missing the "
-                    f"variables {missing}; all of {_PRESCRIBED_FLUX_VARS} "
-                    "are required (contract units/signs: "
-                    "docs/source/design/surface_exchange.md)."
-                )
-            # Resolve the time-axis handling ONCE for the whole file (all four
-            # vars share the ``time`` coordinate). Two coupled decisions, both
-            # order-sensitive:
-            #
-            # 1. SORT the axis ascending and reorder every variable's samples to
-            #    match. BY_DATE indexing (``jcm.forcing._by_date_index``) calls
-            #    ``jnp.searchsorted``, which REQUIRES an ascending axis, so a
-            #    Dec→Jan-stored file would otherwise select an endpoint/wrong
-            #    sample; sorting also puts a Jan→Dec climatology's January into
-            #    position 0, which is what WRAP_YEAR's positional index needs
-            #    (Codex jax-gcm#877). ``argsort`` is stable, so equal timestamps
-            #    keep file order.
-            # 2. Choose WRAP_YEAR (replay one calendar year) ONLY for a genuine
-            #    Jan→Dec monthly climatology, judged from the SORTED months; see
-            #    :func:`_is_monthly_climatology`. Everything else aligns BY_DATE.
-            order = None
-            time_seconds = None
-            align = BY_DATE
-            if "time" in ds.dims:
-                raw_seconds = np.asarray(_time_axis_seconds_from_ds(ds))
-                order = np.argsort(raw_seconds, kind="stable")
-                time_seconds = raw_seconds[order]
-                # argsort guarantees this; assert so a future refactor cannot
-                # silently feed a non-ascending axis to searchsorted.
-                if time_seconds.size > 1 and not bool(
-                        np.all(np.diff(time_seconds) >= 0)):
-                    raise ValueError(
-                        f"prescribed_surface_flux file {path}: time axis could "
-                        "not be ordered ascending."
-                    )
-                try:
-                    months = np.asarray(
-                        ds["time"].dt.month, dtype=np.int64)[order]
-                except (AttributeError, TypeError):
-                    months = None  # non-datetime axis -> not a climatology
-                align = (WRAP_YEAR if _is_monthly_climatology(months)
-                         else BY_DATE)
-            for var in _PRESCRIBED_FLUX_VARS:
-                da = ds[var]
-                spatial = [d for d in da.dims if d != "time"]
-                if sorted(spatial) != ["lat", "lon"]:
-                    raise ValueError(
-                        f"prescribed_surface_flux variable {var!r} in "
-                        f"{path} must be dimensioned (lat, lon) with an "
-                        f"optional leading time axis; got {da.dims}."
-                    )
-                # (*time, lon, lat), coordinate-validated and lat-oriented.
-                values = _orient_to_model_grid(da, lat_deg, lon_deg, name=var)
-                if "time" in ds[var].dims:
-                    # Reorder samples onto the ascending-time axis (axis 0).
-                    values = np.asarray(values)[order]
-                    fields[var] = make_time_series(values, time_seconds, align)
-                else:
-                    fields[var] = jnp.asarray(values)
+            fields = read_prescribed_surface_fluxes(
+                ds, lat_deg, lon_deg,
+                align_mode=align,
+                source=f"prescribed_surface_flux file {path}")
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")
         provenance.record_input(path)
 
     forcing = _ensure_parent_forcing(forcing, coords)
-    return forcing.copy(
-        prescribed_sensible_heat_flux=fields["sensible_heat_flux"],
-        prescribed_evaporation=fields["evaporation"],
-        prescribed_stress_u=fields["stress_u"],
-        prescribed_stress_v=fields["stress_v"],
-    )
+    return forcing.copy(**fields)

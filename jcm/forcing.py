@@ -1663,6 +1663,252 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
     return year_weight, ann_cycle
 
 
+# ---------------------------------------------------------------------------
+# Prescribed surface fluxes (forced surface mode, jax-gcm#301)
+# ---------------------------------------------------------------------------
+
+#: The four flux variables a prescribed-surface-flux source must define — names,
+#: units and signs are the surface-exchange contract's
+#: (docs/source/design/surface_exchange.md): sensible heat [W/m²] and
+#: evaporation [kg/m²/s] positive up, stress [N/m²] positive down. Maps each
+#: file variable to the ``ForcingData`` field it fills.
+PRESCRIBED_FLUX_FILE_VARS = {
+    "sensible_heat_flux": "prescribed_sensible_heat_flux",
+    "evaporation": "prescribed_evaporation",
+    "stress_u": "prescribed_stress_u",
+    "stress_v": "prescribed_stress_v",
+}
+
+_PRESCRIBED_FLUX_ALIGN_MODES = ("auto", "wrap_year", "by_date", "by_date_interp")
+
+
+def has_cf_climatology_marker(ds, time_var: str = "time") -> bool:
+    """Whether ``ds``'s time coordinate declares itself a CF climatology.
+
+    CF-1.x §7.4 ("Climatological statistics") marks a climatological time axis
+    with a ``climatology`` attribute on the time coordinate naming its
+    ``climatology_bounds`` variable. It is the only in-file signal that a
+    time-stamped series is a *representative* annual cycle rather than a
+    record of one particular year: the timestamps of a Jan→Dec climatology
+    and of a Jan→Dec transient archive of one real year are otherwise
+    identical. xarray keeps the attribute in ``attrs`` on decode; ``encoding``
+    is checked as well so a reader configuration that moves CF bookkeeping
+    attributes there is still honoured.
+    """
+    if time_var not in ds.variables:
+        return False
+    var = ds[time_var]
+    return bool(var.attrs.get("climatology") or var.encoding.get("climatology"))
+
+
+def _is_datetime_axis(values) -> bool:
+    """Return whether ``values`` is a decoded date axis (datetime64 or cftime).
+
+    A plain numeric axis (e.g. an undecodable ``months since`` unit, or bare
+    integers) is NOT a date axis: :func:`_time_axis_seconds_from_ds` would
+    reinterpret the numbers as nanoseconds since 1970 and BY_DATE would then
+    align every sample to the first second of 1970.
+    """
+    values = np.asarray(values)
+    if np.issubdtype(values.dtype, np.datetime64):
+        return True
+    return values.dtype == object and values.size > 0 and hasattr(
+        np.ravel(values)[0], "month")
+
+
+def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
+                                   align_mode: str = "auto",
+                                   source: str = "prescribed_surface_flux"):
+    """Read a forced-mode surface-flux dataset into ``ForcingData`` fields.
+
+    The Python door behind ``forcing.prescribed_surface_flux.file`` (the Hydra
+    door calls exactly this): returns a dict keyed by the ``ForcingData``
+    field names (``prescribed_sensible_heat_flux``, ``prescribed_evaporation``,
+    ``prescribed_stress_u``, ``prescribed_stress_v``), so
+    ``forcing.copy(**read_prescribed_surface_fluxes(ds, lat, lon, ...))``
+    attaches them. A coupler that already holds the fluxes in memory sets the
+    fields directly instead (a bare ``(lon, lat)`` map per coupling interval,
+    or a :class:`TimeSeries` built with :func:`make_time_series` and an
+    explicit ``align_mode``).
+
+    Each variable is ``(lat, lon)`` (static → bare ``(lon, lat)`` array) or
+    ``(time, lat, lon)`` (→ a :class:`TimeSeries`). A length-1 time axis is a
+    static field and is collapsed, as the other static readers do
+    (:func:`_drop_degenerate_time`). Grid validation/reorientation is
+    :func:`_orient_to_model_grid`'s.
+
+    **Time alignment is declared, never inferred from the timestamps.** A
+    one-year transient archive (one sample per month, January to December of a
+    specific year — e.g. a coupler's history file) is indistinguishable by its
+    timestamps from a monthly climatology, and replaying it every year would
+    silently recycle that year's fluxes. So:
+
+    - ``align_mode="wrap_year"`` — the file is a climatology: replayed every
+      model year by month position (:func:`_wrap_year_index`).
+    - ``align_mode="by_date"`` / ``"by_date_interp"`` — aligned on the absolute
+      timestamps (piecewise constant / linearly interpolated).
+    - ``align_mode="auto"`` (default) — ``wrap_year`` only when the file itself
+      declares a CF climatology (:func:`has_cf_climatology_marker`), otherwise
+      ``by_date``. Unlike :func:`_resolve_align_mode`'s ``auto`` for the surface
+      boundary file, it never looks at the span, count, spacing or calendar
+      months of the samples.
+
+    Whichever way ``wrap_year`` is selected it is then VALIDATED: WRAP_YEAR
+    picks sample ``floor(tyear * 12) % 12``, i.e. a January-anchored month
+    position, so the (ascending) samples must be exactly twelve, one per
+    calendar month January→December. Anything else raises rather than
+    replaying out of phase.
+
+    The time axis is sorted ascending (samples reordered to match) before
+    either mode: ``_by_date_index`` uses ``searchsorted`` (requires ascending)
+    and WRAP_YEAR's position 0 must be January. Duplicate, non-finite or
+    non-date timestamps raise. Coverage of the run window by a BY_DATE axis is
+    checked at run start (:func:`by_date_coverage_error`, called from the
+    forced-mode terms' ``validate_forcing``), because only the run knows its
+    window.
+
+    Args:
+        ds: An open ``xarray.Dataset``.
+        lat_deg, lon_deg: The model grid (degrees) to validate against.
+        align_mode: ``"auto"`` | ``"wrap_year"`` | ``"by_date"`` |
+            ``"by_date_interp"`` — the vocabulary of ``forcing.align`` /
+            :func:`_resolve_align_mode`.
+        source: Label (file path) for error messages.
+
+    Returns:
+        ``dict`` mapping ``ForcingData`` field name → array or TimeSeries.
+
+    """
+    align_mode = str(align_mode)
+    if align_mode not in _PRESCRIBED_FLUX_ALIGN_MODES:
+        raise ValueError(
+            f"{source}: unknown align {align_mode!r}; expected one of "
+            f"{_PRESCRIBED_FLUX_ALIGN_MODES}.")
+    missing = [v for v in PRESCRIBED_FLUX_FILE_VARS if v not in ds]
+    if missing:
+        raise ValueError(
+            f"{source} is missing the variables {missing}; all of "
+            f"{tuple(PRESCRIBED_FLUX_FILE_VARS)} are required (contract "
+            "units/signs: docs/source/design/surface_exchange.md).")
+    for var in PRESCRIBED_FLUX_FILE_VARS:
+        spatial = [d for d in ds[var].dims if d != "time"]
+        if sorted(spatial) != ["lat", "lon"]:
+            raise ValueError(
+                f"{source}: variable {var!r} must be dimensioned (lat, lon) "
+                f"with an optional leading time axis; got {ds[var].dims}.")
+
+    timed = [v for v in PRESCRIBED_FLUX_FILE_VARS if "time" in ds[v].dims]
+    order = time_seconds = None
+    mode = None
+    if timed and ds.sizes["time"] > 1:
+        order, time_seconds, mode = _prescribed_flux_time_axis(
+            ds, align_mode, source)
+
+    out = {}
+    for var, field in PRESCRIBED_FLUX_FILE_VARS.items():
+        # (*time, lon, lat), coordinate-validated and lat-oriented.
+        values = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
+        if "time" not in ds[var].dims:
+            out[field] = jnp.asarray(values)
+        elif mode is None:
+            # Degenerate (length-1) time axis → a static field.
+            out[field] = jnp.asarray(values[0])
+        else:
+            out[field] = make_time_series(
+                np.asarray(values)[order], time_seconds, mode)
+    return out
+
+
+def _prescribed_flux_time_axis(ds, align_mode, source):
+    """Sort, validate and align-resolve a prescribed-flux time axis.
+
+    Returns ``(order, ascending_time_seconds, align_int)``; see
+    :func:`read_prescribed_surface_fluxes` for the rules.
+    """
+    if not _is_datetime_axis(ds["time"].values):
+        raise ValueError(
+            f"{source}: the time coordinate does not decode to dates (dtype "
+            f"{ds['time'].dtype}); give it CF 'units' such as 'days since "
+            "2000-01-01' (and a 'calendar'). A numeric axis cannot be aligned "
+            "to the model clock.")
+    raw = np.asarray(_time_axis_seconds_from_ds(ds), dtype=float)
+    if not np.all(np.isfinite(raw)):
+        raise ValueError(f"{source}: the time axis has missing (NaT) entries.")
+    # Stable sort: BY_DATE's searchsorted needs ascending time, and WRAP_YEAR's
+    # position 0 must be January.
+    order = np.argsort(raw, kind="stable")
+    seconds = raw[order]
+    if not np.all(np.diff(seconds) > 0):
+        dup = np.asarray(ds["time"].values)[order][
+            np.flatnonzero(np.diff(seconds) <= 0)[0]]
+        raise ValueError(
+            f"{source}: the time axis has duplicate timestamps (e.g. {dup}); "
+            "each sample must have a distinct time.")
+
+    if align_mode == "auto":
+        mode = WRAP_YEAR if has_cf_climatology_marker(ds) else BY_DATE
+        why = ("the time coordinate carries a CF 'climatology' attribute"
+               if mode == WRAP_YEAR else "")
+    else:
+        mode = _resolve_align_mode(align_mode, ds)  # explicit: ds unused
+        why = f"align={align_mode!r} was requested"
+
+    if mode == WRAP_YEAR:
+        months = np.asarray(ds["time"].dt.month, dtype=np.int64)[order]
+        if not (months.size == 12
+                and np.array_equal(months, np.arange(1, 13))):
+            raise ValueError(
+                f"{source}: treated as a climatology because {why}, but its "
+                f"sorted samples fall in calendar months {months.tolist()}. "
+                "Climatology replay (WRAP_YEAR) selects sample "
+                "floor(fraction_of_year * 12), so it needs exactly twelve "
+                "samples, one per month January..December. Supply such a file, "
+                "or set forcing.prescribed_surface_flux.align=by_date to align "
+                "the samples on their absolute timestamps.")
+    return order, jnp.asarray(seconds), mode
+
+
+def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
+                           end_seconds: float, name: str = "") -> str | None:
+    """Message if a date-aligned ``ts`` does not cover ``[start, end]``, else None.
+
+    ``BY_DATE``/``BY_DATE_INTERP`` selection (:func:`_select_time_series`) clamps
+    to the first/last sample outside the axis, so running past the end of a
+    transient archive would otherwise silently hold its last sample forever.
+    Each sample stands for the interval up to the next, and a sample's
+    timestamp may sit at the start (month-start stamps) or the middle
+    (mid-month stamps) of the interval it represents, so the axis is taken to
+    cover ``[t_first - Δ, t_last + Δ]`` with ``Δ`` its LARGEST sample spacing —
+    e.g. a Jan-1..Dec-1 monthly archive covers the whole of that calendar year
+    (Dec-1 + 31 days) and a mid-month one the same year. ``WRAP_YEAR`` leaves
+    (a climatology covers every date) and axes with fewer than two samples
+    return ``None``. Times are seconds since ``MODEL_EPOCH``.
+    """
+    mode = int(np.asarray(ts.align_mode))
+    if mode not in (BY_DATE, BY_DATE_INTERP):
+        return None
+    t = np.asarray(ts.time_seconds, dtype=float)
+    if t.size < 2:
+        return None
+    tol = float(np.max(np.diff(t)))
+    lo, hi = t[0] - tol, t[-1] + tol
+    if start_seconds >= lo and end_seconds <= hi:
+        return None
+    import pandas as pd
+
+    def _d(s):
+        return str(pd.Timestamp(float(s), unit="s"))[:19]
+    return (
+        f"{name}: the date-aligned (BY_DATE) time axis spans {_d(t[0])} .. "
+        f"{_d(t[-1])} (usable {_d(lo)} .. {_d(hi)}, one sample interval "
+        f"either side), but the run covers {_d(start_seconds)} .. "
+        f"{_d(end_seconds)}. Outside its axis a date-aligned series would "
+        "silently hold its end sample. Supply fluxes covering the whole run; "
+        "if the file is a monthly climatology meant to repeat every year, "
+        "set forcing.prescribed_surface_flux.align=wrap_year (or give its "
+        "time coordinate a CF 'climatology' attribute).")
+
+
 # ``expand_yearly_files`` is re-exported from the top-of-module import of the
 # import-free engine :mod:`jcm.data.input_resolution` (see the imports block);
 # its historical home is this module, so the runner and tests still reach it as

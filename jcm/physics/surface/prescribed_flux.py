@@ -66,6 +66,54 @@ def missing_prescribed_flux_fields(forcing: ForcingData) -> list[str]:
             if getattr(forcing, name) is None]
 
 
+def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
+                                  run_window=None) -> None:
+    """Fail loudly if forced mode cannot be served by ``forcing`` over the run.
+
+    Shared by every forced-mode term's ``validate_forcing`` (the ECHAM
+    :class:`PrescribedSurfaceFlux` and SPEEDY's
+    ``SpeedySurfaceFlux(prescribed_fluxes=True)``) so the two stay identical.
+    Two checks:
+
+    1. every ``prescribed_*`` field is present (absence is a composition
+       error, not a zero flux);
+    2. when ``run_window = (start_s, end_s)`` (seconds since
+       ``MODEL_EPOCH``) is known, every date-aligned (``BY_DATE``/
+       ``BY_DATE_INTERP``) ``TimeSeries`` field covers it — outside its axis
+       the selection clamps and would silently hold the archive's end sample
+       (see :func:`jcm.forcing.by_date_coverage_error`). Skipped when the
+       window or the leaf is traced (``run`` inside a JAX transformation),
+       where no concrete value exists to check.
+    """
+    import jax
+
+    from jcm.forcing import TimeSeries, by_date_coverage_error
+
+    missing = missing_prescribed_flux_fields(forcing)
+    if missing:
+        raise ValueError(
+            f"{owner} needs the prescribed surface-flux forcing fields, but "
+            f"{missing} are None. Supply them via "
+            "forcing.prescribed_surface_flux (CLI) or set them on the "
+            "ForcingData directly (coupler door); units/signs follow the "
+            "surface-exchange contract, "
+            "docs/source/design/surface_exchange.md."
+        )
+    if run_window is None:
+        return
+    start_s, end_s = run_window
+    for name in PRESCRIBED_FLUX_FORCING_FIELDS:
+        leaf = getattr(forcing, name)
+        if not isinstance(leaf, TimeSeries) or any(
+                isinstance(x, jax.core.Tracer)
+                for x in (leaf.time_seconds, leaf.align_mode)):
+            continue
+        err = by_date_coverage_error(leaf, start_s, end_s,
+                                     name=f"{owner}: forcing.{name}")
+        if err is not None:
+            raise ValueError(err)
+
+
 class PrescribedSurfaceFlux(PhysicsTerm):
     """Deliver externally prescribed turbulent surface fluxes (#301).
 
@@ -97,18 +145,13 @@ class PrescribedSurfaceFlux(PhysicsTerm):
             prescribed_stress_v=zeros,
         )
 
-    def validate_forcing(self, forcing: ForcingData) -> None:
-        """Fail loudly at run start if the prescribed fields are absent."""
-        missing = missing_prescribed_flux_fields(forcing)
-        if missing:
-            raise ValueError(
-                "PrescribedSurfaceFlux is composed but the forcing fields "
-                f"{missing} are None. Supply them via "
-                "forcing.prescribed_surface_flux (CLI) or set them on the "
-                "ForcingData directly (coupler door); units/signs follow "
-                "the surface-exchange contract, "
-                "docs/source/design/surface_exchange.md."
-            )
+    def validate_forcing(self, forcing: ForcingData,
+                         run_window=None) -> None:
+        """Fail loudly at run start if the prescribed fields are absent or
+        a date-aligned archive does not cover the run window.
+        """
+        check_prescribed_flux_forcing(forcing, "PrescribedSurfaceFlux",
+                                      run_window)
 
     def __call__(
         self,

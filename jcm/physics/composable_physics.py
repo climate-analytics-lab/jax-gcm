@@ -736,16 +736,19 @@ class ComposablePhysics(nnx.Module, Physics):
             for term in self.terms
         )
 
-    def validate_forcing(self, forcing) -> None:
+    def validate_forcing(self, forcing, run_window=None) -> None:
         """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
 
         :class:`~jcm.model.Model` calls this on the concrete run forcing
         before compiling, so a term that requires an optional field it
         cannot run without (e.g. forced-mode surface fluxes) fails loudly
-        at run start rather than silently applying a zero.
+        at run start rather than silently applying a zero. ``run_window``
+        (``(start_seconds, end_seconds)`` since ``MODEL_EPOCH``, or ``None``
+        when not concretely known) is passed through so a term can check a
+        date-aligned series covers the run.
         """
         for term in self.terms:
-            term.validate_forcing(forcing)
+            term.validate_forcing(forcing, run_window=run_window)
 
     def require_surface_exchange(self) -> None:
         """Fail loudly at composition time if no surface exchange is published.
