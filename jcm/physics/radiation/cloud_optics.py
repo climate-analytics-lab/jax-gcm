@@ -12,7 +12,13 @@ from typing import Tuple
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
-from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_LW_BANDS
+from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
+
+# Wavelength (um) separating the UV/visible shortwave bands from the near-IR.
+# 0.69 um is the SW_BAND_LIMITS split (4000-14500 cm^-1 = near-IR); 0.7 sits
+# just above it so the near-IR band centre (1.08 um) is near-IR and the
+# UV/visible centre (0.31 um) is not.
+_VIS_NIR_BOUNDARY_UM = 0.7
 
 
 def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
@@ -96,6 +102,36 @@ def get_band_wavelength(band: int, is_sw: bool = True) -> float:
     """
     wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM
     return wavelengths[band]
+
+
+def sw_band_is_near_ir(band) -> jnp.ndarray:
+    """Return True where shortwave ``band`` is near-IR (wavelength > 0.7 um).
+
+    Single source of truth for the near-IR vs UV/visible split of the SW bands,
+    derived from each band's own wavelength (hence from ``SW_BAND_LIMITS``).
+    EVERY SW band-indexed input keys off this -- cloud optics wavelength,
+    surface albedo (``surface_albedo_by_sw_band``), ozone absorption (strong in
+    UV/visible) and water-vapour absorption (near-IR) -- so a reorder of
+    ``SW_BAND_LIMITS`` propagates to all of them at once and cannot be
+    half-applied. This is exactly the trap #678 fixed: the band order was
+    corrected for cloud optics but the albedo / gas-optics arrays kept the old
+    order, pairing near-IR cloud properties with visible albedo and ozone.
+    Accepts a scalar or an array of band indices.
+    """
+    return get_band_wavelength(band, is_sw=True) > _VIS_NIR_BOUNDARY_UM
+
+
+def surface_albedo_by_sw_band(
+    albedo_vis: jnp.ndarray, albedo_nir: jnp.ndarray,
+) -> jnp.ndarray:
+    """Surface albedo per SW band, ordered by the band wavelengths.
+
+    Returns an ``(N_SW_BANDS,)`` array giving each band its near-IR or visible
+    albedo according to ``sw_band_is_near_ir`` -- never a hardcoded
+    ``[vis, nir]`` order that could disagree with the band definitions (#678).
+    """
+    near_ir = sw_band_is_near_ir(jnp.arange(N_SW_BANDS))
+    return jnp.where(near_ir, albedo_nir, albedo_vis)
 
 
 @jax.jit

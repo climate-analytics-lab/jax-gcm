@@ -23,7 +23,7 @@ from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
-from ..cloud_optics import cloud_optics
+from ..cloud_optics import cloud_optics, surface_albedo_by_sw_band
 from ..mcica import (
     column_total_cover,
     effective_cloud_fraction,
@@ -494,7 +494,11 @@ def radiation_scheme(
     # Note: When vmapped, albedos are scalars; otherwise extract first element
     albedo_vis_val = surface_albedo_vis if surface_albedo_vis.ndim == 0 else surface_albedo_vis[0]
     albedo_nir_val = surface_albedo_nir if surface_albedo_nir.ndim == 0 else surface_albedo_nir[0]
-    surface_albedo_arr = jnp.array([albedo_vis_val, albedo_nir_val])
+    # Order the albedo BY BAND WAVELENGTH, not a hardcoded [vis, nir]: band 0 is
+    # near-IR under SW_BAND_LIMITS, so it must receive the near-IR albedo. Keying
+    # off ``sw_band_is_near_ir`` keeps this consistent with the cloud-optics and
+    # gas-optics band order (#678).
+    surface_albedo_arr = surface_albedo_by_sw_band(albedo_vis_val, albedo_nir_val)
 
     # Two shortwave RT calls, one per beam. ``shortwave_fluxes`` also
     # returns direct/diffuse split components which we don't propagate

@@ -10,6 +10,8 @@ Simplified implementation with parameterized absorption.
 import jax.numpy as jnp
 import jax
 
+from ..cloud_optics import sw_band_is_near_ir
+
 
 @jax.jit
 def water_vapor_continuum(
@@ -188,8 +190,10 @@ def ozone_absorption_sw(
     Args:
         o3_vmr: Ozone volume mixing ratio [nlev]
         temperature: Temperature [K] [nlev]
-        band: Spectral band index (0=vis/UV, 1=nir)
-        
+        band: Shortwave band index. The near-IR vs UV/visible role is resolved
+            from the band's wavelength (``sw_band_is_near_ir``), not the raw
+            index, so this stays aligned with ``SW_BAND_LIMITS`` (#678).
+
     Returns:
         Absorption coefficient (m²/kg)
 
@@ -224,13 +228,13 @@ def ozone_absorption_sw(
     temp_factor_nir = 1.0 + 1.5e-4 * (temperature - T_ref)
     k_o3_nir = sigma_ref_nir * N_A / M_O3 * temp_factor_nir * 1e-4
 
-    # 2 SW bands: 0 = UV+visible (4000-14500 cm⁻¹), 1 = near-IR (14500-50000 cm⁻¹)
-    k_o3_by_band = jnp.array([
-        k_o3_uv_vis,        # UV + visible: strong O3 (Hartley-Huggins-Chappuis)
-        k_o3_nir * 0.5,     # Near-IR: very weak
-    ])
-
-    k_o3 = k_o3_by_band[band]
+    # O3 is strong in the UV/visible (Hartley-Huggins-Chappuis) and very weak in
+    # the near-IR. Select by the band's WAVELENGTH, not a hardcoded index, so it
+    # tracks SW_BAND_LIMITS: near-IR = band 0 (4000-14500 cm⁻¹, 1.08 um),
+    # UV+visible = band 1 (14500-50000 cm⁻¹, 0.31 um). See ``sw_band_is_near_ir``
+    # (#678 -- the old ``[k_uv_vis, k_nir]`` order put strong ozone in the near-IR
+    # band once the cloud-optics band order was corrected).
+    k_o3 = jnp.where(sw_band_is_near_ir(band), k_o3_nir * 0.5, k_o3_uv_vis)
 
     # Convert VMR to mass mixing ratio
     o3_mmr = o3_vmr * (48.0 / 29.0)  # M_O3 / M_air
@@ -355,10 +359,12 @@ def gas_optical_depth_sw(
 
     # Calculate absorption for all bands
     def single_band_absorption(band):
-        # Water vapor absorption (simplified - mainly NIR)
+        # Water vapor absorbs in the near-IR. Select by the band's WAVELENGTH
+        # (``sw_band_is_near_ir``), not a hardcoded index, so it stays aligned
+        # with SW_BAND_LIMITS -- near-IR is band 0, not band 1 (#678).
         h2o_mmr = h2o_vmr * 0.622
         k_h2o = jnp.where(
-            band == 1,  # NIR band
+            sw_band_is_near_ir(band),
             0.01 * h2o_mmr,  # Very simplified
             0.0
         )
