@@ -1023,6 +1023,33 @@ _PRESCRIBED_FLUX_VARS = (
     "sensible_heat_flux", "evaporation", "stress_u", "stress_v",
 )
 
+#: Consecutive-sample spacing (days) that counts as a monthly climatology.
+#: Covers 28-31-day calendar months plus the ~30.4-day Gregorian average and a
+#: little rounding slack; excludes sub-monthly (hours/days) and super-monthly
+#: (yearly) cadences, which must align by absolute date instead.
+_MONTHLY_GAP_DAYS = (26.0, 32.0)
+
+
+def _is_monthly_climatology_cadence(time_seconds) -> bool:
+    """Whether a time axis is a 12-step MONTHLY climatology (WRAP_YEAR-eligible).
+
+    WRAP_YEAR replays a series as twelve evenly-spaced fraction-of-year bins,
+    which is faithful only for a monthly climatology. The sample count alone
+    does not establish that — a 12-hour, 12-day or 12-year archive also has 12
+    samples but must be read at its absolute timestamps — so this checks the
+    actual cadence: exactly 12 samples whose consecutive gaps are all
+    month-sized (:data:`_MONTHLY_GAP_DAYS`). Every other cadence returns
+    ``False`` and the caller falls back to ``BY_DATE`` (Codex jax-gcm#877).
+    """
+    import numpy as np
+
+    ts = np.asarray(time_seconds, dtype=float)
+    if ts.size != 12:
+        return False
+    gaps_days = np.diff(ts) / 86400.0
+    lo, hi = _MONTHLY_GAP_DAYS
+    return bool(np.all((gaps_days >= lo) & (gaps_days <= hi)))
+
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
     """Attach forced-mode surface fluxes from ``cfg.forcing.prescribed_surface_flux``.
@@ -1034,9 +1061,11 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
       aquaplanet / smoke-test door;
     - ``file``: a netCDF already on the model grid carrying all four as
       variables dimensioned ``(lat, lon)``/``(lon, lat)`` (static) or with
-      a leading ``time`` axis (attached as a ``TimeSeries``: 12 monthly
-      steps align ``WRAP_YEAR`` like the surface climatology, anything
-      else ``BY_DATE``) — the archived-coupler-flux door.
+      a leading ``time`` axis (attached as a ``TimeSeries``: a 12-step
+      *monthly-cadence* climatology aligns ``WRAP_YEAR`` like the surface
+      climatology — see :func:`_is_monthly_climatology_cadence` — every other
+      cadence aligns ``BY_DATE`` on its absolute timestamps) — the
+      archived-coupler-flux door.
 
     All four fields are required together: a partially prescribed surface
     is not a defined mode (the forced terms deliver nothing interactively),
@@ -1103,6 +1132,21 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                     "are required (contract units/signs: "
                     "docs/source/design/surface_exchange.md)."
                 )
+            # Resolve the time-axis alignment ONCE for the whole file (all four
+            # vars share the ``time`` coordinate). WRAP_YEAR replays a series as
+            # twelve evenly-spaced fraction-of-year bins, which is correct ONLY
+            # for a 12-step MONTHLY climatology — so it is gated on the actual
+            # cadence (month-sized gaps), not the sample count: a 12-hour,
+            # 12-day or 12-year archive also has 12 samples but must be read at
+            # its absolute timestamps, and ``_resolve_align_mode("auto")`` keys
+            # off span alone and would mis-wrap any <=380-day file
+            # (Codex jax-gcm#877).
+            time_seconds = None
+            align = BY_DATE
+            if "time" in ds.dims:
+                time_seconds = _time_axis_seconds_from_ds(ds)
+                align = (WRAP_YEAR if _is_monthly_climatology_cadence(time_seconds)
+                         else BY_DATE)
             for var in _PRESCRIBED_FLUX_VARS:
                 da = ds[var]
                 spatial = [d for d in da.dims if d != "time"]
@@ -1115,18 +1159,7 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                 # (*time, lon, lat), coordinate-validated and lat-oriented.
                 values = _orient_to_model_grid(da, lat_deg, lon_deg, name=var)
                 if "time" in ds[var].dims:
-                    # WRAP_YEAR is ONLY correct for a 12-step monthly
-                    # climatology (replayed by fraction-of-year); any other
-                    # cadence — a 24-hour archive, a multi-year record — must
-                    # align on its absolute timestamps, or its samples get
-                    # smeared into evenly-spaced year bins (Codex #877). Note
-                    # ``_resolve_align_mode("auto")`` keys off the span, not
-                    # the sample count, so it would pick WRAP_YEAR for any
-                    # <=380-day archive — hence the explicit count check here.
-                    n_time = ds[var].sizes["time"]
-                    align = WRAP_YEAR if n_time == 12 else BY_DATE
-                    fields[var] = make_time_series(
-                        values, _time_axis_seconds_from_ds(ds), align)
+                    fields[var] = make_time_series(values, time_seconds, align)
                 else:
                     fields[var] = jnp.asarray(values)
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")

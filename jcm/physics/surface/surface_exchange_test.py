@@ -490,29 +490,80 @@ class TestPrescribedFluxForcingAttach:
         # smeared into year bins (Codex #877).
         assert int(ts.align_mode) == BY_DATE
 
-    def test_file_monthly_climatology_wraps_year(self, tmp_path):
+    def _write_flux_nc_at(self, path, coords, times):
+        """Write a 4-variable flux file with an explicit ``time`` axis."""
         import numpy as np
         import xarray as xr
-        from jcm.forcing import WRAP_YEAR, TimeSeries
-        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
-        coords = self._coords()
         nlon, nlat = coords.horizontal.nodal_shape
         lat = np.degrees(np.asarray(coords.horizontal.latitudes))
         lon = np.degrees(np.asarray(coords.horizontal.longitudes))
-        t = np.array([np.datetime64("2000-01-15") + np.timedelta64(30 * i, "D")
-                      for i in range(12)])
         varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
-        p = tmp_path / "flux_monthly.nc"
+        nt = len(times)
         xr.Dataset(
-            {v: (("time", "lat", "lon"), np.zeros((12, nlat, nlon)))
+            {v: (("time", "lat", "lon"), np.zeros((nt, nlat, nlon)))
              for v in varnames},
-            coords={"time": t, "lat": lat, "lon": lon},
-        ).to_netcdf(p)
+            coords={"time": np.asarray(times), "lat": lat, "lon": lon},
+        ).to_netcdf(path)
+
+    def test_file_monthly_climatology_wraps_year(self, tmp_path):
+        import numpy as np
+        from jcm.forcing import WRAP_YEAR, TimeSeries
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # 12 mid-month timestamps → month-sized gaps → WRAP_YEAR.
+        t = [np.datetime64("2000-01-15") + np.timedelta64(30 * i, "D")
+             for i in range(12)]
+        p = tmp_path / "flux_monthly.nc"
+        self._write_flux_nc_at(p, coords, t)
         f = _attach_prescribed_surface_fluxes(
             None, self._cfg({"file": str(p)}), coords)
         ts = f.prescribed_sensible_heat_flux
         assert isinstance(ts, TimeSeries)
         assert int(ts.align_mode) == WRAP_YEAR
+
+    def test_file_real_month_starts_wrap_year(self, tmp_path):
+        """Actual calendar month-starts (28-31 day gaps) also count as monthly."""
+        import numpy as np
+        from jcm.forcing import WRAP_YEAR
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # Jan..Dec 1st of a leap year (Feb->Mar gap = 29 d, the tightest real
+        # monthly gap) — all within the month-sized window.
+        t = (np.datetime64("2000-01", "M") + np.arange(12)).astype(
+            "datetime64[ns]")
+        p = tmp_path / "flux_month_starts.nc"
+        self._write_flux_nc_at(p, coords, t)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert int(f.prescribed_sensible_heat_flux.align_mode) == WRAP_YEAR
+
+    @pytest.mark.parametrize("step_days,label", [
+        (0.5, "12-hourly"),   # sub-daily
+        (1.0, "12-daily"),    # daily
+        (365.0, "12-yearly"),  # yearly
+    ])
+    def test_file_twelve_samples_non_monthly_cadence_by_date(
+            self, tmp_path, step_days, label):
+        """A 12-SAMPLE archive that is not monthly (sub-daily / daily / yearly)
+        must align by absolute date, not be wrapped as a fake climatology
+        (Codex #877: count is not cadence).
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # Fixed-duration hour steps so the arithmetic stays on the ns clock
+        # (calendar "M"/"Y" timedeltas can't be added to datetime64[ns]).
+        base = np.datetime64("2000-01-01", "ns")
+        t = np.array([base + np.timedelta64(int(step_days * 24 * i), "h")
+                      for i in range(12)])
+        p = tmp_path / f"flux_{label}.nc"
+        self._write_flux_nc_at(p, coords, t)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE, (
+            f"{label} cadence must align BY_DATE"
+        )
 
     def test_file_missing_variable_raises(self, tmp_path):
         import numpy as np
