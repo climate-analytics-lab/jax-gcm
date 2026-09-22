@@ -34,6 +34,11 @@ class DowndraftState(NamedTuple):
                          # into the descending parcel, debited from the rain
                          # flux and credited back to the environment through
                          # the cudtdq ledger.
+    ud: jnp.ndarray      # Downdraft zonal wind (m/s) — ECHAM ``pud`` (cuddraf),
+                         # mixed toward the entrained environment as the parcel
+                         # descends. Consumed by cududv's SEPARATE downdraft
+                         # momentum flux ``mfd·(ud − ū)``.
+    vd: jnp.ndarray      # Downdraft meridional wind (m/s) — ECHAM ``pvd``.
     lfs: int             # Level of free sinking
     active: bool         # Whether downdraft is active
 
@@ -216,7 +221,8 @@ def downdraft_step(
     """
     carry, rain_flux = carry_and_rain
     (k, env_temp, env_q, pressure, dz, rho, precip,
-     entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac) = level_inputs
+     entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac,
+     env_u, env_v) = level_inputs
 
     # Surface-first index convention: k=0 = TOA, k=nlev-1 = surface.
     # Downdraft is active from carry.lfs (somewhere in cloud, lower index)
@@ -229,6 +235,8 @@ def downdraft_step(
         prev_mfd = carry.mfd[k - 1]
         prev_td = carry.td[k - 1]
         prev_qd = carry.qd[k - 1]
+        prev_ud = carry.ud[k - 1]
+        prev_vd = carry.vd[k - 1]
 
         # 1) Dry-adiabatic descent: a parcel falling by dz warms by g·dz/cp
         # (~1.95 K per 200 m). ECHAM ``cuddraf`` builds this into the DSE
@@ -273,6 +281,10 @@ def downdraft_step(
         )
         td_mix = (1.0 - mix_fraction) * td_desc + mix_fraction * env_temp
         qd_mix = (1.0 - mix_fraction) * qd_desc + mix_fraction * env_q
+        # Downdraft wind (ECHAM cuddraf ``pud``/``pvd``): passive, mixed
+        # toward the entrained environment with the same fraction as td/qd.
+        ud_new = (1.0 - mix_fraction) * prev_ud + mix_fraction * env_u
+        vd_new = (1.0 - mix_fraction) * prev_vd + mix_fraction * env_v
 
         # 5) Saturate the descending parcel by evaporating rain into it —
         # ECHAM cuddraf lines 286-316: cuadjtq(kcall=2) drives (T,q) to
@@ -309,6 +321,8 @@ def downdraft_step(
             qd=carry.qd.at[k].set(qd_new),
             mfd=carry.mfd.at[k].set(mfd_final),
             pdmfdp=carry.pdmfdp.at[k].set(zdmfdp),
+            ud=carry.ud.at[k].set(ud_new),
+            vd=carry.vd.at[k].set(vd_new),
             active=jnp.abs(mfd_final) > cmfcmin,
         )
         return new_state, rain_flux_new
@@ -332,7 +346,9 @@ def calculate_downdraft(
     precip_rate: jnp.ndarray,
     kbase: int,
     ktop: int,
-    config: ConvectionParameters
+    config: ConvectionParameters,
+    u_wind: jnp.ndarray | None = None,
+    v_wind: jnp.ndarray | None = None,
 ) -> DowndraftState:
     """Calculate full downdraft profile
     
@@ -353,7 +369,11 @@ def calculate_downdraft(
 
     """
     nlev = len(temperature)
-    
+    if u_wind is None:
+        u_wind = jnp.zeros(nlev)
+    if v_wind is None:
+        v_wind = jnp.zeros(nlev)
+
     # Find level of free sinking
     lfs, has_lfs = find_lfs(
         temperature, humidity, pressure,
@@ -365,7 +385,11 @@ def calculate_downdraft(
     td_init = temperature.copy()
     qd_init = humidity.copy()
     mfd_init = jnp.zeros(nlev)
-    
+    # Downdraft wind starts from the environment; at the LFS it is the
+    # cloud/environment mix (below), mirroring td/qd.
+    ud_init = u_wind.copy()
+    vd_init = v_wind.copy()
+
     # Initialize downdraft conditionally using JAX-compatible operations
     def initialize_downdraft():
         # Mix cloud and environmental air at LFS
@@ -374,6 +398,14 @@ def calculate_downdraft(
         )
         td_new = td_init.at[lfs].set(0.5 * (updraft_state.tu[lfs] + twb))
         qd_new = qd_init.at[lfs].set(0.5 * (updraft_state.qu[lfs] + qwb))
+        # ECHAM cudlfs seeds the downdraft wind from the 50/50 updraft/
+        # environment mix at the LFS (mirrors the td/qd wet-bulb mix).
+        ud_new = ud_init.at[lfs].set(
+            0.5 * (updraft_state.uu[lfs] + u_wind[lfs])
+        )
+        vd_new = vd_init.at[lfs].set(
+            0.5 * (updraft_state.vu[lfs] + v_wind[lfs])
+        )
 
         # Initial downdraft mass flux: ECHAM cudlfs uses
         #   zmftop = -cmfdeps * pmfub
@@ -384,13 +416,13 @@ def calculate_downdraft(
         mfd_new = mfd_init.at[lfs].set(
             -config.cmfdeps * updraft_state.mfu[kbase]
         )
-        return td_new, qd_new, mfd_new
+        return td_new, qd_new, mfd_new, ud_new, vd_new
 
     def no_downdraft():
-        return td_init, qd_init, mfd_init
+        return td_init, qd_init, mfd_init, ud_init, vd_init
 
     # Apply Pattern 2: Conditional Computation
-    td_final, qd_final, mfd_final = lax.cond(
+    td_final, qd_final, mfd_final, ud_final, vd_final = lax.cond(
         has_lfs,
         initialize_downdraft,
         no_downdraft
@@ -401,6 +433,8 @@ def calculate_downdraft(
         qd=qd_final,
         mfd=mfd_final,
         pdmfdp=jnp.zeros(nlev),
+        ud=ud_final,
+        vd=vd_final,
         lfs=lfs,
         active=has_lfs
     )
@@ -427,6 +461,7 @@ def calculate_downdraft(
         jnp.full(nlev, config.cevapcu),
         jnp.full(nlev, klev_m2),
         p_taper_frac,
+        u_wind, v_wind,
     )
     
     # Use scan to compute downdraft from LFS downward. The carry threads

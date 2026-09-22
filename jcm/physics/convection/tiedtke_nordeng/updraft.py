@@ -26,6 +26,15 @@ from jcm.physics.convection.saturation import (
 )
 
 
+#: Ceiling on the organized-detrainment tan-profile fractional height
+#: ``zzmzk/ztmzk``. ECHAM's ``tan(π·frac/2)`` diverges at ``frac == 1``
+#: (cloud top); the ``centrmax`` cap below already saturates the top layers
+#: for any physical cloud depth, so clipping the argument strictly below
+#: π/2 changes nothing physically while keeping ``tan`` — and its VJP —
+#: finite (no ``0·inf`` gradient poison, jax-gcm#558/#559).
+_ORG_DETR_FRAC_MAX = 0.98
+
+
 class UpdatedraftState(NamedTuple):
     """State variables for updraft calculation"""
 
@@ -42,6 +51,11 @@ class UpdatedraftState(NamedTuple):
                          # via zxtec = g/Δp·plude) and the cudtdq latent-heat
                          # ledger; includes the cloud-top dump of the remaining
                          # plume condensate when the updraft terminates.
+    uu: jnp.ndarray      # Updraft zonal wind (m/s) — ECHAM ``puu`` (cuasc),
+                         # mass-weighted mixing of the lifted plume wind and the
+                         # entrained environmental wind. Consumed by cududv's
+                         # momentum-transport deviation flux ``mfu·(uu − ū)``.
+    vu: jnp.ndarray      # Updraft meridional wind (m/s) — ECHAM ``pvu``.
 
 
 def calculate_updraft(
@@ -58,6 +72,8 @@ def calculate_updraft(
     land_fraction: jnp.ndarray = jnp.array(0.0),
     type_weights: jnp.ndarray | None = None,
     lift: jnp.ndarray = jnp.array(0.0),
+    u_wind: jnp.ndarray | None = None,
+    v_wind: jnp.ndarray | None = None,
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -90,6 +106,13 @@ def calculate_updraft(
 
     """
     nlev = len(temperature)
+    # Environmental winds for the prognostic plume wind (cududv). Column
+    # callers that do not transport momentum (older tests) pass none; a
+    # zero wind then makes the plume wind identically zero, which is inert.
+    if u_wind is None:
+        u_wind = jnp.zeros(nlev)
+    if v_wind is None:
+        v_wind = jnp.zeros(nlev)
     # Linear blend of ocean/land precip-zone threshold by land fraction —
     # smooth in land_fraction so the column gradient is well-defined.
     zdnoprc_col = (
@@ -107,6 +130,8 @@ def calculate_updraft(
     buoy_init = jnp.zeros(nlev)
     pdmfup_init = jnp.zeros(nlev)
     plude_init = jnp.zeros(nlev)
+    uu_init = jnp.zeros(nlev)
+    vu_init = jnp.zeros(nlev)
 
     # Set cloud base values. The parcel arriving at the LCL has the
     # surface mixing ratio (q is conserved during dry-adiabatic ascent).
@@ -159,6 +184,12 @@ def calculate_updraft(
     qu_init = qu_init.at[kbase].set(qu_cb)
     lu_init = lu_init.at[kbase].set(lu_cb)
     mfu_init = mfu_init.at[kbase].set(mass_flux_base)
+    # Plume wind at cloud base: the environmental wind there (ECHAM ``cubase``
+    # sets ``puu(kcbot)`` from the sub-cloud source). Both surface-triggered
+    # and mid-level (cubasmc) plumes start with the base-level environment
+    # wind; the ascent then mixes in entrained environmental momentum.
+    uu_init = uu_init.at[kbase].set(u_wind[kbase])
+    vu_init = vu_init.at[kbase].set(v_wind[kbase])
 
     buoy_init = buoy_init.at[kbase].set(0.0)  # Neutral at cloud base
 
@@ -168,6 +199,7 @@ def calculate_updraft(
         buoy=buoy_init,
         pdmfup=pdmfup_init,
         plude=plude_init,
+        uu=uu_init, vu=vu_init,
     )
     # Carry = (updraft_state, integrated_buoyancy). The integrated
     # buoyancy drives Nordeng (1994) organized entrainment and is kept
@@ -180,6 +212,16 @@ def calculate_updraft(
     # against it.
     k_levels = jnp.arange(nlev)
     p_base_const = jnp.full(nlev, pressure[kbase])
+    # Geopotential height of each full level above the surface [m], for the
+    # metre-based organized detrainment (mo_cuascent.f90:779-784). Top-first
+    # cumulative thickness: ``heights[k]`` is larger for higher levels, so
+    # ``heights[ktop] > heights[kbase]`` and the cloud depth is positive.
+    heights = jnp.cumsum(layer_thickness[::-1])[::-1]
+    z_base_const = jnp.full(nlev, heights[kbase])
+    z_top_const = jnp.full(nlev, heights[ktop])
+    # Environmental temperature one level ABOVE (smaller index, top-first),
+    # for the ``zdrodz`` density-gradient term in the organized entrainment.
+    temp_above = jnp.concatenate([temperature[:1], temperature[:-1]])
     # Type-blended base entrainment and deep-convection weight. With the
     # smooth type selection (tiedtke_nordeng.py) the per-type entrainment
     # rates combine by the softmax weights instead of a hard ktype
@@ -208,6 +250,8 @@ def calculate_updraft(
         jnp.full(nlev, config.cprcon),
         p_base_const,
         jnp.full(nlev, zdnoprc_col),
+        u_wind, v_wind, temp_above, heights, z_base_const, z_top_const,
+        jnp.full(nlev, config.cu_centrmax),
     )
 
     # Create specialized step function with config parameters
@@ -215,7 +259,8 @@ def calculate_updraft(
         carry, zbuoy_accum = carry_tuple
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
          entr_base_in, w_deep_in, w_term_buoy, w_term_mf, w_precip,
-         cprcon, p_at_base, zdnoprc) = inputs
+         cprcon, p_at_base, zdnoprc,
+         env_u, env_v, env_temp_above, z_k, z_base, z_top, centrmax) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -244,50 +289,78 @@ def calculate_updraft(
             # accumulated moisture tendency); tracked as a follow-up.
             entr_turb = jnp.clip(entr_base, 0.0, 0.01)
 
-            # Nordeng (1994) organized entrainment for deep convection:
-            # rate ∝ local buoyancy, suppressed by the running integral of
-            # buoyancy below. See ECHAM/ICON `mo_cuascent.f90` lines 511-523.
-            # Use previous-level updraft buoyancy as proxy for "local zbuoyz"
-            # (computed bottom-up via scan, so one step behind).
+            # Nordeng (1994) organized entrainment for deep convection
+            # (ECHAM ``mo_cuascent.f90:517-526``). The organized rate is the
+            # local-buoyancy contribution ``zbuoyz·0.5/(1+∫buoyancy)`` PLUS
+            # the density-scale-height gradient ``zdrodz``, then clamped to
+            # ``[0, centrmax]`` — ECHAM's exact clamp order (MIN then MAX).
             next_level_for_buoy = jnp.minimum(k + 1, nlev - 1)
             prev_buoy = carry.buoy[next_level_for_buoy]
-            # Only positive buoyancy drives organized entrainment
+            # Only positive buoyancy drives organized entrainment (proxy:
+            # previous-level buoyancy, one scan step behind).
             zbuoyz = jnp.maximum(prev_buoy, 0.0)
+            # ``zdrodz`` (mo_cuascent.f90:521-522): the density lapse of the
+            # environment, ≈ −1e-4 m⁻¹ in the lower troposphere — comparable
+            # to ``entrpen`` itself. Omitting it (the prior code) left
+            # organized entrainment systematically too large and removed the
+            # ``MAX(...,0)`` mechanism that clamps entrainment to zero in
+            # weakly buoyant layers. Full-level env T/q stand in for ECHAM's
+            # half-level ptenh/pqenh (the scheme-wide #530 staggering).
+            zdz = jnp.maximum(dz, 1.0)
+            zdrodz = (
+                -jnp.log(env_temp_above / env_temp) / zdz
+                - c.grav / (c.rd * env_temp * (1.0 + c.vtmpc1 * env_q))
+            )
+            zoentr = jnp.clip(
+                zbuoyz * 0.5 / (1.0 + zbuoy_accum) + zdrodz, 0.0, centrmax,
+            )
             # Organized entrainment scales with the smooth deep weight
-            # (1 for a solidly deep column; fades across the 1000 J/kg
-            # type boundary instead of switching).
-            entr_org = w_deep_in * zbuoyz * 0.5 / (1.0 + zbuoy_accum)
-            entr = jnp.clip(entr_turb + entr_org, 0.0, 0.01)
+            # (1 for a solidly deep column; fades across the type boundary
+            # instead of switching). The previous code capped the SUM
+            # entr_turb+entr_org at 0.01 m⁻¹ (33× centrmax): ECHAM caps the
+            # ORGANIZED rate alone at centrmax, so that clip is dropped here.
+            entr_org = w_deep_in * zoentr
+            entr = entr_turb + entr_org
 
             # Turbulent detrainment equals turbulent entrainment (ECHAM
             # cuentr: zdmfde = zdmfen for the turbulent part — δ = ε; the
             # previous 0.5·ε under-detrained and over-deepened the plume).
             detr_turb = entr_turb
 
-            # Organized detrainment for deep convection (Fortran tan() profile).
-            # The ICON cuentr subroutine uses a tan-based profile that produces
-            # sharp detrainment near cloud top, unlike a symmetric Gaussian.
-            cloud_depth = jnp.maximum(kbase - ktop, 1.0)
-            # Fractional distance from base (0 at base, 1 at top)
-            frac_height = jnp.clip((kbase - k) / cloud_depth, 0.0, 1.0)
-            # tan() profile: gentle in lower cloud, sharp increase near top
-            # Argument mapped to (-pi/4, pi/2) so tan ranges from ~-1 to inf
-            tan_arg = jnp.pi * (0.75 * frac_height - 0.25)
-            org_profile = jnp.maximum(jnp.tan(tan_arg), 0.0)
-            # Normalize: peak value of tan(pi/2 * 0.75 - pi/4) is bounded
-            # Scale strength with cloud depth
-            detr_strength = 0.003 * jnp.sqrt(jnp.maximum(cloud_depth / 10.0, 1.0e-30))
-            detr_org = w_deep_in * detr_strength * org_profile
+            # Organized detrainment (ECHAM ``mo_cuascent.f90:769-784``): a
+            # tan profile in HEIGHT (metres) whose prefactor scales as
+            # 1/(cloud depth), capped at ``centrmax``. ``ztmzk`` is the cloud
+            # depth and ``zzmzk = z(k) − z(kbase)`` the height above cloud
+            # base. ECHAM's lower bound is ``khmin`` (the MSE-minimum onset
+            # level); jcm's single-pass ascent does not compute khmin, so
+            # cloud base is used as the onset — the tan form itself keeps
+            # near-base detrainment negligible (tan(0)=0). This replaces the
+            # previous LEVEL-COUNT profile ``0.003·sqrt(depth/10)·tan(...)``,
+            # which INCREASED with vertical resolution at fixed physics (the
+            # wrong sign) and was uncapped — detraining up to ~19× the plume
+            # mass in one layer against ECHAM's ceiling of centrmax·dz.
+            ztmzk = jnp.maximum(z_top - z_base, 1.0)          # cloud depth [m]
+            zzmzk = jnp.clip(z_k - z_base, 0.0, ztmzk)
+            frac_height = jnp.minimum(zzmzk / ztmzk, _ORG_DETR_FRAC_MAX)
+            zorgde = jnp.tan(jnp.pi * frac_height * 0.5) * jnp.pi * 0.5 / ztmzk
+            detr_org = w_deep_in * jnp.minimum(zorgde, centrmax)
 
             detr = detr_turb + detr_org
-            
+
             # Safe array indexing - clamp k+1 to valid range
             next_level = jnp.minimum(k + 1, nlev - 1)
-            
-            # Mass flux change
+
+            # Mass flux change. ECHAM ``cuasc`` line 500 caps the detrained
+            # MASS at 0.75 of the plume mass entering the layer, so
+            # turbulent+organized detrainment can never remove more than 75%
+            # of the plume in one layer — and the ``plude`` condensate ledger
+            # (∝ dmf_detr) can never exceed the available plume mass.
             dmf_entr = entr * carry.mfu[next_level] * dz
-            dmf_detr = detr * carry.mfu[next_level] * dz
-            
+            dmf_detr = jnp.minimum(
+                detr * carry.mfu[next_level] * dz,
+                0.75 * carry.mfu[next_level],
+            )
+
             # Update mass flux
             mfu_new = jnp.maximum(carry.mfu[next_level] + dmf_entr - dmf_detr, 0.0)
             
@@ -340,6 +413,27 @@ def calculate_updraft(
                 compute_updraft_properties,
                 use_environmental_values
             )
+
+            # Prognostic plume wind (ECHAM ``cuasc`` ``puu``/``pvu``): the
+            # wind is a PASSIVE scalar mass-weighted between the plume air
+            # lifted from below and the entrained environmental wind — the
+            # same entrainment weighting the DSE/moisture mixing above uses
+            # (the pre-detrainment mass ``mfu_below + dmf_entr``). ECHAM's
+            # ``cuasc`` adds a momentum-specific ``zz`` entrainment
+            # enhancement (lines 494-499) that jcm's simplified entrainment
+            # does not carry; using the thermodynamic entrainment weighting
+            # here is the leading-order behaviour and is consistent with the
+            # rest of the port. Where the plume is negligible the wind
+            # follows the environment.
+            mfu_mix_wind = jnp.maximum(carry.mfu[next_level] + dmf_entr, 1e-10)
+            uu_mixed = (
+                carry.uu[next_level] * carry.mfu[next_level] + env_u * dmf_entr
+            ) / mfu_mix_wind
+            vv_mixed = (
+                carry.vu[next_level] * carry.mfu[next_level] + env_v * dmf_entr
+            ) / mfu_mix_wind
+            uu_new = jnp.where(mfu_new > mfu_threshold, uu_mixed, env_u)
+            vu_new = jnp.where(mfu_new > mfu_threshold, vv_mixed, env_v)
 
             # Per-layer precipitation generation (ECHAM cuasc lines 454-457).
             # The parcel converts a fraction of its liquid water to precip
@@ -449,6 +543,8 @@ def calculate_updraft(
                 buoy=carry.buoy.at[k].set(buoy_new),
                 pdmfup=carry.pdmfup.at[k].set(pdmfup),
                 plude=carry.plude.at[k].set(plude_layer),
+                uu=carry.uu.at[k].set(uu_new),
+                vu=carry.vu.at[k].set(vu_new),
             )
             # Accumulate integrated positive buoyancy for the next step's
             # organized-entrainment denominator (matches ECHAM `zbuoy`).

@@ -1037,7 +1037,14 @@ def _tiedtke_convection_toa_first(
             moisture_supply / jnp.maximum(q_excess, zdqmin),
             config.cmfcmin, config.cmfcmax,
         )
-        mass_flux_cape = mass_flux_closure_blend(
+        # ECHAM's cloud-base first-guess FALLBACK when the PBL moisture-budget
+        # closure is invalid (mo_cumastr.f90:567): the constant
+        # zmfub = 0.01 kg/m²/s, bounded by the CFL cap applied to
+        # mass_flux_base below. A genuine mass flux — the previous
+        # cape/(g·tau) fallback had units of m/s (review finding 2.5). Deep
+        # columns get their CAPE dependence from the Nordeng zmfub1 rescale
+        # further down; shallow/mid keep this bounded constant, matching ECHAM.
+        mass_flux_fallback = mass_flux_closure_blend(
             cape, cin, jnp.array(0.0), type_weights, config
         )
         # Apply the moisture-anchored flux to any active convection (deep/
@@ -1050,7 +1057,9 @@ def _tiedtke_convection_toa_first(
         # evaporation 0 < E ≤ _MIN_MOISTURE_SUPPLY) keep the bounded CAPE
         # closure rather than a CFL-saturating or ~zero moisture flux.
         use_moisture = jnp.logical_and(conv_type >= 1, moisture_valid)
-        mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
+        mass_flux_base = jnp.where(
+            use_moisture, mass_flux_moisture, mass_flux_fallback
+        )
 
         # A ``cubasmc`` plume takes neither closure: its cloud-base flux is
         # the resolved ascent that triggered it (mo_cuascent.f90:643).
@@ -1093,6 +1102,8 @@ def _tiedtke_convection_toa_first(
             # ECHAM's zlift, for the one ascent test that uses it: the
             # first step above a ``cubasmc`` (klab == 1) cloud base.
             lift=cloud_base_lift(config, thvsig),
+            # Environmental winds for the prognostic plume wind (cududv).
+            u_wind=u_wind, v_wind=v_wind,
         )
         
         # --- ECHAM depth demotion (mo_cumastr.f90:750-753) ---------------
@@ -1130,7 +1141,8 @@ def _tiedtke_convection_toa_first(
         # Calculate downdraft (now properly implemented)
         downdraft_state = calculate_downdraft(
             temperature, humidity, pressure, layer_thickness, rho,
-            updraft_state, precip_rate, cloud_base, ktop, config
+            updraft_state, precip_rate, cloud_base, ktop, config,
+            u_wind=u_wind, v_wind=v_wind,
         )
         
         # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
@@ -1202,10 +1214,47 @@ def _tiedtke_convection_toa_first(
         # trigger (the closure fades in over smooth_trigger_j instead of
         # snapping), which also keeps gentle convective precip alive at
         # the near-neutral equilibrium the efficient rescale produces.
+        # ECHAM SHALLOW re-closure (mo_cumastr.f90:909-936): after the
+        # downdrafts, a ktype==2 column recomputes its cloud-base flux from
+        # the PBL moisture budget INCLUDING the downdraft moisture at cloud
+        # base (zqumqe = qu + lu − zeps·qd − (1−zeps)·qenh, with zeps = cmfdeps
+        # where a downdraft reaches the base) and applies it only when it
+        # moves less than 20% from the first guess. With the faithful
+        # deep/shallow split most columns are shallow, so this term (a
+        # NEGATIVE moisture correction from downdraft drying) matters. jcm
+        # previously applied the pre-downdraft moisture-anchored flux with no
+        # re-closure.
+        ikb = cloud_base
+        zeps = jnp.where(
+            (downdraft_state.mfd[ikb] < 0.0) & downdraft_state.active,
+            config.cmfdeps, 0.0,
+        )
+        zqumqe = (
+            updraft_state.qu[ikb] + updraft_state.lu[ikb]
+            - zeps * downdraft_state.qd[ikb]
+            - (1.0 - zeps) * humidity[ikb]
+        )
+        zdqmin_sh = jnp.maximum(0.01 * humidity[ikb], 1.0e-10)
+        zdqpbl = moisture_supply * c.grav  # zdqpbl = g·E
+        shallow_valid = (
+            (zdqpbl > 0.0) & (zqumqe > zdqmin_sh) & (zmfub < mfu_cfl_max)
+        )
+        zmfub1_sh = jnp.where(
+            shallow_valid,
+            zdqpbl / (c.grav * jnp.maximum(zqumqe, zdqmin_sh)),
+            zmfub,
+        )
+        # 20% guard: keep the re-closure only if it stays within 20% of the
+        # first guess (mo_cumastr.f90:932-933).
+        zmfub1_sh = jnp.where(
+            jnp.abs(zmfub1_sh - zmfub) < 0.2 * zmfub, zmfub1_sh, zmfub,
+        )
+        rescale_shallow = zmfub1_sh / zmfub
+
         rescale = jnp.where(
             (conv_type_final == 1) & (zheat > 1e-10) & (zcape_plume > 0.0),
             zmfub1 / zmfub,
-            1.0,
+            jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
         )
         updraft_state = updraft_state._replace(
             mfu=updraft_state.mfu * rescale,
@@ -1783,9 +1832,19 @@ class TiedtkeConvection(PhysicsTerm):
         cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
+        # Momentum transport carries the SAME per-column cap scaling as the
+        # rest of the ledger (jax-gcm#676 item 2 / the #641 doc's follow-up).
+        # cududv's u/v tendency is the divergence of a flux built from the
+        # SAME mass fluxes that drive T/q/qc/qi; when the ``_DTDT_MAX`` cap
+        # rescales the column, leaving dudt/dvdt unscaled would deliver a
+        # capped plume's momentum transport at full amplitude while its
+        # thermodynamics are held to ~9 %, breaking the proportionality the
+        # cap's comment claims. Neither ECHAM nor CAM has such a cap, so the
+        # only correct choice is to scale momentum consistently with the
+        # ledger it shares a mass flux with.
         tendency = PhysicsTendency(
-            u_wind=tendencies_all.dudt.T,
-            v_wind=tendencies_all.dvdt.T,
+            u_wind=(tendencies_all.dudt * cap_scale).T,
+            v_wind=(tendencies_all.dvdt * cap_scale).T,
             temperature=(tendencies_all.dtedt * cap_scale).T,
             specific_humidity=(tendencies_all.dqdt * cap_scale).T,
             tracers={

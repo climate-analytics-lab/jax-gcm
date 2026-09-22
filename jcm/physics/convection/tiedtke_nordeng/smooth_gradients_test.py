@@ -75,9 +75,46 @@ class TestSmoothTriggerGradients:
         assert np.isfinite(float(g)) and float(g) != 0.0, g
 
     def test_tau_gradient_nonzero(self):
-        """The CAPE-closure timescale was dead behind lax.switch."""
-        loss, x0 = _grad_wrt('tau', supply=0.0)  # CAPE closure path
-        g = jax.grad(loss)(x0)
+        """The ``tau`` CAPE-consumption timescale must be learnable where
+        the deep Nordeng closure is UNCLIPPED.
+
+        Since #676 the cloud-base first-guess FALLBACK is ECHAM's constant
+        ``zmfub = 0.01`` (no tau), so tau enters ONLY the deep Nordeng
+        rescale ``zmfub1 = zcape·zmfub/(zheat·tau)`` — the physically
+        correct home for the CAPE-consumption timescale (the previous
+        ``cape/(g·tau)`` fallback was dimensionally a velocity and gave tau
+        a spurious gradient on every column). On a strongly-convecting FINE
+        column the rescale saturates the CFL cap ``layer_mass/dt`` and the
+        gradient is a legitimate exact zero (as for the trigger threshold);
+        on a COARSE deep column with headroom below the cap it is finite and
+        nonzero.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            saturation_mixing_ratio,
+        )
+
+        def precip(tau):
+            nlev = 12
+            p = jnp.linspace(10_000.0, 101_325.0, nlev)
+            t = 298.0 - 6.5e-3 * 8000.0 * (1.0 - p / p[-1]) ** 0.8
+            t = jnp.clip(t, 200.0, 298.0)
+            q = 0.8 * jax.vmap(saturation_mixing_ratio)(p, t)
+            rho = p / (287.0 * t)
+            dz = jnp.abs(jnp.diff(p, prepend=p[:1] * 0.5)) / (rho * 9.81)
+            sl = slice(nlev // 2, nlev - 2)
+            conv = jnp.zeros(nlev).at[sl].set(
+                2.0 * 1.0e-5 / jnp.sum(rho[sl] * dz[sl]))
+            cfg = ConvectionParameters.default(tau=tau)
+            tend, _ = tiedtke_nordeng_convection(
+                t, q, p, dz, rho,
+                jnp.zeros(nlev), jnp.zeros(nlev),
+                jnp.zeros(nlev), jnp.zeros(nlev),
+                dt=1800.0, config=cfg,
+                moisture_supply=jnp.asarray(1.0e-5), qte_dynamics=conv,
+            )
+            return tend.precip_conv
+
+        g = jax.grad(precip)(jnp.asarray(7200.0))
         assert np.isfinite(float(g)) and float(g) != 0.0, g
 
     def test_zdnoprc_gradient_nonzero(self):

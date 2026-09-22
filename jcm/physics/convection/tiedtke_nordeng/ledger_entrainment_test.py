@@ -1,0 +1,297 @@
+"""Unit tests for the Tiedtke ledger + entrainment fixes (#676, #669).
+
+Each test pins one reference deviation against a hand-computed value or an
+ECHAM reference bound:
+
+* #676.1 — the cloud-base first-guess FALLBACK is ECHAM's constant
+  ``zmfub = 0.01`` (mo_cumastr.f90:567), not the dimensionally-invalid
+  ``cape/(g·tau)`` velocity.
+* #676.3 — the condensate-flux heating term uses the PHASE-KEYED latent heat
+  (``alhs`` below the melting point, ``alhc`` above), the same key as the
+  per-level source term.
+* #676.4 — the SURFACE layer receives a convective tendency (ECHAM's
+  ``jk == klev`` cudtdq branch), no longer identically zero.
+* #676.2 — momentum transport (cududv) carries a surface-layer term and a
+  sub-cloud taper; the ``_DTDT_MAX`` cap scales dudt/dvdt consistently with
+  the rest of the ledger.
+* #669 — organized entrainment/detrainment are the metre-based fractional
+  rates capped at ``centrmax`` (3.0e-4 m⁻¹); the cap engages on a deep plume.
+"""
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+import jcm.constants as c
+from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+    ECHAM_MFUB_FALLBACK,
+    calculate_tendencies,
+    mass_flux_closure,
+    mass_flux_closure_blend,
+)
+from jcm.physics.convection.tiedtke_nordeng.updraft import (
+    UpdatedraftState,
+    calculate_updraft,
+)
+from jcm.physics.convection.tiedtke_nordeng.downdraft import DowndraftState
+from jcm.physics.convection.tiedtke_nordeng.types import ConvectionParameters
+
+
+def _zero_updraft(nlev):
+    z = jnp.zeros(nlev)
+    return UpdatedraftState(
+        tu=z, qu=z, lu=z, mfu=z, entr=z, detr=z, buoy=z,
+        pdmfup=z, plude=z, uu=z, vu=z,
+    )
+
+
+def _zero_downdraft(nlev):
+    z = jnp.zeros(nlev)
+    return DowndraftState(
+        td=z, qd=z, mfd=z, pdmfdp=z, ud=z, vd=z, lfs=0, active=False,
+    )
+
+
+# --------------------------------------------------------------------------
+# #676 item 1 — constant fallback closure
+# --------------------------------------------------------------------------
+class TestConstantFallbackClosure:
+    def test_fallback_is_echam_constant_independent_of_cape(self):
+        cfg = ConvectionParameters.default()
+        vals = [
+            float(mass_flux_closure(jnp.array(cape), jnp.array(0.0),
+                                    jnp.array(0.0), 1, cfg))
+            for cape in (10.0, 500.0, 5000.0)
+        ]
+        # A genuine mass flux, and independent of CAPE (the CAPE dependence
+        # for deep lives in the Nordeng zmfub1 rescale).
+        for v in vals:
+            assert v == pytest.approx(ECHAM_MFUB_FALLBACK, rel=1e-6)
+        assert ECHAM_MFUB_FALLBACK == pytest.approx(0.01)
+
+    def test_blend_matches_the_same_constant(self):
+        cfg = ConvectionParameters.default()
+        mfb = mass_flux_closure_blend(
+            jnp.array(3000.0), jnp.array(0.0), jnp.array(0.0),
+            jnp.array([1.0, 0.0, 0.0]), cfg,
+        )
+        assert float(mfb) == pytest.approx(ECHAM_MFUB_FALLBACK, rel=1e-6)
+
+
+# --------------------------------------------------------------------------
+# #676 items 3 & 4 — phase-keyed latent heat + surface-layer tendency
+# --------------------------------------------------------------------------
+class TestCondensateFluxLedger:
+    """Isolate the condensate-flux heating term.
+
+    Setting ``tu == env T`` (zero DSE deviation flux) and ``qu == env q``
+    (zero moisture deviation flux) with ``mfd = plude = pdmfup = pdmfdp = 0``
+    leaves the condensate flux ``L·lu·mfu`` as the ONLY nonzero divergence,
+    so ``dtedt`` is exactly ``−Δ(zalv·lu·mfu)/(cpd·Δp/g)`` and can be
+    hand-computed.
+    """
+
+    def _setup(self, T_value):
+        nlev = 5
+        pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        temperature = jnp.full(nlev, T_value)
+        humidity = jnp.full(nlev, 5.0e-3)
+        rho = pressure / (c.rd * temperature)
+        dz = jnp.full(nlev, 1000.0)
+        # Condensate flux lu·mfu = [0, 1e-4, 2e-4, 3e-4, 4e-4] — nonzero at
+        # the surface (last index) so the surface-layer closure is exercised.
+        mfu = jnp.array([0.0, 0.1, 0.1, 0.1, 0.1])
+        lu = jnp.array([0.0, 1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3])
+        up = _zero_updraft(nlev)._replace(
+            tu=temperature, qu=humidity, lu=lu, mfu=mfu,
+        )
+        dn = _zero_downdraft(nlev)
+        tend = calculate_tendencies(
+            temperature, humidity, jnp.zeros(nlev), jnp.zeros(nlev),
+            pressure, rho, dz, up, dn, kbase=4, ktop=1, dt=1800.0,
+            config=ConvectionParameters.default(), ktype=jnp.array(1),
+        )
+        dp = float(pressure[1] - pressure[0])
+        mass = dp / c.grav
+        cond_flux = np.asarray(lu * mfu)
+        return tend, cond_flux, mass
+
+    def test_phase_keyed_latent_heat_cold_uses_alhs(self):
+        tend, cond_flux, mass = self._setup(250.0)  # below tmelt
+        # div = diff([cond_flux, 0]) ; dtedt = -alhs*div/(cpd*mass)
+        div = np.diff(np.append(cond_flux, 0.0))
+        expected = -c.alhs * div / (c.cpd * mass)
+        np.testing.assert_allclose(np.asarray(tend.dtedt), expected, rtol=1e-5)
+        # A fixed-alhc ledger would be measurably different (~13%).
+        wrong = -c.alhc * div / (c.cpd * mass)
+        assert not np.allclose(np.asarray(tend.dtedt), wrong, rtol=1e-3)
+
+    def test_phase_keyed_latent_heat_warm_uses_alhc(self):
+        tend, cond_flux, mass = self._setup(290.0)  # above tmelt
+        div = np.diff(np.append(cond_flux, 0.0))
+        expected = -c.alhc * div / (c.cpd * mass)
+        np.testing.assert_allclose(np.asarray(tend.dtedt), expected, rtol=1e-5)
+
+    def test_surface_layer_receives_tendency(self):
+        # With the plume flux nonzero at the surface (last index), the
+        # ECHAM klev closure gives dtedt[surface] = -(-F[surface])... i.e.
+        # nonzero, where the old diff-into-[:-1] left it exactly 0.
+        tend, cond_flux, mass = self._setup(290.0)
+        surf = float(tend.dtedt[-1])
+        expected_surf = -(-c.alhc * cond_flux[-1]) / (c.cpd * mass)
+        assert surf != 0.0
+        assert surf == pytest.approx(expected_surf, rel=1e-5)
+
+
+# --------------------------------------------------------------------------
+# #676 item 2 — momentum surface term + sub-cloud taper
+# --------------------------------------------------------------------------
+class TestMomentumTransport:
+    def test_surface_and_subcloud_momentum_present(self):
+        nlev = 6
+        pressure = jnp.linspace(2.0e4, 1.0e5, nlev)
+        temperature = jnp.full(nlev, 290.0)
+        humidity = jnp.full(nlev, 5.0e-3)
+        rho = pressure / (c.rd * temperature)
+        dz = jnp.full(nlev, 1000.0)
+        u_wind = jnp.linspace(-10.0, 10.0, nlev)  # sheared
+        v_wind = jnp.zeros(nlev)
+        # Plume (with prognostic uu) and downdraft (with ud) both present.
+        mfu = jnp.array([0.0, 0.1, 0.1, 0.1, 0.0, 0.0])
+        uu = jnp.array([0.0, -8.0, -6.0, -4.0, 0.0, 0.0])
+        up = _zero_updraft(nlev)._replace(
+            tu=temperature, qu=humidity, mfu=mfu, uu=uu,
+        )
+        dn = _zero_downdraft(nlev)
+        cfg = ConvectionParameters.default()
+        tend = calculate_tendencies(
+            temperature, humidity, u_wind, v_wind, pressure, rho, dz,
+            up, dn, kbase=3, ktop=1, dt=1800.0, config=cfg,
+            ktype=jnp.array(1),
+        )
+        dudt = np.asarray(tend.dudt)
+        assert np.all(np.isfinite(dudt))
+        # Momentum transport reaches BELOW cloud base (sub-cloud taper) and
+        # to the surface, where the previous truncated form left zeros.
+        assert np.any(np.abs(dudt[4:]) > 0.0), "no sub-cloud/surface friction"
+        # v is uniform → no v tendency.
+        np.testing.assert_allclose(np.asarray(tend.dvdt), 0.0, atol=1e-12)
+
+    def test_lmfdudv_off_zeros_momentum(self):
+        nlev = 6
+        pressure = jnp.linspace(2.0e4, 1.0e5, nlev)
+        temperature = jnp.full(nlev, 290.0)
+        humidity = jnp.full(nlev, 5.0e-3)
+        rho = pressure / (c.rd * temperature)
+        dz = jnp.full(nlev, 1000.0)
+        up = _zero_updraft(nlev)._replace(
+            tu=temperature, qu=humidity,
+            mfu=jnp.array([0.0, 0.1, 0.1, 0.1, 0.0, 0.0]),
+            uu=jnp.array([0.0, -8.0, -6.0, -4.0, 0.0, 0.0]),
+        )
+        dn = _zero_downdraft(nlev)
+        cfg = ConvectionParameters.default(lmfdudv=False)
+        tend = calculate_tendencies(
+            temperature, humidity, jnp.linspace(-10.0, 10.0, nlev),
+            jnp.zeros(nlev), pressure, rho, dz, up, dn,
+            kbase=3, ktop=1, dt=1800.0, config=cfg, ktype=jnp.array(1),
+        )
+        np.testing.assert_allclose(np.asarray(tend.dudt), 0.0, atol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# #669 — organized entrainment / detrainment metre-based + capped
+# --------------------------------------------------------------------------
+def _deep_unstable_column(nlev, dz_m):
+    """Build a conditionally-unstable deep column (``nlev`` × ``dz_m`` m)."""
+    # Build pressures hydrostatically-ish from a fixed dz and lapse.
+    T = np.empty(nlev)
+    T[-1] = 300.0
+    for k in range(nlev - 2, -1, -1):
+        T[k] = T[k + 1] - 8.5e-3 * dz_m
+    # pressure from hydrostatic integration (surface last, top-first).
+    p = np.empty(nlev)
+    p[-1] = 1.0e5
+    for k in range(nlev - 2, -1, -1):
+        rho_k = p[k + 1] / (c.rd * T[k + 1])
+        p[k] = p[k + 1] - rho_k * c.grav * dz_m
+    p = np.clip(p, 5.0e3, None)
+    from jcm.physics.convection.saturation import (
+        saturation_specific_humidity_and_derivative as qsd,
+    )
+    qs, _ = qsd(jnp.array(T), jnp.array(p))
+    q = 0.9 * np.asarray(qs)
+    rho = p / (c.rd * T)
+    return (jnp.array(T), jnp.array(q), jnp.array(p),
+            jnp.full(nlev, dz_m), jnp.array(rho))
+
+
+class TestOrganizedEntrainmentDetrainment:
+    def test_organized_rates_capped_at_centrmax(self):
+        cfg = ConvectionParameters.default()
+        T, q, p, dz, rho = _deep_unstable_column(nlev=40, dz_m=400.0)
+        nlev = T.shape[0]
+        kbase = nlev - 3
+        ktop = 4
+        # Force a solidly deep plume.
+        tw = jnp.array([1.0, 0.0, 0.0])
+        up = calculate_updraft(
+            T, q, p, dz, rho, kbase, ktop, 1, 0.05, cfg,
+            type_weights=tw,
+        )
+        entr = np.asarray(up.entr)
+        detr = np.asarray(up.detr)
+        centrmax = float(cfg.cu_centrmax)
+        entrpen = float(cfg.entrpen)
+        # organized part is capped at centrmax; turbulent part is entrpen.
+        # So both rates must stay at/below entrpen + centrmax (+ fp slack).
+        ceiling = entrpen + centrmax + 1e-9
+        assert entr.max() <= ceiling, f"entr max {entr.max():.3e} > {ceiling:.3e}"
+        assert detr.max() <= ceiling, f"detr max {detr.max():.3e} > {ceiling:.3e}"
+        # The cap must actually engage somewhere in the deep plume (the
+        # organized rate would otherwise be far larger — the #669 bug).
+        assert detr.max() > entrpen, "organized detrainment never engaged"
+
+    def test_detrainment_rate_is_resolution_independent(self):
+        """The per-metre organized detrainment must NOT scale with level
+        count (the #669 wrong-sign resolution dependence). Same physical
+        cloud at 400 m and 200 m spacing must give a comparable capped rate.
+        """
+        cfg = ConvectionParameters.default()
+        tw = jnp.array([1.0, 0.0, 0.0])
+        rates = []
+        for dz_m, nlev in ((400.0, 40), (200.0, 80)):
+            T, q, p, dz, rho = _deep_unstable_column(nlev=nlev, dz_m=dz_m)
+            kbase = nlev - 3
+            ktop = nlev // 8
+            up = calculate_updraft(
+                T, q, p, dz, rho, kbase, ktop, 1, 0.05, cfg, type_weights=tw,
+            )
+            rates.append(float(np.asarray(up.detr).max()))
+        # Both hit the same centrmax cap → within a small tolerance, NOT the
+        # ~2x of the old sqrt(level-count) form.
+        assert rates[0] == pytest.approx(rates[1], rel=0.2), rates
+
+    def test_plume_penetrates_deeper_than_uncapped_form(self):
+        """With bounded entrainment/detrainment the deep plume reaches a
+        higher cloud top (smaller top index) — the physical point of #669.
+        """
+        cfg = ConvectionParameters.default()
+        T, q, p, dz, rho = _deep_unstable_column(nlev=40, dz_m=400.0)
+        nlev = T.shape[0]
+        up = calculate_updraft(
+            T, q, p, dz, rho, nlev - 3, 4, 1, 0.05, cfg,
+            type_weights=jnp.array([1.0, 0.0, 0.0]),
+        )
+        mfu = np.asarray(up.mfu)
+        top = np.where(mfu > 1e-6)[0]
+        assert top.size > 0
+        # The plume survives well into the upper troposphere (index well
+        # above cloud base), not annihilated mid-column.
+        depth_levels = (nlev - 3) - int(top.min())
+        assert depth_levels >= 10, f"plume only {depth_levels} levels deep"
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-q"]))

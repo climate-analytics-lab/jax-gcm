@@ -18,8 +18,17 @@ class ConvectionParameters:
 
     # Entrainment/detrainment parameters
     entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
-    entrscv: float           # Entrainment rate for shallow convection (m⁻¹) 
+    entrscv: float           # Entrainment rate for shallow convection (m⁻¹)
     entrmid: float           # Entrainment rate for mid-level convection (m⁻¹)
+    cu_centrmax: float       # Hard cap on the ORGANIZED (Nordeng) fractional
+                             # entrainment AND detrainment rates (m⁻¹) — ECHAM
+                             # ``centrmax`` (mo_echam_conv_constants.f90), the
+                             # same order as ``entrpen`` itself. Both reference
+                             # schemes bound these per-metre rates: ECHAM caps
+                             # ``zoentr``/``zorgde`` at 3.0e-4 m⁻¹
+                             # (mo_cuascent.f90:525,784), CAM ZM at 2.0e-4.
+                             # Without it a deep plume entrains/detrains a large
+                             # fraction of its mass in a single stretched layer.
     
     # CAPE closure
     tau: float               # CAPE adjustment timescale (s)
@@ -122,6 +131,7 @@ class ConvectionParameters:
 
     @classmethod
     def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+                 cu_centrmax=3.0e-4,
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
                  cevapcu=2.0e-5, cu_updraft_velocity=2.0,
@@ -140,6 +150,7 @@ class ConvectionParameters:
             entrpen=jnp.array(entrpen),
             entrscv=jnp.array(entrscv),
             entrmid=jnp.array(entrmid),
+            cu_centrmax=jnp.array(cu_centrmax),
             tau=jnp.array(tau),
             cmfcmax=jnp.array(cmfcmax),
             cmfcmin=jnp.array(cmfcmin),
