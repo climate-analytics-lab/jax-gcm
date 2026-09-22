@@ -442,6 +442,32 @@ Radiation, clouds and gravity waves
 - **Per-level precipitation flux profiles** and a CloudSat COSP warm-rain
   hook.
 
+Coupling to an external surface component
+"""""""""""""""""""""""""""""""""""""""""
+
+- **A package-independent surface-exchange contract.** Every physics package
+  that resolves a surface publishes a
+  :class:`~jcm.physics.surface.surface_exchange.SurfaceExchange` struct under
+  ``diagnostics["surface_exchange"]`` — net downward heat flux, sensible and
+  latent heat, evaporation, total precipitation, wind stress, near-surface
+  wind, and lowest-level air density / potential temperature, with one
+  documented sign convention (turbulent fluxes positive up, net heat flux
+  positive down). Grid-mean fields are guaranteed; per-tile and rain/snow-split
+  fields are optional and absent (not zero) where a package cannot fill them
+  faithfully. SPEEDY and ECHAM publish it; Held-Suarez opts out;
+  ``ComposablePhysics.require_surface_exchange()`` fails a coupler fast at
+  composition time (#754).
+- **Forced surface mode.** ``physics=speedy-forced-flux`` /
+  ``physics=echam-forced-flux`` deliver externally prescribed sensible-heat,
+  evaporation and momentum fluxes in place of the package's own surface
+  exchange, entering the same tendency pathways (SPEEDY's bottom-level source;
+  ECHAM's ``TteTkeVerticalDiffusion(couple_surface=False)`` plus an explicit
+  ``PrescribedSurfaceFlux`` term). Fluxes ride
+  ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file)
+  or the ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
+  published contract's units and signs (#301). See
+  :doc:`design/surface_exchange`.
+
 Mechanisms
 """"""""""
 
