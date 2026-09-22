@@ -174,7 +174,9 @@ replying — Codex has been right (forcing unit conventions) and wrong
   recompiling. Only the XLA-compile share is saved — tracing reruns —
   and only for bit-identical whole model steps. Safe: a miss just
   recompiles.
-- The repo pins `ruff` in CI; run the pinned version (`pip show ruff`
-  vs `.github/workflows/run_linter.yaml`) before trusting a clean pass.
+- The repo pins `ruff` in CI, in two places that must agree —
+  `run_linter.yaml` (lints everything, every push) and the `lint` gate job
+  in `run_test.yaml` (the fast/slow suites hang off it). Run the pinned
+  version (`pip show ruff` vs either file) before trusting a clean pass.
 - GPU-gated slow tests skip on CPU exactly as they do in CI — a local
   CPU pass is equivalent evidence.

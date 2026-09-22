@@ -99,6 +99,25 @@ cgroup makes ``-n 12`` an OOM rather than a test result — see
 :doc:`design/test_suite_memory`, which also covers the ``jax_enable_x64``
 isolation the root ``conftest.py`` provides.
 
+What CI runs
+^^^^^^^^^^^^
+
+``ruff check .`` is a gate, not a parallel job: it runs first and both test
+jobs hang off it, so a lint error costs about twenty seconds instead of two
+runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
+only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel. If
+the fast suite fails it cancels the whole run, taking the in-flight slow job
+with it, so **a cancelled slow result means the fast suite went red, not that
+the slow tests passed**. Two limits by design: the cancel only fires on pull
+requests, since a push to ``main`` or ``dev`` has no slow job to stop and a
+cancelled run there would mute the failure notification; and it is
+best-effort, because a pull request from a fork gets a read-only token, so
+there the slow suite runs to completion.
+
+The workflow is triggered by pull requests, and by pushes to ``main`` and
+``dev`` only. A branch with no open pull request gets no CI at all, so run the
+commands above locally before opening one.
+
 Code Quality
 ^^^^^^^^^^^^
 
