@@ -531,7 +531,8 @@ def diagnose_surface_fluxes(
         E  = ρ_s·C_q·(q_s_eff − X̂_K)         [kg/m²/s, positive up]
         SH = ρ_s·cpd·C_h·(T_s_eff − T̂_K)     [W/m²,   positive up]
         LH = alhc·E
-        τ  = ρ_s·C_m·(Û_K − û_s)             [N/m², stress on the atmosphere]
+        τ  = ρ_s·C_m·(Û_K − û_s)             [N/m², momentum flux into the
+                                              surface, positive with the wind]
 
     Implementation note: the fluxes are written in the algebraically
     equivalent form ``ρ_s·C·tpfac1·(tpfac2·X_s − bb_K)``. With ECHAM's exact

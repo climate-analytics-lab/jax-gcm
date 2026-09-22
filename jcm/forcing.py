@@ -354,6 +354,25 @@ class ForcingData:
     # (see :class:`PreSpeciatedEmissions`). ``None`` ⇒ no prescribed emission.
     prescribed_aerosol_emissions: Any = None
 
+    # Externally prescribed turbulent surface fluxes for forced mode
+    # (jax-gcm#301): a coupler (or the CLI's
+    # ``forcing.prescribed_surface_flux`` block) supplies the fluxes and the
+    # forced surface path delivers them INSTEAD of the package's own bulk /
+    # implicit surface exchange. Each is a 2-D ``(ix, il)`` map or a
+    # ``TimeSeries`` thereof (``select(date)`` slices them like any other
+    # leaf). Units and signs follow the surface-exchange coupling contract
+    # (``docs/source/design/surface_exchange.md`` — the SAME convention the
+    # published ``SurfaceExchange`` struct uses, so a coupler can feed back
+    # exactly what it read): sensible heat [W/m²] and evaporation [kg/m²/s]
+    # positive UP (surface → atmosphere); stress [N/m²] positive DOWN (the
+    # eastward/northward momentum flux INTO the surface). ``None`` (the
+    # default) means "not prescribed" — the forced-mode terms raise a
+    # pointed error rather than silently applying zero fluxes.
+    prescribed_sensible_heat_flux: Any = None
+    prescribed_evaporation: Any = None
+    prescribed_stress_u: Any = None
+    prescribed_stress_v: Any = None
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -760,7 +779,11 @@ class ForcingData:
              dust_roughness=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
-             prescribed_aerosol_emissions=None):
+             prescribed_aerosol_emissions=None,
+             prescribed_sensible_heat_flux=None,
+             prescribed_evaporation=None,
+             prescribed_stress_u=None,
+             prescribed_stress_v=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -806,6 +829,26 @@ class ForcingData:
                 prescribed_aerosol_emissions
                 if prescribed_aerosol_emissions is not None
                 else self.prescribed_aerosol_emissions
+            ),
+            prescribed_sensible_heat_flux=(
+                prescribed_sensible_heat_flux
+                if prescribed_sensible_heat_flux is not None
+                else self.prescribed_sensible_heat_flux
+            ),
+            prescribed_evaporation=(
+                prescribed_evaporation
+                if prescribed_evaporation is not None
+                else self.prescribed_evaporation
+            ),
+            prescribed_stress_u=(
+                prescribed_stress_u
+                if prescribed_stress_u is not None
+                else self.prescribed_stress_u
+            ),
+            prescribed_stress_v=(
+                prescribed_stress_v
+                if prescribed_stress_v is not None
+                else self.prescribed_stress_v
             ),
         )
 

@@ -10,12 +10,18 @@ native g/kg arithmetic. The numerical implementation is untouched.
 
 from __future__ import annotations
 
+import functools
 from importlib import resources
 from typing import ClassVar
 
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.surface.surface_exchange import (
+    SURFACE_EXCHANGE_KEY,
+    SURFACE_EXCHANGE_OUTPUT_ATTRS,
+    SurfaceExchange,
+)
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -444,17 +450,46 @@ class SpeedyDownwardLongwaveRadiation(SpeedyTermBase):
 
 
 class SpeedySurfaceFlux(SpeedyTermBase):
-    """Surface exchange of momentum, heat, and moisture."""
+    """Surface exchange of momentum, heat, and moisture.
+
+    Besides the SPEEDY-internal ``_surface_flux`` diagnostics, this term
+    publishes the package-independent :class:`~jcm.physics.surface.
+    surface_exchange.SurfaceExchange` coupling struct (#754). It sits here —
+    not in a separate publisher term — because at this point in SPEEDY's
+    fixed ordering everything the contract needs is already on the
+    diagnostics dict (convective + large-scale precipitation, downward
+    radiation) and the fluxes are published in the very step they are
+    delivered, from the same ``merged`` values the tendencies use.
+
+    With ``prescribed_fluxes=True`` the term runs in forced mode (#301):
+    the turbulent fluxes are read from the ``prescribed_*`` fields of
+    :class:`~jcm.forcing.ForcingData` instead of the bulk formulae — see
+    :func:`jcm.physics.surface.speedy_surface_flux.get_surface_fluxes`.
+    """
 
     name: ClassVar[str] = "speedy_surface_flux"
     category: ClassVar[str] = "surface"
+    # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
+    # walk can evaluate the tuple.
+    provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
+    output_attrs: ClassVar = SURFACE_EXCHANGE_OUTPUT_ATTRS
 
     def __init__(
         self,
         surface_params: SurfaceFluxParameters | None = None,
         mod_radcon_params: ModRadConParameters | None = None,
+        prescribed_fluxes: bool = False,
     ):
-        """Initialize SpeedySurfaceFlux."""
+        """Initialize SpeedySurfaceFlux.
+
+        Args:
+            surface_params: SPEEDY surface-flux parameters.
+            mod_radcon_params: SPEEDY radiation/convection shared parameters.
+            prescribed_fluxes: Static flag selecting forced mode (#301):
+                replace the bulk-formula turbulent fluxes with the
+                ``prescribed_*`` fields of the run's ``ForcingData``.
+
+        """
         super().__init__()
         # SurfaceFluxParameters contains bools — use Variable
         # for non-differentiable parts.
@@ -464,6 +499,7 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         self.mod_radcon_params = nnx.Param(
             mod_radcon_params or ModRadConParameters.default()
         )
+        self.prescribed_fluxes = prescribed_fluxes
 
     def stable_time_step_minutes(self, coords) -> float | None:
         """Forward-Euler stability limit of the explicit surface drag.
@@ -501,13 +537,85 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         # Use the day-sliced forcing computed by SpeedyForcing
         forcing_2d = diagnostics.get("_forcing_2d", forcing)
 
-        from jcm.physics.surface.speedy_surface_flux import get_surface_fluxes
+        from jcm.physics.surface.speedy_surface_flux import (
+            PrescribedFluxes,
+            get_surface_fluxes,
+        )
+        routine = get_surface_fluxes
+        if self.prescribed_fluxes:
+            missing = [name for name in (
+                "prescribed_sensible_heat_flux", "prescribed_evaporation",
+                "prescribed_stress_u", "prescribed_stress_v",
+            ) if getattr(forcing_2d, name) is None]
+            if missing:
+                raise ValueError(
+                    "SpeedySurfaceFlux(prescribed_fluxes=True) needs the "
+                    f"prescribed surface-flux forcing fields, but {missing} "
+                    "are absent from ForcingData. Supply them via "
+                    "forcing.prescribed_surface_flux (CLI) or set them on "
+                    "the ForcingData directly (coupler door); units/signs "
+                    "follow the surface-exchange contract, "
+                    "docs/source/design/surface_exchange.md."
+                )
+            prescribed = PrescribedFluxes(
+                sensible_heat_flux=forcing_2d.prescribed_sensible_heat_flux,
+                evaporation=forcing_2d.prescribed_evaporation,
+                stress_u=forcing_2d.prescribed_stress_u,
+                stress_v=forcing_2d.prescribed_stress_v,
+            )
+            routine = functools.partial(
+                get_surface_fluxes, prescribed=prescribed)
         tend, data = _call_legacy_speedy(
-            get_surface_fluxes, state, data, params, forcing_2d, terrain,
+            routine, state, data, params, forcing_2d, terrain,
         )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
+        diagnostics[SURFACE_EXCHANGE_KEY] = self._publish_surface_exchange(
+            state, data)
         return tend, diagnostics
+
+    def _publish_surface_exchange(self, state, data) -> SurfaceExchange:
+        """Fill the #754 coupling contract from SPEEDY's delivered fluxes.
+
+        Everything comes from the same ``surface_flux`` grid means the
+        bottom-level tendencies were just computed from (so published ==
+        delivered, in interactive and forced mode alike), plus the
+        convective/large-scale precipitation already on the diagnostics.
+        Unit and sign normalisation to the contract happens here and only
+        here: evaporation/precipitation g -> kg/m2/s, latent heat via
+        SPEEDY's own ``alhc`` [J/g], stress negated from "on the
+        atmosphere" to "into the surface". SPEEDY has no faithful
+        rain/snow split and no per-tile delivered fluxes (the sea tile
+        blends the ice *temperature*, not fluxes), so the optional
+        contract fields stay ``None`` — see
+        docs/source/design/surface_exchange.md.
+        """
+        import jcm.constants as c
+        from jcm.physics.speedy.physical_constants import alhc
+
+        sf = data.surface_flux
+        g_to_kg = 1.0 / _KG_PER_KG_TO_G_PER_KG
+        # Lowest-model-level thermodynamics for the external bulk-flux
+        # algorithms (#301 discussion): moist density and potential
+        # temperature at the full-level pressure sigma_bot * p0 * psa.
+        fsg_bot = data.speedy_coords.fsg[-1]
+        psa = state.normalized_surface_pressure
+        p_bot = fsg_bot * c.p0 * psa
+        t_bot = state.temperature[-1]
+        q_bot = state.specific_humidity[-1]  # kg/kg on the public state
+        return SurfaceExchange(
+            net_heat_flux=sf.hfluxn,
+            sensible_heat_flux=sf.shf,
+            latent_heat_flux=alhc * sf.evap,
+            evaporation=sf.evap * g_to_kg,
+            precipitation=(data.convection.precnv
+                           + data.condensation.precls) * g_to_kg,
+            stress_u=-sf.ustr,
+            stress_v=-sf.vstr,
+            wind_speed=jnp.sqrt(sf.u0 ** 2 + sf.v0 ** 2),
+            air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
+            air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
+        )
 
 
 class SpeedyUpwardLongwaveRadiation(SpeedyTermBase):

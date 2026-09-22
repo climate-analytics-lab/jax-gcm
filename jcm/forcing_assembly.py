@@ -456,6 +456,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_dust(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
+    forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -1008,3 +1009,127 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(aerosol_year_weight=year_weight,
                         aerosol_ann_cycle=ann_cycle)
+
+
+# ---------------------------------------------------------------------------
+# prescribed surface fluxes (forced mode, jax-gcm#301)
+# ---------------------------------------------------------------------------
+
+#: The four flux variables a ``forcing.prescribed_surface_flux`` block must
+#: define — names, units and signs are the surface-exchange contract's
+#: (docs/source/design/surface_exchange.md): sensible heat [W/m²] and
+#: evaporation [kg/m²/s] positive up, stress [N/m²] positive down.
+_PRESCRIBED_FLUX_VARS = (
+    "sensible_heat_flux", "evaporation", "stress_u", "stress_v",
+)
+
+
+def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
+    """Attach forced-mode surface fluxes from ``cfg.forcing.prescribed_surface_flux``.
+
+    No-op when the block is unset. Two mutually exclusive sources:
+
+    - ``constants``: a mapping with all four flux names to scalar values,
+      broadcast to uniform ``(nlon, nlat)`` maps — the constant-flux
+      aquaplanet / smoke-test door;
+    - ``file``: a netCDF already on the model grid carrying all four as
+      variables dimensioned ``(lat, lon)``/``(lon, lat)`` (static) or with
+      a leading ``time`` axis (attached as a ``TimeSeries``: 12 monthly
+      steps align ``WRAP_YEAR`` like the surface climatology, anything
+      else ``BY_DATE``) — the archived-coupler-flux door.
+
+    All four fields are required together: a partially prescribed surface
+    is not a defined mode (the forced terms deliver nothing interactively),
+    so a missing variable raises here rather than surfacing as a confusing
+    ``None``-field error at physics composition. A coupler driving jcm
+    programmatically bypasses this and sets the ``prescribed_*`` fields on
+    ``ForcingData`` directly.
+    """
+    if forcing_cfg is None:
+        return forcing
+    block = forcing_cfg.get("prescribed_surface_flux", None)
+    if block in (None, "", "null"):
+        return forcing
+    constants = block.get("constants", None)
+    path = block.get("file", None)
+    if (constants is None) == (path in (None, "", "null")):
+        raise ValueError(
+            "forcing.prescribed_surface_flux needs exactly one of "
+            "'constants' or 'file'."
+        )
+
+    import jax.numpy as jnp
+
+    nlon, nlat = coords.horizontal.nodal_shape
+    fields = {}
+    if constants is not None:
+        missing = [v for v in _PRESCRIBED_FLUX_VARS if v not in constants]
+        if missing:
+            raise ValueError(
+                "forcing.prescribed_surface_flux.constants is missing "
+                f"{missing}; all of {_PRESCRIBED_FLUX_VARS} are required "
+                "(contract units/signs: "
+                "docs/source/design/surface_exchange.md)."
+            )
+        for var in _PRESCRIBED_FLUX_VARS:
+            fields[var] = jnp.full((nlon, nlat), float(constants[var]))
+        provenance.record_fact("prescribed_surface_flux", "constants")
+    else:
+        import numpy as np
+        import xarray as xr
+
+        from jcm.forcing import (
+            _resolve_align_mode,
+            _time_axis_seconds_from_ds,
+            make_time_series,
+        )
+        path = str(_resolve_data_path(path))
+        with xr.open_dataset(path) as ds:
+            missing = [v for v in _PRESCRIBED_FLUX_VARS if v not in ds]
+            if missing:
+                raise ValueError(
+                    f"prescribed_surface_flux file {path} is missing the "
+                    f"variables {missing}; all of {_PRESCRIBED_FLUX_VARS} "
+                    "are required (contract units/signs: "
+                    "docs/source/design/surface_exchange.md)."
+                )
+            for var in _PRESCRIBED_FLUX_VARS:
+                da = ds[var]
+                spatial = [d for d in da.dims if d != "time"]
+                if sorted(spatial) != ["lat", "lon"]:
+                    raise ValueError(
+                        f"prescribed_surface_flux variable {var!r} in "
+                        f"{path} must be dimensioned (lat, lon) with an "
+                        f"optional leading time axis; got {da.dims}."
+                    )
+                if "time" in da.dims:
+                    da = da.transpose("time", "lon", "lat")
+                else:
+                    da = da.transpose("lon", "lat")
+                if da.shape[-2:] != (nlon, nlat):
+                    raise ValueError(
+                        f"prescribed_surface_flux variable {var!r} has "
+                        f"spatial shape {da.shape[-2:]} (lon, lat) but the "
+                        f"model grid is {(nlon, nlat)}; the file must "
+                        "already be on the model grid."
+                    )
+                values = np.asarray(da.values)
+                if "time" in ds[var].dims:
+                    # Same auto rule as the surface climatology loaders: a
+                    # 12-step monthly file cycles WRAP_YEAR, longer records
+                    # align BY_DATE on their absolute time axis.
+                    fields[var] = make_time_series(
+                        values, _time_axis_seconds_from_ds(ds),
+                        _resolve_align_mode("auto", ds))
+                else:
+                    fields[var] = jnp.asarray(values)
+        provenance.record_fact("prescribed_surface_flux", f"file:{path}")
+        provenance.record_input(path)
+
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(
+        prescribed_sensible_heat_flux=fields["sensible_heat_flux"],
+        prescribed_evaporation=fields["evaporation"],
+        prescribed_stress_u=fields["stress_u"],
+        prescribed_stress_v=fields["stress_v"],
+    )

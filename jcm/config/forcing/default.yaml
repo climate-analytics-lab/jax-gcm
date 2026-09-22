@@ -62,3 +62,19 @@ dust_roughness_file: auto
 # ``oxidants_pd`` climatologies — so a transient oxidants run needs a
 # separately prepared dataset pointed at by such a pattern.
 oxidants_file: auto
+
+# Externally prescribed turbulent surface fluxes for the forced surface mode
+# (jax-gcm#301; compose with ``physics=speedy-forced-flux`` or
+# ``physics=echam-forced-flux``). Exactly one of two sources:
+#   constants: {sensible_heat_flux: <W/m2>, evaporation: <kg/m2/s>,
+#               stress_u: <N/m2>, stress_v: <N/m2>} — uniform maps;
+#   file: <path> — a netCDF already on the model grid with those four
+#               variables, static ``(lat, lon)`` or with a leading time axis
+#               (12 monthly steps cycle like the surface climatology, longer
+#               records align by date).
+# Units/signs are the surface-exchange coupling contract's
+# (docs/source/design/surface_exchange.md): sensible heat and evaporation
+# positive UP, stress positive DOWN (momentum into the surface). ``null``
+# leaves the ``prescribed_*`` ForcingData fields absent, which is an error
+# only if a forced-mode physics preset is composed.
+prescribed_surface_flux: null
