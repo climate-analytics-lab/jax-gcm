@@ -3899,12 +3899,16 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 mock.patch("xarray.open_dataset",
                            side_effect=_open_datetime_stub), \
                 mock.patch("jcm.forcing.read_oxidant_vmr",
-                           return_value={"oh": object(), "no3": object()}), \
+                           return_value={"oh": object(), "no3": object()}) \
+                as read_mock, \
                 mock.patch("jcm.forcing.validate_oxidant_levels"):
             build_forcing(cfg, coords)
 
         # The whole list reached a single open_mfdataset (one product, one axis).
         self.assertEqual(seen["paths"], ["/ox_a.nc", "/ox_b.nc"])
+        # Hydra stores the explicit Python list as ListConfig; it remains a
+        # dated product rather than being mistaken for a scalar climatology.
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "by_date")
 
     def test_oxidants_mixed_time_axes_raise(self):
         """A mixed integer-month + datetime oxidant set is rejected loudly (F2).
@@ -4003,6 +4007,26 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["oxidants_file"],
             ["hf://bundles/t42_l8/oxidants_2000.nc",
              "hf://bundles/t42_l8/oxidants_2001.nc"])
+
+    def test_pyses_scalar_oxidant_climatology_stays_scalar_for_loader(self):
+        """Resolution must retain the scalar climatology alignment contract."""
+        from jcm.forcing import ForcingData
+        from jcm.runners import build_forcing
+        dycore, coords = self._pyses_dycore_and_coords()
+        cfg = self._pyses_cfg(oxidants_file="/oxidants_climatology.nc")
+        base = ForcingData.zeros(nodal_shape=(1, 4))
+        seen = {}
+
+        def _capture(_forcing_file, _dycore, **kw):
+            seen.update(kw)
+            return base
+
+        with mock.patch.object(forcing_assembly, "_resolve_data_path",
+                               side_effect=lambda p: p), \
+                mock.patch("jcm.dycore.pyses.forcing.build_forcing",
+                           side_effect=_capture):
+            build_forcing(cfg, coords, dycore=dycore)
+        self.assertEqual(seen["oxidants_file"], "/oxidants_climatology.nc")
 
     def test_pyses_emissions_year_pattern_expands_before_loader(self):
         """Expand pySES emissions ``{year}`` before the loader (same class as F1).

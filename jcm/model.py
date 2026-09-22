@@ -1412,6 +1412,13 @@ class Model:
         Under tracing neither is available and there is no axis to record.
         """
         if observer_t0_days is not None:
+            # Prepared tables already carry their host-resolved geometry. A
+            # traced exact clock cannot be converted to a Python float here;
+            # retain the legacy value only as optional host metadata. Concrete
+            # clocks still take the mismatch guard below.
+            if (_contains_tracers(initial_time)
+                    or isinstance(observer_t0_days, jax.core.Tracer)):
+                return None
             expected = self._observer_window_start(initial_time)
             if abs(float(observer_t0_days) - expected) > 0.5 / SECONDS_PER_DAY:
                 raise ValueError("observer_t0_days conflicts with initial_time.")

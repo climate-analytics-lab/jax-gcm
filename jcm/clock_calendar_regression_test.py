@@ -87,6 +87,19 @@ def test_end_time_resolves_nonmidnight_exact_seconds():
     assert parse_duration_seconds(duration) == 90_125
 
 
+@pytest.mark.parametrize("kwargs", [
+    {},
+    {"total_time": "1 day", "end_time": "2000-01-02"},
+])
+def test_model_run_requires_exactly_one_duration_or_endpoint(kwargs):
+    from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+    from jcm.physics.held_suarez.utils import get_held_suarez_coords
+
+    model = Model(coords=get_held_suarez_coords(), physics=held_suarez_physics())
+    with pytest.raises(ValueError, match="exactly one"):
+        model.run(**kwargs)
+
+
 def _trajectory(start_time, start_step, outer_steps):
     def step(state, physics, date):
         # The value depends on the authoritative step, making a reset at the

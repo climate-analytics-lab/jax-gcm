@@ -31,7 +31,7 @@ def set_cf_datetime_encoding(ds: xr.Dataset, *names: str) -> xr.Dataset:
     return ds
 
 
-def _time_operations(cell_methods: str) -> set[str]:
+def time_cell_operations(cell_methods: str) -> set[str]:
     """Return every operation declared for the CF time axis."""
     words = cell_methods.replace(":", " : ").split()
     return {
@@ -105,7 +105,7 @@ def monthly_means(ds: xr.Dataset) -> xr.Dataset:
     if not time_vars:
         raise ValueError("Dataset contains no time-dependent variables to average.")
     invalid = [name for name in time_vars
-               if _time_operations(
+               if time_cell_operations(
                    ds[name].attrs.get("cell_methods", "")) != {"mean"}]
     if invalid:
         raise ValueError(
@@ -113,7 +113,7 @@ def monthly_means(ds: xr.Dataset) -> xr.Dataset:
             f"cell_methods='time: mean' on {invalid}."
         )
 
-    durations_ns = (bounds[:, 1] - bounds[:, 0]) / _TICK
+    durations_ms = (bounds[:, 1] - bounds[:, 0]) / _TICK
     month_values = np.unique(interval_months)
     monthly_parts = []
     monthly_bounds = []
@@ -124,11 +124,11 @@ def monthly_means(ds: xr.Dataset) -> xr.Dataset:
         actual_start = bounds[indices, 0].min()
         actual_end = bounds[indices, 1].max()
         monthly_bounds.append((actual_start, actual_end))
-        coverage_ns = durations_ns[indices].sum()
+        coverage_ms = durations_ms[indices].sum()
         full_start = month.astype("datetime64[ms]")
         full_end = (month + np.timedelta64(1, "M")).astype("datetime64[ms]")
-        coverages.append(np.timedelta64(int(coverage_ns), "ms"))
-        fractions.append(float(coverage_ns / ((full_end - full_start) / _TICK)))
+        coverages.append(np.timedelta64(int(coverage_ms), "ms"))
+        fractions.append(float(coverage_ms / ((full_end - full_start) / _TICK)))
 
         variables = {}
         for name in time_vars:
@@ -140,7 +140,7 @@ def monthly_means(ds: xr.Dataset) -> xr.Dataset:
                     "cannot be duration-averaged."
                 )
             weights = xr.DataArray(
-                durations_ns[indices], dims=("time",),
+                durations_ms[indices], dims=("time",),
                 coords={"time": var["time"]})
             valid_weights = weights.where(var.notnull())
             reduced = (var * valid_weights).sum("time", skipna=True) / (
@@ -188,9 +188,9 @@ class MonthlyMeanAccumulator:
         self._month = None
         self._start = None
         self._end = None
-        self._coverage_ns = 0
+        self._coverage_ms = 0
         self._sums = {}
-        self._valid_ns = {}
+        self._valid_duration_ms = {}
         self._templates = {}
         self._static = None
         self._attrs = {}
@@ -216,13 +216,47 @@ class MonthlyMeanAccumulator:
                 "variables."
             )
         invalid = [name for name in variables
-                   if _time_operations(
+                   if time_cell_operations(
                        ds[name].attrs.get("cell_methods", "")) != {"mean"}]
         if invalid:
             raise ValueError(
                 "Monthly aggregation accepts interval means only; missing "
                 f"cell_methods='time: mean' on {invalid}."
             )
+        nonnumeric = [
+            name for name in variables
+            if not (np.issubdtype(ds[name].dtype, np.number)
+                    or np.issubdtype(ds[name].dtype, np.bool_))
+        ]
+        if nonnumeric:
+            raise TypeError(
+                f"Time-dependent variable {nonnumeric[0]!r} is not numeric."
+            )
+
+        # Validate alignment before changing any pending statistics.  A bad
+        # later variable must not partially consume an otherwise valid chunk.
+        for name in variables:
+            if name in self._sums:
+                incoming_dims = tuple(
+                    dim for dim in ds[name].dims if dim != "time"
+                )
+                if incoming_dims != self._sums[name].dims:
+                    raise ValueError(
+                        f"Variable {name!r} changed dimensions or spatial "
+                        "coordinates across streaming chunks."
+                    )
+                try:
+                    xr.align(
+                        self._sums[name],
+                        ds[name].isel(time=0, drop=True),
+                        join="exact",
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        f"Variable {name!r} changed dimensions or spatial "
+                        "coordinates across streaming chunks."
+                    ) from error
+
         # Dropping the dimension also drops the potentially large source time
         # coordinate.  Only true non-time variables/coordinates are retained.
         static = ds.drop_dims("time")
@@ -249,34 +283,32 @@ class MonthlyMeanAccumulator:
             if self._month is None:
                 self._month = month_text
                 self._start = bounds[i, 0]
-            duration_ns = int((bounds[i, 1] - bounds[i, 0]) / _TICK)
+            duration_ms = int((bounds[i, 1] - bounds[i, 0]) / _TICK)
             self._end = bounds[i, 1]
-            self._coverage_ns += duration_ns
+            self._coverage_ms += duration_ms
             for name in variables:
                 value = ds[name].isel(time=i, drop=True)
-                if not (np.issubdtype(value.dtype, np.number)
-                        or np.issubdtype(value.dtype, np.bool_)):
-                    raise TypeError(f"Time-dependent variable {name!r} is not numeric.")
                 valid = value.notnull()
-                contribution = value.fillna(0) * duration_ns
-                valid_duration = valid.astype(np.int64) * duration_ns
+                contribution = value.fillna(0) * duration_ms
+                valid_duration = valid.astype(np.int64) * duration_ms
                 if name not in self._sums:
                     self._sums[name] = contribution
-                    self._valid_ns[name] = valid_duration
+                    self._valid_duration_ms[name] = valid_duration
                     self._templates[name] = dict(value.attrs)
                 else:
                     try:
                         total, contribution = xr.align(
                             self._sums[name], contribution, join="exact")
                         valid_total, valid_duration = xr.align(
-                            self._valid_ns[name], valid_duration, join="exact")
+                            self._valid_duration_ms[name], valid_duration,
+                            join="exact")
                     except ValueError as error:
                         raise ValueError(
                             f"Variable {name!r} changed dimensions or spatial "
                             "coordinates across streaming chunks."
                         ) from error
                     self._sums[name] = total + contribution
-                    self._valid_ns[name] = valid_total + valid_duration
+                    self._valid_duration_ms[name] = valid_total + valid_duration
         if len(emitted) == 1:
             return emitted[0]
         return xr.concat(emitted, dim="time") if emitted else None
@@ -292,7 +324,8 @@ class MonthlyMeanAccumulator:
     def _emit(self) -> xr.Dataset:
         variables = {}
         for name, total in self._sums.items():
-            mean = total / self._valid_ns[name].where(self._valid_ns[name] != 0)
+            valid = self._valid_duration_ms[name]
+            mean = total / valid.where(valid != 0)
             mean.attrs = self._templates[name]
             variables[name] = mean
         midpoint = self._start + (self._end - self._start) // 2
@@ -304,12 +337,12 @@ class MonthlyMeanAccumulator:
                                      np.asarray([[self._start, self._end]]))
         result[self._bounds_name].attrs.update(_TIME_BOUNDS_ATTRS)
         month = np.datetime64(self._month, "M")
-        full_ns = int(((month + np.timedelta64(1, "M")).astype("datetime64[ms]")
+        full_month_ms = int(((month + np.timedelta64(1, "M")).astype("datetime64[ms]")
                        - month.astype("datetime64[ms]")) / _TICK)
         result["time_coverage"] = ("time",
-                                   [np.timedelta64(self._coverage_ns, "ms")])
+                                   [np.timedelta64(self._coverage_ms, "ms")])
         result["time_coverage_fraction"] = (
-            "time", [self._coverage_ns / full_ns])
+            "time", [self._coverage_ms / full_month_ms])
         result.time.attrs.update(self._time_attrs)
         result.time.attrs["bounds"] = self._bounds_name
         result["time_coverage"].attrs.update(
@@ -320,9 +353,9 @@ class MonthlyMeanAccumulator:
 
     def _reset_month(self):
         self._month = self._start = self._end = None
-        self._coverage_ns = 0
+        self._coverage_ms = 0
         self._sums = {}
-        self._valid_ns = {}
+        self._valid_duration_ms = {}
         self._templates = {}
 
     def state_dict(self) -> dict:
@@ -331,10 +364,10 @@ class MonthlyMeanAccumulator:
             "month": self._month,
             "start": None if self._start is None else str(self._start),
             "end": None if self._end is None else str(self._end),
-            "coverage_ns": self._coverage_ns,
+            "coverage_ms": self._coverage_ms,
             "sums": {name: value.to_dict() for name, value in self._sums.items()},
-            "valid_ns": {name: value.to_dict()
-                         for name, value in self._valid_ns.items()},
+            "valid_duration_ms": {name: value.to_dict()
+                                  for name, value in self._valid_duration_ms.items()},
             "templates": self._templates,
             "static": None if self._static is None else self._static.to_dict(),
             "attrs": self._attrs,
@@ -353,11 +386,13 @@ class MonthlyMeanAccumulator:
                       else np.datetime64(state["start"], "ms"))
         obj._end = (None if state["end"] is None
                     else np.datetime64(state["end"], "ms"))
-        obj._coverage_ns = int(state["coverage_ns"])
+        obj._coverage_ms = int(state["coverage_ms"])
         obj._sums = {name: xr.DataArray.from_dict(value)
                      for name, value in state["sums"].items()}
-        obj._valid_ns = {name: xr.DataArray.from_dict(value)
-                         for name, value in state["valid_ns"].items()}
+        obj._valid_duration_ms = {
+            name: xr.DataArray.from_dict(value)
+            for name, value in state["valid_duration_ms"].items()
+        }
         obj._templates = state["templates"]
         obj._static = (None if state["static"] is None
                        else xr.Dataset.from_dict(state["static"]))
@@ -366,11 +401,11 @@ class MonthlyMeanAccumulator:
         obj._bounds_name = state.get("bounds_name", "time_bounds")
         names = state.get("variable_names")
         obj._variable_names = None if names is None else set(names)
-        if set(obj._sums) != set(obj._valid_ns):
+        if set(obj._sums) != set(obj._valid_duration_ms):
             raise ValueError("Accumulator state has inconsistent variable statistics.")
         if obj._month is None:
-            if obj._sums or obj._coverage_ns or obj._start is not None or obj._end is not None:
+            if obj._sums or obj._coverage_ms or obj._start is not None or obj._end is not None:
                 raise ValueError("Empty accumulator state contains pending statistics.")
-        elif obj._start is None or obj._end is None or obj._coverage_ns <= 0:
+        elif obj._start is None or obj._end is None or obj._coverage_ms <= 0:
             raise ValueError("Pending accumulator state is missing its interval metadata.")
         return obj

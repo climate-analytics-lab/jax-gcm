@@ -75,16 +75,6 @@ def _has_cell_method(existing: str, requested: str) -> bool:
     return normalize(requested) in normalize(existing)
 
 
-def _time_cell_operations(cell_methods: str) -> set[str]:
-    """Extract every operation following a CF ``time:`` cell method."""
-    words = cell_methods.replace(":", " : ").split()
-    return {
-        words[index + 2]
-        for index in range(len(words) - 2)
-        if words[index:index + 2] == ["time", ":"]
-    }
-
-
 def _apply_term_output_attrs(ds, physics):
     """Stamp per-term ``output_attrs`` onto matching variables of ``ds`` (#740).
 
@@ -529,7 +519,7 @@ class ModelPredictions:
             for var in ds.data_vars.values():
                 if "time" in var.dims and var.name != "time_bounds":
                     existing = var.attrs.get("cell_methods", "")
-                    operations = _time_cell_operations(existing)
+                    operations = temporal_aggregation.time_cell_operations(existing)
                     if operations - {"mean"}:
                         raise ValueError(
                             f"Variable {var.name!r} declares incompatible "

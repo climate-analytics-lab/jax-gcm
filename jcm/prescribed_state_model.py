@@ -106,6 +106,8 @@ class PrescribedStatePredictions:
 
         from jcm import cf_metadata
         from jcm import constants as c
+        from jcm.predictions import output_time_labels
+        from jcm.temporal_aggregation import set_cf_datetime_encoding
 
         # Hardcoded positional dim names matching the prescribed-mode
         # vmap layout: (time, level, lon, lat) for column variables,
@@ -145,7 +147,7 @@ class PrescribedStatePredictions:
                     arr = np.asarray(v)
                     data_vars[f"diag.{k}"] = (_dims_for(arr), arr)
 
-        host_times = jax.device_get(self.times).to_datetime64()
+        host_times = output_time_labels(self.times)
         ds = xr.Dataset(
             data_vars=data_vars,
             coords={"time": np.asarray(host_times)},
@@ -168,7 +170,7 @@ class PrescribedStatePredictions:
             # self-describing.
             ds = cf_metadata.orient_surface_first(ds)
             ds = cf_metadata.apply_cf_attributes(ds)
-        return ds
+        return set_cf_datetime_encoding(ds, "time")
 
 
 class PrescribedStateModel:

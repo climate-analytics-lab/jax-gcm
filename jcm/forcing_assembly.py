@@ -24,6 +24,8 @@ from __future__ import annotations
 import functools
 import logging
 
+from omegaconf import ListConfig
+
 from jcm import provenance
 from jcm.data import input_resolution as ir
 from jcm.data import mirror_manifest as mm
@@ -930,7 +932,7 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     if not paths:
         return forcing
     raw_oxidants = forcing_cfg.get("oxidants_file", None)
-    dated_product = (isinstance(raw_oxidants, (list, tuple))
+    dated_product = (isinstance(raw_oxidants, (list, tuple, ListConfig))
                      or (isinstance(raw_oxidants, str)
                          and "{year}" in raw_oxidants))
 

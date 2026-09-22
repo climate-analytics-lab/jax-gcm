@@ -501,6 +501,13 @@ Run and save durations must divide exactly into model steps, and the run must
 contain complete save intervals. Averaged save intervals must contain an even
 number of seconds so their midpoint fits the whole-second model clock.
 
+Seasonal physics now evaluates January 1 at phase zero in every year. The v2
+default instead inherited an epoch-dependent offset (seven days on
+2000-01-01), so one-day ECHAM and longer climate fingerprints change even
+though the physics equations do not. The ECHAM regression shift was isolated
+by running the v3 integrator with the legacy phase before updating that
+reference; see :doc:`design/datetime_v3_scope`.
+
 Interval means include ``time_bounds`` and midpoint labels. Monthly means
 weight each contributing interval by its duration; snapshots cannot be
 converted into interval means after the run. Observers keep their own

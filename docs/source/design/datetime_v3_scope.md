@@ -288,6 +288,13 @@ SPEEDY solar/ozone at fixed phase separately from date-to-phase tests, then run
 seasonal surface/radiation checks and climate regressions. Do not update all
 reference data automatically merely because the date tests pass.
 
+The ECHAM one-day regression was isolated before its reference was updated:
+the v3 integrator with the exact legacy ``days % 365`` phase reproduced the
+old fingerprint, while the Gregorian January-1 phase produced the changed
+winds. This identifies the reference shift as the intended removal of #449's
+seven-day epoch offset, rather than an integration or output-label change. Only
+that affected reference was regenerated; its cross-runner tolerance remains 3%.
+
 ## jax-esm migration against PR #125
 
 The PR's protocol-based component API and authoritative coupling step counter

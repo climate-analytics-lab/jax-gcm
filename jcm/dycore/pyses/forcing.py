@@ -351,11 +351,17 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
               if len(paths) > 1 else xr.open_dataset(paths[0]))
         with ds:
             lon, lat = _reader_grid(ds)
-            # ``auto`` (matching the spectral ``_attach_oxidants``) keeps a lone
-            # 12-month file WRAP_YEAR but reads a concatenated multi-year
-            # transient set BY_DATE — without it the yearly ``{year}`` product
-            # would be mis-indexed as a 24-month wrap-year climatology.
-            vmr = read_oxidant_vmr(ds, nlev=nlev, align_mode="auto")
+            # Match the spectral ``_attach_oxidants`` contract: a scalar path
+            # is the standard repeating climatology, while a list denotes an
+            # explicitly dated product (including a one-year, 12-record list).
+            # Inferring from record count or datetime coordinates would make a
+            # normal dated climatology stop repeating after its source year.
+            vmr = read_oxidant_vmr(
+                ds, nlev=nlev,
+                align_mode=("by_date" if isinstance(oxidants_file,
+                                                     (list, tuple))
+                            else "wrap_year"),
+            )
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 

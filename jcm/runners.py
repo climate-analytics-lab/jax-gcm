@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import jax
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 from jcm import provenance
 from jcm.data import mirror_manifest as mm
@@ -1184,6 +1184,19 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     # never expand); a ``{year}`` there is rejected loudly by
     # ``_reject_year_pattern`` on both paths rather than reaching
     # ``open_dataset`` as a literal-brace file-not-found.
+    oxidants_paths = _resolve_oxidant_paths(_forcing_cfg)
+    raw_oxidants = _forcing_cfg.get("oxidants_file", None)
+    dated_oxidants = (
+        isinstance(raw_oxidants, (list, tuple, ListConfig))
+        or (isinstance(raw_oxidants, str) and "{year}" in raw_oxidants)
+    )
+    # Preserve the user-facing scalar/list distinction through resolution.
+    # The pySES attachment uses a scalar as the known repeating climatology
+    # contract, while an explicit list or ``{year}`` expansion is BY_DATE.
+    oxidants_input = (
+        oxidants_paths if dated_oxidants
+        else (oxidants_paths[0] if oxidants_paths else None)
+    )
     forcing = pyses_build_forcing(
         str(file), dycore,
         emissions_file=_resolve_pyses_emission_paths(_forcing_cfg),
@@ -1195,7 +1208,7 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             _forcing_cfg.get(key, None), key))
            for key in ("dust_preferential_file", "dust_soil_types_file",
                        "dust_regions_file", "dust_roughness_file")},
-        oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
+        oxidants_file=oxidants_input,
         ozone_file=_resolve_data_path(ozone_file),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the

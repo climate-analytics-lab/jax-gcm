@@ -112,6 +112,29 @@ class TestPrescribedStateModel(unittest.TestCase):
         )
         self.assertEqual(ds.sizes["time"], 2)
 
+    def test_to_xarray_uses_shared_exact_time_serialization(self):
+        import numpy as np
+
+        model = PrescribedStateModel(
+            physics=held_suarez_physics(), coords=self.coords,
+            dt_seconds=500,
+            start_time="2000-01-01T00:00:00",
+        )
+        ds = model.run([self.state] * 2).to_xarray()
+
+        assert ds.time.dtype == np.dtype("datetime64[ms]")
+        np.testing.assert_array_equal(
+            ds.time.values,
+            np.array(
+                ["2000-01-01T00:00:00.000", "2000-01-01T00:08:20.000"],
+                dtype="datetime64[ms]",
+            ),
+        )
+        assert ds.time.encoding["units"] == (
+            "seconds since 1970-01-01 00:00:00"
+        )
+        assert ds.time.encoding["calendar"] == "proleptic_gregorian"
+
     def test_to_xarray_physics_data_dict_handling(self):
         # Private ("_"-prefixed) diagnostics are dropped; struct-valued
         # entries expand via asdict; plain arrays serialise directly.

@@ -649,11 +649,11 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(cloud_scheme="2m", aerosol_module="jam",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         sw = "jam_optics.aod_sw_per_band"
         lw = "jam_optics.aod_lw_per_band"
         self.assertIn(sw, ds.data_vars)
@@ -686,11 +686,11 @@ class Macv2NamespaceOutputTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(aerosol_module="macv2sp",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         # Namespaced, CF-named MACv2-SP output present...
         self.assertIn("macsp.od550aer", ds.data_vars)
         self.assertIn("macsp.aod_anthropogenic", ds.data_vars)

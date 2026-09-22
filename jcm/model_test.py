@@ -1563,6 +1563,33 @@ class TestObserversUnderJit(unittest.TestCase):
             self.assertGreater(value, 200.0)
             self.assertLess(value, 320.0)
 
+    def test_prepared_tables_allow_traced_clock_with_explicit_legacy_t0(self):
+        """Prepared geometry must not force a traced clock onto the host."""
+        from jcm.forcing import default_forcing
+
+        model, state = self._seed_state()
+        carry = model.physics_carry
+        kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
+        tables = model.prepare_observers(model.start_time, **kw)
+        forcing = default_forcing(self.coords.horizontal)
+        t0_days = model._observer_window_start(model.start_time)
+
+        @jax.jit
+        def sample(initial_time):
+            _, predictions = model.run_from_state_with_carry(
+                state, forcing,
+                initial_physics_state=carry,
+                initial_time=initial_time,
+                initial_step=jnp.int32(0),
+                observer_xs=tables,
+                observer_t0_days=t0_days,
+                **kw,
+            )
+            return jnp.nanmean(predictions.observations[0]["temperature"])
+
+        value = float(sample(model.start_time))
+        self.assertTrue(np.isfinite(value))
+
     def test_tables_built_for_another_window_are_rejected(self):
         """A length mismatch is caught here, not deep inside the scan."""
         model, state = self._seed_state()
@@ -1626,3 +1653,11 @@ class TestObserversUnderJit(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(implicit.observations[0]["temperature"]),
             np.asarray(explicit.observations[0]["temperature"]))
+
+    def test_concrete_legacy_window_start_must_match_exact_clock(self):
+        model, state = self._seed_state()
+        with self.assertRaisesRegex(ValueError, "conflicts with initial_time"):
+            model.run(
+                state, save_interval=1 / 48.0, total_time=1 / 48.0,
+                observer_t0_days=(
+                    model._observer_window_start(model.start_time) + 1.0))

@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.forcing import BY_DATE, ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY
+from jcm.forcing import BY_DATE, ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY, WRAP_YEAR
 
 # Tiny source grid and a handful of scattered "columns" inside it.
 _LON = np.arange(0.0, 360.0, 45.0)            # 8
@@ -154,7 +154,8 @@ class AttachJamForcingTest(unittest.TestCase):
         # Distinct per-level values so we can check levels stay level-for-level
         # through the horizontal interpolation.
         base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
-        data = np.broadcast_to(base * 1.0e-9,
+        month = np.arange(1, 13, dtype=float).reshape(12, 1, 1, 1)
+        data = np.broadcast_to(month * base * 1.0e-9,
                                (12, nlev, _LAT.size, _LON.size)).copy()
         ds = xr.Dataset(
             {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
@@ -169,15 +170,47 @@ class AttachJamForcingTest(unittest.TestCase):
         self.assertEqual(sorted(forcing.oxidant_vmr), ["h2o2", "no3", "o3", "oh"])
         oh = forcing.oxidant_vmr["oh"]
         self.assertEqual(oh.values.shape, (12, nlev, 1, _NCOL))
+        self.assertEqual(int(oh.align_mode), WRAP_YEAR)
         np.testing.assert_allclose(
             np.asarray(oh.values[0, :, 0, 0]),
             np.arange(1, nlev + 1) * 1.0e-9, rtol=1e-6)
+        # A scalar oxidant file is the standard monthly climatology even when
+        # its coordinate contains real dates. It must repeat seasonally rather
+        # than clamp after the source year.
+        from jcm.model import DateData
+        import jax_datetime as jdt
+        jan_2014 = DateData.set_date(jdt.to_datetime("2014-01-15"))
+        jan_2015 = DateData.set_date(jdt.to_datetime("2015-01-15"))
+        jul_2015 = DateData.set_date(jdt.to_datetime("2015-07-15"))
+        jan_source = np.asarray(forcing.select(jan_2014).oxidant_vmr["oh"])
+        np.testing.assert_allclose(
+            np.asarray(forcing.select(jan_2015).oxidant_vmr["oh"]), jan_source)
+        self.assertFalse(np.allclose(
+            np.asarray(forcing.select(jul_2015).oxidant_vmr["oh"]), jan_source,
+            rtol=1e-6, atol=0.0))
+
+    def test_single_year_oxidant_list_is_explicitly_dated(self):
+        """A one-file yearly product remains BY_DATE despite having 12 rows."""
+        nlev = 4
+        data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
+        ds = xr.Dataset(
+            {f"{name}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                                  {"units": "mole/mole"})
+             for name in ("OH", "NO3", "O3", "H2O2")},
+            coords={"time": _TIME, "mlev": np.arange(1, nlev + 1),
+                    "lat": _LAT, "lon": _LON},
+        )
+        ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "oxid_2014.nc", ds)
+            forcing = _attach(oxidants_file=[path])
+        self.assertEqual(int(forcing.oxidant_vmr["oh"].align_mode), BY_DATE)
 
     def test_oxidants_year_list_concatenated_on_columns(self):
         # A ``{year}`` expansion hands attach_jam_forcing the yearly files of ONE
         # transient product as a list; they must open together (open_mfdataset,
         # by-coords) into a single concatenated time axis and read BY_DATE
-        # (align_mode="auto"), mirroring the spectral _attach_oxidants — not a
+        # (align_mode="by_date"), mirroring the spectral _attach_oxidants — not a
         # 24-month wrap-year climatology. Two 12-month yearly files -> 24 steps.
         from jcm.forcing import BY_DATE
         nlev = 4

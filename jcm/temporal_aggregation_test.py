@@ -133,6 +133,32 @@ def test_streaming_chunk_resume_matches_batch_and_retains_only_statistics():
         changed.update(shifted)
 
 
+def test_rejected_streaming_chunk_does_not_mutate_pending_statistics():
+    daily = _daily("2000-01-01", "2000-01-05")
+    daily["zzz"] = ("time", np.arange(daily.sizes["time"], dtype=float),
+                    {"cell_methods": "time: mean"})
+    accumulator = temporal_aggregation.MonthlyMeanAccumulator()
+    accumulator.update(daily.isel(time=slice(0, 2)))
+    before = accumulator.state_dict()
+
+    invalid = daily.isel(time=slice(2, 4)).copy()
+    invalid["zzz"] = ("time", np.array(["bad", "chunk"]),
+                      {"cell_methods": "time: mean"})
+    with pytest.raises(TypeError, match="'zzz'.*not numeric"):
+        accumulator.update(invalid)
+
+    assert accumulator.state_dict() == before
+
+    changed_dims = daily.isel(time=slice(2, 4)).copy()
+    changed_dims["air"] = changed_dims.air.expand_dims(
+        station=changed_dims.station
+    ).transpose("time", "station")
+    with pytest.raises(ValueError, match="changed dimensions"):
+        accumulator.update(changed_dims)
+
+    assert accumulator.state_dict() == before
+
+
 def test_half_second_midpoint_and_dates_beyond_nanosecond_range_are_exact():
     bounds = np.array([["2500-01-01T00:00:00.000",
                         "2500-01-01T00:00:01.000"]],

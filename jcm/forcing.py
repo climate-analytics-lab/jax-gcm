@@ -1031,6 +1031,11 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     idx_daily = _daily_climatology_index(ts.times, date)
     idx_date = _by_date_index(ts.times, date)
 
+    # Legacy WRAP_YEAR also accepts arbitrary phase-bin tables (e.g. four
+    # equal seasonal bins). Those retain equal fractional-year spacing;
+    # they do not represent civil months. Use the explicit monthly/daily
+    # modes for dated climatology semantics; standard lengths below also
+    # receive those semantics through the compatibility mode.
     equal_bin_idx = jnp.floor(date.tyear() * n_time).astype(jnp.int32)
     legacy_idx = jnp.where(n_time == 12, idx_month,
                            jnp.where((n_time == 365) | (n_time == 366),
@@ -1152,16 +1157,17 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
 
     The fields must already be on the model horizontal grid: this does **no**
     regridding (use :mod:`jcm.data.emissions.prepare` to conservatively remap a
-    source-grid file first). Monthly data uses the same wrap-year/by-date time
-    alignment as the other forcing fields, so a 12-month climatology wraps and a
-    multi-year axis aligns by date.
+    source-grid file first). With ``auto``, nominal integer month axes repeat;
+    real datetime axes stay dated even when they contain twelve records.
+    Declare real-dated climatologies explicitly with ``monthly_climatology``.
+    Inputs are flux rates, not interval totals. Bounds-aware conversion of
+    interval totals at ingestion remains tracked in #876.
     """
     emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
     if not emis_names:
         return None
     has_time = any("time" in ds[n].dims for n in emis_names)
-    # The shipped emissions contract defines a single 12-record file as a
-    # monthly climatology. Concatenated/multi-year products remain dated.
+    # Only nominal integer month coordinates imply a monthly climatology.
     effective_mode = ("monthly_climatology" if align_mode == "auto"
                       and _is_nominal_month_axis(ds) else align_mode)
     mode = _resolve_align_mode(effective_mode, ds) if has_time else BY_DATE
@@ -1192,7 +1198,8 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     3-D (``lev, lon, lat`` volume); the non-time axes are kept in file order
     (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
     reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
-    regridding here — use :mod:`jcm.data.emissions.prepare`).
+    regridding here — use :mod:`jcm.data.emissions.prepare`). Inputs are flux
+    rates; bounds-aware interval-total conversion remains tracked in #876.
     """
     prefix = "aero_emis_"
     names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
