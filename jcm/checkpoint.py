@@ -36,6 +36,7 @@ from pathlib import Path
 
 import flax.serialization
 import jax
+import jax_datetime as jdt
 import numpy as np
 
 
@@ -49,7 +50,9 @@ logger = logging.getLogger(__name__)
 #: 1 — named arrays, ``jcm`` version, physics-carry struct fields and the
 #:     dycore tracer set; every mass mixing ratio stored as the physical
 #:     kg/kg value (the contract PR #824 settled).
-SCHEMA_VERSION = 1
+# 2 — exact Gregorian run clock and its origin/timestep. Older states may
+# be imported as initial conditions, but cannot resume a different season.
+SCHEMA_VERSION = 2
 
 #: Schema of a file with no stamp: anything written before this policy.
 _UNSTAMPED_SCHEMA = 0
@@ -254,7 +257,7 @@ def _prognostic_carry_slots(model) -> list[str]:
     return [str(key) for key in (declared() if callable(declared) else declared)]
 
 
-def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
+def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
     """Persist the model's current dycore + physics state to ``path``.
 
     Writes schema ``SCHEMA_VERSION``: every state array under its pytree
@@ -267,8 +270,8 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
             ``physics_carry`` have been populated, either by a
             prior ``run`` / ``resume`` call or by ``bootstrap_state``.
         path: Output file path (parent directories are created).
-        elapsed_days: Sim-day count to record alongside the state so a
-            chunked driver can resume at the correct offset.
+        elapsed_days: Optional consistency assertion; the saved count is
+            derived from the exact model clock, in elapsed days.
 
     Returns:
         ``Path(path)`` for chaining.
@@ -281,10 +284,27 @@ def save_checkpoint(model, path, *, elapsed_days: float) -> Path:
         )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    run_state = model.run_state
+    if run_state is None:
+        raise ValueError("Model has no exact run clock to checkpoint.")
+    delta = run_state.time - model.start_time
+    clock_elapsed = int(delta.days) + int(delta.seconds) / 86400.0
+    if elapsed_days is not None and not np.isclose(
+            float(elapsed_days), clock_elapsed, rtol=0, atol=1e-9):
+        raise ValueError("elapsed_days does not match the model's exact run clock: "
+                         f"{elapsed_days} vs {clock_elapsed}.")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "jcm_version": _jcm_version(),
-        "elapsed_days": float(elapsed_days),
+        "elapsed_days": clock_elapsed,
+        "clock": {
+            "start_days": np.asarray(model.start_time.delta.days),
+            "start_seconds": np.asarray(model.start_time.delta.seconds),
+            "days": np.asarray(run_state.time.delta.days),
+            "seconds": np.asarray(run_state.time.delta.seconds),
+            "step": np.asarray(run_state.step),
+            "dt_seconds": float(model.dt_si.m),
+        },
         "dycore": dict(_named_leaves(model.dycore_state)),
         "physics": dict(_named_leaves(model.physics_carry)),
         "physics_fields": _struct_fields(model.physics_carry),
@@ -608,7 +628,8 @@ def _load_unstamped(
     return groups[0], groups[1]
 
 
-def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
+def load_checkpoint(model, path, *, unstamped_scale=None,
+                    as_initial_condition=False) -> float:
     """Restore ``dycore_state`` + ``physics_carry`` from ``path``.
 
     The model must already have been bootstrapped (e.g. by an earlier
@@ -645,6 +666,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
             file's unit convention, or ``{}`` to assert it needs no
             rescale. See the compatibility policy in
             ``docs/source/design/checkpoint_compatibility.md``.
+        as_initial_condition: Import the fields at this model's start time,
+            resetting the exact clock and dycore counter. Required for files
+            predating the exact-clock schema; their seasonal interpretation
+            cannot be continued as a v3 run.
 
     Returns:
         The ``elapsed_days`` count recorded when the checkpoint was
@@ -695,6 +720,47 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
             "newer schema may store values this version would misread. See "
             f"{_POLICY_DOC}."
         )
+
+    if schema < 2 and not as_initial_condition:
+        raise ValueError(
+            f"Checkpoint {path} has no exact Gregorian clock (schema {schema}). "
+            "It cannot resume a v3 run. Import it with "
+            "as_initial_condition=True to start a new run; an unstamped file "
+            "also requires unstamped_scale to declare its unit convention.")
+
+    if as_initial_condition:
+        restored_time = model.start_time
+        restored_step = np.int32(0)
+    else:
+        clock = raw.get("clock")
+        required = {"start_days", "start_seconds", "days", "seconds", "step",
+                    "dt_seconds"}
+        if not isinstance(clock, Mapping) or not required.issubset(clock):
+            raise ValueError(f"Checkpoint {path} has an incomplete exact clock.")
+        for name in required - {"dt_seconds"}:
+            value = np.asarray(clock[name])
+            if (value.shape != () or value.dtype.kind not in "iu"
+                    or not np.iinfo(np.int32).min <= int(value) <= np.iinfo(np.int32).max):
+                raise ValueError(f"Checkpoint clock {name!r} must be a scalar integer.")
+        if not (0 <= int(clock["seconds"]) < 86400
+                and 0 <= int(clock["start_seconds"]) < 86400
+                and int(clock["step"]) >= 0):
+            raise ValueError("Checkpoint clock is not normalized or has a negative step.")
+        if (int(clock["start_days"]) != int(model.start_time.delta.days)
+                or int(clock["start_seconds"]) != int(model.start_time.delta.seconds)
+                or float(clock["dt_seconds"]) != float(model.dt_si.m)):
+            raise ValueError("Checkpoint start_time/timestep does not match the model; "
+                             "use as_initial_condition=True for a new experiment.")
+        restored_time = jdt.Datetime(jdt.Timedelta(
+            days=np.asarray(clock["days"], dtype=np.int32),
+            seconds=np.asarray(clock["seconds"], dtype=np.int32)))
+        restored_step = np.asarray(clock["step"], dtype=np.int32)
+        delta = restored_time - model.start_time
+        elapsed_seconds = int(delta.days) * 86400 + int(delta.seconds)
+        if (elapsed_seconds != int(restored_step) * int(model.dt_si.m)
+                or not np.isclose(float(raw["elapsed_days"]),
+                                  elapsed_seconds / 86400.0, rtol=0, atol=1e-9)):
+            raise ValueError("Checkpoint clock, step and elapsed_days disagree.")
 
     dycore_template = _named_leaves(model.dycore_state)
     physics_template = _named_leaves(model.physics_carry)
@@ -763,5 +829,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None) -> float:
         dycore_treedef, dycore_leaves)
     restored_physics_carry = jax.tree_util.tree_unflatten(
         physics_treedef, physics_leaves)
-    model.restore_state(restored_dycore_state, restored_physics_carry)
+    if as_initial_condition:
+        restored_dycore_state = model.dycore.with_sim_time(
+            restored_dycore_state,
+            np.zeros_like(model.dycore.sim_time(restored_dycore_state)))
+    model.restore_state(restored_dycore_state, restored_physics_carry,
+                        time=restored_time, step=restored_step)
     return float(np.asarray(raw["elapsed_days"]))

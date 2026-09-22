@@ -27,7 +27,7 @@ from jax.tree_util import tree_map
 
 from dinosaur.coordinate_systems import CoordinateSystem
 
-from jcm.date import DEFAULT_CALENDAR, DateData
+from jcm.date import DateData, SECONDS_PER_DAY, to_datetime
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
     Physics,
@@ -144,9 +144,10 @@ class PrescribedStatePredictions:
                     arr = np.asarray(v)
                     data_vars[f"diag.{k}"] = (_dims_for(arr), arr)
 
+        host_times = jax.device_get(self.times).to_datetime64()
         ds = xr.Dataset(
             data_vars=data_vars,
-            coords={"time": np.asarray(self.times)},
+            coords={"time": np.asarray(host_times)},
         )
 
         # Data is still top-first here. Bring it into the file convention.
@@ -187,12 +188,11 @@ class PrescribedStateModel:
         coords: CoordinateSystem,
         terrain: TerrainData | None = None,
         dt_seconds: float = 1800.0,
-        start_date: jdt.Datetime | None = None,
-        calendar: str = DEFAULT_CALENDAR,
+        start_time: jdt.Datetime | str | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions).
 
-        ``start_date`` and ``calendar`` mirror :class:`jcm.model.Model` so
+        ``start_time`` mirrors :class:`jcm.model.Model` so
         each prescribed state can collapse ``TimeSeries`` forcing leaves
         (sea ice, SST, ozone climatology, ...) to the slice valid at that
         state's ``sim_time`` before physics is evaluated. Without this,
@@ -204,9 +204,14 @@ class PrescribedStateModel:
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-        self.dt_seconds = float(dt_seconds)
-        self.start_date = start_date if start_date is not None else jdt.to_datetime("2000-01-01")
-        self.calendar = calendar
+        if not jnp.isfinite(float(dt_seconds)) or float(dt_seconds) <= 0:
+            raise ValueError("dt_seconds must be finite and positive.")
+        if float(dt_seconds) != round(float(dt_seconds)):
+            raise ValueError("dt_seconds must be representable as whole seconds.")
+        self.dt_seconds = int(dt_seconds)
+        self.start_time = to_datetime(
+            "2000-01-01" if start_time is None else start_time,
+            name="start_time")
         self.physics.cache_coords(coords)
         # Hand the timestep down to the composable-physics container so its
         # terms read a single ``dt`` source — mirrors the wiring in ``Model``
@@ -226,7 +231,8 @@ class PrescribedStateModel:
             states: List of ``PhysicsState`` snapshots, or a single
                 ``PhysicsState`` whose leading axis is time.
             forcing: Surface forcing; defaults to aquaplanet from ``coords``.
-            times: Optional days-since-start array.
+            times: Optional fixed-duration days since ``start_time``. Output
+                labels are exact :class:`jax_datetime.Datetime` values.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -244,24 +250,22 @@ class PrescribedStateModel:
 
         physics = self.physics
         terrain = self.terrain
-        start_date = self.start_date
-        calendar = self.calendar
+        start_time = self.start_time
         dt_seconds = self.dt_seconds
 
-        # ``times`` is days-since-``start_date``; convert to sim_time
+        # ``times`` is days-since-``start_time``; convert to sim_time
         # seconds so ``_date_for`` matches ``Model.date_from_sim_time``.
         sim_times = jnp.asarray(times) * 86400.0
 
         def _date_for(sim_time):
             sim_time = jax.lax.stop_gradient(sim_time)
             return DateData.set_date(
-                model_time=start_date + jdt.Timedelta(
-                    days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                    seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
+                model_time=start_time + jdt.Timedelta(
+                    days=jnp.floor(sim_time / SECONDS_PER_DAY).astype(jnp.int32),
+                    seconds=jnp.round(sim_time % SECONDS_PER_DAY).astype(jnp.int32),
                 ),
                 model_step=jnp.int32(sim_time / dt_seconds),
                 dt_seconds=dt_seconds,
-                calendar=calendar,
             )
 
         def step(state, sim_time):
@@ -269,7 +273,7 @@ class PrescribedStateModel:
             # Collapse any TimeSeries forcing leaves to the slice valid
             # at this state's sim_time (same clock as
             # Model.date_from_sim_time).
-            forcing_now = forcing.select(_date_for(sim_time), calendar=calendar)
+            forcing_now = forcing.select(_date_for(sim_time))
             return physics.compute_tendencies(clamped, forcing_now, terrain)
 
         @jax.jit
@@ -277,6 +281,10 @@ class PrescribedStateModel:
             return jax.vmap(step)(states, sim_times)
 
         tendencies, physics_data = vmapped()
+        exact_times = start_time + jdt.Timedelta(
+            days=jnp.floor(sim_times / SECONDS_PER_DAY).astype(jnp.int32),
+            seconds=jnp.round(sim_times % SECONDS_PER_DAY).astype(jnp.int32),
+        )
         # Carry the TOA-first hybrid (a, b) interface tables so ``to_xarray``
         # can write real surface-first sigma coordinates + CF metadata (#739).
         from jcm import cf_metadata
@@ -285,7 +293,7 @@ class PrescribedStateModel:
             states=states,
             tendencies=tendencies,
             physics_data=physics_data,
-            times=times,
+            times=exact_times,
             a_boundaries_pa=a_half,
             b_boundaries=b_half,
         )

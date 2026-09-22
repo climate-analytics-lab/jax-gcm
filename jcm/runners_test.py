@@ -982,7 +982,7 @@ class TestEmissionsConfig(unittest.TestCase):
         from omegaconf import open_dict
 
         from jcm.date import DateData
-        from jcm.forcing import BY_DATE, WRAP_YEAR, TimeSeries
+        from jcm.forcing import BY_DATE, MONTHLY_CLIMATOLOGY, TimeSeries
         from jcm.runners import build_forcing
         coords = self._coords()
         nlon, nlat = coords.horizontal.nodal_shape
@@ -1029,7 +1029,7 @@ class TestEmissionsConfig(unittest.TestCase):
         # WRAP_YEAR over 12 — not one shared axis.
         self.assertEqual(int(bb.align_mode), BY_DATE)
         self.assertEqual(bb.values.shape[0], 24)
-        self.assertEqual(int(an.align_mode), WRAP_YEAR)
+        self.assertEqual(int(an.align_mode), MONTHLY_CLIMATOLOGY)
         self.assertEqual(an.values.shape[0], 12)
         # No NaN fill (the outer-join corruption mode).
         self.assertFalse(bool(np.isnan(np.asarray(bb.values)).any()))
@@ -1038,9 +1038,8 @@ class TestEmissionsConfig(unittest.TestCase):
         # of 2001 (200106) and climatology month index 6 (16).
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime("2001-07-15")),
-            calendar="gregorian")
-        sel = f.select(date, calendar="gregorian").anthropogenic_emissions
+                jdt.to_datetime("2001-07-15")))
+        sel = f.select(date).anthropogenic_emissions
         self.assertAlmostEqual(
             float(np.asarray(sel["emis_biomass_burning_bc"])[0, 0]), 200106.0)
         self.assertAlmostEqual(
@@ -1197,7 +1196,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
 
     def test_cfg_populates_all_three_fields_nonzero(self):
         import tempfile
-        from jcm.forcing import WRAP_YEAR, TimeSeries
+        from jcm.forcing import WRAP_YEAR, MONTHLY_CLIMATOLOGY, TimeSeries
         from jcm.runners import build_forcing
         coords = self._coords()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1220,7 +1219,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             (f.oxidant_vmr["o3"], (12, nlev, nlon, nlat)),
         ]:
             self.assertIsInstance(leaf, TimeSeries)
-            self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+            self.assertIn(int(leaf.align_mode), (WRAP_YEAR, MONTHLY_CLIMATOLOGY))
             self.assertEqual(leaf.values.shape, shape)
             self.assertGreater(float(np.abs(np.asarray(leaf.values)).min()),
                                0.0)
@@ -1432,8 +1431,11 @@ class TestModeDispatch(unittest.TestCase):
                     params=None,
                     to_xarray=lambda: dataset,
                 )
+                import jax_datetime as jdt
                 model = types.SimpleNamespace(
                     dt_si=types.SimpleNamespace(m=1800.0),
+                    start_time=jdt.to_datetime("2000-01-01"),
+                    run_state=types.SimpleNamespace(time=jdt.to_datetime("2000-01-02")),
                     run=mock.Mock(return_value=predictions),
                 )
                 cfg = _compose([
@@ -1597,7 +1599,7 @@ class TestModeDispatch(unittest.TestCase):
             cfg = _compose([
                 "physics=held_suarez",
                 "grid=held_suarez_t31_l8",
-                "run.time_step=180",
+                "run.time_step=36",
                 "run.total_time=1.2",
                 "run.save_interval=0.3",
                 "run.chunk_days=0.3",
@@ -2599,16 +2601,16 @@ class TestAutoInputResolution(unittest.TestCase):
 
 
 class TestYearExpansionAndStartDate(unittest.TestCase):
-    """{year} pattern expansion + run.start_date threading (#610)."""
+    """{year} pattern expansion + run.start_time threading (#610)."""
 
     def test_amip_preset_composes(self):
         cfg = _compose(["forcing=amip", "forcing.years=[1979,1980]",
-                        "run.start_date=1979-01-01"])
+                        "run.start_time=1979-01-01"])
         self.assertEqual(cfg.forcing.kind, "from_file")
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("{year}", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.years), [1979, 1980])
-        self.assertEqual(cfg.run.start_date, "1979-01-01")
+        self.assertEqual(cfg.run.start_time, "1979-01-01")
 
     def test_ozone_coverage_falls_back_and_overrides(self):
         # Per-product coverage (Codex P1 on #633): the era5 preset's
@@ -2698,7 +2700,7 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
 
     def test_era5_preset_composes(self):
         cfg = _compose(["forcing=era5", "forcing.years=[2023,2024]",
-                        "run.start_date=2023-01-01"])
+                        "run.start_time=2023-01-01"])
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
@@ -2732,34 +2734,34 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
             runners._forcing_products("/bb_{year}.nc", [2000, 2001], None),
             [["/bb_2000.nc", "/bb_2001.nc"]])
 
-    def test_start_date_resolves_to_datetime(self):
+    def test_start_time_resolves_to_datetime(self):
         from omegaconf import OmegaConf
 
         from jcm import runners
-        cfg = OmegaConf.create({"run": {"start_date": "1979-01-01"}})
-        dt = runners._resolve_start_date(cfg)
+        cfg = OmegaConf.create({"run": {"start_time": "1979-01-01"}})
+        dt = runners._resolve_start_time(cfg)
         self.assertIsNotNone(dt)
         import jax_datetime as jdt
         self.assertEqual(
             int((dt - jdt.to_datetime("1979-01-01")).days), 0)
 
-    def test_start_date_null_keeps_model_default(self):
+    def test_start_time_null_keeps_model_default(self):
         from omegaconf import OmegaConf
 
         from jcm import runners
-        self.assertIsNone(runners._resolve_start_date(
+        self.assertIsNone(runners._resolve_start_time(
             OmegaConf.create({"run": {}})))
-        self.assertIsNone(runners._resolve_start_date(
-            OmegaConf.create({"run": {"start_date": None}})))
+        self.assertIsNone(runners._resolve_start_time(
+            OmegaConf.create({"run": {"start_time": None}})))
 
-    def test_start_date_threads_into_model(self):
+    def test_start_time_threads_into_model(self):
         from jcm import runners
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8",
-                        "run.time_step=180", "run.start_date=1979-01-01"])
+                        "run.time_step=180", "run.start_time=1979-01-01"])
         model = runners.build_model(cfg)
         import jax_datetime as jdt
         self.assertEqual(
-            int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+            int((model.start_time - jdt.to_datetime("1979-01-01")).days), 0)
 
 
 class TestEmulatorWeightsBuilderPath(unittest.TestCase):
@@ -2860,7 +2862,7 @@ class TestEmulatorGhgGuard(unittest.TestCase):
 
         rising = make_time_series(
             np.array([DEFAULT_CH4_VMR_PPMV, 2.4, 3.0]),
-            np.array([0.0, 1.0, 2.0]),
+            np.arange("2000-01-01", "2000-01-04", dtype="datetime64[D]"),
         )
         forcing = types.SimpleNamespace(
             ch4_vmr=rising, n2o_vmr=self._forcing().n2o_vmr)
@@ -2874,7 +2876,7 @@ class TestEmulatorGhgGuard(unittest.TestCase):
         from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
 
         flat = make_time_series(
-            np.full(3, DEFAULT_CH4_VMR_PPMV), np.array([0.0, 1.0, 2.0]))
+            np.full(3, DEFAULT_CH4_VMR_PPMV), np.arange("2000-01-01", "2000-01-04", dtype="datetime64[D]"))
         forcing = types.SimpleNamespace(
             ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
         guard_emulator_ghg_forcing(self._physics(True), forcing)
@@ -2949,8 +2951,8 @@ class TestWarnOnConfigTraps:
 
         from jcm.forcing import make_time_series
         if loaded:
-            yw = make_time_series(jnp.full((2, 9), 0.3), jnp.arange(2.0))
-            ac = make_time_series(jnp.full((2, 2, 9), 0.7), jnp.arange(2.0))
+            yw = make_time_series(jnp.full((2, 9), 0.3), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"))
+            ac = make_time_series(jnp.full((2, 2, 9), 0.7), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"))
         else:
             yw = jnp.ones(9)
             ac = jnp.ones((2, 9))
@@ -2967,7 +2969,7 @@ class TestWarnOnConfigTraps:
         import jax.numpy as jnp
 
         from jcm.forcing import make_time_series
-        sst = make_time_series(jnp.zeros((2, 4, 4)), jnp.arange(2.0),
+        sst = make_time_series(jnp.zeros((2, 4, 4)), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"),
                                align_mode=align_mode)
         static = jnp.zeros((4, 4))
         return types.SimpleNamespace(
@@ -4411,3 +4413,62 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         with self.assertRaisesRegex(
                 ValueError, "transient surface forcing is not supported"):
             build_forcing(cfg, coords, dycore=dycore)
+
+
+class TestRunDateEndpoints(unittest.TestCase):
+    """CLI endpoints follow the same real dates and duration contract."""
+
+    def test_leap_year_endpoint(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days
+
+        cfg = OmegaConf.create({"run": {"total_time": None,
+                                        "end_time": "2000-03-01"}})
+        self.assertEqual(_configured_total_days(cfg, jdt.to_datetime("2000-02-01")), 29)
+
+    def test_duration_and_endpoint_are_exclusive(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days
+
+        for total, end in [(10, "2000-03-01"), (None, None)]:
+            cfg = OmegaConf.create({"run": {"total_time": total, "end_time": end}})
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                _configured_total_days(cfg, jdt.to_datetime("2000-01-01"))
+
+
+    def test_config_rejects_subsecond_dates_before_chunking(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days, _resolve_start_time
+
+        cfg = OmegaConf.create({"run": {"total_time": None,
+                                        "end_time": "2000-03-01T00:00:00.5",
+                                        "start_time": "2000-01-01T00:00:00.5"}})
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            _resolve_start_time(cfg)
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            _configured_total_days(cfg, jdt.to_datetime("2000-01-01"))
+
+
+    def test_supplied_model_clock_drives_era5_interfaces(self):
+        import types
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm import runners
+
+        cfg = OmegaConf.create({
+            "run": {"start_time": None, "total_time": 1, "end_time": None},
+            "init": {"date": None}, "nudging": {"enabled": True}})
+        model = types.SimpleNamespace(start_time=jdt.to_datetime("2010-02-03"),
+                                      coords=object())
+        forcing = mock.Mock()
+        with mock.patch("jcm.data.era5.nudging_target") as target, \
+                mock.patch("jcm.data.era5.initial_state") as initial, \
+                mock.patch("jcm.runners.provenance.record_fact"):
+            runners._maybe_attach_nudging_target(forcing, cfg, model)
+            target.assert_called_once_with(model.coords, "2010-02-02", "2010-02-06",
+                                           freq="6h")
+            runners._state_from_era5(model, cfg)
+            self.assertEqual(initial.call_args.args[1], "2010-02-03T00:00:00")

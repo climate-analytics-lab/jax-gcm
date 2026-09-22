@@ -929,6 +929,10 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     paths = _resolve_oxidant_paths(forcing_cfg)
     if not paths:
         return forcing
+    raw_oxidants = forcing_cfg.get("oxidants_file", None)
+    dated_product = (isinstance(raw_oxidants, (list, tuple))
+                     or (isinstance(raw_oxidants, str)
+                         and "{year}" in raw_oxidants))
 
     import xarray as xr
 
@@ -946,7 +950,9 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     ref = paths if len(paths) > 1 else paths[0]
     try:
         mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
-                                   lon_deg=lon_deg, align_mode="auto")
+                                   lon_deg=lon_deg,
+                                   align_mode=("by_date" if dated_product
+                                               else "wrap_year"))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()

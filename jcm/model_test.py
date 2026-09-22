@@ -3,10 +3,12 @@ import unittest
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 from jax.test_util import check_vjp, check_jvp
 import functools
+from jcm.date import DateData
 
 class TestModelUnit(unittest.TestCase):
     def setUp(self):
@@ -581,12 +583,10 @@ class TestCalendarDurations(unittest.TestCase):
                      physics=held_suarez_physics())
 
     def test_run_with_calendar_strings(self):
-        """`save_interval='1 month'`, `total_time='2 months'` should yield 2 saves."""
+        """Named month/year units require an explicit endpoint schedule."""
         model = self._build_held_suarez_model()
-        predictions = model.run(save_interval='1 month', total_time='2 months')
-        # Under the default 365_day calendar, '1 month' is 365/12 days,
-        # and total/save = 2 outer steps.
-        self.assertEqual(predictions.dynamics.temperature.shape[0], 2)
+        with self.assertRaisesRegex(ValueError, "not fixed"):
+            model.run(save_interval='1 month', total_time='2 months')
 
     def test_xarray_resample_pattern(self):
         """Calendar-aligned aggregation is exposed via xarray's standard
@@ -732,14 +732,17 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.forcing import default_forcing
 
         model = self._speedy_model()
-        _ = model.run(total_time=0)
-        initial_state = model._final_dycore_state
+        initial_state, _ = model.bootstrap_state()
 
         forcing = default_forcing(model.coords.horizontal)
         step = jax.jit(model._get_op_split_step_fn(forcing))
         ps0 = model._build_initial_physics_carry()
-        x1, ps1 = step(initial_state, ps0)
-        x2, ps2 = step(x1, ps1)
+        date0 = DateData(model.start_time, jnp.int32(0), int(model.dt_si.m))
+        date1 = DateData(
+            model.start_time + jdt.Timedelta(seconds=jnp.int32(model.dt_si.m)),
+            jnp.int32(1), int(model.dt_si.m))
+        x1, ps1 = step(initial_state, ps0, date0)
+        x2, ps2 = step(x1, ps1, date1)
 
         s0 = jax.tree_util.tree_structure(ps0)
         s1 = jax.tree_util.tree_structure(ps1)
@@ -1202,7 +1205,7 @@ class TestModelStateApi(unittest.TestCase):
         model = self._model()
         state, carry = model.bootstrap_state()
         replacement_state = model.dycore.with_sim_time(
-            state, jnp.asarray(4321.0),
+            state, jnp.asarray(float(model.dt_si.m)),
         )
         replacement_carry = jax.tree.map(
             lambda value: jnp.ones_like(value), carry,
@@ -1213,25 +1216,49 @@ class TestModelStateApi(unittest.TestCase):
         with self.assertRaises(AttributeError):
             model.physics_carry = replacement_carry
 
-        model.restore_state(replacement_state, replacement_carry)
+        restored_time = model.start_time + jdt.Timedelta(
+            seconds=jnp.int32(model.dt_si.m))
+        model.restore_state(replacement_state, replacement_carry,
+                            time=restored_time, step=1)
         self.assertIs(model.dycore_state, replacement_state)
         self.assertIs(model.physics_carry, replacement_carry)
         self.assertEqual(float(model.dycore.sim_time(model.dycore_state)),
-                         4321.0)
+                         float(model.dt_si.m))
 
         with self.assertRaisesRegex(ValueError, "requires both"):
-            model.restore_state(replacement_state, None)
+            model.restore_state(replacement_state, None,
+                                time=restored_time, step=1)
 
     def test_restore_rejects_tracers_instead_of_leaking_them(self):
         model = self._model()
         _, carry = model.bootstrap_state()
 
         def attempt_restore(traced_state):
-            model.restore_state(traced_state, carry)
+            model.restore_state(traced_state, carry,
+                                time=model.start_time, step=0)
             return traced_state
 
         with self.assertRaisesRegex(ValueError, "cannot retain JAX tracers"):
             jax.make_jaxpr(attempt_restore)(jnp.asarray(1.0))
+
+    def test_restore_accepts_drifted_backend_elapsed_counter(self):
+        """The exact clock is authoritative over a long-running float counter."""
+        model = self._model()
+        state, carry = model.bootstrap_state()
+        step = 10_000
+        exact_seconds = step * int(model.dt_si.m)
+        drifted_state = model.dycore.with_sim_time(
+            state, jnp.asarray(exact_seconds + 720.0))
+        days, seconds = divmod(exact_seconds, 86_400)
+        exact_time = model.start_time + jdt.Timedelta(
+            days=jnp.int32(days), seconds=jnp.int32(seconds))
+
+        model.restore_state(
+            drifted_state, carry, time=exact_time, step=step)
+
+        self.assertEqual(int(model.run_state.step), step)
+        self.assertEqual(int(model.run_state.time.delta.days),
+                         int(exact_time.delta.days))
 
 
 class TestModelLogging(unittest.TestCase):
@@ -1452,7 +1479,7 @@ class TestObserversUnderJit(unittest.TestCase):
 
     def test_an_explicit_window_start_makes_the_run_jittable(self):
         model, state = self._seed_state()
-        t0 = model._observer_window_start(state)
+        t0 = model._observer_window_start(model.start_time)
         traces = []
 
         def sample(state):
@@ -1486,7 +1513,7 @@ class TestObserversUnderJit(unittest.TestCase):
         _, preds = model.run_from_state(
             state, default_forcing(self.coords.horizontal),
             save_interval=1 / 48.0, total_time=1 / 48.0,
-            observer_t0_days=model._observer_window_start(state))
+            observer_t0_days=model._observer_window_start(model.start_time))
         self.assertTrue(np.isfinite(
             float(jnp.nanmean(preds.observations[0]["temperature"]))))
 
@@ -1501,7 +1528,7 @@ class TestObserversUnderJit(unittest.TestCase):
         that actually reuses a compilation.
         """
         model, state = self._seed_state()
-        t0 = model._observer_window_start(state)
+        t0 = model._observer_window_start(model.start_time)
 
         with self.assertRaises(ValueError) as caught:
             jax.jit(lambda s, t: model.run(
@@ -1519,7 +1546,6 @@ class TestObserversUnderJit(unittest.TestCase):
         static jit argument would compile once per window.
         """
         model, state = self._seed_state()
-        t0 = model._observer_window_start(state)
         kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
         traces = []
 
@@ -1529,8 +1555,9 @@ class TestObserversUnderJit(unittest.TestCase):
             return jnp.nanmean(preds.observations[0]["temperature"])
 
         jitted = jax.jit(sampled)
-        values = [float(jitted(state, model.prepare_observers(day, **kw)))
-                  for day in (t0, t0 + 30.0, t0 + 400.0)]
+        values = [float(jitted(state, model.prepare_observers(
+            model.start_time + jdt.Timedelta(days=jnp.int32(offset)), **kw)))
+                  for offset in (0, 30, 400)]
 
         self.assertEqual(len(traces), 1)
         for value in values:
@@ -1541,9 +1568,8 @@ class TestObserversUnderJit(unittest.TestCase):
     def test_tables_built_for_another_window_are_rejected(self):
         """A length mismatch is caught here, not deep inside the scan."""
         model, state = self._seed_state()
-        t0 = model._observer_window_start(state)
         mismatched = model.prepare_observers(
-            t0, save_interval=1 / 48.0, total_time=1 / 12.0)
+            model.start_time, save_interval=1 / 48.0, total_time=1 / 12.0)
 
         with self.assertRaises(ValueError) as caught:
             model.run(state, save_interval=1 / 48.0, total_time=1 / 48.0,
@@ -1562,11 +1588,11 @@ class TestObserversUnderJit(unittest.TestCase):
         """
         model, state = self._seed_state()
         kw = dict(save_interval=1 / 48.0, total_time=1 / 48.0)
-        t0 = model._observer_window_start(state)
-
-        preds = model.run(state, observer_xs=model.prepare_observers(t0, **kw),
+        preds = model.run(state, observer_xs=model.prepare_observers(
+                              model.start_time, **kw),
                           **kw)
-        self.assertEqual(preds._obs_t0_days, t0)
+        self.assertEqual(int(preds._observer_start_time.delta.days),
+                         int(model.start_time.delta.days))
         datasets = model.run(state, **kw).observation_datasets()
         with_tables = preds.observation_datasets()
         self.assertIn("stations", with_tables)
@@ -1584,12 +1610,12 @@ class TestObserversUnderJit(unittest.TestCase):
         model, state = self._seed_state()
         preds = ModelPredictions(
             None, None, None, observations=({"temperature": jnp.zeros((2, 1))},),
-            observers=tuple(model.observers), obs_t0_days=None,
+            observers=tuple(model.observers), observer_start_time=None,
             obs_dt_seconds=1800.0)
 
         with self.assertRaises(ValueError) as caught:
             preds.observation_datasets()
-        self.assertIn("observer_t0_days", str(caught.exception))
+        self.assertIn("observer_start_time", str(caught.exception))
 
     def test_the_recovered_window_start_is_unchanged_by_the_argument(self):
         """Passing what the model would have read gives the same samples."""
@@ -1598,7 +1624,7 @@ class TestObserversUnderJit(unittest.TestCase):
                              total_time=1 / 48.0)
         explicit = model.run(
             state, save_interval=1 / 48.0, total_time=1 / 48.0,
-            observer_t0_days=model._observer_window_start(state))
+            observer_t0_days=model._observer_window_start(model.start_time))
         np.testing.assert_allclose(
             np.asarray(implicit.observations[0]["temperature"]),
             np.asarray(explicit.observations[0]["temperature"]))

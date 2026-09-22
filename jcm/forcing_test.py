@@ -358,7 +358,8 @@ class TestForcingDataFromFile(unittest.TestCase):
         data_dir = resources.files('jcm.data.bc.t30.clim')
 
         coords = get_speedy_coords(layers=8, spectral_truncation=31)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         expected_2d_shape = coords.horizontal.nodal_shape
         expected_ts_shape = (365, *expected_2d_shape)
@@ -656,13 +657,12 @@ class TestForcingDataBcSanityCheck(unittest.TestCase):
 class TestTimeSeriesAndSelect(unittest.TestCase):
     """Tests for the new TimeSeries leaf wrapper and ForcingData.select method."""
 
-    def _build_date(self, tyear=0.5, calendar='gregorian'):
+    def _build_date(self, tyear=0.5):
         from jcm.date import DateData
         import jax_datetime as jdt
         # Constructed via set_date so tyear/dt agree under the calendar.
         return DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')),
-            calendar=calendar,
         )
 
     def test_static_forcing_select_is_noop_on_arrays(self):
@@ -673,7 +673,7 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         nodal_shape = (32, 16)
         forcing = ForcingData.zeros(nodal_shape)
         date = self._build_date()
-        sliced = forcing.select(date, calendar='gregorian')
+        sliced = forcing.select(date)
 
         self.assertTrue(jnp.array_equal(sliced.alb0, forcing.alb0))
         self.assertTrue(jnp.array_equal(sliced.sea_surface_temperature, forcing.sea_surface_temperature))
@@ -684,35 +684,35 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         from jcm.forcing import ForcingData
         forcing = ForcingData.zeros((4, 4))
         date = self._build_date()
-        sliced = forcing.select(date, calendar='gregorian')
+        sliced = forcing.select(date)
 
         # tyear should match date.tyear (~ 0.5 for July 2 — exactly
         # 182/365 under non-leap-year gregorian).
-        self.assertAlmostEqual(float(sliced.solar.tyear), float(date.tyear('gregorian')), places=4)
+        self.assertAlmostEqual(float(sliced.solar.tyear), float(date.tyear()), places=4)
         # orbital_phase = 2π × tyear, so close to π but not exactly π
         # because July 2 is a couple days off the year midpoint.
-        self.assertAlmostEqual(float(sliced.solar.orbital_phase), 2.0 * float(jnp.pi) * float(date.tyear('gregorian')), places=4)
+        self.assertAlmostEqual(float(sliced.solar.orbital_phase), 2.0 * float(jnp.pi) * float(date.tyear()), places=4)
 
     def test_time_series_wrap_year_indexing(self):
         """A 12-entry monthly TimeSeries indexed via WRAP_YEAR should pick
         the slice corresponding to floor(tyear * 12).
         """
-        from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
+        from jcm.forcing import ForcingData, make_time_series, MONTHLY_CLIMATOLOGY
         nodal_shape = (4, 4)
         # 12 months of synthetic SST: month i = 280 + i*0.5 K
         sst_axis = jnp.arange(12, dtype=jnp.float32)[:, None, None] * 0.5 + 280.0
         sst_ts = make_time_series(
             values=jnp.broadcast_to(sst_axis, (12, *nodal_shape)),
-            time_seconds=jnp.arange(12, dtype=jnp.float32),  # ignored for WRAP_YEAR
-            align_mode=WRAP_YEAR,
+            times=np.arange('2001-01', '2002-01', dtype='datetime64[M]'),
+            align_mode=MONTHLY_CLIMATOLOGY,
         )
         forcing = ForcingData.zeros(nodal_shape, sea_surface_temperature=sst_ts)
 
         # 2001-07-02 → tyear ~0.498 under gregorian → month index 5 → SST = 282.5
         date = self._build_date()
-        sliced = forcing.select(date, calendar='gregorian')
+        sliced = forcing.select(date)
         self.assertEqual(sliced.sea_surface_temperature.shape, nodal_shape)
-        expected = 280.0 + int(date.tyear('gregorian') * 12) * 0.5
+        expected = 283.0  # July is record 6; month lengths do not affect selection.
         self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, expected))
 
     def test_time_series_by_date_indexing(self):
@@ -720,21 +720,15 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         pick the entry closest to (and at-or-before) the model date.
         """
         from jcm.forcing import ForcingData, make_time_series, BY_DATE
-        from jcm.date import DateData, absolute_seconds_since_epoch
+        from jcm.date import DateData
         import jax_datetime as jdt
 
         # Three entries: 2000-01-01, 2001-01-01, 2002-01-01.
-        timestamps = [
-            jdt.Datetime.from_pydatetime(jdt.to_datetime(s))
-            for s in ['2000-01-01', '2001-01-01', '2002-01-01']
-        ]
-        time_seconds = jnp.asarray(
-            [float(absolute_seconds_since_epoch(t)) for t in timestamps]
-        )
         # CO2 = 370, 380, 390 ppmv at those years.
         co2_ts = make_time_series(
             values=jnp.array([370.0, 380.0, 390.0]),
-            time_seconds=time_seconds,
+            times=np.asarray(['2000-01-01', '2001-01-01', '2002-01-01'],
+                             dtype='datetime64[s]'),
             align_mode=BY_DATE,
         )
         nodal_shape = (4, 4)
@@ -743,39 +737,70 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         # Mid-2001 → second entry (2001-01-01) → 380 ppmv
         date_2001 = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-07-02')),
-            calendar='gregorian',
         )
         self.assertAlmostEqual(
-            float(forcing.select(date_2001, calendar='gregorian').co2_vmr),
+            float(forcing.select(date_2001).co2_vmr),
             380.0,
         )
 
         # Mid-2000 → first entry → 370 ppmv
         date_2000 = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('2000-07-02')),
-            calendar='gregorian',
         )
         self.assertAlmostEqual(
-            float(forcing.select(date_2000, calendar='gregorian').co2_vmr),
+            float(forcing.select(date_2000).co2_vmr),
             370.0,
         )
 
         # Way before the first entry → still picks first entry (clamp).
         date_1995 = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime('1995-01-01')),
-            calendar='gregorian',
         )
         self.assertAlmostEqual(
-            float(forcing.select(date_1995, calendar='gregorian').co2_vmr),
+            float(forcing.select(date_1995).co2_vmr),
             370.0,
         )
+
+    def test_month_boundary_and_exact_hour_are_not_float32_epoch_lookup(self):
+        """Month climatology and dated hourly data retain their real labels."""
+        from jcm.date import DateData
+        from jcm.forcing import (BY_DATE, ForcingData, MONTHLY_CLIMATOLOGY,
+                                 make_time_series)
+        import jax_datetime as jdt
+
+        monthly = make_time_series(
+            jnp.arange(12),
+            np.arange('2001-01', '2002-01', dtype='datetime64[M]'),
+            MONTHLY_CLIMATOLOGY)
+        hourly = make_time_series(
+            jnp.asarray([1., 2.]),
+            np.asarray(['2026-01-01T00:00:00', '2026-01-01T01:00:00'],
+                       dtype='datetime64[s]'), BY_DATE)
+        forcing = ForcingData.zeros((2, 2), sea_surface_temperature=monthly,
+                                    co2_vmr=hourly)
+        date = DateData.set_date(jdt.to_datetime('2026-03-01T01:00:00'))
+        self.assertEqual(int(forcing.select(date).sea_surface_temperature), 2)
+        date = DateData.set_date(jdt.to_datetime('2026-01-01T01:00:00'))
+        self.assertEqual(float(forcing.select(date).co2_vmr), 2.)
+
+    def test_interpolation_clamps_across_century_without_int32_overflow(self):
+        from jcm.date import DateData
+        from jcm.forcing import BY_DATE_INTERP, ForcingData, make_time_series
+        import jax_datetime as jdt
+        ts = make_time_series(
+            jnp.asarray([1., 2.]),
+            np.asarray(['1900-01-01', '1901-01-01'], dtype='datetime64[s]'),
+            BY_DATE_INTERP)
+        forcing = ForcingData.zeros((2, 2), co2_vmr=ts)
+        date = DateData.set_date(jdt.to_datetime('2026-01-01'))
+        self.assertEqual(float(forcing.select(date).co2_vmr), 2.)
 
     def test_time_axis_noleap_matches_model_gregorian_clock(self):
         """A 365_day (noleap) emissions time axis must land on the SAME
         leap-aware Gregorian clock as the BY_DATE lookup target.
 
         The model has no real noleap clock (#449): the lookup target is
-        ``absolute_seconds_since_epoch`` built from ``jax_datetime`` (Gregorian).
+        the exact ``jax_datetime`` Gregorian clock.
         So a cftime axis must be aligned on its *nominal* calendar date, not by
         noleap day-counting — which would drift by accumulated leap days
         (~7 days by 2000, growing) and select the wrong multi-year slice. This
@@ -784,40 +809,34 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         """
         import cftime
         import xarray as xr
-        import jax_datetime as jdt
-        from jcm.forcing import _time_axis_seconds_from_ds
-        from jcm.date import absolute_seconds_since_epoch
+        from jcm.forcing import _time_axis_from_ds
 
         years = [2000, 2001, 2002]
         ds = xr.Dataset(
             coords={'time': ('time', [cftime.DatetimeNoLeap(y, 1, 1) for y in years])}
         )
-        secs = np.asarray(_time_axis_seconds_from_ds(ds))
-
-        expected = np.array([
-            float(absolute_seconds_since_epoch(
-                jdt.Datetime.from_pydatetime(jdt.to_datetime(f'{y}-01-01'))))
-            for y in years
-        ])
-        np.testing.assert_allclose(secs, expected, rtol=0, atol=1.0)
+        times = _time_axis_from_ds(ds)
+        np.testing.assert_array_equal(
+            times.to_datetime64().astype('datetime64[s]'),
+            np.asarray([f'{y}-01-01' for y in years], dtype='datetime64[s]'))
 
     def test_select_under_jit(self):
         """Select must be JIT-compatible."""
         import jax
-        from jcm.forcing import ForcingData, make_time_series, WRAP_YEAR
+        from jcm.forcing import ForcingData, make_time_series, MONTHLY_CLIMATOLOGY
 
         nodal_shape = (4, 4)
         ts = make_time_series(
             values=jnp.arange(12, dtype=jnp.float32)[:, None, None] *
                    jnp.ones((12, *nodal_shape), dtype=jnp.float32),
-            time_seconds=jnp.arange(12, dtype=jnp.float32),
-            align_mode=WRAP_YEAR,
+            times=np.arange('2001-01', '2002-01', dtype='datetime64[M]'),
+            align_mode=MONTHLY_CLIMATOLOGY,
         )
         forcing = ForcingData.zeros(nodal_shape, sea_surface_temperature=ts)
 
         @jax.jit
         def get_sst(forcing, date):
-            return forcing.select(date, calendar='gregorian').sea_surface_temperature
+            return forcing.select(date).sea_surface_temperature
 
         date = self._build_date()
         sst_now = get_sst(forcing, date)
@@ -1176,7 +1195,7 @@ class TestNaturalEmissionReaders(unittest.TestCase):
                 jdt.to_datetime("2001-07-02")
             ),
         )
-        sliced = forcing.select(date, calendar="gregorian")
+        sliced = forcing.select(date)
         self.assertEqual(
             sliced.oxidant_vmr["oh"].shape, (5, self.NLON, self.NLAT)
         )
@@ -1191,28 +1210,19 @@ class TestByDateInterp(unittest.TestCase):
         from jcm.date import DateData
         return DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime(iso)),
-            calendar='gregorian',
         )
 
     def _series(self, isodates, values):
-        import jax_datetime as jdt
-
-        from jcm.date import absolute_seconds_since_epoch
         from jcm.forcing import BY_DATE_INTERP, make_time_series
-        time_seconds = jnp.asarray([
-            float(absolute_seconds_since_epoch(
-                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
-            for s in isodates
-        ])
-        return make_time_series(jnp.asarray(values), time_seconds,
+        return make_time_series(jnp.asarray(values),
+                                np.asarray(isodates, dtype='datetime64[s]'),
                                 align_mode=BY_DATE_INTERP)
 
     def test_midpoint_interpolates_linearly(self):
         from jcm.forcing import ForcingData
         ts = self._series(['2000-01-01', '2000-01-03'], [300.0, 302.0])
         forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
-        got = float(forcing.select(self._date('2000-01-02'),
-                                   calendar='gregorian').co2_vmr)
+        got = float(forcing.select(self._date('2000-01-02')).co2_vmr)
         self.assertAlmostEqual(got, 301.0, places=3)
 
     def test_exact_sample_and_end_clamps(self):
@@ -1222,25 +1232,17 @@ class TestByDateInterp(unittest.TestCase):
         for iso, expected in [('2000-01-01', 300.0),   # exact sample
                               ('1999-06-01', 300.0),   # before axis -> clamp
                               ('2000-02-01', 302.0)]:  # after axis -> clamp
-            got = float(forcing.select(self._date(iso),
-                                       calendar='gregorian').co2_vmr)
+            got = float(forcing.select(self._date(iso)).co2_vmr)
             self.assertAlmostEqual(got, expected, places=3, msg=iso)
 
     def test_by_date_mode_stays_piecewise_constant(self):
         # The interp branch must not leak into plain BY_DATE leaves.
-        from jcm.date import absolute_seconds_since_epoch
         from jcm.forcing import BY_DATE, ForcingData, make_time_series
-        import jax_datetime as jdt
-        time_seconds = jnp.asarray([
-            float(absolute_seconds_since_epoch(
-                jdt.Datetime.from_pydatetime(jdt.to_datetime(s))))
-            for s in ['2000-01-01', '2000-01-03']
-        ])
-        ts = make_time_series(jnp.asarray([300.0, 302.0]), time_seconds,
+        times = np.asarray(['2000-01-01', '2000-01-03'], dtype='datetime64[s]')
+        ts = make_time_series(jnp.asarray([300.0, 302.0]), times,
                               align_mode=BY_DATE)
         forcing = ForcingData.zeros((4, 4), co2_vmr=ts)
-        got = float(forcing.select(self._date('2000-01-02'),
-                                   calendar='gregorian').co2_vmr)
+        got = float(forcing.select(self._date('2000-01-02')).co2_vmr)
         self.assertAlmostEqual(got, 300.0, places=3)
 
 
@@ -1291,9 +1293,8 @@ class TestYearlyForcingFiles(unittest.TestCase):
         from jcm.date import DateData
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime('1981-07-02')),
-            calendar='gregorian')
-        sliced = forcing.select(date, calendar='gregorian')
+                jdt.to_datetime('1981-07-02')))
+        sliced = forcing.select(date)
         self.assertTrue(jnp.allclose(sliced.sea_surface_temperature, 292.0))
 
     def test_single_year_interp_keeps_real_dates(self):
@@ -1467,9 +1468,9 @@ class TestReadMacv2Weights(unittest.TestCase):
         from jcm.forcing import read_macv2_weights
         ds, _, _ = self._synthetic_macv2(years=(1970, 1971))
         yw_ts, _ = read_macv2_weights(ds)
-        # 1970-01-01 is MODEL_EPOCH -> 0 s; 1971-01-01 is 365 days later.
-        np.testing.assert_allclose(np.asarray(yw_ts.time_seconds),
-                                   [0.0, 365 * 86400.0])
+        np.testing.assert_array_equal(
+            yw_ts.times.to_datetime64().astype('datetime64[D]'),
+            np.asarray(['1970-01-01', '1971-01-01'], dtype='datetime64[D]'))
 
 
 def _t63l47_coords():
@@ -1722,9 +1723,8 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
         self.assertIsNotNone(forcing.soilw_rel)
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime('1981-07-02')),
-            calendar='gregorian')
-        sliced = forcing.select(date, calendar='gregorian')
+                jdt.to_datetime('1981-07-02')))
+        sliced = forcing.select(date)
         self.assertEqual(sliced.soilw_rel.shape, (96, 48))
         self.assertTrue(bool(jnp.all(sliced.soilw_rel >= 0.0)))
         self.assertTrue(bool(jnp.all(sliced.soilw_rel <= 1.0)))

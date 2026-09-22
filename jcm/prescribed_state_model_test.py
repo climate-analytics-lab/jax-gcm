@@ -3,6 +3,7 @@
 import unittest
 
 import jax.numpy as jnp
+import jax_datetime as jdt
 import pytest
 
 from jcm.constants import grav
@@ -62,7 +63,8 @@ class TestPrescribedStateModel(unittest.TestCase):
         times = jnp.array([0.0, 0.5])  # days
         predictions = model.run(stacked, times=times)
         self.assertEqual(predictions.tendencies.temperature.shape[0], 2)
-        self.assertTrue(jnp.allclose(predictions.times, times))
+        self.assertTrue(jnp.array_equal(
+            predictions.times.delta.seconds, jnp.array([0, 43200])))
         # Identical prescribed states must yield identical tendencies —
         # there is no carry between steps in prescribed mode.
         t_tend = predictions.tendencies.temperature
@@ -74,9 +76,10 @@ class TestPrescribedStateModel(unittest.TestCase):
             dt_seconds=43200.0,  # half a day per step
         )
         predictions = model.run([self.state] * 3)
-        self.assertTrue(
-            jnp.allclose(predictions.times, jnp.array([0.0, 0.5, 1.0]))
-        )
+        self.assertTrue(jnp.array_equal(
+            predictions.times.delta.days, jnp.array([10957, 10957, 10958])))
+        self.assertTrue(jnp.array_equal(
+            predictions.times.delta.seconds, jnp.array([0, 43200, 0])))
 
     def test_to_xarray_layout_and_diagnostics(self):
         model = PrescribedStateModel(
@@ -135,7 +138,8 @@ class TestPrescribedStateModel(unittest.TestCase):
                 "column_series": jnp.zeros((2, nlev)),
                 "rank5": jnp.zeros((2, 1, 1, 1, 1)),
             },
-            times=jnp.array([0.0, 1.0]),
+            times=jdt.to_datetime('2000-01-01') + jdt.Timedelta(
+                days=jnp.array([0, 1], dtype=jnp.int32)),
         )
         ds = preds.to_xarray()
         self.assertNotIn("diag._private", ds)

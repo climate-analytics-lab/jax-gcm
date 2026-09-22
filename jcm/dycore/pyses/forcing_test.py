@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.forcing import ForcingData, TimeSeries, WRAP_YEAR
+from jcm.forcing import ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY
 
 # Tiny source grid and a handful of scattered "columns" inside it.
 _LON = np.arange(0.0, 360.0, 45.0)            # 8
@@ -53,7 +53,7 @@ class AttachJamForcingTest(unittest.TestCase):
         leaf = forcing.anthropogenic_emissions["emis_surface_combustion_so2"]
         self.assertIsInstance(leaf, TimeSeries)
         self.assertEqual(leaf.values.shape, (12, 1, _NCOL))
-        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+        self.assertEqual(int(leaf.align_mode), MONTHLY_CLIMATOLOGY)
         np.testing.assert_allclose(np.asarray(leaf.values), 2.0e-12)
         self.assertIsNone(forcing.prescribed_aerosol_emissions)
 
@@ -236,7 +236,7 @@ class AttachJamForcingTest(unittest.TestCase):
         # then died in the radiation halo padder with
         # "arr_shape=(1, 47) shape=(47,)".
         self.assertEqual(leaf.values.shape, (12, nlev, _NCOL))
-        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+        self.assertEqual(int(leaf.align_mode), MONTHLY_CLIMATOLOGY)
         np.testing.assert_allclose(                      # ppmv, per level
             np.asarray(leaf.values[0, :, 0]),
             np.arange(1, nlev + 1, dtype=float), rtol=1e-6)
@@ -291,9 +291,8 @@ class AttachJamForcingTest(unittest.TestCase):
             forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds_e))
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2014-07-01")),
-            calendar="gregorian",
         )
-        sliced = forcing.select(date, calendar="gregorian")
+        sliced = forcing.select(date)
         leaf = sliced.anthropogenic_emissions["emis_biomass_burning_bc"]
         self.assertEqual(leaf.shape, (1, _NCOL))
         np.testing.assert_allclose(np.asarray(leaf), 3.0e-12)

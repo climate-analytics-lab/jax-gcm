@@ -28,6 +28,7 @@ terrain:
   file: hf://bundles/t63/terrain.nc
   interpolate: true
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
 run:
   time_step: 15

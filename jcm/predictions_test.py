@@ -7,6 +7,7 @@ import unittest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 
@@ -53,6 +54,7 @@ class _Dycore:
                     ("time", "level", "x", "y"),
                     np.asarray(predictions.dynamics.temperature),
                 ),
+                "category": ("time", np.ones(len(times), dtype=np.int32)),
             },
             coords={"time": np.asarray(times)},
         )
@@ -61,9 +63,11 @@ class _Dycore:
 class _Observer:
     name = "station"
 
-    def to_dataset(self, samples, t0_days, dt_seconds):
+    def to_dataset(self, samples, start_time, dt_seconds):
         values = np.asarray(samples["temperature"])
-        times = t0_days + np.arange(values.shape[0]) * dt_seconds / 86400.0
+        start = jax.device_get(start_time).to_datetime64()
+        times = start + np.arange(values.shape[0]) * np.timedelta64(
+            int(dt_seconds), "s")
         return xr.Dataset(
             {"temperature": (("time", "point"), values)},
             coords={"time": times},
@@ -80,7 +84,11 @@ def _predictions():
         geopotential=jnp.zeros(shape),
         normalized_surface_pressure=jnp.ones((1, 2, 3)),
     )
-    return Predictions(dynamics=dynamics, physics={}, times=jnp.array([11.0]))
+    times = jax.tree.map(
+        lambda value: value[None],
+        jdt.Datetime.from_isoformat("2000-01-12T00:00:00"),
+    )
+    return Predictions(dynamics=dynamics, physics={}, times=times)
 
 
 class WaterPositivityOutputTest(unittest.TestCase):
@@ -117,7 +125,11 @@ class WaterPositivityOutputTest(unittest.TestCase):
         predictions = Predictions(
             dynamics=dynamics,
             physics={"water_positivity_correction": correction},
-            times=jnp.arange(ntime, dtype=jnp.float32),
+            times=jax.tree.map(
+                lambda *values: jnp.stack(values),
+                jdt.Datetime.from_isoformat("2000-01-01T00:00:00"),
+                jdt.Datetime.from_isoformat("2000-01-02T00:00:00"),
+            ),
         )
 
         ds = ModelPredictions(predictions, coords, physics).to_xarray()
@@ -160,6 +172,13 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
         self.snapshots = {
             "surface.temperature": jnp.arange(12.0).reshape(2, 2, 3),
         }
+        self.observer_start_time = jdt.Datetime.from_isoformat(
+            "2000-01-10T00:00:00")
+        self.snapshot_times = jax.tree.map(
+            lambda *values: jnp.stack(values),
+            jdt.Datetime.from_isoformat("2000-01-10T12:00:00"),
+            jdt.Datetime.from_isoformat("2000-01-11T00:00:00"),
+        )
         self.original = ModelPredictions(
             _predictions(),
             self.coords,
@@ -167,11 +186,11 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
             dycore=self.dycore,
             observations=self.observations,
             observers=(self.observer,),
-            obs_t0_days=10.0,
+            observer_start_time=self.observer_start_time,
             obs_dt_seconds=self.dycore.dt_seconds,
             snapshots=self.snapshots,
             snapshot_variables=("surface.temperature",),
-            snapshot_interval_days=0.5,
+            snapshot_times=self.snapshot_times,
         )
 
     def test_model_form_rebuilds_tree_map_result_and_all_datasets(self):
@@ -187,18 +206,19 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
             self.model,
             snapshots=self.snapshots,
             snapshot_variables=("surface.temperature",),
-            snapshot_interval_days=0.5,
+            snapshot_times=self.snapshot_times,
+            observer_start_time=self.observer_start_time,
         )
 
         self.assertIs(restored._coords, self.coords)
         self.assertIs(restored._physics, self.physics)
         self.assertIs(restored._dycore, self.dycore)
         self.assertEqual(restored._observers, (self.observer,))
-        self.assertEqual(restored._obs_t0_days, 10.0)
+        self.assertIs(restored._observer_start_time, self.observer_start_time)
         self.assertEqual(restored._obs_dt_seconds, self.dycore.dt_seconds)
         self.assertEqual(restored._snapshot_variables,
                          ("surface.temperature",))
-        self.assertEqual(restored._snapshot_interval_days, 0.5)
+        self.assertIs(restored._snapshot_times, self.snapshot_times)
 
         # Context stays outside the pytree: restoring it cannot change the
         # leaves or treedef seen by a later JAX transformation.
@@ -213,11 +233,15 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
 
         observations = restored.observation_datasets()["station"]
         self.assertEqual(observations["temperature"].shape, (4, 1))
-        np.testing.assert_allclose(observations["time"].values[0], 10.0)
+        self.assertEqual(observations["time"].values[0],
+                         np.datetime64("2000-01-10T00:00:00"))
 
         snapshots = restored.snapshot_dataset()
         self.assertEqual(snapshots["surface_temperature"].shape, (2, 2, 3))
-        np.testing.assert_allclose(snapshots["snap_time"].values, [0.5, 1.0])
+        np.testing.assert_array_equal(
+            snapshots["snap_time"].values,
+            np.array(["2000-01-10T12:00:00", "2000-01-11T00:00:00"],
+                     dtype="datetime64[ns]"))
 
         for dataset in (trajectory, observations, snapshots):
             params = json.loads(dataset.attrs["jcm_prov_params"])
@@ -246,8 +270,8 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
         self.assertIs(restored.snapshots, self.snapshots)
         self.assertIs(restored.observations, self.observations)
         self.assertEqual(restored._observers, (self.observer,))
-        self.assertEqual(restored._obs_t0_days, 10.0)
-        self.assertEqual(restored._snapshot_interval_days, 0.5)
+        self.assertIs(restored._observer_start_time, self.observer_start_time)
+        self.assertIs(restored._snapshot_times, self.snapshot_times)
 
     def test_obvious_grid_shape_mismatch_is_rejected(self):
         rebuilt = jax.tree.map(lambda value: value, self.original)
@@ -265,6 +289,70 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Prediction grid shape"):
             rebuilt.with_context(bad_model)
+
+    def test_interval_bounds_control_exact_midpoint_and_metadata(self):
+        predictions = _predictions()
+        start = jdt.Datetime.from_isoformat("2000-01-01T00:00:00")
+        end = jdt.Datetime.from_isoformat("2000-01-01T00:00:01")
+        bounds = jax.tree.map(
+            lambda left, right: jnp.stack([left[None], right[None]], axis=1),
+            start, end,
+        )
+        predictions = predictions.replace(
+            times=jax.tree.map(lambda value: value[None], start),
+            time_bounds=bounds,
+            time_cell_method=jnp.asarray(True),
+        )
+
+        ds = ModelPredictions(
+            predictions, self.coords, self.physics, dycore=self.dycore,
+        ).to_xarray()
+
+        self.assertEqual(str(ds.time.values[0]), "2000-01-01T00:00:00.500")
+        self.assertEqual(ds.time.attrs["bounds"], "time_bounds")
+        self.assertEqual(ds.temperature.attrs["cell_methods"], "time: mean")
+        self.assertNotIn("category", ds)
+        self.assertEqual(ds.attrs["omitted_interval_mean_variables"],
+                         "category")
+        self.assertEqual(ds.time.encoding["units"],
+                         "seconds since 1970-01-01 00:00:00")
+        self.assertEqual(ds.time_bounds.encoding, ds.time.encoding)
+
+    def test_raw_predictions_remain_differentiable(self):
+        def loss(temperature):
+            predictions = _predictions().replace(
+                dynamics=_predictions().dynamics.replace(
+                    temperature=temperature))
+            wrapped = ModelPredictions(
+                predictions, self.coords, self.physics, dycore=self.dycore)
+            return jnp.sum(wrapped.dynamics.temperature ** 2)
+
+        temperature = jnp.ones((1, 2, 2, 3))
+        np.testing.assert_allclose(jax.grad(loss)(temperature), 2.0)
+
+    def test_interval_mean_rejects_conflicting_declared_cell_method(self):
+        class ConflictingDycore(_Dycore):
+            def to_xarray(self, predictions, times):
+                ds = super().to_xarray(predictions, times)
+                ds.temperature.attrs["cell_methods"] = (
+                    "area: mean time: mean time: maximum")
+                return ds
+
+        predictions = _predictions()
+        start = jdt.Datetime.from_isoformat("2000-01-01T00:00:00")
+        end = jdt.Datetime.from_isoformat("2000-01-02T00:00:00")
+        predictions = predictions.replace(
+            times=jax.tree.map(lambda value: value[None], start),
+            time_bounds=jax.tree.map(
+                lambda left, right: jnp.stack([left[None], right[None]], axis=1),
+                start, end),
+            time_cell_method=jnp.asarray(True),
+        )
+
+        with self.assertRaisesRegex(ValueError, "maximum"):
+            ModelPredictions(
+                predictions, self.coords, self.physics,
+                dycore=ConflictingDycore()).to_xarray()
 
 
 if __name__ == "__main__":

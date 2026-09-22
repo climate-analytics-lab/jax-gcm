@@ -54,6 +54,9 @@ omit =
     jcm/forcing_assembly.py
     jcm/terrain.py
     jcm/date.py
+    # Host-only monthly interval reduction: covered by the fast utility tests;
+    # the slow integration suite produces trajectories without resampling them.
+    jcm/temporal_aggregation.py
     jcm/diagnostics.py
     # Same rationale for the v2 dycore-protocol scaffolding: the fast
     # suite drives the registry directly and runs every method on the

@@ -136,11 +136,9 @@ surface looks like) and ``ForcingData`` (what it does over time):
 
    predictions.to_xarray().to_netcdf("output.nc")
 
-One thing that catches people out: ``from_file`` decides between climatology
-and date-aligned mode from the netCDF time axis — a one-year file wraps, a
-multi-year file aligns by date. And SPEEDY assumes a 365-day no-leap calendar;
-pass ``Model(..., calendar='gregorian')`` if you need the clock to track real
-Gregorian dates.
+``from_file`` treats input timestamps as real dates by default. Select
+``align_mode="wrap_year"`` explicitly for a repeating monthly or daily
+climatology. All physics packages use the same Gregorian model clock.
 
 .. _configurations-from-python:
 
@@ -224,7 +222,7 @@ composes the whole canonical forcing set for a composition in one call:
 
    predictions = model.run(
        initial_state=jw_state(model, rh=0.0),
-       forcing=forcing, total_time="1 year", save_interval="1 day",
+       forcing=forcing, total_time="365 days", save_interval="1 day",
    )
 
 Use ``from_bundles`` when you are composing your **own** model, as above. It

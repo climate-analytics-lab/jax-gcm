@@ -33,8 +33,8 @@ from dataclasses import dataclass
 #: onto the time-series indexing mode the readers use: a climatology wraps within
 #: the year (``WRAP_YEAR``), a transient series indexes by absolute date
 #: (``BY_DATE``), a static field has no time axis. ``AUTO`` defers the choice to
-#: the reader's span heuristic — used for an explicit path whose kind the
-#: resolver cannot know without opening it.
+#: the reader's conservative dated-data default — used for an explicit path
+#: whose kind the resolver cannot know without opening it.
 STATIC = "static"
 WRAP_YEAR = "wrap_year"
 BY_DATE = "by_date"

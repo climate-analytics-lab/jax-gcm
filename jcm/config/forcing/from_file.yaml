@@ -43,8 +43,9 @@ ozone_available_years: null
 emissions_available_years: null
 oxidants_available_years: null
 
-# Time alignment for ``file``: auto (default; climatology span → wrap_year,
-# longer → by_date), or force wrap_year / by_date / by_date_interp.
+# Time alignment for ``file``: auto (default) means dated data. Select
+# wrap_year explicitly for a repeating monthly/daily climatology, or choose
+# by_date / by_date_interp for transient data.
 # ``by_date_interp`` linearly interpolates between samples — the correct
 # mode for AMIP mid-month boundary values (tosbcs), which are constructed
 # so linear interpolation reconstructs observed monthly means.

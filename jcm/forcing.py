@@ -2,6 +2,7 @@ import warnings
 from typing import Any
 
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import tree_math
 from jax import tree_util
@@ -17,8 +18,7 @@ from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
-    DEFAULT_CALENDAR,
-    absolute_seconds_since_epoch,
+    gregorian_ymd_from_days,
 )
 from jcm.ozone_climatology import OzoneClimatology
 
@@ -125,12 +125,14 @@ def _validate_bc_fields(ds) -> None:
 
 # `TimeSeries.align_mode` constants. Stored as ints rather than strings so the
 # struct stays a clean JAX pytree (string fields can't ride through `jit`).
-WRAP_YEAR = 0   # index by `floor(date.tyear * n_time) % n_time` — climatology mode
-BY_DATE = 1     # index by absolute time, using `time_seconds` as the lookup axis
+WRAP_YEAR = 0   # legacy climatology mode; dispatches by axis length
+BY_DATE = 1     # piecewise-constant lookup on exact datetimes
 BY_DATE_INTERP = 2  # as BY_DATE, but linearly interpolate between samples.
                     # The right mode for AMIP mid-month boundary values
                     # (PCMDI ``tosbcs`` is constructed so that linear
                     # interpolation reconstructs the observed monthly means).
+MONTHLY_CLIMATOLOGY = 3
+DAILY_CLIMATOLOGY = 4
 
 # Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
 # 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
@@ -161,24 +163,69 @@ DEFAULT_N2O_VMR_PPMV = 0.327
 class TimeSeries:
     """A time-varying forcing leaf.
 
-    `values` carries the data with a time axis at index 0; `time_seconds`
-    is a 1-D coordinate (seconds since `MODEL_EPOCH`) used by `BY_DATE`
-    indexing. `align_mode` is `WRAP_YEAR` or `BY_DATE`. The Model collapses
+    `values` carries the data with a time axis at index 0; `times` is its exact
+    :class:`jax_datetime.Datetime` coordinate. `align_mode` distinguishes
+    dated samples from monthly and daily climatologies. The Model collapses
     every `TimeSeries` leaf to its current-step slice via
     `ForcingData.select(date)` before handing the forcing to physics, so
     physics terms always see the leading-time axis already removed.
     """
 
     values: jnp.ndarray
-    time_seconds: jnp.ndarray
+    times: jdt.Datetime
     align_mode: jnp.ndarray   # int scalar, stored as a 0-d jnp array
 
 
-def make_time_series(values, time_seconds, align_mode=BY_DATE):
-    """Build a `TimeSeries` leaf with the given alignment mode."""
+def make_time_series(values, times, align_mode=BY_DATE):
+    """Build a validated `TimeSeries` with a strictly increasing time axis."""
+    values = jnp.asarray(values)
+    raw_times = np.asarray(times) if not isinstance(times, jdt.Datetime) else None
+    if raw_times is not None and np.issubdtype(raw_times.dtype, np.datetime64):
+        if np.any(np.isnat(raw_times)):
+            raise ValueError("TimeSeries times cannot contain NaT")
+        whole_seconds = raw_times.astype("datetime64[s]")
+        if np.any((raw_times - whole_seconds) != np.timedelta64(0, "s")):
+            raise ValueError("TimeSeries times must have whole-second precision")
+    times = jdt.to_datetime(times)
+    if values.shape[0] != times.delta.days.shape[0]:
+        raise ValueError(
+            f"values has {values.shape[0]} records but times has "
+            f"{times.delta.days.shape[0]}"
+        )
+    # Forcing is loaded on the host. Reject duplicate or decreasing labels
+    # here so exact left-hold/interpolation lookup remains unambiguous in JIT.
+    day = np.asarray(times.delta.days, dtype=np.int64)
+    second = np.asarray(times.delta.seconds, dtype=np.int64)
+    key = day * 86400 + second
+    if key.size > 1 and np.any(np.diff(key) <= 0):
+        raise ValueError("TimeSeries times must be strictly increasing")
+    mode_value = int(np.asarray(align_mode))
+    host_dates = np.asarray(times.to_datetime64()).astype("datetime64[s]")
+    months = host_dates.astype("datetime64[M]").astype(np.int64) % 12 + 1
+    is_monthly = (mode_value == MONTHLY_CLIMATOLOGY
+                  or mode_value == WRAP_YEAR and host_dates.size == 12)
+    is_daily = (mode_value == DAILY_CLIMATOLOGY
+                or mode_value == WRAP_YEAR and host_dates.size in (365, 366))
+    if is_monthly and not np.array_equal(
+            months, np.arange(1, 13)):
+        raise ValueError(
+            "monthly climatology must contain January through December in order"
+        )
+    if is_daily:
+        month_starts = host_dates.astype("datetime64[M]")
+        days = (host_dates.astype("datetime64[D]") - month_starts).astype(int) + 1
+        nominal_keys = months * 32 + days
+        if (host_dates.size not in (365, 366)
+                or months[0] != 1 or days[0] != 1
+                or months[-1] != 12 or days[-1] != 31
+                or np.any(np.diff(nominal_keys) <= 0)):
+            raise ValueError(
+                "daily climatology must contain ordered Jan 1 through Dec 31 "
+                "nominal dates"
+            )
     return TimeSeries(
-        values=jnp.asarray(values),
-        time_seconds=jnp.asarray(time_seconds),
+        values=values,
+        times=times,
         align_mode=jnp.asarray(align_mode, dtype=jnp.int32),
     )
 
@@ -565,6 +612,10 @@ class ForcingData:
                         "— pass years=[first, last].")
                 forcing_dict["align"] = "by_date_interp"
                 forcing_dict["available_years"] = mm.coverage(manifest, product)
+            else:
+                # Manifest climatologies are the authoritative periodic inputs;
+                # generic short dated files remain transient under ``auto``.
+                forcing_dict["align"] = "wrap_year"
             file_spec = "hf://" + mm.bundle_path(manifest, product,
                                                  grid_token, nlev)
             if fetch is not None:
@@ -603,9 +654,9 @@ class ForcingData:
             ds: An `xarray.Dataset` carrying the expected forcing fields.
             coords: CoordinateSystem to upscale to. If None, the dataset's
                 native nodal shape is used.
-            align_mode: "auto" (default) chooses `wrap_year` for files that
-                cover at most one calendar year and `by_date` for longer
-                spans; pass `"wrap_year"`, `"by_date"` or
+            align_mode: "auto" (default) always treats the axis as dated,
+                including short transient files; pass `"wrap_year"`,
+                `"monthly_climatology"`, `"daily_climatology"`, `"by_date"` or
                 `"by_date_interp"` to force the choice. `wrap_year` indexes
                 the time axis by fraction of year (climatology mode);
                 `by_date` aligns by absolute model date (piecewise
@@ -648,8 +699,13 @@ class ForcingData:
         # real dates — ``interpolate_to_daily`` is a climatology transform
         # and only applies when the file actually wraps the year.
         resolved_align_mode = _resolve_align_mode(align_mode, ds)
-        is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
+        is_wrap_year_monthly = (resolved_align_mode in (WRAP_YEAR, MONTHLY_CLIMATOLOGY)
                                 and _is_monthly_climatology(ds))
+        if is_wrap_year_monthly:
+            # Surface climatologies are continuous boundary conditions. Expand
+            # them with periodic Dec/Jan interpolation regardless of whether
+            # horizontal regridding is also needed.
+            ds = interpolate_to_daily(ds)
 
         if target_resolution is None:
             ix, il, n_times = ds['stl'].shape
@@ -667,15 +723,17 @@ class ForcingData:
             # multi-year axes are passed through to the TimeSeries/BY_DATE
             # alignment unchanged (interpolate_to_daily requires exactly 12
             # monthly timestamps and would otherwise raise).
-            if is_wrap_year_monthly:
-                ds = interpolate_to_daily(ds)
+            pass
         else:
-            base = interpolate_to_daily(ds) if is_wrap_year_monthly else ds
-            ds = upsample_forcings_ds(base, grid=coords.horizontal)
+            ds = upsample_forcings_ds(ds, grid=coords.horizontal)
 
         # Build the shared time axis (seconds since MODEL_EPOCH) for every
         # time-varying variable in this file.
-        time_seconds = _time_axis_seconds_from_ds(ds)
+        times = _time_axis_from_ds(ds)
+        series_mode = (DAILY_CLIMATOLOGY if resolved_align_mode in
+                       (WRAP_YEAR, MONTHLY_CLIMATOLOGY)
+                       and ds.sizes.get("time") in (365, 366)
+                       else resolved_align_mode)
 
         def _ts(values):
             """Wrap an `(lon, lat, time)` array as a `TimeSeries` leaf with
@@ -684,7 +742,7 @@ class ForcingData:
             """
             arr = jnp.asarray(values)
             arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
-            return make_time_series(arr, time_seconds, align_mode=resolved_align_mode)
+            return make_time_series(arr, times, align_mode=series_mode)
 
         # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
@@ -727,7 +785,7 @@ class ForcingData:
             arr = jnp.asarray(ds[name])
             if arr.ndim == 0:
                 return arr
-            return make_time_series(arr, time_seconds, align_mode=resolved_align_mode)
+            return make_time_series(arr, times, align_mode=series_mode)
 
         co2_vmr = _optional_ghg("co2")
         ch4_vmr = _optional_ghg("ch4")
@@ -815,15 +873,15 @@ class ForcingData:
     def any_true(self):
         return tree_util.tree_reduce(lambda x, y: x or y, tree_util.tree_map(jnp.any, self))
 
-    def select(self, date: DateData, calendar: str = DEFAULT_CALENDAR) -> "ForcingData":
+    def select(self, date: DateData) -> "ForcingData":
         """Collapse every `TimeSeries` leaf to the current step's slice and
         populate `solar` from `date`.
 
         Static fields pass through unchanged. Returns a new `ForcingData`
         whose every leaf is the shape physics expects (no leading time axis).
         """
-        sliced = _slice_time_series_leaves(self, date, calendar=calendar)
-        return sliced.copy(solar=_solar_from_date(date, calendar=calendar))
+        sliced = _slice_time_series_leaves(self, date)
+        return sliced.copy(solar=_solar_from_date(date))
 
 
 # ---------------------------------------------------------------------------
@@ -844,9 +902,8 @@ def _is_monthly_climatology(ds) -> bool:
     return "time" in ds.dims and ds.sizes.get("time") == 12
 
 
-def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
-    """Convert a netCDF dataset's `time` coordinate to seconds since
-    `MODEL_EPOCH` (1970-01-01 UTC). Returned as a 1-D float array.
+def _time_axis_from_ds(ds) -> jdt.Datetime:
+    """Convert a decoded netCDF time coordinate to exact Gregorian dates.
 
     Handles both numpy ``datetime64`` axes (standard/proleptic-Gregorian) and
     ``cftime`` axes from non-standard calendars — the CESM emission files use a
@@ -855,10 +912,9 @@ def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
 
     Both kinds are placed on the **same Gregorian clock the model runs on** by
     aligning on the *nominal* calendar date ``(year, month, day, …)``. This is
-    deliberate: the ``BY_DATE`` lookup target is
-    :func:`jcm.date.absolute_seconds_since_epoch`, which is built from
-    ``jax_datetime`` and is leap-aware Gregorian (the model has no real noleap
-    clock — see #449). Converting a ``365_day`` axis with *noleap day-counting*
+    deliberate: ``BY_DATE`` compares this axis directly with the model's
+    leap-aware Gregorian ``jax_datetime`` clock. Converting a ``365_day`` axis
+    with *noleap day-counting*
     (e.g. ``cftime.date2num(..., calendar='365_day')``) would instead drift
     against that target by the accumulated leap days (~7 days by 2000, growing
     every leap year), so ``searchsorted`` would pick the wrong slice and corrupt
@@ -868,7 +924,6 @@ def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
     mapping is exact.
     """
     import numpy as np
-    import pandas as pd
     vals = np.asarray(ds["time"].values)
     if vals.dtype == object:
         # cftime objects (a non-standard calendar like 365_day). Reinterpret
@@ -877,29 +932,64 @@ def _time_axis_seconds_from_ds(ds) -> jnp.ndarray:
         # leap-aware lookup target (see docstring).
         import datetime as _dt
         flat = np.ravel(vals)
-        py_dates = [
-            _dt.datetime(d.year, d.month, d.day,
-                         getattr(d, "hour", 0), getattr(d, "minute", 0),
-                         getattr(d, "second", 0))
-            for d in flat
-        ]
-        idx = pd.DatetimeIndex(py_dates) if py_dates else pd.DatetimeIndex([])
-        delta = (idx - pd.Timestamp("1970-01-01")).total_seconds().to_numpy()
+        py_dates = []
+        for d in flat:
+            calendar = getattr(d, "calendar", "standard")
+            if calendar not in ("standard", "gregorian", "proleptic_gregorian",
+                                "365_day", "noleap"):
+                raise ValueError(
+                    f"Unsupported forcing calendar {calendar!r}; only Gregorian "
+                    "and nominal noleap dates map to the model clock."
+                )
+            try:
+                if getattr(d, "microsecond", 0):
+                    raise ValueError("sub-second precision is unsupported")
+                py_dates.append(_dt.datetime(
+                    d.year, d.month, d.day, getattr(d, "hour", 0),
+                    getattr(d, "minute", 0), getattr(d, "second", 0),
+                    getattr(d, "microsecond", 0)))
+            except ValueError as exc:
+                raise ValueError(
+                    f"Forcing date {d!r} is not a valid Gregorian date"
+                ) from exc
+        vals = np.asarray(py_dates, dtype="datetime64[us]")
     else:
-        # datetime64, or plain numeric (pandas interprets the latter as ns).
-        delta = (pd.DatetimeIndex(vals)
-                 - pd.Timestamp("1970-01-01")).total_seconds().to_numpy()
-    return jnp.asarray(np.asarray(delta, dtype=float))
+        if not np.issubdtype(vals.dtype, np.datetime64):
+            raise ValueError("forcing 'time' must decode to datetime values")
+    if np.any(np.isnat(vals)):
+        raise ValueError("forcing 'time' contains NaT")
+    whole_seconds = vals.astype("datetime64[s]")
+    if np.any((vals - whole_seconds) != np.timedelta64(0, "s")):
+        raise ValueError("forcing dates must have whole-second precision")
+    return jdt.Datetime.from_datetime64(vals)
+
+
+def _time_axis_for_mode(ds, mode: int) -> jdt.Datetime:
+    """Return exact labels, supplying canonical dates for index climatologies."""
+    vals = np.asarray(ds["time"].values)
+    if np.issubdtype(vals.dtype, np.number):
+        if mode in (WRAP_YEAR, MONTHLY_CLIMATOLOGY) and vals.size == 12:
+            return jdt.Datetime.from_datetime64(
+                np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
+        raise ValueError(
+            "numeric forcing time coordinates are supported only for an "
+            "explicit 12-month climatology; dated series require decoded dates"
+        )
+    return _time_axis_from_ds(ds)
 
 
 def _resolve_align_mode(align_mode: str, ds) -> int:
-    """Pick `WRAP_YEAR` vs `BY_DATE` from a string spec ("auto"/"wrap_year"/"by_date").
+    """Resolve an explicit climatology or dated-series alignment mode.
 
-    `auto` chooses `wrap_year` when the file's time span fits in a single
-    year (climatology) and `by_date` otherwise.
+    `auto` is deliberately conservative and always means dated data. Known
+    climatology readers specify their monthly or daily semantics explicitly.
     """
     if align_mode == "wrap_year":
         return WRAP_YEAR
+    if align_mode == "monthly_climatology":
+        return MONTHLY_CLIMATOLOGY
+    if align_mode == "daily_climatology":
+        return DAILY_CLIMATOLOGY
     if align_mode == "by_date":
         return BY_DATE
     if align_mode == "by_date_interp":
@@ -907,26 +997,19 @@ def _resolve_align_mode(align_mode: str, ds) -> int:
     if align_mode != "auto":
         raise ValueError(
             f"Unknown align_mode {align_mode!r}; expected 'auto', 'wrap_year', "
-            "'by_date', or 'by_date_interp'"
+            "'monthly_climatology', 'daily_climatology', 'by_date', or "
+            "'by_date_interp'"
         )
-    # Auto-detect: if the time axis spans <= ~1.05 years, treat as climatology.
-    # Reuse the calendar-aware seconds conversion so non-standard (cftime)
-    # calendars work here too.
-    import numpy as np
-    seconds = np.asarray(_time_axis_seconds_from_ds(ds))
-    if seconds.size <= 1:
-        return WRAP_YEAR
-    span_days = (seconds[-1] - seconds[0]) / 86400.0
-    return WRAP_YEAR if span_days <= 380 else BY_DATE
+    return BY_DATE
 
 
-def _slice_time_series_leaves(forcing: ForcingData, date: DateData, calendar: str) -> ForcingData:
+def _slice_time_series_leaves(forcing: ForcingData, date: DateData) -> ForcingData:
     """Return `forcing` with every `TimeSeries` leaf replaced by its slice
     at `date`. Non-`TimeSeries` leaves are passed through unchanged.
     """
     def slice_leaf(leaf):
         if isinstance(leaf, TimeSeries):
-            return _select_time_series(leaf, date, calendar=calendar)
+            return _select_time_series(leaf, date)
         return leaf
 
     return tree_util.tree_map(
@@ -936,7 +1019,7 @@ def _slice_time_series_leaves(forcing: ForcingData, date: DateData, calendar: st
     )
 
 
-def _select_time_series(ts: TimeSeries, date: DateData, calendar: str) -> jnp.ndarray:
+def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
     """Index `ts.values` along the leading time axis at `date`."""
     n_time = ts.values.shape[0]
     if n_time == 0:
@@ -944,10 +1027,17 @@ def _select_time_series(ts: TimeSeries, date: DateData, calendar: str) -> jnp.nd
         return ts.values
 
     # Every branch has to produce the same shape, which they do (scalar idx).
-    idx_wrap = _wrap_year_index(n_time, date, calendar=calendar)
-    idx_date = _by_date_index(ts.time_seconds, date)
+    idx_month = _monthly_climatology_index(date)
+    idx_daily = _daily_climatology_index(ts.times, date)
+    idx_date = _by_date_index(ts.times, date)
 
-    idx = jnp.where(ts.align_mode == WRAP_YEAR, idx_wrap, idx_date)
+    equal_bin_idx = jnp.floor(date.tyear() * n_time).astype(jnp.int32)
+    legacy_idx = jnp.where(n_time == 12, idx_month,
+                           jnp.where((n_time == 365) | (n_time == 366),
+                                     idx_daily, equal_bin_idx))
+    idx = jnp.where(ts.align_mode == WRAP_YEAR, legacy_idx, idx_date)
+    idx = jnp.where(ts.align_mode == MONTHLY_CLIMATOLOGY, idx_month, idx)
+    idx = jnp.where(ts.align_mode == DAILY_CLIMATOLOGY, idx_daily, idx)
     idx = jnp.clip(idx, 0, n_time - 1)
     stepped = jnp.take(ts.values, idx, axis=0)
     if n_time < 2:
@@ -958,34 +1048,51 @@ def _select_time_series(ts: TimeSeries, date: DateData, calendar: str) -> jnp.nd
     # both the stepped and interpolated values are computed and selected with
     # `where` (cheap: one extra gather + fma per leaf per step).
     lo = jnp.clip(idx_date, 0, n_time - 2)
-    t_lo = jnp.take(ts.time_seconds, lo)
-    t_hi = jnp.take(ts.time_seconds, lo + 1)
-    target = absolute_seconds_since_epoch(date.dt)
-    frac = jnp.clip((target - t_lo) / jnp.maximum(t_hi - t_lo, 1e-9), 0.0, 1.0)
+    t_lo = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(ts.times.delta.days, lo),
+        seconds=jnp.take(ts.times.delta.seconds, lo)))
+    t_hi = jdt.Datetime(jdt.Timedelta(
+        days=jnp.take(ts.times.delta.days, lo + 1),
+        seconds=jnp.take(ts.times.delta.seconds, lo + 1)))
+    elapsed = date.dt - t_lo
+    interval = t_hi - t_lo
+    # Cast before multiplying: Timedelta stores int32 days and a century-scale
+    # out-of-range query would otherwise overflow before the fraction clamps.
+    elapsed_seconds = elapsed.days.astype(jnp.float32) * 86400.0 + elapsed.seconds
+    interval_seconds = interval.days.astype(jnp.float32) * 86400.0 + interval.seconds
+    frac = jnp.clip(elapsed_seconds / jnp.maximum(interval_seconds, 1), 0.0, 1.0)
     interp = ((1.0 - frac) * jnp.take(ts.values, lo, axis=0)
               + frac * jnp.take(ts.values, lo + 1, axis=0))
     return jnp.where(ts.align_mode == BY_DATE_INTERP, interp, stepped)
 
 
-def _wrap_year_index(n_time: int, date: DateData, calendar: str) -> jnp.ndarray:
-    """Climatological wrap: split the year evenly into `n_time` bins."""
-    # `date.tyear(calendar)` is in [0, 1) by construction in date.py.
-    idx = jnp.floor(date.tyear(calendar) * n_time).astype(jnp.int32) % n_time
-    return idx
+def _monthly_climatology_index(date: DateData) -> jnp.ndarray:
+    """Select a Gregorian calendar month (January is record zero)."""
+    _, month, _ = gregorian_ymd_from_days(date.dt.delta.days)
+    return (month - 1).astype(jnp.int32)
 
 
-def _by_date_index(time_seconds: jnp.ndarray, date: DateData) -> jnp.ndarray:
-    """Date-aligned: nearest `time_seconds` entry at-or-before `date`."""
-    target = absolute_seconds_since_epoch(date.dt)
+def _daily_climatology_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
+    """Select the latest nominal month/day; missing Feb 29 holds Feb 28."""
+    _, months, days = gregorian_ymd_from_days(times.delta.days)
+    _, month, day = gregorian_ymd_from_days(date.dt.delta.days)
+    keys = months * 32 + days
+    key = month * 32 + day
+    return jnp.clip(jnp.searchsorted(keys, key, side="right") - 1,
+                    0, times.delta.days.shape[0] - 1).astype(jnp.int32)
+
+
+def _by_date_index(times: jdt.Datetime, date: DateData) -> jnp.ndarray:
+    """Date-aligned: nearest exact datetime entry at-or-before `date`."""
     # `searchsorted(side='right') - 1` puts us at the entry whose timestamp
     # is the latest one <= target, which is the natural piecewise-constant
     # left interpretation of the forcing axis.
-    raw = jnp.searchsorted(time_seconds, target, side='right') - 1
-    return jnp.clip(raw, 0, time_seconds.shape[0] - 1).astype(jnp.int32)
+    raw = jdt.searchsorted(times, date.dt, side='right') - 1
+    return jnp.clip(raw, 0, times.delta.days.shape[0] - 1).astype(jnp.int32)
 
 
-def _solar_from_date(date: DateData, calendar: str) -> SolarGeometry:
-    """Build a `SolarGeometry` from a `DateData`, parameterized by calendar.
+def _solar_from_date(date: DateData) -> SolarGeometry:
+    """Build Gregorian `SolarGeometry` from exact per-step date metadata.
 
     Calendar-aware fraction of year (Gregorian honours leap years; see
     `fraction_of_year_elapsed`). The orbital phase tracks the same
@@ -993,7 +1100,7 @@ def _solar_from_date(date: DateData, calendar: str) -> SolarGeometry:
     (#410). `synodic_phase` is fraction-of-day × 2π, calendar-independent.
     """
     fraction_of_day = date.dt.delta.seconds / 86400.0
-    tyear = date.tyear(calendar)
+    tyear = date.tyear()
     two_pi = 2.0 * jnp.pi
     return SolarGeometry(
         tyear=jnp.asarray(tyear, dtype=jnp.float32),
@@ -1017,6 +1124,20 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     sst_profile = jnp.where(jnp.abs(lat) < jnp.pi/3, 27*jnp.cos(3*lat/2)**2, 0) + 273.15
     return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
 
+
+def _is_nominal_month_axis(ds) -> bool:
+    """Whether ``time`` is an explicit integer January-through-December axis."""
+    if "time" not in ds.coords or ds.sizes.get("time") != 12:
+        return False
+    values = np.asarray(ds["time"].values)
+    if not np.issubdtype(values.dtype, np.number):
+        return False
+    # Both zero-based month indices (the JCM emissions-prep contract) and
+    # conventional one-based month numbers are accepted. Real datetime axes,
+    # including a twelve-month transient, deliberately do not match.
+    return (np.array_equal(values, np.arange(12))
+            or np.array_equal(values, np.arange(1, 13)))
+
 def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
     """Build the ``ForcingData.anthropogenic_emissions`` mapping from a dataset.
 
@@ -1039,8 +1160,12 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
     if not emis_names:
         return None
     has_time = any("time" in ds[n].dims for n in emis_names)
-    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
-    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    # The shipped emissions contract defines a single 12-record file as a
+    # monthly climatology. Concatenated/multi-year products remain dated.
+    effective_mode = ("monthly_climatology" if align_mode == "auto"
+                      and _is_nominal_month_axis(ds) else align_mode)
+    mode = _resolve_align_mode(effective_mode, ds) if has_time else BY_DATE
+    times = _time_axis_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in emis_names:
         da = ds[name]
@@ -1050,7 +1175,7 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
             # them to (ncols,).
             others = [d for d in da.dims if d != "time"]
             arr = jnp.asarray(da.transpose("time", *others).values)
-            out[name] = make_time_series(arr, time_seconds, align_mode=mode)
+            out[name] = make_time_series(arr, times, align_mode=mode)
         else:
             out[name] = jnp.asarray(da.values)
     return out
@@ -1074,8 +1199,10 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     if not names:
         return None
     has_time = any("time" in ds[n].dims for n in names)
-    time_seconds = _time_axis_seconds_from_ds(ds) if has_time else None
-    mode = _resolve_align_mode(align_mode, ds) if has_time else BY_DATE
+    effective_mode = ("monthly_climatology" if align_mode == "auto"
+                      and _is_nominal_month_axis(ds) else align_mode)
+    mode = _resolve_align_mode(effective_mode, ds) if has_time else BY_DATE
+    times = _time_axis_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in names:
         da = ds[name]
@@ -1083,7 +1210,7 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
         if "time" in da.dims:
             others = [d for d in da.dims if d != "time"]
             arr = jnp.asarray(da.transpose("time", *others).values)
-            out[key] = make_time_series(arr, time_seconds, align_mode=mode)
+            out[key] = make_time_series(arr, times, align_mode=mode)
         else:
             out[key] = jnp.asarray(da.values)
     return out
@@ -1224,7 +1351,7 @@ def read_dms_seawater(ds, lat_deg=None, lon_deg=None, var_name="DMS_sea",
             "'kg m-3'."
         )
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, _time_axis_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )
 
 
@@ -1273,7 +1400,7 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
             "Tegen scheme steps it by month start (WRAP_YEAR); a different "
             "record count means a different product.")
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, _time_axis_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )
 
 
@@ -1412,7 +1539,7 @@ def read_dust_roughness(ds, lat_deg=None, lon_deg=None, var_name="surfrough",
             f"{var_name}: expected {_DUST_MONTHS} monthly records, found "
             f"{ds.sizes['time']}.")
     return make_time_series(
-        arr, _time_axis_seconds_from_ds(ds), _resolve_align_mode(align_mode, ds)
+        arr, _time_axis_from_ds(ds), _resolve_align_mode(align_mode, ds)
     )
 
 
@@ -1484,15 +1611,17 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
                 "but the model expects top→bottom (surface last). Flip the "
                 "level axis of the file."
             )
-    time_seconds = _time_axis_seconds_from_ds(ds)
-    mode = _resolve_align_mode(align_mode, ds)
+    times = _time_axis_from_ds(ds)
+    effective_mode = ("monthly_climatology" if align_mode == "auto"
+                      and _is_nominal_month_axis(ds) else align_mode)
+    mode = _resolve_align_mode(effective_mode, ds)
     out: dict[str, Any] = {}
     for var, key in _OXIDANT_VAR_MAP.items():
         arr = _orient_to_model_grid(ds[var], lat_deg, lon_deg, name=var)
         # Defensive: a fill-value cell decoded to NaN means "no data" — treat
         # as zero oxidant rather than let NaN poison the sulfur chemistry.
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-        out[key] = make_time_series(arr, time_seconds, align_mode=mode)
+        out[key] = make_time_series(arr, times, align_mode=mode)
     return out
 
 
@@ -1582,7 +1711,6 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
     extra is needed at run time. Attach both to a :class:`ForcingData` via
     ``base.copy(aerosol_year_weight=..., aerosol_ann_cycle=...)``.
     """
-    import jax_datetime as jdt
     import xarray as xr
 
     ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
@@ -1600,20 +1728,18 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
         # year-start. The file labels year Y with the integer Y; treat it as
         # Y-01-01 00:00 UTC.
         years = ds["years"].values.astype(int)
-        epoch_seconds = [
-            float(absolute_seconds_since_epoch(
-                jdt.Datetime.from_pydatetime(jdt.to_datetime(f"{int(y)}-01-01"))))
-            for y in years
-        ]
+        year_dates = np.asarray(
+            [f"{int(y)}-01-01" for y in years], dtype="datetime64[s]")
         year_weight = make_time_series(
-            yw, jnp.asarray(epoch_seconds), align_mode=BY_DATE)
+            yw, year_dates, align_mode=BY_DATE)
 
         # ann_cycle: (plume, week, feature) -> (week, feature, plume). WRAP_YEAR
-        # repeats every year; time_seconds is unused by that indexing but must
-        # be a 1-D coord of matching length, so pass the week index.
+        # repeats every year; the exact labels are informational for this
+        # legacy weekly climatology.
         ac = jnp.asarray(np.transpose(ds["ann_cycle"].values, (1, 2, 0)))
+        week_dates = np.datetime64("2001-01-01") + np.arange(ac.shape[0]) * np.timedelta64(7, "D")
         ann_cycle = make_time_series(
-            ac, jnp.arange(ac.shape[0]), align_mode=WRAP_YEAR)
+            ac, week_dates, align_mode=WRAP_YEAR)
     finally:
         if not isinstance(path, xr.Dataset):
             ds.close()

@@ -45,7 +45,6 @@ class ContractRoundTripTest(unittest.TestCase):
         import jax_datetime as jdt
         return DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian",
         )
 
     def test_returns_none_without_emis_vars(self):
@@ -67,11 +66,21 @@ class ContractRoundTripTest(unittest.TestCase):
         emis = read_anthropogenic_emissions(_synthetic_emissions_ds())
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             anthropogenic_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         bc = sliced.anthropogenic_emissions["emis_surface_combustion_bc"]
         self.assertEqual(bc.shape, (_NLON, _NLAT))
         self.assertEqual(jnp.ravel(bc).size, _NLON * _NLAT)
         self.assertTrue(np.allclose(np.asarray(bc), 1.0e-11))
+
+    def test_single_year_dated_axis_is_transient(self):
+        """Twelve real dates must not be inferred to repeat as climatology."""
+        from jcm.forcing import BY_DATE
+
+        ds = _synthetic_emissions_ds().assign_coords(
+            time=np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
+        emissions = read_anthropogenic_emissions(ds)
+        self.assertEqual(
+            int(emissions["emis_surface_combustion_bc"].align_mode), BY_DATE)
 
     def test_static_field_passthrough(self):
         # A time-less emissions field is carried as a bare array, still sliced
@@ -106,8 +115,7 @@ class PreSpeciatedContractTest(unittest.TestCase):
         from jcm.date import DateData
         import jax_datetime as jdt
         return DateData.set_date(
-            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian")
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")))
 
     def test_returns_none_without_vars(self):
         ds = xr.Dataset({"emis_surface_combustion_so2":
@@ -122,7 +130,7 @@ class PreSpeciatedContractTest(unittest.TestCase):
         emis = read_prescribed_aerosol_emissions(_synthetic_speciated_ds())
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             prescribed_aerosol_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         got = sliced.prescribed_aerosol_emissions
         # 2-D surface channel → (lon, lat); 3-D volume channel → (lev, lon, lat).
         self.assertEqual(got["m_bc_pcm"].shape, (_NLON, _NLAT))

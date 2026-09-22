@@ -13,6 +13,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/writing_a_physics_scheme
    design/parallelization
    design/output_vertical_conventions
+   design/datetime_v3_scope
    design/checkpoint_compatibility
    design/pyses_cam_se_dycore
    design/dinosaur_sl_jam_configuration
@@ -170,7 +171,7 @@ between the gridpoint state supplied by the dycore and a physics package:
                state: Current atmospheric state (temperature, winds, etc.)
                forcing: Boundary conditions for the *current step*. The
                    Model collapses every `TimeSeries` leaf and populates
-                   `forcing.solar` via ``forcing.select(date, calendar)``
+                   `forcing.solar` via ``forcing.select(date)``
                    before this call, so physics terms see only flat 2-D
                    spatial fields and a precomputed `SolarGeometry` —
                    no time axis, no `DateData`.

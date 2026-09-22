@@ -473,6 +473,54 @@ Other config-surface changes
   MACv2-SP on default all-ones weights; and transient by-date forcing composed
   with present-day JAM emission bundles.
 
+.. _v3-datetime:
+
+One real datetime clock
+-----------------------
+
+Model time now follows Gregorian dates, including February 29, at whole-second
+precision. Timezone-aware inputs are normalized to UTC; naive inputs use the
+same timeline. Days contain 86,400 seconds; leap-second timestamps are not
+supported. Replace
+``start_date`` with ``start_time`` and remove the ``calendar`` argument.
+Use exactly one of a fixed ``total_time`` or an absolute ``end_time``:
+
+.. code-block:: python
+
+   model = Model(..., start_time="2000-01-01")
+   daily = model.run(forcing=forcing, end_time="2001-01-01",
+                     save_interval="1D", output_averages=True)
+   monthly = daily.monthly_means()
+
+Numeric run durations remain days. Strings such as ``"6h"`` and ``"1D"``
+are fixed durations; ``"1 month"`` and ``"1 year"`` are rejected because
+months and years have different lengths. In Hydra, select an endpoint with
+``run.total_time=null run.end_time=2001-01-01``.
+
+Run and save durations must divide exactly into model steps, and the run must
+contain complete save intervals. Averaged save intervals must contain an even
+number of seconds so their midpoint fits the whole-second model clock.
+
+Interval means include ``time_bounds`` and midpoint labels. Monthly means
+weight each contributing interval by its duration; snapshots cannot be
+converted into interval means after the run. Observers keep their own
+sampling: this helper aggregates only the primary output stream. See
+:doc:`design/datetime_v3_scope` for the forcing and partial-month contracts.
+
+Input ``align_mode="auto"`` now treats a time axis as dated data. A short
+file is no longer assumed to repeat annually. Declare repeating monthly or
+daily climatologies explicitly (the product-specific readers do this for
+known climatology formats). A monthly climatology selects civil months;
+no-leap dated inputs retain their nominal date components on ingestion.
+
+A saved run now includes its exact datetime and integer step count. External
+couplers must preserve the complete ``RunState`` or pass ``time`` and ``step``
+explicitly to ``restore_state``. Dycore ``sim_time`` alone is insufficient.
+Checkpoints predating the exact clock can only be imported as initial
+conditions (``as_initial_condition=True``), starting at the new model's
+``start_time``. Unstamped files additionally require the unit assertion
+explained below.
+
 .. _v3-checkpoints:
 
 Checkpoint compatibility
@@ -516,14 +564,14 @@ convention yourself, per leaf:
    from jcm.checkpoint import load_checkpoint
 
    # a pre-#824 ECHAM donor: its stored mass mixing ratios are 1000x small
-   load_checkpoint(model, path, unstamped_scale={
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={
        "tracers.specific_humidity": 1000.0,
        "tracers.qc": 1000.0,
        "tracers.qi": 1000.0,
    })
 
    # or, having checked the file is already in the current convention:
-   load_checkpoint(model, path, unstamped_scale={})
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={})
 
 and, for a *fresh start from* a saved state, from the CLI through the ``init``
 group:

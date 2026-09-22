@@ -39,11 +39,17 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     previous_year_padding = [ds_monthly[time_vars].isel(time=i) for i in range(12 - pad_n, 12)]
     next_year_padding = [ds_monthly[time_vars].isel(time=i) for i in range(pad_n)]
     extended_monthly_time_vars = xr.concat(previous_year_padding + [ds_monthly[time_vars]] + next_year_padding, dim='time')
-    extended_time = pd.date_range(start=f'1980-{13-pad_n:02}-01', end=f'1982-{pad_n:02}-01', freq='MS')
+    # Keep the source year. The labels are part of the forcing semantics and
+    # must not be silently rewritten to the historical implementation's 1981.
+    source_year = int(time[0].year)
+    extended_time = pd.date_range(
+        start=f'{source_year - 1}-{13-pad_n:02}-01',
+        end=f'{source_year + 1}-{pad_n:02}-01', freq='MS')
     extended_monthly_time_vars['time'] = extended_time
 
     daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
-    daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
+    daily_time_vars = daily_time_vars.sel(
+        time=slice(f'{source_year}-01-01', f'{source_year}-12-31'))
     return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
 def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:

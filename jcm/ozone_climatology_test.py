@@ -339,7 +339,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
         # Second year's slices carry the second year's value (8 ppmv).
         self.assertAlmostEqual(float(ts.values[12:].max()), 8.0, delta=0.1)
         # Time axis is strictly increasing across the file boundary.
-        self.assertTrue(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+        self.assertTrue(np.all(np.diff(np.asarray(ts.times.delta.days)) >= 0))
 
     def test_yearly_interp_blends_across_the_year_boundary(self):
         # 1980-01-01 sits between 1979-12-15 (4 ppmv) and 1980-01-15
@@ -359,13 +359,26 @@ class TestYearlyOzoneFiles(unittest.TestCase):
         forcing = ForcingData.zeros((8, 4)).copy(ozone_climatology=clim)
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime("1980-01-01")),
-            calendar="gregorian")
+                jdt.to_datetime("1980-01-01")))
         o3 = np.asarray(
-            forcing.select(date, calendar="gregorian")
+            forcing.select(date)
             .ozone_climatology.o3_ppmv)
         self.assertGreater(float(o3.max()), 5.0)
         self.assertLess(float(o3.max()), 7.5)
+
+    def test_single_year_list_remains_dated_and_interpolated(self):
+        """A one-element yearly expansion must not become a climatology."""
+        from jcm.forcing import BY_DATE_INTERP
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "1980.nc"
+            _write_yearly_ozone(path, 1980, 8, 4, 16, 8.0e-6)
+            clim = OzoneClimatology.from_file(
+                [path], nlon=8, nlat=4, nlev=16)
+        self.assertEqual(int(clim.o3_ppmv.align_mode), BY_DATE_INTERP)
+        np.testing.assert_array_equal(
+            clim.o3_ppmv.times.to_datetime64().astype("datetime64[M]"),
+            np.arange("1980-01", "1981-01", dtype="datetime64[M]"))
 
     def test_mixed_time_epochs_raise(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,8 +407,8 @@ class TestYearlyOzoneFiles(unittest.TestCase):
                                               nlev=16)
         ts = clim.o3_ppmv
         self.assertEqual(int(ts.align_mode), BY_DATE_INTERP)
-        self.assertTrue(np.all(np.isfinite(np.asarray(ts.time_seconds))))
-        self.assertTrue(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+        self.assertTrue(np.all(np.isfinite(np.asarray(ts.times.delta.days))))
+        self.assertTrue(np.all(np.diff(np.asarray(ts.times.delta.days)) >= 0))
 
 
 if __name__ == "__main__":

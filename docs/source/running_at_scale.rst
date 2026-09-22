@@ -360,7 +360,7 @@ and ``init=era5`` starts the run from the ERA5 state at the same date.
 Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
 
    python -m jcm.main +configuration=t63-echam-rrtmgp \
-       init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
+       init=era5 nudging=era5 run.start_time=2010-01-01 run.total_time=30
 
 Prefetch on a login node first when compute nodes lack internet
 (``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start 2010-01-01 --end

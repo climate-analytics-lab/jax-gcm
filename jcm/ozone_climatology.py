@@ -10,13 +10,12 @@ the prep script so the online code is just an array slice — no per-step
 
 Two routing modes, auto-detected from the file's time-axis length:
 
-* ``ntime == 12`` — climatology, ``align_mode=WRAP_YEAR``. Year wraps
+* ``ntime == 12`` — explicit monthly climatology. Year wraps
   to itself; the same January slice gets returned every January
   regardless of year. Matches the prep-script default for files like
   ``T63L47_ozone_picontrol.nc``.
-* ``ntime > 12``  — transient, ``align_mode=BY_DATE``. The file's
-  ``time`` coordinate is decoded to absolute seconds since
-  ``1970-01-01`` and ``ForcingData.select(date)`` looks up the
+* ``ntime > 12``  — transient, ``align_mode=BY_DATE``. The file's exact
+  ``time`` coordinate and ``ForcingData.select(date)`` provide the
   date-aligned slice (e.g. an SSP / historical multi-year run gets the
   right monthly value for *that* year).
 
@@ -127,8 +126,8 @@ class OzoneClimatology:
         import xarray as xr
         # Local import: ``jcm.forcing`` already imports this module via
         # ``ForcingData``, so importing it at module top would cycle.
-        from jcm.forcing import (BY_DATE, BY_DATE_INTERP, WRAP_YEAR,
-                                 make_time_series)
+        from jcm.forcing import (BY_DATE, BY_DATE_INTERP,
+                                 MONTHLY_CLIMATOLOGY, make_time_series)
 
         from_yearly_list = isinstance(path, (list, tuple))
         if from_yearly_list:
@@ -227,22 +226,18 @@ class OzoneClimatology:
         # climatology (WRAP_YEAR), anything else → piecewise ``BY_DATE``
         # (unchanged behaviour for existing transient files).
         if from_yearly_list:
-            time_seconds = _decode_time_axis_seconds(ds, path)
+            times = _decode_time_axis(ds, path)
             align = BY_DATE_INTERP
         elif ntime == 12:
-            seconds_per_month = 30.4375 * 86400.0  # 365.25/12 days
-            time_seconds = jnp.asarray(
-                (np.arange(ntime) + 0.5) * seconds_per_month,
-                dtype=jnp.float32,
-            )
-            align = WRAP_YEAR
+            times = np.arange("2001-01", "2002-01", dtype="datetime64[M]").astype("datetime64[s]")
+            align = MONTHLY_CLIMATOLOGY
         else:
-            time_seconds = _decode_time_axis_seconds(ds, path)
+            times = _decode_time_axis(ds, path)
             align = BY_DATE
 
         ts = make_time_series(
             jnp.asarray(o3_cols, dtype=jnp.float32),
-            time_seconds,
+            times,
             align_mode=align,
         )
         return cls(o3_ppmv=ts)
@@ -275,16 +270,16 @@ class OzoneClimatology:
         return bool(arr.size > 0)
 
 
-def _decode_time_axis_seconds(ds, path: Path) -> jnp.ndarray:
-    """Decode a transient ozone file's time axis to seconds since 1970.
+def _decode_time_axis(ds, path: Path):
+    """Decode a transient ozone file's exact Gregorian time axis.
 
-    Mirrors ``jcm.forcing._time_axis_seconds_from_ds`` but works on the
+    Mirrors ``jcm.forcing._time_axis_from_ds`` but works on the
     raw ``(values, units)`` pair (we opened with ``decode_times=False``
     above so the climatology branch could keep month indices as plain
     integers).
     """
-    import pandas as pd
     import xarray as xr
+    from jcm.forcing import _time_axis_from_ds
 
     # Re-decode just the time coord. ``xr.decode_cf`` on the whole
     # dataset would also try to re-encode masked O3 values etc., which
@@ -295,22 +290,4 @@ def _decode_time_axis_seconds(ds, path: Path) -> jnp.ndarray:
             f"``time`` coordinate."
         )
     time_da = xr.decode_cf(ds[["time"]])["time"]
-    vals = np.asarray(time_da.values)
-    if vals.dtype == object:
-        # cftime axis (e.g. the FZJ ozone's 365_day calendar): map each
-        # date by its calendar components onto the Gregorian clock, the
-        # same convention as ``jcm.forcing._time_axis_seconds_from_ds``
-        # (noleap day-counting would drift ~7 days by 2000 against the
-        # model's leap-aware lookup target).
-        import datetime as _dt
-        times = pd.DatetimeIndex([
-            _dt.datetime(d.year, d.month, d.day,
-                         getattr(d, "hour", 0), getattr(d, "minute", 0),
-                         getattr(d, "second", 0))
-            for d in np.ravel(vals)
-        ])
-    else:
-        times = pd.DatetimeIndex(vals)
-    epoch = pd.Timestamp("1970-01-01")
-    delta_s = (times - epoch).total_seconds().to_numpy()
-    return jnp.asarray(delta_s, dtype=jnp.float32)
+    return _time_axis_from_ds(xr.Dataset(coords={"time": time_da}))

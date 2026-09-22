@@ -25,7 +25,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.dycore.pyses.interp import interp_grid_to_points
-from jcm.forcing import ForcingData, TimeSeries, WRAP_YEAR, make_time_series
+from jcm.forcing import (
+    ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY, make_time_series,
+)
 
 
 # Time-varying monthly fields expected in the jcm-canonical forcing file,
@@ -80,9 +82,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     Returns:
         :class:`ForcingData` whose spatial leaves are ``(1, ncol)`` (static
         albedo) or ``TimeSeries`` with values ``(12, 1, ncol)`` in
-        ``WRAP_YEAR`` (climatology) alignment — the current month is
-        selected by fraction-of-year, so the ``time_seconds`` axis (month
-        starts, 365-day year) is informational.
+        monthly-climatology alignment — the current record is selected by
+        Gregorian calendar month from the exact datetime coordinate.
 
     """
     import xarray as xr
@@ -106,10 +107,7 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             f"build_forcing expects a 12-month climatology; {forcing_file} "
             f"has {n_time} time slices."
         )
-    # Month-start seconds in a 365-day year: informational under WRAP_YEAR
-    # (selection is by fraction-of-year), but kept physically labelled.
-    month_days = np.array([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334])
-    time_seconds = month_days * 86400.0
+    month_times = np.arange("2001-01", "2002-01", dtype="datetime64[M]").astype("datetime64[s]")
 
     def monthly_to_columns(name):
         arr = np.asarray(ds[name].transpose("lon", "lat", "time").values)
@@ -140,8 +138,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     ).reshape(1, ncol)
 
     def ts(values):
-        return make_time_series(jnp.asarray(values), time_seconds,
-                                align_mode=WRAP_YEAR)
+        return make_time_series(jnp.asarray(values), month_times,
+                                align_mode=MONTHLY_CLIMATOLOGY)
 
     forcing = ForcingData.zeros(
         nodal_shape=(1, ncol),
@@ -189,8 +187,7 @@ def _leaf_to_columns(leaf, lon, lat, col_lon, col_lat):
         axis=0,
     ).reshape(lead + (1, col_lon.size))
     if isinstance(leaf, TimeSeries):
-        return TimeSeries(values=jnp.asarray(cols),
-                          time_seconds=leaf.time_seconds,
+        return TimeSeries(values=jnp.asarray(cols), times=leaf.times,
                           align_mode=leaf.align_mode)
     return jnp.asarray(cols)
 
@@ -409,12 +406,11 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
         # ``_to_3d_with_filled_halo`` with "Cannot broadcast to shape with
         # fewer dimensions: arr_shape=(1, 47) shape=(47,)".
         cols = np.asarray(cols).reshape(cols.shape[:-2] + (-1,))
-        seconds_per_month = 30.4375 * 86400.0            # match from_file
+        month_times = np.arange("2001-01", "2002-01", dtype="datetime64[M]").astype("datetime64[s]")
         ts = make_time_series(
             jnp.asarray(cols, dtype=jnp.float32),
-            jnp.asarray((np.arange(12) + 0.5) * seconds_per_month,
-                        dtype=jnp.float32),
-            WRAP_YEAR,
+            month_times,
+            MONTHLY_CLIMATOLOGY,
         )
         forcing = forcing.copy(ozone_climatology=OzoneClimatology(o3_ppmv=ts))
 

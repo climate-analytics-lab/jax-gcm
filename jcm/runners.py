@@ -443,7 +443,7 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
 
     Timescale config only — the ERA5 reference target is attached to
     forcing at run time (``_maybe_attach_nudging_target``), windowed to
-    ``run.start_date + run.total_time``.
+    ``run.start_time + run.total_time``.
     """
     nudging_cfg = cfg.get("nudging", None)
     if nudging_cfg is None or not nudging_cfg.get("enabled", False):
@@ -464,7 +464,7 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
 def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     """Attach the windowed ERA5 nudging target to forcing (#610).
 
-    The window is ``[run.start_date, start + total_time]`` padded by a
+    The window is ``[run.start_time, start + total_time]`` padded by a
     day each side. Requires internet (or a warm ``jcm.data.era5``
     cache — prefetch on a login node for compute-node runs).
     """
@@ -478,9 +478,8 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     import datetime as _dt
 
     from jcm.data import era5
-    start_raw = cfg.get("run", {}).get("start_date", None) or "2000-01-01"
-    start = _dt.date.fromisoformat(str(start_raw)[:10])
-    days = float(cfg.run.total_time)
+    start = model.start_time.to_pydatetime().date()
+    days = _configured_total_days(cfg, model.start_time)
     window = (str(start - _dt.timedelta(days=1)),
               str(start + _dt.timedelta(days=int(days) + 2)))
     target = era5.nudging_target(
@@ -636,7 +635,7 @@ def _state_from_file(model: Model, cfg: DictConfig):
 def _state_from_era5(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=era5`` initial condition.
 
-    Resolves the ERA5 slice date from ``init.date``, else ``run.start_date``,
+    Resolves the ERA5 slice date from ``init.date``, else ``run.start_time``,
     else the 2000-01-01 default — matching the calendar the run integrates on
     — records provenance, then returns the regridded ``PhysicsState`` from
     :func:`jcm.data.era5.initial_state` for the caller to run.
@@ -644,8 +643,7 @@ def _state_from_era5(model: Model, cfg: DictConfig):
     from jcm.data import era5
 
     date = (cfg.get("init", {}).get("date", None)
-            or cfg.get("run", {}).get("start_date", None)
-            or "2000-01-01")
+            or str(model.start_time.to_datetime64()))
     provenance.record_fact("initial_condition", f"era5:{date}")
     return era5.initial_state(model.coords, str(date))
 
@@ -714,19 +712,39 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
         "plev" in (phys.get("aerocom_groups") or ()))
 
 
-def _resolve_start_date(cfg: DictConfig):
-    """``run.start_date`` (ISO date string) as a ``jax_datetime.Datetime``.
+def _configured_total_days(cfg: DictConfig, start_time) -> float:
+    """Resolve the mutually exclusive run duration/end time on the host."""
+    import numpy as np
+    from jcm.date import parse_duration_days, to_datetime
+
+    total = cfg.run.get("total_time")
+    end = cfg.run.get("end_time")
+    if (total is None) == (end is None):
+        raise ValueError("Set exactly one of run.total_time and run.end_time; "
+                         "set run.total_time=null when selecting an end_time.")
+    if end is None:
+        days = parse_duration_days(total)
+    else:
+        delta = to_datetime(str(end), name="end_time") - to_datetime(start_time)
+        days = float(delta.days) + float(delta.seconds) / 86400.0
+    if not np.isfinite(days) or days <= 0:
+        raise ValueError("The configured run must have a positive finite duration.")
+    return days
+
+
+def _resolve_start_time(cfg: DictConfig):
+    """``run.start_time`` (ISO date string) as a ``jax_datetime.Datetime``.
 
     ``None``/unset keeps ``Model``'s default (2000-01-01). Transient
     (``BY_DATE``-aligned) forcing samples the file at the absolute model
     date, so a historical run must set this to place itself on the
-    forcing's calendar (issue #610).
+    forcing's dated coverage (issue #610).
     """
-    raw = cfg.get("run", {}).get("start_date", None)
+    raw = cfg.get("run", {}).get("start_time", None)
     if raw in (None, "", "null"):
         return None
-    import jax_datetime as jdt
-    return jdt.to_datetime(str(raw))
+    from jcm.date import to_datetime
+    return to_datetime(str(raw), name="start_time")
 
 
 _LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -904,7 +922,7 @@ def build_model(cfg: DictConfig) -> Model:
         dycore,
         physics=physics,
         time_step=time_step,
-        start_date=_resolve_start_date(cfg),
+        start_time=_resolve_start_time(cfg),
     )
 
 
@@ -971,7 +989,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
             configured_time_step,
         )
     return Model(dycore=dycore, physics=physics,
-                 start_date=_resolve_start_date(cfg))
+                 start_time=_resolve_start_time(cfg))
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -1364,12 +1382,12 @@ def _forcing_tracks_calendar(forcing) -> bool:
 
     The config keys ``forcing.years`` / ``forcing.align`` miss the common case
     of a single multi-year netCDF under the default ``align: auto``:
-    ``ForcingData.from_file``'s span-based auto-detection resolves it to
+    ``ForcingData.from_file``'s conservative dated-data default resolves it to
     ``BY_DATE`` at build time, yet the config still reads ``align: auto`` /
     ``years: null``. So classify from what the resolution actually produced —
     any surface ``TimeSeries`` leaf (SST / sea-ice / snow / soil / land T) whose
     ``align_mode`` is ``BY_DATE`` / ``BY_DATE_INTERP`` means those fields track
-    real calendar dates. A 12-month climatology resolves to ``WRAP_YEAR`` and is
+    real calendar dates. An explicitly declared climatology resolves to a repeating mode and is
     not transient. ``forcing`` may be ``None`` (default/prescribed path builds
     none) — then there is no date-aligned surface forcing to flag.
     """
@@ -1685,7 +1703,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         return model.run(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
+            total_time=cfg.run.get("total_time"),
+            end_time=cfg.run.get("end_time"),
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -1709,7 +1728,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         initial_physics_state=initial_physics_state,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
-        total_time=cfg.run.total_time,
+        total_time=cfg.run.get("total_time"),
+        end_time=cfg.run.get("end_time"),
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -1774,6 +1794,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     _, states = _load_states_from_cfg(cfg, physics)
 
     model = PrescribedStateModel(
+        start_time=_resolve_start_time(cfg),
         physics=physics,
         coords=coords,
         terrain=terrain,
@@ -1865,8 +1886,10 @@ def run_chunked(
     if forcing is None:
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
-    save_interval = float(cfg.run.save_interval)
-    total_time = float(cfg.run.total_time)
+    from jcm.date import parse_duration_days
+
+    save_interval = parse_duration_days(cfg.run.save_interval)
+    total_time = _configured_total_days(cfg, model.start_time)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
 
@@ -1959,7 +1982,8 @@ def run_chunked(
         )
         chunk_wall = time.perf_counter() - t0
         total_wall += chunk_wall
-        elapsed_sim_days += cur_chunk
+        elapsed = model.run_state.time - model.start_time
+        elapsed_sim_days = int(elapsed.days) + int(elapsed.seconds) / 86400.0
 
         ds = preds.to_xarray()
         ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
@@ -1977,7 +2001,7 @@ def run_chunked(
         for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
-        nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
+        nc_path = f"{output_prefix}_day{elapsed_sim_days:g}.nc"
         # The parameters ride on the predictions object, not the module
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
@@ -1990,7 +2014,7 @@ def run_chunked(
         print(f"  Saved {nc_path}")
         snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
-            snap_path = (f"{output_prefix}_day{int(elapsed_sim_days)}"
+            snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
             snap_ds.to_netcdf(snap_path)
@@ -2010,7 +2034,7 @@ def run_chunked(
             cp = Path(ckpt_path)
             if cp.exists():
                 cp.replace(f"{ckpt_path}.prev")
-            save_checkpoint(model, ckpt_path, elapsed_days=elapsed_sim_days)
+            save_checkpoint(model, ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
             archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
             # Archive at the first chunk boundary past each interval multiple,

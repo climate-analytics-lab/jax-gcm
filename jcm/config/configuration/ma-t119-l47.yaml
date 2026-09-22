@@ -46,6 +46,7 @@ defaults:
 init:
   rh: 0.0
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
   # Emission-free: T119 has no mirror bundle, so ``auto`` cannot resolve these
   # (see the header). Explicit nulls keep the composed run one command instead
