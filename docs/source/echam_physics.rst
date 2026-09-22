@@ -408,7 +408,7 @@ Key processes:
    - Ice uses the integral form ``zxised = xi · exp(-vt·dt/dz) + flux_in / (rho·vt) · (1 - exp(...))`` for stability at the long ECHAM-default ``dt = 12 min`` timestep
    - Rain and snow use the simpler instantaneous form
 
-7. **Evaporation / sublimation** of precipitation in subsaturated layers
+7. **Evaporation** of rain in subsaturated layers (Rotstayn 1997; the 1M port has no snow sublimation)
 8. **Droplet effective radius** for radiation, from the ECHAM law
    ``r_eff = 1e6 · κ(N) · (3 ρ q_l,in-cloud / (4 π ρ_w N))^(1/3)`` with the Peng &
    Lohmann (2003) breadth factor — the same
@@ -446,8 +446,8 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
      - Snow density (kg/m³)
      - 100.0
    * - ``cvtfall``
-     - Ice content-dependent terminal velocity factor
-     - 3.29
+     - Ice/snow terminal-velocity factor (ECHAM ``mo_echam_cloud_params`` value at T63; the 2M scheme uses the same)
+     - 2.5
    * - ``base_cdnc``
      - Baseline CDNC in clean air (1/m³)
      - 100e6

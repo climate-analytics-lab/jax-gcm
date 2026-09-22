@@ -715,8 +715,16 @@ def cloud_microphysics_column_sweep(
     droplet_number: jnp.ndarray,
     dt: float,
     config: Optional[MicrophysicsParameters] = None,
+    specific_humidity_m1: Optional[jnp.ndarray] = None,
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """ECHAM ``mo_cloud.f90`` column-sweep cloud + microphysics routine.
+
+    ``temperature`` / ``specific_humidity`` are the provisional
+    (post-vdiff/convection) state the sweep acts on and its tendencies are
+    relative to. ``specific_humidity_m1`` is the STEP-START humidity (ECHAM
+    ``qm1``) from which the moist heat capacity ``pcair`` — and hence every
+    ``L/cp`` latent-heat factor — is built; it defaults to
+    ``specific_humidity`` for standalone callers with no upstream increment.
 
     Faithful port of ICON/ECHAM ``mo_cloud.f90`` lines 260-1080. Treats
     rain (``zrfl``) and snow (``zsfl``) as **downward fluxes** that
@@ -785,15 +793,21 @@ def cloud_microphysics_column_sweep(
 
     # Latent-heat-to-heat-capacity ratios built from the MOIST heat capacity
     # ``cpd·(1 + vtmpc2·q)`` (ECHAM zlvdcp = alv/pcair, zlsdcp = als/pcair;
-    # mo_cloud.f90:412-414, pcair from qm1). Per-level (nlev,) columns frozen
-    # at the sweep's input humidity — as ECHAM fixes pcair at level entry and
-    # does not update it as q evolves through the microphysics. Every latent
-    # term below (melt, clear-sky evaporation, riming, rain evap) and the
-    # in-sweep saturation adjustment divide by this SAME per-level cp so the
-    # column's latent heating stays internally consistent (#706).
-    zlvdcp_col, zlsdcp_col = latent_heat_over_cp(specific_humidity)
+    # mo_cloud.f90:412-414). ECHAM builds pcair ONCE per step in physc
+    # (physc.f90:289, ``zcair = cpd + cpd·vtmpc2·max(qm1, 0)``) from the
+    # STEP-START humidity qm1 — before vdiff/convection advance q — and hands
+    # that same array to cloud; so q here is ``specific_humidity_m1``, not
+    # the provisional post-upstream humidity the sweep otherwise acts on
+    # (same anchoring as the 2M port). Per-level (nlev,) columns, fixed
+    # through the sweep. Every latent term below (melt, clear-sky
+    # evaporation, riming, rain evap) and the in-sweep saturation adjustment
+    # divide by this SAME per-level cp so the column's latent heating stays
+    # internally consistent (#706).
+    if specific_humidity_m1 is None:
+        specific_humidity_m1 = specific_humidity
+    zlvdcp_col, zlsdcp_col = latent_heat_over_cp(specific_humidity_m1)
     zlfdcp_col = zlsdcp_col - zlvdcp_col        # alhf / cp
-    cp_moist_col = moist_isobaric_heat_capacity(specific_humidity)
+    cp_moist_col = moist_isobaric_heat_capacity(specific_humidity_m1)
 
     def step(carry, level_inputs):
         zrfl, zsfl, zclcpre, zxiflux = carry
@@ -1354,7 +1368,10 @@ class Echam1MMicrophysics(PhysicsTerm):
         # sweep's saturation balance and rain evaporation must see THAT
         # (T, q) — using the step-start state let the same supersaturation
         # be condensed by both convection and microphysics, and computed
-        # evaporation against a stale qsat (review finding 2.15).
+        # evaporation against a stale qsat (review finding 2.15). The moist
+        # heat capacity is the one exception: ECHAM builds pcair from the
+        # step-start qm1, so ``state.specific_humidity`` is passed to the
+        # sweep separately for the L/cp factors.
         thermo_run = diagnostics.get("thermo_run")
         if thermo_run is None:
             temperature_in = state.temperature
@@ -1391,13 +1408,15 @@ class Echam1MMicrophysics(PhysicsTerm):
         # :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`.
         micro_tend, micro_state = jax.vmap(
             cloud_microphysics_column_sweep,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1),
             out_axes=(0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, cloud_fraction,
             air_density, layer_thickness,
             droplet_number_per_kg, dt, params,
+            # Step-start q (ECHAM qm1) anchors the moist-cp L/cp factors.
+            state.specific_humidity,
         )
 
         tendency = PhysicsTendency(

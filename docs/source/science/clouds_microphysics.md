@@ -15,7 +15,9 @@
   top-down column sweep: autoconversion (Beheng 1994 default or KK2000),
   accretion, ice→snow aggregation (Levkov 1992), riming, snow/ice melt, ice
   sedimentation, Rotstayn (1997) rain evaporation. Ports the ECHAM6/ICON
-  ``mo_cloud.f90`` single-moment branch.
+  ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
+  ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
+  (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
