@@ -306,6 +306,36 @@ class PhysicsTerm(nnx.Module):
         """
         raise NotImplementedError
 
+    def augment_probe_forcing(self, forcing: ForcingData) -> ForcingData:
+        """Complete the shape-probe ``ForcingData`` for this term.
+
+        ``ComposablePhysics.get_empty_data`` traces ``__call__`` abstractly
+        against a zero-filled ``ForcingData`` to discover the diagnostics
+        pytree. A term that reads an *optional* forcing field (default
+        ``None``) it genuinely REQUIRES for a given configuration — e.g. a
+        forced-surface-flux term reading ``prescribed_*`` — overrides this
+        to fill that field with a zero array of the right shape, so the
+        probe traces the real code path instead of a ``None``-guard.
+
+        This is the forcing analogue of the probe seeding tracers from
+        :meth:`required_tracers`: it makes the probe structurally match a
+        live step WITHOUT weakening the term's own run-time validation
+        (:meth:`validate_forcing`), which still fires on the real,
+        un-augmented forcing. Default: identity (most terms need nothing).
+        """
+        return forcing
+
+    def validate_forcing(self, forcing: ForcingData) -> None:
+        """Raise if the run's forcing is missing a field this term requires.
+
+        Called once by :meth:`~jcm.physics.composable_physics.
+        ComposablePhysics.validate_forcing` on the concrete run forcing
+        (not the abstract shape probe), so a term configured to read an
+        optional field it cannot run without — e.g. forced-mode surface
+        fluxes — fails loudly at run start rather than silently applying a
+        zero. Default: no-op.
+        """
+
     def __add__(self, other):
         """Compose two terms (or a term and a ComposablePhysics).
 

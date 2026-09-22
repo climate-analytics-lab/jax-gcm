@@ -83,14 +83,22 @@ class PrescribedSurfaceFlux(PhysicsTerm):
     )
     provides: ClassVar[tuple[str, ...]] = ()
 
-    def __call__(
-        self,
-        state: PhysicsState,
-        diagnostics: dict,
-        forcing: ForcingData,
-        terrain: TerrainData,
-    ) -> tuple[PhysicsTendency, dict]:
-        """Apply the prescribed fluxes as an explicit bottom-layer source."""
+    def augment_probe_forcing(self, forcing: ForcingData) -> ForcingData:
+        """Seed the shape probe's ``prescribed_*`` fields with zeros.
+
+        Lets ``get_empty_data`` trace the prescribed-flux path rather than a
+        ``None``-guard; the real run's check lives in :meth:`validate_forcing`.
+        """
+        zeros = jnp.zeros_like(forcing.stl_am)
+        return forcing.copy(
+            prescribed_sensible_heat_flux=zeros,
+            prescribed_evaporation=zeros,
+            prescribed_stress_u=zeros,
+            prescribed_stress_v=zeros,
+        )
+
+    def validate_forcing(self, forcing: ForcingData) -> None:
+        """Fail loudly at run start if the prescribed fields are absent."""
         missing = missing_prescribed_flux_fields(forcing)
         if missing:
             raise ValueError(
@@ -102,14 +110,34 @@ class PrescribedSurfaceFlux(PhysicsTerm):
                 "docs/source/design/surface_exchange.md."
             )
 
+    def __call__(
+        self,
+        state: PhysicsState,
+        diagnostics: dict,
+        forcing: ForcingData,
+        terrain: TerrainData,
+    ) -> tuple[PhysicsTendency, dict]:
+        """Apply the prescribed fluxes as an explicit bottom-layer source.
+
+        A missing prescribed field is caught before the run by
+        :meth:`validate_forcing`; here (which also runs under the abstract
+        shape probe) a ``None`` field falls back to a zero map so the trace
+        stays well-defined.
+        """
         _nlev, ncols = state.temperature.shape
         dt = diagnostics["_dt_seconds"]
 
         # Contract convention: SHF/E positive up, stress positive down.
-        shf = forcing.prescribed_sensible_heat_flux.reshape(ncols)
-        evap = forcing.prescribed_evaporation.reshape(ncols)
-        stress_u = forcing.prescribed_stress_u.reshape(ncols)
-        stress_v = forcing.prescribed_stress_v.reshape(ncols)
+        zeros_col = jnp.zeros(ncols)
+
+        def _prescribed(name):
+            value = getattr(forcing, name)
+            return zeros_col if value is None else value.reshape(ncols)
+
+        shf = _prescribed("prescribed_sensible_heat_flux")
+        evap = _prescribed("prescribed_evaporation")
+        stress_u = _prescribed("prescribed_stress_u")
+        stress_v = _prescribed("prescribed_stress_v")
 
         # Bottom-layer pressure thickness from the moist-air diagnostics
         # (physics-internal frame is top-first: index -1 = surface).

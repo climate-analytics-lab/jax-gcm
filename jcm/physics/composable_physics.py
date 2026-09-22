@@ -571,6 +571,13 @@ class ComposablePhysics(nnx.Module, Physics):
             },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
+        # Let terms complete the probe forcing the same way it seeds tracers
+        # (above): a term that requires an optional forcing field for its
+        # configuration — e.g. a forced-surface-flux term reading
+        # ``prescribed_*`` — fills it here so the abstract trace follows the
+        # real code path instead of a ``None``-guard.
+        for term in self.terms:
+            probe_forcing = term.augment_probe_forcing(probe_forcing)
         probe_terrain = TerrainData.aquaplanet(coords)
 
         diagnostics = jax.eval_shape(
@@ -728,6 +735,17 @@ class ComposablePhysics(nnx.Module, Physics):
             SURFACE_EXCHANGE_KEY in getattr(term, "provides", ())
             for term in self.terms
         )
+
+    def validate_forcing(self, forcing) -> None:
+        """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
+
+        :class:`~jcm.model.Model` calls this on the concrete run forcing
+        before compiling, so a term that requires an optional field it
+        cannot run without (e.g. forced-mode surface fluxes) fails loudly
+        at run start rather than silently applying a zero.
+        """
+        for term in self.terms:
+            term.validate_forcing(forcing)
 
     def require_surface_exchange(self) -> None:
         """Fail loudly at composition time if no surface exchange is published.

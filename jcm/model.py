@@ -1484,9 +1484,18 @@ class Model:
             "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
             save_interval, total_time, output_averages,
         )
+        forcing = forcing or default_forcing(self.coords.horizontal)
+        # Fail loudly on the CONCRETE run forcing before compiling: a term
+        # that requires an optional forcing field for its configuration (e.g.
+        # forced-mode surface fluxes reading ``prescribed_*``) reports the
+        # missing field here rather than silently applying a zero. Terms
+        # without such a requirement no-op. Guarded so a physics package that
+        # predates the hook (or a non-ComposablePhysics) is tolerated.
+        if hasattr(self.physics, "validate_forcing"):
+            self.physics.validate_forcing(forcing)
         final_dycore_state, final_physics_state, predictions = self.run_from_state_with_carry(
             initial_state=self.dycore_state,
-            forcing=forcing or default_forcing(self.coords.horizontal),
+            forcing=forcing,
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,

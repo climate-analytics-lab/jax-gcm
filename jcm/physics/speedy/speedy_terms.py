@@ -22,6 +22,7 @@ from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_OUTPUT_ATTRS,
     SurfaceExchange,
 )
+from jcm.physics.surface.prescribed_flux import missing_prescribed_flux_fields
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -527,6 +528,41 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             return None
         return stable_time_step_from_geometry(dsigma_bottom, truncation)
 
+    def augment_probe_forcing(self, forcing):
+        """Seed the shape probe's ``prescribed_*`` fields with zeros.
+
+        In forced mode the probe (``get_empty_data``) must trace the
+        prescribed-flux code path, not the ``None`` fallback. Fill the four
+        fields with zero maps sized off an always-present forcing leaf so
+        the abstract trace matches a live step; the real run's validation
+        lives in :meth:`validate_forcing`.
+        """
+        if not self.prescribed_fluxes:
+            return forcing
+        zeros = jnp.zeros_like(forcing.stl_am)
+        return forcing.copy(
+            prescribed_sensible_heat_flux=zeros,
+            prescribed_evaporation=zeros,
+            prescribed_stress_u=zeros,
+            prescribed_stress_v=zeros,
+        )
+
+    def validate_forcing(self, forcing):
+        """Fail loudly at run start if forced mode lacks its forcing fields."""
+        if not self.prescribed_fluxes:
+            return
+        missing = missing_prescribed_flux_fields(forcing)
+        if missing:
+            raise ValueError(
+                "SpeedySurfaceFlux(prescribed_fluxes=True) needs the "
+                f"prescribed surface-flux forcing fields, but {missing} "
+                "are absent from ForcingData. Supply them via "
+                "forcing.prescribed_surface_flux (CLI) or set them on "
+                "the ForcingData directly (coupler door); units/signs "
+                "follow the surface-exchange contract, "
+                "docs/source/design/surface_exchange.md."
+            )
+
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
         params = _params_with(
@@ -543,25 +579,20 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         )
         routine = get_surface_fluxes
         if self.prescribed_fluxes:
-            missing = [name for name in (
-                "prescribed_sensible_heat_flux", "prescribed_evaporation",
-                "prescribed_stress_u", "prescribed_stress_v",
-            ) if getattr(forcing_2d, name) is None]
-            if missing:
-                raise ValueError(
-                    "SpeedySurfaceFlux(prescribed_fluxes=True) needs the "
-                    f"prescribed surface-flux forcing fields, but {missing} "
-                    "are absent from ForcingData. Supply them via "
-                    "forcing.prescribed_surface_flux (CLI) or set them on "
-                    "the ForcingData directly (coupler door); units/signs "
-                    "follow the surface-exchange contract, "
-                    "docs/source/design/surface_exchange.md."
-                )
+            # A missing field is caught before the run by ``validate_forcing``;
+            # here (which also runs under the abstract shape probe) fall back
+            # to a zero map so the trace stays well-defined.
+            zeros = jnp.zeros_like(state.temperature[-1])
+
+            def _prescribed(name):
+                value = getattr(forcing_2d, name)
+                return zeros if value is None else value
+
             prescribed = PrescribedFluxes(
-                sensible_heat_flux=forcing_2d.prescribed_sensible_heat_flux,
-                evaporation=forcing_2d.prescribed_evaporation,
-                stress_u=forcing_2d.prescribed_stress_u,
-                stress_v=forcing_2d.prescribed_stress_v,
+                sensible_heat_flux=_prescribed("prescribed_sensible_heat_flux"),
+                evaporation=_prescribed("prescribed_evaporation"),
+                stress_u=_prescribed("prescribed_stress_u"),
+                stress_v=_prescribed("prescribed_stress_v"),
             )
             routine = functools.partial(
                 get_surface_fluxes, prescribed=prescribed)

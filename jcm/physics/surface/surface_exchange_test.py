@@ -239,9 +239,12 @@ class TestSpeedyForcedMode:
             assert jnp.allclose(getattr(sef, name), getattr(self.se, name))
 
     def test_missing_forcing_raises(self):
+        # The loud check lives in validate_forcing (called by Model on the
+        # concrete run forcing); __call__ itself falls back to zeros so the
+        # abstract shape probe stays well-defined.
         with pytest.raises(ValueError, match="prescribed"):
-            self.forced.compute_tendencies(
-                self.state, self.forcing, self.terrain)
+            self.forced.validate_forcing(self.forcing)
+        self.forced.validate_forcing(self.forcing_p)  # complete forcing: no raise
 
 
 # ---------------------------------------------------------------------------
@@ -379,10 +382,11 @@ class TestEchamForcedMode:
         assert jnp.allclose(sef.stress_u, self.se.stress_u)
 
     def test_missing_forcing_raises(self):
+        # The loud check lives in validate_forcing (called by Model on the
+        # concrete run forcing); __call__ falls back to zeros for the probe.
         with pytest.raises(ValueError, match="prescribed"):
-            self.forced.compute_tendencies(
-                self.state, self.forcing, self.terrain,
-                self.forced.initial_carry_state(self.coords))
+            self.forced.validate_forcing(self.forcing)
+        self.forced.validate_forcing(self.forcing_p)  # complete forcing: no raise
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +405,10 @@ def test_speedy_forced_constant_flux_aquaplanet_smoke():
     terrain = TerrainData.aquaplanet(coords)
     physics = speedy_physics().replace(
         "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+    # ``time_step`` is in MINUTES; 20 min is comfortably stable at T21 and
+    # divides the 1-hour save interval into 3 inner steps.
     model = Model(coords=coords, terrain=terrain, physics=physics,
-                  time_step=600)
+                  time_step=20)
 
     nodal = coords.horizontal.nodal_shape
     forcing = default_forcing(coords.horizontal).copy(
