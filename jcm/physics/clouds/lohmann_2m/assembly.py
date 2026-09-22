@@ -112,7 +112,8 @@ def update_tendencies_and_important_vars(
     incloud_ice_melt, ice_flux_melt, snow_melt :
         Melting diagnostics (pimlt, pximlt, psmlt).
     lsdcp, lvdcp :
-        Latent-heat constants (Ls/cpd, Lv/cpd).
+        Latent-heat-to-heat-capacity ratios (Ls/cp, Lv/cp) built from the
+        MOIST cp = cpd·(1 + vtmpc2·q), per-level (#706).
     air_density, inv_air_density :
         prho, prho_rcp.
     rain_formation, snow_accretion, snow_formation :

@@ -31,6 +31,15 @@
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants. See
   {doc}`../design/lohmann_2m_column_processes`.
 
+Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
+temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
+heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start
+humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
+(``mo_cloud.f90``, ``mo_cloud_micro_2m.f90``), shared through
+``cloud_utils.latent_heat_over_cp``. Dry ``cpd`` would over-heat every
+condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
+enthalpy budget closes against this same moist ``cp``.
+
 Cloud parameters are ``flax.struct.dataclass`` leaves (differentiable), threaded
 through the scheme via ``nnx.Param``; only genuine code-path switches
 (``nic_cirrus``, ``ldyn_cdnc_min``) are static aux.

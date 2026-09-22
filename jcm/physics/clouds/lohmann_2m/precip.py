@@ -29,7 +29,7 @@ def sublimation_snow_and_ice_evaporation_rain(
     pressure_thickness: jnp.ndarray,          # pdp [Pa]
     dp_over_g: jnp.ndarray,                   # pdpg [kg/m^2] (delta p / g)
     subsat_wrt_ice: jnp.ndarray,              # picesub (sub-saturation w.r.t. ice; scheme-specific)
-    lsdcp: jnp.ndarray,                       # plsdcp = Ls/cpd
+    lsdcp: jnp.ndarray,                       # plsdcp = Ls/cp (moist, #706)
     inv_air_density: jnp.ndarray,             # pqrho [m^3/kg] = 1/rho
     qsat_ice: jnp.ndarray,                    # pqsi [kg/kg]
     inv_air_density_rcp: jnp.ndarray,         # prho_rcp (also 1/rho; retained for exact port)
@@ -102,7 +102,7 @@ def sublimation_snow_and_ice_evaporation_rain(
     subsat_wrt_ice :
         `picesub`, subsaturation w.r.t. ice (scheme-specific diagnostic).
     lsdcp :
-        `plsdcp`, latent heat of sublimation divided by cp [K] (ECHAM convention).
+        `plsdcp`, latent heat of sublimation over the MOIST cp [K] (ECHAM convention, #706).
     inv_air_density :
         `pqrho`, inverse air density [m^3/kg] (1/rho).
     qsat_ice :
@@ -767,9 +767,9 @@ def update_precip_fluxes(
     rain_evap_mmr : jnp.ndarray
         pevp, rain evaporation expressed as mixing-ratio [kg/kg].
     lsdcp : jnp.ndarray
-        plsdcp, latent heat of sublimation / cpd [K].
+        plsdcp, latent heat of sublimation over the moist cp [K] (#706).
     lvdcp : jnp.ndarray
-        plvdcp, latent heat of vaporisation / cpd [K].
+        plvdcp, latent heat of vaporisation over the moist cp [K] (#706).
     rain_formation : jnp.ndarray
         prpr, rain production rate (grid-mean) [kg/kg].
     snow_accretion : jnp.ndarray
