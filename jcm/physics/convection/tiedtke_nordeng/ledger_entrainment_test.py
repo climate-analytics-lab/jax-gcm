@@ -18,6 +18,7 @@ ECHAM reference bound:
   rates capped at ``centrmax`` (3.0e-4 m⁻¹); the cap engages on a deep plume.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -33,7 +34,14 @@ from jcm.physics.convection.tiedtke_nordeng.updraft import (
     UpdatedraftState,
     calculate_updraft,
 )
-from jcm.physics.convection.tiedtke_nordeng.downdraft import DowndraftState
+from jcm.physics.convection.tiedtke_nordeng.downdraft import (
+    DowndraftState,
+    calculate_downdraft,
+)
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+    find_cloud_base,
+    saturation_mixing_ratio,
+)
 from jcm.physics.convection.tiedtke_nordeng.types import ConvectionParameters
 
 
@@ -174,6 +182,13 @@ class TestMomentumTransport:
         # Momentum transport reaches BELOW cloud base (sub-cloud taper) and
         # to the surface, where the previous truncated form left zeros.
         assert np.any(np.abs(dudt[4:]) > 0.0), "no sub-cloud/surface friction"
+        # The LOWEST model layer (surface, last index) must carry the tapered
+        # cumulus friction: cududv's zzp uses the layer TOP interface, not the
+        # surface interface, so it stays > 0 there (Codex P2). A full-level
+        # pressure ratio would zero zzp[-1] and this tendency.
+        assert abs(float(dudt[-1])) > 0.0, (
+            "surface-layer momentum tendency is zero — the sub-cloud taper "
+            "must not vanish at the lowest full level")
         # v is uniform → no v tendency.
         np.testing.assert_allclose(np.asarray(tend.dvdt), 0.0, atol=1e-12)
 
@@ -290,6 +305,58 @@ class TestOrganizedEntrainmentDetrainment:
         # above cloud base), not annihilated mid-column.
         depth_levels = (nlev - 3) - int(top.min())
         assert depth_levels >= 10, f"plume only {depth_levels} levels deep"
+
+
+class TestShallowReclosureDowndraftDetection:
+    """#676 shallow re-closure keys the cloud-base downdraft on ``mfd[ikb]<0``.
+
+    ECHAM (mo_cumastr.f90:924) uses ``pmfd(ikb) < 0 .AND. loddraf`` — where
+    ``loddraf`` is "an LFS was found", never reset by the surface taper. The
+    port must NOT gate on ``DowndraftState.active``, which is the scan-EXIT
+    carry: the surface taper zeroes ``mfd`` in the lowest layers and drives
+    ``active`` to False, so a downdraft that reaches cloud base is still
+    ``active == False`` at exit (Codex P2).
+    """
+
+    def _deep_downdraft_column(self):
+        cfg = ConvectionParameters.default()
+        nlev = 47
+        p0 = 1.01325e5
+        sig = jnp.linspace(1000.0 / p0, 1.0, nlev + 1)
+        ph = sig * p0
+        p = 0.5 * (ph[:-1] + ph[1:])
+        z = -7.6e3 * jnp.log(p / p0)
+        dry = c.grav / c.cpd
+        mlt = 800.0
+        T = jnp.maximum(
+            jnp.where(z <= mlt, 302.0 - dry * z,
+                      302.0 - dry * mlt - 6.0e-3 * (z - mlt)), 200.0)
+        qs = jax.vmap(saturation_mixing_ratio)(p, T)
+        q = (0.7 + 0.25 * jnp.exp(-(z / 9000.0) ** 2)) * qs
+        Tv = T * (1 + 0.608 * q)
+        rho = p / (c.rd * Tv)
+        dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
+        cb, _ = find_cloud_base(T, q, p, cfg)
+        ktop = jnp.maximum(cb - 35, jnp.array(2))
+        upd = calculate_updraft(T, q, p, dz, rho, cb, ktop, 1, jnp.array(0.05),
+                                cfg, type_weights=jnp.array([1.0, 0.0, 0.0]))
+        prec = jnp.sum(upd.pdmfup)
+        dwn = calculate_downdraft(T, q, p, dz, rho, upd, prec, cb, ktop, cfg)
+        return int(cb), dwn
+
+    def test_downdraft_at_cloud_base_detected_despite_scan_exit_inactive(self):
+        cb, dwn = self._deep_downdraft_column()
+        mfd_cb = float(np.asarray(dwn.mfd)[cb])
+        active_exit = bool(dwn.active)
+        # A downdraft IS present at cloud base ...
+        assert mfd_cb < 0.0, f"fixture built no cloud-base downdraft (mfd={mfd_cb})"
+        # ... but the scan-exit activity flag is False (surface taper), so the
+        # OLD ``mfd<0 & active`` gate would wrongly exclude it, while the
+        # faithful ``mfd[ikb] < 0`` detection includes it.
+        assert active_exit is False, (
+            "fixture must reproduce the taper-inactivated exit state")
+        assert not (mfd_cb < 0.0 and active_exit), "old gate should miss it"
+        assert mfd_cb < 0.0, "new gate (mfd[ikb] < 0) detects the downdraft"
 
 
 if __name__ == "__main__":

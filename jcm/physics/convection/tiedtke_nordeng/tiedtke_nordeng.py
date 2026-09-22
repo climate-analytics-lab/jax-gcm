@@ -1225,9 +1225,17 @@ def _tiedtke_convection_toa_first(
         # previously applied the pre-downdraft moisture-anchored flux with no
         # re-closure.
         ikb = cloud_base
+        # ECHAM keys zeps on ``pmfd(ikb) < 0 .AND. loddraf``
+        # (mo_cumastr.f90:924). ``loddraf`` is "a downdraft was initiated"
+        # (an LFS was found) — it is NOT the scan-EXIT activity flag, which the
+        # surface taper always drives to False (and an early termination does
+        # the same). A negative downdraft mass flux AT CLOUD BASE already means
+        # a downdraft is present there (loddraf implied), so test that directly
+        # rather than ``downdraft_state.active`` (the final carry), which would
+        # zero ``zeps`` in exactly the LFS-above-base columns the shallow
+        # re-closure targets (Codex P2).
         zeps = jnp.where(
-            (downdraft_state.mfd[ikb] < 0.0) & downdraft_state.active,
-            config.cmfdeps, 0.0,
+            downdraft_state.mfd[ikb] < 0.0, config.cmfdeps, 0.0,
         )
         zqumqe = (
             updraft_state.qu[ikb] + updraft_state.lu[ikb]

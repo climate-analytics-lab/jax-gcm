@@ -604,11 +604,25 @@ def calculate_tendencies(
         zmfuv = updraft_state.mfu * (updraft_state.vu - v_up)
         zmfdu = downdraft_state.mfd * (downdraft_state.ud - u_up)
         zmfdv = downdraft_state.mfd * (downdraft_state.vd - v_up)
-        # Sub-cloud taper. Top-first: surface = last index, k > kbase is
-        # below cloud base. ``zzp`` falls from 1 at cloud base to 0 at the
-        # surface (pressure ratio), squared for mid-level convection.
-        p_sfc = pressure[-1]
-        zzp = (p_sfc - pressure) / jnp.maximum(p_sfc - pressure[kbase], _MASS_EPS)
+        # Sub-cloud taper (cududv:913): ECHAM keys zzp to the SURFACE INTERFACE
+        # pressure ``paphp1(klevp1)`` and the layer TOP interfaces
+        # ``paphp1(jk)`` — ``zzp = (p_s − p_half(jk))/(p_s − p_half(kbase))`` —
+        # so at the LOWEST model layer ``p_half(jk)`` is that layer's top
+        # interface, NOT the surface, and ``zzp`` stays > 0 there: the surface
+        # layer still carries the tapered flux, and cududv's ``jk == klev``
+        # branch (``−(g/dp)(zmfuu(klev)+zmfdu(klev))``) deposits it. We
+        # reconstruct ``p_s − p_half(k) = g·Σ_{j≥k} Δp_j`` from the cumulative
+        # layer masses (the same true half-level Δp ``updraft_area_cover`` uses)
+        # — ``pressure[-1]`` is only the lowest FULL-level pressure, so a
+        # full-level ratio would force ``zzp[-1]`` and the entire surface-layer
+        # momentum tendency to zero and misplace the terminal flux convergence
+        # one level too high (Codex P2). Top-first: surface = last index,
+        # k > kbase is below cloud base.
+        taper_mass = (
+            layer_mass if layer_mass is not None else rho * layer_thickness
+        )
+        mass_below = jnp.cumsum(taper_mass[::-1], axis=0)[::-1]
+        zzp = mass_below / jnp.maximum(mass_below[kbase], _MASS_EPS)
         ktype_taper = jnp.asarray(0) if ktype is None else ktype
         zzp = jnp.where(ktype_taper == 3, zzp * zzp, zzp)
         below_base = jnp.arange(nlev) > kbase
