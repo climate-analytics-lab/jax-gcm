@@ -106,7 +106,7 @@ on `Λ ∝ R` vanishing without precip — equivalent, and why there is no mask.
 
 CAM's cancellation above holds for the stratiform carrier, whose rain rate
 `wetdepa_v2` rescales to the precipitating area. For the convective carrier
-jcm follows HAMMOZ instead (#781). `mo_hammoz_wetdep.f90::prep_wetdep_hydro`
+jcm follows HAMMOZ instead (PR #776). `mo_hammoz_wetdep.f90::prep_wetdep_hydro`
 takes the fraction of the grid box the convective precipitation falls
 through to be the **updraft area**,
 
@@ -152,7 +152,8 @@ Two things to be clear about:
   washout is `f_cu` (a few per cent) times CAM's. jcm takes HAMMOZ's form for
   the convective carrier: the updraft area is the physical footprint of the
   shaft, and the in-plume sink (`ConvectiveTracerTransport`) already removes
-  what is inside it — the double counting #781 describes. The CAM-consistent
+  what is inside it, so applying CAM's cancellation on top would double-count
+  that in-plume removal (PR #776). The CAM-consistent
   variant (`R/f_cu` in the exponential, still capped at `f_cu` per step) is a
   one-line change here if validation says otherwise — and ECHAM's own
   sub-cloud rain evaporation argues for it: under `lham`, `cuflx` uses this
@@ -166,7 +167,8 @@ Two things to be clear about:
 - **HAMMOZ's cloud-free gating is not ported.** `ham_wetdep` zeroes
   below-cloud scavenging wherever the stratiform cover exceeds `1e-10`. jcm's
   stratiform carrier carries no cover (CAM), and gating the convective carrier
-  on the stratiform cover is exactly the cross-carrier coupling #781 removed.
+  on the stratiform cover would couple the two carriers, which jcm deliberately
+  avoids (PR #776).
   The ambient tracer scavenged is the grid-mean working copy, standing in for
   HAMMOZ's environment value `pxtenh` to O(`f_cu`).
 
