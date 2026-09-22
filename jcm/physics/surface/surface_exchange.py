@@ -135,48 +135,65 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
     "surface_exchange.net_heat_flux": {
         "units": "W m-2",
         "long_name": "net downward heat flux into the surface (positive down)",
+        "description": "net downward heat flux into the surface medium "
+                       "(SW_net + LW_net - SHF - LHF), positive down",
     },
     "surface_exchange.sensible_heat_flux": {
         "units": "W m-2",
         "standard_name": "surface_upward_sensible_heat_flux",
         "long_name": "surface sensible heat flux (positive up)",
+        "description": "surface sensible heat flux, positive up "
+                       "(surface to atmosphere)",
     },
     "surface_exchange.latent_heat_flux": {
         "units": "W m-2",
         "standard_name": "surface_upward_latent_heat_flux",
         "long_name": "surface latent heat flux (positive up)",
+        "description": "surface latent heat flux, positive up "
+                       "(surface to atmosphere)",
     },
     "surface_exchange.evaporation": {
         "units": "kg m-2 s-1",
         "standard_name": "water_evapotranspiration_flux",
         "long_name": "surface evaporation (positive up)",
+        "description": "surface evaporation / moisture flux, positive up",
     },
     "surface_exchange.precipitation": {
         "units": "kg m-2 s-1",
         "standard_name": "precipitation_flux",
         "long_name": "total precipitation (rain + snow, positive down)",
+        "description": "total precipitation reaching the surface "
+                       "(rain + snow, convective + stratiform), positive down",
     },
     "surface_exchange.stress_u": {
         "units": "N m-2",
         "standard_name": "surface_downward_eastward_stress",
         "long_name": "downward eastward momentum flux into the surface",
+        "description": "downward flux of eastward momentum into the surface "
+                       "(= minus the stress on the atmosphere)",
     },
     "surface_exchange.stress_v": {
         "units": "N m-2",
         "standard_name": "surface_downward_northward_stress",
         "long_name": "downward northward momentum flux into the surface",
+        "description": "downward flux of northward momentum into the surface "
+                       "(= minus the stress on the atmosphere)",
     },
     "surface_exchange.wind_speed": {
         "units": "m s-1",
         "long_name": "near-surface wind speed at the package reference height",
+        "description": "near-surface wind speed at the package's reference "
+                       "height (SPEEDY: sigma=0.99; ECHAM: 10 m)",
     },
     "surface_exchange.air_density": {
         "units": "kg m-3",
         "long_name": "moist air density at the lowest model level",
+        "description": "moist air density at the lowest model level",
     },
     "surface_exchange.air_potential_temperature": {
         "units": "K",
         "long_name": "potential temperature at the lowest model level",
+        "description": "potential temperature at the lowest model level",
     },
 }
 
