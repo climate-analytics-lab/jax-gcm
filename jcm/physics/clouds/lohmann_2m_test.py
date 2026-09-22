@@ -1608,7 +1608,8 @@ class TestIcon2MPipeline:
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
-        model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
+        # Model.time_step is minutes; use the intended 180-second step.
+        model = Model(coords=get_speedy_coords(), physics=physics, time_step=3)
         preds = model.run(save_interval=(1 / 24.0), total_time=(2 / 24.0))
 
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))

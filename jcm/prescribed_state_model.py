@@ -18,6 +18,7 @@ depends on the previous one), use ``SingleColumnModel`` instead.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 import jax
 import jax.numpy as jnp
@@ -204,7 +205,7 @@ class PrescribedStateModel:
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-        if not jnp.isfinite(float(dt_seconds)) or float(dt_seconds) <= 0:
+        if not math.isfinite(float(dt_seconds)) or float(dt_seconds) <= 0:
             raise ValueError("dt_seconds must be finite and positive.")
         if float(dt_seconds) != round(float(dt_seconds)):
             raise ValueError("dt_seconds must be representable as whole seconds.")

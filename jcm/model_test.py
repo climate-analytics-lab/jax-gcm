@@ -244,7 +244,6 @@ class TestModelUnit(unittest.TestCase):
         state = model._prepare_initial_dycore_state()
 
         def fn(state):
-            _ = model.run(total_time=0) # to set up model fields
             predictions = model.run(initial_state=state, save_interval=(1/48.), total_time=(1/48.))
             return model._final_dycore_state, predictions
 
@@ -397,7 +396,6 @@ class TestModelUnit(unittest.TestCase):
         # Create model that goes through one timestep
         model = Model(coords=get_speedy_coords())
         state = model._prepare_initial_dycore_state()
-        _ = model.run(total_time=0)  # to set up model fields
 
         # check_vjp/check_jvp probe with unit-normal tangents, but the initial
         # condition's spectral coefficients are O(1e-5): a unit perturbation
@@ -704,9 +702,7 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.forcing import default_forcing
 
         model = self._speedy_model()
-        # Set up an initial state via the public API.
-        _ = model.run(total_time=0)
-        initial_state = model._final_dycore_state
+        initial_state, _ = model.bootstrap_state()
 
         forcing = default_forcing(model.coords.horizontal)
         step = model._get_op_split_step_fn(forcing)
@@ -714,7 +710,8 @@ class TestOperatorSplitPhysics(unittest.TestCase):
 
         # Trace and execute one step under jit.
         jit_step = jax.jit(step)
-        x1, ps1 = jit_step(initial_state, initial_physics_state)
+        date = DateData(model.start_time, jnp.int32(0), int(model.dt_si.m))
+        x1, ps1 = jit_step(initial_state, initial_physics_state, date)
 
         # Dynamics state pytree should round-trip.
         self.assertEqual(
@@ -1464,8 +1461,8 @@ class TestObserversUnderJit(unittest.TestCase):
         model.bootstrap_state(None)
         return model, model._final_dycore_state
 
-    def test_traced_initial_state_asks_for_the_window_start(self):
-        """The error names the argument to pass, not the tracer it met."""
+    def test_exact_clock_keeps_traced_initial_state_observers_jittable(self):
+        """Observer geometry uses the model's exact clock, not state time."""
         model, state = self._seed_state()
 
         def sample(state):
@@ -1473,9 +1470,8 @@ class TestObserversUnderJit(unittest.TestCase):
                               total_time=1 / 48.0)
             return jnp.nanmean(preds.observations[0]["temperature"])
 
-        with self.assertRaises(ValueError) as caught:
-            jax.jit(sample)(state)
-        self.assertIn("observer_t0_days", str(caught.exception))
+        value = float(jax.jit(sample)(state))
+        self.assertTrue(np.isfinite(value))
 
     def test_an_explicit_window_start_makes_the_run_jittable(self):
         model, state = self._seed_state()

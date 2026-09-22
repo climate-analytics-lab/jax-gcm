@@ -3854,8 +3854,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["paths"],
             ["hf://bundles/t42_l8/oxidants_2000.nc",
              "hf://bundles/t42_l8/oxidants_2001.nc"])
-        # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
-        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")
+        # A yearly product declares dated alignment even for a single year.
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "by_date")
 
     def test_oxidants_explicit_list_is_one_product(self):
         """An explicit-list oxidants_file is ONE product, opened together (F2).

@@ -43,7 +43,7 @@ class TestHeldSuarezUnit(unittest.TestCase):
         coords = get_held_suarez_coords()
         model = Model(coords=coords, physics=held_suarez_physics())
 
-        _ = model.run(total_time=36)
+        _ = model.run(total_time=36, save_interval=6)
 
         final_state = model._final_dycore_state
 

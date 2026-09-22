@@ -476,6 +476,11 @@ class ModelPredictions:
                     f"{bounds.shape}."
                 )
             ds["time_bounds"] = (("time", "bounds"), bounds)
+            ds["time_bounds"].attrs.update(
+                long_name="time interval bounds",
+                description=(
+                    "lower and upper bounds of each represented time interval"),
+            )
             ds["time"].attrs["bounds"] = "time_bounds"
         is_mean = (cell_method is not None
                    and bool(np.asarray(jax.device_get(cell_method))))

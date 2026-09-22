@@ -17,6 +17,10 @@ _CF_TIME_ENCODING = {
     "units": "seconds since 1970-01-01 00:00:00",
     "calendar": "proleptic_gregorian",
 }
+_TIME_BOUNDS_ATTRS = {
+    "long_name": "time interval bounds",
+    "description": "lower and upper bounds of each represented time interval",
+}
 
 
 def set_cf_datetime_encoding(ds: xr.Dataset, *names: str) -> xr.Dataset:
@@ -157,6 +161,7 @@ def monthly_means(ds: xr.Dataset) -> xr.Dataset:
     bounds_name = ds["time"].attrs.get("bounds", "time_bounds")
     out[bounds_name] = (("time", "bounds"),
                         np.asarray(monthly_bounds, dtype="datetime64[ms]"))
+    out[bounds_name].attrs.update(_TIME_BOUNDS_ATTRS)
     out["time_coverage"] = ("time", np.asarray(coverages))
     out["time_coverage_fraction"] = ("time", np.asarray(fractions))
     out["time"].attrs.update(ds["time"].attrs)
@@ -297,6 +302,7 @@ class MonthlyMeanAccumulator:
                 result[name] = var
         result[self._bounds_name] = (("time", "bounds"),
                                      np.asarray([[self._start, self._end]]))
+        result[self._bounds_name].attrs.update(_TIME_BOUNDS_ATTRS)
         month = np.datetime64(self._month, "M")
         full_ns = int(((month + np.timedelta64(1, "M")).astype("datetime64[ms]")
                        - month.astype("datetime64[ms]")) / _TICK)

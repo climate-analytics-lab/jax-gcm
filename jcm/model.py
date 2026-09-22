@@ -24,6 +24,7 @@ from typing import Callable, Any
 from dinosaur.scales import units
 from functools import partial
 import logging
+import math
 
 from jcm import profiling, provenance
 from jcm.date import (
@@ -528,7 +529,7 @@ class Model:
         time_step = self._resolve_time_step_minutes(time_step, dycore, coords)
         self.dt_si = (time_step * units.minute).to(units.second)
         dt_seconds = float(self.dt_si.m)
-        if not jnp.isfinite(dt_seconds) or dt_seconds <= 0:
+        if not math.isfinite(dt_seconds) or dt_seconds <= 0:
             raise ValueError("time_step must be finite and positive.")
         if dt_seconds != round(dt_seconds):
             raise ValueError("time_step must be representable as whole seconds.")
