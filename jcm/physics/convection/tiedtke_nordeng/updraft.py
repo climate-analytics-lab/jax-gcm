@@ -529,6 +529,18 @@ def calculate_updraft(
                  - 0.01) / w_term_mf
             )
             survival = jnp.where(above_cloud_base, surv_buoy * surv_mf, 1.0)
+            # Forced total detrainment at the scan ceiling (ECHAM
+            # mo_cuasc.f90:540-563: at cloud top the plume fully detrains —
+            # ``plude(jk-1) = pmful(jk)`` dumps the ENTIRE remaining condensate
+            # flux). With the metre-based capped detrainment a still-buoyant
+            # plume can now reach the supplied ``ktop`` with positive mfu/lu;
+            # without this, its residual ``lu·mfu`` would leave through the top
+            # interface as a flux-boundary loss instead of feeding the
+            # stratiform dqc/dqi ledger, under-supplying anvil condensate and
+            # breaking column water conservation at the ceiling (Codex P2).
+            # Forcing survival to 0 at ``ktop`` routes the whole remaining
+            # plume condensate to ``plude`` and terminates mfu there.
+            survival = jnp.where(at_cloud_top, 0.0, survival)
             plude_layer = plude_layer + lu_new * mfu_new * (1.0 - survival)
             mfu_new = mfu_new * survival
 

@@ -409,6 +409,76 @@ class TestReturnedStateCarriesPlumeWinds:
         assert not np.allclose(np.asarray(state.ud), un)
 
 
+class TestCloudTopForcedDetrainment:
+    """#676 a plume reaching the scan ceiling fully detrains (water conserved).
+
+    ECHAM forces total detrainment at cloud top (mo_cuasc.f90:540-563,
+    ``plude(jk-1)=pmful(jk)``). With the metre-based capped detrainment a
+    still-buoyant plume can reach the supplied ``ktop`` with positive mfu/lu;
+    its residual condensate must go to ``plude``/the stratiform dqc-dqi ledger,
+    not vanish as a flux-boundary loss (Codex P2).
+    """
+
+    def _deep_column_reaching_ceiling(self):
+        cfg = ConvectionParameters.default()
+        nlev = 40
+        p0 = 1.01325e5
+        ph = jnp.linspace(2000.0 / p0, 1.0, nlev + 1) * p0
+        p = 0.5 * (ph[:-1] + ph[1:])
+        T = np.empty(nlev)
+        T[-1] = 303.0
+        for k in range(nlev - 2, -1, -1):
+            T[k] = T[k + 1] - 9.0e-3 * 300.0   # steep, deeply unstable
+        T = jnp.array(T)
+        q = 0.95 * jax.vmap(saturation_mixing_ratio)(p, T)
+        Tv = T * (1 + 0.608 * q)
+        rho = p / (c.rd * Tv)
+        dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
+        cb, _ = find_cloud_base(T, q, p, cfg)
+        # Ceiling BELOW the plume's natural top, so it reaches ktop buoyant.
+        ktop = jnp.array(8)
+        u = jnp.zeros(nlev)
+        upd = calculate_updraft(T, q, p, dz, rho, cb, ktop, 1, jnp.array(0.05),
+                                cfg, type_weights=jnp.array([1.0, 0.0, 0.0]),
+                                u_wind=u, v_wind=u)
+        return cfg, T, q, p, rho, dz, u, cb, ktop, upd
+
+    def test_residual_condensate_detrained_at_ceiling(self):
+        _, _, _, _, _, _, _, _, ktop, upd = self._deep_column_reaching_ceiling()
+        kt = int(ktop)
+        mfu = np.asarray(upd.mfu)
+        plude = np.asarray(upd.plude)
+        # The plume is alive just below the ceiling ...
+        assert mfu[kt + 1] > 1e-6, "fixture: plume did not reach the ceiling"
+        # ... fully terminates AT the ceiling (forced detrainment) ...
+        assert mfu[kt] == 0.0, "plume not terminated at the scan ceiling"
+        # ... and its residual condensate is detrained, not lost.
+        assert plude[kt] > 0.0, "residual plume condensate not detrained to plude"
+
+    def test_column_water_conserved_when_plume_reaches_ceiling(self):
+        cfg, T, q, p, rho, dz, u, cb, ktop, upd = (
+            self._deep_column_reaching_ceiling())
+        prec = jnp.sum(upd.pdmfup)
+        dn = calculate_downdraft(T, q, p, dz, rho, upd, prec, cb, ktop, cfg,
+                                 u_wind=u, v_wind=u)
+        tend = calculate_tendencies(T, q, u, u, p, rho, dz, upd, dn, cb, ktop,
+                                    1800.0, cfg, ktype=jnp.array(1))
+        dp_abs = np.abs(np.diff(np.asarray(p)))
+        mass = np.concatenate([dp_abs, dp_abs[-1:]]) / c.grav
+        water_tend = np.sum(
+            (np.asarray(tend.dqdt) + np.asarray(tend.dqc_dt)
+             + np.asarray(tend.dqi_dt)) * mass)
+        precip = float(tend.precip_conv)
+        # Water removed from vapour+condensate == precip out, to round-off.
+        residual = water_tend + precip
+        assert abs(residual) / max(abs(precip), 1e-20) < 1e-5, (
+            f"column water budget open: residual {residual:.3e} vs "
+            f"precip {precip:.3e}")
+        # The anvil condensate at the ceiling feeds the stratiform ledger.
+        kt = int(ktop)
+        assert (float(tend.dqc_dt[kt]) + float(tend.dqi_dt[kt])) > 0.0
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
