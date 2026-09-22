@@ -16,9 +16,9 @@ def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
                   nan_frac: float = 0.0):
     """Build a synthetic xarray dataset for the health-check tests.
 
-    ``q_max_gkg`` is the per-cell upper bound on specific_humidity in g/kg
-    (matches the unit convention :func:`dynamics_state_to_physics_state` writes
-    into the saved netCDF). Healthy tropical surface q runs ~10-25 g/kg.
+    ``q_max_gkg`` is a convenient human-facing upper bound. The synthetic
+    ``specific_humidity`` variable itself follows the output contract (kg/kg).
+    Healthy tropical surface q runs ~10-25 g/kg.
     """
     nx, ny, nt = 4, 4, 2
     rng = np.random.default_rng(0)
@@ -26,7 +26,7 @@ def _make_dataset(T_min: float, T_max: float, q_max_gkg: float = 15.0,
     if nan_frac > 0:
         mask = rng.random(T.shape) < nan_frac
         T = np.where(mask, np.nan, T)
-    q = q_max_gkg * rng.random((nt, nx, ny))
+    q = q_max_gkg * 1e-3 * rng.random((nt, nx, ny))
     return xr.Dataset({
         "temperature": (("time", "lon", "lat"), T),
         "specific_humidity": (("time", "lon", "lat"), q),

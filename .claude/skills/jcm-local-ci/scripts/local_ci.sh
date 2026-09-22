@@ -67,6 +67,10 @@ if [ "$LOCAL_FAST" = 1 ]; then
     echo "         failures. The PBS gate below is the authoritative run."
     JAX_PLATFORMS=cpu pytest -n 2 -m "not slow" --cov=jcm --cov-fail-under=90 -q \
         || LOCAL_FAST_STATUS=$?
+    # Re-check through coverage itself (#786): --cov-fail-under is judged at
+    # the reported precision and has changed semantics under us before.
+    [ "$LOCAL_FAST_STATUS" -eq 0 ] && { coverage report --fail-under=90 \
+        || LOCAL_FAST_STATUS=$?; }
     echo "LOCAL_FAST_EXIT=$LOCAL_FAST_STATUS"
 fi
 
@@ -98,11 +102,15 @@ SLOW_STATUS=0
 
 echo "=== fast gate (not slow, cov>=90) ==="
 pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90 -q || FAST_STATUS=\$?
+# Belt for the plugin's own fail-under (#786): same data file, coverage's exit.
+[ "\$FAST_STATUS" -eq 0 ] && { coverage report --fail-under=90 || FAST_STATUS=\$?; }
 echo "FAST_EXIT=\$FAST_STATUS"
 
 echo "=== slow gate (slow only, cov>=80 vs .coveragerc-pr) ==="
 pytest -n 4 -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80 \
     || SLOW_STATUS=\$?
+[ "\$SLOW_STATUS" -eq 0 ] && { coverage report --rcfile=.coveragerc-pr \
+    --fail-under=80 || SLOW_STATUS=\$?; }
 echo "SLOW_EXIT=\$SLOW_STATUS"
 
 if [ "\$FAST_STATUS" -ne 0 ] || [ "\$SLOW_STATUS" -ne 0 ]; then

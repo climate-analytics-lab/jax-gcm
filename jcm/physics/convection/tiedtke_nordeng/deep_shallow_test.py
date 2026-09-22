@@ -188,7 +188,8 @@ class TestLaggedDynamicsReconstruction(unittest.TestCase):
                             air_density, u_wind, v_wind, qc, qi, dt_seconds,
                             params, land_fraction, moisture_supply,
                             moisture_tend_profile, thvsig, omega,
-                            qte_dynamics):
+                            qte_dynamics, layer_mass=None,
+                            use_updraft_cover=False):
             zeros = jnp.zeros_like(temperature)
             return ConvectionTendencies(
                 dtedt=zeros, dqdt=qte_dynamics, dudt=zeros, dvdt=zeros,

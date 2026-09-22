@@ -27,3 +27,16 @@ omit =
     # strictly ahead (5e55b17 is package-only). Delete the file (and this
     # entry) once the structure-split PR lands.
     jcm/physics/clouds/lohmann_2m.py
+
+[report]
+# Two decimal places, and NOT for cosmetics: the reported precision is what
+# ``fail_under`` is judged at. ``coverage.results.should_fail_under`` returns
+# ``round(total, precision) < fail_under``, so at the default precision of 0 a
+# 90 floor is really an 89.5 floor — 89.6% rounds to 90 and passes. pytest-cov
+# has used this same rounded comparison since 6.0.0 ("Changed fail under checks
+# to use the precision set in the coverage configuration"), while the
+# "FAIL Required test coverage ... not reached" line it prints compares the raw
+# float. That is how the slow job could print FAIL at 79.68% and still exit 0
+# (#786). Setting the precision here fixes both ``pytest --cov-fail-under`` and
+# a standalone ``coverage report --fail-under``, which share the function.
+precision = 2

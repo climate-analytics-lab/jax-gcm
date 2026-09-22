@@ -17,8 +17,6 @@ from typing import ClassVar
 import jax.numpy as jnp
 from flax import nnx
 
-from jcm.constants import cpd as _CPD
-from jcm.constants import grav as _G
 from jcm.physics.aerosol.jam.ice_nucleation.in_populations import in_populations
 from jcm.physics.aerosol.jam.ice_nucleation.lohmann_diehl import (
     lohmann_diehl_inp,
@@ -30,6 +28,13 @@ from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.convection.saturation import saturation_specific_humidity
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsTendency
+
+# Constants are read through the module alias and never bound with
+# ``from jcm.constants import grav``: a from-import captures the float at
+# import time, so a later ``set_constants`` override (another planet, a
+# sensitivity study, gradient calibration) would silently never reach this
+# scheme while the dynamics used the new value (#772).
+import jcm.constants as c
 
 _W_MIN = 0.01      # m/s — floor on the characteristic updraft
 _W_DEFAULT = 0.1   # m/s — fallback updraft when TKE is unavailable (step 1)
@@ -67,7 +72,8 @@ class IceNucleation(PhysicsTerm):
             w = jnp.sqrt(jnp.maximum(2.0 / 3.0 * vd.tke, 0.0))
         else:
             w = jnp.full_like(temperature, _W_DEFAULT)
-        return jnp.maximum(w, _W_MIN) * _G / _CPD
+        # Dry-adiabatic cooling of the ascent, w·g/cp.
+        return jnp.maximum(w, _W_MIN) * c.grav / c.cpd
 
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()

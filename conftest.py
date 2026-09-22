@@ -5,6 +5,7 @@ Derecho login node: ``docs/source/design/test_suite_memory.md``.
 """
 
 import gc
+import logging
 import os
 import sys
 
@@ -18,17 +19,32 @@ _PYSES_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 _X64_BASELINE = False
 
+# Level and propagation of every ``jcm`` logger as the session found them,
+# keyed by name. Normally empty: ``pytest_configure`` runs before collection
+# imports ``jcm``, and nothing in the package sets a level at import time, so
+# in practice every logger restores to the ``NOTSET`` default below. It is
+# captured anyway so that a package that *did* set one (issue #817 weighs
+# attaching jcm's handler to the ``jcm`` logger, which would) is preserved
+# rather than silently flattened by the restore. See ``_pin_logging_levels``.
+_LOGGING_BASELINE = {}
+
 
 def pytest_configure(config):
-    """Record the session's starting ``jax_enable_x64`` (issue #729).
+    """Record the session's starting global config (#729, #815).
 
-    Imported here rather than lazily at the first test because the baseline
-    has to predate every test-module import: a module that flips the flag at
-    collection time would otherwise define the baseline meant to detect it.
+    Both baselines are taken here rather than lazily at the first test
+    because they have to predate every test-module import: a module (or a
+    ``setUpClass``, which runs before any function-scoped fixture) that flips
+    ``jax_enable_x64`` — or builds a quiet ``Model`` — would otherwise define
+    the baseline meant to detect it.
     """
     global _X64_BASELINE
     import jax
     _X64_BASELINE = bool(jax.config.read("jax_enable_x64"))
+
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        _LOGGING_BASELINE[name] = (logger.level, logger.propagate)
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +68,58 @@ def _pin_jax_x64(request):
     _restore()
     yield
     _restore()
+
+
+def _jcm_logger_names():
+    """Every logger in the ``jcm`` hierarchy that currently exists."""
+    return [name for name in list(logging.Logger.manager.loggerDict)
+            if name == "jcm" or name.startswith("jcm.")]
+
+
+def _restore_logging():
+    """Put the ``jcm`` logger levels back to the session baseline.
+
+    A logger with no baseline entry — which is every one of them in a normal
+    run, see ``_LOGGING_BASELINE`` — goes back to ``NOTSET`` and propagating,
+    i.e. deferring to its ancestors, which is how a freshly imported module's
+    logger starts out.
+
+    The root logger is deliberately left alone: pytest owns it (``--log-level``
+    and ``caplog`` set and restore it around each test phase), so pinning it
+    here would quietly override ``--log-level`` for the whole session.
+    """
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        level, propagate = _LOGGING_BASELINE.get(name, (logging.NOTSET, True))
+        if logger.level != level:
+            logger.setLevel(level)  # also clears the manager's level cache
+        logger.propagate = propagate
+
+
+@pytest.fixture(autouse=True)
+def _pin_logging_levels():
+    """Hold the ``jcm`` logger levels at the session default (#815).
+
+    ``runners.run()`` sets the level on the ``jcm`` logger from
+    ``run.log_level`` — the CLI is the application, so that is where the
+    knob belongs — and every test that drives a run therefore leaves one
+    behind. That breaks any later test asserting a warning fires, because
+    ``assertLogs(level=...)`` and ``caplog.at_level(...)`` raise only the
+    ROOT logger's level: the record is filtered at its own logger and never
+    propagates. Under xdist it depends on which worker drew the run, so it
+    surfaces as an unreproducible failure in an unrelated module.
+
+    This is what #815 was, in its original form: ``Model.__init__`` used to
+    set the level too, so merely *constructing* a quiet model leaked one.
+    That is gone — jcm the library configures no logging — but the runners
+    layer still legitimately sets a level, so the isolation is still needed.
+
+    Restored before as well as after the test, so a leak from a test that
+    errored out of its own teardown does not travel any further either.
+    """
+    _restore_logging()
+    yield
+    _restore_logging()
 
 
 def _memory_group(item):

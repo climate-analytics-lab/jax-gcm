@@ -16,13 +16,19 @@ two-stream scheme, which reads a single broadband 550 nm profile rather than
 per-band optics, this term also writes ``aod_profile``/``ssa_profile``/
 ``asy_profile`` (the SW band nearest 550 nm) and a band-ratio ``angstrom`` so
 grey+JAM keeps a direct effect (#640).
+
+The one genuinely optical step — the mode-integrated extinction, scattering
+and forward-scattering of one lognormal mode at one wavelength — is delegated
+to :meth:`JamOpticsTerm._mode_optics`, so an alternative Mie pathway is a
+subclass overriding that hook rather than a second copy of everything around
+it. See ``docs/source/design/jam_optics_mode_seam.md``.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import math
-from typing import ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +43,16 @@ from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _TINY = 1.0e-30
 
+#: Degeneracy floor [m] on the dry radius in the hygroscopic growth ratio
+#: ``(r_wet/r_dry)³``. Defensive only — neither in-repo core can reach it
+#: (``PlaceholderMicrophysics`` falls back to ``mode.dgnum`` on an empty
+#: mode, MAM4-JAX takes ``0.5·dgncur_a``), so it guards against an external
+#: or future core reporting ``r_dry = 0``. A picometre is far below any
+#: aerosol particle, and it keeps the ratio's CUBE representable in float32
+#: rather than ``inf``, which matters because both arms of the ``jnp.where``
+#: below are evaluated.
+_MIN_DRY_RADIUS = 1.0e-12
+
 # AeroCom diagnostic wavelengths [nm]. 550 is the reference observable;
 # 440/670/865 give the Angstrom exponent and the 440 nm single-scattering
 # albedo AERONET reports; 355 is the lidar (ATLID/EarthCARE) wavelength.
@@ -49,7 +65,6 @@ _I355, _I440, _I550, _I670, _I865 = 0, 1, 2, 3, 4
 _GH_NODES, _GH_WEIGHTS = (
     tuple(float(v) for v in arr) for arr in np.polynomial.hermite.hermgauss(8)
 )
-_FOUR_THIRDS_PI = 4.0 / 3.0 * math.pi
 
 
 #: Reference wavelength for the column AOD diagnostic — 550 nm is the
@@ -72,6 +87,70 @@ _AER_RAD_PMIN = 200.0
 #: ``_MAX_IN_CLOUD_CONDENSATE`` in the RRTMGP wrapper: genuine plumes are
 #: untouched, only the runaway tail is clipped.
 _MAX_LAYER_TAU = 1.0
+
+
+class ModeOpticsInputs(NamedTuple):
+    """Everything a bulk-optics backend needs for one mode in one band.
+
+    Passed to :meth:`JamOpticsTerm._mode_optics`, which is the single
+    extension point for an alternative Mie pathway (see
+    ``docs/source/design/jam_optics_mode_seam.md``). The record is assembled
+    once per (mode, band) by ``_band_optics``, which keeps ownership of the
+    modal geometry, the mass gate, the per-species apportionment and the
+    column diagnostics, so a backend only has to answer the optical question.
+
+    Two normalisations of the same population are supplied because backends
+    differ in which one they predict against: the default Gauss-Hermite
+    quadrature integrates efficiencies per particle CROSS-SECTION and needs
+    ``num_per_area``, while an emulator predicting an extinction per unit
+    particle VOLUME needs ``vol_total * col_factor``. Both routes reduce to
+    ``pi * n_A * <Qe r^2>`` in the continuum, so they are directly comparable.
+
+    Attributes:
+        mode: the :class:`~jcm.physics.aerosol.jam.population.AerosolMode`
+            being evaluated -- static Python config, so a backend may branch
+            on ``mode.species`` or ``mode.geom_std_dev`` at trace time.
+        mode_index: the mode's index in ``spec.modes`` (static).
+        wavelength_m: band centre wavelength [m], scalar.
+        r_wet: number-median WET radius [m], shape ``(nlev, ncols)``.
+        r_dry: number-median DRY radius [m], as the microphysics core
+            reported it. Carried even though ``vol_dry``/``vol_total`` imply
+            the growth factor, because recovering it as
+            ``r_wet*(vol_dry/vol_total)**(1/3)`` is singular on an empty mode
+            — precisely the derivative the ``_mode_optics`` contract tells a
+            backend not to construct. This value is finite there.
+        m_n, m_k: volume-mixed refractive index of the whole mode, dry
+            species plus aerosol water. ``m_k`` is the positive imaginary
+            convention. Both fall back to ``(1.5, 1e-8)`` on an empty mode
+            rather than forming ``0/0``.
+        ri_band: ``species -> (n, k)`` at this band, including ``"h2o"``.
+            Supplied so a backend that does NOT volume-mix -- a core-shell
+            treatment, say -- can recompose the index it needs.
+        vol_species: ``species -> dry volume`` [m^3 per kg of air].
+        vol_water: hygroscopic water volume, same units.
+        vol_dry: sum of ``vol_species``.
+        vol_total: ``vol_dry + vol_water``.
+        num_per_area: column number per area for this mode [m^-2], already
+            floored at zero.
+        col_factor: ``air_density * dz`` [kg m^-2] -- multiply a volume in
+            ``m^3 kg^-1`` by this to get a volume per unit area.
+
+    """
+
+    mode: Any
+    mode_index: int
+    wavelength_m: Any
+    r_wet: Any
+    r_dry: Any
+    m_n: Any
+    m_k: Any
+    ri_band: dict
+    vol_species: dict
+    vol_water: Any
+    vol_dry: Any
+    vol_total: Any
+    num_per_area: Any
+    col_factor: Any
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,7 +224,7 @@ class JamOpticsTerm(PhysicsTerm):
         aerosol optics rather than a per-step cost.
         """
         self._spec = spec or MAM4_SPEC
-        self._lut = default_mie_lut()
+        self._lut = self._build_mie_lut()
         self._cache = None   # set by cache_band_config
         self._radiation_interval_s: float | None = None
         self._optics_diagnostics = bool(optics_diagnostics)
@@ -188,6 +267,20 @@ class JamOpticsTerm(PhysicsTerm):
         v = float(interval_s)
         self._radiation_interval_s = v if v > 0 else None
 
+    def adopt_runtime_configuration(self, previous) -> None:
+        """Inherit the radiation cadence from a displaced optics term.
+
+        The gate is set by ``echam_physics`` after the package is composed,
+        from the radiation term's interval, so a term swapped in afterwards
+        has never seen it. Left unset it recomputes all 30 bands every step
+        instead of every eighth at the default 2 h / 900 s — roughly 8x the
+        optics work, correct but needlessly slow, and with nothing to signal
+        it.
+        """
+        interval = getattr(previous, "_radiation_interval_s", None)
+        if interval is not None:
+            self.configure_radiation_gate(interval)
+
     def cache_band_config(self, band_config) -> None:
         """Precompute band centers and per-species refractive indices."""
         sw_nm = np.asarray(band_config.sw_band_centers_nm, np.float64)
@@ -229,16 +322,129 @@ class JamOpticsTerm(PhysicsTerm):
         self._cache = _OpticsCache(sw_nm, lw_nm, ri_sw, ri_lw, aod_idx, aod_nm,
                                    ang_idx, ang_nm, ri_diag)
 
-    def _band_optics(self, state, aer, num_per_area, centers_nm, ri,
+    def _build_mie_lut(self):
+        """Lookup table backing the default Gauss-Hermite quadrature.
+
+        A hook rather than a direct call so a subclass that replaces
+        :meth:`_mode_optics` entirely can return ``None`` and skip the ~4 s
+        table build, which it would otherwise pay for a table it never reads.
+        """
+        return default_mie_lut()
+
+    def _mode_optics(self, inputs: ModeOpticsInputs):
+        """Mode-integrated optical depths for one mode in one band.
+
+        Returns ``(tau, tau_scat, tau_scat_g)`` -- extinction, scattering and
+        scattering-weighted-asymmetry optical depths, each shaped like
+        ``inputs.r_wet``, for THIS mode alone and UNGATED. The caller applies
+        the dry-mass gate, sums the modes, forms the extinction-weighted SSA
+        and asymmetry, and (for the AeroCom pass) apportions the result across
+        species, so a backend never has to reproduce any of that.
+
+        This is the single extension point for an alternative Mie pathway.
+        Override it in a subclass and attach the subclass with
+        ``physics.replace("aerosol_optics", MyOpticsTerm(...))``; see
+        ``docs/source/design/jam_optics_mode_seam.md``.
+
+        The contract an override must honour:
+
+        * **Finite everywhere, in value and in derivative.** The dry-mass gate
+          and the ``_MAX_LAYER_TAU`` cap downstream select and bound VALUES;
+          neither can repair a ``NaN``, an ``inf``, or a singular derivative
+          produced in here, because reverse mode multiplies a zero cotangent
+          into whatever this returned. Empty modes, a single species, zero
+          water and a degenerate wet radius all occur in a real column, so
+          construct any reciprocal or fractional power on a substituted
+          argument rather than on the raw one (the ``jnp.where``-before-divide
+          pattern used throughout this file). A cube root of a species volume
+          fraction, for instance, is singular at zero and must be guarded.
+        * **Non-negative extinction**, and scattering no larger than it, so
+          the SSA the caller derives stays in ``[0, 1]`` -- RRTMGP's two-stream
+          solver returns ``NaN`` outside it.
+        * **Traceable**: no Python branch on a traced value. Branching on
+          ``inputs.mode`` is fine; that is static config.
+
+        The default is the Bohren-Huffman path: integrate LUT efficiencies
+        over the mode's lognormal in ``ln r``. ``r_wet`` is the NUMBER-MEDIAN
+        radius, so a single ``Qext(r_wet)*pi*r_wet^2`` misses the ``r^2``
+        moment (x ``e^{2 ln^2 sigma}``) and ``Qext`` at the extinction-carrying
+        sizes. Gauss-Hermite: ``r_k = r_g e^{sqrt2 ln(sigma) t_k}`` with weight
+        ``(w_k/sqrt(pi)) e^{2 sqrt2 ln(sigma) t_k}``; sigma is preserved under
+        hygroscopic growth and the refractive index is size-independent, so
+        only ``x`` varies per node. ``lax.scan`` keeps one node's Mie
+        intermediates live at a time -- unrolling multiplies the working set by
+        ``n_nodes x n_bands`` and exceeds GPU memory.
+        """
+        r_wet = inputs.r_wet
+        lam_m = inputs.wavelength_m
+        m_n, m_k = inputs.m_n, inputs.m_k
+        ln_sig = math.log(inputs.mode.geom_std_dev)
+
+        def _gh_node(carry, t_w):
+            t_k, w_k = t_w
+            growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)
+            x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
+            q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
+            wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
+            c_sec, c_scat, c_gscat = carry
+            return (
+                c_sec + wgt * q_k,
+                c_scat + wgt * q_k * ssa_k,
+                c_gscat + wgt * q_k * ssa_k * g_k,
+            ), None
+
+        (sec, sec_scat, sec_gscat), _ = jax.lax.scan(
+            _gh_node,
+            (jnp.zeros_like(r_wet),) * 3,
+            (jnp.asarray(_GH_NODES, r_wet.dtype),
+             jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
+        )
+        # The three products keep the exact association they had before the
+        # per-mode block became a hook — extinction as
+        # ``n*sec*pi*r^2`` and the two scattering moments through a shared
+        # ``area`` — because float multiplication does not reassociate, and
+        # the default answers of every JAM configuration are pinned to these
+        # orderings.
+        area = inputs.num_per_area * math.pi * r_wet ** 2
+        tau = inputs.num_per_area * sec * math.pi * r_wet ** 2
+        return tau, area * sec_scat, area * sec_gscat
+
+    def _map_bands(self, one_band, lam_all, ri_j):
+        """Evaluate ``one_band`` over the band axis.
+
+        ``jax.vmap`` by default: the bands are independent and share the whole
+        modal geometry (volumes, wet radii, number), so only the wavelength
+        and the per-species refractive index vary across them, and the LUT
+        path's per-band working set is small enough to hold all bands at once.
+
+        It is a hook because that last clause is a property of the backend,
+        not of the band loop. A backend whose per-band intermediates are large
+        — a network's hidden activations carry an extra width axis on top of
+        ``(band, level, column)`` — should override this with
+        ``jax.lax.map(lambda xs: one_band(xs[0], xs[1]), (lam_all, ri_j))``,
+        which keeps one band live at a time. That is the same reasoning that
+        already puts the Gauss-Hermite nodes in a ``lax.scan``. The two forms
+        agree to rounding rather than bit-for-bit — XLA associates a batched
+        and a scanned band axis differently, worth ~2 ulp in float32 — so
+        switching band maps is a memory decision, not a free one for a
+        configuration whose answers are pinned bitwise.
+        """
+        return jax.vmap(one_band)(lam_all, ri_j)
+
+    def _band_optics(self, state, aer, num_per_area, col_factor, centers_nm, ri,
                      want_decomposition: bool = False):
         """Per-band ``(aod, ssa, asy)``, each ``(n_band, nlev, ncols)``.
 
-        The bands are independent and share the whole modal geometry
-        (volumes, wet radii, number), so the band axis is mapped with a
-        single ``jax.vmap`` rather than a Python loop: only the wavelength
-        and the per-species refractive index ``(n, k)`` vary across bands.
-        The inner loops over modes/species stay explicit — they are ragged
-        (each mode carries a different species set) and small.
+        The band axis is mapped rather than looped in Python (see
+        :meth:`_map_bands`): only the wavelength and the per-species
+        refractive index ``(n, k)`` vary across bands. The inner loops over
+        modes/species stay explicit — they are ragged (each mode carries a
+        different species set) and small.
+
+        This method owns the modal geometry, the dry-mass gate, the SSA/
+        asymmetry weighting and the per-species apportionment; the optical
+        question alone is delegated per mode to :meth:`_mode_optics`, which
+        is the hook an alternative Mie pathway overrides.
         """
         n_band = centers_nm.shape[0]
         if n_band == 0:
@@ -266,7 +472,6 @@ class JamOpticsTerm(PhysicsTerm):
             sp_abs: dict = {}
             for i, mode in enumerate(self._spec.modes):
                 r_wet = aer.r_wet[i]
-                ln_sig = math.log(mode.geom_std_dev)
                 vol_n = jnp.zeros_like(state.temperature)
                 vol_k = jnp.zeros_like(state.temperature)
                 vol_tot = jnp.zeros_like(state.temperature)
@@ -280,47 +485,91 @@ class JamOpticsTerm(PhysicsTerm):
                     vol_tot = vol_tot + v
                     vol_sp[sp] = v
                 vol_dry = vol_tot
-                v_water = aer.number[i] * _FOUR_THIRDS_PI * jnp.maximum(
-                    r_wet ** 3 - aer.r_dry[i] ** 3, 0.0
-                )
+                # Hygroscopic water volume from the DRY volume just summed
+                # and the mode's growth factor, ``V_w = V_dry·(g³ − 1)`` with
+                # ``g = r_wet/r_dry``. Both cores grow a mode by applying ONE
+                # ratio to the whole of it — the placeholder core's κ-Köhler
+                # factor with the Kelvin term dropped, MAM4's ``wateruptake``
+                # Köhler solve (Kelvin kept) rescaling ``dgncur_awet`` from
+                # ``dgncur_a`` — so every radius scales by the same ``g`` and
+                # the wet third moment is exactly ``g³`` times the dry one.
+                # Only that RATIO appears here, so the identity holds for any
+                # ``σ_g`` and also where a core clips ``dg`` to a per-mode
+                # bound.
+                #
+                # A per-particle ``N·(4/3)π·(r_wet³ − r_dry³)`` is NOT an
+                # equivalent substitute: ``r_dry`` is the NUMBER-MEDIAN
+                # radius, defined through the third moment
+                # ``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``, so ``N·(4/3)π·r_dry³``
+                # is not ``V_dry`` but ``V_dry·(dg_clip/dg_true)³ /
+                # exp(4.5 ln²σ_g)``. Unclipped that understates the water by
+                # ``exp(4.5 ln²σ_g)`` — 2.70 at σ_g = 1.6 (Aitken, primary
+                # carbon), 4.73 at σ_g = 1.8 (accumulation, coarse) — but on a
+                # clip bound the factor moves either way: clipping DOWN to
+                # ``dgnum_hi`` understates further, while clipping UP to
+                # ``dgnum_lo`` (more number than the mass supports) can
+                # OVERSTATE the water instead. Either way the volume-mixed
+                # index is wrong (#790).
+                #
+                # Being number-free, the term is also identically zero on a
+                # mode with no dry material, whatever ringing the number
+                # field carries.
+                #
+                # Where ``dg`` is unclipped, ``vol_tot`` below is moreover the
+                # third moment of the very lognormal the Gauss–Hermite
+                # quadrature integrates the Mie efficiencies over, so mixing
+                # rule and size integral describe one population. That
+                # stronger property is what clipping breaks: the size integral
+                # then follows the clipped radius while ``vol_dry`` follows
+                # the mass, and the two differ by ``(dg_clip/dg_true)³``.
+                #
+                # ``r_dry`` is floored so the ratio and its cube stay finite
+                # in the arm ``where`` does not take (both are evaluated, and
+                # an ``inf`` there would poison the reverse pass); the select
+                # returns 1.0 — no growth, no water, and zero gradient — on a
+                # degenerate dry radius.
+                r_dry_i = aer.r_dry[i]
+                ratio = r_wet / jnp.maximum(r_dry_i, _MIN_DRY_RADIUS)
+                growth_cubed = jnp.where(
+                    r_dry_i > _MIN_DRY_RADIUS, ratio ** 3, 1.0)
+                # Clamped at zero so a core that reports r_wet < r_dry cannot
+                # put a negative volume into the mixing rule.
+                v_water = vol_dry * jnp.maximum(growth_cubed - 1.0, 0.0)
                 n_w, k_w = ri_band["h2o"]
                 vol_n = vol_n + v_water * n_w
                 vol_k = vol_k + v_water * k_w
                 vol_tot = vol_tot + v_water
 
-                safe = jnp.maximum(vol_tot, _TINY)
-                m_n = jnp.where(vol_tot > _TINY, vol_n / safe, 1.5)
-                m_k = jnp.where(vol_tot > _TINY, vol_k / safe, 1.0e-8)
-                # Integrate Mie efficiencies over the mode's lognormal in
-                # ln r — ``r_wet`` is the NUMBER-MEDIAN radius, so a single
-                # Qext(r_wet)·π·r_wet² misses the r² moment (×e^{2ln²σ})
-                # and Qext at the extinction-carrying sizes. Gauss–Hermite:
-                # r_k = r_g·e^{√2 lnσ t_k}, weight (w_k/√π)·e^{2√2 lnσ t_k};
-                # σ preserved under hygroscopic growth, refractive index
-                # size-independent (only x varies per node).
-                # ``lax.scan`` so only one node's Mie intermediates are
-                # live at a time (unrolling multiplies the working set by
-                # n_nodes × n_bands and exceeds GPU memory).
-                def _gh_node(carry, t_w):
-                    t_k, w_k = t_w
-                    growth = jnp.exp(math.sqrt(2.0) * ln_sig * t_k)
-                    x_k = 2.0 * math.pi * (r_wet * growth) / lam_m
-                    q_k, ssa_k, g_k = interp_mie(self._lut, x_k, m_n, m_k)
-                    wgt = (w_k / math.sqrt(math.pi)) * growth ** 2
-                    c_sec, c_scat, c_gscat = carry
-                    return (
-                        c_sec + wgt * q_k,
-                        c_scat + wgt * q_k * ssa_k,
-                        c_gscat + wgt * q_k * ssa_k * g_k,
-                    ), None
-
-                (sec, sec_scat, sec_gscat), _ = jax.lax.scan(
-                    _gh_node,
-                    (jnp.zeros_like(r_wet),) * 3,
-                    (jnp.asarray(_GH_NODES, r_wet.dtype),
-                     jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
-                )
-                aod_i = num_per_area[i] * sec * math.pi * r_wet ** 2
+                # Double ``where`` rather than a floored denominator, here and
+                # in the apportionment below. A mode with no dry material now
+                # has ``vol_tot`` EXACTLY zero — the water is proportional to
+                # ``vol_dry`` — where before it inherited a spurious
+                # number-driven water volume that kept it positive. Dividing
+                # by a floored ``vol_tot`` is finite forward but not in
+                # reverse: the local partial of ``1/max(v, 1e-30)`` is
+                # ``-1e60``, which overflows float32 to ``-inf``, and the
+                # outer select's zero cotangent then gives ``0 × inf = NaN``.
+                # Substituting the denominator BEFORE the division keeps both
+                # arms finite, so clean columns contribute a zero gradient
+                # instead of poisoning the whole reverse pass.
+                ok = vol_tot > _TINY
+                safe = jnp.where(ok, vol_tot, 1.0)
+                m_n = jnp.where(ok, vol_n / safe, 1.5)
+                m_k = jnp.where(ok, vol_k / safe, 1.0e-8)
+                # The optical question, and only it, is delegated to the
+                # backend hook: how much extinction, scattering and
+                # scattering-weighted asymmetry this mode's lognormal carries
+                # at this wavelength. Everything around it — the volumes just
+                # summed, the gate below, the apportionment, the column
+                # diagnostics — stays here, so an alternative Mie pathway is a
+                # one-method override rather than a second copy of the term.
+                aod_i, scat_i, gscat_i = self._mode_optics(ModeOpticsInputs(
+                    mode=mode, mode_index=i, wavelength_m=lam_m, r_wet=r_wet,
+                    r_dry=r_dry_i, m_n=m_n, m_k=m_k, ri_band=ri_band,
+                    vol_species=vol_sp, vol_water=v_water, vol_dry=vol_dry,
+                    vol_total=vol_tot, num_per_area=num_per_area[i],
+                    col_factor=col_factor,
+                ))
                 # Physical mass gate: tau is EXACTLY zero where the mode
                 # carries no material. The number floor above handles the
                 # NEGATIVE side of the cold-start Gibbs ringing, but the
@@ -332,17 +581,19 @@ class JamOpticsTerm(PhysicsTerm):
                 # +90 K in 6 h and a global NaN by day 10 of the first
                 # coupled JAM year. 1e-24 m³/kg (≈1e-21 kg/kg of aerosol)
                 # is radiatively nothing and far above ringing amplitudes.
-                # Gate on the DRY species volume: the hygroscopic water
-                # term n·(r_wet³−r_dry³) is itself ringing garbage when
-                # there is no dry aerosol to condense on, and it passes a
-                # total-volume gate on its own.
+                # Gate on the DRY species volume: it is the quantity that
+                # says whether there is anything to condense on or to
+                # scatter from. (``vol_tot`` is ``vol_dry·g³`` — see above —
+                # so it is monotone in ``vol_dry`` and a total-volume gate
+                # would select the same cells, at a threshold differing by
+                # ``g³``. The extinction ``n·q_ext·π·r²``, built from the
+                # ringing fields, is what would otherwise sneak through.)
                 gate = (vol_dry > 1.0e-24)
-                area = num_per_area[i] * math.pi * r_wet ** 2
                 aod_gated = jnp.where(gate, aod_i, 0.0)
-                scat_gated = jnp.where(gate, area * sec_scat, 0.0)
+                scat_gated = jnp.where(gate, scat_i, 0.0)
                 aod = aod + aod_gated
                 scat = scat + scat_gated
-                gscat = gscat + jnp.where(gate, area * sec_gscat, 0.0)
+                gscat = gscat + jnp.where(gate, gscat_i, 0.0)
 
                 # Diagnostic decomposition (jax-gcm#584). The mode's species
                 # are volume-mixed into ONE effective refractive index before
@@ -371,8 +622,10 @@ class JamOpticsTerm(PhysicsTerm):
                 # added above, so the fractions sum to one over the mode's
                 # species plus water — no extinction is dropped or double
                 # counted.
-                inv_vol = jnp.where(vol_tot > _TINY, 1.0 / jnp.maximum(vol_tot, _TINY), 0.0)
-                inv_volk = jnp.where(vol_k > _TINY, 1.0 / jnp.maximum(vol_k, _TINY), 0.0)
+                # Same reverse-mode-safe substitution as ``safe`` above.
+                ok_k = vol_k > _TINY
+                inv_vol = jnp.where(ok, 1.0 / safe, 0.0)
+                inv_volk = jnp.where(ok_k, 1.0 / jnp.where(ok_k, vol_k, 1.0), 0.0)
                 abs_gated = aod_gated - scat_gated
                 for sp, v_sp in vol_sp.items():
                     sp_aod[sp] = sp_aod.get(sp, 0.0) + aod_gated * (v_sp * inv_vol)
@@ -385,12 +638,14 @@ class JamOpticsTerm(PhysicsTerm):
             # Clamp the extinction-/scattering-weighted SSA and asymmetry to
             # their physical [0, 1] range. With a non-negative per-mode AOD
             # (number floored at 0 in ``__call__``) these ratios are already
-            # bounded, but a tiny Mie-LUT edge overshoot in ``q_ext``/``ssa``
-            # could still nudge them out of range, and RRTMGP's two-stream
-            # solver NaNs on an SSA outside [0, 1] — so clamp defensively. SSA is
-            # physically [0, 1]; the asymmetry parameter is [-1, 1] (negative g =
-            # back-scattering), so keep its lower bound at -1 to preserve valid
-            # back-scattering aerosol rather than only bounding overshoot.
+            # bounded, but a tiny backend edge overshoot in extinction or
+            # scattering could still nudge them out of range (the default
+            # path's LUT interpolation does it at the table edges), and
+            # RRTMGP's two-stream solver NaNs on an SSA outside [0, 1] — so
+            # clamp defensively. SSA is physically [0, 1]; the asymmetry
+            # parameter is [-1, 1] (negative g = back-scattering), so keep its
+            # lower bound at -1 to preserve valid back-scattering aerosol
+            # rather than only bounding overshoot.
             ssa_b = jnp.clip(scat / jnp.maximum(aod, _TINY), 0.0, 1.0)
             asy_b = jnp.clip(gscat / jnp.maximum(scat, _TINY), -1.0, 1.0)
             if not want_decomposition:
@@ -399,9 +654,10 @@ class JamOpticsTerm(PhysicsTerm):
                     jnp.stack(per_mode_aod), jnp.stack(per_mode_abs),
                     sp_aod, sp_abs)
 
-        return jax.vmap(one_band)(lam_all, ri_j)
+        return self._map_bands(one_band, lam_all, ri_j)
 
-    def _optics_diagnostics_fields(self, state, aer, num_per_area, dz) -> dict:
+    def _optics_diagnostics_fields(self, state, aer, num_per_area, col_factor,
+                                   dz) -> dict:
         """AeroCom per-species / per-mode / spectral optics (jax-gcm#584).
 
         A second Mie pass at ``_DIAG_WAVELENGTHS_NM``, independent of the
@@ -425,7 +681,7 @@ class JamOpticsTerm(PhysicsTerm):
         """
         c = self._cache
         tau, ssa, _asy, mode_tau, mode_abs, sp_tau, sp_abs = self._band_optics(
-            state, aer, num_per_area,
+            state, aer, num_per_area, col_factor,
             np.asarray(_DIAG_WAVELENGTHS_NM, np.float64), c.ri_diag,
             want_decomposition=True,
         )
@@ -505,13 +761,19 @@ class JamOpticsTerm(PhysicsTerm):
         # so this is a hard stability requirement, not a cosmetic floor. With
         # number ≥ 0 every derived optic is physical (AOD ≥ 0 ⇒ SSA, g ∈
         # [0, 1]); consistent with the AOD-550 diagnostic floor below.
-        num_per_area = jnp.maximum(aer.number, 0.0) * (air_density * dz)[jnp.newaxis]
+        # ``col_factor`` is the air mass per unit area of the layer, the one
+        # geometric factor that turns a per-kg-of-air quantity into a column
+        # amount. The number path folds it into ``num_per_area``; it is also
+        # passed on unfolded because a backend predicting an extinction per
+        # unit particle VOLUME needs it against a volume rather than a number.
+        col_factor = air_density * dz
+        num_per_area = jnp.maximum(aer.number, 0.0) * col_factor[jnp.newaxis]
 
         aod_sw, ssa_sw, asy_sw = self._band_optics(
-            state, aer, num_per_area, c.sw_nm, c.ri_sw
+            state, aer, num_per_area, col_factor, c.sw_nm, c.ri_sw
         )
         aod_lw, ssa_lw, asy_lw = self._band_optics(
-            state, aer, num_per_area, c.lw_nm, c.ri_lw
+            state, aer, num_per_area, col_factor, c.lw_nm, c.ri_lw
         )
 
         # No aerosol radiative effect above _AER_RAD_PMIN. In the thin lid
@@ -599,7 +861,7 @@ class JamOpticsTerm(PhysicsTerm):
             # ``fields``) does not see these as struct fields; they are
             # plain diagnostics keys.
             fields["_optics_diag"] = self._optics_diagnostics_fields(
-                state, aer, num_per_area, dz)
+                state, aer, num_per_area, col_factor, dz)
         return fields
 
     def __call__(self, state, diagnostics, forcing, terrain):

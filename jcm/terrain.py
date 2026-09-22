@@ -1,4 +1,6 @@
 """TerrainData struct for boundary conditions that vary per simulation."""
+import logging
+
 import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
@@ -6,6 +8,8 @@ from dinosaur.coordinate_systems import CoordinateSystem, HorizontalGridTypes
 # override is honoured at call time rather than captured at import.
 import jcm.constants as _constants
 from jcm.utils import VALID_NODAL_SHAPES, VALID_TRUNCATIONS, validate_ds, spectral_truncation
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +471,7 @@ class TerrainData:
             # File SSO is at a different resolution than the model grid —
             # using it raw would crash deep inside a vmapped physics call
             # (#578). Fall through to deriving from the source orography.
-            import logging
-            logging.warning(
+            logger.warning(
                 "terrain file %s carries SSO fields at %s, not the model's "
                 "%s — ignoring them and deriving SSO from the source "
                 "orography instead", terrain_file,

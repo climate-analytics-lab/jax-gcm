@@ -2,7 +2,8 @@
 
 Produces the Tier A land-surface product at native 0.25°: a 12-month
 climatology of skin temperature, soil temperature and moisture, snow
-depth (water equivalent) and albedo, plus the invariant land-sea mask.
+depth (water equivalent) and albedo, plus the invariant land-sea mask,
+vegetation cover and soil type.
 Per-grid regridding and translation into jcm forcing variables happens
 at bundle assembly.
 """
@@ -36,10 +37,14 @@ def _open_year(field_code: str, year: int) -> xr.DataArray:
     return ds[name]
 
 
-# Invariant fields: land fraction + low/high vegetation cover (the
-# SPEEDY soil-availability formula weights the deep layer by vegetation).
+# Invariant fields: land fraction, low/high vegetation cover (the SPEEDY
+# soil-availability formula weights the deep layer by vegetation) and soil
+# type ``slt``, which selects each cell's HTESSEL field capacity — the
+# denominator of the ECHAM-like relative soil wetness (#787). ``slt`` is part
+# of ERA5's standard invariant group; a missing file raises here rather than
+# letting the wetness field be normalised by a stand-in constant.
 INVARIANTS = {"lsm": "128_172_lsm", "cvl": "128_027_cvl",
-              "cvh": "128_028_cvh"}
+              "cvh": "128_028_cvh", "slt": "128_043_slt"}
 
 
 def load_invariant(name: str) -> xr.DataArray:

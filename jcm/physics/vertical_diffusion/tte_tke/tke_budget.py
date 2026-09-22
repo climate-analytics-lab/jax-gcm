@@ -73,7 +73,7 @@ def compute_buoyancy_production(
     temperature: jnp.ndarray,
     dz: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    gravity: float = c.grav
+    gravity: float | None = None,
 ) -> jnp.ndarray:
     """Compute buoyancy production term in TKE budget.
     
@@ -83,7 +83,10 @@ def compute_buoyancy_production(
         temperature: Temperature [K] (ncol, nlev)
         dz: Increments between full level heights [m] (ncol, nlev-1)
         exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        gravity: Gravitational acceleration [m/s²]
+        gravity: Gravitational acceleration [m/s²]. ``None`` (the
+            default) reads ``jcm.constants.grav`` at trace time, so a
+            ``set_constants`` override applies; a default argument
+            would have captured it at import instead (#772).
         
     Returns:
         Buoyancy production [m²/s³] (ncol, nlev)
@@ -103,6 +106,9 @@ def compute_buoyancy_production(
     
     # Buoyancy production: P_b = -K_h * (g/T) * (dT/dz + g/cp)
     # Note: The dry adiabatic lapse rate g/cp is included for stability
+    # Resolved here, not as a default argument: a default is evaluated
+    # once at import and would freeze the pre-override value (#772).
+    gravity = c.grav if gravity is None else gravity
     lapse_rate = gravity / c.cpd
     buoyancy_freq = (gravity / temp_avg) * (dt_dz_extended + lapse_rate)
     
@@ -205,7 +211,22 @@ def echam_tke_source_update(
     """
     zzb = mixing_length * (c_m * shear_squared - c_h * buoy_freq_squared)
     zdisl = (mixing_length / c_d) / dt          # m/s
-    sqrt_prev = jnp.sqrt(jnp.maximum(prev_tke, 0.0))
+    # ``sqrt(maximum(x, 0))`` is the one floor shape that does *not* protect
+    # the derivative: at ``prev_tke == 0`` the two arguments of ``maximum``
+    # tie, JAX splits the derivative evenly between them (0.5 each) and
+    # multiplies it by ``sqrt'(0) = inf``, so the whole column's gradient with
+    # respect to TKE comes back non-finite. A *positive* floor would be safe —
+    # below it ``maximum`` passes a zero derivative — but 0 is the physically
+    # right floor here, so the guard has to be the double-``where`` instead.
+    # A cold-started or fully-decayed column sits exactly at TKE = 0, and
+    # ``lohmann_2m`` hands this scheme's companions a literal zeros array, so
+    # this is an operating point the model reaches rather than an edge case.
+    # Forward-identical: ``sqrt(max(0, 0)) == 0`` is what the outer ``where``
+    # selects. The derivative reported at 0 is then 0 rather than ``+inf``,
+    # which is the only finite choice available at a square-root's endpoint.
+    positive_tke = prev_tke > 0.0
+    sqrt_prev = jnp.where(
+        positive_tke, jnp.sqrt(jnp.where(positive_tke, prev_tke, 1.0)), 0.0)
     arg = (zzb * dt + 2.0 * sqrt_prev) / zdisl
     zktest = 1.0 + arg
     # When net source is negative enough that zktest < 1, the implicit

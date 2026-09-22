@@ -1,5 +1,6 @@
 """Unit tests for main surface physics interface."""
 
+import jax
 import pytest
 import jax.numpy as jnp
 
@@ -11,6 +12,7 @@ from jcm.physics.surface.echam.surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
 )
+from jcm.testing import check_gradients
 
 
 class TestInitializeSurfaceState:
@@ -361,6 +363,180 @@ class TestCombineSurfaceFluxes:
         # Check mean calculation
         expected_mean = jnp.sum(fractions * sensible_heat, axis=1)
         assert jnp.allclose(combined_fluxes.sensible_heat_mean, expected_mean)
+
+
+class TestSurfacePhysicsStepGradients:
+    """Whole-scheme gradients through ``surface_physics_step`` (#820).
+
+    ``EchamSurface`` is in the default ECHAM stack, so this is the surface
+    path a run differentiates through: ocean, sea-ice and land tiles, their
+    combination into grid-box means, and the diagnostics.
+
+    Green, against a central difference, for a single column and for a
+    four-column block. The two finiteness tests below carry the substance:
+    the module's wind norms and the ``wind_speed_10m / wind_speed_atm``
+    quotient are cone tips at calm wind, where no two-sided derivative
+    exists, and a run reaches them (an initialised-at-rest spin-up starts
+    there).
+    """
+
+    @staticmethod
+    def _forcing(ncol, u_wind, v_wind):
+        """Lowest-level atmospheric forcing for ``ncol`` columns."""
+        nsfc_type = 3
+        return AtmosphericForcing(
+            temperature=jnp.linspace(290.0, 284.0, ncol),
+            humidity=jnp.linspace(0.010, 0.007, ncol),
+            u_wind=u_wind,
+            v_wind=v_wind,
+            pressure=jnp.linspace(101325.0, 97000.0, ncol),
+            sw_downward=jnp.linspace(300.0, 240.0, ncol),
+            lw_downward=jnp.linspace(350.0, 315.0, ncol),
+            rain_rate=jnp.full(ncol, 1.0e-6),
+            snow_rate=jnp.zeros(ncol),
+            exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.011),
+            exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.010),
+            exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.013),
+        )
+
+    @staticmethod
+    def _state(ncol, ocean_temp=None, land_temp=283.0):
+        """Build a mixed water/ice/land surface for ``ncol`` columns."""
+        fraction = jnp.stack([jnp.full(ncol, 0.5), jnp.full(ncol, 0.2),
+                              jnp.full(ncol, 0.3)], axis=1)
+        if ocean_temp is None:
+            ocean_temp = jnp.linspace(291.5, 285.5, ncol)
+        return initialize_surface_state(
+            ncol, fraction, ocean_temp, jnp.full((ncol, 2), 268.0),
+            jnp.full((ncol, 4), land_temp))
+
+    def _step(self, ncol, atmospheric_state, surface_state):
+        """Return ``f(u, v, T, q, CH, CM, CE, T_ocean, U_10m)``."""
+        def f(u_wind, v_wind, temperature, humidity, exchange_heat,
+              exchange_momentum, exchange_moisture, ocean_temp,
+              wind_speed_10m):
+            state = atmospheric_state._replace(
+                u_wind=u_wind, v_wind=v_wind, temperature=temperature,
+                humidity=humidity, exchange_coeff_heat=exchange_heat,
+                exchange_coeff_momentum=exchange_momentum,
+                exchange_coeff_moisture=exchange_moisture)
+            # The water tile's temperature *is* the ocean temperature, so
+            # both have to move together or the check would compare a
+            # derivative against a difference taken along a different
+            # direction.
+            surface = surface_state._replace(
+                ocean_temp=ocean_temp,
+                temperature=surface_state.temperature.at[:, 0].set(ocean_temp))
+            return surface_physics_step(state, surface, 3600.0,
+                                        wind_speed_10m)
+
+        return f
+
+    @pytest.mark.parametrize("ncol", [1, 4], ids=["column", "block"])
+    def test_step_gradients_match_a_central_difference(self, ncol):
+        """A single column and a four-column block, both off the switches.
+
+        The winds are O(5 m/s) — above ``min_wind_speed = 1``, so the
+        ``jnp.maximum`` floors in ``compute_surface_resistances`` and the
+        Charnock roughness are inactive — and the tile temperatures differ
+        from the air temperature by a few kelvin, so no flux sits on a sign
+        change.
+        """
+        u_wind = jnp.linspace(6.0, 3.0, ncol)
+        v_wind = jnp.linspace(2.5, 4.5, ncol)
+        atmospheric_state = self._forcing(ncol, u_wind, v_wind)
+        surface_state = self._state(ncol)
+        args = (u_wind, v_wind, atmospheric_state.temperature,
+                atmospheric_state.humidity,
+                atmospheric_state.exchange_coeff_heat,
+                atmospheric_state.exchange_coeff_momentum,
+                atmospheric_state.exchange_coeff_moisture,
+                surface_state.ocean_temp,
+                0.9 * jnp.sqrt(u_wind ** 2 + v_wind ** 2))
+        check_gradients(self._step(ncol, atmospheric_state, surface_state),
+                        args, rtol=1e-3)
+
+    @pytest.mark.parametrize("wind_10m", [0.0, 0.3], ids=["w10=0", "w10>0"])
+    def test_calm_wind_gradients_are_finite(self, wind_10m):
+        """``u = v = 0``: every wind norm in the step is at its cone tip.
+
+        ``surface_physics.py:154`` and ``turbulent_fluxes.py:220/311/318/322``
+        all form ``sqrt(maximum(u^2 + v^2, 1e-30))``, and ``:313`` then
+        divides the diagnosed 10 m wind by the result — 1e-15 here. The
+        gradient is finite because the floor is 1e-30 rather than 0: below it
+        ``jnp.maximum`` routes the whole derivative to the constant branch,
+        so ``sqrt'`` at the floor is multiplied by an exact zero instead of
+        meeting a 0.5/0.5 tie and forming ``0 * inf``.
+
+        Momentum is exactly zero here too, so ``:318``/``:322`` sit at their
+        own tips at the same time.
+        """
+        ncol = 2
+        calm = jnp.zeros(ncol)
+        atmospheric_state = self._forcing(ncol, calm, calm)
+        surface_state = self._state(ncol)
+        step = self._step(ncol, atmospheric_state, surface_state)
+        args = (calm, calm, atmospheric_state.temperature,
+                atmospheric_state.humidity,
+                atmospheric_state.exchange_coeff_heat,
+                atmospheric_state.exchange_coeff_momentum,
+                atmospheric_state.exchange_coeff_moisture,
+                surface_state.ocean_temp, jnp.full(ncol, wind_10m))
+
+        def total(*a):
+            return sum(jnp.sum(leaf ** 2)
+                       for leaf in jax.tree.leaves(step(*a)))
+
+        gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
+        names = ("u_wind", "v_wind", "temperature", "humidity",
+                 "exchange_coeff_heat", "exchange_coeff_momentum",
+                 "exchange_coeff_moisture", "ocean_temp", "wind_speed_10m")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at calm wind: {gradient}")
+
+    def test_zero_temperature_difference_gradients_are_finite(self):
+        """Every tile at the air temperature: all three fluxes vanish at once.
+
+        The sensible-heat, ground-heat and longwave terms are each linear in
+        a temperature difference that is exactly zero here, and the land
+        tile's ``jnp.maximum(net_radiation * 0.5, 0.0)`` and
+        ``jnp.maximum(evaporation, 0.0)`` hinges (``land.py:241/402``) are
+        the nearest switches. Finiteness is the assertion: these are kinks,
+        so a central difference would report the mean of two one-sided
+        slopes rather than anything AD computes.
+        """
+        ncol = 2
+        u_wind = jnp.linspace(6.0, 3.0, ncol)
+        v_wind = jnp.linspace(2.5, 4.5, ncol)
+        atmospheric_state = self._forcing(ncol, u_wind, v_wind)
+        air_temperature = atmospheric_state.temperature
+        surface_state = self._state(ncol, ocean_temp=air_temperature)
+        surface_state = surface_state._replace(
+            temperature=jnp.broadcast_to(air_temperature[:, None], (ncol, 3)),
+            soil_temp=jnp.broadcast_to(air_temperature[:, None], (ncol, 4)),
+            ice_temp=jnp.broadcast_to(air_temperature[:, None], (ncol, 2)),
+            vegetation_temp=air_temperature)
+        step = self._step(ncol, atmospheric_state, surface_state)
+        args = (u_wind, v_wind, air_temperature, atmospheric_state.humidity,
+                atmospheric_state.exchange_coeff_heat,
+                atmospheric_state.exchange_coeff_momentum,
+                atmospheric_state.exchange_coeff_moisture,
+                surface_state.ocean_temp,
+                0.9 * jnp.sqrt(u_wind ** 2 + v_wind ** 2))
+
+        def total(*a):
+            return sum(jnp.sum(leaf ** 2)
+                       for leaf in jax.tree.leaves(step(*a)))
+
+        gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
+        names = ("u_wind", "v_wind", "temperature", "humidity",
+                 "exchange_coeff_heat", "exchange_coeff_momentum",
+                 "exchange_coeff_moisture", "ocean_temp", "wind_speed_10m")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at zero temperature difference: "
+                f"{gradient}")
 
 
 class TestEchamSurfaceTerm:

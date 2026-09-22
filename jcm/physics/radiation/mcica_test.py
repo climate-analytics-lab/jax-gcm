@@ -6,13 +6,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import pytest
+
 from jcm.physics.radiation.mcica import (
     column_key,
     column_total_cover,
     effective_cloud_fraction,
+    expected_total_cover,
     generate_subcolumns,
     in_cloud_path,
 )
+from jcm.testing import check_gradients
 
 
 _NLEV = 20
@@ -228,3 +232,108 @@ def test_effective_fraction_removes_spurious_cover_from_optically_empty_layer():
     np.testing.assert_allclose(
         float(column_total_cover(effective_cloud_fraction(f2, eps=eps), 1)),
         0.6, rtol=1e-5)
+
+
+# A deck profile with real clear gaps, and a thin one whose random-overlap
+# cover stays well away from 1.
+_DECK_CLOUD = jnp.array([0.02, 0.05, 0.35, 0.60, 0.55, 0.08,
+                         0.05, 0.20, 0.75, 0.80, 0.10, 0.03])
+_THIN_CLOUD = jnp.linspace(0.04, 0.26, 12)
+_GRADIENT_DZ = _layer_thickness(nlev=12)
+
+
+class TestMcicaGradients:
+    """AD against a central difference through the McICA helpers (#820).
+
+    Every *continuous* entry point here is green. The sampler itself is the
+    exception, and deliberately so — see
+    ``test_subcolumn_masks_carry_no_gradient``.
+
+    The random-overlap fixtures use ``_THIN_CLOUD`` rather than the deck
+    profile: random overlap of a 12-layer deck column gives a total cover of
+    0.999, and ``1 - prod(1 - f)`` that close to 1 leaves a float32 secant
+    only a handful of ulps of signal, so a comparison there would be
+    measuring the reference's precision rather than the derivative. The
+    correlated rules do not saturate and use the deck profile.
+    """
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_in_cloud_path(self, seed):
+        """Cloud fractions clear of the ``2*eps`` zeroing threshold."""
+        check_gradients(
+            in_cloud_path,
+            (jnp.linspace(1.0e-5, 3.0e-4, 12), _DECK_CLOUD), rtol=1e-3,
+            seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_effective_cloud_fraction(self, seed):
+        """The same threshold, applied to the fraction itself."""
+        check_gradients(effective_cloud_fraction, (_DECK_CLOUD,), rtol=1e-3,
+                        seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("overlap_code", [0, 1, 2],
+                             ids=["random", "maximum_random", "exponential"])
+    def test_column_total_cover(self, overlap_code, seed):
+        """The grey beam-split's closed-form cover, for all three codes."""
+        check_gradients(lambda f: column_total_cover(f, overlap_code),
+                        (_THIN_CLOUD,), rtol=1e-3, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 4])
+    @pytest.mark.parametrize("overlap,cloud_fraction", [
+        ("random", _THIN_CLOUD),
+        ("maximum_random", _DECK_CLOUD),
+        ("exponential", _DECK_CLOUD),
+    ])
+    def test_expected_total_cover(self, overlap, cloud_fraction, seed):
+        """The O(nlev^2) rank-segment recursion, for each overlap rule.
+
+        This is the differentiable counterpart of the sampler — the cover the
+        NN emulator publishes — so it is the one place in this module where a
+        cloud-fraction gradient survives, and worth a fence for that reason
+        alone.
+        """
+        check_gradients(
+            lambda f, dz: expected_total_cover(f, dz, overlap=overlap),
+            (cloud_fraction, _GRADIENT_DZ), rtol=1e-3, seed=seed)
+
+    def test_subcolumn_masks_carry_no_gradient(self):
+        """The sampler is a hard Bernoulli draw, so its gradient is zero.
+
+        ``per_subcol`` returns ``(r < cloud_fraction).astype(float32)``: a
+        comparison feeding an integer-to-float cast. Both kill the
+        derivative, so ``d(mask)/d(cloud_fraction)`` is identically zero —
+        finite, but carrying no information. Radiative gradients with respect
+        to cloud fraction therefore do **not** flow through the McICA path;
+        they flow through the in-cloud condensate (``in_cloud_path``, which
+        is differentiable) and, for the schemes that use it, through
+        ``expected_total_cover``.
+
+        That is the Raisanen (2004) sampler as ECHAM runs it, not a defect to
+        guard away — making it differentiable means a relaxed or
+        straight-through estimator, which changes what is sampled and needs
+        its own validation. This test pins the present behaviour so that such
+        a change cannot land unnoticed, and asserts finiteness because a
+        ``nan`` would be a different matter entirely.
+        """
+        key = jax.random.PRNGKey(20260918)
+        masks = generate_subcolumns(
+            _DECK_CLOUD, _GRADIENT_DZ, n_subcols=32,
+            overlap="exponential", key=key)
+        # The draw is a real one, not an all-clear column that would make the
+        # zero gradient uninteresting.
+        assert 0.0 < float(jnp.mean(masks)) < 1.0
+
+        gradients = jax.grad(
+            lambda f, dz: jnp.sum(generate_subcolumns(
+                f, dz, n_subcols=32, overlap="exponential", key=key) ** 2),
+            argnums=(0, 1),
+        )(_DECK_CLOUD, _GRADIENT_DZ)
+        for name, gradient in zip(("cloud_fraction", "layer_thickness"),
+                                  gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite: {gradient}")
+            assert jnp.all(gradient == 0.0), (
+                f"d/d{name} is no longer identically zero: {gradient}. The "
+                f"sampler has become differentiable; that is a change to "
+                f"what McICA samples, not a test to relax.")

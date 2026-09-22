@@ -12,16 +12,233 @@ from __future__ import annotations
 
 import unittest
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jcm.dycore.dinosaur.state_bridge import (
     dynamics_state_to_physics_state,
     physics_state_to_dynamics_state,
+    physics_tendency_to_dynamics_tendency,
 )
 from jcm.model import Model
 from jcm.physics.physics_term import TracerSpec
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics_interface import PhysicsTendency
+
+
+class TestSpecificHumidityContract(unittest.TestCase):
+    """Humidity crosses the Dinosaur boundary as dimensionless kg/kg."""
+
+    def setUp(self):
+        self._previous_x64 = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", False)
+        self.coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        self.model = Model(coords=self.coords, time_step=720)
+        self.primitive = self.model.dycore.primitive
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._previous_x64)
+
+    def test_float32_state_and_tendency_round_trip(self):
+        """Every mass mixing ratio crosses the boundary unscaled, in kg/kg."""
+        base = self.model.dycore.to_physics_state(self.model.initial_state())
+        shape = base.specific_humidity.shape
+        q = jnp.full(shape, 0.0125, dtype=jnp.float32)
+        # A generic mass mixing ratio (condensate, aerosol or gas mass all
+        # take this path) and a number concentration, which opts out.
+        cloud_mass = jnp.full(shape, 2.5e-4, dtype=jnp.float32)
+        number = jnp.full(shape, 1.0e8, dtype=jnp.float32)
+        specs = {
+            "qc": TracerSpec("qc", units="kg/kg"),
+            "qnc": TracerSpec("qnc", units="kg^-1", nondimensionalize=False),
+        }
+        seeded = base.copy(
+            specific_humidity=q,
+            tracers={"qc": cloud_mass, "qnc": number},
+        )
+
+        modal = physics_state_to_dynamics_state(
+            seeded, self.primitive, tracer_specs=specs,
+        )
+        q_in_dynamics = self.coords.horizontal.to_nodal(
+            modal.tracers["specific_humidity"]
+        )
+        mass_in_dynamics = self.coords.horizontal.to_nodal(
+            modal.tracers["qc"]
+        )
+        recovered = dynamics_state_to_physics_state(
+            modal, self.primitive, tracer_specs=specs,
+        )
+
+        self.assertEqual(recovered.specific_humidity.dtype, jnp.float32)
+        np.testing.assert_allclose(recovered.specific_humidity, q, rtol=1e-6)
+        np.testing.assert_allclose(q_in_dynamics, q, rtol=1e-6)
+        # Condensate is stored unscaled: Dinosaur reads it directly for the
+        # virtual-temperature loading term, so a g/kg store would weaken that
+        # coupling by 1000x — the same defect #666 fixed for humidity.
+        np.testing.assert_allclose(mass_in_dynamics, cloud_mass, rtol=2e-6)
+        np.testing.assert_allclose(
+            recovered.tracers["qc"], cloud_mass, rtol=2e-6,
+        )
+        # ``nondimensionalize=False`` still passes straight through.
+        np.testing.assert_allclose(
+            recovered.tracers["qnc"], number, rtol=2e-6,
+        )
+
+        dqdt = jnp.full(shape, 1.25e-8, dtype=jnp.float32)
+        cloud_mass_tend = jnp.full(shape, 2.5e-9, dtype=jnp.float32)
+        tendency = PhysicsTendency.zeros(
+            shape,
+            specific_humidity=dqdt,
+            tracers={"qc": cloud_mass_tend},
+        )
+        modal_tendency = physics_tendency_to_dynamics_tendency(
+            tendency, self.primitive, tracer_specs=specs,
+        )
+        q_tend_in_dynamics = self.coords.horizontal.to_nodal(
+            modal_tendency.tracers["specific_humidity"]
+        )
+        mass_tend_in_dynamics = self.coords.horizontal.to_nodal(
+            modal_tendency.tracers["qc"]
+        )
+        self.assertEqual(q_tend_in_dynamics.dtype, jnp.float32)
+        np.testing.assert_allclose(q_tend_in_dynamics, dqdt, rtol=1e-6)
+        np.testing.assert_allclose(
+            mass_tend_in_dynamics, cloud_mass_tend, rtol=2e-6,
+        )
+
+    def test_moist_geopotential_uses_specific_humidity(self):
+        base = self.model.dycore.to_physics_state(self.model.initial_state())
+        moist = base.copy(
+            specific_humidity=jnp.full_like(base.specific_humidity, 0.02),
+        )
+        dry = base.copy(specific_humidity=jnp.zeros_like(base.specific_humidity))
+
+        moist_phi = dynamics_state_to_physics_state(
+            physics_state_to_dynamics_state(moist, self.primitive),
+            self.primitive,
+        ).geopotential
+        dry_phi = dynamics_state_to_physics_state(
+            physics_state_to_dynamics_state(dry, self.primitive),
+            self.primitive,
+        ).geopotential
+
+        # Moist virtual temperature increases the layer thickness above the
+        # same surface geopotential; the bottom full level is above the surface
+        # too, so every layer responds.
+        self.assertTrue(jnp.all(moist_phi > dry_phi))
+
+
+class TestHybridVirtualTemperatureContract(unittest.TestCase):
+    """The hybrid primitive equations see physical q, not q/1000."""
+
+    def test_virtual_temperature_adjustment_uses_kg_per_kg(self):
+        from dinosaur.primitive_equations import compute_diagnostic_state_hybrid
+
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords,
+            physics=held_suarez_physics(),
+            time_step=180.0,
+        )
+        physical = model.dycore.to_physics_state(model.initial_state())
+        q = jnp.full_like(physical.specific_humidity, 0.01)
+        modal = physics_state_to_dynamics_state(
+            physical.copy(specific_humidity=q), model.dycore.primitive,
+        )
+        diagnostic = compute_diagnostic_state_hybrid(modal, coords)
+
+        adjustment = model.dycore.primitive._virtual_temperature_adjustment(
+            diagnostic
+        )
+        expected = 1.0 + (
+            model.dycore.physics_specs.R_vapor / model.dycore.physics_specs.R
+            - 1.0
+        ) * q
+        np.testing.assert_allclose(adjustment, expected, rtol=2e-6)
+
+    def test_condensate_loads_the_virtual_temperature(self):
+        """Tv = T(1 + (Rv/Rd-1)q - (qc+qi+qr+qs)), ECHAM6 dyn.f90::ztv."""
+        from dinosaur.primitive_equations import compute_diagnostic_state_hybrid
+
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        specs = {
+            name: TracerSpec(name, units="kg/kg")
+            for name in ("qc", "qi", "qr", "qs")
+        }
+        model = Model(
+            coords=coords, physics=held_suarez_physics(), time_step=180.0,
+        )
+        model.dycore.tracer_specs = specs
+
+        physical = model.dycore.to_physics_state(
+            model.initial_state()
+        )
+        q = jnp.full_like(physical.specific_humidity, 0.01)
+        condensate = {
+            "qc": jnp.full_like(q, 3.0e-4),
+            "qi": jnp.full_like(q, 1.0e-4),
+            "qr": jnp.full_like(q, 5.0e-5),
+            "qs": jnp.full_like(q, 2.0e-5),
+        }
+        modal = physics_state_to_dynamics_state(
+            physical.copy(specific_humidity=q, tracers=condensate),
+            model.dycore.primitive,
+            tracer_specs=specs,
+        )
+        diagnostic = compute_diagnostic_state_hybrid(modal, coords)
+
+        adjustment = model.dycore.primitive._virtual_temperature_adjustment(
+            diagnostic
+        )
+        ratio = (
+            model.dycore.physics_specs.R_vapor
+            / model.dycore.physics_specs.R - 1.0
+        )
+        expected = 1.0 + ratio * q - sum(condensate.values())
+        np.testing.assert_allclose(adjustment, expected, rtol=2e-6)
+        # Every species must be represented: dropping rain/snow would leave a
+        # 7e-5 gap, far outside this tolerance.
+        self.assertEqual(
+            model.dycore._cloud_keys, ("qc", "qi", "qr", "qs"),
+        )
+
+    def test_cloud_keys_follow_the_composition(self):
+        """Only condensate the composition declares enters the coupling."""
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        model = Model(
+            coords=coords, physics=held_suarez_physics(), time_step=180.0,
+        )
+        # Held-Suarez alone carries no condensate.
+        self.assertIsNone(model.dycore._cloud_keys)
+
+        # A rebuild that introduces condensate re-derives the keys, and a
+        # non-condensate tracer is not swept in.
+        model.dycore.tracer_specs = {
+            "qc": TracerSpec("qc", units="kg/kg"),
+            "dust": TracerSpec("dust", units="kg/kg"),
+        }
+        self.assertEqual(model.dycore._cloud_keys, ("qc",))
 
 
 @pytest.mark.slow

@@ -67,8 +67,93 @@ documented fallback when the GPL extra is unavailable. The core's cloudy ``amicp
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
 lifetimes vs observations (``tools/jam_burden_report.py``): BC roughly matches
-observations, SO4 is somewhat long (wet scavenging too weak), and the sea-salt
-source under-emits (see {doc}`../design/dinosaur_sl_jam_configuration`).
+observations and sea salt is in range, while SO4 is somewhat long (wet
+scavenging too weak). See {doc}`../design/dinosaur_sl_jam_configuration`.
+
+### Online aerosol optics
+
+**What we do.** ``JamOpticsTerm`` (``jcm/physics/aerosol/jam/optics/optics_term.py``)
+gives the modal population a direct radiative effect: per mode and radiation
+band it forms a **volume-mixed complex refractive index** over the mode's dry
+species plus its **hygroscopic water**, looks up Mie efficiencies at the wet
+size parameter, integrates them over the mode's lognormal with an 8-node
+Gauss–Hermite quadrature in ``ln r`` (σ_g preserved under growth), and sums
+extinction across modes; single-scattering albedo and asymmetry are
+extinction-/scattering-weighted. The water volume is
+``V_w = V_dry·(g³ − 1)`` with the hygroscopic growth factor
+``g = r_wet/r_dry``: each core grows a mode by applying one ratio to the whole
+of it, so every radius scales by the same ``g`` and the wet third moment is
+exactly ``g³`` times the dry one, whatever ``σ_g``. ``V_dry`` is the species
+mass over density summed within the mode. Water's share of a mode's volume —
+hence of its apportioned extinction, ``od550aerh2o`` — is therefore
+``(g³ − 1)/g³``. Only the *ratio* of the two radii enters, so this holds
+whether or not the core clips ``dg`` to a per-mode bound.
+
+Where ``dg`` is **unclipped** there is a stronger property: ``V_dry + V_w`` is
+then the third moment of the very lognormal the Gauss–Hermite quadrature
+integrates over, so the mixing rule and the size integral describe one
+particle population. Clipping breaks that second statement (not the first):
+the size integral follows the clipped radius while ``V_dry`` follows the mass,
+and the two part company by ``(dg_clip/dg_true)³``.
+
+**What ECHAM-HAM/MAM does.** HAM carries aerosol water as a per-mode tracer
+and volume-mixes it with the mode's dry species before the optics lookup
+(``mo_ham_rad.f90::ham_rad_refrac_volume``, the "Add aerosol water" block at
+lines 277-298 summing ``zv = mass/density`` into the same ``znrsum``/
+``znisum``/``zvsum`` as the dry species), then reports it as an optics
+component of its own — ``zvcomp`` at ``ham_rad_diag`` lines 1898-1906,
+apportioned by volume fraction at 1927-1933 and written to the
+``TAU_COMP_WAT`` stream (``mo_ham_streams.f90:652``), which ``od550aerh2o``
+mirrors.
+
+CAM computes the same quantity per particle:
+``modal_aero_wateruptake.F90::modal_aero_wateruptake_sub`` takes
+``wetvol = (4/3)π·wetrad³`` and ``wtrvol = wetvol − dryvol`` (lines 596-598),
+and ``qaerwat = ρ_w·naer·wtrvol`` (line 456). That is consistent because its
+``dryrad`` is the dry **volume-mean** radius, defined by
+``dryrad = (dryvol/((4/3)π))^(1/3)`` from the single-particle-mean ``dryvol``
+(``modal_aero_calcsize.F90::modal_aero_calcdry``, lines 1565-1567), so
+``naer·wtrvol`` telescopes to exactly ``V_dry·(g³ − 1)``. CAM's *number-median*
+diameter is a separate quantity, ``dgncur_a = (drv/(dumfac·num))^(1/3)`` with
+``dumfac = exp(4.5 ln²σ_g)·π/6`` (``modal_aero_calcsize.F90:549, 685``), and
+the mode is grown by one ratio applied to it,
+``dgncur_awet = dgncur_a·(wetrad/dryrad)`` (``modal_aero_wateruptake.F90:455``).
+
+**Why we differ.** Faithful in the mixing rule and the lognormal integration;
+the LUT-and-quadrature evaluation is a `compute` choice (Mie paid once at
+construction, differentiable table interpolation per step). The mode-volume
+form is stated explicitly because CAM's **per-particle** shape,
+``N·(4/3)π·(r_wet³ − r_dry³)``, is *not* transferable to this code's radii:
+CAM applies it to the volume-mean ``dryrad``, whereas ``r_dry`` here (and in
+MAM4-JAX) is the **number-median** radius, defined through the third moment
+``V = N·(π/6)·Dg³·exp(4.5 ln²σ_g)``. On those radii ``N·(4/3)π·r_dry³`` is not
+``V_dry`` but ``V_dry·(dg_clip/dg_true)³/exp(4.5 ln²σ_g)``. Off a clip bound
+that understates the water by ``exp(4.5 ln²σ_g)`` — 2.70 for σ_g = 1.6
+(Aitken, primary carbon), 4.73 for σ_g = 1.8 (accumulation, coarse). On a clip
+bound the factor moves either way: clipping down to ``dgnum_hi`` understates
+further, while clipping up to ``dgnum_lo`` — more number than the mass
+supports — can *overstate* the water instead. Either way the mixed index would
+be wrong on these radii, which is why the volume form is the one used. It is
+also identically zero where a mode holds no dry material, whatever ringing the
+number field carries.
+
+**Status & known limitations.** Spherical, homogeneously mixed particles: the
+in-repo pathway has no core–shell treatment of black carbon, so BC's imaginary
+index is smeared over the whole particle by the volume mixing rule above. An
+alternative bulk-optics pathway — a core–shell treatment, or a neural emulator
+of the mode integral — is supplied out-of-tree against the per-mode seam in
+{doc}`../design/jam_optics_mode_seam`, which is why no second Mie pathway is
+carried here. Per-species optics are an apportionment of the mixed mode's
+extinction, not a decomposition — see
+{doc}`../design/aerosol_optics_diagnostics`.
+
+Because the water volume is number-free, the mixed refractive index is
+scale-free in the mode's masses, so **the core's ``dg`` diagnosis is the only
+channel from aerosol burden to radiation**. That channel saturates on a mode
+whose ``dg`` sits on a ``dgnum_lo``/``dgnum_hi`` bound: its radii, and hence
+its cross-section, stop responding to mass entirely. Neither core adjusts
+number to bring a clipped mode back inside its bounds the way MAM4's
+``calcsize`` does, so a clipped mode stays clipped — tracked in issue #823.
 
 ### Cloud-droplet activation (ARG)
 
@@ -359,8 +444,9 @@ mixture: ``1 − psrc`` of it keeps its mapped Zobler/East-Asian textures with t
 unmapped remainder as type 1 (coarse), and ``psrc`` becomes soil type 10
 (100 % silt, α = 1e-5). Emission needs ``u* ≥ 21·nduscale/feff`` cm/s and
 ``pot_source > r_dust_lai``; the surviving flux is multiplied by ``pot_source``
-again, by ``1 − snow_cover``, and zeroed where the relative soil wetness exceeds
-0.99.
+again, by ``1 − snow_cover``, and zeroed where the relative soil wetness
+``forcing.soilw_rel`` (soil water as a fraction of that soil's field capacity,
+ECHAM's ``ws/wsmx``) exceeds 0.99.
 
 The emitted spectrum is integrated onto MAM4's emission windows — accumulation
 ``0.1 ≤ D < 1 µm``, coarse ``1 ≤ D < 10 µm``, everything coarser discarded — with
@@ -384,9 +470,15 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   across textures. We integrate the **online** spectrum over MAM4's windows
   instead. The window edges (0.1 / 1 / 10 µm) are MAM4's convention, so HAM's
   8-bin structure is deliberately *not* reproduced — only the underlying
-  191-class spectrum is. The ≥ 10 µm remainder is discarded, as HAM discards its
-  super-coarse mode, and nothing is renormalised; it is published per column as
-  ``dust_supercoarse_flux`` because it is large (0.11-0.75 of the total).
+  191-class spectrum is. The ≥ 10 µm remainder is discarded and nothing is
+  renormalised; it is published per column as ``dust_supercoarse_flux``
+  because it is large (0.11-0.75 of the total). HAM discards a remainder too,
+  but at a **different edge**: ``ham_m7_dust_emissions`` puts tracer 1 into
+  the insoluble accumulation mode and tracers 2-4 into the insoluble coarse
+  mode, so everything below its tracer-4 edge of 15.887 µm is emitted and
+  tracers 5-8 (to 1300 µm) never reach the aerosol. The 10-15.887 µm slice
+  between the two conventions is what a budget comparison has to account for;
+  it is measured under **The one scalar jcm calibrates** below.
 - `data` (snow) — HAM multiplies by ``1 − cvs`` with ECHAM's ``physc`` snow-cover
   formula (a ``tanh`` in snow depth with orographic-σ damping, a canopy-snow
   substitute and ``cvs = 1`` on glaciers). jcm has no prognostic snow depth
@@ -394,16 +486,41 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``snowc_am`` is zero on permanent ice where ECHAM sets ``cvs = 1``, which is
   harmless because ``pot_source`` is zero there.
 - `data` (soil moisture) — the ``ws/wsmx > 0.99`` cut-off is unconditional in
-  every HAM preset, but jcm carries SPEEDY's vegetation-weighted availability
-  index ``soilw_am``, not ECHAM's ``ws/wsmx``. It is wired so the term is
-  structurally complete, and is close to inert because ``soilw_am`` is capped at
-  field capacity by construction (#787).
+  every HAM preset, and jcm feeds it ``forcing.soilw_rel``: ERA5's 0-7 cm
+  volumetric water content divided by the HTESSEL field capacity of that
+  cell's own soil type (Balsamo et al. 2009), i.e. soil water as a fraction of
+  field capacity — what ECHAM's ``ws/wsmx`` means. Normalising each texture by
+  its own capacity is what makes 1 mean "saturated" on sand as well as on
+  clay; one global constant would read a saturated desert sand
+  (θ_cap = 0.244) as 0.70 and never fire the cut-off in the cells that emit.
+  Two differences from ECHAM remain, stated rather than hidden: the layer is
+  the 0-7 cm one that governs saltation rather than ECHAM's whole root-zone
+  bucket, and the field is a **monthly climatology** where ECHAM's is
+  prognostic, which averages away individual saturation events — over the T63
+  cells that pass the vegetation gate the cut-off fires on 0.77 % of
+  cell-months on the climatology against 2.19 % on individual ERA5 samples of
+  the same decade. A forcing file that carries no such channel leaves the
+  cut-off inert and logs that it has. ECHAM's own ``wsmx`` and an ECHAM ``ws``
+  exist at T63 (``T63GR15_jan_surf.nc``, ``ic_land_soil_T63GR15_*.nc``) and
+  agree with this field on magnitude over the source cells (mean 0.238 against
+  0.245 in January, spatial correlation 0.46), but that ``ws`` is a single
+  initial condition with no time axis, and both files exist only at T63. ERA5
+  is used instead because it carries the seasonal cycle and derives on every
+  published grid.
 - `data` (resolution) — the HAMMOZ inputs exist only at T63. The T106 products
   are derived from them by nearest neighbour (conservative regridding cannot
   refine a grid, and the region mask is categorical), and the ``ndust = 3``
   resolution polynomial carries an explicit source warning that
   ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too (#810 for the native fields, #808 for the tuning).
+  ne30 configurations too. The
+  regional ``ndust = 4`` vector is likewise set only at T63; every other
+  resolution, the cubed sphere included, takes the Fortran's uniform
+  ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this
+  bounds what an unsupported composition would do rather than describing
+  one the model ships. There are no ne30 dust products on the data mirror at
+  all, so a shipped ne30 configuration runs with the dust emission term composed
+  but inert — see {doc}`boundary_conditions` for what that means for the inputs
+  and for the column sampling a hand-supplied file gets.
 
 **Status & known limitations.**
 - The **``U10 = 10 m/s`` texture switch is a hard step**: above it the
@@ -434,7 +551,111 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 - ``nduscale_reg`` is HAM's only global tuning knob and it scales the
   *threshold*, so a larger value emits **less**. The default is the T63
   free-running vector ``(1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05)``;
-  ``DustParameters.preset(3)`` selects Stier et al. (2005) instead.
+  ``DustParameters.preset(3)`` selects Stier et al. (2005) instead. HAM tunes
+  that vector twice — ``(0.95, 1.25)`` for nudged simulations against
+  ``(1.05, 1.45)`` free-running — and jcm carries both, selected by
+  ``physics.jam_dust_nudged``. ``null`` (the shipped value) means "follow the
+  run": ``runners.py::_resolve_nudging_dependent_physics`` fills it from
+  ``nudging.enabled``, because the nudging term is appended after physics is
+  composed and the dust term cannot otherwise see it. An explicit ``true`` or
+  ``false`` wins.
+- **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
+  whole ``ndust = 4`` T63 vector, and is exposed per run as
+  ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
+  because HAM's eight regional parameters cannot be identified against a
+  single global budget: the regional *ratios* stay HAM's and only the level
+  moves. It applies at T63, which is every resolution the model ships JAM
+  at; a composition built at another resolution keeps HAM's untuned
+  ``0.86``, since its source fields are interpolated from T63 anyway.
+
+  The **target** is the parent model's own budget, converted to this port's
+  size window. ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day and 923
+  pre-industrial at T63 (Krätschmer et al. 2022, Clim. Past 18, 67, §3.1 and
+  Table 2). That number is the mass that reaches the aerosol — the paper's
+  emissions go "either into the insoluble accumulation mode (mmr 0.37 µm) or
+  the insoluble coarse mode (mmr 1.75 µm)" and "emissions into the
+  super-coarse mode are neglected" — which in the code is
+  ``ham_m7_dust_emissions`` summing BGC-dust tracer 1 and tracers 2-4, i.e.
+  every class below **15.887 µm**. (HAM's own ``flux_a10`` budget diagnostic
+  selects the same four tracers: it keeps those whose ``dpk`` is under 10, and
+  ``dpk`` is the geometric-mean *radius* of the tracer's bin, so its "< 10 µm"
+  label is the one place HAM's published figure is loosely named.) The
+  conversion to this port's D < 10 µm window is therefore a single slice: over
+  the full T63 year, re-running the emission with the coarse window widened to
+  15.887 µm puts **47.4 %** of HAM's window in 10-15.887 µm (49.7 % over
+  N Africa, 48.1 % Middle East, 37.2 % Asia, 35.7 % N America). The
+  HAM-equivalent D < 10 µm target is thus **1221 × 0.526 = 642 Tg/yr**
+  present-day, and 485 pre-industrial.
+
+  Two further points of reference, neither of them a like-for-like target.
+  AeroCom phase I gives a median of 1123 Tg/yr across 15 models with a spread
+  of roughly 500-4400 (Huneeus et al. 2011, ACP 11, 7781), but its members use
+  different upper size cut-offs, so it measures inter-model spread rather than
+  a value to hit. Kok et al. (2021, ACP 21, 8169, Table 1, "All source
+  regions") put the AeroCom ensemble at 1.7 (1.2-3.1) × 10³ Tg/yr and their
+  own observationally-constrained inverse model at **4.7 (3.4-9.1) × 10³
+  Tg/yr** for dust with *geometric* diameter ≤ 20 µm. Their window is twice
+  this one's and their central value is seven times HAM's converted budget,
+  which is their point: models, this one included, carry far less coarse dust
+  than the observations support. It is a statement about the size range being
+  compared, not a bound this port can be scored against.
+
+  The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-1300 Tg/yr**, roughly
+  a factor of 1.6 below and 2 above that 642. It spans the parent model's own
+  pre-industrial value (485) and a T63 year 29 % above its present-day point
+  (the 829 Tg/yr measured here), and is far wider than the 6 % run-to-run
+  spread, so it cannot function as a tuning target — which is also why it is
+  exempt from the regression tier. It is the check that dust has neither
+  vanished (HAM's untuned threshold gives 5.7 Tg/yr here) nor run away (the
+  same parent model's last-glacial-maximum run emits 5159 Tg/yr).
+
+  The value is **0.5**, calibrated on 30-day T63L47 April members started from
+  an ERA5 state and driven by the model's own instantaneous 10 m winds:
+
+  | ``nduscale_scale`` | 1.00 | 0.65 | **0.50** | 0.45 |
+  |---|---|---|---|---|
+  | April D < 10 µm, Tg/yr | 5.7 | 294.6 | **1158.4** | 1838.6 |
+  | discarded ≥ 10 µm | 77.1 % | 75.2 % | 72.6 % | 71.1 % |
+
+  A factor 2 in the threshold is a factor ~300 in emission here, because
+  saltation samples the far tail of the wind distribution and jcm's tail is
+  thin. That steepness is the reason the scalar is fitted to a run rather than
+  inherited, and the reason it is one scalar and not eight.
+
+  A full ``echam-jam-t63-l47`` year at 0.5 confirms it: **829 Tg/yr** of
+  D < 10 µm dust, with a further 73.1 % of the emitted spectrum discarded
+  above 10 µm, a dust burden of 6.0 mg/m² and a dust lifetime of 1.36 days.
+  That is the number the release band is scored against.
+
+  The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
+  T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
+  0.80, 1024 at 0.65 and 2540 at 0.50 annually, with April/annual running 1.05
+  to 1.33. Two things follow from the pair of curves. HAM's published
+  threshold is ~5x short of the 642 Tg/yr that is the parent model's own
+  budget in this size window **even on a perfect wind field**, so the retune
+  is required by the threshold and not only by a host-model wind bias. And jcm needs a lower multiplier than ERA5's
+  winds would, because its wind tail is thinner: over the same T63 April
+  source cells the two agree on the mean (3.98 m/s against 4.00) and diverge
+  in the tail, 0.69 % of cell-samples above 7.62 m/s against ERA5's 4.41 %,
+  and 0.003 % against 0.332 % above 10.52 m/s (the saltation onsets at
+  ``nduscale`` 1.05 and 1.45). Both tables are instantaneous samples over the
+  cells that pass the vegetation gate; a time-mean wind cannot resolve an
+  exceedance frequency at all, which is why the calibration run saves
+  ``vertical_diffusion.wind_10m`` through ``run.snapshot_variables`` rather
+  than as a chunk mean.
+
+- HAM's nudged/free-running split of ``nduscale_reg`` earns its keep in jcm
+  too, which is why both vectors are carried. Holding the threshold fixed and
+  changing only the nudging, a 30-day member relaxed toward ERA5 emits
+  549 Tg/yr against 1158 free-running — while two free members differing only
+  in start date give 1158 and 1085, a 6 % spread. The nudging signal is eight
+  times that spread, and it acts through the wind the emission reads: the
+  nudged member's 10 m wind over the source cells is weaker throughout
+  (mean 3.60 m/s against 3.97, 18.1 % of samples above 4.93 m/s against
+  27.5 %), even though ``nudging/era5.yaml`` relaxes winds only and excludes
+  the two lowest levels. HAM's nudged vector is 0.905x its free-running one,
+  i.e. a lower threshold and more emission — the same sign as this deficit,
+  and of comparable size on the curve above.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/dust.py`` — ``DustEmissions``,
@@ -442,9 +663,13 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``soil_size_distributions``, ``emission_weight_matrix``, ``SOIL_TABLE``,
   ``MIXTURE_ROWS``, ``DUST_SUPERCOARSE_KEY``.
 - ``jcm/forcing.py`` — ``read_dust_source``, ``read_dust_preferential``,
-  ``read_dust_soil_types``, ``read_dust_regions``, ``read_dust_roughness``.
+  ``read_dust_soil_types``, ``read_dust_regions``, ``read_dust_roughness``,
+  and the ``soilw_rel`` channel.
 - ``jcm/forcing_assembly.py`` — ``_attach_dust``.
-- ``jcm/data/mirror/dust.py`` — ``build_dust_product``.
+- ``jcm/data/mirror/dust.py`` — ``build_dust_product``;
+  ``jcm/data/mirror/bundles.py`` — ``translate_land``, ``HTESSEL_THETA_CAP``.
+- ``tools/release_validation/aerosol_stats.py`` —
+  ``DUST_EMISSION_TG_PER_YR``, the release band on the annual budget.
 
 **Validation evidence.** ``dust_test.py`` pins ``u*t`` at eight diameters
 against MB95 (1091.08 cm/s at 0.2 µm to 66.30 at 1262 µm, minimum 20.4502 at

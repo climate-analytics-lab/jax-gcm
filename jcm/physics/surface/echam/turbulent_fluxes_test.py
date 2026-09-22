@@ -1,13 +1,58 @@
 """Unit tests for turbulent flux calculations."""
 
+import jax
 import pytest
 import jax.numpy as jnp
 
+from jcm.physics.surface.echam.surface_physics import initialize_surface_state
 from jcm.physics.surface.echam.turbulent_fluxes import (
     compute_bulk_richardson_number, compute_stability_functions,
-    compute_exchange_coefficients, compute_surface_humidity
+    compute_exchange_coefficients, compute_surface_humidity,
+    compute_surface_diagnostics, compute_surface_resistances
 )
-from jcm.physics.surface.echam.surface_types import SurfaceParameters
+from jcm.physics.surface.echam.surface_types import (
+    AtmosphericForcing, SurfaceFluxes, SurfaceParameters
+)
+from jcm.testing import check_gradients
+
+
+def _atmospheric_forcing(ncol, nsfc_type, u_wind, v_wind):
+    """Lowest-level forcing for a small block of columns."""
+    return AtmosphericForcing(
+        temperature=jnp.linspace(290.0, 285.0, ncol),
+        humidity=jnp.linspace(0.010, 0.008, ncol),
+        u_wind=u_wind,
+        v_wind=v_wind,
+        pressure=jnp.linspace(101325.0, 98000.0, ncol),
+        sw_downward=jnp.linspace(300.0, 250.0, ncol),
+        lw_downward=jnp.linspace(350.0, 320.0, ncol),
+        rain_rate=jnp.full(ncol, 1.0e-6),
+        snow_rate=jnp.zeros(ncol),
+        exchange_coeff_heat=jnp.full((ncol, nsfc_type), 0.011),
+        exchange_coeff_moisture=jnp.full((ncol, nsfc_type), 0.010),
+        exchange_coeff_momentum=jnp.full((ncol, nsfc_type), 0.013),
+    )
+
+
+def _surface_state(ncol):
+    """Build a mixed water/ice/land surface the way a run builds it."""
+    fraction = jnp.stack([jnp.full(ncol, 0.5), jnp.full(ncol, 0.2),
+                          jnp.full(ncol, 0.3)], axis=1)
+    return initialize_surface_state(
+        ncol, fraction, jnp.linspace(291.5, 286.5, ncol),
+        jnp.full((ncol, 2), 268.0), jnp.full((ncol, 4), 283.0))
+
+
+def _zero_momentum_fluxes(ncol, nsfc_type):
+    """Fluxes whose momentum components are exactly zero (calm column)."""
+    tile, mean = jnp.zeros((ncol, nsfc_type)), jnp.zeros(ncol)
+    return SurfaceFluxes(
+        sensible_heat=tile, latent_heat=tile, longwave_net=tile,
+        shortwave_net=tile, ground_heat=tile, momentum_u=tile,
+        momentum_v=tile, evaporation=tile, transpiration=tile,
+        sensible_heat_mean=mean, latent_heat_mean=mean,
+        momentum_u_mean=mean, momentum_v_mean=mean, evaporation_mean=mean,
+    )
 
 
 class TestBulkRichardsonNumber:
@@ -361,6 +406,172 @@ class TestSurfaceHumidity:
         # Should be clipped to reasonable bounds
         assert jnp.all(q_surface <= 0.1)  # Max 100 g/kg
         assert jnp.all(q_surface >= 0.0)
+
+
+class TestTurbulentFluxGradients:
+    """AD against a central difference for the bulk surface layer (#820).
+
+    All green. The operating points are placed off this module's switches,
+    and each test says which one:
+
+     - ``compute_exchange_coefficients`` floors the roughnesses at 1e-5 m
+       (``turbulent_fluxes.py:139/141``). ``initialize_surface_state`` sets
+       ``roughness_heat = 0.1 * roughness_momentum``, so with the default
+       ``z0_water = 1e-4`` the *water* tile's heat roughness lands on that
+       floor exactly; a fixture built that way reports the floor's tie
+       (``jnp.maximum`` splits 0.5/0.5, so AD returns the mean of the two
+       one-sided slopes) rather than anything about the logarithmic profile.
+       The roughnesses below are all well above it.
+     - ``compute_stability_functions`` selects on ``Ri >= 0`` and clips the
+       unstable branch at ``Ri = -0.5``, so the two regimes are checked
+       separately and neither fixture touches 0 or -0.5.
+
+    The calm-wind and zero-buoyancy cases are checked for *finiteness*
+    instead: both are cone tips where no two-sided derivative exists, so a
+    difference is not the reference to compare against — what matters is that
+    the gradient is finite and does not poison the column.
+    """
+
+    PARAMS = SurfaceParameters.default()
+
+    @staticmethod
+    def _columns():
+        """Three columns: one stable, one unstable, one near-neutral."""
+        return (jnp.array([288.0, 293.0, 280.0]),          # air temperature
+                jnp.array([[291.0, 272.0, 285.0],          # tile temperature
+                           [296.0, 271.0, 290.0],
+                           [278.5, 270.0, 276.0]]),
+                jnp.array([0.009, 0.012, 0.004]),          # air humidity
+                jnp.array([[0.013, 0.004, 0.010],          # tile humidity
+                           [0.018, 0.004, 0.013],
+                           [0.006, 0.003, 0.005]]),
+                jnp.array([6.0, 3.5, 9.0]))                # wind speed
+
+    def test_bulk_richardson_number(self):
+        """Stable, unstable and near-neutral columns in one call."""
+        check_gradients(compute_bulk_richardson_number, self._columns(),
+                        rtol=1e-3)
+
+    @pytest.mark.parametrize("richardson", [
+        jnp.array([[0.02, 0.05, 0.11], [0.03, 0.08, 0.15]]),    # stable
+        jnp.array([[-0.02, -0.08, -0.2], [-0.05, -0.12, -0.3]]),  # unstable
+    ], ids=["stable", "unstable"])
+    def test_stability_functions(self, richardson):
+        """One regime per call: the branch switch at ``Ri = 0`` is a kink."""
+        check_gradients(compute_stability_functions, (richardson,), rtol=1e-3)
+
+    def test_exchange_coefficients(self):
+        """Roughnesses an order of magnitude clear of the 1e-5 m floor."""
+        _, _, _, _, wind_speed = self._columns()
+        roughness_momentum = jnp.array([[2.0e-4, 1.0e-3, 0.10],
+                                        [3.0e-4, 1.2e-3, 0.20],
+                                        [5.0e-4, 8.0e-4, 0.05]])
+        stability_heat, stability_momentum = compute_stability_functions(
+            jnp.array([[0.02, -0.05, 0.11],
+                       [-0.03, 0.08, -0.15],
+                       [0.05, -0.2, 0.01]]))
+        check_gradients(
+            lambda u, z0m, z0h, ph, pm: compute_exchange_coefficients(
+                u, z0m, z0h, ph, pm, self.PARAMS.min_wind_speed,
+                self.PARAMS.von_karman),
+            (wind_speed, roughness_momentum, 0.1 * roughness_momentum,
+             stability_heat, stability_momentum),
+            rtol=1e-3)
+
+    def test_surface_humidity(self):
+        """Tile temperatures spanning the freezing point, off both clips."""
+        _, temperature_surface, _, _, _ = self._columns()
+        check_gradients(compute_surface_humidity,
+                        (temperature_surface,
+                         jnp.array([1.0e5, 9.7e4, 1.01e5])),
+                        rtol=1e-3)
+
+    @pytest.mark.parametrize("wind_10m", [0.0, 0.3], ids=["w10=0", "w10>0"])
+    def test_calm_wind_diagnostics_gradients_are_finite(self, wind_10m):
+        """The cone tips of ``compute_surface_diagnostics`` at ``u = v = 0``.
+
+        Three wind norms meet here at once: ``sqrt(u^2 + v^2)`` at
+        ``turbulent_fluxes.py:311``, the momentum-flux magnitude at ``:318``
+        and the friction velocity at ``:322``, plus the quotient
+        ``wind_speed_10m / wind_speed_atm`` at ``:313`` whose denominator is
+        then the 1e-30 floor's square root, 1e-15.
+
+        Finite, and for the reason the floors are 1e-30 rather than 0: below
+        the floor ``jnp.maximum`` sends the whole derivative to the constant
+        branch, so the ``sqrt'`` singularity is multiplied by an exact zero
+        instead of forming ``0 * inf``. A ``maximum(x, 0.0)`` there would tie
+        at the tip and split 0.5/0.5 against ``sqrt'(0) = inf``, which is the
+        shape that produces a NaN. ``wind_10m = 0.3`` with a calm column is
+        the awkward combination — a finite 10 m wind over a 1e-15 denominator
+        — and is checked alongside the fully calm one.
+        """
+        ncol, nsfc_type = 2, 3
+        calm = jnp.zeros(ncol)
+        atmospheric_state = _atmospheric_forcing(ncol, nsfc_type, calm, calm)
+        surface_state = _surface_state(ncol)
+        fluxes = _zero_momentum_fluxes(ncol, nsfc_type)
+        resistances = compute_surface_resistances(
+            atmospheric_state, surface_state,
+            compute_bulk_richardson_number(
+                atmospheric_state.temperature, surface_state.temperature,
+                atmospheric_state.humidity,
+                jnp.full((ncol, nsfc_type), 0.01), calm))
+
+        def total(u_wind, v_wind, momentum_u, momentum_v, wind_speed_10m):
+            state = atmospheric_state._replace(u_wind=u_wind, v_wind=v_wind)
+            flux = fluxes._replace(momentum_u_mean=momentum_u,
+                                   momentum_v_mean=momentum_v)
+            diagnostics = compute_surface_diagnostics(
+                state, surface_state, flux, resistances, wind_speed_10m)
+            return sum(jnp.sum(leaf ** 2)
+                       for leaf in jax.tree.leaves(diagnostics))
+
+        args = (calm, calm, calm, calm, jnp.full(ncol, wind_10m))
+        gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
+        names = ("u_wind", "v_wind", "momentum_u_mean", "momentum_v_mean",
+                 "wind_speed_10m")
+        for name, gradient in zip(names, gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at calm wind: {gradient}")
+
+    def test_zero_buoyancy_gradients_are_finite(self):
+        """``Ri = 0`` exactly: air and surface at the same virtual temperature.
+
+        The branch switch in ``compute_stability_functions`` sits at
+        ``Ri >= 0`` and the unstable branch carries ``jnp.abs(Ri)``, so this
+        point is a kink — the check is finiteness, not agreement with a
+        difference. It is also the point an aquaplanet spin-up passes through.
+        """
+        ncol, nsfc_type = 2, 3
+        temperature_air = jnp.array([290.0, 285.0])
+        humidity_air = jnp.array([0.010, 0.008])
+
+        def total(temperature_surface, humidity_surface, wind_speed):
+            richardson = compute_bulk_richardson_number(
+                temperature_air, temperature_surface, humidity_air,
+                humidity_surface, wind_speed)
+            stability_heat, stability_momentum = compute_stability_functions(
+                richardson)
+            coefficients = compute_exchange_coefficients(
+                wind_speed,
+                jnp.full((ncol, nsfc_type), 1.0e-3),
+                jnp.full((ncol, nsfc_type), 1.0e-4),
+                stability_heat, stability_momentum,
+                self.PARAMS.min_wind_speed, self.PARAMS.von_karman)
+            return (jnp.sum(richardson ** 2)
+                    + sum(jnp.sum(x ** 2) for x in coefficients))
+
+        args = (jnp.broadcast_to(temperature_air[:, None],
+                                 (ncol, nsfc_type)) * jnp.ones(1),
+                jnp.broadcast_to(humidity_air[:, None],
+                                 (ncol, nsfc_type)) * jnp.ones(1),
+                jnp.array([6.0, 4.0]))
+        gradients = jax.grad(total, argnums=(0, 1, 2))(*args)
+        for name, gradient in zip(
+                ("temperature_surface", "humidity_surface", "wind_speed"),
+                gradients):
+            assert jnp.all(jnp.isfinite(gradient)), (
+                f"d/d{name} is not finite at zero buoyancy: {gradient}")
 
 
 if __name__ == "__main__":

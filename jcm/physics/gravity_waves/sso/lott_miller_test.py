@@ -14,11 +14,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.constants import grav, rd
 from jcm.physics.gravity_waves.sso import (
     SSOParameters, sso_drag,
 )
+from jcm.testing import check_gradients
 
 
 def _make_alps_column(nlev: int = 47, **overrides):
@@ -163,3 +165,121 @@ class TestSSOParameters:
         ]:
             np.testing.assert_allclose(float(getattr(p, name)), expected,
                                        atol=1e-6, rtol=1e-6)
+
+
+class TestSSOGradients:
+    """AD against a central difference through the SSO column (#820).
+
+    The scheme is green at every operating point tried, including the two the
+    ``_safe_denom`` floors and the ``argmax``​es were expected to be
+    brittle at: an aquaplanet column where ``orography_std`` and every other
+    orographic descriptor is exactly 0, so ``lott_miller.py:114/537/554/606/
+    692`` all sit on their floors at once, and a column just above the
+    activation threshold where the drag is switched on but vanishingly small.
+    Worth pinning precisely because those are the states an aquaplanet
+    configuration spends all of its time in.
+
+    ``rtol=1e-2``: this module sets ``JAX_ENABLE_X64`` before importing jcm,
+    but issue #729's conftest pins float32 for the suite, so the reference is
+    a float32 secant at whatever rung the consistency search settles on.
+    """
+
+    KEYS = ("temperature", "u_wind", "v_wind", "orography_std",
+            "orography_slope", "peak_elevation")
+
+    AQUAPLANET = dict(
+        orography_std=0.0, orography_slope=0.0, orography_anisotropy=0.0,
+        peak_elevation=0.0, valley_elevation=0.0, mean_orography=0.0,
+        surface_height=0.0, land_fraction=0.0,
+    )
+
+    def _scheme_fn(self, column, config):
+        """Return f(T, u, v, std, slope, peak) -> the three tendencies."""
+        def f(*values):
+            inputs = dict(column)
+            inputs.update(dict(zip(self.KEYS, values)))
+            tend, _ = sso_drag(**inputs, config=config)
+            return (tend.dudt, tend.dvdt, tend.dissip)
+
+        return f
+
+    @pytest.mark.parametrize(
+        "label, overrides",
+        [("alps", {}),
+         ("aquaplanet", AQUAPLANET)],
+    )
+    @pytest.mark.parametrize("seed", [0, 3])
+    def test_gradients_match_a_central_difference(self, label, overrides,
+                                                  seed):
+        """Every orographic regime, including an entirely flat one."""
+        column = _make_alps_column(nlev=30, **overrides)
+        check_gradients(
+            self._scheme_fn(column, SSOParameters.default()),
+            tuple(column[k] for k in self.KEYS), rtol=1e-2, seed=seed)
+
+    @pytest.mark.parametrize(
+        "label, overrides",
+        [("alps", {}),
+         ("aquaplanet", AQUAPLANET),
+         ("near-calm wind", {"u_wind": 1.0e-4, "v_wind": 1.0e-4})],
+    )
+    def test_gradients_are_finite(self, label, overrides):
+        """No orographic or wind regime may return a non-finite gradient."""
+        column = _make_alps_column(nlev=30)
+        for key, value in overrides.items():
+            column[key] = jnp.full_like(column[key], value) \
+                if jnp.ndim(column[key]) else jnp.asarray(value)
+        f = self._scheme_fn(column, SSOParameters.default())
+        args = tuple(column[k] for k in self.KEYS)
+        grads = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=tuple(range(len(args))),
+        )(*args)
+        for name, grad in zip(self.KEYS, grads):
+            assert jnp.all(jnp.isfinite(grad)), (
+                f"d/d{name} is not finite for {label}")
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="an exactly calm column (u = v = 0 at every level) returns a "
+               "NaN gradient with respect to both wind components. Any "
+               "non-zero wind is finite — 1e-4 m/s already is — so this is a "
+               "norm evaluated at its cone tip, not a floor that is too "
+               "small; the candidates are the low-level wind norms at "
+               "lott_miller.py:377/442/466 and the tendency norms at "
+               ":699-700/717/737. Not fixed here: each is a separate "
+               "double-where and the forward result has to be shown "
+               "unchanged for every one. Tracked for the gradient-smoothing "
+               "follow-up. (#843)")
+    def test_calm_column_wind_gradient_is_finite(self):
+        """Record the exactly-calm column as an open NaN, not a tolerance."""
+        column = _make_alps_column(nlev=30)
+        column["u_wind"] = jnp.zeros_like(column["u_wind"])
+        column["v_wind"] = jnp.zeros_like(column["v_wind"])
+        f = self._scheme_fn(column, SSOParameters.default())
+        args = tuple(column[k] for k in self.KEYS)
+        grads = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=tuple(range(len(args))),
+        )(*args)
+        for name, grad in zip(self.KEYS, grads):
+            assert jnp.all(jnp.isfinite(grad)), f"d/d{name} is not finite"
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="d/d(orography_std) is NaN for orography_std in roughly "
+               "[1e-6, 1e-5] — at and just above ``_MIN_OROG_STD`` "
+               "(lott_miller.py:111), the floor ``_safe_denom`` stops "
+               "applying. Below the floor and at realistic values (0.5 m, "
+               "400 m) it is finite, so the floor protects one side of "
+               "itself and not the other. Not fixed here; tracked for the "
+               "gradient-smoothing follow-up. 1e-8 is included because the "
+               "reverse pass is NaN there too once every input is displaced "
+               "together, even though d/d(orography_std) alone is finite. (#843)")
+    @pytest.mark.parametrize("orography_std", [1.0e-8, 1.0e-6, 1.0e-5])
+    def test_gradient_at_the_orography_floor_is_finite(self, orography_std):
+        """Record the band around ``_MIN_OROG_STD`` as an open NaN."""
+        column = _make_alps_column(nlev=30, orography_std=orography_std)
+        check_gradients(
+            self._scheme_fn(column, SSOParameters.default()),
+            tuple(column[k] for k in self.KEYS), rtol=1e-2)

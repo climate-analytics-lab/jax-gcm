@@ -158,7 +158,11 @@ Two things to be clear about:
   sub-cloud rain evaporation argues for it: under `lham`, `cuflx` uses this
   same updraft area as its evaporation footprint and evaluates the rain
   intensity inside the shaft, `sqrt(zrfl/zcucov)`. jcm's convection scheme
-  still carries ECHAM's non-HAM `zcucov = 0.05` for that evaporation (#812).
+  matches that: with the JAM chain composed it takes the updraft area as the
+  sub-cloud evaporation cover through the shared `updraft_area_cover`, so the
+  evaporation and this washout share one footprint (and one `zwu`). The
+  convection scheme divides by the true updraft density `p/(R_d·T_u)`, which
+  it has; this washout keeps the environment-density stand-in noted above.
 - **HAMMOZ's cloud-free gating is not ported.** `ham_wetdep` zeroes
   below-cloud scavenging wherever the stratiform cover exceeds `1e-10`. jcm's
   stratiform carrier carries no cover (CAM), and gating the convective carrier

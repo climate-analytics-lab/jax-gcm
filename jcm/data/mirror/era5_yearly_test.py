@@ -110,7 +110,8 @@ class IceSheetMaskTest(unittest.TestCase):
         era5 = xr.Dataset({"sd": sd, "stl1": ones * 280.0,
                            "swvl1": ones * 0.2, "swvl2": ones * 0.2,
                            "cvh": ones.isel(time=0) * 0.5,
-                           "cvl": ones.isel(time=0) * 0.5})
+                           "cvl": ones.isel(time=0) * 0.5,
+                           "slt": ones.isel(time=0) * 2})
         mask = xr.DataArray([True, False], dims=("cell",))
         out = translate_land(era5, permanent_snow=mask)
         np.testing.assert_array_equal(out["snowc"].values[:, 0], 0.0)
@@ -119,6 +120,53 @@ class IceSheetMaskTest(unittest.TestCase):
         self.assertTrue(((out["soilw_am"].values >= 0)
                          & (out["soilw_am"].values <= 1)).all())
         np.testing.assert_array_equal(out["stl"].values, 280.0)
+
+
+class RelativeSoilWetnessTest(unittest.TestCase):
+    """``soilw_rel`` = swvl1 / θ_cap(slt), the ECHAM ws/wsmx analogue (#787)."""
+
+    def _era5(self, swvl1, slt):
+        cells = len(swvl1)
+        base = xr.DataArray(np.ones((1, cells)), dims=("time", "cell"))
+        return xr.Dataset({
+            "sd": base * 0.0, "stl1": base * 280.0,
+            "swvl1": base * xr.DataArray(np.asarray(swvl1, dtype=float),
+                                         dims=("cell",)),
+            "swvl2": base * 0.2,
+            "cvh": xr.DataArray(np.zeros(cells), dims=("cell",)),
+            "cvl": xr.DataArray(np.zeros(cells), dims=("cell",)),
+            "slt": xr.DataArray(np.asarray(slt, dtype=float), dims=("cell",)),
+        })
+
+    def test_normalised_by_each_cells_own_field_capacity(self):
+        # Same water content, three textures: the coarse desert sand (slt=1,
+        # θ_cap = 0.244) is much closer to saturation than the fine soil
+        # (slt=4, θ_cap = 0.448). A single global constant would rank them
+        # identically, which is the whole point of reading ``slt``.
+        mask = xr.DataArray(np.zeros(3, dtype=bool), dims=("cell",))
+        out = translate_land(self._era5([0.2, 0.2, 0.2], [1, 2, 4]),
+                             permanent_snow=mask)
+        np.testing.assert_allclose(out["soilw_rel"].values[0],
+                                   [0.2 / 0.244, 0.2 / 0.347, 0.2 / 0.448],
+                                   rtol=1e-12)
+
+    def test_saturated_soil_reads_one_on_every_texture(self):
+        # At its own field capacity every texture must read 1.0 — that is what
+        # makes the 0.99 cut-off mean "saturated" rather than "fine-textured".
+        mask = xr.DataArray(np.zeros(3, dtype=bool), dims=("cell",))
+        out = translate_land(self._era5([0.244, 0.347, 0.663], [1, 2, 6]),
+                             permanent_snow=mask)
+        np.testing.assert_allclose(out["soilw_rel"].values[0], 1.0, rtol=1e-12)
+
+    def test_supersaturation_and_ocean_stay_in_range(self):
+        # slt = 0 is ERA5's ocean code; a water content above field capacity
+        # (ERA5 allows it up to porosity) clips rather than exceeding 1.
+        mask = xr.DataArray(np.zeros(2, dtype=bool), dims=("cell",))
+        out = translate_land(self._era5([0.42, 0.3], [2, 0]),
+                             permanent_snow=mask)
+        values = out["soilw_rel"].values[0]
+        self.assertTrue(((values >= 0.0) & (values <= 1.0)).all())
+        self.assertEqual(values[0], 1.0)
 
 
 class GhgExtrapolationTest(unittest.TestCase):

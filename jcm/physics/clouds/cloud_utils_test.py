@@ -14,6 +14,7 @@ from .cloud_utils import (
     ice_volume_mean_radius,
 )
 from .lohmann_2m_params import CloudParams2M
+from jcm.testing import check_gradients
 
 _EPS = 1.1920929e-7  # float32 machine epsilon, as CloudParams2M.eps
 
@@ -215,3 +216,40 @@ class TestIceVolumeMeanRadius:
             lambda x: ice_volume_mean_radius(x, jnp.array([5.0e4]), self._P).sum(),
         )(jnp.array([0.0]))
         assert jnp.all(jnp.isfinite(g)), g
+
+
+class TestCloudUtilsGradients:
+    """AD against a central difference for the radius helpers (#820).
+
+    All green. ``ice_volume_mean_radius`` carries the Schumann (2011)
+    ``-2261 + sqrt(5113188 + 2809*r**3)`` inversion, whose square root would
+    be the obvious hazard; the ``ceffmin``/``ceffmax`` clip above it keeps the
+    argument near 5e6 and the operating points below stay inside the clip, so
+    the derivative is ordinary. A point on the clip itself would report the
+    clip's kink rather than anything about the inversion.
+    """
+
+    _PARAMS = CloudParams2M.default()
+
+    def test_ice_volume_mean_radius(self):
+        """Cirrus-like ice contents and crystal numbers, inside the clip."""
+        check_gradients(
+            lambda ice, number: ice_volume_mean_radius(
+                ice, number, self._PARAMS),
+            (jnp.array([1.0e-3, 1.0e-2, 5.0e-2]),
+             jnp.array([1.0e4, 5.0e4, 2.0e5])),
+            rtol=1e-3)
+
+    def test_eff_liquid_droplet_radius(self):
+        """Liquid contents well above the eps guard on the denominator."""
+        check_gradients(
+            lambda q, rho, cdnc: eff_liquid_droplet_radius(q, rho, cdnc, _EPS),
+            (jnp.array([1.0e-5, 2.0e-4, 8.0e-4]),
+             jnp.array([0.6, 0.9, 1.15]),
+             jnp.array([3.0e7, 1.0e8, 2.0e8])),
+            rtol=1e-3)
+
+    def test_breadth_factor(self):
+        """Linear in CDNC, so this is a pure regression fence."""
+        check_gradients(breadth_factor, (jnp.array([3.0e7, 1.0e8, 2.0e8]),),
+                        rtol=1e-3)

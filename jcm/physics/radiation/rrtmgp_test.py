@@ -287,6 +287,30 @@ class TestRRTMGPGreenhouseGases:
     normalisation branch.
     """
 
+    def test_public_ppmv_contract_converts_each_gas_once(self):
+        """A realistic ppmv input must reach gas optics as mol/mol (#749)."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.chemistry.simple_chemistry import ChemistryData
+        from jcm.physics.radiation.rrtmgp import (
+            _greenhouse_gas_mole_fractions,
+        )
+
+        chemistry = ChemistryData.zeros((1,), 2).copy(
+            ozone_vmr=jnp.full((2, 1), 8.0),
+            methane_vmr=jnp.full((2, 1), 1.9),
+        )
+        forcing = ForcingData.zeros(
+            (1,), co2_vmr=jnp.asarray(420.0), n2o_vmr=jnp.asarray(0.327),
+        )
+
+        ozone, methane, co2, n2o = _greenhouse_gas_mole_fractions(
+            chemistry, forcing,
+        )
+        np.testing.assert_allclose(ozone, 8.0e-6)
+        np.testing.assert_allclose(methane, 1.9e-6)
+        np.testing.assert_allclose(co2, 420.0e-6)
+        np.testing.assert_allclose(n2o, 0.327e-6)
+
     def test_added_ghgs_reduce_olr(self):
         nlev = 10
         base = _make_inputs(nlev=nlev)
@@ -1158,8 +1182,16 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         frac0 = effect0 / np.asarray(r0.toa_lw_up)
         frac2 = (np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)) \
             / np.asarray(r2.toa_lw_up)
+        # The fraction is ~-0.0067 of a ~250 W/m2 flux and is recovered from
+        # a float32 reconstruction, F2 - F2*(1 - f): one ulp of that flux
+        # (~1.5e-5 W/m2) moves the recovered fraction by ulp(F)/F ~ 6e-8,
+        # which is rtol 1e-5 of the fraction itself. The tolerance therefore
+        # has to admit several ulps of the flux path, whose rounding order
+        # belongs to jax-rrtmgp and changed between 0.3.0 and 0.4.0 (#849);
+        # 1e-4 admits ~15 ulps and still fails a hold that drifts with the
+        # 4 K perturbation (a fraction moving with the flux changes by O(1e-2)).
         np.testing.assert_allclose(
-            frac2, frac0, rtol=1e-5, atol=1e-9,
+            frac2, frac0, rtol=1e-4, atol=1e-9,
             err_msg="the held aerosol fraction changed on a skipped step",
         )
 

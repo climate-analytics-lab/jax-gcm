@@ -216,3 +216,57 @@ class DustProductTest(unittest.TestCase):
                 build_dust_product("dust_regions", self.NLAT,
                                    os.path.join(tmp, "reg.nc"),
                                    source_dir=tmp)
+
+
+class LandChannelCoverageTest(unittest.TestCase):
+    """Every surface-forcing writer must carry each ``translate_land`` channel.
+
+    ``translate_land`` is the single land translation, but three builders
+    serialize its output independently — the climatological bundles, the
+    transient ERA5 years and the transient AMIP years — and a builder that
+    silently omits a channel produces files that load with that channel
+    ``None``. For ``soilw_rel`` that means the dust saturation cut-off runs
+    inert with no other symptom (#787), which is exactly the failure this
+    guards: the builders read multi-GB Glade sources, so no unit test runs
+    them end to end.
+    """
+
+    _WRITERS = ("bundles", "era5_yearly", "amip_yearly")
+
+    def test_no_writer_drops_a_channel(self):
+        import ast
+        import inspect
+        import importlib
+
+        translated = set(_translate_land_keys())
+        self.assertIn("soilw_rel", translated)
+        for name in self._WRITERS:
+            module = importlib.import_module(f"jcm.data.mirror.{name}")
+            # Dict KEYS only: every one of these builders assembles the
+            # variables it writes as a dict literal, and a channel merely
+            # mentioned in a comment or read back out of ``land[...]`` is
+            # exactly the case that passes review and writes nothing.
+            written = {key.value for node in
+                       ast.walk(ast.parse(inspect.getsource(module)))
+                       if isinstance(node, ast.Dict)
+                       for key in node.keys
+                       if isinstance(key, ast.Constant)
+                       and isinstance(key.value, str)}
+            missing = sorted(translated - written)
+            self.assertEqual(missing, [], f"{name}.py never names {missing}")
+
+
+def _translate_land_keys():
+    """Return the channel names ``translate_land`` produces on a minimal input."""
+    import xarray as xr
+
+    from jcm.data.mirror.bundles import translate_land
+
+    base = xr.DataArray(np.ones((1, 2)), dims=("time", "cell"))
+    cell = lambda v: xr.DataArray(np.full(2, v), dims=("cell",))  # noqa: E731
+    era5 = xr.Dataset({"sd": base * 0.0, "stl1": base * 280.0,
+                       "swvl1": base * 0.2, "swvl2": base * 0.2,
+                       "cvh": cell(0.0), "cvl": cell(0.0), "slt": cell(2.0)})
+    return translate_land(
+        era5, permanent_snow=xr.DataArray(np.zeros(2, dtype=bool),
+                                          dims=("cell",))).keys()

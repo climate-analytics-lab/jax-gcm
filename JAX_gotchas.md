@@ -28,6 +28,64 @@ def update_fun(operand):
 t,s,u,v = jax.lax.cond(flag, update_fun, pass_fun, operand=(t,s,u,v))
 ```
 
+## Gradients that are NaN or infinite where the forward pass is fine
+
+Reverse-mode AD differentiates *every* branch, including the one a
+`jnp.where`/`jnp.clip` discards, and applies the mask afterwards. So a guard
+that makes the forward value finite does nothing for the gradient if the
+guarded expression is singular on the untaken branch. Four shapes of this
+were found across the ECHAM physics by `jcm.testing.check_gradients` (#820);
+each had a correct forward value and a NaN or infinite derivative at an
+ordinary operating point:
+
+1. **Masked infinity.** `jnp.clip(a / jnp.maximum(jnp.abs(x), 1e-30), 0, 1)`
+   where `x == 0`: the quotient's partial is `a / 1e-60`, which is `inf` in
+   float32, and the clip's zero mask multiplies it — `0 * inf = nan`. The same
+   happens to `jnp.exp(big)` evaluated on the branch a `where` discards.
+2. **Tie at zero.** `jnp.sqrt(jnp.maximum(x, 0.0))` at `x == 0`: both
+   arguments of `maximum` tie, JAX splits the derivative half to each, and
+   half of `sqrt'(0) = inf` is still `inf`. Zero TKE is an ordinary state
+   (laminar layer, cold start, zero-initialised carry), so this fires.
+3. **Cone tip.** `jnp.sqrt(u**2 + v**2)` at `u = v = 0` (a calm column): no
+   derivative exists there and AD returns `nan`.
+4. **Float32 range in the derivative, not the value.** A quotient's VJP is
+   `-num / den**2`. For `(h*c) / (k*T)` the denominator squared,
+   `(1.38e-23 * 250)**2 ~ 1e-41`, is below float32's smallest normal, so
+   `dB/dT` overflows to `inf` at *every* temperature. A floor such as
+   `jnp.maximum(den**2, 1e-30)` does not help: the VJP squares the floor too.
+   The same arithmetic sets a hard bound on **any** float32 denominator:
+   `den**-2` is `inf` for every `den` below `2**-63 ~ 1.08e-19` (XLA evaluates
+   it as `1/(den*den)` and flushes the subnormal square to zero), so a `where`
+   that makes a denominator merely *positive* has not made it safe to divide
+   by — a zero numerator over it still gives `0 * inf = nan`. A guard floor
+   sized in float64 (`1e-30`, `1e-154`) is therefore not a guard at all here.
+
+The house idiom is the **double `where`**: make the *argument* safe before the
+singular operation, then mask the result, so the singular function is never
+differentiated at the singular point in either AD mode:
+
+```python
+safe_x = jnp.where(x > 0.0, x, 1.0)                 # untaken branch is benign
+y = jnp.where(x > 0.0, jnp.sqrt(safe_x), 0.0)       # sqrt' is only ever taken at safe_x
+```
+
+For (3) apply it to `r2 = u**2 + v**2` and mask the norm to zero; for (4) fold
+the constants so that the differentiated denominator is the O(1)–O(1000)
+physical variable itself (`HC_OVER_K / T`), or divide through by the largest
+exponential so every intermediate stays in `[0, 1]`. Where a small denominator
+is the physics rather than an artefact of the units — the liquid/ice split
+`qc / (qc + qi)` in `clouds/echam_1m.py` — put the `where`'s threshold above
+the `1.08e-19` bound instead, and justify it by the scheme's own physical
+floors rather than by the check it quiets.
+
+Check with `jcm.testing.check_gradients(f, args, rtol=...)`. It compares
+`jvp` and `vjp` against a central difference whose step is *relative* to each
+input leaf's magnitude, so a `stop_gradient`, an integer cast or a masked
+infinity on a large-magnitude field cannot hide behind the small ones; with
+`reference="adjoint"` and `live_inputs=(...)` it fences finiteness and
+liveness where an output is piecewise constant (a level index) and no
+difference quotient exists.
+
 ## Static arguments hold whole objects, and `Model` is one
 
 `Model._run_from_state` is jitted with `self` static. A static argument is a

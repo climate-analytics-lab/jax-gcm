@@ -227,6 +227,31 @@ class TestComposablePhysics(unittest.TestCase):
         ])
         self.assertEqual(len(physics.terms), 2)
 
+    def test_replace_hands_the_displaced_term_to_its_replacement(self):
+        """Post-compose configuration must survive a swap (jax-gcm#835).
+
+        Settings applied by a factory AFTER composition live on the instance,
+        so without this handover a replacement silently reverts to constructor
+        defaults — which is how a swapped optics term loses its radiation
+        cadence and recomputes every band on every step.
+        """
+        seen = []
+
+        class Configurable(LinearHeating):
+            def adopt_runtime_configuration(self, previous):
+                seen.append(previous)
+
+        physics = self._make_physics()
+        original = physics.terms[0]
+        new_rad = Configurable(alpha=5.0)
+        physics.replace("radiation", new_rad)
+        self.assertEqual(seen, [original])
+
+    def test_adopt_runtime_configuration_defaults_to_noop(self):
+        """Most terms carry nothing, so the base hook must be harmless."""
+        a, b = LinearHeating(), LinearHeating(alpha=2.0)
+        self.assertIsNone(a.adopt_runtime_configuration(b))
+
     def test_replace_nonexistent_category_raises(self):
         physics = self._make_physics()
         with self.assertRaises(ValueError):
@@ -273,12 +298,21 @@ class TestOutputAttrs(unittest.TestCase):
         self.assertEqual(merged["shared"]["units"], "from_a")
 
     def test_terms_without_output_attrs_are_tolerated(self):
-        """A term predating the attribute contributes nothing, no error."""
+        """A term predating the attribute contributes no term-owned metadata."""
         # ``LinearHeating`` declares no ``output_attrs``; the base default {}
         # plus the ``getattr`` guard must keep it out of the merge cleanly.
+        # Container-owned positivity diagnostics still carry their metadata.
         physics = ComposablePhysics(
             terms=[LinearHeating(), DiagnosticConsumer()])
-        self.assertEqual(physics.output_attrs(), {})
+        attrs = physics.output_attrs()
+        self.assertEqual(
+            attrs["water_positivity_correction.total_water_tendency"]["units"],
+            "kg kg-1 s-1",
+        )
+        self.assertEqual(
+            attrs["water_positivity_correction.column_water_source"]["units"],
+            "kg m-2 s-1",
+        )
 
 
 class TestDifferentiabilityGate(unittest.TestCase):
@@ -633,6 +667,13 @@ class TestComposablePhysicsUtilities(unittest.TestCase):
         empty = physics.get_empty_data(coords)
         self.assertIsInstance(empty, dict)
         self.assertIn("heating_rate", empty)
+        self.assertIn("water_positivity_correction", empty)
+        self.assertIn(
+            "total_water_tendency", empty["water_positivity_correction"],
+        )
+        self.assertNotIn(
+            "column_water_source", empty["water_positivity_correction"],
+        )
         # Array values should be zeros
         for v in empty.values():
             if isinstance(v, jax.Array) and v.shape:

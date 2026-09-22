@@ -115,11 +115,33 @@ user-facing behaviour is incomplete until the docs say so:
    ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
    implementation-specific details and gotchas belong in the PR description.
    Do **not** create ad-hoc top-level ``*.md`` files in the repo root.
- - **User-facing behaviour changes** (new/changed defaults, new mechanisms like
-   timestep resolution, new CLI/config knobs) must be reflected in
-   ``README.md`` and/or ``docs/source/getting_started.rst`` in the same PR.
+ - **The user guides are curated, not a changelog.** When a PR adds a **major**
+   new feature, *consider* an entry in ``docs/source/getting_started.rst`` (if it
+   is something a new user needs on day one) or ``docs/source/advanced_features.rst``
+   (if it is a capability an experienced user reaches for later). For ordinary
+   knobs, changed defaults and fixes, leave both alone — those belong in the
+   design doc, the release notes and the docstring.
+   Keep both **lean**: they orient a new user, they are not a reference. Add
+   only what someone needs in order to do the new thing, and nothing else. A new
+   public function is **not** by itself such a change — ``docs/source/api.rst``
+   autodocs the modules, so its docstring is its documentation. Rationale,
+   provenance, measured numbers and caveats belong in ``docs/source/design/*.md``
+   (or ``docs/source/science/`` for a science choice), never in the guide.
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
+ - **The strict Sphinx build is the gate.** Before pushing anything that touches
+   ``docs/`` — or a public docstring, which ``api.rst`` autodocs into the tree —
+   run exactly what CI runs:
+
+   ```bash
+   sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+   ```
+
+   It must end in ``build succeeded`` with zero warnings. ``.github/workflows/
+   run_docs.yaml`` builds the full tree this way on every ``docs/**`` change
+   (#829), so a malformed ``Args:`` block or an unmatched ``inline literal`` is
+   a CI failure, not a cosmetic nit. Fix warnings at the source: ``conf.py``
+   carries no ``suppress_warnings`` on purpose.
 
 ## The model description is a living document
 ``docs/source/science/`` is the by-process model description: every consequential
@@ -133,6 +155,13 @@ section (or configuration selection page) in the same PR. State what the code
 *is* and why, with a reference (Fortran ``file::routine``, paper, scheme name);
 never a fix narrative or a before/after. A reviewer should be able to read the
 science doc and the diff together and find them consistent.
+
+A ``#NNN`` on these pages asserts the gap is **open**. Pointer and toctree rot
+fails the PR that causes it; whether a cited issue is still open is checked out
+of band instead — closing a cited issue gets you a comment and an assigned
+follow-up, and a daily sweep catches the rest — so a pull request never fails
+for something no commit did. ``JCM_CHECK_TRACKED_GAPS=1`` runs that check
+locally. See ``docs/source/design/science_register_enforcement.md``.
 
 ## Project Overview
 
@@ -243,9 +272,22 @@ already seen, not discover it:
 ```bash
 ruff check .                     # MUST be clean before EVERY push
 JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+coverage report --fail-under=90                      # belt: enforce it again
 JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
+coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```
+
+Both floors are checked twice because `--cov-fail-under` alone did not enforce
+them. `fail_under` is judged at the *reported* precision
+(`round(total, precision) < fail_under`), so at coverage's default precision of
+0 the 80 floor was really a 79.5 floor: the slow job printed `FAIL ... Total
+coverage: 79.68%` and still exited 0. Both rcfiles now set
+`[report] precision = 2`, which is the actual fix; the extra `coverage report`
+line re-checks the same `.coverage` data through coverage itself, so a future
+plugin change cannot silently disarm the gate again (#786). Keep the rcfile
+precision and the `coverage report` steps together — either alone leaves a
+hole.
 
 Then review your own diff adversarially **before pushing** and fix or refute
 every finding (`jcm-dev-workflow` step 3). Codex credits are finite and a CI
@@ -373,7 +415,9 @@ from dinosaur import primitive_equations
 ### Testing
 - Test files: `module_name_test.py` in the same directory as the module
 - Mark slow tests (>1 min) with `@pytest.mark.slow`
-- Include gradient checks (`check_vjp`, `check_jvp`) for JAX functions
+- Include gradient checks (`jcm.testing.check_gradients`, AD against a
+  relative-step central difference; see `JAX_gotchas.md` for the
+  NaN-gradient traps it catches) for JAX functions
 - PRs should include tests for new functionality and bug fixes
 
 ## Documentation
@@ -381,10 +425,24 @@ from dinosaur import primitive_equations
 Built with Sphinx + Furo theme:
 
 ```bash
-cd docs && make html
+(cd docs && make html)                                      # convenient loop
+sphinx-build -W --keep-going -b html docs/source /tmp/docs   # THE GATE
 ```
 
+Both run from the repository root — the subshell keeps `make html` from
+leaving the shell in `docs/`, where the gate's `docs/source` path would not
+resolve.
+
+The second command is what `.github/workflows/run_docs.yaml` runs on every
+`docs/**` change: the full tree with warnings as errors (#829). It must end in
+`build succeeded` with zero warnings before you push. See "Documentation lives
+with the change" above and `docs/source/developer.rst` for the details.
+
 Auto-generated physics variable translation docs come from `jcm/physics/speedy/units_table.csv` via `docs/generate_docs.py`.
+
+`api.rst` autosummarises `jcm` recursively; co-located `*_test.py` and
+`conftest.py` modules are filtered out of that walk by
+`docs/source/_templates/autosummary/module.rst`.
 
 ## Architecture Notes
 

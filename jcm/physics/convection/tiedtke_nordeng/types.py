@@ -43,6 +43,15 @@ class ConvectionParameters:
 
     # Evaporation parameters
     cevapcu: float           # Coefficient for rain evaporation
+    cu_updraft_velocity: float  # Assumed in-cloud updraft speed ``zwu``
+                             # (m/s) used to turn the updraft mass flux into
+                             # the updraft AREA ``pmfu/(zwu*rhou)`` — ECHAM
+                             # ``mo_cufluxdts.f90:166`` (zwu = 2.0). That area
+                             # is the sub-cloud rain-evaporation footprint
+                             # under the HAM submodel (``updraft_precip_cover``
+                             # on ``TiedtkeConvection``) and the convective
+                             # washout footprint the JAM wet deposition uses
+                             # (jax-gcm#812).
 
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
@@ -115,7 +124,8 @@ class ConvectionParameters:
     def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
-                 cevapcu=2.0e-5, cmfdeps=0.3, entrdd=2.0e-4,
+                 cevapcu=2.0e-5, cu_updraft_velocity=2.0,
+                 cmfdeps=0.3, entrdd=2.0e-4,
                  trigger_cape=100.0, smooth_trigger_j=25.0,
                  cu_dqcv_width=2.0e-7, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
@@ -137,6 +147,7 @@ class ConvectionParameters:
             cu_dnoprc_ocean=jnp.array(cu_dnoprc_ocean),
             cu_dnoprc_land=jnp.array(cu_dnoprc_land),
             cevapcu=jnp.array(cevapcu),
+            cu_updraft_velocity=jnp.array(cu_updraft_velocity),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
             trigger_cape=jnp.array(trigger_cape),

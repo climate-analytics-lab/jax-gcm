@@ -1,11 +1,13 @@
 """Tests for the AeroCom omnibus additions (#583, #586, #581 residuals)."""
 import unittest
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.diagnostics.aerocom import AerocomDiagnostics
+from jcm.testing import check_gradients
 
 
 class NearSurfaceGroupTest(unittest.TestCase):
@@ -115,6 +117,131 @@ class NearSurfaceGroupTest(unittest.TestCase):
         out2 = term._nearsurface_group(
             state, diag, None, state.temperature, p_full)
         np.testing.assert_allclose(np.asarray(out2["aerocom_wbase"]), 0.0)
+
+
+class NearSurfaceGroupGradientTest(unittest.TestCase):
+    """AD through the nearsurface group (#820).
+
+    The substance is ``test_zero_tke_gradient_is_finite``: ``wbase`` used to
+    be ``0.7 * sqrt(maximum(2 * tke, 0))``, and at TKE = 0 — a laminar
+    layer, a cold start, a zero-initialised vdiff carry — the ``maximum``
+    ties, JAX splits the derivative 0.5/0.5 between its two arguments, and
+    ``sqrt'(0) = inf`` came back through the reverse pass as ``+inf``
+    (``nan`` in forward mode). The double-``where`` in
+    ``aerocom.py::_nearsurface_group`` replaced it; the forward value is
+    unchanged, and the derivative at 0 is now 0, the only finite choice at a
+    square root's endpoint.
+
+    At TKE = 0 there is still no *two-sided* derivative to compare against —
+    the one-sided secant from the positive side grows as ``1/sqrt(eps)``,
+    which the ladder correctly refuses — so the comparison against a central
+    difference is made at TKE > 0 and the zero point is fenced on
+    finiteness.
+    """
+
+    NLEV, NX = 6, 3
+
+    def _pieces(self):
+        """Return the static (non-differentiated) inputs of the group."""
+        nlev, nx = self.NLEV, self.NX
+        clouds = SimpleNamespace(
+            cloud_fraction=jnp.zeros((nlev, nx)).at[3].set(0.6),
+            precip_snow=jnp.full((nx,), 1e-5),
+            precip_rain=jnp.full((nx,), 3e-5))
+        diagnostics = {
+            "clouds": clouds,
+            "convection": SimpleNamespace(precip_conv=jnp.full((nx,), 2e-5)),
+            "height_full": (jnp.linspace(15000.0, 50.0, nlev)[:, None]
+                            * jnp.ones((1, nx))),
+            "height_half": (jnp.linspace(16000.0, 0.0, nlev + 1)[:, None]
+                            * jnp.ones((1, nx))),
+        }
+        p_full = (jnp.linspace(20000.0, 99600.0, nlev)[:, None]
+                  * jnp.ones((1, nx)))
+        terrain = SimpleNamespace(orog=jnp.full((nx,), 200.0))
+        return diagnostics, p_full, terrain
+
+    def _group(self):
+        """Return ``f(T, q, u, v, tke, t_skin) -> the group's fields``."""
+        nx = self.NX
+        term = AerocomDiagnostics(groups=("nearsurface",))
+        diagnostics, p_full, terrain = self._pieces()
+
+        def f(temperature, humidity, u_wind, v_wind, tke, skin_temperature):
+            state = SimpleNamespace(
+                temperature=temperature, specific_humidity=humidity,
+                u_wind=u_wind, v_wind=v_wind,
+                normalized_surface_pressure=jnp.ones((nx,)), tracers={})
+            local = {
+                **diagnostics,
+                "vertical_diffusion": SimpleNamespace(tke=tke),
+                "surface": SimpleNamespace(
+                    surface_temperature=skin_temperature,
+                    roughness_length=jnp.full((nx,), 0.1)),
+            }
+            out = term._nearsurface_group(
+                state, local, terrain, temperature, p_full)
+            return tuple(out[key] for key in sorted(out))
+
+        return f
+
+    def _field_names(self):
+        """Return the group's keys, in the order ``_group`` returns them."""
+        nx = self.NX
+        term = AerocomDiagnostics(groups=("nearsurface",))
+        diagnostics, p_full, terrain = self._pieces()
+        temperature, humidity, u_wind, v_wind, tke, skin = self._args(0.0)
+        state = SimpleNamespace(
+            temperature=temperature, specific_humidity=humidity,
+            u_wind=u_wind, v_wind=v_wind,
+            normalized_surface_pressure=jnp.ones((nx,)), tracers={})
+        out = term._nearsurface_group(
+            state,
+            {**diagnostics,
+             "vertical_diffusion": SimpleNamespace(tke=tke),
+             "surface": SimpleNamespace(surface_temperature=skin,
+                                        roughness_length=jnp.full((nx,), 0.1))},
+            terrain, temperature, p_full)
+        return sorted(out)
+
+    def _args(self, tke_value):
+        nlev, nx = self.NLEV, self.NX
+        return (jnp.full((nlev, nx), 260.0).at[-1].set(290.0),
+                jnp.full((nlev, nx), 5.0e-3),
+                jnp.full((nlev, nx), 10.0),
+                jnp.full((nlev, nx), -5.0),
+                jnp.full((nx, nlev), tke_value),
+                jnp.full((nx,), 288.0))
+
+    def test_zero_tke_gradient_is_finite(self):
+        """TKE = 0: the cloud-base updraft's square root at its endpoint.
+
+        ``d/d(tke)`` came back ``+inf`` here before the double-``where``.
+        """
+        f = self._group()
+        args = self._args(0.0)
+        gradients = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=tuple(range(len(args))),
+        )(*args)
+        names = ("temperature", "humidity", "u_wind", "v_wind", "tke",
+                 "skin_temperature")
+        for name, gradient in zip(names, gradients):
+            self.assertTrue(bool(jnp.all(jnp.isfinite(gradient))),
+                            f"d/d{name} is not finite at TKE = 0: {gradient}")
+
+    def test_zero_tke_updraft_is_still_exactly_zero(self):
+        """The guard is forward-identical: ``wbase`` is 0 at TKE = 0."""
+        fields = dict(zip(self._field_names(), self._group()(*self._args(0.0))))
+        np.testing.assert_array_equal(
+            np.asarray(fields["aerocom_wbase"]), 0.0)
+
+    def test_gradients_match_a_central_difference(self):
+        """TKE > 0, where a two-sided derivative of the root exists."""
+        f = self._group()
+        for seed in (0, 4):
+            with self.subTest(seed=seed):
+                check_gradients(f, self._args(0.5), rtol=1e-3, seed=seed)
 
 
 class PlevOmegaTest(unittest.TestCase):

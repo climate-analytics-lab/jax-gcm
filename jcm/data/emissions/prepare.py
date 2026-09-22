@@ -39,15 +39,16 @@ import jcm.constants as _const
 from jcm.data.emissions.regrid import build_regridder, model_grid
 from jcm.physics.aerosol.jam.emissions.sectors import OM_OC_RATIO
 
-_AVOGADRO = _const.physical_constants.avogadro  # molec / mol
-
 
 def molec_flux_to_mass_flux(molar_mass_g_per_mol: float) -> float:
     """Factor converting ``molecules cm⁻² s⁻¹`` → ``kg m⁻² s⁻¹``.
 
     ``(MW/N_A) g/molec · 1e-3 kg/g · 1e4 cm²/m² = MW·10/N_A``.
+
+    N_A is read here rather than captured at import so a ``set_constants``
+    override reaches it (#772).
     """
-    return molar_mass_g_per_mol * 10.0 / _AVOGADRO
+    return molar_mass_g_per_mol * 10.0 / _const.avogadro
 
 
 @dataclass(frozen=True)
