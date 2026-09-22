@@ -70,8 +70,8 @@ oxidants_file: auto
 #               stress_u: <N/m2>, stress_v: <N/m2>} — uniform maps;
 #   file: <path> — a netCDF already on the model grid with those four
 #               variables, static ``(lat, lon)`` or with a leading time axis
-#               (a 12-step monthly-cadence climatology cycles like the surface
-#               climatology; every other cadence aligns by absolute date).
+#               (a Jan->Dec monthly climatology cycles like the surface
+#               climatology; every other time axis aligns by absolute date).
 # Units/signs are the surface-exchange coupling contract's
 # (docs/source/design/surface_exchange.md): sensible heat and evaporation
 # positive UP, stress positive DOWN (momentum into the surface). ``null``

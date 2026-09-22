@@ -1023,32 +1023,43 @@ _PRESCRIBED_FLUX_VARS = (
     "sensible_heat_flux", "evaporation", "stress_u", "stress_v",
 )
 
-#: Consecutive-sample spacing (days) that counts as a monthly climatology.
-#: Covers 28-31-day calendar months plus the ~30.4-day Gregorian average and a
-#: little rounding slack; excludes sub-monthly (hours/days) and super-monthly
-#: (yearly) cadences, which must align by absolute date instead.
-_MONTHLY_GAP_DAYS = (26.0, 32.0)
+def _is_monthly_climatology(time_coord) -> bool:
+    """Whether a time axis is a Jan→Dec MONTHLY climatology (WRAP_YEAR-eligible).
 
+    WRAP_YEAR selects a sample by ``floor(tyear * 12) % 12`` — a POSITION index
+    that assumes sample 0 is January, sample 1 February, …, sample 11 December
+    (``jcm.forcing._wrap_year_index``). It is therefore faithful ONLY when the
+    file's 12 samples are, in file order, exactly January through December of a
+    single annual cycle. That is stricter than "12 samples", "month-sized gaps"
+    or even "12 consecutive months" (Codex jax-gcm#877, three iterations):
 
-def _is_monthly_climatology_cadence(time_seconds) -> bool:
-    """Whether a time axis is a 12-step MONTHLY climatology (WRAP_YEAR-eligible).
+    - a 12-hour / 12-day / 12-year archive has 12 samples but repeats a month;
+    - an every-4-weeks archive (Jan 1, Jan 29, Feb 26, …) has ~30-day gaps yet
+      lands two samples in January and none in December;
+    - a July→June span is 12 consecutive months but, positioned into WRAP_YEAR's
+      January-anchored bins, would be replayed six months out of phase.
 
-    WRAP_YEAR replays a series as twelve evenly-spaced fraction-of-year bins,
-    which is faithful only for a monthly climatology. The sample count alone
-    does not establish that — a 12-hour, 12-day or 12-year archive also has 12
-    samples but must be read at its absolute timestamps — so this checks the
-    actual cadence: exactly 12 samples whose consecutive gaps are all
-    month-sized (:data:`_MONTHLY_GAP_DAYS`). Every other cadence returns
-    ``False`` and the caller falls back to ``BY_DATE`` (Codex jax-gcm#877).
+    So the check is exactly the semantics WRAP_YEAR needs: the calendar months,
+    in file order, equal ``[1, 2, …, 12]``. This is the robust analogue of the
+    repo's own monthly test (``jcm.data.bc.interpolate.interpolate_to_daily``
+    gates on ``pandas.infer_freq in {"MS","M"}``), but keyed on the month
+    sequence rather than a frequency alias so a mid-month-dated climatology
+    (the 15th of each month) is accepted too. The year is not constrained —
+    only the month position matters to WRAP_YEAR — so a climatology assembled
+    from representative timestamps in different years still qualifies. Every
+    other axis returns ``False`` and the caller uses ``BY_DATE``.
+
+    ``time_coord`` is the xarray ``time`` coordinate (datetime64 or cftime;
+    ``.dt`` dispatches for both). A non-datetime axis (no ``.dt``) is treated
+    as not-a-climatology.
     """
     import numpy as np
 
-    ts = np.asarray(time_seconds, dtype=float)
-    if ts.size != 12:
+    try:
+        months = np.asarray(time_coord.dt.month, dtype=np.int64)
+    except (AttributeError, TypeError):
         return False
-    gaps_days = np.diff(ts) / 86400.0
-    lo, hi = _MONTHLY_GAP_DAYS
-    return bool(np.all((gaps_days >= lo) & (gaps_days <= hi)))
+    return months.size == 12 and bool(np.array_equal(months, np.arange(1, 13)))
 
 
 def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
@@ -1061,11 +1072,11 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
       aquaplanet / smoke-test door;
     - ``file``: a netCDF already on the model grid carrying all four as
       variables dimensioned ``(lat, lon)``/``(lon, lat)`` (static) or with
-      a leading ``time`` axis (attached as a ``TimeSeries``: a 12-step
-      *monthly-cadence* climatology aligns ``WRAP_YEAR`` like the surface
-      climatology — see :func:`_is_monthly_climatology_cadence` — every other
-      cadence aligns ``BY_DATE`` on its absolute timestamps) — the
-      archived-coupler-flux door.
+      a leading ``time`` axis (attached as a ``TimeSeries``: a Jan→Dec
+      monthly climatology aligns ``WRAP_YEAR`` like the surface climatology —
+      see :func:`_is_monthly_climatology` — every other axis aligns
+      ``BY_DATE`` on its absolute timestamps) — the archived-coupler-flux
+      door.
 
     All four fields are required together: a partially prescribed surface
     is not a defined mode (the forced terms deliver nothing interactively),
@@ -1133,19 +1144,17 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                     "docs/source/design/surface_exchange.md)."
                 )
             # Resolve the time-axis alignment ONCE for the whole file (all four
-            # vars share the ``time`` coordinate). WRAP_YEAR replays a series as
-            # twelve evenly-spaced fraction-of-year bins, which is correct ONLY
-            # for a 12-step MONTHLY climatology — so it is gated on the actual
-            # cadence (month-sized gaps), not the sample count: a 12-hour,
-            # 12-day or 12-year archive also has 12 samples but must be read at
-            # its absolute timestamps, and ``_resolve_align_mode("auto")`` keys
-            # off span alone and would mis-wrap any <=380-day file
-            # (Codex jax-gcm#877).
+            # vars share the ``time`` coordinate). WRAP_YEAR (replay one
+            # calendar year, every year) is used ONLY for a genuine Jan→Dec
+            # monthly climatology — the exact positional semantics WRAP_YEAR's
+            # index needs — verified from the parsed timestamps; every other
+            # axis aligns on absolute dates. See
+            # :func:`_is_monthly_climatology` (Codex jax-gcm#877).
             time_seconds = None
             align = BY_DATE
             if "time" in ds.dims:
                 time_seconds = _time_axis_seconds_from_ds(ds)
-                align = (WRAP_YEAR if _is_monthly_climatology_cadence(time_seconds)
+                align = (WRAP_YEAR if _is_monthly_climatology(ds["time"])
                          else BY_DATE)
             for var in _PRESCRIBED_FLUX_VARS:
                 da = ds[var]

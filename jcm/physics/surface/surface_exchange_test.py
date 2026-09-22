@@ -510,7 +510,9 @@ class TestPrescribedFluxForcingAttach:
         from jcm.forcing import WRAP_YEAR, TimeSeries
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
         coords = self._coords()
-        # 12 mid-month timestamps → month-sized gaps → WRAP_YEAR.
+        # 12 mid-month timestamps stepping through Jan..Dec (each 30-day step
+        # lands in the next distinct calendar month) → WRAP_YEAR. Verifies the
+        # progression check accepts a mid-month-dated climatology.
         t = [np.datetime64("2000-01-15") + np.timedelta64(30 * i, "D")
              for i in range(12)]
         p = tmp_path / "flux_monthly.nc"
@@ -522,13 +524,12 @@ class TestPrescribedFluxForcingAttach:
         assert int(ts.align_mode) == WRAP_YEAR
 
     def test_file_real_month_starts_wrap_year(self, tmp_path):
-        """Actual calendar month-starts (28-31 day gaps) also count as monthly."""
+        """Actual calendar month-starts (Jan..Dec 1st) step one-per-month."""
         import numpy as np
         from jcm.forcing import WRAP_YEAR
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
         coords = self._coords()
-        # Jan..Dec 1st of a leap year (Feb->Mar gap = 29 d, the tightest real
-        # monthly gap) — all within the month-sized window.
+        # Jan..Dec 1st of a leap year — 12 distinct consecutive months.
         t = (np.datetime64("2000-01", "M") + np.arange(12)).astype(
             "datetime64[ns]")
         p = tmp_path / "flux_month_starts.nc"
@@ -536,6 +537,63 @@ class TestPrescribedFluxForcingAttach:
         f = _attach_prescribed_surface_fluxes(
             None, self._cfg({"file": str(p)}), coords)
         assert int(f.prescribed_sensible_heat_flux.align_mode) == WRAP_YEAR
+
+    def test_file_cross_year_month_span_aligns_by_date(self, tmp_path):
+        """A 12-consecutive-month span that is NOT Jan-anchored (Jul→Jun) must
+        align BY_DATE: WRAP_YEAR indexes by ``floor(tyear*12)%12``, i.e. sample
+        0 == January, so replaying a July-first file through it would phase the
+        fluxes six months wrong. Only a Jan→Dec file is WRAP_YEAR-faithful.
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        t = (np.datetime64("2000-07", "M") + np.arange(12)).astype(
+            "datetime64[ns]")
+        p = tmp_path / "flux_jul_jun.nc"
+        self._write_flux_nc_at(p, coords, t)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
+
+    def test_file_every_four_weeks_aligns_by_date(self, tmp_path):
+        """Codex #877's case: an every-4-weeks archive has ~30-day gaps but
+        lands TWO samples in January and none in December, so it is NOT a
+        monthly climatology and must align BY_DATE — the gap-size heuristic
+        that preceded this got it wrong.
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # Jan 1, Jan 29, Feb 26, ... : months [1,1,2,3,4,5,6,7,8,9,10,11].
+        base = np.datetime64("2000-01-01", "ns")
+        t = np.array([base + np.timedelta64(28 * 24 * i, "h")
+                      for i in range(12)])
+        p = tmp_path / "flux_4weekly.nc"
+        self._write_flux_nc_at(p, coords, t)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
+
+    def test_file_transient_window_aligns_by_date(self, tmp_path):
+        """A 12-sample transient window that is not a monthly climatology —
+        here bi-monthly over two years (Jan, Mar, May, … one calendar cycle
+        skipped between samples) — aligns BY_DATE, not rephased into 12 bins.
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # Every 2 months for 24 months: distinct months but NOT consecutive
+        # (absolute-month step is 2, not 1).
+        t = (np.datetime64("2000-01", "M") + 2 * np.arange(12)).astype(
+            "datetime64[ns]")
+        p = tmp_path / "flux_bimonthly.nc"
+        self._write_flux_nc_at(p, coords, t)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
 
     @pytest.mark.parametrize("step_days,label", [
         (0.5, "12-hourly"),   # sub-daily
