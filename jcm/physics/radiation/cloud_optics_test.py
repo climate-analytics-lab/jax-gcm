@@ -47,6 +47,51 @@ def test_band_wavelength_within_band_limits(is_sw):
         )
 
 
+def test_sw_band_wavelength_is_the_solar_weighted_effective_wavelength():
+    """SW bands are evaluated at their solar-flux-weighted mean wavelength.
+
+    The broad UV/visible band (0.20-0.69 um) must sit near 0.49 um -- where
+    its solar photons are -- not at the 0.31 um mid-wavenumber value that
+    inflated an Angstrom-2 aerosol AOD ~2.5x. Pinned against an independent
+    5772 K blackbody integral so a regression to the mid-wavenumber (or any
+    other) convention fails.
+    """
+    import numpy as np
+
+    h, c_light, k_b, t_sun = 6.62607015e-34, 2.99792458e8, 1.380649e-23, 5772.0
+    for band, (wn_lo, wn_hi) in enumerate(SW_BAND_LIMITS):
+        lam = np.linspace(1.0e4 / wn_hi, 1.0e4 / wn_lo, 50001)
+        planck = 1.0 / ((lam * 1e-6) ** 5
+                        * np.expm1(h * c_light / (lam * 1e-6 * k_b * t_sun)))
+        expected = np.sum(lam * planck) / np.sum(planck)
+        got = float(get_band_wavelength(band, is_sw=True))
+        assert got == pytest.approx(expected, rel=1e-4)
+    # The concrete values the grey scheme documents.
+    assert float(get_band_wavelength(1, is_sw=True)) == pytest.approx(0.489, abs=2e-3)
+    assert float(get_band_wavelength(0, is_sw=True)) == pytest.approx(1.136, abs=2e-3)
+
+
+def test_grey_aerosol_aod_scaling_uses_the_effective_wavelength():
+    """The grey aerosol Angstrom scaling reads the same band wavelength.
+
+    For alpha = 2 the UV/visible factor is (0.489/0.55)^-2 ~ 1.27, not the
+    mid-wavenumber (0.31/0.55)^-2 ~ 3.15; the near-IR factor is
+    (1.136/0.55)^-2 ~ 0.23.
+    """
+    from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+        aerosol_band_aod_scaling,
+    )
+
+    sw, lw = aerosol_band_aod_scaling(jnp.asarray(2.0), N_SW_BANDS, N_LW_BANDS)
+    for band in range(N_SW_BANDS):
+        lam = float(get_band_wavelength(band, is_sw=True))
+        assert float(sw[band]) == pytest.approx((lam / 0.55) ** -2.0, rel=1e-5)
+    assert float(sw[1]) == pytest.approx(1.266, abs=0.01)
+    assert float(sw[0]) == pytest.approx(0.234, abs=0.01)
+    assert lw.shape == (N_LW_BANDS,)
+    assert bool(jnp.all(lw < 1e-2))  # LW aerosol AOD is negligible
+
+
 def test_inhomogeneity_scales_optical_depth_at_fixed_radius():
     """The inhomogeneity factor multiplies τ only; the ice radius is fixed.
 
@@ -84,7 +129,7 @@ def test_near_ir_sw_band_absorbs():
 
     Regression for #678: with the old 0.245 um mapping both SW bands had
     ssa ~ 0.99999 (zero absorption). Band 0 is now the near-IR band
-    (0.69-2.5 um, 1.08 um centre), where liquid water absorbs, so its
+    (0.69-2.5 um, 1.14 um effective), where liquid water absorbs, so its
     single-scatter albedo must be measurably below the UV/visible band's.
     """
     nlev = 1

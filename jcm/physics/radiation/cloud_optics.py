@@ -8,6 +8,7 @@ Includes wavelength-dependent optical properties across multiple spectral bands.
 
 import jax.numpy as jnp
 import jax
+import numpy as np
 from typing import Tuple
 # from functools import partial  # Not needed anymore
 
@@ -16,23 +17,69 @@ from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
 
 # Wavelength (um) separating the UV/visible shortwave bands from the near-IR.
 # 0.69 um is the SW_BAND_LIMITS split (4000-14500 cm^-1 = near-IR); 0.7 sits
-# just above it so the near-IR band centre (1.08 um) is near-IR and the
-# UV/visible centre (0.31 um) is not.
+# just above it, so the near-IR band's effective wavelength (1.14 um) is
+# near-IR and the UV/visible band's (0.49 um) is not.
 _VIS_NIR_BOUNDARY_UM = 0.7
+
+# Effective solar photosphere temperature [K] (IAU 2015 nominal) for the
+# broadband solar weighting of the shortwave bands.
+_SOLAR_T_EFF_K = 5772.0
+
+
+def _planck_lambda(wavelength_um: np.ndarray, temperature: float) -> np.ndarray:
+    """Planck spectral radiance B_lambda (arbitrary units) at ``wavelength_um``."""
+    h, c_light, k_b = 6.62607015e-34, 2.99792458e8, 1.380649e-23
+    lam = wavelength_um * 1.0e-6
+    return 1.0 / (lam**5 * np.expm1(h * c_light / (lam * k_b * temperature)))
+
+
+def _solar_weighted_wavelengths_um(band_limits) -> jnp.ndarray:
+    """Return the solar-flux-weighted effective wavelength (um) of each SW band.
+
+    ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from ``constants.py``
+    (wavenumber, cm^-1). Each band's effective wavelength is the mean
+    wavelength weighted by the incident solar spectrum, approximated by a
+    5772 K blackbody:
+
+        lambda_eff = int lambda B_lambda(T_sun) dlambda / int B_lambda(T_sun) dlambda
+
+    over the band's own interval. This is the standard broadband-effective-
+    wavelength convention: a spectrally varying property (aerosol AOD via its
+    Angstrom law, droplet refractive index, ice absorption) is evaluated at
+    the wavelength where the band's photons actually are. The grey scheme has
+    no ECHAM counterpart to defer to (ECHAM's radiation is RRTM(G)/PSrad with
+    narrow bands), so the choice is ours. The alternative -- the
+    mid-WAVENUMBER wavelength -- is heavily biased toward the short end of a
+    broad band: for UV/visible (14500-50000 cm^-1, 0.20-0.69 um) it gives
+    0.31 um, where only a sliver of the band's solar energy lies, and with an
+    Angstrom exponent of 2 it inflates the band's aerosol optical depth by
+    (0.49/0.31)^2 ~ 2.5x over the solar-weighted value.
+
+    Computed once at import in NumPy (static configuration, not traced).
+    Current values: near-IR 1.136 um, UV/visible 0.489 um. The two bands
+    carry 50.6 % / 49.4 % of the blackbody solar flux between 0.2 and 2.5 um,
+    consistent with the grey scheme's equal per-band TOA split.
+    """
+    out = []
+    for lo, hi in band_limits:
+        lam = np.linspace(1.0e4 / hi, 1.0e4 / lo, 20001)
+        weight = _planck_lambda(lam, _SOLAR_T_EFF_K)
+        # Uniform grid: the trapezoid spacing cancels in the ratio.
+        trap = np.ones_like(lam)
+        trap[0] = trap[-1] = 0.5
+        out.append(float(np.sum(trap * lam * weight) / np.sum(trap * weight)))
+    return jnp.array(out)
 
 
 def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
-    """Return the representative wavelength (um) for each band in ``band_limits``.
+    """Return the mid-wavenumber wavelength (um) for each band in ``band_limits``.
 
-    ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from
-    ``constants.py`` (wavenumber, cm^-1). The representative wavelength is
-    the one at the band's mid-wavenumber, ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))``
-    um. Deriving it from the limits directly is what keeps the cloud optics
-    tied to the ACTUAL spectral bands: the previous hardcoded 6-SW/8-LW
-    wavelength tables were indexed by the 2-SW/3-LW band loop, so band 0 --
-    the near-IR band carrying essentially all cloud SW absorption -- was
-    evaluated at 0.245 um (n_imag ~ 1e-9, zero absorption). Now band b is
-    always evaluated inside band b's own wavenumber interval (#678).
+    Used for the LONGWAVE bands: ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))`` um.
+    The longwave cloud absorption is tabulated per band
+    (``_LW_KABS_LIQUID``/``_LW_KABS_ICE``) and the LW aerosol optical depth is
+    negligible, so the LW representative wavelength only needs to lie inside
+    its own band. Deriving it from the limits keeps band b evaluated inside
+    band b's own interval (#678).
     """
     return jnp.array(
         [1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits]
@@ -40,7 +87,9 @@ def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
 
 
 # Per-band representative wavelengths (um), derived once from the band limits.
-_SW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(SW_BAND_LIMITS)
+# SW: solar-flux-weighted effective wavelength (see
+# ``_solar_weighted_wavelengths_um``); LW: mid-wavenumber.
+_SW_BAND_WAVELENGTHS_UM = _solar_weighted_wavelengths_um(SW_BAND_LIMITS)
 _LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
 
 # Heuristic longwave mass-absorption coefficients (m^2/kg) per LW band. These
@@ -96,8 +145,12 @@ def get_band_wavelength(band: int, is_sw: bool = True) -> float:
             may be a traced integer and indexes the derived array.
 
     Returns:
-        Representative wavelength in micrometers, the value at the band's
-        mid-wavenumber. See ``_band_centre_wavelengths_um``.
+        Representative wavelength in micrometers: the solar-flux-weighted
+        effective wavelength for a shortwave band
+        (``_solar_weighted_wavelengths_um``), the mid-wavenumber wavelength
+        for a longwave band (``_band_centre_wavelengths_um``). Every
+        wavelength-dependent grey optical property -- cloud optics, aerosol
+        Angstrom scaling, the near-IR/visible classifier -- reads it here.
 
     """
     wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM

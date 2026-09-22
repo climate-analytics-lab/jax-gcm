@@ -113,11 +113,20 @@ RRTMGP and the NN emulator so a feature and its label describe the same cloud):
   scaling in the backend (jax-rrtmgp#37) and, for the convection dependence,
   ``ktype`` in the radiation glue (#870). Applied on both the RRTMGP and grey
   backends via ``RadiationParameters.cloud_inhomogeneity``.
-- **Grey backend cloud-optics bands** — the grey Mie/heuristic cloud optics
-  (``jcm/physics/radiation/cloud_optics.py``, grey backend only) key their
-  representative wavelength to each band's own wavenumber limits in
-  ``jcm/physics/radiation/constants.py`` (``λ = 1e4/wn_mid``), so band *b* is
-  always evaluated inside band *b*.
+- **Grey backend band wavelengths** — every wavelength-dependent grey optical
+  property (the Mie/heuristic cloud optics in
+  ``jcm/physics/radiation/cloud_optics.py``, the Ångström scaling of the
+  broadband aerosol AOD, and the near-IR/visible band classifier that assigns
+  surface albedo and gas absorbers) reads one representative wavelength per band
+  from ``get_band_wavelength``, derived from the band limits in
+  ``jcm/physics/radiation/constants.py``. For a **shortwave** band it is the
+  solar-flux-weighted mean wavelength, ``λ_eff = ∫λ B_λ(5772 K) dλ / ∫B_λ dλ``
+  over the band: 0.489 µm for UV/visible (0.20–0.69 µm) and 1.136 µm for the
+  near-IR (0.69–2.5 µm). **Longwave** bands use the mid-wavenumber wavelength
+  (their cloud absorption is tabulated per band and their aerosol AOD is
+  negligible, so the value only has to lie inside the band). The grey scheme's
+  TOA flux is split equally between the two SW bands, which the 5772 K
+  blackbody supports (50.6 % / 49.4 %).
 
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
 correlated-k scheme (``mo_psrad_interface.f90``; Pincus & Stevens 2013; RRTMG:
@@ -144,6 +153,18 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   aerosol direct effect — at band-centre rather than exact-550 nm accuracy, and
   only with ``jam_optics=True`` (the default; ``False`` leaves the carry slot
   radiatively passive).
+- `science` — the grey scheme has no ECHAM counterpart (ECHAM's radiation is
+  PSrad/RRTMG with narrow bands), so its broadband representative wavelength is
+  our choice. It follows the standard broadband-effective-wavelength convention
+  (weight by the incident solar spectrum) rather than the mid-wavenumber value,
+  which for the broad UV/visible band sits at 0.31 µm, where little of the
+  band's solar energy lies: with an Ångström exponent of 2 it inflates that
+  band's aerosol optical depth ~2.5× relative to the solar-weighted value
+  (MACv2-SP plumes carry exponents up to 2). Cloud SW optics barely move: for
+  liquid at ``r_eff`` = 10 µm the optical depth and asymmetry are unchanged
+  (geometric-optics limit, size parameter ≫ 1) and the near-IR single-scattering
+  albedo shifts by 3e-5; for ice at 30 µm the optical depth changes by ≤ 2 % and
+  the near-IR single-scattering albedo by −0.005.
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
   (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
   direct-diffuse albedo needs a g-point→band map in the library (deferred).

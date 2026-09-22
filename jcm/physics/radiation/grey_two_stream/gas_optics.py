@@ -230,8 +230,8 @@ def ozone_absorption_sw(
 
     # O3 is strong in the UV/visible (Hartley-Huggins-Chappuis) and very weak in
     # the near-IR. Select by the band's WAVELENGTH, not a hardcoded index, so it
-    # tracks SW_BAND_LIMITS: near-IR = band 0 (4000-14500 cm⁻¹, 1.08 um),
-    # UV+visible = band 1 (14500-50000 cm⁻¹, 0.31 um). See ``sw_band_is_near_ir``
+    # tracks SW_BAND_LIMITS: near-IR = band 0 (4000-14500 cm⁻¹, 1.14 um),
+    # UV+visible = band 1 (14500-50000 cm⁻¹, 0.49 um). See ``sw_band_is_near_ir``
     # (#678 -- the old ``[k_uv_vis, k_nir]`` order put strong ozone in the near-IR
     # band once the cloud-optics band order was corrected).
     k_o3 = jnp.where(sw_band_is_near_ir(band), k_o3_nir * 0.5, k_o3_uv_vis)

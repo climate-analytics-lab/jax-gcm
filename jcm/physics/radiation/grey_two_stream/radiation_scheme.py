@@ -23,7 +23,11 @@ from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
-from ..cloud_optics import cloud_optics, surface_albedo_by_sw_band
+from ..cloud_optics import (
+    cloud_optics,
+    get_band_wavelength,
+    surface_albedo_by_sw_band,
+)
 from ..mcica import (
     column_total_cover,
     effective_cloud_fraction,
@@ -116,6 +120,42 @@ def combine_optical_properties(
         single_scatter_albedo=combined_ssa,
         asymmetry_factor=combined_g
     )
+
+
+# Reference wavelength (um) of the broadband aerosol AOD the grey scheme reads.
+_AOD_REFERENCE_WAVELENGTH_UM = 0.55
+
+
+def aerosol_band_aod_scaling(
+    angstrom: jnp.ndarray, n_sw_bands: int, n_lw_bands: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-band factors that scale the 550 nm aerosol AOD to each grey band.
+
+    Ångström law ``AOD(λ) = AOD(0.55 µm) · (λ / 0.55)^(-α)`` evaluated at each
+    band's representative wavelength from the shared ``get_band_wavelength``
+    helper -- the same wavelength the cloud optics use. For the shortwave that
+    is the solar-flux-weighted effective wavelength (UV/visible 0.489 µm,
+    near-IR 1.136 µm): a broadband AOD evaluated at the band's
+    mid-WAVENUMBER (0.31 µm for the 0.20-0.69 µm band) would inflate the
+    UV/visible AOD ~2.5x for α = 2 (see
+    ``cloud_optics._solar_weighted_wavelengths_um``).
+
+    Args:
+        angstrom: Ångström exponent α (scalar per column).
+        n_sw_bands: Number of shortwave bands.
+        n_lw_bands: Number of longwave bands.
+
+    Returns:
+        ``(sw_scaling, lw_scaling)`` of shapes ``(n_sw_bands,)`` and
+        ``(n_lw_bands,)``.
+
+    """
+    sw_wavelengths = get_band_wavelength(jnp.arange(n_sw_bands), is_sw=True)
+    lw_wavelengths = get_band_wavelength(jnp.arange(n_lw_bands), is_sw=False)
+    sw_scaling = (sw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    # LW: tiny AOD at long wavelengths, kept for completeness.
+    lw_scaling = (lw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    return sw_scaling, lw_scaling
 
 
 def prepare_radiation_state(
@@ -287,23 +327,13 @@ def radiation_scheme(
     default_n_sw_bands = 2
     default_n_lw_bands = 3
 
-    # Compute representative wavelengths (μm) from SW band limits (wavenumbers cm⁻¹)
-    # λ = 1e4 / ν_mid, where ν_mid is the midpoint wavenumber of the band
-    sw_band_limits = parameters.sw_band_limits  # [[4000, 14500], [14500, 50000]]
-    sw_wavelengths = 1e4 / ((sw_band_limits[:, 0] + sw_band_limits[:, 1]) / 2.0)
-
-    # Apply Angstrom scaling: AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
-    ref_wavelength = 0.55  # μm (550 nm reference)
-    sw_scaling = (sw_wavelengths / ref_wavelength) ** (-angstrom)  # [n_sw_bands]
+    sw_scaling, lw_scaling = aerosol_band_aod_scaling(
+        angstrom, default_n_sw_bands, default_n_lw_bands,
+    )
 
     aerosol_tau_sw = aerosol_aod_col[:, None] * sw_scaling[None, :]  # [nlev, n_sw_bands]
     aerosol_ssa_sw = jnp.tile(aerosol_ssa_col[:, None], (1, default_n_sw_bands))
     aerosol_asy_sw = jnp.tile(aerosol_asy_col[:, None], (1, default_n_sw_bands))
-
-    # LW bands: apply Angstrom scaling (gives very small AOD at long wavelengths)
-    lw_band_limits = parameters.lw_band_limits  # [[10, 350], [350, 500], [500, 2500]]
-    lw_wavelengths = 1e4 / ((lw_band_limits[:, 0] + lw_band_limits[:, 1]) / 2.0)
-    lw_scaling = (lw_wavelengths / ref_wavelength) ** (-angstrom)
 
     aerosol_tau_lw = aerosol_aod_col[:, None] * lw_scaling[None, :]  # [nlev, n_lw_bands]
     aerosol_ssa_lw = jnp.zeros((nlev, default_n_lw_bands))  # Pure absorption in LW
