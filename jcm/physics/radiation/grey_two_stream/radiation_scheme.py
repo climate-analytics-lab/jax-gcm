@@ -7,6 +7,7 @@ coordinating shortwave and longwave radiation computations.
 
 import jax.numpy as jnp
 
+from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.coords_util import column_lat_lon
 from typing import Tuple, Optional
 
@@ -766,8 +767,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         chemistry = diagnostics["chemistry"]
         # Convert ppmv → mole fraction. Ozone is a chemistry field; CO2 is a
         # prescribed forcing read straight from ForcingData (well-mixed scalar).
-        ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = forcing.co2_vmr * 1e-6
+        ozone_vmr = chemistry.ozone_mole_fraction()
+        co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Surface temperature still lives in the legacy "surface" key
         # (until the EchamSurface migration); the radiation surface

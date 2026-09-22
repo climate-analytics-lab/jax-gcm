@@ -25,6 +25,14 @@ from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+_LIVE_CONTEXT_PARAMS_KEY = "parameters_rederived_from_live_context"
+_LIVE_CONTEXT_PARAMS_DESCRIPTION = (
+    "values were read from the live physics passed to "
+    "ModelPredictions.with_context; they are not a trace-time record of the "
+    "parameters that produced this trajectory"
+)
+
 
 def _apply_term_output_attrs(ds, physics):
     """Stamp per-term ``output_attrs`` onto matching variables of ``ds`` (#740).
@@ -160,6 +168,215 @@ class ModelPredictions:
     def snapshots(self):
         """Raw interval-instantaneous snapshot arrays, or ``None``."""
         return self._snapshots
+
+    def with_context(
+        self,
+        model_or_coords,
+        physics: Physics | None = None,
+        *,
+        dycore=_MISSING,
+        observations=_MISSING,
+        observers=_MISSING,
+        obs_t0_days=_MISSING,
+        obs_dt_seconds=_MISSING,
+        snapshots=_MISSING,
+        snapshot_variables=_MISSING,
+        snapshot_interval_days=_MISSING,
+    ) -> "ModelPredictions":
+        """Return a copy with host-side model/output context re-attached.
+
+        JAX pytree operations deliberately carry only prediction and
+        observation arrays. Consequently, a ``ModelPredictions`` returned by
+        ``jax.tree.map`` (or reconstructed after another JAX boundary) needs
+        its static context restored before its Dataset accessors can be used.
+        The common spelling is::
+
+            restored = transformed.with_context(model)
+
+        ``model`` supplies coordinates, physics, dycore, observers, and the
+        model timestep. Alternatively, pass ``coords`` and ``physics`` as the
+        first two arguments and supply any remaining context by keyword.
+
+        Snapshot arrays are not pytree children, so a transformed object
+        cannot recover them. Pass ``snapshots``, ``snapshot_variables``, and
+        ``snapshot_interval_days`` when restoring a snapshot stream. Omitted
+        keyword metadata is preserved when it is still present on ``self``.
+
+        Parameter values are always re-read from the supplied *live* physics
+        and marked in :attr:`params` as re-derived. They must not be presented
+        as the trace-time parameters that produced the transformed arrays,
+        because pytree operations may combine predictions from a different
+        model instance.
+
+        Args:
+            model_or_coords: A :class:`~jcm.model.Model`, or the coordinate
+                system to attach.
+            physics: Physics package when ``model_or_coords`` is a coordinate
+                system. Must be omitted when passing a Model.
+            dycore: Optional dynamical core. The model-bound form obtains this
+                from the Model.
+            observations: Raw observer samples. Defaults to the samples that
+                survived the pytree operation.
+            observers: Observer definitions. The model-bound form obtains
+                these from the Model.
+            obs_t0_days: Observation-window start in days since 1970. When
+                omitted in the model-bound form, it is inferred from the last
+                trajectory timestamp, sample count, and model timestep where
+                those values are concrete.
+            obs_dt_seconds: Observation cadence. The model-bound form uses the
+                model timestep.
+            snapshots: Raw interval-instantaneous snapshot arrays.
+            snapshot_variables: Names requested for the snapshot stream.
+            snapshot_interval_days: Snapshot cadence in days.
+
+        Returns:
+            A new ``ModelPredictions`` with the same pytree children and the
+            supplied host-side context.
+
+        Raises:
+            TypeError: If neither a Model nor ``(coords, physics)`` is passed.
+            ValueError: If the prediction, observation, or snapshot arrays are
+                obviously incompatible with the supplied context.
+
+        """
+        is_model = all(
+            hasattr(model_or_coords, name)
+            for name in ("coords", "physics", "dycore")
+        )
+        if is_model:
+            if physics is not None:
+                raise TypeError(
+                    "Pass either with_context(model) or "
+                    "with_context(coords, physics), not both.")
+            model = model_or_coords
+            coords = model.coords
+            physics = model.physics
+            if dycore is _MISSING:
+                dycore = model.dycore
+            if observers is _MISSING:
+                observers = getattr(model, "observers", ())
+            if obs_dt_seconds is _MISSING:
+                dt_si = getattr(model, "dt_si", None)
+                obs_dt_seconds = getattr(
+                    dt_si, "m", getattr(model.dycore, "dt_seconds", None))
+        else:
+            coords = model_or_coords
+            if physics is None:
+                raise TypeError(
+                    "with_context(coords, physics) requires a physics "
+                    "argument; pass a Model as the sole positional argument "
+                    "for the model-bound form.")
+
+        dycore = self._dycore if dycore is _MISSING else dycore
+        observations = (
+            self._observations if observations is _MISSING else observations
+        )
+        observers = self._observers if observers is _MISSING else observers
+        obs_t0_days = (
+            self._obs_t0_days if obs_t0_days is _MISSING else obs_t0_days
+        )
+        obs_dt_seconds = (
+            self._obs_dt_seconds
+            if obs_dt_seconds is _MISSING else obs_dt_seconds
+        )
+        snapshots = self._snapshots if snapshots is _MISSING else snapshots
+        snapshot_variables = (
+            self._snapshot_variables
+            if snapshot_variables is _MISSING else snapshot_variables
+        )
+        snapshot_interval_days = (
+            self._snapshot_interval_days
+            if snapshot_interval_days is _MISSING
+            else snapshot_interval_days
+        )
+
+        if (obs_t0_days is None and observations
+                and obs_dt_seconds is not None):
+            obs_t0_days = self._infer_observation_t0(
+                observations, obs_dt_seconds)
+
+        self._validate_context_shapes(
+            coords, observations, observers, snapshots)
+        restored = ModelPredictions(
+            self._predictions,
+            coords,
+            physics,
+            dycore=dycore,
+            observations=observations,
+            observers=observers,
+            obs_t0_days=obs_t0_days,
+            obs_dt_seconds=obs_dt_seconds,
+            snapshots=snapshots,
+            snapshot_variables=snapshot_variables,
+            snapshot_interval_days=snapshot_interval_days,
+        )
+        # ``__init__`` has just captured the live values. Label that record
+        # after construction rather than passing it as ``params=``: the latter
+        # means "trace-time record" and intentionally invokes the live-vs-
+        # compiled mismatch check, which is not the claim this API can make.
+        restored._params = dict(restored._params)
+        restored._params[_LIVE_CONTEXT_PARAMS_KEY] = (
+            _LIVE_CONTEXT_PARAMS_DESCRIPTION)
+        return restored
+
+    def _infer_observation_t0(self, observations, obs_dt_seconds):
+        """Infer a concrete observer-window start from retained array data."""
+        lengths = {
+            int(leaf.shape[0])
+            for leaf in jax.tree_util.tree_leaves(observations)
+            if hasattr(leaf, "shape") and leaf.ndim > 0
+        }
+        if not lengths:
+            return None
+        if len(lengths) != 1:
+            raise ValueError(
+                "Observation arrays have inconsistent leading sample counts: "
+                f"{sorted(lengths)}.")
+        times = getattr(self._predictions, "times", None)
+        if times is None or getattr(times, "ndim", 0) != 1 or not times.shape[0]:
+            return None
+        try:
+            final_time = float(jax.device_get(times[-1]))
+            dt_days = float(obs_dt_seconds) / 86400.0
+        except (TypeError, ValueError):
+            # Traced timestamps/cadences cannot be used as host metadata. The
+            # observation accessor already explains how to provide t0 when it
+            # remains unavailable.
+            return None
+        return final_time - lengths.pop() * dt_days
+
+    def _validate_context_shapes(
+        self, coords, observations, observers, snapshots,
+    ) -> None:
+        """Reject context that is plainly incompatible with retained arrays."""
+        expected = getattr(coords, "nodal_shape", None)
+        dynamics = getattr(self._predictions, "dynamics", None)
+        u_wind = getattr(dynamics, "u_wind", None)
+        if expected is not None and u_wind is not None:
+            expected = tuple(int(size) for size in expected)
+            actual = tuple(int(size) for size in u_wind.shape[1:])
+            if actual != expected:
+                raise ValueError(
+                    "Prediction grid shape is incompatible with the supplied "
+                    f"coordinates: retained u_wind frames have {actual}, but "
+                    f"coords.nodal_shape is {expected}.")
+
+        if observations and len(observations) != len(observers):
+            raise ValueError(
+                f"Retained observations contain {len(observations)} stream(s), "
+                f"but the supplied context has {len(observers)} observer(s).")
+
+        horizontal_shape = getattr(
+            getattr(coords, "horizontal", None), "nodal_shape", None)
+        if snapshots and horizontal_shape is not None:
+            horizontal_shape = tuple(int(size) for size in horizontal_shape)
+            for name, values in snapshots.items():
+                actual = tuple(int(size) for size in values.shape[1:])
+                if actual != horizontal_shape:
+                    raise ValueError(
+                        f"Snapshot {name!r} has horizontal shape {actual}, "
+                        "but the supplied coordinates require "
+                        f"{horizontal_shape}.")
 
     def snapshot_dataset(self):
         """Interval-instantaneous 2-D snapshots as one xarray Dataset.

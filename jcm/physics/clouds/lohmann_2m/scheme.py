@@ -1050,6 +1050,19 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
+    def adopt_runtime_configuration(self, previous) -> None:
+        """Inherit the SPA activation tuning from a displaced 2M term.
+
+        Set by ``echam_physics`` after composition, from the aerosol module's
+        parameters, so a term swapped in afterwards would otherwise silently
+        fall back to the (1.0, 0.5, 0.0) constructor defaults and change the
+        droplet number the whole cloud scheme keys off.
+        """
+        for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
+            param = getattr(previous, name, None)
+            if param is not None:
+                setattr(self, name, nnx.Param(jnp.asarray(param.get_value())))
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """Declare the full 2M prognostic tracer set."""

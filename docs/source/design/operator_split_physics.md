@@ -79,8 +79,9 @@ remapping, and other representation-specific operations.
 
 The shipped `DinosaurDycore` converts the tendency to a spectral
 primitive-equation tendency, applies the forward-Euler physics update,
-runs IMEX-RK SIL3, then applies the surface-pressure conservation and
-spectral diffusion filters.
+runs the two-time-level semi-Lagrangian semi-implicit Crank–Nicolson RK2
+step, then applies the surface-pressure conservation and spectral
+diffusion filters.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
@@ -88,8 +89,11 @@ Accepts an already-gridpoint `PhysicsState`, runs `verify_state`
 (non-negativity clamp on tracers), calls
 `Physics.compute_tendencies(state, forcing, terrain,
 prev_physics_data=physics_state)`, applies `verify_tendencies` (caps
-negative-going tracer tendencies at `-state/dt`), and returns the
-gridpoint tendency unchanged by any backend-specific conversion.
+negative-going tracer tendencies at `-state/dt` and charges the
+condensate corrections to the local vapour with latent heat, ECHAM
+mo_cloud 8.4 style, so the cap conserves total water per cell — see
+{doc}`water_positivity_conservation`), and returns the gridpoint
+tendency unchanged by any backend-specific conversion.
 
 Returns `(physics_tendency, new_physics_state)`. The new carry is the
 dict the physics call writes to (radiation cache, prior-step TKE,
@@ -132,26 +136,32 @@ in-stage scheme.
 
 ### Cross-step carry persistence
 
-`Model` holds two slots of cross-step state:
+`Model` exposes two read-only slots of cross-step state:
 
-- `_final_dycore_state` — backend-native state at the end of the last
+- `dycore_state` — backend-native state at the end of the last
   `run()` / `resume()` call.
-- `_final_physics_state` — the cross-step physics carry at the end of
+- `physics_carry` — the cross-step physics carry at the end of
   the last call.
 
 `run()` resets both via `bootstrap_state` (and rebuilds the physics
-carry via `_build_initial_physics_carry`). `resume()` threads them
+carry via `initial_physics_carry`). `resume()` threads them
 back in. The result: a `run(5d)` + `resume(5d)` chain is numerically
 equivalent to a contiguous `run(10d)` — sub-cycled radiation and
 prior-step TKE do not reset at the API seam. Regression covered by
 `test_op_split_carry_persists_across_resume`.
+
+`initial_state()` and `initial_physics_carry()` return fresh pytrees without
+mutating the model. `bootstrap_state()` installs and returns a matched pair;
+checkpoint deserializers replace a pair atomically through `restore_state()`.
+The two public properties are deliberately read-only so a dycore state cannot
+be paired accidentally with a stale radiation/TKE carry.
 
 `run_from_state_with_carry` exposes the carry seed and final carry
 directly for callers that need explicit control.
 
 ### Initial physics carry
 
-`Model._build_initial_physics_carry` unions:
+`Model.initial_physics_carry` unions:
 
 - `Physics.initial_carry_state(coords)` — per-term deterministic seed.
   Each `PhysicsTerm` that has cross-step state overrides this with a
@@ -170,6 +180,15 @@ The isothermal probe (rather than a zero-state probe) avoids a
 `0/0 = NaN` cascade in schemes that cannot diagnose a valid state from
 all-zero thermodynamic inputs. The result of `get_empty_data` is never
 used as live state — only as a shape template.
+
+Almost every carry entry is a diagnostic the next step or two rewrites,
+which is what lets a checkpoint restore absorb a changed carry field set
+by matching on names. A term whose slot is instead the *only* copy of a
+physical quantity — JAM's cloud-borne aerosol phase — declares it in
+`PhysicsTerm.prognostic_carry_slots`, and a restore that would have to
+seed or drop that slot is refused rather than silently inventing or
+destroying the quantity. See
+[checkpoint compatibility](checkpoint_compatibility.md).
 
 ### Coupling within physics
 
@@ -235,9 +254,14 @@ kwarg on `run()` / `resume()` / `run_from_state()`.
 
 ## Performance notes
 
-- Physics runs once per `dt` rather than three times per `dt` (one per
-  IMEX-RK explicit substage). For RRTMGP / TTE-TKE / Tiedtke-Nordeng
-  this is roughly 3× the wall-time saving on the physics path.
+- Physics runs once per `dt`. The removed in-stage path called it once
+  per explicit substage of the IMEX-RK SIL3 step the Dinosaur backend
+  integrated with at the time — three times per `dt` — so for RRTMGP /
+  TTE-TKE / Tiedtke-Nordeng the change was roughly a 3× wall-time saving
+  on the physics path. (The backend now integrates with a two-stage
+  semi-Lagrangian Crank–Nicolson RK2 step, so a hypothetical in-stage
+  path today would cost 2×, not 3×; the measured saving above is the
+  historical one against SIL3.)
 - Backward passes pay `~3×` less memory under `jax.checkpoint` for the
   physics path because each checkpoint re-traces a single physics call.
 - Radiation sub-cycling honours one timeline (`radiation_should_compute`
@@ -280,16 +304,22 @@ called exactly once per dynamics timestep.**
 Two structural differences from JCM:
 
 1. **Dynamics integrator.** ECHAM uses leapfrog + semi-implicit
-   (spectral); JCM's shipped Dinosaur backend uses IMEX-RK SIL3.
-   The split point is the same — operator-split physics — but the
-   dynamics integrator on each side differs. ECHAM's split is forced
-   by leapfrog's single RHS evaluation per `dt`; Dinosaur's SIL3 has
-   substages and *could* in principle evaluate physics at each one,
-   so for JCM operator-splitting is a real design choice. CAM (HOMME
-   spectral element), E3SM (HOMME with sub-cycled advection), and IFS
-   (semi-Lagrangian + semi-implicit) op-split despite having more
-   than one dynamics evaluation per physics `dt` — the same situation
-   JCM-with-SIL3 is in.
+   (spectral); JCM's shipped Dinosaur backend uses a two-time-level
+   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step (both are
+   semi-implicit — the contrast is the time-level structure and the SL
+   transport; see {doc}`../science/dynamical_core`). The split point is
+   the same — operator-split physics — but the dynamics integrator on
+   each side differs. ECHAM's split is forced by leapfrog's single RHS
+   evaluation per `dt`; the RK2 step has two stages and *could* in
+   principle evaluate physics at each one, so for JCM
+   operator-splitting is a real design choice. That places JCM with IFS
+   (semi-Lagrangian + semi-implicit, op-split), and with CAM (HOMME
+   spectral element) and E3SM (HOMME with sub-cycled advection), all of
+   which op-split despite more than one dynamics evaluation per physics
+   `dt` — as does JCM's own pySES CAM-SE backend, whose explicit
+   RK3-5STAGE core takes the physics tendency once per coupling step
+   (under the shipped `coupling: hybrid`, CAM-SE `se_ftype 2`, tracers
+   are lumped while u/v/T are dribbled across the dynamics substeps).
 
 2. **Within-physics coupling.** ECHAM is **sequential** (each scheme
    reads the state with prior schemes' tendencies already applied via

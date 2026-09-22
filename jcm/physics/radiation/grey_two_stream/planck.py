@@ -17,6 +17,12 @@ C_LIGHT = 2.99792458e8       # Speed of light (m/s)
 K_BOLTZMANN = 1.380649e-23   # Boltzmann constant (J/K)
 STEFAN_BOLTZMANN = 5.670374419e-8  # Stefan-Boltzmann constant (W/m²/K⁴)
 
+# The second radiation constant hc/k, in m·K. Folded here, in Python's
+# float64, rather than left as ``(H_PLANCK * C_LIGHT) / (K_BOLTZMANN * T)``
+# for the reason in ``planck_function_wavenumber``: the derivative of that
+# form underflows in float32.
+HC_OVER_K = (H_PLANCK * C_LIGHT) / K_BOLTZMANN  # 1.4387769e-2 m·K
+
 
 @jax.jit
 def planck_function_wavenumber(
@@ -38,8 +44,22 @@ def planck_function_wavenumber(
     # Convert wavenumber from cm⁻¹ to m⁻¹
     nu = wavenumber * 100.0
 
-    # Calculate hc/kT
-    hc_kt = (H_PLANCK * C_LIGHT) / (K_BOLTZMANN * temperature)
+    # Calculate hc/kT.
+    #
+    # Divide by the temperature itself, never by ``K_BOLTZMANN *
+    # temperature``. The two are the same number, but the *derivative* of the
+    # second form is not representable in float32: the quotient's VJP is
+    # ``-numerator / denominator**2``, and ``(1.38e-23 * 250)**2 ~ 1.2e-41``
+    # is below float32's smallest normal (1.18e-38), so it flushes toward
+    # zero and the reported ``d(hc_kt)/dT`` overflows to ``+inf`` — at every
+    # temperature and every wavenumber, not at some corner. The forward value
+    # is perfectly finite, which is why this survived: it only shows up when
+    # something differentiates the longwave, and then it takes the whole
+    # longwave flux gradient with it.
+    #
+    # With ``hc/k`` folded into one O(1e-2) constant the denominator is the
+    # temperature, whose square is O(1e5), and the derivative is ordinary.
+    hc_kt = HC_OVER_K / temperature
 
     # Planck function
     # CRITICAL FIX: Was * 1e-2, should be * 100.0 (or * 1e2)

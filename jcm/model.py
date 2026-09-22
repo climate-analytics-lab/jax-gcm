@@ -104,7 +104,7 @@ def _neutralize_mesh_typing(physics) -> None:
     gives the mesh-less, uncommitted typing that every pre-mesh module
     constant has — freely usable in both explicit and auto regions. In-place
     via ``nnx.update``; dtypes are preserved (the float32 physics cast in
-    ``_build_initial_physics_carry`` is unaffected).
+    ``initial_physics_carry`` is unaffected).
     """
     import numpy as np
     from flax import nnx
@@ -387,8 +387,7 @@ class Model:
                  physics: Physics = None,
                  start_date: jdt.Datetime | None = None,
                  calendar: str = "365_day",
-                 observers=(),
-                 log_level=logging.WARNING) -> None:
+                 observers=()) -> None:
         """Initialise the model.
 
         Args:
@@ -396,7 +395,8 @@ class Model:
                 ``None``, a default :class:`DinosaurDycore` is constructed
                 from ``coords`` and ``terrain`` for convenience. Backend-
                 specific knobs (diffusion, nudging-as-PhysicsTerm targets,
-                IMEX stepper details) belong to the dycore's own constructor
+                stepper options such as the semi-Lagrangian off-centering)
+                belong to the dycore's own constructor
                 — wire them there, then pass the dycore in.
             coords: CoordinateSystem. Required when ``dycore`` is ``None``.
                 To enable SPMD parallelization, pass ``spmd_mesh`` to the
@@ -447,22 +447,8 @@ class Model:
                 automatically so state fields are sampleable. Results ride
                 on :class:`~jcm.predictions.ModelPredictions` — see
                 :meth:`~jcm.predictions.ModelPredictions.observation_datasets`.
-            log_level: Verbosity applied to the ``jcm`` logger hierarchy.
-                Defaults to ``logging.WARNING`` so that warnings jcm raises
-                about a run stay audible — notably the one saying an
-                in-place parameter change did not reach the computation
-                (#735), which the previous ``CRITICAL`` default silenced.
-                Only the ``jcm`` logger is set, not the root logger, so
-                constructing a Model neither clobbers an application's own
-                logging configuration nor lets an application-wide filter
-                suppress jcm's warnings about its own results. Pass
-                ``logging.CRITICAL`` to quieten jcm.
 
         """
-        # The ``jcm`` package logger, not the root logger: every jcm module
-        # logs through ``logging.getLogger(__name__)``, so this reaches all
-        # of them without deciding logging policy for the host application.
-        logging.getLogger("jcm").setLevel(log_level)
         self.calendar = calendar
         # Default built HERE, not as a def-time default: a def-time
         # ``jdt.to_datetime(...)`` freezes its array dtypes at import time,
@@ -602,7 +588,10 @@ class Model:
         # Initial gridpoint state set upon calling model.run.
         self.initial_nodal_state = None
 
-        # Dycore-native state at end of last run/resume.
+        # Dycore-native state at end of the last bootstrap/run/resume. Public
+        # callers read this through the read-only ``dycore_state`` property;
+        # writes are centralized in ``_record_state`` so the dycore state and
+        # physics carry cannot be updated independently by checkpoint code.
         self._final_dycore_state = None
 
         # Set when a run's final state was a tracer, so the carry on this
@@ -612,7 +601,8 @@ class Model:
         # Cross-step physics carry threaded through op-split run/resume.
         # ``None`` means "build a fresh carry on the next call"; set by
         # ``bootstrap_state`` so that ``run() + resume()`` matches a single
-        # ``run()`` of the combined duration.
+        # ``run()`` of the combined duration. Public callers read this through
+        # the read-only ``physics_carry`` property.
         self._final_physics_state = None
 
     def __repr__(self) -> str:
@@ -632,6 +622,78 @@ class Model:
             f"grid={grid}, levels={layers}, dt={float(self.dt_si.m):g}s, "
             f"physics={physics})"
         )
+
+    @property
+    def dycore_state(self) -> Any | None:
+        """Most recent concrete backend-native state, or ``None``.
+
+        The state is populated by :meth:`bootstrap_state`, :meth:`run`,
+        :meth:`resume`, or :func:`jcm.checkpoint.load_checkpoint`. It is
+        read-only so state and :attr:`physics_carry` cannot be replaced
+        independently; checkpoint implementations should use
+        :meth:`restore_state` to replace the pair atomically.
+
+        A run performed inside a JAX transformation leaves this property as
+        ``None`` because retaining a tracer on the model would let it escape
+        its transformation. In that setting, use
+        :meth:`run_from_state_with_carry`, which returns both values.
+        """
+        return self._final_dycore_state
+
+    @property
+    def physics_carry(self) -> Any | None:
+        """Most recent concrete cross-step physics carry, or ``None``.
+
+        This is the carry paired with :attr:`dycore_state`. It includes state
+        such as radiation sub-cycle caches and prior-step turbulence values.
+        The property is read-only; use :meth:`restore_state` when restoring a
+        checkpoint pair and :meth:`initial_physics_carry` for a fresh seed.
+        """
+        return self._final_physics_state
+
+    def _record_state(
+        self,
+        dycore_state: Any | None,
+        physics_carry: Any | None,
+        *,
+        carry_was_traced: bool = False,
+    ) -> None:
+        """Record one matched state/carry pair for bootstrap and resume."""
+        self._final_dycore_state = dycore_state
+        self._final_physics_state = physics_carry
+        self._carry_was_traced = carry_was_traced
+
+    def restore_state(self, dycore_state: Any, physics_carry: Any) -> None:
+        """Replace the model's resumable state with one concrete pair.
+
+        This narrow mutation seam exists for deserializers such as
+        :func:`jcm.checkpoint.load_checkpoint`. Both values are required so a
+        dycore state can never be paired with a stale physics carry. Ordinary
+        callers should prefer :meth:`bootstrap_state`, :meth:`run`, or
+        :meth:`run_from_state_with_carry`.
+
+        Args:
+            dycore_state: Backend-native state to continue from.
+            physics_carry: Matching cross-step physics carry.
+
+        Raises:
+            ValueError: If either value is ``None`` or contains a JAX tracer.
+                Traced values must be threaded functionally with
+                :meth:`run_from_state_with_carry` instead of stored on a
+                Python object.
+
+        """
+        if dycore_state is None or physics_carry is None:
+            raise ValueError(
+                "restore_state requires both a dycore state and its matching "
+                "physics carry."
+            )
+        if _contains_tracers((dycore_state, physics_carry)):
+            raise ValueError(
+                "restore_state cannot retain JAX tracers on Model; thread "
+                "them explicitly with run_from_state_with_carry instead."
+            )
+        self._record_state(dycore_state, physics_carry)
 
     # Default step when the active physics reports no stability limit (ECHAM,
     # Held-Suarez, ...): the validated ECHAM L47/L95 production step, matching
@@ -693,9 +755,44 @@ class Model:
             return self._DEFAULT_TIME_STEP_MINUTES
         return min(self._MAX_PHYSICS_TIME_STEP_MINUTES, float(limit))
 
-    def _date_from_sim_time(self, sim_time) -> DateData:
-        # Stop gradient: date/calendar computations use non-differentiable ops
-        # (floor, round, int casts) and should not be part of the AD graph.
+    def date_from_sim_time(self, sim_time) -> DateData:
+        """Convert elapsed simulation seconds to model date metadata.
+
+        This is the model clock conversion used internally for date-aware
+        forcing and physics.  Callers should pass the ``sim_time`` carried by
+        this model's dynamical core so that the returned step number is based
+        on the same timestep.
+
+        Args:
+            sim_time: Scalar seconds elapsed from :attr:`start_date`. Date
+                arithmetic is intentionally detached with
+                ``jax.lax.stop_gradient``, so traced values are safe under
+                ``jax.jit`` and ``jax.lax.scan`` but date metadata does
+                not contribute to derivatives.
+
+        Returns:
+            A :class:`~jcm.date.DateData` containing the rounded absolute
+            date, the timestep-derived model step, and this model's timestep
+            in seconds.
+
+        Notes:
+            Whole elapsed days are taken with ``floor(sim_time / 86400)`` and
+            the sub-day remainder is rounded to the nearest integer second
+            with ``jax.numpy.round`` (ties to even). A remainder that rounds
+            to 86,400 seconds is normalized by ``jax_datetime.Timedelta``
+            into the next day. ``model_step`` is computed independently as
+            ``int32(sim_time / dt_seconds)`` (truncation toward zero), so an
+            arbitrary time just before a rounded date rollover remains in the
+            preceding model step. Normal simulation clocks are non-negative.
+
+            :class:`~jcm.date.DateData` is calendar-neutral. Pass
+            :attr:`calendar` to calendar-dependent accessors such as
+            :meth:`~jcm.date.DateData.tyear` and
+            :meth:`~jcm.date.DateData.model_year`.
+
+        """
+        # Date/calendar computations use non-differentiable operations and
+        # represent metadata, so they must not become part of the AD graph.
         sim_time = jax.lax.stop_gradient(sim_time)
         return DateData.set_date(
             model_time=self.start_date + jdt.Timedelta(
@@ -707,12 +804,35 @@ class Model:
             calendar=self.calendar,
         )
 
-    def _prepare_initial_dycore_state(self, physics_state: PhysicsState = None,
-                                      random_seed=0, sim_time=0.0):
-        """Build the dycore-native initial state.
+    def _date_from_sim_time(self, sim_time) -> DateData:
+        """Compatibility alias for :meth:`date_from_sim_time`."""
+        return self.date_from_sim_time(sim_time)
+
+    def initial_state(
+        self,
+        physics_state: PhysicsState | None = None,
+        *,
+        random_seed: int = 0,
+        sim_time: float = 0.0,
+    ) -> Any:
+        """Build and return a fresh backend-native initial state.
 
         Thin wrapper around :meth:`DynamicalCore.initial_state` that supplies
-        the tracer specs aggregated from the active physics package.
+        the tracer specs aggregated from the active physics package. This
+        method does not mutate :attr:`dycore_state` or :attr:`physics_carry`;
+        use :meth:`bootstrap_state` when the returned state should also become
+        the model's resumable state.
+
+        Args:
+            physics_state: Optional gridpoint state to project into the active
+                dycore. When omitted, the dycore constructs its default state.
+            random_seed: Seed used by a dycore's default-state perturbations.
+            sim_time: Initial model time in seconds.
+
+        Returns:
+            A backend-native state containing every tracer required by the
+            composed physics package.
+
         """
         tracer_specs = {spec.name: spec for spec in self.physics.required_tracers()}
         return self.dycore.initial_state(
@@ -720,6 +840,19 @@ class Model:
             sim_time=sim_time,
             random_seed=random_seed,
             tracer_specs=tracer_specs,
+        )
+
+    def _prepare_initial_dycore_state(
+        self,
+        physics_state: PhysicsState | None = None,
+        random_seed: int = 0,
+        sim_time: float = 0.0,
+    ) -> Any:
+        """Forward to :meth:`initial_state` for compatibility."""
+        return self.initial_state(
+            physics_state,
+            random_seed=random_seed,
+            sim_time=sim_time,
         )
 
     def _get_op_split_step_fn(self, forcing: ForcingData):
@@ -752,7 +885,7 @@ class Model:
         )
 
         def step(state, physics_state):
-            date = self._date_from_sim_time(self.dycore.sim_time(state))
+            date = self.date_from_sim_time(self.dycore.sim_time(state))
             forcing_now = forcing.select(date, calendar=self.calendar)
             # The scopes opened here and in ComposablePhysics's term loop label
             # this step's HLO, so that a profiler trace can be split into
@@ -841,10 +974,8 @@ class Model:
         boundary so spectral Gibbs ringing of the physics tendency doesn't leak
         negative values into user-visible output.
         """
-        jax.debug.callback(
-            lambda t: logger.info("Post processing: %s simulated seconds", t),
-            self.dycore.sim_time(state),
-        )
+        # No logging inside the scan: a host callback here makes the whole
+        # integration ineligible for XLA's persistent compilation cache.
         if isinstance(physics_state, dict) and "_sampler_state" in physics_state:
             # The StateSampler's per-step state snapshot exists only for the
             # per-dt observer channel; saving it would duplicate the dynamics
@@ -858,15 +989,18 @@ class Model:
             times=None,
         )
 
-    def _build_initial_physics_carry(self) -> Any:
-        """Build the cross-step physics carry seed for an op-split run.
+    def initial_physics_carry(self) -> Any:
+        """Build and return a fresh cross-step physics carry.
 
         Pulls per-term initial state from :meth:`Physics.initial_carry_state`
         (deterministic, no zero-state probe). Unions with the *structural
         template* from :meth:`Physics.get_empty_data` so the ``lax.scan`` carry
         pytree matches the post-step ``compute_tendencies`` output structure
         on iteration 1 (within-step diagnostic keys terms write are
-        zero-filled). ``get_empty_data`` is internal-only in this role.
+        zero-filled). ``get_empty_data`` is internal-only in this role. This
+        method does not mutate :attr:`physics_carry`; use
+        :meth:`bootstrap_state` to install a fresh state/carry pair on the
+        model.
         """
         template = self.physics.get_empty_data(self.coords)
         initial_carry = self.physics.initial_carry_state(self.coords)
@@ -894,6 +1028,10 @@ class Model:
                 carry,
             )
         return carry
+
+    def _build_initial_physics_carry(self) -> Any:
+        """Forward to :meth:`initial_physics_carry` for compatibility."""
+        return self.initial_physics_carry()
 
     def _get_op_split_integrate_fn(
         self,
@@ -1043,7 +1181,7 @@ class Model:
         (radiation cache, prior-step TKE, …). This method rebuilds that carry
         from scratch at every call. For chaining runs continuously (so the
         carry persists across API boundaries), use ``run`` / ``resume`` —
-        those thread ``self._final_physics_state`` automatically. For an
+        those thread :attr:`physics_carry` automatically. For an
         advanced caller that wants explicit control of the carry, use
         :meth:`run_from_state_with_carry`.
 
@@ -1255,7 +1393,7 @@ class Model:
                     f"snapshot_interval {snapshot_interval!r} is not a "
                     f"multiple of the model timestep ({self.dt_si.m} s).")
         if initial_physics_state is None:
-            initial_physics_state = self._build_initial_physics_carry()
+            initial_physics_state = self.initial_physics_carry()
 
         # Build the observers' per-step sampling tables for this window
         # (offline numpy; horizontal weights are resolved here once and only
@@ -1324,7 +1462,7 @@ class Model:
         """Continue from end of previous ``run`` / ``resume``.
 
         Continues the cross-step physics carry across the call boundary:
-        ``self._final_physics_state`` from the previous ``run``/``resume`` is
+        :attr:`physics_carry` from the previous ``run``/``resume`` is
         threaded back in so sub-cycled radiation, prior-step TKE, etc. don't
         reset at the API seam. A run broken into ``run()`` then ``resume()``
         for the same total duration therefore matches a single ``run()`` of
@@ -1340,24 +1478,25 @@ class Model:
                 "and physics states alongside the predictions; outside one, "
                 "start again from an explicit state with run(initial_state)."
             )
-        jax.debug.callback(
-            lambda: logger.info(
-                "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
-                save_interval, total_time, output_averages),
+        # Plain logging: these are static Python values, so there is nothing to
+        # defer to a host callback (which would also block the cache).
+        logger.info(
+            "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
+            save_interval, total_time, output_averages,
         )
         final_dycore_state, final_physics_state, predictions = self.run_from_state_with_carry(
-            initial_state=self._final_dycore_state,
+            initial_state=self.dycore_state,
             forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,
-            initial_physics_state=self._final_physics_state,
+            initial_physics_state=self.physics_carry,
             snapshot_interval=snapshot_interval,
             snapshot_variables=snapshot_variables,
             observer_t0_days=observer_t0_days,
             observer_xs=observer_xs,
         )
-        jax.debug.callback(lambda: logger.info("Run completed."))
+        logger.info("Run completed.")
         # Under an enclosing transformation these are tracers, and storing
         # them poisons the model: the next ``resume`` would thread a value
         # that escaped its trace back into a new one and raise
@@ -1365,13 +1504,9 @@ class Model:
         # fine — its results are returned, not read back off the model — so
         # record that there is no carry rather than keeping a broken one.
         if _contains_tracers((final_dycore_state, final_physics_state)):
-            self._final_dycore_state = None
-            self._final_physics_state = None
-            self._carry_was_traced = True
+            self._record_state(None, None, carry_was_traced=True)
         else:
-            self._final_dycore_state = final_dycore_state
-            self._final_physics_state = final_physics_state
-            self._carry_was_traced = False
+            self._record_state(final_dycore_state, final_physics_state)
         return predictions
 
     def run(self,
@@ -1403,20 +1538,23 @@ class Model:
         carry we want to preserve rather than reset — it *replaces* the
         freshly-built carry after ``bootstrap_state`` and before the first
         ``resume``. It must be a carry that structurally matches what
-        :meth:`_build_initial_physics_carry` builds for this model (same
+        :meth:`initial_physics_carry` builds for this model (same
         physics composition + coords): ``resume`` uses the freshly-built carry
         as the pytree template and unflattens the checkpoint against it, so a
         carry from a different composition would not line up. In practice this
         is the value returned by :func:`jcm.initial_states.checkpoint_state`,
         which loads it through that same template.
         """
-        self.bootstrap_state(initial_state)
+        dycore_state, physics_carry = self.bootstrap_state(initial_state)
         if initial_physics_state is not None:
             # ``bootstrap_state`` just built a fresh carry; a warm start wants
             # the donor's restored carry instead so sub-cycled radiation /
             # prior-step TKE don't reset at the run seam. Replace it before the
-            # first ``resume`` threads ``self._final_physics_state`` in.
-            self._final_physics_state = initial_physics_state
+            # first ``resume`` threads :attr:`physics_carry` in. This accepts
+            # tracers because ``run`` can itself execute under a JAX
+            # transformation; ``resume`` drops traced results before they can
+            # escape the transformation.
+            self._record_state(dycore_state, initial_physics_state)
         return self.resume(
             forcing=forcing, save_interval=save_interval,
             total_time=total_time, output_averages=output_averages,
@@ -1426,34 +1564,41 @@ class Model:
             observer_xs=observer_xs,
         )
 
-    def bootstrap_state(self, initial_state=None) -> None:
-        """Populate ``_final_dycore_state`` and ``_final_physics_state`` without integrating.
+    def bootstrap_state(self, initial_state=None) -> tuple[Any, Any]:
+        """Build, install, and return an initial state/carry pair.
 
         Equivalent to the prep that ``run`` does before its first ``resume``
         call, but exposed as a standalone method so callers that need only the
-        initial pytrees — checkpoint restore (where ``flax.serialization.from_bytes``
-        requires a template), state introspection, or a bring-your-own-stepper
-        workflow — don't have to spin up a zero-length integration to get them.
+        initial pytrees — checkpoint restore (where
+        ``flax.serialization.from_bytes`` requires a template), state
+        introspection, or a bring-your-own-stepper workflow — don't have to
+        spin up a zero-length integration to get them.
 
         ``initial_state`` may be ``None``, a gridpoint :class:`PhysicsState`,
         or a dycore-native state.
+
+        Returns:
+            ``(dycore_state, physics_carry)``. These are the same objects
+            exposed through :attr:`dycore_state` and :attr:`physics_carry`.
+
         """
         if initial_state is None:
             self.initial_nodal_state = None
-            self._final_dycore_state = self._prepare_initial_dycore_state(None)
+            dycore_state = self.initial_state()
         elif isinstance(initial_state, PhysicsState):
             self.initial_nodal_state = initial_state
-            self._final_dycore_state = self._prepare_initial_dycore_state(initial_state)
+            dycore_state = self.initial_state(initial_state)
         else:
             # Assume the caller has supplied a dycore-native state object.
             self.initial_nodal_state = self.dycore.to_physics_state(initial_state)
-            self._final_dycore_state = initial_state
+            dycore_state = initial_state
 
         # Eagerly build the physics carry. ``resume`` would otherwise build it
         # lazily on first call, but materialising it here makes the pytree
-        # available as a checkpoint-restore template and to any caller that
-        # wants to inspect / mutate the seed state before stepping.
-        self._final_physics_state = self._build_initial_physics_carry()
+        # available as a checkpoint-restore template and to callers that want
+        # to thread the seed explicitly through their own stepper.
+        physics_carry = self.initial_physics_carry()
         # An explicit state is a fresh, concrete carry: whatever a previous
         # traced run left behind no longer applies.
-        self._carry_was_traced = False
+        self._record_state(dycore_state, physics_carry)
+        return dycore_state, physics_carry

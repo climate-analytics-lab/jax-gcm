@@ -505,7 +505,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
             provenance.record_fact(
                 "ozone_source", "analytic (auto: no product for a sigma grid)")
             return forcing
-        logging.info("forcing.ozone_file=auto resolved to %s", ozone_file)
+        logger.info("forcing.ozone_file=auto resolved to %s", ozone_file)
     import numpy as np
 
     from jcm.forcing import default_forcing
@@ -648,7 +648,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
                 f"forcing.emissions_file {path!r} has no emissions variables: "
                 "expected ``emis_<sector>_<species>`` (bulk) or "
                 "``aero_emis_<tracer>`` (pre-speciated). See the emissions-file "
-                "contract in docs/design/jam.md."
+                "contract in docs/source/design/jam.md."
             )
         if a:
             _merge_disjoint_emissions(anthro, anthro_src, a, path)

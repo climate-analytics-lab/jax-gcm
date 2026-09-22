@@ -6,6 +6,7 @@ so it can run in the regular pytest sweep — we do not test the full ECHAM
 T85x47 grid here.
 """
 
+import logging
 import os
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ from jcm.runners import (
     build_tracer_filter,
     configure_host_device_count,
     guard_emulator_ghg_forcing,
+    resolve_effective_time_step_seconds,
     run,
 )
 
@@ -49,6 +51,130 @@ _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
 )
+
+
+class TestEffectiveTimeStepResolution(unittest.TestCase):
+    """One config/model contract supplies every runner timestep (#801)."""
+
+    def test_built_model_takes_precedence_over_an_explicit_config_value(self):
+        """A built integrator is authoritative; the config cannot outvote it.
+
+        A diagnostic that quoted the config value here would describe a run
+        that is not happening — the pySES failure mode of #801.
+        """
+        import types
+
+        cfg = _compose(["run.time_step=7.5"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_explicit_minutes_used_when_nothing_is_built(self):
+        cfg = _compose(["run.time_step=7.5"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 450.0)
+
+    def test_null_falls_back_to_the_pyses_dycore_group(self):
+        """The pySES group owns its step, so no build is needed to read it."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 900.0)
+
+    def test_null_does_not_read_dt_seconds_from_a_dinosaur_config(self):
+        """The dinosaur group derives dt_seconds FROM run.time_step.
+
+        Treating it as an independent owner would resolve a stale number, so
+        the fallback is gated on the backend that genuinely owns its step.
+        """
+        from omegaconf import open_dict
+
+        cfg = _compose(["run.time_step=null"])
+        with open_dict(cfg):
+            cfg.dycore.dt_seconds = 4242.0
+        with self.assertRaises(ValueError):
+            resolve_effective_time_step_seconds(cfg)
+
+    def test_explicit_zero_is_not_treated_as_delegation(self):
+        cfg = _compose(["run.time_step=0"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 0.0)
+
+    def test_null_delegates_to_built_model(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_null_accepts_a_built_dycore(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        dycore = types.SimpleNamespace(dt_seconds=900.0)
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, dycore), 900.0,
+        )
+
+    def test_null_without_an_owner_raises_a_contract_error(self):
+        cfg = _compose(["run.time_step=null"])
+        with self.assertRaisesRegex(ValueError, "owns a timestep"):
+            resolve_effective_time_step_seconds(cfg)
+
+    def _build_pyses_with_mocks(self, cfg):
+        from jcm.runners import _build_pyses_model
+
+        physics = mock.MagicMock()
+        physics.required_tracers.return_value = ()
+        dycore = mock.MagicMock()
+        dycore.dt_seconds = 900.0
+        expected = object()
+
+        with mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch(
+                    "jcm.dycore.pyses.PysesCamSEDycore",
+                    return_value=dycore,
+                ), \
+                mock.patch("jcm.runners._pyses_lid_sponge_term"), \
+                mock.patch("jcm.runners.Model", return_value=expected) as model:
+            result = _build_pyses_model(cfg)
+        self.assertIs(result, expected)
+        return model
+
+    def test_pyses_never_forwards_a_runner_timestep_to_model(self):
+        """The dycore owns the step; run.time_step must not veto the build.
+
+        ``run/default.yaml`` sets 12 minutes, so forwarding it would make
+        ``dycore=pyses_ne30l47`` fail construction unless the user also
+        selected ``run=pyses_year`` — a value they never chose overriding the
+        group that owns it.
+        """
+        for overrides in (
+            ["dycore=pyses_ne30l47"],                      # default run group
+            ["dycore=pyses_ne30l47", "run.time_step=30"],  # explicit conflict
+            ["dycore=pyses_ne30l47", "run.time_step=null"],
+        ):
+            with self.subTest(overrides=overrides):
+                model = self._build_pyses_with_mocks(_compose(overrides))
+                self.assertNotIn("time_step", model.call_args.kwargs)
+
+    def test_pyses_warns_when_the_runner_value_disagrees(self):
+        """A conflicting value is ignored loudly, not silently."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])
+        with self.assertLogs("jcm.runners", level="WARNING") as logs:
+            self._build_pyses_with_mocks(cfg)
+        joined = "\n".join(logs.output)
+        self.assertIn("pySES owns the timestep", joined)
+        self.assertIn("900.0", joined)
+
+    def test_pyses_is_quiet_when_the_runner_value_agrees(self):
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=15"])
+        with mock.patch("jcm.runners.logger") as log:
+            self._build_pyses_with_mocks(cfg)
+        log.warning.assert_not_called()
 
 
 class TestTracerPositivityResolution(unittest.TestCase):
@@ -440,6 +566,131 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
             np.asarray(forcing_with_ozone.sea_surface_temperature),
             np.asarray(baseline.sea_surface_temperature),
         )
+
+
+class TestRunLogLevel(unittest.TestCase):
+    """``run.log_level`` must reach jcm's loggers in every run mode (#815).
+
+    ``runners`` is the only layer that sets a level — jcm the library sets
+    none — so ``run()`` applying it before the mode dispatch is what makes
+    the knob mean the same thing everywhere. It used to be applied by
+    ``Model.__init__``, and only ``full`` builds a ``Model``, so it did
+    nothing at all in ``prescribed`` and ``scm``: the ``jcm`` logger stayed
+    NOTSET and deferred to the root level Hydra's job logging sets (INFO),
+    the opposite of what a user asking for WARNING wants.
+    """
+
+    def _level_seen_by(self, mode, requested):
+        """Level on the ``jcm`` logger when ``run`` dispatches to ``mode``.
+
+        The mode's runner is stubbed out, so this asserts the level is in
+        place *before* dispatch — which is what makes it mode-independent,
+        rather than a property of whatever each runner happens to build.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        # Set on the composed config rather than as a Hydra override: the
+        # override grammar parses ``run.log_level=50`` to an int either way,
+        # so an override string could not exercise the numeric-*string* path.
+        cfg.run.log_level = requested
+        cfg.run.mode = mode
+        seen = {}
+
+        def _capture(*args, **kwargs):
+            seen["level"] = logging.getLogger("jcm").level
+            return None
+
+        target = {"full": "_run_full", "prescribed": "_run_prescribed",
+                  "scm": "_run_scm"}[mode]
+        with mock.patch.object(runners, target, _capture):
+            runners.run(cfg)
+        return seen["level"]
+
+    def test_every_mode_applies_the_requested_level(self):
+        for mode in ("full", "prescribed", "scm"):
+            for requested, expected in (("WARNING", logging.WARNING),
+                                        ("CRITICAL", logging.CRITICAL),
+                                        ("INFO", logging.INFO)):
+                with self.subTest(mode=mode, log_level=requested):
+                    self.assertEqual(
+                        self._level_seen_by(mode, requested), expected)
+
+    def test_a_numeric_level_is_taken_as_is(self):
+        """The Python door spells this as an int, so the config may too.
+
+        The string spelling is not hypothetical: an interpolation such as
+        ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always resolves to ``str``, as
+        does a shell-quoted CLI override.
+        """
+        for requested in (50, "50"):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._level_seen_by("scm", requested), logging.CRITICAL)
+
+    def test_a_missing_level_uses_the_documented_default(self):
+        """A hand-rolled ``run`` group must not die before the run starts."""
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.mode = "scm"
+        del cfg.run.log_level
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_scm",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg)
+        self.assertEqual(seen["level"], logging.WARNING)
+
+    def test_the_config_applies_even_with_a_supplied_model(self):
+        """``run(cfg, model=...)`` applies the config's level regardless.
+
+        ``run()`` is the only caller of ``_apply_log_level``, so this pins
+        that its own call covers the pre-built-model path too, and that a
+        level the caller had already set is superseded by the config, which
+        is what describes the run.
+        """
+        from jcm import runners
+
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # a caller's own choice
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_full",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg, model=object())
+        self.assertEqual(seen["level"], logging.CRITICAL)
+
+    def test_the_python_door_leaves_the_callers_level_alone(self):
+        """Only the CLI configures logging — ``build_model`` must not.
+
+        ``jcm.configurations.load`` is a documented library API and reaches
+        ``build_model``, so applying the config's level there would put jcm
+        back to reconfiguring logging for a host application that never
+        asked for a CLI run (found by review on #819). ``run()`` is the CLI's
+        own entry point and is the only place that may.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # the caller's choice
+
+        from jcm.dycore.dinosaur import dycore as dinosaur_dycore
+        with mock.patch.object(dinosaur_dycore, "DinosaurDycore",
+                               side_effect=RuntimeError("stop here")):
+            with self.assertRaises(RuntimeError):
+                runners.build_model(cfg)
+
+        self.assertEqual(logging.getLogger("jcm").level, logging.DEBUG)
+
+    def test_an_unrecognised_level_is_refused(self):
+        """A typo must not silently run the job at some other verbosity."""
+        with self.assertRaisesRegex(ValueError, "not a logging level"):
+            self._level_seen_by("scm", "warnign")
 
 
 class TestAutoOzoneDefault(unittest.TestCase):
@@ -1130,12 +1381,181 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports1), 1)
             self.assertTrue(Path(ckpt_path).exists())
 
+            # The file carries the schema stamp, which is what lets a later
+            # jcm migrate a changed carry field set rather than reject the
+            # whole checkpoint (#731).
+            import flax.serialization
+
+            from jcm.checkpoint import SCHEMA_VERSION
+
+            day1 = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertEqual(int(day1["schema_version"]), SCHEMA_VERSION)
+            self.assertAlmostEqual(float(day1["elapsed_days"]), 1.0)
+
             # Second invocation: total 2 days, but the first chunk
             # should be skipped because the checkpoint records day=1.
             cfg2 = _compose(base_overrides + ["run.total_time=2"])
             reports2 = run(cfg2)
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
+            # That chunk rotated the day-1 checkpoint to ``.prev`` instead of
+            # overwriting the only restartable state.
+            prev = Path(f"{ckpt_path}.prev")
+            self.assertTrue(prev.exists())
+            rotated = flax.serialization.msgpack_restore(prev.read_bytes())
+            self.assertAlmostEqual(float(rotated["elapsed_days"]), 1.0)
+            current = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertAlmostEqual(float(current["elapsed_days"]), 2.0)
+
+    def test_chunked_budget_uses_model_timestep(self):
+        """The budget floor uses the step that advanced the model (#801)."""
+        import tempfile
+        import types
+
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            def __init__(self):
+                self.attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        for configured in ("null", "7"):
+            with self.subTest(configured_time_step=configured):
+                dataset = _Dataset()
+                predictions = types.SimpleNamespace(
+                    _predictions={},
+                    params=None,
+                    to_xarray=lambda: dataset,
+                )
+                model = types.SimpleNamespace(
+                    dt_si=types.SimpleNamespace(m=1800.0),
+                    run=mock.Mock(return_value=predictions),
+                )
+                cfg = _compose([
+                    f"run.time_step={configured}",
+                    "run.total_time=1",
+                    "run.save_interval=1",
+                ])
+
+                with tempfile.TemporaryDirectory() as tmpdir, \
+                        mock.patch("jcm.diagnostics.check_health",
+                                   return_value=(True, {})), \
+                        mock.patch("jcm.diagnostics.print_report"), \
+                        mock.patch("jcm.diagnostics.aerosol_budget_report",
+                                   return_value=[]) as budget, \
+                        mock.patch("jcm.runners.provenance.attrs",
+                                   return_value={}), \
+                        mock.patch("jcm.runners.provenance.write_sidecar"):
+                    run_chunked(
+                        cfg,
+                        chunk_days=1,
+                        output_prefix=f"{tmpdir}/chunk",
+                        model=model,
+                        forcing=object(),
+                    )
+
+                budget.assert_called_once_with(dataset, 1800.0)
+
+    def test_prescribed_mode_resolves_a_delegated_timestep_without_building(self):
+        """A delegating backend's step is read from its config group.
+
+        The physics-only driver has no dycore of its own, but constructing a
+        whole ne30L47 core just to read ``dt_seconds`` is not the way to get
+        one.
+        """
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(None, object())), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 900.0,
+        )
+
+    def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
+        """When the caller already built the model, it owns the step."""
+        import types
+
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12"])
+        owner = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(None, object())), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg, owner)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 1800.0,
+        )
+
+    def test_scm_mode_preserves_explicit_zero_timestep(self):
+        """Explicit zero reaches the SCM instead of triggering fallback."""
+        import types
+
+        from jcm.runners import _run_scm
+
+        cfg = _compose(["run.time_step=0"])
+        vertical = object()
+        coords = types.SimpleNamespace(vertical=vertical)
+        physics = object()
+        states = object()
+        column_states = object()
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=coords), \
+                mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(object(), states)), \
+                mock.patch("jcm.runners._select_column", return_value=(
+                    column_states, (1, 2, 3.0, 4.0))), \
+                mock.patch(
+                    "jcm.single_column_model.SingleColumnModel",
+                ) as scm_cls:
+            scm_cls.return_value.run.return_value = expected
+            result = _run_scm(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(scm_cls.call_args.kwargs["dt_seconds"], 0.0)
 
     def test_archive_fires_on_interval_crossing_not_divisibility(self):
         """``archive_ckpt_every`` need not divide ``chunk_days``.
@@ -1278,6 +1698,62 @@ class TestModeDispatch(unittest.TestCase):
             # inherits the donor clock and stamps ~day 3.
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
+
+    def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
+        """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
+
+        End-to-end through Hydra, because the escape hatch is only useful
+        if the override grammar can express it: the leaf names contain
+        dots, so the value is a list of ``"name=factor"`` entries rather
+        than a mapping (#731).
+        """
+        import tempfile
+
+        import flax.serialization
+        import jax
+
+        import numpy as np
+
+        from jcm.runners import build_model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            common = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+            ]
+            donor_cfg = _compose(common + ["run.total_time=1"])
+            donor = build_model(donor_cfg)
+            donor.bootstrap_state()
+            # The pre-#731 payload: positional leaf lists and no stamp.
+            legacy = f"{tmpdir}/legacy.ckpt"
+            Path(legacy).write_bytes(flax.serialization.to_bytes({
+                "elapsed_days": 1.0,
+                "dycore_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.dycore_state)],
+                "physics_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.physics_carry)],
+            }))
+
+            warm = common + [
+                "init=from_state",
+                f"init.file={legacy}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                run(_compose(warm))
+            self.assertIn("unstamped_scale", str(ctx.exception))
+
+            reports = run(_compose(warm + [
+                'init.unstamped_scale=["tracers.specific_humidity=1000"]',
+            ]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 1.0, places=5)
 
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
@@ -1932,13 +2408,9 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
-    Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
-    into the dynamics ``State.tracers`` skipped the
-    ``nondimensionalize(q * gram/kilogram)`` that the canonical
-    physics->dynamics bridge applies. The forward bridge then re-dimensionalized
-    (~x1000), so the physics saw q ~ 5 kg/kg; the cloud saturation adjustment
-    read that as hugely supersaturated and dumped ~7000 K of latent heat in a
-    single step, NaNing every moist init at step 1.
+    The dycore-native state and public ``PhysicsState`` both represent q as a
+    dimensionless kg/kg mass fraction. This catches either a missing or an
+    accidental extra factor of 1000 in the direct JW injection path.
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):
@@ -2417,23 +2889,6 @@ class TestWarnOnConfigTraps:
     real (expensive) model. Every finding is a WARNING; the tests assert both
     that it fires on its trap combo and that it stays silent on the sane one.
     """
-
-    @pytest.fixture(autouse=True)
-    def _audible_jcm_logger(self):
-        # ``caplog.at_level("WARNING")`` sets only the ROOT logger level, so a
-        # leaked ``jcm``-hierarchy level (another module's logging test can
-        # leave ``logging.getLogger("jcm")`` at CRITICAL under xdist) would
-        # filter these warnings before they reach caplog and make the
-        # assert-present cases spuriously fail. Force the ``jcm`` logger audible
-        # for the duration and restore it, so the capture is order-independent.
-        import logging
-        jcm_logger = logging.getLogger("jcm")
-        prev = jcm_logger.level
-        jcm_logger.setLevel(logging.WARNING)
-        try:
-            yield
-        finally:
-            jcm_logger.setLevel(prev)
 
     @staticmethod
     def _physics(*names):

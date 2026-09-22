@@ -26,20 +26,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax.scipy.special import erf
 
-# All physical constants are sourced from jcm.constants.PhysicalConstants
-# (short local aliases keep the formulae readable). _RGAS is the *universal*
-# gas constant (J/mol/K), distinct from the per-mass dry-air constant.
-from jcm.constants import air_thermal_conductivity as _KA
-from jcm.constants import alhc as _LV
-from jcm.constants import cpd as _CP
-from jcm.constants import grav as _G
-from jcm.constants import m_air as _MA
-from jcm.constants import m_water as _MW
-from jcm.constants import r_universal as _RGAS
-from jcm.constants import rhow as _RHOW
-from jcm.constants import surface_tension_water as _SIGMA_W
-from jcm.constants import tiny as _TINY
-from jcm.constants import vapor_diffusivity as _DV
+# Constants are read through the module alias and never bound with
+# ``from jcm.constants import grav``: a from-import captures the float at
+# import time, so a later ``set_constants`` override (another planet, a
+# sensitivity study, gradient calibration) would silently never reach this
+# scheme while the dynamics used the new value (#772).
+import jcm.constants as c
 
 # Ghosh et al. (2025) σ_acc validity range.
 _SIGMA_ACC_LO = 1.4
@@ -136,6 +128,13 @@ def arg_activation(
     # n_act, n_total ≥ 0 ⇒ activated_fraction ∈ [0, 1], activated_cdnc ≥ 0. Same
     # ringing root cause as the JAM-optics number floor (#543).
     number_vol = jnp.maximum(number_vol, 0.0)
+    # Bound here, per call, rather than at import: the short aliases keep the
+    # ARG formulae below readable while still reading the live constants (see
+    # the import note). _RGAS is the *universal* gas constant (J/mol/K),
+    # distinct from the per-mass dry-air constant.
+    _KA, _LV, _CP, _G = c.air_thermal_conductivity, c.alhc, c.cpd, c.grav
+    _MA, _MW, _RGAS, _RHOW = c.m_air, c.m_water, c.r_universal, c.rhow
+    _SIGMA_W, _TINY, _DV = c.surface_tension_water, c.tiny, c.vapor_diffusivity
     t = temperature
     p = pressure
     es = _saturation_vapor_pressure(t)

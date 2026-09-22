@@ -18,7 +18,18 @@
   (``adjustment.py``) with the three ``kcall`` modes. The precipitation budget
   (rain/snow partition, snow melt, sub-cloud Kessler evaporation, proportional
   depletion) transcribes ECHAM ``cuflx`` (``flux_tendencies.py``,
-  ``mo_cufluxdts.f90``).
+  ``mo_cufluxdts.f90``). The fractional precipitation cover the sub-cloud
+  evaporation acts over follows ECHAM's submodel dependence
+  (``mo_cufluxdts.f90:414-420``): plain ECHAM uses the constant
+  ``zcucov = 0.05``, but with the JAM aerosol chain composed
+  (``aerosol_module='jam'``, jcm's analogue of ECHAM's ``lham``) it uses the
+  **updraft area** ``pmfu/(zwu·ρ_u)`` — ``ρ_u = p/(R_d·T_u)`` the updraft
+  density, ``zwu = 2`` m/s the assumed in-cloud updraft speed — evaluated
+  over the plume profile and ECHAM's sub-cloud taper. This is the identical
+  footprint the JAM convective wet deposition uses for below-cloud washout
+  (``updraft_area_cover`` is shared between the two), so the rain the
+  aerosol scavenging sees and the rain the evaporation depletes agree by
+  construction.
 - **SPEEDY convection** (``jcm/physics/convection/speedy_convection.py::diagnose_convection``)
   — SPEEDY's simplified Tiedtke (1993) mass-flux scheme with a
   conditional-instability trigger on saturation moist static energy.

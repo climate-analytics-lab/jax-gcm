@@ -8,9 +8,12 @@ CLAUDE.md maintenance rule enforceable rather than aspirational.
 """
 
 import ast
+import os
 import re
 import unittest
 from pathlib import Path
+
+import tracked_gaps
 
 REPO = Path(__file__).resolve().parent.parent
 SCIENCE = REPO / "docs" / "source" / "science"
@@ -29,10 +32,9 @@ _DIR_POINTER = re.compile(
 # ``dir/{a,b}.yaml`` — a brace-grouped pointer naming several sibling files.
 _BRACE_POINTER = re.compile(
     r"``([A-Za-z0-9_./-]*)\{([A-Za-z0-9_,-]+)\}([A-Za-z0-9_.-]*)``")
-# Tracked-gap references. The register's rule is that an issue number means an
-# OPEN gap; a closed one silently converts a documented limitation into a
-# claim the reader believes was fixed.
-_ISSUE_REF = re.compile(r"#(\d{1,6})\b")
+# Tracked-gap references live in ``tracked_gaps``, shared with the workflow
+# that enforces them, so the guard and the hook cannot disagree about what
+# counts as a citation.
 # A bare ``Symbol`` / ``dotted.Symbol`` literal, as used in Code-pointer
 # bullets of the form ``file.py`` — ``ClassA``, ``func_b``.
 _BARE_SYMBOL = re.compile(r"``([A-Za-z_][A-Za-z0-9_.]*)``")
@@ -286,61 +288,33 @@ class TestSciencePagesAreWired(unittest.TestCase):
 
 
 class TestTrackedGapsAreOpen(unittest.TestCase):
-    """Every ``#NNN`` reference points at an OPEN issue.
+    """Every ``#NNN`` reference points at an OPEN issue — opt-in.
 
-    Queries the public GitHub API (unauthenticated; a handful of requests) and
-    skips cleanly when the network or the API is unavailable, so offline runs
-    and rate-limited CI are not broken by it.
+    Deliberately NOT part of the pull-request gate. Its verdict depends on
+    GitHub rather than on the tree, so as a blocking test it made closing an
+    issue a breaking change for ``dev``: a green merge went red with no commit
+    touching the repo, and the failure landed on the next contributor rather
+    than on whoever closed the issue. Twice — #825 and #791 — before #836
+    moved the check to where it is actionable.
+
+    The invariant still holds; it is enforced by
+    ``.github/workflows/science_register.yaml``, which tells the closer at
+    close time and sweeps daily for what that cannot see. Set
+    ``JCM_CHECK_TRACKED_GAPS=1`` to run it here as well, e.g. before editing
+    the register.
     """
 
     def test_issue_refs_are_open(self):
-        import json
-        import os
-        import urllib.error
-        import urllib.request
-
-        refs: dict[str, list[str]] = {}
-        for page in _pages():
-            for num in _ISSUE_REF.findall(page.read_text()):
-                refs.setdefault(num, []).append(page.name)
-        self.assertTrue(refs, "the register should carry tracked-gap refs")
-
-        stale = []
-        for num, pages in sorted(refs.items()):
-            url = ("https://api.github.com/repos/"
-                   f"climate-analytics-lab/jax-gcm/issues/{num}")
-            headers = {"Accept": "application/vnd.github+json"}
-            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-            if token:
-                # Unauthenticated is 60 req/hr per IP — dead on shared CI
-                # runners; the Actions-provided token is 5000 req/hr.
-                headers["Authorization"] = f"Bearer {token}"
-            req = urllib.request.Request(url, headers=headers)
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    payload = json.load(resp)
-                state = payload.get("state")
-                if "pull_request" in payload:
-                    # The issues API returns PRs too; a PR (even an open one)
-                    # is not a durable tracked gap.
-                    stale.append(f"#{num} is a pull request, not an issue "
-                                 f"(cited in {sorted(set(pages))})")
-                    continue
-            except urllib.error.HTTPError as e:
-                # Only a permanent 404/410 means the citation itself is wrong.
-                # Rate limits and server-side 5xx are outages: skip, so an API
-                # incident cannot fail otherwise-valid documentation CI.
-                if e.code in (404, 410):
-                    stale.append(f"#{num} does not exist (HTTP {e.code}; "
-                                 f"cited in {sorted(set(pages))})")
-                    continue
-                self.skipTest(f"GitHub API unavailable (HTTP {e.code}); "
-                              "issue-state check skipped")
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
-                self.skipTest(f"GitHub API unreachable ({e}); "
-                              "issue-state check skipped")
-            if state != "open":
-                stale.append(f"#{num} is {state} (cited in {sorted(set(pages))})")
+        if not os.environ.get("JCM_CHECK_TRACKED_GAPS"):
+            self.skipTest(
+                "issue-state check is not part of the PR gate (#836); "
+                "set JCM_CHECK_TRACKED_GAPS=1 to run it")
+        self.assertTrue(tracked_gaps.citations(),
+                        "the register should carry tracked-gap refs")
+        try:
+            stale = tracked_gaps.stale_citations()
+        except tracked_gaps.ApiUnavailable as e:
+            self.skipTest(f"GitHub Issues API unavailable ({e})")
         self.assertEqual(
             stale, [],
             "closed issues cited as tracked gaps — either the gap is fixed "

@@ -47,7 +47,10 @@ round-tripping through the device.
 - `-n 12` is the local default; `-n auto` picks from visible CPUs; `-n 0` (or
   omitting `-n`) forces one process when you need ordered output or are
   chasing a flake.
-- Coverage: `JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90`.
+- Coverage: `JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90`,
+  then `coverage report --fail-under=90`. The second command is the one that
+  reliably fails: `fail_under` is judged at the reported precision, which is
+  why both rcfiles set `[report] precision = 2` (#786).
 - Tests are `*_test.py`, co-located with the module, `unittest.TestCase` run
   under pytest. Root `conftest.py` clears `jcm` imports between tests to stop
   state leaking.

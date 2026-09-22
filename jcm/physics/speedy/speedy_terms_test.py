@@ -8,12 +8,16 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
-from jcm.physics.speedy.speedy_terms import speedy_physics
+from jcm.physics.speedy.speedy_terms import (
+    _call_legacy_speedy,
+    speedy_physics,
+)
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.physics.speedy.params import Parameters
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.date import DateData
@@ -32,7 +36,7 @@ def _make_test_state(coords):
         u_wind=5.0 * jax.random.normal(keys[0], shape_3d),
         v_wind=5.0 * jax.random.normal(keys[1], shape_3d),
         temperature=250.0 + 20.0 * jax.random.normal(keys[2], shape_3d),
-        specific_humidity=jnp.abs(3.0 * jax.random.normal(keys[3], shape_3d)),
+        specific_humidity=jnp.abs(3e-3 * jax.random.normal(keys[3], shape_3d)),
         geopotential=jnp.broadcast_to(
             jnp.linspace(50000, 0, nlev)[:, None, None], shape_3d
         ),
@@ -70,6 +74,38 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
             total_time=1.0,
         )
         self.assertIsNotNone(preds)
+
+    def test_adapter_preserves_legacy_humidity_numerics(self):
+        """Only q crosses SPEEDY's kg/kg <-> g/kg compatibility boundary."""
+        shape = self.state.specific_humidity.shape
+        canonical = self.state.copy(
+            specific_humidity=jnp.full(shape, 7.5e-3, dtype=jnp.float32),
+            tracers={"signed": jnp.full(shape, -2.0, dtype=jnp.float32)},
+        )
+
+        def legacy_routine(legacy_state):
+            # A stand-in for any translated SPEEDY routine: observe its input
+            # and emit a g/kg/s q tendency plus unrelated fields/tracers.
+            tendency = PhysicsTendency.zeros(
+                shape,
+                temperature=jnp.full(shape, 4.0, dtype=jnp.float32),
+                specific_humidity=jnp.full(shape, 2.5, dtype=jnp.float32),
+                tracers={"signed": jnp.full(shape, -3.0, dtype=jnp.float32)},
+            )
+            return tendency, {"legacy_state": legacy_state}
+
+        tendency, data = _call_legacy_speedy(legacy_routine, canonical)
+        legacy_state = data["legacy_state"]
+
+        np.testing.assert_allclose(
+            legacy_state.specific_humidity, 7.5, rtol=1e-6,
+        )
+        np.testing.assert_allclose(tendency.specific_humidity, 2.5e-3)
+        np.testing.assert_allclose(tendency.temperature, 4.0)
+        np.testing.assert_allclose(
+            legacy_state.tracers["signed"], canonical.tracers["signed"],
+        )
+        np.testing.assert_allclose(tendency.tracers["signed"], -3.0)
 
     def test_nnx_grad_through_composable_speedy(self):
         """Gradients flow through the composable SPEEDY physics."""
@@ -132,6 +168,7 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
                               if not ds[v].attrs.get("description"))
         self.assertEqual(undocumented, [],
                          "add a row to jcm/physics/speedy/units_table.csv")
+        self.assertEqual(ds["specific_humidity"].attrs["units"], "kg kg-1")
 
 
 if __name__ == "__main__":

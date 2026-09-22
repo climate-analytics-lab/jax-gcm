@@ -67,6 +67,28 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   source tree. A
   faithful ECHAM-style ``het_mxphase_freezing`` transliteration is defined and
   exported alongside it but is currently **unused**.
+- **Cirrus ICNC diagnosis (default ``nic_cirrus=1``) is bounded by a maximum
+  crystal number, not a minimum size.** In cold, cloudy cells that arrive at or
+  below ``icemin`` the ice-crystal number is diagnosed by inverting the
+  ice-mass / volume-mean-radius relation,
+  ``N = rho q_i / ((4/3) pi r^3 rho_ice)``
+  (``jcm/physics/clouds/lohmann_2m/assembly.py::update_in_cloud_water``). The
+  diagnosed number is **capped at ``icemax``** (1e7 m⁻³). This follows ECHAM-HAM,
+  whose own ``nic_cirrus==1`` branch caps the nucleated number by the available
+  soluble-aerosol count, ``MIN(candidate, zascs)``
+  (``mo_cloud_micro_2m.f90``, the Lohmann (2002) ICNC scheme) — a bound on
+  crystal *number*. jcm does not plumb the aerosol number into this scheme, so
+  ``icemax`` — the same maximum-plausible ICNC the scheme already clamps the ice
+  tracer to (``scheme.py``) — stands in as the ceiling. A fixed minimum crystal
+  *radius* was rejected as the physical bound: at ~100 nm the mass inversion
+  still yields ~1e11–1e12 m⁻³ (far above realistic cirrus, ~1e3–1e6 m⁻³, and
+  above ``icemax``). The 100 nm value survives only as ``cirrus_min_ice_radius``,
+  the coarse-mode-aerosol lower bound (a differentiable parameter leaf) that
+  floors the radius; the inversion itself is non-dimensionalised by a *static*
+  1 µm scale so no gradient path — through the state **or** the parameter —
+  divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
+  ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
+  parameter itself as the scale put the same overflow on its own gradient).
 - The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
   radius (#717) — live on the release-validated ``t63-echam-1m`` /
   ``t106-echam-1m`` configurations; 2M paths use microphysical radii.

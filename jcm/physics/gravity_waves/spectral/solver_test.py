@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import jcm.constants as c
+from jcm.testing import check_gradients
 from jcm.physics.gravity_waves.spectral.frontal import (
     gaussian_spectrum,
     gw_cm_src,
@@ -406,6 +407,137 @@ class GradientTest(unittest.TestCase):
         v0 = jnp.zeros(40)
         gu = jax.grad(loss, argnums=0)(u0, v0, 1.5e-3)
         self.assertTrue(bool(jnp.all(jnp.isfinite(gu))))
+
+
+class GwSolverGradientTest(unittest.TestCase):
+    """AD through the spectral solver (#820).
+
+    ``gw_prof`` — the density and Brunt-Vaisala profiles — is smooth and is
+    checked against a central difference. ``gw_drag_prof`` is not: it is a
+    stack of limiters, and every one of them is a switch —
+    ``minimum(taudmp, tausat)`` (Lindzen saturation), the critical-level
+    ``same_sign`` test, the two ``<= TAUMIN`` clamps, the WKB
+    ``|c - u| / dt`` bound and the ``tndmax`` cap. On a random direction the
+    one-sided secants of the projection stay O(1) apart at every rung, which
+    is the signature of a kink rather than of a bad step, so there is no
+    central difference to compare against and the check is the adjoint one:
+    jvp against vjp, and every input asserted live.
+
+    Two zero gradients here are properties of the scheme rather than
+    defects, and both are pinned:
+
+     - ``d/d(rhoi)`` is identically zero at the **default** launch
+       amplitude, because the interface density reaches the answer only
+       through ``tausat`` and saturation never binds on a column launched at
+       ``taubgnd = 1.5e-3``: ``min(taudmp, tausat)`` takes the damped branch
+       everywhere. At ten times that amplitude saturation does bind and the
+       density becomes live, which is why both amplitudes are checked.
+     - ``d/d(frontgf)`` is zero at term level — see
+       ``term_test.py``.
+    """
+
+    NLEV = 40
+
+    def _column(self, taubgnd):
+        """Build one column's solver arguments at a given launch amplitude."""
+        rng = np.random.default_rng(42)
+        p_ifc, p_mid, t, u, v = make_profiles(rng, nlev=self.NLEV)
+        piln = np.log(p_ifc)
+        alpha = newtonian_cooling_profile(p_ifc)
+        ubm, ubi, xv, yv, mag = project_source(u, v, KSRC)
+        cc = DC * np.arange(-NGWV, NGWV + 1) + mag
+        src_tau = ref_gaussian_src_tau(NGWV, DC, taubgnd, WIDTH)
+        band = GWBand(dc=DC, fcrit2=FCRIT2, wavelength=WAVELENGTH, ngwv=NGWV)
+        t_j = jnp.asarray(t, jnp.float32)
+        p_ifc_j = jnp.asarray(p_ifc, jnp.float32)
+        p_mid_j = jnp.asarray(p_mid, jnp.float32)
+        rhoi, _, ni = gw_prof(t_j, p_ifc_j, p_mid_j)
+
+        def solve(t_, rhoi_, ni_, ubm_, ubi_, tau_src_, effgw_):
+            result = gw_drag_prof(
+                band, KSRC, DT, t_, p_ifc_j, jnp.asarray(piln, jnp.float32),
+                rhoi_, ni_, ubm_, ubi_,
+                jnp.asarray(xv, jnp.float32), jnp.asarray(yv, jnp.float32),
+                effgw_, jnp.asarray(cc, jnp.float32), tau_src_,
+                jnp.asarray(alpha, jnp.float32),
+                tndmax=TNDMAX, umcfac=UMCFAC, satfac=SATFAC)
+            return (result.utgw, result.vtgw, result.ttgw, result.gwut,
+                    result.tau)
+
+        args = (t_j, rhoi, ni, jnp.asarray(ubm, jnp.float32),
+                jnp.asarray(ubi, jnp.float32),
+                jnp.asarray(src_tau, jnp.float32),
+                jnp.asarray(1.0, jnp.float32))
+        return solve, args, (t_j, p_ifc_j, p_mid_j)
+
+    def test_gw_prof_matches_a_central_difference(self):
+        """Interface density and Brunt-Vaisala frequency, both smooth."""
+        _, _, profile = self._column(TAUBGND)
+        for seed in (0, 4):
+            with self.subTest(seed=seed):
+                check_gradients(gw_prof, profile, rtol=1e-3, seed=seed)
+
+    def test_drag_profile_is_adjoint_and_inputs_are_live(self):
+        """Both AD modes agree and every input carries a gradient.
+
+        The amplified launch is checked alongside the default one because
+        it is the case in which the Lindzen saturation branch binds, which
+        is what makes the interface density a live input at all.
+        """
+        for taubgnd, live in ((TAUBGND, ["[0]", "[2]", "[3]", "[4]", "[5]",
+                                         "[6]"]),
+                              (10.0 * TAUBGND,
+                               ["[0]", "[1]", "[2]", "[3]", "[4]", "[5]",
+                                "[6]"])):
+            solve, args, _ = self._column(taubgnd)
+            for seed in (0, 4, 11):
+                with self.subTest(taubgnd=taubgnd, seed=seed):
+                    check_gradients(solve, args, reference="adjoint",
+                                    adjoint_rtol=5e-3, live_inputs=live,
+                                    seed=seed)
+
+    def test_drag_profile_gradients_are_finite(self):
+        """No input may return a non-finite gradient, at either amplitude.
+
+        The solver divides by ``ubmc2`` (floored at ``UBMC2MN``) and by
+        ``ni`` in the saturation stress, and forms ``exp(wrk)`` with a
+        damping exponent that grows without bound toward the lid — the
+        three places a critical level or a vanishing density could put an
+        ``inf`` into the reverse pass.
+        """
+        for taubgnd in (TAUBGND, 10.0 * TAUBGND):
+            solve, args, _ = self._column(taubgnd)
+            gradients = jax.grad(
+                lambda *a: sum(jnp.sum(x ** 2) for x in solve(*a)),
+                argnums=tuple(range(len(args))),
+            )(*args)
+            names = ("t", "rhoi", "ni", "ubm", "ubi", "tau_src", "effgw")
+            for name, gradient in zip(names, gradients):
+                self.assertTrue(
+                    bool(jnp.all(jnp.isfinite(gradient))),
+                    f"d/d{name} is not finite at taubgnd={taubgnd}: "
+                    f"{gradient}")
+
+    def test_density_is_dead_below_the_saturation_threshold(self):
+        """``d/d(rhoi)`` is exactly zero while saturation never binds.
+
+        Pinned because it is easy to mistake for a lost gradient. The
+        interface density enters only through ``tausat``, and
+        ``min(taudmp, tausat)`` takes the damped branch at every level of a
+        column launched at the default amplitude, so the density genuinely
+        does not affect the answer there.
+        """
+        solve, args, _ = self._column(TAUBGND)
+        gradient = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in solve(*a)), argnums=1,
+        )(*args)
+        self.assertEqual(float(jnp.max(jnp.abs(gradient))), 0.0)
+
+        solve, args, _ = self._column(10.0 * TAUBGND)
+        gradient = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in solve(*a)), argnums=1,
+        )(*args)
+        self.assertGreater(float(jnp.max(jnp.abs(gradient))), 0.0)
 
 
 if __name__ == "__main__":

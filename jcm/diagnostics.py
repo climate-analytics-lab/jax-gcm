@@ -108,18 +108,13 @@ def check_health(ds, chunk_idx: int, elapsed_days: float) -> tuple[bool, dict]:
         report["T_nan_frac"] = float(np.isnan(T_vals).mean())
 
     if "specific_humidity" in ds:
-        # ``dynamics_state_to_physics_state`` (and so the saved netCDF) stores
-        # specific_humidity already in g/kg — see ``units: 'g/kg'`` attached
-        # to the variable by ``Model.to_xarray``. Earlier versions assumed
-        # the field was in kg/kg and applied a ``* 1000`` conversion here;
-        # that double-counted the units and spuriously tripped the
-        # ``q_max > 100 g/kg`` health threshold on every chunked SPEEDY /
-        # ECHAM run (healthy tropical q at the surface ~30 g/kg → reported
-        # as 30000). Drop the conversion.
-        q_vals = ds["specific_humidity"].isel(time=-1).values
-        report["q_max_gkg"] = float(np.nanmax(q_vals))
-        report["q_mean_gkg"] = float(np.nanmean(q_vals))
-        report["q_nan_frac"] = float(np.isnan(q_vals).mean())
+        # Public state and serialized output use kg/kg. Convert only the
+        # human-facing health metrics to g/kg so their names and thresholds
+        # stay intuitive (healthy tropical near-surface q is ~10--25 g/kg).
+        q_vals_kgkg = ds["specific_humidity"].isel(time=-1).values
+        report["q_max_gkg"] = float(np.nanmax(q_vals_kgkg)) * 1000.0
+        report["q_mean_gkg"] = float(np.nanmean(q_vals_kgkg)) * 1000.0
+        report["q_nan_frac"] = float(np.isnan(q_vals_kgkg).mean())
 
     for key in (
         "radiation.toa_lw_up", "radiation.surface_lw_down",

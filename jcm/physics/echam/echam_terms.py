@@ -84,9 +84,11 @@ def echam_physics(
     jam_ice_scheme: str = "niemand",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
+    jam_dust_nduscale_scale: float | None = None,
     jam_anthropogenic: bool = False,
     jam_prescribed_speciated: bool = False,
     jam_convective_transport: bool = True,
+    convective_updraft_precip_cover: bool | None = None,
     enable_cosp: bool = False,
     cosp_ncolumns: int = 40,
     cosp_calipso: bool = False,
@@ -192,6 +194,10 @@ def echam_physics(
             (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
             The shipped config leaves this ``null``, which the runner fills
             from ``cfg.nudging.enabled``.
+        jam_dust_nduscale_scale: global multiplier on that regional vector —
+            jcm's single dust-emission calibration knob (#808). ``null``
+            takes the calibrated default, which exists at T63 ``ndust = 4``
+            only.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
@@ -200,6 +206,14 @@ def echam_physics(
         jam_prescribed_speciated: include the CAM6/MAM4-faithful already-
             speciated emission path (#498); inert until per-tracer forcing
             fields are supplied.
+        convective_updraft_precip_cover: choose the fractional precipitation
+            cover ECHAM ``cuflx`` uses for the sub-cloud rain evaporation
+            (``mo_cufluxdts.f90:414-420``, jax-gcm#812). ``None`` (default)
+            follows ECHAM's ``lham`` submodel dependence: the updraft area
+            ``pmfu/(zwu·ρ_u)`` when the JAM chain is composed
+            (``aerosol_module='jam'``), the constant ``0.05`` otherwise.
+            Set ``True``/``False`` to pin it — the escape hatch for an A/B
+            against the constant cover, mirroring ``cu_lmfmid``.
 
     Returns:
         A ``ComposablePhysics`` instance with all ECHAM terms in the
@@ -456,6 +470,7 @@ def echam_physics(
             ice_scheme=jam_ice_scheme,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
+            dust_nduscale_scale=jam_dust_nduscale_scale,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
             convective_transport=jam_convective_transport,
@@ -568,7 +583,19 @@ def echam_physics(
             rad_term,
             TteTkeVerticalDiffusion(params=vertical_diffusion_p),
             EchamSurface(params=surface_p),
-            TiedtkeConvection(params=convection_p),
+            TiedtkeConvection(
+                params=convection_p,
+                # ECHAM keys the sub-cloud rain-evaporation footprint on the
+                # HAM submodel (mo_cufluxdts.f90:414-420): the updraft area
+                # under ``lham``, the constant 0.05 otherwise. jcm's ``lham``
+                # is "the JAM aerosol chain is composed" (jax-gcm#812); the
+                # explicit override pins it for an A/B.
+                updraft_precip_cover=(
+                    (aerosol_module == "jam")
+                    if convective_updraft_precip_cover is None
+                    else bool(convective_updraft_precip_cover)
+                ),
+            ),
             micro_term,
             *cosp_terms,
             *jam_post_cloud_terms,

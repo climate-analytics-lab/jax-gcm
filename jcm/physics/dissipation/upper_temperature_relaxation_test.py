@@ -11,6 +11,7 @@ from jcm.physics.dissipation.upper_temperature_relaxation import (
     UpperTemperatureRelaxation,
 )
 from jcm.physics_interface import PhysicsState
+from jcm.testing import check_gradients
 
 
 def _state(nlev=12, ncols=3, t0=150.0, u0=80.0):
@@ -145,6 +146,72 @@ class UpperTemperatureRelaxationFromUssaTest(unittest.TestCase):
         trop = order[p_mid[order] >= 20000.0]
         t_trop = t_ref[trop]
         self.assertTrue(np.all(np.diff(t_trop) >= -1e-6))
+
+
+class UpperTemperatureRelaxationGradientTest(unittest.TestCase):
+    """AD against a central difference for the relaxation (#820).
+
+    Green. The temperature branch is linear in T and the Rayleigh branch is
+    linear in u and v, so the only non-trivial term is the CAM kinetic-energy
+    return ``0.5 (1 - c2^2)(u^2 + v^2) / (cp dt)``, which is a smooth
+    quadratic. This is a fence, not a hunt.
+
+    The state is given horizontal structure rather than the uniform fields
+    the other tests here use: a relative finite-difference step on a uniform
+    field displaces every column identically, and the per-column
+    contributions to the projection would then be indistinguishable.
+    """
+
+    @staticmethod
+    def _fields(shape, seed=0):
+        rng = np.random.default_rng(seed)
+        return (jnp.asarray(60.0 + 15.0 * rng.standard_normal(shape),
+                            jnp.float32),
+                jnp.asarray(-25.0 + 10.0 * rng.standard_normal(shape),
+                            jnp.float32),
+                jnp.asarray(180.0 + 12.0 * rng.standard_normal(shape),
+                            jnp.float32))
+
+    @staticmethod
+    def _tendencies(term, shape, ncols):
+        def f(u_wind, v_wind, temperature):
+            state = PhysicsState.zeros(
+                shape, temperature=temperature, u_wind=u_wind, v_wind=v_wind,
+                normalized_surface_pressure=jnp.ones((ncols,)))
+            tendency, diagnostics = term(
+                state, {"_dt_seconds": 1800.0}, ForcingData.zeros((ncols,)),
+                None)
+            return (tendency.u_wind, tendency.v_wind, tendency.temperature,
+                    diagnostics["upper_t_relaxation"])
+
+        return f
+
+    def test_gradients_with_wind_damping(self):
+        """Temperature relaxation, Rayleigh friction and the KE return."""
+        nlev, ncols = 12, 4
+        term = UpperTemperatureRelaxation(
+            np.linspace(260.0, 190.0, nlev), n_levels=8,
+            timescale_s=21600.0, wind_timescale_s=43200.0,
+            wind_center_level=3.0, wind_range_levels=2.0)
+        for seed in (0, 4):
+            with self.subTest(seed=seed):
+                check_gradients(
+                    self._tendencies(term, (nlev, ncols), ncols),
+                    self._fields((nlev, ncols), seed=seed), rtol=1e-3,
+                    seed=seed)
+
+    def test_gradients_without_wind_damping(self):
+        """``wind_timescale_s=None``: the temperature-only default."""
+        nlev, ncols = 12, 4
+        term = UpperTemperatureRelaxation(
+            np.linspace(260.0, 190.0, nlev), n_levels=8, timescale_s=21600.0)
+        u_wind, v_wind, temperature = self._fields((nlev, ncols))
+        f = self._tendencies(term, (nlev, ncols), ncols)
+        # Only T is an input on this branch; u and v are passed through to a
+        # zero tendency, so a direction along them would carry no signal and
+        # the liveness of T is what there is to check.
+        check_gradients(lambda t: f(u_wind, v_wind, t)[2:], (temperature,),
+                        rtol=1e-3)
 
 
 if __name__ == "__main__":

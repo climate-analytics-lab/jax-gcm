@@ -25,11 +25,13 @@ Contents
    :caption: Contents:
 
    getting_started
+   advanced_features
    running_at_scale
    speedy_physics
    echam_physics
    science
    release_notes
+   v2_to_v3
    v1_to_v2
    speedy_translation
    api

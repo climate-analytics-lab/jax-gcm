@@ -12,6 +12,7 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
     diffuse_tracers_implicit,
 )
 from jcm.physics_interface import PhysicsState
+from jcm.testing import check_gradients
 
 
 class DiffuseImplicitTest(unittest.TestCase):
@@ -163,3 +164,30 @@ class TracerVerticalDiffusionTermTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTracerDiffusionGradients(unittest.TestCase):
+    """AD against a central difference for the implicit tracer solve (#820).
+
+    Green. ``rtol=1e-2`` rather than 1e-3 with its derivation: the
+    consistency search settles on a coarse rung (2.5e-4) here, because the
+    two columns' contributions to the projection partly cancel, and at that
+    step the central secant's own truncation leaves it ~0.3% from the AD
+    value. Tightening the tolerance would be testing the reference's
+    precision, not the solve's derivative.
+    """
+
+    def test_gradients_match_a_central_difference(self):
+        """A two-tracer, two-column block through the tridiagonal solve."""
+        nlev, ncol = 12, 2
+        air_density = (jnp.linspace(0.3, 1.2, nlev)[:, None]
+                       * jnp.ones((1, ncol)))
+        layer_thickness = (jnp.linspace(900.0, 150.0, nlev)[:, None]
+                           * jnp.ones((1, ncol)))
+        kh = jnp.linspace(1.0, 40.0, nlev)[:, None] * jnp.ones((1, ncol))
+        tracers = (jnp.linspace(1.0e-9, 5.0e-9, nlev)[None, :, None]
+                   * jnp.ones((2, 1, ncol)))
+        check_gradients(
+            lambda q, k, rho, dz: diffuse_tracers_implicit(q, k, rho, dz,
+                                                           1800.0),
+            (tracers, kh, air_density, layer_thickness), rtol=1e-2)

@@ -11,7 +11,12 @@ within 2 kilometers does not exceed 2°C per kilometer.
 import jax
 import jax.numpy as jnp
 from typing import Optional
-from jcm.constants import physical_constants
+# The module alias, not ``from jcm.constants import physical_constants``:
+# ``set_constants`` REBINDS that module global (PhysicalConstants is a
+# NamedTuple, so it cannot be mutated in place), which leaves a captured
+# reference pointing at the pre-override object — stale in exactly the same
+# way a captured float would be (#772).
+import jcm.constants as c
 
 # WMO tropopause constants
 GWMO = -0.002  # K/m - The -2°C/km threshold
@@ -22,21 +27,37 @@ def compute_geopotential_height(pressure: jnp.ndarray,
                               temperature: jnp.ndarray,
                               surface_pressure: jnp.ndarray) -> jnp.ndarray:
     """Compute geopotential height from pressure and temperature.
-    
+
     Uses the hypsometric equation with proper handling of model levels.
-    
+
+    **Vertical convention — surface-first.** The level axis (last axis) must
+    run surface-first: index 0 is the surface (highest pressure) and pressure
+    decreases with index towards the model top. This routine prepends the
+    surface pressure at index 0 and integrates the hypsometric equation
+    *upward* with a ``cumsum`` along the level axis, so height is measured from
+    the surface (``height[..., 0]`` is the thickness of the lowest layer, and
+    height increases with index). Feeding it a top-first column (index 0 = model
+    top) integrates the wrong way and pairs each layer's temperature with the
+    wrong interface. The physics-internal and ECHAM input frames are BOTH
+    top-first, so callers there must flip to surface-first at the boundary —
+    see ``jcm/physics/diagnostics/aerocom.py`` and
+    ``docs/source/design/output_vertical_conventions.md``.
+
     Args:
-        pressure: Pressure at model levels [Pa] (shape: [..., nlev])
-        temperature: Temperature at model levels [K] (shape: [..., nlev])
+        pressure: Pressure at model levels [Pa] (shape: [..., nlev]),
+            surface-first along the last axis.
+        temperature: Temperature at model levels [K] (shape: [..., nlev]),
+            surface-first along the last axis.
         surface_pressure: Surface pressure [Pa] (shape: [...])
-        
+
     Returns:
-        Geopotential height [m] (shape: [..., nlev])
+        Geopotential height [m] (shape: [..., nlev]), surface-first,
+        increasing with index.
 
     """
-    # Constants
-    g = physical_constants.grav
-    R = physical_constants.rd
+    # Read per call from the live singleton so set_constants applies (#772).
+    g = c.grav
+    R = c.rd
     
     # Ensure surface_pressure has compatible shape for concatenation
     batch_shape = pressure.shape[:-1]
@@ -100,14 +121,34 @@ def find_tropopause_level(temperature: jnp.ndarray,
                          ncctop: int = 13,
                          nccbot: int = 35) -> jnp.ndarray:
     """Find the tropopause level following WMO definition.
-    
+
+    **Vertical convention — surface-first.** The level axis (last axis) must
+    run surface-first: index 0 is the surface (highest pressure), index
+    increasing towards the model top, and ``height`` increasing with index.
+    The scan walks the search window from its low-index (near-surface) end
+    upward and returns the pressure of the *first* level that satisfies the
+    criteria — which is the WMO "lowest level" only when index 0 is the
+    surface. On a top-first column it returns the *highest* qualifying level
+    instead (a spurious ~30 hPa value on a real sounding, #841). The
+    physics-internal frame is top-first, so callers there flip to surface-first
+    at the boundary; see ``aerocom.py`` and
+    ``docs/source/design/output_vertical_conventions.md``. No data-dependent
+    orientation guard is applied here: orientation is a static property of the
+    caller, and a traced flip inside ``jit`` would both cost and hide the bug.
+
     Args:
-        temperature: Temperature [K] (shape: [..., nlev])
-        pressure: Pressure [Pa] (shape: [..., nlev])
-        height: Geopotential height [m] (shape: [..., nlev])
-        ncctop: Highest level index for tropopause search
-        nccbot: Lowest level index for tropopause search
-        
+        temperature: Temperature [K] (shape: [..., nlev]), surface-first.
+        pressure: Pressure [Pa] (shape: [..., nlev]), surface-first.
+        height: Geopotential height [m] (shape: [..., nlev]), surface-first
+            (increasing with index).
+        ncctop: Surface-first slice START (inclusive, low index) — the
+            near-surface / higher-pressure end of the search window.
+        nccbot: Surface-first slice STOP (exclusive, high index) — the
+            higher-altitude / lower-pressure end. ``[ncctop:nccbot]`` selects
+            the levels the tropopause is searched within. The defaults encode
+            the L47 grid; derive them from the actual level pressures on other
+            grids.
+
     Returns:
         Tropopause pressure [Pa] (shape: [...])
 
@@ -236,10 +277,16 @@ def wmo_tropopause(temperature: jnp.ndarray,
     at which the lapse rate decreases to 2°C per kilometer or less,
     provided the average lapse rate between this level and all higher
     levels within 2 kilometers does not exceed 2°C per kilometer.
-    
+
+    Inputs must be **surface-first** (level axis index 0 = surface); see
+    :func:`find_tropopause_level` and :func:`compute_geopotential_height` for
+    why, and for how top-first callers convert at the boundary.
+
     Args:
-        temperature: Temperature at model levels [K] (shape: [..., nlev])
-        pressure: Pressure at model levels [Pa] (shape: [..., nlev])
+        temperature: Temperature at model levels [K] (shape: [..., nlev]),
+            surface-first along the last axis.
+        pressure: Pressure at model levels [Pa] (shape: [..., nlev]),
+            surface-first along the last axis.
         surface_pressure: Surface pressure [Pa] (shape: [...])
         previous_tropopause: Previous tropopause pressure [Pa] (shape: [...])
                            Used as fallback if no tropopause found

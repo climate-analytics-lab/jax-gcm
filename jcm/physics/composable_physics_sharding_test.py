@@ -4,7 +4,7 @@ These tests cover the SPMD wiring added for multi-device (and multi-CPU)
 runs: the ``vectorize_columns`` path must keep the flattened ``(nlev, ncols)``
 state sharded across devices, produce results identical to a single-device
 run, and merge the mesh axes in lon-major order when building the column
-sharding. See docs/design/parallelization.md.
+sharding. See docs/source/design/parallelization.md.
 
 The physics compute path is purely gridpoint ops + per-column vmaps (no
 spectral transform), so it can be exercised on real devices in isolation,

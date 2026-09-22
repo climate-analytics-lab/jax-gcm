@@ -10,9 +10,14 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import jcm.constants as c
 from jcm.physics.convection import saturation as sat
+from jcm.physics.convection.saturation import (
+    cuadjtq_newton, saturation_mixing_ratio,
+)
+from jcm.testing import check_gradients
 
 
 class TestSaturationVaporPressure(unittest.TestCase):
@@ -152,3 +157,39 @@ class TestSaturationConstantsOverride(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCuadjtqNewtonGradients:
+    """AD against a central difference for the saturation adjustment (#820).
+
+    ``cuadjtq_newton`` is a fixed-length Newton solve — no convergence
+    branch, no ``lax.while_loop`` — which makes it one of the better
+    finite-difference candidates in the package, and it had no test of its
+    own in this module. Both the supersaturated branch (condensation) and the
+    subsaturated one (re-evaporation, bounded by the available liquid) are
+    checked, and both are green; the function is elementwise, so a parcel
+    vector is the natural shape.
+    """
+
+    @staticmethod
+    def _parcels():
+        """Return (temperature, pressure) for four warm parcels."""
+        return (jnp.array([283.0, 288.0, 292.0, 297.0]),
+                jnp.array([9.5e4, 9.0e4, 8.0e4, 7.0e4]))
+
+    @pytest.mark.parametrize("saturation_ratio", [1.25, 0.6])
+    @pytest.mark.parametrize("seed", [0, 4])
+    def test_gradients_match_a_central_difference(self, saturation_ratio,
+                                                  seed):
+        """Supersaturated and subsaturated parcels alike.
+
+        The ratios are 1.25 and 0.6 rather than anything near 1.0: at exactly
+        saturation the first pass's ``max(condensate, 0)`` sits on its hinge,
+        which is a one-sided point rather than a defect in the solve.
+        """
+        temperature, pressure = self._parcels()
+        total_water = saturation_ratio * saturation_mixing_ratio(
+            pressure, temperature)
+        check_gradients(cuadjtq_newton,
+                        (temperature, total_water, pressure),
+                        rtol=1e-3, seed=seed)

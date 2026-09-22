@@ -724,6 +724,8 @@ def _tiedtke_convection_toa_first(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    layer_mass: jnp.ndarray | None = None,
+    use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
 
@@ -1219,7 +1221,9 @@ def _tiedtke_convection_toa_first(
         tendencies = calculate_tendencies(
             temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
             updraft_state, downdraft_state,
-            cloud_base, ktop, dt, config
+            cloud_base, ktop, dt, config,
+            ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
+            layer_mass=layer_mass,
         )
         
         # qc/qi tendencies come from the cudtdq ledger's detrained
@@ -1356,6 +1360,8 @@ def tiedtke_nordeng_convection(
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
+    layer_mass: jnp.ndarray | None = None,
+    use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run the Tiedtke-Nordeng scheme in either vertical ordering.
 
@@ -1390,6 +1396,8 @@ def tiedtke_nordeng_convection(
         dt, config, land_fraction, moisture_supply,
         to_toa(moisture_tend_profile), thvsig,
         to_toa(omega), to_toa(qte_dynamics),
+        to_toa(layer_mass),
+        use_updraft_cover,
     )
 
     def back(a):
@@ -1426,6 +1434,42 @@ from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
 
+# Hard limit on the convective T tendency: 5 K/hr. See the call site in
+# ``TiedtkeConvection.__call__`` for why this stopgap exists and why the
+# rescale is homogeneous over the whole column ledger.
+_DTDT_MAX = 5.0 / 3600.0  # K/s
+
+
+def _tendency_cap_scale(dtedt, dtdt_max=_DTDT_MAX):
+    """Per-column factor that holds ``|dtedt|`` at or below ``dtdt_max``.
+
+    ``dtedt`` is ``(ncols, nlev)`` — the vmapped column scheme's output
+    layout — and the returned ``(ncols, 1)`` factor is the tightest per-level
+    ratio, broadcast back over the levels.
+
+    The safe-denominator double-``where`` is what keeps this differentiable.
+    Only the levels that actually exceed the limit divide by their own
+    magnitude; every other level — which on most of the grid means
+    ``dtedt == 0``, i.e. no convection at all — divides the constant
+    ``dtdt_max`` by itself. Dividing by the magnitude *everywhere* and masking
+    afterwards is finite in the forward pass but not in either derivative: at
+    ``dtedt == 0`` the quotient's partial is ``-dtdt_max/|dtedt|**2``, which
+    overflows float32 to ``inf``, and the mask that discards the branch then
+    forms ``0 * inf = nan``. That NaN propagates out of every jvp and vjp of
+    the term while the forward pass stays clean — the same cotangent-poison
+    class as issue #558, and the reason the untaken branch has to be
+    NaN-free rather than merely unselected.
+
+    Where a level is genuinely over the limit the factor is exactly
+    ``dtdt_max/|dtedt|``; everywhere else it is exactly 1.
+    """
+    magnitude = jnp.abs(dtedt)
+    over_limit = magnitude > dtdt_max
+    safe_magnitude = jnp.where(over_limit, magnitude, dtdt_max)
+    level_scale = jnp.where(over_limit, dtdt_max / safe_magnitude, 1.0)
+    return jnp.min(level_scale, axis=1, keepdims=True)
+
+
 class TiedtkeConvection(PhysicsTerm):
     """Tiedtke-Nordeng mass-flux convection as a composable PhysicsTerm.
 
@@ -1460,8 +1504,22 @@ class TiedtkeConvection(PhysicsTerm):
 
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, params: ConvectionParameters | None = None):
+    def __init__(self, params: ConvectionParameters | None = None,
+                 updraft_precip_cover: bool = False):
         """Hold the scheme-native :class:`ConvectionParameters`.
+
+        ``updraft_precip_cover`` mirrors ECHAM's compile-time ``lham``
+        switch on the sub-cloud rain-evaporation footprint
+        (``mo_cufluxdts.f90:414-420``): with it ``True`` the evaporation
+        acts over the updraft AREA ``pmfu/(zwu·zrhou)``, the same footprint
+        the JAM convective wet deposition uses; with it ``False`` (plain
+        ECHAM) it uses the constant ``zcucov = 0.05``. ``echam_physics``
+        turns it on exactly when the JAM aerosol chain is composed
+        (``aerosol_module='jam'``) — the jcm analogue of ``lham``
+        (jax-gcm#812). It selects a code path at trace time, so it is a
+        plain Python bool held on the term, not a differentiable leaf; the
+        assumed updraft speed ``zwu`` it uses IS differentiable and lives
+        on :class:`ConvectionParameters` as ``cu_updraft_velocity``.
 
         With ECHAM's ``lmfmid`` on (the reference default, setphys.f90:71)
         the scheme runs the ``cubasmc`` mid-level trigger, which needs the
@@ -1487,6 +1545,7 @@ class TiedtkeConvection(PhysicsTerm):
         """
         params = params or ConvectionParameters.default()
         self.params = nnx.Param(params)
+        self._updraft_precip_cover = bool(updraft_precip_cover)
         if bool(params.cu_lmfmid):
             self.requires_dycore_fields = ("omega",)
 
@@ -1655,9 +1714,32 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             qte_dynamics = jnp.zeros_like(state.specific_humidity)
 
+        # Unfloored per-layer air mass Δp/g for the sub-cloud rain-evaporation
+        # cover's taper. ``layer_thickness`` carries moist_air_state's 10 m
+        # floor and is documented there as unusable for mass weighting, so the
+        # taper reads the true half-level ``pressure_thickness`` diagnostic
+        # instead. The ρ·Δz fallback serves hand-built diagnostics dicts
+        # (unit tests, custom stacks) whose thickness is unfloored by
+        # construction — mirroring the ``thermo_run`` fallback above.
+        pressure_thickness = diagnostics.get("pressure_thickness")
+        if pressure_thickness is None:
+            layer_mass = air_density * layer_thickness
+        else:
+            layer_mass = pressure_thickness / c.grav
+
+        # ``use_updraft_cover`` is a static Python bool (a trace-time code-path
+        # selector), so it is closed over here rather than threaded as a
+        # vmapped argument — the ``in_axes`` tuple stays aligned with the 18
+        # mapped/broadcast array arguments.
+        _use_updraft_cover = self._updraft_precip_cover
+
+        def _column_scheme(*args):
+            return tiedtke_nordeng_convection(
+                *args, use_updraft_cover=_use_updraft_cover)
+
         column_fn = jax.vmap(
-            tiedtke_nordeng_convection,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1),
+            _column_scheme,
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -1666,6 +1748,7 @@ class TiedtkeConvection(PhysicsTerm):
             state.u_wind, state.v_wind, qc, qi,
             dt, params, land_fraction, moisture_supply,
             moisture_tend_profile, thvsig, omega, qte_dynamics,
+            layer_mass,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied
@@ -1685,26 +1768,19 @@ class TiedtkeConvection(PhysicsTerm):
         # proportional scale keeps the local energy/water pairing intact;
         # column conservation is still broken wherever the cap fires, which
         # is inherent to any such guard.
-        _DTDT_MAX = 5.0 / 3600.0  # K/s
-        # Per-COLUMN scale: the tightest per-level factor applies to the
-        # WHOLE convective ledger — tendencies AND the precip/detrainment
-        # diagnostics. The previous per-level scaling left precip_conv
-        # unscaled, so every capped burst opened the composed column
-        # water budget by the scaled-away amount (caught by the composed
-        # closure test once the unconditional Nordeng rescale made
+        # Per-COLUMN scale (``_DTDT_MAX``): the tightest per-level factor
+        # applies to the WHOLE convective ledger — tendencies AND the
+        # precip/detrainment diagnostics. A per-level scaling would leave
+        # precip_conv unscaled, so every capped burst would open the composed
+        # column water budget by the scaled-away amount (caught by the
+        # composed closure test once the unconditional Nordeng rescale made
         # capped bursts routine at pulse peaks). A homogeneous column
         # rescale is exactly how ECHAM's own zmfub1 amplitude scaling
         # acts, so proportionality inside the ledger is preserved and
         # column conservation is exact by linearity. The cap itself
         # remains the documented stopgap for the unported mo_cuadjust
         # per-level limits.
-        cap_scale = jnp.min(
-            jnp.clip(
-                _DTDT_MAX / jnp.maximum(jnp.abs(tendencies_all.dtedt), 1e-30),
-                0.0, 1.0,
-            ),
-            axis=1, keepdims=True,
-        )
+        cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
         tendency = PhysicsTendency(
@@ -1786,6 +1862,11 @@ class TiedtkeConvection(PhysicsTerm):
             moistening_rate=tendency.specific_humidity,
         )
 
+        # These floors protect the provisional CloudData consumed by the
+        # downstream microphysics. They can affect what that scheme computes,
+        # but do not modify ``tendency`` above or directly update prognostic
+        # state; the final summed qc/qi tendency is capped and accounted once
+        # at the physics interface.
         clouds = diagnostics["clouds"].copy(
             qc=jnp.maximum(
                 diagnostics["clouds"].qc + tendency.tracers["qc"] * dt,

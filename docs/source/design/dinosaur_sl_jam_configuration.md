@@ -14,7 +14,7 @@ python -m jcm.main \
     terrain=from_file terrain.file=$JCM/data/bc/t63/terrain.nc \
     forcing=from_file forcing.file=$JCM/data/bc/t63/forcing.nc \
     init=jw init.rh=0.0 \
-    run=longrun diffusion.tracer_positivity=true \
+    run=longrun \
     +sl_off_centering=0.2 \
     run.time_step=15
 ```
@@ -23,8 +23,9 @@ Load-bearing pieces:
 
 - **Semi-Lagrangian transport (now unconditional)** — nodal tracer transport (no spectral
   round-trip for the ~40 JAM tracers) with Bermejo–Staniforth monotone
-  limiting: positivity by construction. The Eulerian path requires
-  `tracer_positivity` clipping to survive at all and loses ~20 % of
+  limiting: positivity by construction. It is also the *only* transport the
+  backend has: the Eulerian path was removed (#625) because it required
+  `tracer_positivity` clipping to survive at all and lost ~20 % of
   near-source tracer mass to it by day 10.
 - **`sl_off_centering=0.2`** — required over real orography (`off=0` is
   unstable even from a good state); validated over 215 days. This is now
@@ -94,4 +95,8 @@ fit T106L95 on one or two GPUs.
   (climate-analytics-lab/jax-rrtmgp#19).
 - Aerosol lifetimes vs observations (from
   `tools/jam_burden_report.py --emissions-file`): BC 7.8 d (obs 5–8 ✓),
-  SO4 10.1 d (obs ~4–5 — wet scavenging), sea-salt source under-emitting.
+  SO4 10.1 d (obs ~4–5 — wet scavenging), sea salt 0.50 d (obs 0.4–1 ✓).
+  The sea-salt source itself is **not** the deficit it was once thought to be:
+  the emission flux was audited faithful against HAMMOZ Gong and the 10 m wind
+  was corrected (#722, #723, both closed), which left the burden gap on the
+  removal side.

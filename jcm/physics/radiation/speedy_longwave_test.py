@@ -5,6 +5,8 @@ import jax
 import functools
 from jax.test_util import check_vjp, check_jvp
 
+from jcm.testing import check_gradients
+
 def initialize_arrays(ix, il, kx):
     # Initialize arrays
     ta = jnp.zeros((kx, ix, il))
@@ -211,7 +213,19 @@ class TestLongwave(unittest.TestCase):
         # -> We only test the first 5x5 elements
         zxy = (kx, ix, il)
         xy = (ix, il)
-        ta, rlds, st4a, flux = initialize_arrays(ix, il, kx)
+        _, rlds, st4a, flux = initialize_arrays(ix, il, kx)
+        # The shared 130-250 K ramp belongs to the Fortran regression test
+        # above and is kept there, but it is not a point at which this scheme
+        # is differentiable: ``radset`` clips its argument to [200, 320]
+        # (speedy_longwave.py:265), so 58 % of that ramp sits on the constant
+        # side of the clip and the level containing 200 K has ~60 of its 4608
+        # points swept across the kink by the top rung. The one-sided secants
+        # then disagree by 20-50 % at every rung. This ramp spans the same
+        # 100 K over the same grid, placed wholly inside the clip's smooth
+        # interval, and is an ordinary terrestrial column besides.
+        n = kx * ix * il
+        ta = 210.0 + (100.0 / (n - 1)) * jnp.arange(n).reshape(
+            (kx, il, ix)).transpose((0, 2, 1))
         mod_radcon = ModRadConData.zeros((ix, il), kx, flux=flux, st4a=st4a)
         physics_data = PhysicsData.zeros((ix, il), kx, mod_radcon=mod_radcon,speedy_coords=speedy_coords)
         forcing = ForcingData.ones(xy)
@@ -233,19 +247,20 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # eps is wedged: below ~1e-5 it is under an ulp of the O(400) st4a/dfabs
-        # fields, and at 1e-4 it steps across a where-branch in them. The
-        # quantisation that leaves puts the inner product ~7e-2 from AD.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=1e-1, eps=0.00001)
-        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
-        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # The step is chosen by jcm.testing from the difference's own
+        # self-consistency: st4a carries where-branches whose distance from
+        # this point depends on the direction, so no fixed step is safe.
+        # Measured agreement here is 7.1e-4.
+        #
+        # ``fsg`` alone is held fixed, for the same reason as in the upward
+        # check below: it is the one sigma-grid leaf this scheme *selects* on,
+        # through ``stratosphere_mask(fsg)`` whose sigma < 0.2 boundary the
+        # 8-level grid sits exactly on. The rest of the grid (dhs, grdscp,
+        # wvi) scales results and stays live, so its gradient is still
+        # checked — freezing the whole subtree would have taken those three
+        # out of both sides of the comparison as well.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords/fsg"])
 
 
     def test_upward_longwave_rad_fluxes_gradient_check(self):
@@ -284,18 +299,20 @@ class TestLongwave(unittest.TestCase):
                                        )
             return convert_to_float(data_out)
         
-        # Calculate gradient
-        f_jvp = functools.partial(jax.jvp, f)
-        f_vjp = functools.partial(jax.vjp, f)  
-
-        # Same float32 wedge as the downward check, but on a smaller output
-        # tree: the inner product lands ~3e-2 from AD.
-        check_vjp(f, f_vjp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=5e-2, eps=0.00001)
-        # eps=1e-4 leaves the O(1e3) scalar leaves (dt_seconds) bit-unchanged in
-        # float32 and reports a zero reference slope; 1e-3 moves them by ulps.
-        check_jvp(f, f_jvp, args = (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), 
-                                atol=None, rtol=2e-2, eps=0.001)
+        # Same branch structure as the downward check on a smaller output
+        # tree; measured agreement 9.9e-4.
+        #
+        # ``fsg`` is held fixed, and only ``fsg``. It is the sigma-grid leaf
+        # this scheme *selects* on: ``stratosphere_mask(fsg)`` has its
+        # sigma < 0.2 boundary exactly where the 8-level grid sits
+        # (fsg[2] = 0.2), so displacing fsg moves a whole layer between the
+        # stratospheric and tropospheric blackbody treatments, jumping ftop
+        # and dfabs by ~4.8 and leaving the secant reporting jump/eps at every
+        # rung above 4e-6. The grid's scaling leaves — dhs, grdscp and the
+        # interpolation weights wvi — are ordinary differentiable inputs here
+        # and are left live.
+        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-2,
+                        fixed_inputs=["speedy_coords/fsg"])
 
 
 

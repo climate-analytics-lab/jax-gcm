@@ -48,6 +48,20 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
   the ``physics_state`` carry is threaded as an explicit JAX pytree rather than
   ECHAM's module-level globals, so the step is a pure function.
 
+**Positivity and water conservation.** Because tendencies sum against one input
+state, a layer's summed water tendency can drive it negative — a donor layer
+overdrawn by vertical diffusion's conservative q/qc/qi redistribution plus the
+co-located cloud and convection sinks. `verify_tendencies` caps each water
+field's tendency at the drain rate `-q/dt` (which reproduces the sequential
+ECHAM-order atmosphere state: the donor drains to zero, the redistribution's
+receivers keep the water that genuinely left it) and, following ECHAM's
+negative-water correction (`mo_cloud.f90` section 8.4), charges the condensate
+each cap adds to the same cell's vapour with the matching phase-split latent
+heat. Total water per cell is conserved to round-off wherever the vapour can
+supply the correction; a cell whose vapour cannot keeps the remainder as a
+bounded, ledgered artificial source. The engineering treatment is
+{doc}`../design/water_positivity_conservation`.
+
 **Status & known limitations.** Only Lie splitting is implemented; Strang
 splitting (``O(dt²)``, 2× physics cost) is a documented follow-up should a
 coarser-``dt`` regime expose the coupling error. At the current climate-rate
@@ -56,7 +70,7 @@ scheme.
 
 **Code pointers.**
 - ``jcm/model.py`` — ``_get_op_split_step_fn``, ``_op_split_trajectory``,
-  ``_build_initial_physics_carry``.
+  ``initial_physics_carry``.
 - ``jcm/physics_interface.py`` — ``compute_physics_step_gridpoint``,
   ``verify_state``, ``verify_tendencies``.
 - ``jcm/dycore/base.py`` — ``DynamicalCore.step``.

@@ -20,6 +20,34 @@ selected by config:
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
 
+**Grey two-stream layer solution.** Each homogeneous layer's diffuse
+reflectance and transmittance are the exact two-stream result of Meador &
+Weaver (1980, eq. 14-15; equivalently Toon et al. 1989) under the Eddington
+closure (``two_stream_coefficients``: ``gamma1 = (7 - ssa(4 + 3g))/4``,
+``gamma2 = -(1 - ssa(4 - 3g))/4``). With eigenvalue
+``lambda = sqrt(gamma1**2 - gamma2**2)``, ``e = exp(-lambda*tau)`` and
+``Gamma = gamma2/(gamma1 + lambda)`` the solution is
+``R = Gamma (1 - e^2)/(1 - Gamma^2 e^2)`` and
+``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)``,
+so a semi-infinite layer has albedo ``Gamma`` and a conservative
+(``ssa = 1``) layer reflects ``R = gamma1*tau/(1 + gamma1*tau)`` with
+``R + T = 1``. ``layer_reflectance_transmittance`` evaluates the algebraically
+identical rearrangement ``R = gamma2 S/(gamma1 S + 1 + e^2)``,
+``T = 2 e/(gamma1 S + 1 + e^2)`` with ``S = (1 - e^2)/lambda``, chosen because
+its denominator cannot cancel to zero, it never divides by ``gamma1`` or
+``gamma1 + lambda`` (both zero at ``ssa = g = 1``), and it contains no growing
+exponential — one expression is valid and differentiable at every optical
+depth. For ``lambda*tau < 0.1`` it is evaluated as an even Taylor series in
+``(lambda*tau)^2``: R and T are even functions of ``lambda``, hence smooth in
+``lambda^2 = 3(1-ssa)(1-ssa*g)``, and the series carries the true endpoint
+derivative through autodiff at the conservative limit (where the closed value
+is ``R = gamma1*tau/(1+gamma1*tau)``). Longwave gas layers (``ssa = 0``) keep
+the Eddington coefficients ``gamma1 = 7/4``, ``gamma2 = -1/4``,
+``lambda = sqrt(3)``: the closure yields a small *negative* reflectance
+(``Gamma ~ -0.07``), clipped to ``R = 0`` as an approximation artefact, and a
+diffuse transmittance ``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)`` — within 0.5%
+of, but not exactly, ``exp(-sqrt(3)*tau)``.
+
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
@@ -34,12 +62,25 @@ layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
 carries its own cloud formulation. Swapping backends therefore changes the
 cloud-overlap treatment, not just the gas optics. The AeroCom
 total-cloud-cover diagnostic uses the maximum-random closure.
+
+**Offline**, the total cloud cover jcm reports from saved output is also
+maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
+:func:`jcm.analysis.total_cloud_cover`, and it is what the release-validation
+``cloud_cover`` gate scores. That choice defers to ECHAM and is deliberate:
+overlap is a definition, the three in common use differ by ~0.3 in the global
+mean, and a total cover is the basis the satellite climatologies are quoted
+on. It is a different number from the McICA ``radiation.total_cloud_cover``
+above — sampled quantity, different preprocessing, different time treatment —
+and {doc}`../design/cloud_cover_gate` sets out the provenance, the measured
+magnitudes and how far apart the two run.
 Radiation **sub-steps** on the ECHAM-family backends (grey, RRTMGP, NN
 emulator): a gate (``radiation_should_compute``) skips the expensive solve and
 rescales cached heating on intermediate steps. SPEEDY has its own, different
-cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls and the skipped
-calls contribute a *zero* shortwave tendency rather than replaying cached
-heating (#752).
+cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls, and the
+skipped calls re-apply the heating rate cached from the last solve
+(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``) rather than rescaling
+it, which is what the Fortran does. The two families therefore differ in how
+they *reuse* the cached solve, not in whether they reuse it.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
@@ -93,6 +134,12 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   not form ``0·inf`` on clear columns.
 
 **Status & known limitations.**
+- **Grey shortwave direct-beam source is not energy-conserving (#855).** The
+  direct-to-diffuse reflectance ``R_dir`` uses a single-scattering source whose
+  ``gamma3`` goes negative for forward-scattering clouds at high sun, so a thick
+  conservative cloud reflects ~0 at TOA and its scattered energy is dropped. The
+  diffuse layer solution above is exact; this is a separate defect in the
+  direct-beam source, awaiting the Toon et al. (1989) source functions.
 - **No sub-grid cloud inhomogeneity scaling.** ECHAM's continuous
   ``zinhoml = LWP^{-p}`` rescaling is not implemented; instead a one-sided
   in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) prevents thin-cloud

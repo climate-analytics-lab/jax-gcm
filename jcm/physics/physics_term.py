@@ -5,7 +5,7 @@ that can be composed with other terms to build a full physics package. Terms
 communicate through a ``diagnostics`` dict that flows forward through the term
 list, replacing the physics-package-specific PhysicsData structs.
 
-See docs/design/composable_physics.md for the full design.
+See docs/source/design/composable_physics.md for the full design.
 
 """
 
@@ -30,18 +30,22 @@ class TracerSpec:
     initial state's tracer dict with ``initial_value`` for any tracer
     whose name is declared here and not already present.
 
-    ``nondimensionalize=False`` means the state/tendency converters in
-    physics_interface pass the tracer through untouched (no gram/kg
-    scaling). Use this for tracers that already carry no unit expressible
-    as a mixing ratio — e.g. number concentrations per kg of air.
+    ``nondimensionalize=True`` (the default) declares the tracer a mass
+    mixing ratio in kg/kg. kg/kg is dimensionless, so the dycore state
+    bridges store the physical value unscaled — the same contract specific
+    humidity uses, and a requirement for the condensate species Dinosaur
+    reads directly in its virtual-temperature loading term.
+    ``nondimensionalize=False`` passes the tracer through untouched. Use it
+    for tracers carrying no unit expressible as a mixing ratio — e.g. number
+    concentrations per kg of air, or volume mixing ratios.
 
     Attributes:
         name: key in ``state.tracers`` (also on the dynamics side).
         units: human-readable units, informational only.
         initial_value: fill value used when seeding the initial tracer dict.
-        nondimensionalize: whether to apply the standard gram/kg
-            nondimensionalization when converting between physics and
-            dynamics representations.
+        nondimensionalize: whether the tracer is a kg/kg mass mixing ratio
+            (see above). Informational ``units`` never drives this; the flag
+            does.
 
     """
 
@@ -147,6 +151,20 @@ class PhysicsTerm(nnx.Module):
     # ``_forcing_2d``, …) repopulate every step and must NOT appear here.
     carry_slots: ClassVar[dict[str, type]] = {}
 
+    # Carry keys whose contents are PROGNOSTIC state: the only copy of a
+    # physical quantity, not something the next step recomputes. The
+    # cloud-borne aerosol phase is the case this exists for — it lives in
+    # the carry and nowhere else (#602), so a zero seed would destroy
+    # aerosol mass rather than cost one step of staleness.
+    #
+    # A checkpoint restore migrates a changed carry field set by name
+    # (``docs/source/design/checkpoint_compatibility.md``), which is safe
+    # precisely because carry fields are normally rewritten within a step
+    # or two. Keys listed here are excluded: a restore that would have to
+    # seed or drop one is refused instead. Declare a key here only when a
+    # fresh seed would be *wrong*, not merely stale.
+    prognostic_carry_slots: ClassVar[tuple[str, ...]] = ()
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """Declare the tracers this term needs in ``state.tracers``.
@@ -223,6 +241,29 @@ class PhysicsTerm(nnx.Module):
 
         """
         return None
+
+    def adopt_runtime_configuration(self, previous: PhysicsTerm) -> None:
+        """Take over post-compose configuration from the term being replaced.
+
+        A handful of terms are configured *after* a package is assembled,
+        because the setting comes from a sibling term rather than from their
+        own constructor — ``JamOpticsTerm.configure_radiation_gate`` reads the
+        radiation cadence, ``Lohmann2MMicrophysics.configure_spa`` the aerosol
+        activation tuning. That configuration lives on the instance, so
+        ``ComposablePhysics.replace`` would otherwise drop it on the floor and
+        leave the replacement running on constructor defaults, silently and
+        with no error.
+
+        ``replace`` therefore calls this on the incoming term, passing the
+        first term it displaced. The default does nothing, which is right for
+        the great majority of terms; a term with post-compose configuration
+        overrides it to copy that state across. Implementations must tolerate
+        a ``previous`` of an unrelated class and one that was never configured
+        — a package can be assembled without the sibling that configures it.
+
+        This is what makes attaching an out-of-tree term by ``replace`` safe;
+        see ``docs/source/design/jam_optics_mode_seam.md``.
+        """
 
     def cache_band_config(self, band_config) -> None:
         """Capture the active radiation band config (in-place).

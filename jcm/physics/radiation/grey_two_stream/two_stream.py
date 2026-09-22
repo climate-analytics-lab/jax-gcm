@@ -74,46 +74,137 @@ def layer_reflectance_transmittance(
     # Get two-stream coefficients
     gamma1, gamma2, gamma3, gamma4 = two_stream_coefficients(ssa, g, mu0)
     
-    # Calculate lambda (eigenvalue)
-    lambda_val = jnp.sqrt(gamma1**2 - gamma2**2)
-    
-    # For normal optical depths, calculate exponentials
-    lambda_tau = lambda_val * tau
-    
-    # Handle large optical depths consistently - use lambda_tau threshold
-    # Use 88 as threshold since exp(90) = inf, so be conservative
-    large_tau = lambda_tau >= 88
-    
-    # exp_plus = jnp.where(large_tau, jnp.inf, jnp.exp(lambda_tau))
-    # exp_minus = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
-    
-    # For large optical depths, avoid NaN by using safe values
-    # Use finite values instead of inf for subsequent calculations
-    exp_plus_safe = jnp.where(large_tau, 1.0, jnp.exp(lambda_tau))
-    exp_minus_safe = jnp.where(large_tau, 0.0, jnp.exp(-lambda_tau))
-    
-    denom = exp_plus_safe - gamma2**2 / gamma1**2 * exp_minus_safe
-    # Ensure denominator is never zero
-    denom = jnp.where(jnp.abs(denom) < 1e-10, 1e-10, denom)
-    
-    R_dif_normal = gamma2 * (exp_plus_safe - exp_minus_safe) / denom
-    T_dif_normal = (1.0 - R_dif_normal * gamma2 / gamma1) * exp_minus_safe
-    
-    # For large optical depths, use asymptotic behavior
-    # Pure absorption case: R=0, T=0
-    # Scattering case: R approaches gamma2/gamma1 (but clipped to physical bounds)
-    R_dif_asymptotic = jnp.where(
-        ssa > 0.001,  # If there's significant scattering
-        jnp.clip(gamma2 / gamma1, 0.0, 1.0),
-        0.0  # Pure absorption case
+    # Calculate lambda (eigenvalue).
+    #
+    # Factored rather than written as ``gamma1**2 - gamma2**2``. For the
+    # Eddington coefficients above the two forms are algebraically the same
+    # quantity — ``(gamma1 - gamma2)(gamma1 + gamma2) = 2(1 - ssa) *
+    # 1.5(1 - ssa*g)`` — but the subtraction is a catastrophic cancellation
+    # exactly where shortwave cloud optics lives. A liquid cloud has
+    # ``ssa ~ 0.9999``, where the two squares agree to four digits and their
+    # float32 difference is mostly round-off; feeding that into ``sqrt``,
+    # whose derivative is ``1/(2*sqrt(x))``, amplifies the round-off instead
+    # of the signal. Measured at ``ssa = 1 - 1e-6``: the subtracted form
+    # reports ``d/d(ssa) ~ 6.4e3`` against a true value near 3.4e2, and at
+    # ``ssa = 1`` it reports 5e5 for a derivative that does not exist. The
+    # factored form has no cancellation at all and is exactly 0 at ssa = 1.
+    #
+    # The double-``where`` guards the square root itself: at ``ssa = 1`` the
+    # masked branch is fed a 1.0 and the outer ``where`` selects the literal 0
+    # the physical branch would have produced. ``lambda_val`` feeds only the
+    # exponential branch below, which is never selected near ``ssa = 1``; the
+    # layer solution there is evaluated as an even series in ``lambda_sq``, so
+    # the endpoint derivative flows through the smooth ``lambda_sq`` rather
+    # than through this cusped square root.
+    lambda_sq = 3.0 * (1.0 - ssa) * (1.0 - ssa * g)
+    lambda_positive = lambda_sq > 0.0
+    lambda_val = jnp.where(
+        lambda_positive,
+        jnp.sqrt(jnp.where(lambda_positive, lambda_sq, 1.0)),
+        0.0,
     )
-    T_dif_asymptotic = 0.0  # No transmission for large tau
-    
-    # Choose based on optical depth
-    R_dif = jnp.where(large_tau, R_dif_asymptotic, R_dif_normal)
-    T_dif = jnp.where(large_tau, T_dif_asymptotic, T_dif_normal)
-    
-    # Ensure physical bounds
+
+    lambda_tau = lambda_val * tau
+
+    # Diffuse reflectance/transmittance of a homogeneous two-stream layer
+    # (Meador & Weaver 1980, eq. 14-15; Toon et al. 1989). With the eigenvalue
+    # ``lambda`` above and
+    #     Gamma = gamma2 / (gamma1 + lambda),   e = exp(-lambda*tau)
+    # the exact solution is
+    #     R = Gamma (1 - e^2) / (1 - Gamma^2 e^2)
+    #     T = (1 - Gamma^2) e / (1 - Gamma^2 e^2)          ->   R_inf = Gamma.
+    #
+    # We evaluate an algebraically identical rearrangement that is free of the
+    # singularities the ratio form carries. Multiplying the numerator and
+    # denominator of both ratios by ``(gamma1 + lambda)/lambda`` and writing
+    #     S = (1 - e^2) / lambda
+    # collapses ``Gamma`` out entirely and gives
+    #     R = gamma2 S / (gamma1 S + 1 + e^2)
+    #     T = 2 e      / (gamma1 S + 1 + e^2).
+    # This is preferred over the ratio form for three reasons, each of which
+    # was a real defect the ratio form had here:
+    #   * The denominator ``gamma1 S + 1 + e^2`` is a sum of non-negative terms
+    #     (``gamma1 >= 0`` for every ssa,g; ``S >= 0``; ``e^2 > 0``) bounded
+    #     below by 1, so it never cancels toward zero and needs no floor. The
+    #     ratio form's ``1 - Gamma^2 e^2`` vanishes 0/0 in the conservative
+    #     limit (ssa -> 1: Gamma -> 1, e -> 1), which is exactly why a
+    #     non-absorbing cloud reflected nothing before this fix.
+    #   * ``gamma1`` and ``gamma1 + lambda`` appear only multiplied in, never
+    #     divided by, so the 0/0 at ssa = g = 1 (where ``gamma1 = 0``) that the
+    #     old ``gamma2/gamma1`` needed a double-``where`` to survive simply
+    #     does not arise.
+    #   * Only the decaying exponentials ``e`` and ``e^2`` appear. The growing
+    #     ``exp(+lambda*tau)`` that overflowed float32 above ``lambda*tau ~ 88``
+    #     — the reason the old code branched to a separate asymptotic formula
+    #     and the reason its two branches disagreed at the cut-off — is gone,
+    #     so a single expression is valid at every optical depth. As tau -> inf
+    #     both exponentials -> 0 and ``S -> 1/lambda``, giving R -> Gamma and
+    #     T -> 0 continuously: the semi-infinite albedo is recovered exactly
+    #     with no branch to disagree with.
+    # Near the conservative limit the same solution is evaluated as an even
+    # Taylor series in ``x2 = (lambda*tau)**2`` instead of via the
+    # exponentials. R and T are *even* functions of ``lambda`` — substituting
+    # ``lambda -> -lambda`` and multiplying numerator and denominator by
+    # ``exp(-2*lambda*tau)`` reproduces them — so they are smooth functions of
+    # ``lambda**2 = 3(1-ssa)(1-ssa*g)`` and therefore genuinely two-sided
+    # differentiable in ``ssa`` and ``g`` at ``ssa = 1``, even though
+    # ``lambda`` itself has a square-root cusp there. A guard that pins
+    # ``lambda`` (and ``S``) at their limit *values* loses that channel:
+    # autodiff then reported ``dT/dssa = 0.4597`` at ``(ssa=1, g=0.85,
+    # tau=0.3)`` against the true 0.4789 (PR #856 review) — a silently biased
+    # endpoint derivative for any optimizer pushing ssa toward 1. In the
+    # hyperbolic form ``R = gamma2*(sinh x/lambda) / (cosh x +
+    # gamma1*(sinh x/lambda))``, ``T = 1/(cosh x + gamma1*(sinh x/lambda))``
+    # (multiply the expressions below through by ``exp(x)/2``), both
+    # ``cosh x`` and ``sinh(x)/lambda = tau*sinh(x)/x`` are analytic in
+    # ``x2``, so truncated series in ``x2`` route AD through the smooth
+    # ``lambda_sq`` and carry the exact endpoint derivative. The series is
+    # used for ``x2 < 1e-2`` (``lambda*tau < 0.1``), where its truncation
+    # error is O(x2**4/4e4) ~ 2.5e-13 relative — below even float64 noise at
+    # the switch, so the forward value is seamless across it; the exponential
+    # branch's ``lambda_tau`` is masked to 1 inside the series region so its
+    # AD stays finite on the discarded branch.
+    x2 = lambda_sq * tau * tau            # (lambda*tau)**2, smooth in ssa, g
+    use_series = x2 < 1e-2
+
+    # Double-``where`` on the series input, mirroring ``lambda_tau_safe`` on
+    # the opposite branch: ``where`` evaluates both branches, and at float32
+    # optical depths large enough that the polynomial's powers overflow
+    # (``tau * x2**3`` passes 3.4e38 around ``lambda*tau ~ 1e6``, e.g. a
+    # ``tau = 1e6`` longwave layer) the discarded ``R_series`` goes
+    # inf/inf = NaN, which reverse mode then hands to the *taken* branch as
+    # ``0 * NaN = NaN`` — the forward value stayed (0, 0) but d/d(tau, ssa, g)
+    # were all NaN. Clamping ``x2`` to 0 outside the series region keeps the
+    # discarded polynomial (and its derivatives) finite; inside the region the
+    # value and derivative are untouched.
+    x2_safe = jnp.where(use_series, x2, 0.0)
+    x2_sq = x2_safe * x2_safe
+    sinhc = (1.0 + x2_safe / 6.0 + x2_sq / 120.0
+             + x2_sq * x2_safe / 5040.0)             # sinh(x)/x
+    cosh_x = 1.0 + x2_safe / 2.0 + x2_sq / 24.0 + x2_sq * x2_safe / 720.0
+    denom_series = cosh_x + gamma1 * tau * sinhc    # >= 1: every term >= 0
+    R_series = gamma2 * tau * sinhc / denom_series
+    T_series = 1.0 / denom_series
+
+    lambda_tau_safe = jnp.where(use_series, 1.0, lambda_tau)
+    exp_minus = jnp.exp(-lambda_tau_safe)           # e
+    exp_minus_sq = jnp.exp(-2.0 * lambda_tau_safe)  # e^2
+    scaled_path = tau * (1.0 - exp_minus_sq) / lambda_tau_safe   # S
+    denom = gamma1 * scaled_path + 1.0 + exp_minus_sq            # >= 1
+    R_exp = gamma2 * scaled_path / denom
+    T_exp = 2.0 * exp_minus / denom
+
+    R_dif = jnp.where(use_series, R_series, R_exp)
+    T_dif = jnp.where(use_series, T_series, T_exp)
+
+    # Physical bounds. R + T <= 1 already holds by construction on both
+    # branches (exponential: ``R + T - 1 = (gamma2 - gamma1) S / denom``;
+    # series: ``((gamma2 - gamma1) tau sinhc + (1 - cosh x)) / denom`` — both
+    # non-positive since ``gamma1 - gamma2 = 2(1 - ssa) >= 0`` and
+    # ``cosh x >= 1``), so the upper clip never acts. The lower clip removes
+    # the small negative reflectance the Eddington closure produces for weakly
+    # scattering layers, where ``gamma2 < 0`` for ``ssa < 1/(4 - 3g)`` — an
+    # approximation artefact, not a physical value.
     R_dif = jnp.clip(R_dif, 0.0, 1.0)
     T_dif = jnp.clip(T_dif, 0.0, 1.0)
     
@@ -123,7 +214,15 @@ def layer_reflectance_transmittance(
         tau_over_mu = jnp.clip(tau / mu0_safe, 0.0, 100.0)
         T_dir = jnp.exp(-tau_over_mu)
 
-        # Direct to diffuse reflectance (guard denom from zero when ssa*gamma4 ≈ 1)
+        # Direct-to-diffuse reflectance (guard denom from zero when ssa*gamma4 ≈ 1).
+        # NOTE (#855): this single-scattering source is not energy-conserving.
+        # ``gamma3 = (2 - 3*g*mu0)/4`` goes negative for forward-scattering
+        # clouds at high sun (g=0.85, mu0=1 -> -0.14), R_dir clips to 0, and the
+        # scattered fraction of the attenuated direct beam is then dropped
+        # entirely — a thick conservative cloud reflects ~0 at TOA. The faithful
+        # fix is the Toon et al. (1989) direct-beam source functions; it is a
+        # separate defect from the diffuse layer solution corrected above (#848)
+        # and is tracked in #855.
         denom_dir = jnp.maximum(1.0 - ssa * gamma4, 1e-8)
         R_dir = ssa * gamma3 * (1.0 - T_dir) / denom_dir
         R_dir = jnp.clip(R_dir, 0.0, 1.0)

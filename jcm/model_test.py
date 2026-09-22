@@ -178,7 +178,6 @@ class TestModelUnit(unittest.TestCase):
         because their ``a_thickness`` is zero so the bad broadcast happened
         to succeed.
         """
-        import logging
         from jcm.model import Model
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
@@ -191,7 +190,6 @@ class TestModelUnit(unittest.TestCase):
             coords=coords,
             physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
             time_step=3.0,
-            log_level=logging.CRITICAL,
         )
 
         save_interval = 1.0 / 24.0  # 1 hour
@@ -453,6 +451,9 @@ class TestModelUnit(unittest.TestCase):
 
         # check whether zonal averages over the last month are within 2 std deviations of the expected values
         for var in default_stat_vars:
+            if var == 'specific_humidity':
+                assert default_stats[f'{var}.mean'].attrs['units'] == 'kg kg-1'
+                assert pred_ds_monthly[var].attrs['units'] == 'kg kg-1'
             lower = default_stats[f'{var}.mean'] - tol*default_stats[f'{var}.std']
             upper = default_stats[f'{var}.mean'] + tol*default_stats[f'{var}.std']
             assert ((lower <= pred_ds_monthly[var]).all()) & ((pred_ds_monthly[var] <= upper).all())
@@ -607,8 +608,9 @@ class TestCalendarDurations(unittest.TestCase):
 class TestOperatorSplitPhysics(unittest.TestCase):
     """Operator-split physics (issue #471).
 
-    The op-split path calls physics exactly once per ``dt`` outside the
-    IMEX-RK stages and applies the tendency as a forward-Euler add.
+    The op-split path calls physics exactly once per ``dt``, outside the
+    dycore's own integration stages, and applies the tendency as a
+    forward-Euler add.
     These tests verify the path is wired correctly, exists as a JAX
     pytree, and produces finite atmospheric state in both snapshot and
     averaged modes.
@@ -1162,15 +1164,89 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
         self.assertLess(g1 * g2, 0.0)
 
 
-class TestModelLogging(unittest.TestCase):
-    """Warnings jcm raises about a run have to reach the user.
+class TestModelStateApi(unittest.TestCase):
+    """Public initial/resumable-state contract (#755)."""
 
-    The default was ``logging.CRITICAL`` applied to the ROOT logger, which
-    silenced every jcm warning — including the one saying an in-place
-    parameter change never reached the computation (#735) — and
-    reconfigured logging for the host application as a side effect. Both
-    halves of that are tested here: the default is audible, and it is
-    scoped to the ``jcm`` hierarchy.
+    @staticmethod
+    def _model():
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_held_suarez_coords()
+        return Model(
+            coords=coords,
+            terrain=TerrainData.from_coords(coords),
+            time_step=180,
+            physics=held_suarez_physics(),
+        )
+
+    def test_fresh_builders_are_pure_and_bootstrap_returns_installed_pair(self):
+        model = self._model()
+
+        state = model.initial_state(sim_time=123.0)
+        carry = model.initial_physics_carry()
+        self.assertIsNone(model.dycore_state)
+        self.assertIsNone(model.physics_carry)
+        self.assertAlmostEqual(float(model.dycore.sim_time(state)), 123.0)
+        self.assertTrue(jax.tree_util.tree_leaves(carry))
+
+        bootstrapped_state, bootstrapped_carry = model.bootstrap_state()
+        self.assertIs(bootstrapped_state, model.dycore_state)
+        self.assertIs(bootstrapped_carry, model.physics_carry)
+
+    def test_resumable_properties_are_read_only_and_restore_is_atomic(self):
+        model = self._model()
+        state, carry = model.bootstrap_state()
+        replacement_state = model.dycore.with_sim_time(
+            state, jnp.asarray(4321.0),
+        )
+        replacement_carry = jax.tree.map(
+            lambda value: jnp.ones_like(value), carry,
+        )
+
+        with self.assertRaises(AttributeError):
+            model.dycore_state = replacement_state
+        with self.assertRaises(AttributeError):
+            model.physics_carry = replacement_carry
+
+        model.restore_state(replacement_state, replacement_carry)
+        self.assertIs(model.dycore_state, replacement_state)
+        self.assertIs(model.physics_carry, replacement_carry)
+        self.assertEqual(float(model.dycore.sim_time(model.dycore_state)),
+                         4321.0)
+
+        with self.assertRaisesRegex(ValueError, "requires both"):
+            model.restore_state(replacement_state, None)
+
+    def test_restore_rejects_tracers_instead_of_leaking_them(self):
+        model = self._model()
+        _, carry = model.bootstrap_state()
+
+        def attempt_restore(traced_state):
+            model.restore_state(traced_state, carry)
+            return traced_state
+
+        with self.assertRaisesRegex(ValueError, "cannot retain JAX tracers"):
+            jax.make_jaxpr(attempt_restore)(jnp.asarray(1.0))
+
+
+class TestModelLogging(unittest.TestCase):
+    """jcm is a library: it emits log records and configures nothing.
+
+    Level and handler policy belong to whoever assembles the process, so
+    importing jcm or building a Model must leave the host's logging exactly
+    as it found it. The CLI is the one place that does configure — Hydra's
+    ``job_logging`` plus ``runners._apply_log_level`` — because there jcm
+    *is* the application.
+
+    Constructing a Model used to set a level on the ``jcm`` logger
+    (previously ``CRITICAL`` on the ROOT logger), which reconfigured logging
+    for the host as a side effect and, in the test suite, leaked between
+    tests as an unreproducible xdist failure (#815).
     """
 
     def setUp(self):
@@ -1188,29 +1264,145 @@ class TestModelLogging(unittest.TestCase):
                                               spectral_truncation=21),
                      time_step=30.0, **kwargs)
 
-    def test_warnings_are_audible_even_from_a_quiet_application(self):
-        # An application that has silenced the root logger still hears
-        # jcm's warnings about its own results, because the level is set
-        # on the jcm logger: level lookup stops at the first logger with
-        # one set, and propagation to handlers does not consult the root
-        # logger's level.
+    def test_construction_leaves_logging_exactly_as_it_found_it(self):
+        """Neither logger the library could reach for is touched.
+
+        Handlers as well as levels, on the ``jcm`` logger as well as root:
+        attaching jcm's own handler to the ``jcm`` logger is a live option
+        (see #817's discussion), and doing it from ``Model.__init__`` would
+        put the library back to configuring the host's logging.
+        """
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("jcm").setLevel(logging.ERROR)
+        before = {
+            name: (lg.level, lg.handlers[:], lg.propagate)
+            for name, lg in (("", logging.getLogger()),
+                             ("jcm", logging.getLogger("jcm")))
+        }
+
+        self._model()
+
+        for name, (level, handlers, propagate) in before.items():
+            lg = logging.getLogger(name) if name else logging.getLogger()
+            with self.subTest(logger=name or "root"):
+                self.assertEqual(lg.level, level)
+                self.assertEqual(lg.handlers, handlers)
+                self.assertEqual(lg.propagate, propagate)
+
+    def test_an_applications_silence_is_respected(self):
+        """The counterpart of the old behaviour, stated deliberately.
+
+        #735 wanted jcm's warnings audible even from an application that had
+        silenced its root logger. That is the library overriding a choice the
+        host made, so it is gone: a caller who silences logging gets silence.
+        Findings that must survive it belong in the run's provenance, which
+        is a file rather than a stream — see ``jcm.provenance``.
+        """
         logging.getLogger().setLevel(logging.CRITICAL)
         self._model()
-        self.assertTrue(
-            logging.getLogger("jcm.predictions").isEnabledFor(
-                logging.WARNING))
-
-    def test_construction_leaves_the_root_logger_alone(self):
-        logging.getLogger().setLevel(logging.DEBUG)
-        self._model()
-        self.assertEqual(logging.getLogger().level, logging.DEBUG)
-        self.assertEqual(logging.getLogger("jcm").level, logging.WARNING)
-
-    def test_log_level_argument_still_quietens_jcm(self):
-        self._model(log_level=logging.CRITICAL)
         self.assertFalse(
             logging.getLogger("jcm.predictions").isEnabledFor(
                 logging.WARNING))
+
+    def test_importing_jcm_installs_no_handler(self):
+        """A library that calls ``basicConfig`` decides the host's format.
+
+        It was also pointless for the CLI, which is the only place it could
+        have applied: Hydra's ``job_logging`` runs ``dictConfig`` with a
+        ``root:`` section, which replaces root's handlers outright.
+        """
+        import os
+        import subprocess
+        import sys
+
+        probe = (
+            "import logging, sys\n"
+            "before = list(logging.getLogger().handlers)\n"
+            "import jcm\n"
+            "after = list(logging.getLogger().handlers)\n"
+            "sys.stdout.write(repr(before == after))\n"
+        )
+        # A bounded timeout and an explicit returncode: importing jcm pulls
+        # in JAX, which on a GPU host without JAX_PLATFORMS=cpu can block,
+        # and an unbounded child would hang the suite rather than fail it.
+        out = subprocess.run([sys.executable, "-c", probe],
+                             capture_output=True, text=True, timeout=300,
+                             env={**os.environ, "JAX_PLATFORMS": "cpu"})
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        self.assertEqual(out.stdout.strip(), "True", out.stderr[-2000:])
+
+    def test_no_jcm_module_logs_through_the_root_logger(self):
+        """Records from jcm must be addressable as a group.
+
+        The module-level ``logging.warning(...)`` helpers, ``logging.root``
+        and the ``from logging import warning`` aliases all emit on the ROOT
+        logger, so a message sent that way sits outside the ``jcm``
+        hierarchy — beyond the reach of ``run.log_level``, and of anything a
+        host application sets for ``jcm`` specifically. Whether jcm's records
+        can be addressed as a group is the whole point of the naming
+        convention.
+
+        Matched on the parsed AST rather than the source text, so a call
+        nested in an expression or reached through an alias counts, and a
+        usage example in a docstring does not.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent
+        # Names ``logging`` exports that emit on the root logger.
+        emitters = {"debug", "info", "warning", "warn", "error", "critical",
+                    "exception", "log"}
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Whatever this module calls the logging package (``import
+            # logging as log``), and any emitter pulled into its namespace
+            # directly (``from logging import warning``).
+            modules, aliased = set(), set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        root_name = alias.name.split(".")[0]
+                        if root_name != "logging":
+                            continue
+                        # ``import logging.config`` binds the bare name
+                        # ``logging`` too; ``... as c`` binds only ``c``.
+                        modules.add(alias.asname or root_name)
+                elif (isinstance(node, ast.ImportFrom)
+                      and node.module == "logging"):
+                    aliased |= {alias.asname or alias.name
+                                for alias in node.names
+                                if alias.name in emitters}
+
+            def _is_logging_module(node):
+                # ``logging`` itself, or ``logging.root`` — both emit on root.
+                if isinstance(node, ast.Name):
+                    return node.id in modules
+                return (isinstance(node, ast.Attribute)
+                        and node.attr == "root"
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in modules)
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                hit = (
+                    (isinstance(func, ast.Attribute)
+                     and func.attr in emitters
+                     and _is_logging_module(func.value))
+                    or (isinstance(func, ast.Name) and func.id in aliased))
+                if hit:
+                    offenders.append(
+                        f"{path.relative_to(root.parent)}:{node.lineno}")
+        self.assertEqual(
+            offenders, [],
+            "these emit on the root logger, where ``log_level`` cannot reach "
+            "them; use a module-level ``logger = "
+            "logging.getLogger(__name__)`` instead. A message deliberately "
+            "aimed at the root logger — and so deliberately outside the "
+            "knob — must say so explicitly via ``logging.getLogger()``.")
 
 
 class TestObserversUnderJit(unittest.TestCase):
