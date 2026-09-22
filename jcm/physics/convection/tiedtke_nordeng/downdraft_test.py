@@ -62,9 +62,14 @@ def _rce_column(klev=47):
     surf_T = 305.0
     surf_q = 0.025
     Gamma = 6.5e-3  # K/m
-    # Approximate height from p (just for T profile shape)
+    # Approximate height from p (just for T profile shape). ``z_full`` is
+    # POSITIVE height above the surface (p < p0 ⇒ z_full > 0), so the lapse
+    # subtracts with height: T decreases upward, as in a real sounding. (The
+    # earlier ``-Gamma·(-z_full)`` had a sign error that made T *increase*
+    # with height — 376 K at 255 hPa — an unphysical column that only stayed
+    # hidden while the plume/LFS happened to land in its lower part.)
     z_full = -8000.0 * jnp.log(p / p0)  # H ~ 8 km scale height
-    T = jnp.maximum(surf_T - Gamma * (-z_full), 200.0)
+    T = jnp.maximum(surf_T - Gamma * z_full, 200.0)
     # Constant 90 % RH (clipped to small at top)
     from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
         saturation_mixing_ratio,

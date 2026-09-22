@@ -382,8 +382,26 @@ _CHECKS: dict = {
     # the check can honestly assert. The plume on this column stays warm, so
     # it detrains no ice and the qi tendency is a structural zero rather than
     # a lost gradient.
+    #
+    # ``adjoint_rtol`` is relaxed to 3.0e-3 because the faithful #676/#669
+    # reformulation lengthened the convecting-plume float32 reduction: the
+    # cududv momentum tendency now sums SEPARATE updraft and downdraft
+    # deviation-flux divergences, each built from a prognostic plume wind
+    # mixed through the ascent/descent scans, plus the sub-cloud taper and the
+    # surface-layer closure; and the organized entrainment/detrainment add the
+    # ``zdrodz`` log-density term and the metre-based ``tan`` profile with
+    # their ``centrmax`` clips. In float64 the seed-0 jvp and vjp agree to
+    # 8.1e-13 (≤4e-14 over seeds 1-2), so the float32 gap is reduction order,
+    # not a jvp/vjp asymmetry — and there is no ``custom_jvp``, ``custom_vjp``
+    # or ``stop_gradient`` in the scheme for one to come from; the two float32
+    # modes straddle the float64 truth (-2527.3: jvp -2530.1, vjp -2528.9).
+    # The worst float32 spread over seeds 0-5 is 4.85e-4, all of it on seed 0
+    # (the smallest-magnitude projection, |Δ|≈1.2 on a value of 2530; the
+    # other five seeds are ≤2.6e-5). 3.0e-3 keeps ~6x headroom and still
+    # detects a 0.3 % asymmetry — far tighter than the 1.2e-1 the 1M
+    # convecting cell had to reject as unusable.
     ("tiedtke_convection", "convecting"): _Check(
-        reference="adjoint", outputs="tendency",
+        reference="adjoint", adjoint_rtol=3.0e-3, outputs="tendency",
         skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
 }
 

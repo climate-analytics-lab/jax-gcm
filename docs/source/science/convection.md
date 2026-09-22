@@ -6,13 +6,30 @@
   (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::TiedtkeConvection``)
   — the ECHAM/ICON scheme: deep, shallow and mid-level convection, convective
   momentum transport, and downdrafts (``updraft.py``, ``downdraft.py``,
-  ``flux_tendencies.py``). Moisture convergence *classifies* deep vs shallow
+  ``flux_tendencies.py``). Organized (Nordeng) entrainment and detrainment are
+  the **metre-based fractional rates** of ``mo_cuascent.f90`` — organized
+  entrainment carries the ``zbuoyz·0.5/(1+∫buoyancy) + zdrodz`` density-lapse
+  term and organized detrainment is the ``tan``-profile in height that scales
+  as 1/(cloud depth) — each clamped to ECHAM's hard cap ``centrmax = 3.0e-4
+  m⁻¹``, and per-layer detrained mass is capped at 0.75 of the plume
+  (``cu_asc`` line 500) so the detrained-condensate ledger can never exceed the
+  plume mass. Momentum transport is the ``cududv`` deviation-flux divergence
+  with SEPARATE updraft and downdraft fluxes, each carrying its own prognostic
+  plume wind (mass-weighted entrainment of the environment), the upstream
+  ``jk−1`` environment offset, the sub-cloud pressure-ratio taper, and the
+  explicit surface-layer closure. The ``cudtdq`` ledger keys its
+  condensate-flux latent heat to the phase (``alhs`` below the melting point,
+  ``alhc`` above) and writes a tendency to the surface layer (ECHAM's
+  ``jk == klev`` branch). Moisture convergence *classifies* deep vs shallow
   (ECHAM's ``mo_cumastr.f90`` test), while the cloud-base *closure* routes
   independently of that type: any active surface plume takes the
   moisture-budget flux ``E/(q_u−q_e)`` where it is valid (ECHAM's ``zlo1``
   test — near-saturated cloud bases and negligible evaporation fail it) and
-  the bounded CAPE flux otherwise, so surface evaporation, not CAPE, sets the
-  steady-state flux of a healthy plume. Mid-level (``cubasmc``) plumes take
+  ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
+  (``mo_cumastr.f90:567``) otherwise, so surface evaporation, not CAPE, sets
+  the steady-state flux of a healthy plume; the deep amplitude is then set by
+  the Nordeng ``zmfub1 = zcape·zmfub/(zheat·tau)`` rescale, which is where the
+  CAPE-consumption timescale ``tau`` lives. Mid-level (``cubasmc``) plumes take
   neither: their base flux is the resolved ascent that triggered them. The saturation
   adjustment ``cuadjtq`` is a faithful linearised-Newton port of ``mo_cuadjust.f90``
   (``adjustment.py``) with the three ``kcall`` modes. The precipitation budget
@@ -66,23 +83,22 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``zmfmax = layer_mass/dt`` bounds the column-integrated flux but not per-level
   latent-heat spikes inside the updraft loop. Until the per-level limits land, an
   explicitly-labelled stopgap caps the convective T-tendency at 5 K/hr
-  (``_DTDT_MAX``) and rescales the thermodynamic ledger homogeneously — T, q,
-  qc/qi, precipitation, and the mass fluxes with the tracer transport they
-  drive — preserving column conservation by linearity, as ECHAM's ``zmfub1``
-  amplitude scaling does. The **momentum tendencies are the exception**:
-  ``dudt``/``dvdt`` are returned unscaled, so a capped plume's momentum
-  transport keeps full amplitude (tracked with the other ledger gaps in #676).
-  This cap is the documented cause of a cap-pinned single-layer heating
-  artifact in pathological columns.
+  (``_DTDT_MAX``) and rescales the **whole** ledger homogeneously — T, q,
+  qc/qi, precipitation, the mass fluxes with the tracer transport they drive,
+  **and the momentum tendencies** ``dudt``/``dvdt``, which share the same mass
+  flux — preserving column conservation by linearity, as ECHAM's ``zmfub1``
+  amplitude scaling does. This cap is the documented cause of a cap-pinned
+  single-layer heating artifact in pathological columns.
 
 **Status & known limitations.**
 - The 5 K/hr tendency cap is a **safety net, not physics**; it fires only where
   the parcel-vs-environment balance has gone pathological (healthy tropical deep
   convection is ~1 K/hr). It remains until the ``mo_cuadjust`` per-level limits are
   ported.
-- Cloud-base closure falls back to the bounded CAPE flux (rather than ECHAM's tiny
-  flux) when the moisture-budget denominator collapses under a near-saturated cloud
-  base or spectral supersaturation ringing.
+- Cloud-base closure falls back to ECHAM's constant ``zmfub = 0.01`` first
+  guess when the moisture-budget denominator collapses under a near-saturated
+  cloud base or spectral supersaturation ringing; deep columns then take the
+  Nordeng CAPE rescale, so ``tau`` still sets their amplitude.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
 

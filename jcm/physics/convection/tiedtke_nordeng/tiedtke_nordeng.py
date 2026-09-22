@@ -706,6 +706,36 @@ _MIN_MOISTURE_SUPPLY = 1.0e-7
 _MIN_CAPE_FOR_MOISTURE_TRIGGER = 10.0
 
 
+def shallow_reclosure_flux(zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, config):
+    """ECHAM shallow re-closure cloud-base mass flux, with jcm's CFL cap.
+
+    Recomputes the ktype=2 cloud-base flux from the PBL moisture budget
+    (``zdqpbl/(g·max(zqumqe,zdqmin))``, ``zqumqe`` including the downdraft
+    moisture) and accepts it only when it moves less than 20% from the
+    first-guess ``zmfub`` — ECHAM ``mo_cumastr.f90:921-937``.
+
+    ECHAM's shallow branch does NOT re-apply ``MIN(zmfub1, zmfmax)`` after the
+    20% guard (unlike the deep branch at ``:904``), so a first guess just below
+    the CFL limit can be raised to as much as ``1.2·zmfmax``. jcm treats
+    ``mfu_cfl_max`` — the air mass of the cloud-base source layer per timestep —
+    as a HARD stability invariant (the documented T63L47 hot-cell-runaway
+    guard, applied to ``mass_flux_base`` and the deep ``zmfub1`` alike), so the
+    accepted value is clipped here to the same final limits (the CFL cap and
+    ``cmfcmax``). This is a small, deliberate deviation from ECHAM's 20%
+    overshoot tolerance, keeping the CFL invariant consistent across the deep
+    and shallow paths (Codex review on #874).
+    """
+    zmfub1 = jnp.where(
+        (zdqpbl > 0.0) & (zqumqe > zdqmin) & (zmfub < mfu_cfl_max),
+        zdqpbl / (c.grav * jnp.maximum(zqumqe, zdqmin)),
+        zmfub,
+    )
+    # 20% acceptance window around the first guess.
+    zmfub1 = jnp.where(jnp.abs(zmfub1 - zmfub) < 0.2 * zmfub, zmfub1, zmfub)
+    # Re-apply jcm's cloud-base mass-flux limits (CFL cap and cmfcmax).
+    return jnp.minimum(zmfub1, jnp.minimum(mfu_cfl_max, config.cmfcmax))
+
+
 def _tiedtke_convection_toa_first(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -1037,7 +1067,14 @@ def _tiedtke_convection_toa_first(
             moisture_supply / jnp.maximum(q_excess, zdqmin),
             config.cmfcmin, config.cmfcmax,
         )
-        mass_flux_cape = mass_flux_closure_blend(
+        # ECHAM's cloud-base first-guess FALLBACK when the PBL moisture-budget
+        # closure is invalid (mo_cumastr.f90:567): the constant
+        # zmfub = 0.01 kg/m²/s, bounded by the CFL cap applied to
+        # mass_flux_base below. A genuine mass flux — the previous
+        # cape/(g·tau) fallback had units of m/s (review finding 2.5). Deep
+        # columns get their CAPE dependence from the Nordeng zmfub1 rescale
+        # further down; shallow/mid keep this bounded constant, matching ECHAM.
+        mass_flux_fallback = mass_flux_closure_blend(
             cape, cin, jnp.array(0.0), type_weights, config
         )
         # Apply the moisture-anchored flux to any active convection (deep/
@@ -1050,7 +1087,9 @@ def _tiedtke_convection_toa_first(
         # evaporation 0 < E ≤ _MIN_MOISTURE_SUPPLY) keep the bounded CAPE
         # closure rather than a CFL-saturating or ~zero moisture flux.
         use_moisture = jnp.logical_and(conv_type >= 1, moisture_valid)
-        mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
+        mass_flux_base = jnp.where(
+            use_moisture, mass_flux_moisture, mass_flux_fallback
+        )
 
         # A ``cubasmc`` plume takes neither closure: its cloud-base flux is
         # the resolved ascent that triggered it (mo_cuascent.f90:643).
@@ -1093,6 +1132,8 @@ def _tiedtke_convection_toa_first(
             # ECHAM's zlift, for the one ascent test that uses it: the
             # first step above a ``cubasmc`` (klab == 1) cloud base.
             lift=cloud_base_lift(config, thvsig),
+            # Environmental winds for the prognostic plume wind (cududv).
+            u_wind=u_wind, v_wind=v_wind,
         )
         
         # --- ECHAM depth demotion (mo_cumastr.f90:750-753) ---------------
@@ -1130,7 +1171,8 @@ def _tiedtke_convection_toa_first(
         # Calculate downdraft (now properly implemented)
         downdraft_state = calculate_downdraft(
             temperature, humidity, pressure, layer_thickness, rho,
-            updraft_state, precip_rate, cloud_base, ktop, config
+            updraft_state, precip_rate, cloud_base, ktop, config,
+            u_wind=u_wind, v_wind=v_wind,
         )
         
         # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
@@ -1202,10 +1244,50 @@ def _tiedtke_convection_toa_first(
         # trigger (the closure fades in over smooth_trigger_j instead of
         # snapping), which also keeps gentle convective precip alive at
         # the near-neutral equilibrium the efficient rescale produces.
+        # ECHAM SHALLOW re-closure (mo_cumastr.f90:909-936): after the
+        # downdrafts, a ktype==2 column recomputes its cloud-base flux from
+        # the PBL moisture budget INCLUDING the downdraft moisture at cloud
+        # base (zqumqe = qu + lu − zeps·qd − (1−zeps)·qenh, with zeps = cmfdeps
+        # where a downdraft reaches the base) and applies it only when it
+        # moves less than 20% from the first guess. With the faithful
+        # deep/shallow split most columns are shallow, so this term (a
+        # NEGATIVE moisture correction from downdraft drying) matters. jcm
+        # previously applied the pre-downdraft moisture-anchored flux with no
+        # re-closure.
+        ikb = cloud_base
+        # ECHAM keys zeps on ``pmfd(ikb) < 0 .AND. loddraf``
+        # (mo_cumastr.f90:924). ``loddraf`` is "a downdraft was initiated"
+        # (an LFS was found) — it is NOT the scan-EXIT activity flag, which the
+        # surface taper always drives to False (and an early termination does
+        # the same). A negative downdraft mass flux AT CLOUD BASE already means
+        # a downdraft is present there (loddraf implied), so test that directly
+        # rather than ``downdraft_state.active`` (the final carry), which would
+        # zero ``zeps`` in exactly the LFS-above-base columns the shallow
+        # re-closure targets (Codex P2).
+        zeps = jnp.where(
+            downdraft_state.mfd[ikb] < 0.0, config.cmfdeps, 0.0,
+        )
+        zqumqe = (
+            updraft_state.qu[ikb] + updraft_state.lu[ikb]
+            - zeps * downdraft_state.qd[ikb]
+            - (1.0 - zeps) * humidity[ikb]
+        )
+        zdqmin_sh = jnp.maximum(0.01 * humidity[ikb], 1.0e-10)
+        zdqpbl = moisture_supply * c.grav  # zdqpbl = g·E
+        # The re-closed flux is accepted within a 20% window of the first
+        # guess and then clipped to jcm's CFL cap / cmfcmax (see
+        # ``shallow_reclosure_flux`` — ECHAM's shallow branch omits that final
+        # clip, so a near-cap first guess could otherwise be raised past the
+        # hard CFL limit the rest of the scheme enforces).
+        zmfub1_sh = shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin_sh, zdqpbl, mfu_cfl_max, config,
+        )
+        rescale_shallow = zmfub1_sh / zmfub
+
         rescale = jnp.where(
             (conv_type_final == 1) & (zheat > 1e-10) & (zcape_plume > 0.0),
             zmfub1 / zmfub,
-            1.0,
+            jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
         )
         updraft_state = updraft_state._replace(
             mfu=updraft_state.mfu * rescale,
@@ -1281,12 +1363,18 @@ def _tiedtke_convection_toa_first(
             has_active, jnp.min(candidate).astype(jnp.int32), ktop,
         )
 
-        # Update state
+        # Update state. The prognostic plume winds computed for the cududv
+        # momentum transport (``uu``/``vu`` from cuasc, ``ud``/``vd`` from
+        # cuddraf) are carried out on the state so a standalone caller
+        # consuming it sees the actual in-plume winds rather than the
+        # environment. They are intensive (m/s), so — unlike the mass fluxes —
+        # they are NOT touched by the Nordeng amplitude rescale and carry no
+        # cap scaling; the momentum TENDENCY the cap scales is separate.
         new_state = ConvectionState(
             tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
-            uu=u_wind, vu=v_wind,  # Simplified - would update from momentum transport
+            uu=updraft_state.uu, vu=updraft_state.vu,
             td=downdraft_state.td, qd=downdraft_state.qd,
-            ud=u_wind, vd=v_wind,  # Simplified
+            ud=downdraft_state.ud, vd=downdraft_state.vd,
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
             # Fractional entrainment (1/m) is rescale-invariant (a rate,
             # not a flux); the transport term rebuilds the absolute
@@ -1783,9 +1871,19 @@ class TiedtkeConvection(PhysicsTerm):
         cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
+        # Momentum transport carries the SAME per-column cap scaling as the
+        # rest of the ledger (jax-gcm#676 item 2 / the #641 doc's follow-up).
+        # cududv's u/v tendency is the divergence of a flux built from the
+        # SAME mass fluxes that drive T/q/qc/qi; when the ``_DTDT_MAX`` cap
+        # rescales the column, leaving dudt/dvdt unscaled would deliver a
+        # capped plume's momentum transport at full amplitude while its
+        # thermodynamics are held to ~9 %, breaking the proportionality the
+        # cap's comment claims. Neither ECHAM nor CAM has such a cap, so the
+        # only correct choice is to scale momentum consistently with the
+        # ledger it shares a mass flux with.
         tendency = PhysicsTendency(
-            u_wind=tendencies_all.dudt.T,
-            v_wind=tendencies_all.dvdt.T,
+            u_wind=(tendencies_all.dudt * cap_scale).T,
+            v_wind=(tendencies_all.dvdt * cap_scale).T,
             temperature=(tendencies_all.dtedt * cap_scale).T,
             specific_humidity=(tendencies_all.dqdt * cap_scale).T,
             tracers={
