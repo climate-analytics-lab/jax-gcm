@@ -1092,6 +1092,33 @@ class TestEmissionsConfig(unittest.TestCase):
             self.assertEqual(int(em[var].align_mode), BY_DATE)
             self.assertEqual(em[var].values.shape[0], 24)
 
+    def test_static_user_file_loads_under_auto(self):
+        # Codex #877 P2: a user emissions file whose fields have no time axis
+        # needs no alignment, so the default ``emissions_align=auto`` must not
+        # reject it (alignment is resolved only for a timed product).
+        import tempfile
+
+        import xarray as xr
+        from jcm.forcing import TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "static.nc"
+            xr.Dataset(
+                {"emis_surface_combustion_bc": (("lon", "lat"),
+                                                np.full((nlon, nlat), 1e-11))},
+                coords={"lon": np.linspace(0, 360, nlon, endpoint=False),
+                        "lat": np.linspace(-87, 87, nlat)},
+            ).to_netcdf(p)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            f = build_forcing(cfg, coords)
+        leaf = f.anthropogenic_emissions["emis_surface_combustion_bc"]
+        self.assertNotIsInstance(leaf, TimeSeries)
+        self.assertTrue(np.allclose(np.asarray(leaf), 1e-11))
+
     def test_user_file_align_auto_raises_naming_the_knob(self):
         # #884: a user emission file is not a mirror product, so ``auto``
         # cannot resolve its time alignment and must raise, not guess.

@@ -666,7 +666,7 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # already-merged variable, for a precise collision message (F1).
     anthro_src: dict = {}
     speciated_src: dict = {}
-    from jcm.forcing import resolve_align
+    from jcm.forcing import emissions_have_time, resolve_align
     products = list(_forcing_products(raw, years, available))
     aligns = _per_product_align(forcing_cfg.get("emissions_align", "auto"),
                                 len(products))
@@ -674,12 +674,15 @@ def _attach_emissions(forcing, forcing_cfg, coords):
         path = _resolve_data_path(product)
         if path in (None, "", "null"):
             continue
-        # Per product: a mirror product resolves ``auto`` from its manifest
-        # kind (the UNFETCHED spec names it), a user file must declare (#884).
-        align = resolve_align(align_spec, paths=product,
-                              config_key="forcing.emissions_align")
         ds = _open_forcing_dataset(path)
         try:
+            # Per product, and only for a TIMED product: a mirror product
+            # resolves ``auto`` from its manifest kind (the UNFETCHED spec
+            # names it), a user file must declare (#884); an all-static
+            # product has no time axis to align and loads under ``auto``.
+            align = (resolve_align(align_spec, paths=product,
+                                   config_key="forcing.emissions_align")
+                     if emissions_have_time(ds) else align_spec)
             a = read_anthropogenic_emissions(ds, align_mode=align)
             s = read_prescribed_aerosol_emissions(ds, align_mode=align)
         finally:

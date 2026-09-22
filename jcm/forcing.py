@@ -1143,6 +1143,18 @@ def _fixed_ssts(grid: HorizontalGridTypes) -> jnp.ndarray:
     sst_profile = jnp.where(jnp.abs(lat) < jnp.pi/3, 27*jnp.cos(3*lat/2)**2, 0) + 273.15
     return jnp.tile(sst_profile, (grid.nodal_shape[0], 1))
 
+def emissions_have_time(ds) -> bool:
+    """Whether any emission variable (``emis_*`` / ``aero_emis_*``) is timed.
+
+    A product whose emission fields are all static needs no time alignment,
+    so callers resolve ``emissions_align`` only when this is true — a static
+    user file loads under the default ``auto`` (#884 applies to time axes
+    only).
+    """
+    return any("time" in ds[v].dims for v in ds.data_vars
+               if str(v).startswith(("emis_", "aero_emis_")))
+
+
 def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
     """Build the ``ForcingData.anthropogenic_emissions`` mapping from a dataset.
 
@@ -1617,6 +1629,10 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
                 "but the model expects top→bottom (surface last). Flip the "
                 "level axis of the file."
             )
+    if "time" not in sample.dims:
+        raise ValueError(
+            "Oxidant variables must carry a time axis (a monthly climatology "
+            f"or a dated series); got dims {sample.dims}.")
     mode = align_mode_code(resolve_align(
         align_mode, config_key="forcing.oxidants_align"))
     time_seconds = _time_seconds_for_mode(ds, mode)

@@ -995,6 +995,29 @@ class TestNaturalEmissionReaders(unittest.TestCase):
                     "dust_regions_file", "dust_roughness_file"):
             self.assertIsNone(out.get(key), key)
 
+    def test_roughness_reader_accepts_static_map(self):
+        # A time-invariant roughness map needs no alignment (#884 applies to
+        # time axes only): a bare (lon, lat) array comes back.
+        import xarray as xr
+        from jcm.forcing import TimeSeries, read_dust_roughness
+        ds = xr.Dataset(
+            {"surfrough": (("lat", "lon"),
+                           np.full((self.NLAT, self.NLON), 0.5),
+                           {"units": "cm"})},
+            coords={"lat": np.linspace(60, -60, self.NLAT),
+                    "lon": np.linspace(0, 270, self.NLON)})
+        out = read_dust_roughness(ds, align_mode="auto")
+        self.assertNotIsInstance(out, TimeSeries)
+        self.assertEqual(out.shape, (self.NLON, self.NLAT))
+
+    def test_static_oxidant_file_is_rejected_clearly(self):
+        # Oxidants are a time-resolved contract; a static file is refused
+        # with that reason, not with an alignment error.
+        from jcm.forcing import read_oxidant_vmr
+        ds = self._oxidant_ds().isel(time=0)
+        with self.assertRaisesRegex(ValueError, "must carry a time axis"):
+            read_oxidant_vmr(ds, nlev=5, align_mode="auto")
+
     def test_dust_reader_rejects_a_non_monthly_time_axis(self):
         from jcm.forcing import read_dust_source
         ds = self._dataset("pot_source",
@@ -1746,6 +1769,29 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
             _validate_bc_fields(ds)
         self.assertIn("'soilw_rel' is out of physical range",
                       str(ctx.exception))
+
+
+class TestStaticEmissionsNeedNoAlignment(unittest.TestCase):
+    """A static (time-less) user emissions file loads under ``auto`` (#884
+    concerns time axes only; Codex #877 P2 regression guard).
+    """
+
+    def test_readers_and_predicate(self):
+        import xarray as xr
+        from jcm.forcing import (TimeSeries, emissions_have_time,
+                                 read_anthropogenic_emissions,
+                                 read_prescribed_aerosol_emissions)
+        ds = xr.Dataset({
+            "emis_surface_combustion_bc": (("lon", "lat"), np.ones((4, 3))),
+            "aero_emis_m_so4_acc": (("lon", "lat"), np.ones((4, 3))),
+        })
+        self.assertFalse(emissions_have_time(ds))
+        a = read_anthropogenic_emissions(ds)            # default auto
+        s = read_prescribed_aerosol_emissions(ds)
+        self.assertNotIsInstance(a["emis_surface_combustion_bc"], TimeSeries)
+        self.assertNotIsInstance(s["m_so4_acc"], TimeSeries)
+        timed = ds.expand_dims(time=3)
+        self.assertTrue(emissions_have_time(timed))
 
 
 class TestResolveAlign(unittest.TestCase):

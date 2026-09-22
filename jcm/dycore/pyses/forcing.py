@@ -263,6 +263,7 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     import xarray as xr
 
     from jcm.forcing import (
+        emissions_have_time,
         resolve_align,
         read_anthropogenic_emissions,
         read_dms_seawater,
@@ -314,8 +315,11 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                         "path opens every emission product as ONE dataset "
                         "along a shared time axis, so they need one mode.")
                 spec = modes.pop()
-            align = resolve_align(spec, paths=paths,
-                                  config_key="forcing.emissions_align")
+            # Only a timed product needs (or may ask for) an alignment; an
+            # all-static user file loads under ``auto`` (#884).
+            align = (resolve_align(spec, paths=paths,
+                                   config_key="forcing.emissions_align")
+                     if emissions_have_time(ds) else spec)
             anthro = read_anthropogenic_emissions(ds, align_mode=align)
             speciated = read_prescribed_aerosol_emissions(ds, align_mode=align)
         if anthro is None and speciated is None:

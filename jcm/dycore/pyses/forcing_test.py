@@ -323,6 +323,20 @@ class PysesAlignmentRuleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transient ozone"):
             _attach(ozone_file="/scratch/me/ozone.nc", ozone_align="by_date")
 
+    def test_static_emissions_load_under_auto(self):
+        # Codex #877 P2: a time-less user emissions file needs no alignment.
+        ds = xr.Dataset(
+            {"emis_biomass_burning_bc": (
+                ("lon", "lat"), np.full((_LON.size, _LAT.size), 3.0e-12))},
+            coords={"lon": _LON, "lat": _LAT},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(emissions_file=_write(tmp, "static.nc", ds),
+                              emissions_align="auto")
+        leaf = forcing.anthropogenic_emissions["emis_biomass_burning_bc"]
+        self.assertNotIsInstance(leaf, TimeSeries)
+        np.testing.assert_allclose(np.asarray(leaf), 3.0e-12)
+
     def test_emissions_modes_must_agree_on_one_open(self):
         ds = xr.Dataset(
             {"emis_biomass_burning_bc": (
