@@ -1023,15 +1023,16 @@ _PRESCRIBED_FLUX_VARS = (
     "sensible_heat_flux", "evaporation", "stress_u", "stress_v",
 )
 
-def _is_monthly_climatology(time_coord) -> bool:
-    """Whether a time axis is a Jan→Dec MONTHLY climatology (WRAP_YEAR-eligible).
+def _is_monthly_climatology(months) -> bool:
+    """Whether ascending-time calendar ``months`` are a Jan→Dec climatology.
 
     WRAP_YEAR selects a sample by ``floor(tyear * 12) % 12`` — a POSITION index
     that assumes sample 0 is January, sample 1 February, …, sample 11 December
     (``jcm.forcing._wrap_year_index``). It is therefore faithful ONLY when the
-    file's 12 samples are, in file order, exactly January through December of a
-    single annual cycle. That is stricter than "12 samples", "month-sized gaps"
-    or even "12 consecutive months" (Codex jax-gcm#877, three iterations):
+    12 samples are, in ascending-time order, exactly January through December of
+    a single annual cycle. That is stricter than "12 samples", "month-sized
+    gaps" or even "12 consecutive months" (Codex jax-gcm#877, several
+    iterations):
 
     - a 12-hour / 12-day / 12-year archive has 12 samples but repeats a month;
     - an every-4-weeks archive (Jan 1, Jan 29, Feb 26, …) has ~30-day gaps yet
@@ -1040,25 +1041,27 @@ def _is_monthly_climatology(time_coord) -> bool:
       January-anchored bins, would be replayed six months out of phase.
 
     So the check is exactly the semantics WRAP_YEAR needs: the calendar months,
-    in file order, equal ``[1, 2, …, 12]``. This is the robust analogue of the
-    repo's own monthly test (``jcm.data.bc.interpolate.interpolate_to_daily``
-    gates on ``pandas.infer_freq in {"MS","M"}``), but keyed on the month
-    sequence rather than a frequency alias so a mid-month-dated climatology
-    (the 15th of each month) is accepted too. The year is not constrained —
-    only the month position matters to WRAP_YEAR — so a climatology assembled
-    from representative timestamps in different years still qualifies. Every
-    other axis returns ``False`` and the caller uses ``BY_DATE``.
+    in ascending-time order (the caller sorts first), equal ``[1, 2, …, 12]``.
+    This is the robust analogue of the repo's own monthly test
+    (``jcm.data.bc.interpolate.interpolate_to_daily`` gates on
+    ``pandas.infer_freq in {"MS","M"}``), but keyed on the month sequence rather
+    than a frequency alias so a mid-month-dated climatology (the 15th of each
+    month) is accepted too. The year is not constrained — only the month
+    position matters to WRAP_YEAR — so a climatology assembled from
+    representative timestamps in different years still qualifies.
 
-    ``time_coord`` is the xarray ``time`` coordinate (datetime64 or cftime;
-    ``.dt`` dispatches for both). A non-datetime axis (no ``.dt``) is treated
-    as not-a-climatology.
+    Args:
+        months: 1-D integer array of calendar months (1-12) in ascending-time
+            order, or ``None`` when the axis is not datetime-typed. Anything
+            that is not exactly ``[1..12]`` returns ``False`` and the caller
+            uses ``BY_DATE``.
+
     """
     import numpy as np
 
-    try:
-        months = np.asarray(time_coord.dt.month, dtype=np.int64)
-    except (AttributeError, TypeError):
+    if months is None:
         return False
+    months = np.asarray(months)
     return months.size == 12 and bool(np.array_equal(months, np.arange(1, 13)))
 
 
@@ -1115,6 +1118,7 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
             fields[var] = jnp.full((nlon, nlat), float(constants[var]))
         provenance.record_fact("prescribed_surface_flux", "constants")
     else:
+        import numpy as np
         import xarray as xr
 
         from jcm.forcing import (
@@ -1143,18 +1147,42 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                     "are required (contract units/signs: "
                     "docs/source/design/surface_exchange.md)."
                 )
-            # Resolve the time-axis alignment ONCE for the whole file (all four
-            # vars share the ``time`` coordinate). WRAP_YEAR (replay one
-            # calendar year, every year) is used ONLY for a genuine Jan→Dec
-            # monthly climatology — the exact positional semantics WRAP_YEAR's
-            # index needs — verified from the parsed timestamps; every other
-            # axis aligns on absolute dates. See
-            # :func:`_is_monthly_climatology` (Codex jax-gcm#877).
+            # Resolve the time-axis handling ONCE for the whole file (all four
+            # vars share the ``time`` coordinate). Two coupled decisions, both
+            # order-sensitive:
+            #
+            # 1. SORT the axis ascending and reorder every variable's samples to
+            #    match. BY_DATE indexing (``jcm.forcing._by_date_index``) calls
+            #    ``jnp.searchsorted``, which REQUIRES an ascending axis, so a
+            #    Dec→Jan-stored file would otherwise select an endpoint/wrong
+            #    sample; sorting also puts a Jan→Dec climatology's January into
+            #    position 0, which is what WRAP_YEAR's positional index needs
+            #    (Codex jax-gcm#877). ``argsort`` is stable, so equal timestamps
+            #    keep file order.
+            # 2. Choose WRAP_YEAR (replay one calendar year) ONLY for a genuine
+            #    Jan→Dec monthly climatology, judged from the SORTED months; see
+            #    :func:`_is_monthly_climatology`. Everything else aligns BY_DATE.
+            order = None
             time_seconds = None
             align = BY_DATE
             if "time" in ds.dims:
-                time_seconds = _time_axis_seconds_from_ds(ds)
-                align = (WRAP_YEAR if _is_monthly_climatology(ds["time"])
+                raw_seconds = np.asarray(_time_axis_seconds_from_ds(ds))
+                order = np.argsort(raw_seconds, kind="stable")
+                time_seconds = raw_seconds[order]
+                # argsort guarantees this; assert so a future refactor cannot
+                # silently feed a non-ascending axis to searchsorted.
+                if time_seconds.size > 1 and not bool(
+                        np.all(np.diff(time_seconds) >= 0)):
+                    raise ValueError(
+                        f"prescribed_surface_flux file {path}: time axis could "
+                        "not be ordered ascending."
+                    )
+                try:
+                    months = np.asarray(
+                        ds["time"].dt.month, dtype=np.int64)[order]
+                except (AttributeError, TypeError):
+                    months = None  # non-datetime axis -> not a climatology
+                align = (WRAP_YEAR if _is_monthly_climatology(months)
                          else BY_DATE)
             for var in _PRESCRIBED_FLUX_VARS:
                 da = ds[var]
@@ -1168,6 +1196,8 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                 # (*time, lon, lat), coordinate-validated and lat-oriented.
                 values = _orient_to_model_grid(da, lat_deg, lon_deg, name=var)
                 if "time" in ds[var].dims:
+                    # Reorder samples onto the ascending-time axis (axis 0).
+                    values = np.asarray(values)[order]
                     fields[var] = make_time_series(values, time_seconds, align)
                 else:
                     fields[var] = jnp.asarray(values)

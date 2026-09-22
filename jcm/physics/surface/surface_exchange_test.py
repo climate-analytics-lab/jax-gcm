@@ -490,8 +490,13 @@ class TestPrescribedFluxForcingAttach:
         # smeared into year bins (Codex #877).
         assert int(ts.align_mode) == BY_DATE
 
-    def _write_flux_nc_at(self, path, coords, times):
-        """Write a 4-variable flux file with an explicit ``time`` axis."""
+    def _write_flux_nc_at(self, path, coords, times, tag_per_time=None):
+        """Write a 4-variable flux file with an explicit ``time`` axis.
+
+        ``tag_per_time`` (optional, one scalar per timestamp) fills every grid
+        cell of that timestep with the scalar, so a test can detect whether the
+        loader reordered the samples correctly.
+        """
         import numpy as np
         import xarray as xr
         nlon, nlat = coords.horizontal.nodal_shape
@@ -499,9 +504,13 @@ class TestPrescribedFluxForcingAttach:
         lon = np.degrees(np.asarray(coords.horizontal.longitudes))
         varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
         nt = len(times)
+        if tag_per_time is None:
+            block = np.zeros((nt, nlat, nlon))
+        else:
+            block = np.stack([np.full((nlat, nlon), float(tag))
+                              for tag in tag_per_time])
         xr.Dataset(
-            {v: (("time", "lat", "lon"), np.zeros((nt, nlat, nlon)))
-             for v in varnames},
+            {v: (("time", "lat", "lon"), block.copy()) for v in varnames},
             coords={"time": np.asarray(times), "lat": lat, "lon": lon},
         ).to_netcdf(path)
 
@@ -575,6 +584,58 @@ class TestPrescribedFluxForcingAttach:
         f = _attach_prescribed_surface_fluxes(
             None, self._cfg({"file": str(p)}), coords)
         assert int(f.prescribed_sensible_heat_flux.align_mode) == BY_DATE
+
+    def test_file_descending_climatology_sorted_and_wraps(self, tmp_path):
+        """A Jan→Dec climatology stored DESCENDING (Dec first) is sorted to
+        ascending time and its samples reordered to match, so WRAP_YEAR's
+        January-anchored position index lands on real January data. Each month
+        is tagged with its number so a mis-order would be caught (Codex #877).
+        """
+        import numpy as np
+        from jcm.forcing import WRAP_YEAR
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        months_desc = list(range(12, 0, -1))  # 12, 11, …, 1  (Dec first)
+        times = [np.datetime64(f"2000-{m:02d}-15", "ns") for m in months_desc]
+        p = tmp_path / "flux_desc_clim.nc"
+        self._write_flux_nc_at(p, coords, times, tag_per_time=months_desc)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        ts = f.prescribed_sensible_heat_flux
+        assert int(ts.align_mode) == WRAP_YEAR
+        tsec = np.asarray(ts.time_seconds)
+        assert bool(np.all(np.diff(tsec) >= 0)), "time axis must be ascending"
+        vals = np.asarray(ts.values)  # (time, lon, lat), ascending time
+        # Position 0 must be January (tag 1), position 11 December (tag 12).
+        assert float(vals[0].mean()) == 1.0
+        assert float(vals[-1].mean()) == 12.0
+
+    def test_file_descending_non_climatology_sorted_for_by_date(self, tmp_path):
+        """Codex #877's core case: a descending (Dec→Jan / late→early) NON-
+        climatology axis routed to BY_DATE must still be sorted ascending, or
+        ``jnp.searchsorted`` selects the wrong sample. Verify the axis is
+        ascending and the tagged samples are reordered to match.
+        """
+        import numpy as np
+        from jcm.forcing import BY_DATE
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        # 12 daily samples stored latest-first; tag = ascending-time index.
+        days_desc = list(range(11, -1, -1))  # 11, 10, …, 0
+        times = [np.datetime64("2000-06-01", "ns") + np.timedelta64(d, "D")
+                 for d in days_desc]
+        p = tmp_path / "flux_desc_daily.nc"
+        self._write_flux_nc_at(p, coords, times, tag_per_time=days_desc)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        ts = f.prescribed_sensible_heat_flux
+        assert int(ts.align_mode) == BY_DATE
+        tsec = np.asarray(ts.time_seconds)
+        assert bool(np.all(np.diff(tsec) >= 0)), "time axis must be ascending"
+        vals = np.asarray(ts.values)
+        # Earliest day (tag 0) at position 0, latest (tag 11) at position 11.
+        assert float(vals[0].mean()) == 0.0
+        assert float(vals[-1].mean()) == 11.0
 
     def test_file_transient_window_aligns_by_date(self, tmp_path):
         """A 12-sample transient window that is not a monthly climatology —
