@@ -1083,6 +1083,24 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     """
     from jcm.dycore.pyses.forcing import build_forcing as pyses_build_forcing
 
+    # Forced-mode surface fluxes (jax-gcm#301) are wired only through the
+    # spectral assembly (``forcing_assembly._attach_prescribed_surface_fluxes``);
+    # the pySES column-forcing builder has no path for them. Rather than accept
+    # the block and silently drop it — which would then trip the run-start
+    # ``validate_forcing`` with all four fields still ``None`` and a confusing
+    # message — refuse it here with the real reason: forced surface fluxes are
+    # a dinosaur(spectral)-backend capability for v3.0.
+    if _forcing_cfg is not None and _forcing_cfg.get(
+            "prescribed_surface_flux", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.prescribed_surface_flux is not supported on the pySES "
+            "backend: forced surface fluxes (jax-gcm#301) are wired through "
+            "the spectral (dinosaur) forcing path only for v3.0. Run the "
+            "forced-flux presets (physics=speedy-forced-flux / "
+            "echam-forced-flux) on a dinosaur dycore, or drop the "
+            "prescribed_surface_flux block for a pySES run."
+        )
+
     ozone_file = _forcing_cfg.get("ozone_file", None)
     if ozone_file == "auto":
         from importlib import resources

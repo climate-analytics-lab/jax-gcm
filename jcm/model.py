@@ -1380,6 +1380,19 @@ class Model:
         *different* windows reuse one compilation, where a concrete
         ``observer_t0_days`` per window cannot.
         """
+        # Fail loudly on the CONCRETE run forcing before compiling — the
+        # single choke point EVERY public entry point funnels through (``run``
+        # → ``resume`` → here; ``run_from_state`` → here). A term that
+        # requires an optional forcing field for its configuration (e.g.
+        # forced-mode surface fluxes reading ``prescribed_*``) reports the
+        # missing field here rather than reaching its ``None`` fallback and
+        # silently running with zero fluxes. Only ``is None`` is inspected,
+        # so this is safe even when ``forcing`` leaves are traced. Guarded so
+        # a physics package predating the hook (or a non-ComposablePhysics)
+        # is tolerated.
+        if hasattr(self.physics, "validate_forcing"):
+            self.physics.validate_forcing(forcing)
+
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
         snapshot_stride = 0
@@ -1484,18 +1497,9 @@ class Model:
             "Model starting with params: save_interval: %s, total_time: %s, output_averages: %s",
             save_interval, total_time, output_averages,
         )
-        forcing = forcing or default_forcing(self.coords.horizontal)
-        # Fail loudly on the CONCRETE run forcing before compiling: a term
-        # that requires an optional forcing field for its configuration (e.g.
-        # forced-mode surface fluxes reading ``prescribed_*``) reports the
-        # missing field here rather than silently applying a zero. Terms
-        # without such a requirement no-op. Guarded so a physics package that
-        # predates the hook (or a non-ComposablePhysics) is tolerated.
-        if hasattr(self.physics, "validate_forcing"):
-            self.physics.validate_forcing(forcing)
         final_dycore_state, final_physics_state, predictions = self.run_from_state_with_carry(
             initial_state=self.dycore_state,
-            forcing=forcing,
+            forcing=forcing or default_forcing(self.coords.horizontal),
             save_interval=save_interval,
             total_time=total_time,
             output_averages=output_averages,

@@ -417,8 +417,13 @@ class TestPrescribedFluxForcingAttach:
             "stress_u": 0.05, "stress_v": 0.0}}), coords)
         nodal = coords.horizontal.nodal_shape
         assert f.prescribed_sensible_heat_flux.shape == nodal
-        assert float(f.prescribed_sensible_heat_flux.mean()) == 12.0
-        assert float(f.prescribed_evaporation.mean()) == pytest.approx(3e-5)
+        # The constant round-trips through the physics float32 working dtype,
+        # so compare at a realistic float32 relative tolerance (~1e-5), not
+        # pytest.approx's f32-impossible 1e-6 default (#849/#850 convention).
+        assert float(f.prescribed_sensible_heat_flux.mean()) == pytest.approx(
+            12.0, rel=1e-5)
+        assert float(f.prescribed_evaporation.mean()) == pytest.approx(
+            3e-5, rel=1e-5)
 
     def test_constants_missing_field_raises(self):
         from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
@@ -497,6 +502,122 @@ class TestPrescribedFluxForcingAttach:
         with pytest.raises(ValueError, match="missing"):
             _attach_prescribed_surface_fluxes(
                 None, self._cfg({"file": str(p)}), coords)
+
+    def test_file_descending_latitude_is_flipped(self, tmp_path):
+        """A north-to-south file is reoriented to the model grid, not consumed
+        positionally — a latitudinally varying field must come back matching
+        the ascending-lat reference.
+        """
+        import numpy as np
+        import xarray as xr
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))  # ascending
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
+        # A field that varies with latitude (index) so a wrong orientation
+        # would be detectable; same physical content written N->S.
+        asc = np.tile(np.arange(nlat, dtype=float), (nlon, 1))  # (lon, lat)
+        p = tmp_path / "desc.nc"
+        xr.Dataset(
+            {v: (("lat", "lon"), asc.T[::-1]) for v in varnames},
+            coords={"lat": lat[::-1], "lon": lon},  # descending latitude
+        ).to_netcdf(p)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        # Reoriented back to the model's (lon, lat) ascending layout.
+        np.testing.assert_allclose(
+            np.asarray(f.prescribed_sensible_heat_flux), asc)
+
+    def test_file_wrong_grid_raises(self, tmp_path):
+        """A file whose latitudes match neither the model grid nor its flip is
+        rejected, not silently regridded by index.
+        """
+        import numpy as np
+        import xarray as xr
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        # Right N points, wrong values (uniform 0..nlat spacing, not Gaussian).
+        bogus_lat = np.linspace(-89.0, 89.0, nlat)
+        varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
+        p = tmp_path / "wrong.nc"
+        xr.Dataset(
+            {v: (("lat", "lon"), np.zeros((nlat, nlon))) for v in varnames},
+            coords={"lat": bogus_lat, "lon": lon},
+        ).to_netcdf(p)
+        with pytest.raises(ValueError, match="latitude"):
+            _attach_prescribed_surface_fluxes(
+                None, self._cfg({"file": str(p)}), coords)
+
+
+# ---------------------------------------------------------------------------
+# Forced-mode validation fires from every public run entry point
+# ---------------------------------------------------------------------------
+
+class TestForcedForcingValidation:
+    """A forced physics package with missing prescribed fields fails loudly at
+    run start, from EVERY public entry point — the validation lives in the
+    shared ``run_from_state_with_carry`` choke point, not one door.
+    """
+
+    def _forced_model(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import (
+            speedy_physics, SpeedySurfaceFlux,
+        )
+        from jcm.terrain import TerrainData
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        physics = speedy_physics().replace(
+            "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        return Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                     physics=physics, time_step=20)
+
+    def test_run_rejects_missing(self):
+        model = self._forced_model()
+        bare = default_forcing(model.coords.horizontal)  # no prescribed_* fields
+        with pytest.raises(ValueError, match="prescribed"):
+            model.run(forcing=bare, save_interval=(1 / 24.0),
+                      total_time=(1 / 24.0))
+
+    def test_run_from_state_rejects_missing(self):
+        model = self._forced_model()
+        state = model._prepare_initial_dycore_state()
+        bare = default_forcing(model.coords.horizontal)
+        with pytest.raises(ValueError, match="prescribed"):
+            model.run_from_state(state, bare, save_interval=(1 / 24.0),
+                                 total_time=(1 / 24.0))
+
+    def test_run_from_state_with_carry_rejects_missing(self):
+        model = self._forced_model()
+        state = model._prepare_initial_dycore_state()
+        bare = default_forcing(model.coords.horizontal)
+        with pytest.raises(ValueError, match="prescribed"):
+            model.run_from_state_with_carry(
+                state, bare, save_interval=(1 / 24.0), total_time=(1 / 24.0))
+
+
+# ---------------------------------------------------------------------------
+# pySES backend rejects forced fluxes loudly (out of scope for v3.0)
+# ---------------------------------------------------------------------------
+
+def test_pyses_forcing_rejects_prescribed_flux():
+    """The pySES column-forcing path has no prescribed-flux wiring; it refuses
+    the block with a clear message rather than dropping it silently.
+    """
+    from omegaconf import OmegaConf
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.runners import _build_pyses_forcing
+    coords = get_speedy_coords(layers=8, spectral_truncation=21)
+    cfg = OmegaConf.create({"prescribed_surface_flux": {"constants": {
+        "sensible_heat_flux": 10.0, "evaporation": 3e-5,
+        "stress_u": 0.05, "stress_v": 0.0}}})
+    # The guard runs before the dycore is touched, so a placeholder is fine.
+    with pytest.raises(ValueError, match="pySES"):
+        _build_pyses_forcing(cfg, dycore=None, coords=coords)
 
 
 # ---------------------------------------------------------------------------

@@ -1075,14 +1075,23 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
             fields[var] = jnp.full((nlon, nlat), float(constants[var]))
         provenance.record_fact("prescribed_surface_flux", "constants")
     else:
-        import numpy as np
         import xarray as xr
 
         from jcm.forcing import (
+            _orient_to_model_grid,
             _resolve_align_mode,
             _time_axis_seconds_from_ds,
             make_time_series,
         )
+        # Validate/reorient against the model's OWN lat/lon, exactly like the
+        # other gridded forcing loaders (dms/dust/ozone): a file with the
+        # right N points but descending latitude or a shifted longitude would
+        # otherwise be consumed positionally and wire the fluxes into the
+        # wrong columns silently. ``_orient_to_model_grid`` flips a
+        # descending-latitude axis to the model's ascending convention and
+        # raises on a genuine grid mismatch, then transposes to the raveled
+        # ``(lon, lat)`` column order the physics reads.
+        lat_deg, lon_deg = _model_latlon_deg(coords)
         path = str(_resolve_data_path(path))
         with xr.open_dataset(path) as ds:
             missing = [v for v in _PRESCRIBED_FLUX_VARS if v not in ds]
@@ -1102,18 +1111,8 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
                         f"{path} must be dimensioned (lat, lon) with an "
                         f"optional leading time axis; got {da.dims}."
                     )
-                if "time" in da.dims:
-                    da = da.transpose("time", "lon", "lat")
-                else:
-                    da = da.transpose("lon", "lat")
-                if da.shape[-2:] != (nlon, nlat):
-                    raise ValueError(
-                        f"prescribed_surface_flux variable {var!r} has "
-                        f"spatial shape {da.shape[-2:]} (lon, lat) but the "
-                        f"model grid is {(nlon, nlat)}; the file must "
-                        "already be on the model grid."
-                    )
-                values = np.asarray(da.values)
+                # (*time, lon, lat), coordinate-validated and lat-oriented.
+                values = _orient_to_model_grid(da, lat_deg, lon_deg, name=var)
                 if "time" in ds[var].dims:
                     # Same auto rule as the surface climatology loaders: a
                     # 12-step monthly file cycles WRAP_YEAR, longer records
