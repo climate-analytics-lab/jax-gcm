@@ -12,6 +12,48 @@ from typing import Tuple
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
+from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_LW_BANDS
+
+
+def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
+    """Return the representative wavelength (um) for each band in ``band_limits``.
+
+    ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from
+    ``constants.py`` (wavenumber, cm^-1). The representative wavelength is
+    the one at the band's mid-wavenumber, ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))``
+    um. Deriving it from the limits directly is what keeps the cloud optics
+    tied to the ACTUAL spectral bands: the previous hardcoded 6-SW/8-LW
+    wavelength tables were indexed by the 2-SW/3-LW band loop, so band 0 --
+    the near-IR band carrying essentially all cloud SW absorption -- was
+    evaluated at 0.245 um (n_imag ~ 1e-9, zero absorption). Now band b is
+    always evaluated inside band b's own wavenumber interval (#678).
+    """
+    return jnp.array(
+        [1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits]
+    )
+
+
+# Per-band representative wavelengths (um), derived once from the band limits.
+_SW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(SW_BAND_LIMITS)
+_LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
+
+# Heuristic longwave mass-absorption coefficients (m^2/kg) per LW band. These
+# are NOT a reference lookup table -- this whole grey cloud-optics module is a
+# Mie/parameterisation approximation used only by the grey two-stream scheme.
+# One coefficient per ACTUAL longwave band (``N_LW_BANDS``); the values are the
+# mean of the finer per-sub-band coefficients this module used previously,
+# aggregated over each band's wavenumber interval (LW bands 10-350 / 350-500 /
+# 500-2500 cm^-1). The prior code indexed an 8-entry table with the 3-band loop,
+# so bands got coefficients belonging to a different band set (#678); an
+# ``N_LW_BANDS``-length array indexed by band cannot mismatch.
+_LW_KABS_LIQUID = jnp.array([100.0, 105.0, 150.0])
+_LW_KABS_ICE = jnp.array([48.0, 52.0, 82.0])
+if _LW_KABS_LIQUID.shape[0] != N_LW_BANDS or _LW_KABS_ICE.shape[0] != N_LW_BANDS:
+    raise ValueError(
+        "LW cloud absorption tables must have one entry per LW band "
+        f"({N_LW_BANDS}); got {_LW_KABS_LIQUID.shape[0]} / "
+        f"{_LW_KABS_ICE.shape[0]}."
+    )
 
 
 # Physical constants for Mie scattering
@@ -39,51 +81,21 @@ WATER_ABSORPTION_COEFF = {
 
 def get_band_wavelength(band: int, is_sw: bool = True) -> float:
     """Get representative wavelength for a spectral band.
-    
+
     Args:
-        band: Band index
-        is_sw: True for shortwave, False for longwave
-        
+        band: Band index into the shortwave (``is_sw=True``) or longwave
+            (``is_sw=False``) band set defined in ``constants.py``.
+        is_sw: True for shortwave, False for longwave. Always a Python bool
+            at the call sites, so it selects the band set in Python; ``band``
+            may be a traced integer and indexes the derived array.
+
     Returns:
-        Representative wavelength in micrometers
+        Representative wavelength in micrometers, the value at the band's
+        mid-wavenumber. See ``_band_centre_wavelengths_um``.
 
     """
-    # Define all SW wavelengths
-    sw_wavelengths = jnp.array([
-        0.245,  # Band 0: UV-C/B (0.20-0.29 μm)
-        0.305,  # Band 1: UV-A (0.29-0.32 μm)
-        0.38,   # Band 2: Blue (0.32-0.44 μm)
-        0.565,  # Band 3: Green-Red (0.44-0.69 μm)
-        0.94,   # Band 4: Near-IR 1 (0.69-1.19 μm)
-        2.595,  # Band 5: Near-IR 2 (1.19-4.00 μm)
-    ])
-    
-    # Define all LW wavelengths (converted from wavenumber)
-    lw_wavelengths = jnp.array([
-        95.2,   # Band 0: Far-IR window (10-200 cm⁻¹)
-        35.7,   # Band 1: H2O rotation (200-280 cm⁻¹)
-        29.4,   # Band 2: CO2 bending (280-400 cm⁻¹)
-        21.3,   # Band 3: CO2 v2 (400-540 cm⁻¹)
-        14.9,   # Band 4: H2O continuum (540-800 cm⁻¹)
-        11.1,   # Band 5: H2O + O3 (800-1000 cm⁻¹)
-        9.1,    # Band 6: O3 + H2O (1000-1200 cm⁻¹)
-        5.26,   # Band 7: H2O bands (1200-2600 cm⁻¹)
-    ])
-    
-    # Get wavelength using JAX-compatible conditional
-    sw_wl = jnp.where(
-        band < len(sw_wavelengths),
-        sw_wavelengths[band],
-        0.55  # Default visible
-    )
-    
-    lw_wl = jnp.where(
-        band < len(lw_wavelengths),
-        lw_wavelengths[band],
-        10.0  # Default LW
-    )
-    
-    return jnp.where(is_sw, sw_wl, lw_wl)
+    wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM
+    return wavelengths[band]
 
 
 @jax.jit
@@ -459,7 +471,7 @@ def liquid_cloud_optics_lw(
     Args:
         cloud_water_path: Cloud water path (kg/m²)
         effective_radius: Droplet effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -467,32 +479,11 @@ def liquid_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Enhanced absorption coefficient depends on band
-    # Based on water absorption spectrum in IR
-    k_abs = jnp.where(
-        band == 0, 25.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 180.0,  # H2O rotation band (200-280 cm⁻¹) - high absorption
-            jnp.where(
-                band == 2, 90.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 120.0,  # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 160.0,  # H2O continuum (540-800 cm⁻¹) - very high
-                        jnp.where(
-                            band == 5, 140.0,  # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 100.0,  # O3 + H2O (1000-1200 cm⁻¹)
-                                200.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). The
+    # values are heuristic band-averages; see ``_LW_KABS_LIQUID``.
+    k_abs = _LW_KABS_LIQUID[band]
+
     # Size dependence - smaller droplets have slightly higher absorption per unit mass
     size_factor = jnp.sqrt(12.0 / effective_radius)
     
@@ -517,7 +508,7 @@ def ice_cloud_optics_lw(
     Args:
         cloud_ice_path: Cloud ice path (kg/m²)
         effective_radius: Ice crystal effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -525,32 +516,11 @@ def ice_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Ice absorption coefficient depends on band
-    # Ice is generally less absorbing than liquid water
-    k_abs = jnp.where(
-        band == 0, 12.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 85.0,   # H2O rotation band (200-280 cm⁻¹) - moderate absorption
-            jnp.where(
-                band == 2, 45.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 60.0,   # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 90.0,   # H2O continuum (540-800 cm⁻¹) - higher
-                        jnp.where(
-                            band == 5, 75.0,   # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 55.0,   # O3 + H2O (1000-1200 cm⁻¹)
-                                110.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). Ice is
+    # generally less absorbing than liquid water; see ``_LW_KABS_ICE``.
+    k_abs = _LW_KABS_ICE[band]
+
     # Size dependence - larger crystals have different absorption characteristics
     size_factor = jnp.sqrt(35.0 / effective_radius)
     
