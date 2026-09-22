@@ -90,11 +90,15 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
   parameter itself as the scale put the same overflow on its own gradient).
 - Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
-  from the shared ECHAM Martin/Bower law
-  (``eff_liquid_droplet_radius``), so the 1M ``physics=echam`` path no longer
-  falls back to a constant droplet radius. The radiative **ice** radius remains
-  limited: mixed-phase ICNC is INP-limited (~1e3 m⁻³), pinning most warm-branch
-  ``r_eff_ice`` at the 150 µm clip (#728).
+  from the shared ECHAM Martin/Bower law (``eff_liquid_droplet_radius``);
+  radiation reads it from the carried ``clouds`` state one step lagged, because
+  the ECHAM term order runs radiation before microphysics. The constant
+  ``effective_radius_liquid`` fallback therefore survives only where that carry
+  is still zero — the cold-start first step and, per column, the step it first
+  turns cloudy — not the steady state the 1M ``physics=echam`` path used to run
+  on. The radiative **ice** radius remains limited: mixed-phase ICNC is
+  INP-limited (~1e3 m⁻³), pinning most warm-branch ``r_eff_ice`` at the 150 µm
+  clip (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 

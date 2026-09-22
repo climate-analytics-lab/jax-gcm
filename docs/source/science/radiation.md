@@ -114,8 +114,13 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   CAM4's land/ocean contrast, because ``cdnc_factor`` already carries the
   aerosol/CCN effect (applying both double-counts it). Both the 1M and 2M
   microphysics now publish an LWC-dependent ``clouds.r_eff_liq`` from the ECHAM
-  Martin/Bower law, so the constant fallback is reached only by a composition
-  that runs radiation with no microphysics publishing a droplet radius.
+  Martin/Bower law; radiation reads it from the carried ``clouds`` state, which
+  — because the ECHAM term order runs radiation *before* microphysics — is the
+  previous step's value (a one-step lag). The constant fallback therefore
+  survives only where that carry is still zero: the cold-start first step and,
+  per column, the step it first turns cloudy (``eff_liquid_droplet_radius``
+  returns exactly 0 in a clear cell), plus any composition that runs radiation
+  with no droplet-radius-publishing microphysics at all.
 - `science` — the grey two-stream backend reads a single *broadband* aerosol
   profile (``aerosol.aod_profile``/``ssa_profile``/``asy_profile`` plus a column
   ``angstrom`` it band-scales itself) rather than the per-band arrays only

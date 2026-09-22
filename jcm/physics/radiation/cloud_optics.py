@@ -245,9 +245,13 @@ def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
 
     A column constant scaled by the Twomey factor. This is a FALLBACK: both the
     2-moment and 1-moment schemes publish a microphysical ``clouds.r_eff_liq``
-    from the ECHAM Martin/Bower law and never reach here, so this fallback
-    applies only to a composition that runs radiation with no microphysics
-    publishing a droplet radius.
+    (ECHAM Martin/Bower law) that ``resolve_effective_radii`` prefers wherever it
+    is nonzero. Because the ECHAM term order runs radiation before microphysics,
+    radiation reads that radius from the carried ``clouds`` state one step
+    lagged, so this fallback is used only where the carry is still zero -- the
+    cold-start first step and, per column, the step it first turns cloudy
+    (``eff_liquid_droplet_radius`` returns exactly 0 in a clear cell) -- and
+    throughout any composition with no droplet-radius-publishing microphysics.
 
     The land/ocean contrast is deliberately NOT applied, because the two
     references mean different things by it:
