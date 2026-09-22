@@ -1634,13 +1634,13 @@ class TestRRTMGPCloudInhomogeneity:
 
         full = dict(base)
         full["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity_liquid=1.0, cloud_inhomogeneity_ice=1.0,
+            cloud_inhomogeneity=1.0,
         )
         _, diag_full = radiation_scheme_rrtmgp(**full)
 
         reduced = dict(base)
         reduced["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity_liquid=0.5, cloud_inhomogeneity_ice=0.5,
+            cloud_inhomogeneity=0.5,
         )
         _, diag_reduced = radiation_scheme_rrtmgp(**reduced)
 
@@ -1650,7 +1650,6 @@ class TestRRTMGPCloudInhomogeneity:
         assert float(diag_reduced.toa_sw_up) < float(diag_full.toa_sw_up)
 
     def test_default_factor_is_echam_t63_value(self):
-        """The default matches ECHAM's nn=63 ``zinhoml1``/``zinhomi`` (0.8)."""
+        """The default matches ECHAM's nn=63 ``zinhoml1 = zinhomi = 0.8``."""
         p = RadiationParameters.default()
-        assert float(p.cloud_inhomogeneity_liquid) == pytest.approx(0.8)
-        assert float(p.cloud_inhomogeneity_ice) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity) == pytest.approx(0.8)

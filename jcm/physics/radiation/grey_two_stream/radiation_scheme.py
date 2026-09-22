@@ -408,8 +408,8 @@ def radiation_scheme(
         cloud_ice_path=in_cloud_ipath,
         layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
-        inhomogeneity_liquid=parameters.cloud_inhomogeneity_liquid,
-        inhomogeneity_ice=parameters.cloud_inhomogeneity_ice,
+        inhomogeneity_liquid=parameters.cloud_inhomogeneity,
+        inhomogeneity_ice=parameters.cloud_inhomogeneity,
     )
     zero_optics_sw = OpticalProperties(
         optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),

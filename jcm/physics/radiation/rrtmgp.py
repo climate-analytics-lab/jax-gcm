@@ -62,7 +62,7 @@ from rrtmgp.rrtmgp import RRTMGP
 # everything above the threshold to the same value -- and is NOT the sub-grid
 # inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
 # ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
+# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity``
 # and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
 # T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
 # practice; keep it strictly as a NaN guard (#678).
@@ -716,15 +716,18 @@ def radiation_scheme_rrtmgp(
     # inhomogeneity factor multiplies the optical depth (``mo_cloud_optics.f90``:
     # ``ztau = ztol*zinhoml + ztoi*zinhomi``, ``l_variable_inhoml = .FALSE.``),
     # so it is applied HERE -- to the τ-driving paths -- not to the physical path
-    # that set the effective radius above (#678). Default 0.8/0.8 (ECHAM nn=63
-    # ``zinhoml1``/``zinhomi``); jcm uses one factor per phase, not ECHAM's
-    # convection-type switch (see ``RadiationParameters.cloud_inhomogeneity_*``
-    # and #870).
-    in_cloud_lwp_lib = parameters.cloud_inhomogeneity_liquid * lax.cond(
+    # that set the effective radius above (#678).
+    #
+    # The SAME factor scales both phases (see ``RadiationParameters`` for why a
+    # single factor, not two): jax-rrtmgp weights the combined ssa (by τ) and
+    # asymmetry (by ssa) from these per-phase paths, so a common factor leaves
+    # those weightings unchanged and scales only the total optical depth --
+    # exactly ECHAM's ``ztau`` at the T63 default ``zinhoml = zinhomi = 0.8``.
+    in_cloud_lwp_lib = parameters.cloud_inhomogeneity * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     )
-    in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
+    in_cloud_ipath_lib = parameters.cloud_inhomogeneity * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_ice_path,
     )

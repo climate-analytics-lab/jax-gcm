@@ -69,22 +69,27 @@ class RadiationParameters:
     # correct time-mean radiative statistics).
     mcica_freeze_step: float
 
-    # Cloud sub-grid inhomogeneity factors (liquid / ice), applied
-    # multiplicatively to the IN-CLOUD condensate path handed to the cloud
-    # optics -- equivalently to the cloud optical depth, since tau is linear in
-    # path at fixed effective radius. This is ECHAM's fixed inhomogeneity
+    # Cloud sub-grid inhomogeneity factor: a single value scaling the cloud
+    # optical depth to correct the plane-parallel albedo bias of assuming
+    # horizontally homogeneous cloud water. This is ECHAM's fixed inhomogeneity
     # treatment (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``
-    # with ``l_variable_inhoml = .FALSE.``), accounting for the plane-parallel
-    # albedo bias of assuming horizontally homogeneous cloud water. The default
-    # 0.8/0.8 are ECHAM's T63 values (``zinhoml1``/``zinhomi`` at nn=63); jcm
-    # applies a single factor per phase rather than ECHAM's convection-type
-    # switch (``zinhoml2=0.4`` for shallow convection, ``ktype=4``), because the
-    # radiation glue does not carry the convective type -- the no-/deep-
-    # convection value 0.8 covers every column except shallow-convective ones.
-    # Set to 1.0 to disable. Differentiable leaves (grad wrt cloud water flows
-    # through them).
-    cloud_inhomogeneity_liquid: jnp.ndarray = 0.8
-    cloud_inhomogeneity_ice: jnp.ndarray = 0.8
+    # with ``l_variable_inhoml = .FALSE.``). The default 0.8 is ECHAM's T63
+    # value, where the liquid and ice factors coincide
+    # (``zinhoml1 = zinhomi = 0.8`` at nn=63).
+    #
+    # A SINGLE factor (same for liquid and ice) is used deliberately, not two:
+    # the RRTMGP backend hands the per-phase condensate paths to jax-rrtmgp,
+    # which weights the combined single-scattering albedo (by optical depth) and
+    # asymmetry (by ssa) from those paths. One factor scales both phases
+    # equally, so the weighting ratios are unchanged and only the total optical
+    # depth scales -- exactly ECHAM's ``ztau`` with a common factor, and
+    # identical on the grey backend. Distinct liquid/ice factors (ECHAM's
+    # ``zinhomi = 0.85`` at T127+, or the shallow-convection ``zinhoml2 = 0.4``)
+    # would additionally re-weight ssa/asymmetry through that interface, so they
+    # need per-phase optical-depth scaling inside the backend (jax-rrtmgp#37);
+    # the convection-type dependence separately needs ``ktype`` in the radiation
+    # glue (#870). Set to 1.0 to disable. Differentiable leaf.
+    cloud_inhomogeneity: jnp.ndarray = 0.8
 
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
@@ -99,8 +104,7 @@ class RadiationParameters:
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
-                 cloud_inhomogeneity_liquid=0.8,
-                 cloud_inhomogeneity_ice=0.8,
+                 cloud_inhomogeneity=0.8,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
@@ -114,8 +118,7 @@ class RadiationParameters:
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
             mcica_freeze_step=jnp.asarray(mcica_freeze_step),
-            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
-            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
+            cloud_inhomogeneity=jnp.asarray(cloud_inhomogeneity),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
