@@ -1338,12 +1338,18 @@ def _tiedtke_convection_toa_first(
             has_active, jnp.min(candidate).astype(jnp.int32), ktop,
         )
 
-        # Update state
+        # Update state. The prognostic plume winds computed for the cududv
+        # momentum transport (``uu``/``vu`` from cuasc, ``ud``/``vd`` from
+        # cuddraf) are carried out on the state so a standalone caller
+        # consuming it sees the actual in-plume winds rather than the
+        # environment. They are intensive (m/s), so — unlike the mass fluxes —
+        # they are NOT touched by the Nordeng amplitude rescale and carry no
+        # cap scaling; the momentum TENDENCY the cap scales is separate.
         new_state = ConvectionState(
             tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
-            uu=u_wind, vu=v_wind,  # Simplified - would update from momentum transport
+            uu=updraft_state.uu, vu=updraft_state.vu,
             td=downdraft_state.td, qd=downdraft_state.qd,
-            ud=u_wind, vd=v_wind,  # Simplified
+            ud=downdraft_state.ud, vd=downdraft_state.vd,
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
             # Fractional entrainment (1/m) is rescale-invariant (a rate,
             # not a flux); the transport term rebuilds the absolute

@@ -41,6 +41,7 @@ from jcm.physics.convection.tiedtke_nordeng.downdraft import (
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     find_cloud_base,
     saturation_mixing_ratio,
+    tiedtke_nordeng_convection,
 )
 from jcm.physics.convection.tiedtke_nordeng.types import ConvectionParameters
 
@@ -357,6 +358,55 @@ class TestShallowReclosureDowndraftDetection:
             "fixture must reproduce the taper-inactivated exit state")
         assert not (mfd_cb < 0.0 and active_exit), "old gate should miss it"
         assert mfd_cb < 0.0, "new gate (mfd[ikb] < 0) detects the downdraft"
+
+
+class TestReturnedStateCarriesPlumeWinds:
+    """#676 the returned ConvectionState carries the prognostic plume winds.
+
+    The cududv momentum transport builds ``updraft_state.uu``/``vu`` and
+    ``downdraft_state.ud``/``vd``; the returned ``ConvectionState`` must expose
+    those, not the environment wind, so a standalone caller's plume-wind
+    diagnostics agree with the profiles that produced ``dudt``/``dvdt``
+    (Codex P2).
+    """
+
+    def test_state_uu_is_the_plume_wind_not_the_environment(self):
+        cfg = ConvectionParameters.default()
+        nlev = 47
+        p0 = 1.01325e5
+        sig = jnp.linspace(1000.0 / p0, 1.0, nlev + 1)
+        ph = sig * p0
+        p = 0.5 * (ph[:-1] + ph[1:])
+        z = -7.6e3 * jnp.log(p / p0)
+        dry = c.grav / c.cpd
+        mlt = 800.0
+        T = jnp.maximum(
+            jnp.where(z <= mlt, 302.0 - dry * z,
+                      302.0 - dry * mlt - 6.0e-3 * (z - mlt)), 200.0)
+        qs = jax.vmap(saturation_mixing_ratio)(p, T)
+        q = (0.7 + 0.25 * jnp.exp(-(z / 9000.0) ** 2)) * qs
+        Tv = T * (1 + 0.608 * q)
+        rho = p / (c.rd * Tv)
+        dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
+        u_wind = jnp.linspace(-12.0, 18.0, nlev)   # sheared
+        v_wind = jnp.linspace(3.0, -3.0, nlev)
+        _, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, u_wind, v_wind,
+            jnp.zeros(nlev), jnp.zeros(nlev), 1800.0, cfg,
+            moisture_supply=jnp.asarray(2.0e-4),
+        )
+        uu = np.asarray(state.uu)
+        un = np.asarray(u_wind)
+        plume = np.asarray(state.mfu) > 1e-6
+        assert plume.any(), "fixture produced no active plume"
+        # The returned plume wind is entrainment-mixed, so it must NOT be the
+        # environment wind the pre-fix code passed straight through.
+        assert not np.allclose(uu, un), (
+            "state.uu equals the environment wind — plume winds not preserved")
+        assert np.max(np.abs(uu[plume] - un[plume])) > 1e-3
+        # The downdraft wind is likewise carried out (it starts from the
+        # LFS mix, not the environment).
+        assert not np.allclose(np.asarray(state.ud), un)
 
 
 if __name__ == "__main__":
