@@ -30,8 +30,27 @@ are only meaningful together and are regenerated together — one command per
 member, on a GPU:
 
 ```bash
-CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
 ```
+
+The `os.environ` assignment must precede the jcm import: importing jcm
+initialises the JAX CUDA backend (#859), and the default preallocates 75% of
+the card to the orchestrating process, starving the workers that actually
+integrate the model. `generate` refuses to run without it.
+
+**Generate in a CI-parity environment** — a fresh venv with
+`pip install -e ".[mam4]"` plus a CUDA jax build of the pinned version
+(`pip install "jax[cuda12]==<the pinned jax>"`), so every dependency resolves
+to the repo's pins — **never in a shared or long-lived environment**. The bands
+are only valid under the dependencies the test later runs with: a jax-rrtmgp
+release a pin has moved past shifts the radiation of the whole column, so bands
+drawn under it fail a correct model across the whole column, indistinguishably
+from a physics regression. Each band file records the versions it was drawn under
+(`bands_environment`) and the ones its init state was spun up under
+(`init_state_environment`); check them first when a whole member fails
+together. To re-derive bands on an already-published state, pass
+`write_state=False` with the state in `out_dir`, plus
+`state_environment=<its init_state_environment>` so that record is kept.
 
 then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
 name carries a digest of its own contents — additively under that member's

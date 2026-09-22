@@ -40,7 +40,8 @@ def pytest_configure(config):
     """
     # Never preallocate the GPU for a test session. XLA's default is to claim
     # 75 % of the card at backend initialisation, and merely *importing* a
-    # test module that reaches jcm is enough to trigger that — measured at
+    # test module that reaches jcm is enough to trigger that (#859: the
+    # SPEEDY lookup tables are built on jcm's import chain) — measured at
     # 61,214 MiB of an 80 GB A100 for a process whose test then does no device
     # work at all. On a shared box that locks out colleagues; worse, it
     # starves this session's own subprocesses, which is how the T106 members

@@ -1530,16 +1530,16 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
     assert stat_vars, f"{bands_file} carries no bands"
 
     tol = 3  # tolerance in standard deviations
-    # ``tol * std`` is the band; three floors keep a tight or degenerate
+    # ``tol * std`` is the band; four floors keep a tight or degenerate
     # ``std`` from yielding a band narrower than the arithmetic underneath
-    # it, and the widest wins. Deliberately NONE of them is a relative
-    # fraction of the mean: a 25 % fallback for ``std == 0`` was tried and
-    # was a worse bug than it fixed, handing the pure-a ``pressure_full``
+    # it, and the widest wins. Deliberately NONE of them is a sizeable
+    # fraction of the mean (the two relative ones are ~ULP-scale): a 25 %
+    # fallback for ``std == 0`` was tried and was a worse bug than it fixed, handing the pure-a ``pressure_full``
     # levels (~13 kPa constants, exactly reproducible so ``std`` is a true
     # zero) half-widths of ~1.8 kPa — wide enough to wave a gross pressure
     # error through — while doing nothing for the near-zero underflow
     # variables it was meant for, since 25 % of ~1e-24 is still ~0. The
-    # three floors are:
+    # four floors are:
     #  - ``ulp_floor * |mean|`` — a few ULP of the field's own magnitude.
     #    Covers a *positive* ``std`` finer than float32 resolves
     #    (``pressure_full`` near the pure-a levels stores 4.9e-4 Pa at
@@ -1547,19 +1547,32 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
     #    constant (the pure-a ``pressure_full`` levels): both are
     #    bit-reproducible, so a few ULP (1e-6 ~ 8 ULP lifts 7405.9 Pa to
     #    7.4e-3 Pa) is the right, tight band — never a wide relative one.
-    #  - ``atol`` — an absolute floor for the near-zero/underflow tail
-    #    (specific/relative humidity, ~1e-24…1e-37 kg kg-1) where
-    #    ``ulp_floor * |mean|`` itself underflows to nothing. (These
-    #    fixtures have no ``std == 0`` cell between ~1e-8 and ~1 in
-    #    magnitude, so the ULP and absolute floors partition the degenerate
-    #    cells cleanly.)
+    #  - ``profile_floor * max|mean|`` — the near-zero tail of a profile
+    #    (humidity or cloud condensate aloft, ~1e-24…1e-37 kg kg-1), where
+    #    ``ulp_floor * |mean|`` itself underflows to nothing. Scaled to the
+    #    variable's OWN peak over its profile, never a fixed absolute value:
+    #    the band variables span some twenty orders of magnitude, and an
+    #    absolute floor sized for humidity (q peaks ~1e-2, so this gives the
+    #    ~1e-8 kg kg-1 it needs) is wider than the whole signal of every JAM
+    #    aerosol mass and precursor gas (global means peak at 1e-10…3e-9
+    #    kg kg-1), which would accept anything from zero aerosol to several
+    #    times the burden. Relative to the peak, each variable's tail is
+    #    banded at the same fraction of its own signal, whatever its units.
+    #  - ``dtype_floor`` — for a variable that is exactly zero everywhere
+    #    (the JAM species no emission or production pathway populates in
+    #    this window: the moa/soa families, coarse BC, ...), where the peak
+    #    is zero too. Sized at the float32 normal/denormal scale so that
+    #    round-off never trips it, yet anything physical does: a source
+    #    appearing for a no-source species FAILS loudly, and that is the
+    #    intended behaviour — it is a real change in what the member does.
     #  - ``noise_tol * <var>.noise`` — ``noise`` is the measured
     #    peak-to-peak spread of this same window across independent repeats
     #    in separate processes, i.e. what the band must absorb with no
     #    physics having changed. Applied to the half-width so it can only
     #    ever widen a band.
     ulp_floor = 1e-6
-    atol = 1e-8
+    profile_floor = 1e-6
+    dtype_floor = 1e-30
     noise_tol = 3
     for var in stat_vars:
         mean = bands[f"{var}.mean"]
@@ -1592,7 +1605,9 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
                 "jcm.data.test.release_matrix.generate_stats.generate"
                 f"({member!r}) if the new grid is intentional.") from exc
         half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
-        half_width = np.maximum(half_width, atol)
+        half_width = np.maximum(
+            half_width, profile_floor * float(np.abs(mean).max()))
+        half_width = np.maximum(half_width, dtype_floor)
         half_width = np.maximum(
             half_width, noise_tol * bands[f"{var}.noise"])
         lower, upper = mean - half_width, mean + half_width
@@ -1601,9 +1616,9 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
         ), (
             f"{member}: {var} fell outside its band (±3σ, floored at 3x "
             "the measured run-to-run reproducibility, at a few ULP of the "
-            f"field magnitude, and at an absolute {atol:g} for the "
-            "near-zero tail). Regenerate this member's band file AND its "
-            "init state together with "
+            f"field magnitude, and at {profile_floor:g} of the variable's "
+            "profile peak for the near-zero tail). Regenerate this member's "
+            "band file AND its init state together with "
             "jcm.data.test.release_matrix.generate_stats.generate"
             f"({member!r}) if the deviation is intentional."
         )
@@ -1827,6 +1842,151 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
         bands = bands.drop_vars("temperature.noise")
         with self.assertRaisesRegex(AssertionError, "noise missing"):
             _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def _small_scale_fixture(self, profile):
+        """Build a band file for one ~1e-9 kg kg-1 aerosol-scale variable.
+
+        Its ``std`` and ``noise`` are 1 % of the mean, so the statistical
+        band is +-3 % and only a floor could make it any wider.
+        """
+        import xarray as xr
+
+        mean = xr.DataArray(profile, coords={"level": [0.996, 0.5, 1e-5]},
+                            dims="level")
+        bands = xr.Dataset({
+            "m_so4_acc.mean": mean,
+            "m_so4_acc.std": 0.01 * mean,
+            "m_so4_acc.noise": 0.01 * mean,
+        })
+        return bands, xr.Dataset({"m_so4_acc": mean.copy()})
+
+    def test_aerosol_scale_variable_is_not_floored_to_humidity_scale(self):
+        # A 1e-8 absolute floor would accept zeroing this variable outright
+        # (|0 - 1e-9| < 1e-8); the band must stay at the variable's own
+        # scale, so both a zeroed and a doubled burden fail.
+        bands, pred = self._small_scale_fixture([1e-9, 5e-10, 1e-12])
+        _assert_within_release_bands("m", "bands.nc", bands, pred)
+        for factor in (0.0, 2.0):
+            with self.assertRaisesRegex(AssertionError,
+                                        "fell outside its band"):
+                _assert_within_release_bands(
+                    "m", "bands.nc", bands, pred * factor)
+
+    def test_exactly_zero_variable_pins_to_zero(self):
+        # A species with no source in the window has a zero band. Round-off
+        # (well below the float32 normal range) must pass, but a physical
+        # amount appearing — a source switching on — must fail.
+        bands, pred = self._small_scale_fixture([0.0, 0.0, 0.0])
+        _assert_within_release_bands("m", "bands.nc", bands, pred + 1e-38)
+        with self.assertRaisesRegex(AssertionError, "fell outside its band"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred + 1e-15)
+
+
+class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
+    """The derived column-number band variables, on a synthetic run."""
+
+    def _run(self, **numbers):
+        import xarray as xr
+
+        dims = ("time", "level", "lon", "lat")
+        shape = (1, 2, 1, 1)
+        ones = np.ones(shape)
+        return xr.Dataset({
+            "air_density": (dims, np.array([1.2, 0.5]).reshape(shape)),
+            "layer_thickness": (dims, np.array([100.0, 400.0]).reshape(shape)),
+            **{k: (dims, v * ones) for k, v in numbers.items()},
+        })
+
+    def test_column_integral_is_mass_weighted_sum_over_levels(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        out = _with_column_number_burdens(self._run(qnc=1e8, qni=1e4))
+        # Layer air masses are 120 and 200 kg m-2: 320 kg m-2 in the column.
+        np.testing.assert_allclose(out["qnc_column"].values, 320 * 1e8)
+        np.testing.assert_allclose(out["qni_column"].values, 320 * 1e4)
+        self.assertNotIn("n_total_column", out)
+        self.assertEqual(out["qnc_column"].dims, ("time", "lon", "lat"))
+
+    def test_jam_total_number_sums_modes_and_both_phases(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(n_ait=1.0, n_acc=2.0,
+                        **{"jam_cloud_borne.nc_acc": 4.0})
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["n_total_column"].values, 320 * 7.0)
+
+    def test_member_without_air_mass_diagnostics_is_unchanged(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8).drop_vars("layer_thickness")
+        self.assertNotIn("qnc_column", _with_column_number_burdens(run))
+
+
+class TestReleaseMatrixGenerationProvenance(unittest.TestCase):
+    def test_environment_names_python_and_every_tracked_distribution(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _ENV_DISTRIBUTIONS,
+            generation_environment,
+        )
+
+        env = generation_environment()
+        self.assertTrue(env.startswith("python=="))
+        for dist in _ENV_DISTRIBUTIONS:
+            self.assertIn(dist, env)
+
+    def test_missing_distribution_is_recorded_not_raised(self):
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        with mock.patch.object(generate_stats, "_ENV_DISTRIBUTIONS",
+                               ("jax", "no-such-distribution-xyz")):
+            env = generate_stats.generation_environment()
+        self.assertIn("no-such-distribution-xyz: not installed", env)
+
+    def test_jam_members_share_the_larger_repeat_count(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            DEFAULT_REPRODUCIBILITY_REPEATS,
+            REPRODUCIBILITY_REPEATS,
+            members,
+        )
+
+        jam = [m for m in members() if "jam" in m]
+        self.assertTrue(jam)
+        counts = {REPRODUCIBILITY_REPEATS.get(m) for m in jam}
+        self.assertEqual(len(counts), 1)
+        self.assertGreater(counts.pop(), DEFAULT_REPRODUCIBILITY_REPEATS)
+
+
+class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
+    def test_generate_refuses_without_preallocation_disabled(self):
+        """generate() must refuse to orchestrate from a preallocated parent.
+
+        Importing jcm initialises the CUDA backend (#859), so by the time
+        ``generate`` runs, a parent without
+        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` already holds 75 % of the
+        card and its workers OOM an hour in. The guard turns that into an
+        immediate, named failure. The test session's own conftest guard
+        *sets* the variable, so simulate the unguarded invocation by
+        removing it.
+        """
+        import os
+        from unittest import mock
+
+        from jcm.data.test.release_matrix.generate_stats import generate
+
+        env = {k: v for k, v in os.environ.items()
+               if k != "XLA_PYTHON_CLIENT_PREALLOCATE"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(
+                    RuntimeError, "XLA_PYTHON_CLIENT_PREALLOCATE"):
+                generate("speedy-t31")
 
 
 

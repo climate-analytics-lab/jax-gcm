@@ -27,7 +27,14 @@ Regenerating
 ------------
 One command per member, on a GPU::
 
-    CUDA_VISIBLE_DEVICES=<idx> python -c "from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+    CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+
+The ``os.environ`` assignment must come *before* the jcm import — merely
+importing jcm initialises the JAX CUDA backend (the SPEEDY lookup tables are
+built at import time), and the default claims 75 % of the card for this
+orchestrating process, which holds no device work of its own but would starve
+every worker it spawns. ``generate`` refuses to run without it rather than
+OOM-ing an hour in.
 
 ``generate`` writes the band file and, unless ``write_state=False``, the
 member's init state to ``out_dir`` for upload to the mirror (see
@@ -77,6 +84,20 @@ _MATRIX = _HERE.parents[3] / "tools" / "release_validation" / "matrix.yaml"
 #: list serves every member and a member that gains a scheme picks it up on the
 #: next regeneration. The band file records the names it ended up with, and the
 #: test reads them back from the file rather than re-deriving them here.
+#:
+#: The list must cover each member's **defining prognostic state**, not just
+#: core meteorology: a matrix member exists to validate its distinguishing
+#: physics, and bands blind to that physics would pass a regression confined
+#: to it — five days of broad meteorological means barely move when an
+#: aerosol or number-concentration pathway breaks. Hence the cloud tracers
+#: for the 1M/2M members, the full JAM tracer mass state (interstitial,
+#: cloud-borne, gases) plus the AOD the radiation sees, and — for the number
+#: concentrations, which cannot be banded level by level — their column
+#: integrals (see :data:`COLUMN_NUMBER_BURDENS`).
+#: Emission / deposition *flux* diagnostics are deliberately not banded:
+#: starting from an identical initial state they act directly on the banded
+#: tracers, so a flux regression surfaces in the tracer bands within the
+#: window without doubling the variable count.
 CANDIDATE_STAT_VARS = (
     # Prognostic state, every package.
     "u_wind",
@@ -89,12 +110,76 @@ CANDIDATE_STAT_VARS = (
     "air_density",
     "layer_thickness",
     "relative_humidity",
+    # Cloud condensate tracers (1M/2M/JAM). NUMBER concentrations are
+    # deliberately NOT banded — not the hydrometeor numbers (qnc/qni), not
+    # the cloud-borne droplet mirror (nc_*), and not the interstitial
+    # aerosol mode numbers (n_*): every one of them is set by a thresholdy
+    # source (droplet/ice activation, Aitken-mode nucleation), so at levels
+    # where the source is intermittent the per-level global mean jumps
+    # between runs on identical code. Measured on echam-jam-t63-l47 across
+    # up to seven independent windows: level-23 qnc was 2.3e-13 on four
+    # generation draws and 33.4 on a fifth; n_ait sat inside its band on six
+    # windows and outside it on a seventh; nc_ait reached 3.2x its band. No
+    # finite-repeat noise floor can band that per level. The numbers ARE
+    # banded as mass-weighted column integrals instead (the ``*_column``
+    # entries below, derived by :func:`_with_column_number_burdens`): a
+    # near-threshold cell carries a negligible share of the column, so the
+    # integral is robust where the level is not. What is banded per level is
+    # every MASS:
+    # condensate (qc/qi here), interstitial aerosol (m_* below) and
+    # cloud-borne aerosol (mc_*), plus the precursor gases (g_*) and AOD.
+    # Those are the conserved burdens an emission/chemistry/deposition
+    # regression actually moves, and across those same windows they
+    # reproduce to <=0.01x of their bands — so the aerosol pathway is
+    # covered where a band is meaningful, and not asserted where it is noise.
+    "qc",
+    "qi",
+    # Column-integrated number concentrations [m-2]: the 2M members' droplet
+    # and ice numbers, and the JAM total particle number. Derived from the
+    # same window (:data:`COLUMN_NUMBER_BURDENS`), not model outputs.
+    "qnc_column",
+    "qni_column",
+    "n_total_column",
     # ECHAM scheme outputs.
     "radiation.toa_lw_up",
     "radiation.surface_sw_down",
     "clouds.cloud_fraction",
     "clouds.precip_rain",
     "convection.precip_conv",
+    # MACv2-SP simple plumes: the non-JAM ECHAM members' aerosol pathway.
+    # The term publishes under the explicit ``macsp.*`` output namespace
+    # (#640), with the CF/AeroCom ``od550aer`` name for the total-column AOD.
+    "macsp.od550aer",
+    # JAM modal aerosol: the interstitial per-species-per-mode MASSES and
+    # the precursor gases (the mode numbers n_* are excluded with the other
+    # number concentrations, see the cloud-tracer note above).
+    "m_so4_ait", "m_so4_acc", "m_so4_cor",
+    "m_bc_acc", "m_bc_cor", "m_bc_pcm",
+    "m_du_acc", "m_du_cor",
+    "m_ss_ait", "m_ss_acc", "m_ss_cor",
+    "m_moa_ait", "m_moa_acc", "m_moa_cor", "m_moa_pcm",
+    "m_poa_acc", "m_poa_cor", "m_poa_pcm",
+    "m_soa_ait", "m_soa_acc", "m_soa_cor",
+    "g_dms", "g_so2", "g_h2so4", "g_soag",
+    # — and the cloud-borne phase's MASSES, transported and scavenged in
+    # their own right (#602/#708). The cloud-borne numbers (nc_*) are
+    # excluded with the other number concentrations (see above).
+    "jam_cloud_borne.mc_so4_ait", "jam_cloud_borne.mc_so4_acc",
+    "jam_cloud_borne.mc_so4_cor",
+    "jam_cloud_borne.mc_bc_acc", "jam_cloud_borne.mc_bc_cor",
+    "jam_cloud_borne.mc_bc_pcm",
+    "jam_cloud_borne.mc_du_acc", "jam_cloud_borne.mc_du_cor",
+    "jam_cloud_borne.mc_ss_ait", "jam_cloud_borne.mc_ss_acc",
+    "jam_cloud_borne.mc_ss_cor",
+    "jam_cloud_borne.mc_moa_ait", "jam_cloud_borne.mc_moa_acc",
+    "jam_cloud_borne.mc_moa_cor", "jam_cloud_borne.mc_moa_pcm",
+    "jam_cloud_borne.mc_poa_acc", "jam_cloud_borne.mc_poa_cor",
+    "jam_cloud_borne.mc_poa_pcm",
+    "jam_cloud_borne.mc_soa_ait", "jam_cloud_borne.mc_soa_acc",
+    "jam_cloud_borne.mc_soa_cor",
+    # JAM optics: the integrated aerosol state the radiation actually sees
+    # (the ``jam_optics.*`` output namespace, #640).
+    "jam_optics.aod_550",
     # SPEEDY scheme outputs.
     "longwave_rad.ftop",
     "shortwave_rad.ftop",
@@ -102,6 +187,57 @@ CANDIDATE_STAT_VARS = (
     "condensation.precls",
     "convection.precnv",
 )
+
+#: Derived band variables: ``name -> predicate`` selecting the per-level
+#: number-concentration outputs [kg-1] whose mass-weighted column integral
+#: [m-2] the variable is. Per-level numbers are too threshold-driven to band
+#: (see the note in :data:`CANDIDATE_STAT_VARS`); their column integrals are
+#: not, because an intermittent activation or nucleation cell holds a
+#: negligible share of the column total.
+#:
+#: ``n_total_column`` sums every JAM mode's number over BOTH phases — the
+#: interstitial ``n_<mode>`` tracers and the cloud-borne
+#: ``jam_cloud_borne.nc_<mode>`` store. Activation moves particles between
+#: those two phases at exactly the thresholds that make the per-level
+#: numbers jumpy, so the phase sum is invariant to the process that makes
+#: the individual numbers unbandable, while an emission, nucleation,
+#: coagulation or deposition regression still moves it.
+COLUMN_NUMBER_BURDENS = {
+    "qnc_column": lambda name: name == "qnc",
+    "qni_column": lambda name: name == "qni",
+    "n_total_column": lambda name: (
+        name.startswith("n_") or name.startswith("jam_cloud_borne.nc_")),
+}
+
+
+def _with_column_number_burdens(ds):
+    """``ds`` plus the :data:`COLUMN_NUMBER_BURDENS` it can supply.
+
+    Each column integral is ``sum_k N_k * rho_k * dz_k`` over the mid-level
+    axis — the layer air mass from the run's own ``air_density`` [kg m-3]
+    and ``layer_thickness`` [m] diagnostics — taken per column, before any
+    horizontal mean, so the band compares the global mean of a burden and
+    not a burden of global means. A variable whose sources the member does
+    not carry (no 2M scheme, no JAM) is simply not added, and so is not
+    banded for that member.
+    """
+    if "air_density" not in ds or "layer_thickness" not in ds:
+        return ds
+    air_mass = ds["air_density"] * ds["layer_thickness"]      # kg m-2
+    derived = {}
+    for out_name, selects in COLUMN_NUMBER_BURDENS.items():
+        sources = [v for v in ds.data_vars
+                   if selects(v) and "level" in ds[v].dims]
+        if sources:
+            number = sum(ds[v] for v in sources)
+            derived[out_name] = (number * air_mass).sum("level")
+            derived[out_name].attrs = {
+                "units": "m-2",
+                "long_name": "column-integrated number: "
+                             + " + ".join(sorted(sources)),
+            }
+    return ds.assign(derived)
+
 
 #: ``member -> bundle``: where on the mirror this member's init state lives.
 MEMBER_BUNDLE = {
@@ -142,6 +278,49 @@ HELD_STATES: dict[str, str] = {}
 SPIN_UP_DAYS = 5.0
 STATS_DAYS = 5.0
 SAVE_INTERVAL_DAYS = 1.0
+
+#: Stats-window repeats used to size ``<var>.noise``, per member; members not
+#: listed use :data:`DEFAULT_REPRODUCIBILITY_REPEATS`. The JAM members carry
+#: more because their band set is the largest and the most intermittent
+#: (cloud cover and cloud-borne aerosol respond to activation thresholds), so
+#: a four-window peak-to-peak spread under-samples their run-to-run
+#: reproducibility: an echam-jam-t63-l47 ``clouds.cloud_fraction`` level fell
+#: outside a band drawn from four windows in an independent run of the same
+#: code and state that a re-run then passed. Both JAM members use the same
+#: count so they are banded alike.
+DEFAULT_REPRODUCIBILITY_REPEATS = 3
+REPRODUCIBILITY_REPEATS = {
+    "echam-jam-t63-l47": 6,
+    "echam-jam-t63-l95": 6,
+}
+
+#: Distributions whose versions a band file records (see
+#: :func:`generation_environment`): the ones that change what a member
+#: produces. jax-rrtmgp is the reason this exists — a band drawn under one
+#: jax-rrtmgp release and checked under another fails with a whole-column
+#: radiative shift, which is indistinguishable from a physics regression
+#: unless the file says what it was drawn under.
+_ENV_DISTRIBUTIONS = ("jax", "jaxlib", "jax-rrtmgp", "dinosaur", "flax",
+                      "mam4-jax", "numpy", "xarray")
+
+
+def generation_environment() -> str:
+    """``name==version`` of every :data:`_ENV_DISTRIBUTIONS` entry, and Python.
+
+    Read from installed-distribution metadata rather than by importing, so
+    it costs nothing and cannot initialise a device. A distribution that is
+    not installed is recorded as such (``mam4-jax`` on a core install).
+    """
+    import platform
+    from importlib import metadata
+
+    parts = [f"python=={platform.python_version()}"]
+    for dist in _ENV_DISTRIBUTIONS:
+        try:
+            parts.append(f"{dist}=={metadata.version(dist)}")
+        except metadata.PackageNotFoundError:
+            parts.append(f"{dist}: not installed")
+    return "; ".join(parts)
 
 
 def members() -> dict[str, str]:
@@ -288,7 +467,7 @@ def _from_state_overrides(file_path: str) -> dict:
 
 def _global_mean(predictions):
     """``(time, lon, lat)``-mean of the candidate variables a run produced."""
-    ds = predictions.to_xarray()
+    ds = _with_column_number_burdens(predictions.to_xarray())
     means = ds.mean(dim={"time", "lon", "lat"})
     present = [v for v in CANDIDATE_STAT_VARS if v in means]
     return means[present]
@@ -316,7 +495,7 @@ def write_stats_window_global_mean(member: str, state_path: str, out: str):
     exp = _load_member(
         member, _from_state_overrides(state_path), STATS_DAYS)
     predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
-    ds = predictions.to_xarray()
+    ds = _with_column_number_burdens(predictions.to_xarray())
     present = [v for v in CANDIDATE_STAT_VARS if v in ds]
     ds[present].mean(dim={"lon", "lat"}).to_netcdf(out)
 
@@ -461,8 +640,8 @@ def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
         f"({members()[member]})")
 
 
-def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
-             write_state=True):
+def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
+             write_state=True, state_environment=None):
     """Generate ``member``'s fixture: its init state and its bands.
 
     Args:
@@ -470,28 +649,57 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
         out_dir: Where the state file is written for upload. Defaults to the
             current directory; keep it off ``/data`` for the larger grids.
         n_reproducibility_repeats: Stats-window repeats, in their own
-            processes, used to size ``<var>.noise``. 0 writes no ``noise``,
-            which the regression test then rejects.
+            processes, used to size ``<var>.noise``. ``None`` takes the
+            member's entry in :data:`REPRODUCIBILITY_REPEATS`. 0 writes no
+            ``noise``, which the regression test then rejects.
         write_state: When False, reuse the state already at ``out_dir`` rather
             than producing one — for re-deriving bands without re-migrating or
             re-spinning.
+        state_environment: With ``write_state=False``, the environment the
+            reused state was spun up under (as :func:`generation_environment`
+            would describe it), recorded in the band file. The state carries
+            no record of its own, and bands may legitimately be drawn under
+            different dependencies from the ones that spun up their initial
+            condition, so the file has to say both. Ignored when
+            ``write_state`` is True: the state is then spun up here, under
+            the same environment as the bands.
 
     Returns:
         ``(state_path, band_path)``.
 
     """
+    import os
     import tempfile
 
     import xarray as xr
 
-    # The orchestrator must never initialise JAX. It holds no device of its own
-    # by design (see :func:`_run_worker`), and a bare ``jax.default_backend()``
-    # or ``jax.devices()`` here would grab a CUDA context — 75 % of the card up
-    # front under JAX's default preallocation — that no per-child
-    # ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` can release, starving the very
-    # workers this subprocess design exists to hand a full card (a T63 L95 JAM
-    # member is what dies first). The backend confirmation therefore runs in
-    # its own throwaway child, which frees its context on exit.
+    # The orchestrator must never hold a device pool (see :func:`_run_worker`)
+    # — but it cannot avoid initialising JAX, because merely importing jcm
+    # builds device lookup tables (measured: ``import jcm`` alone claims
+    # 61,214 MiB of an 80 GB A100 under JAX's default 75 % preallocation, in
+    # a process that then does no device work at all; #859 tracks making the
+    # library import lazy). The pool is grabbed at *import* time, before this
+    # function can do anything about it, so the environment variable must be
+    # set before the jcm import — and rather than hope, refuse to run
+    # without it: with preallocation on, the orchestrator's pool starves the
+    # workers and the largest member OOMs an hour in, which is a far worse
+    # failure than this one. No code here can set it retroactively; only the
+    # invocation can.
+    if os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE") != "false":
+        raise RuntimeError(
+            "generate() must run with XLA_PYTHON_CLIENT_PREALLOCATE=false "
+            "set BEFORE jcm is imported: importing jcm initialises the JAX "
+            "CUDA backend, whose default preallocates 75% of the card to "
+            "this orchestrating process and starves the worker subprocesses "
+            "that integrate the model. Invoke as:\n"
+            "  python -c \"import os; "
+            "os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; "
+            "from jcm.data.test.release_matrix.generate_stats import "
+            f"generate; generate({member!r}, ...)\"")
+    # The backend confirmation still runs in its own throwaway child: the
+    # parent's on-demand footprint stays a few hundred MB and, more
+    # importantly, every process that integrates the model reports the same
+    # way (see :func:`_run_worker`).
     print(f"member {member}:", flush=True)
     _run_worker("report_backend as w; w()")
     out_dir = Path(out_dir or ".")
@@ -524,6 +732,9 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
 
     # One window seeds the bands; the rest size ``noise``. All of them run
     # in their own process, including the first — see :func:`_run_worker`.
+    if n_reproducibility_repeats is None:
+        n_reproducibility_repeats = REPRODUCIBILITY_REPEATS.get(
+            member, DEFAULT_REPRODUCIBILITY_REPEATS)
     n_runs = 1 + n_reproducibility_repeats
     print(f"  {n_runs} x {STATS_DAYS:g}-day stats window …", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -556,6 +767,15 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=3,
         member, Path(state_path).stem.rsplit("_", 1)[-1])
     stats_ds.attrs["init_state_provenance"] = provenance
     stats_ds.attrs["stats_days"] = STATS_DAYS
+    stats_ds.attrs["reproducibility_repeats"] = n_reproducibility_repeats
+    # What the bands were drawn under, and what their initial state was spun
+    # up under — separately, because a reused state can predate the current
+    # dependencies. A band that fails with a whole-column shift is first
+    # checked against this before being read as a physics regression.
+    band_env = generation_environment()
+    stats_ds.attrs["bands_environment"] = band_env
+    stats_ds.attrs["init_state_environment"] = (
+        band_env if write_state else (state_environment or "unrecorded"))
     held = HELD_STATES.get(member)
     stats_ds.attrs["hosted_state"] = "pending" if held else "published"
     if held:
