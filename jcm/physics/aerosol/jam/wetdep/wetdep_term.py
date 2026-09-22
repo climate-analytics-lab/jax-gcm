@@ -250,10 +250,6 @@ def below_cloud_rate(
 #: divided by ``ρ·w_u`` is the updraft area, which HAMMOZ takes as the
 #: fraction of the grid box the convective precipitation falls through.
 CONV_UPDRAFT_VELOCITY_DEFAULT = 2.0
-#: Physical floor on that velocity inside ``conv_precip_cover``'s division
-#: [m/s]; a slower "updraft" is not one, and a tiny epsilon there would put
-#: the VJP in the float32 squared-underflow window (see ``_RATE_FLOOR``).
-_UPDRAFT_VELOCITY_FLOOR = 0.01
 
 
 def conv_precip_cover(
@@ -294,33 +290,32 @@ def conv_precip_cover(
     ~280 K in the plume core, under 2 % — against an assumed ``w_u`` that is
     itself the dominant uncertainty of the estimate.
 
-    Clipped to [0, 1]. HAMMOZ does not clip, but an updraft area above the
-    whole box is a closure artefact, not a cover. The velocity is floored
-    at a physical 0.01 m/s so the division stays clear of the float32
-    squared-underflow window when the differentiable ``w_u`` is driven
-    towards zero (see the ``_RATE_FLOOR`` note above).
+    The area itself is computed by the shared
+    :func:`~jcm.physics.convection.tiedtke_nordeng.flux_tendencies.updraft_area_cover`
+    — the single implementation the convection scheme's own sub-cloud rain
+    evaporation also uses (jax-gcm#812) — so the wet-deposition and
+    evaporation footprints cannot drift apart. That helper floors the
+    velocity at a physical 0.01 m/s so the division stays clear of the
+    float32 squared-underflow window when the differentiable ``w_u`` is
+    driven towards zero (see the ``_RATE_FLOOR`` note above).
+
+    Clipped to [0, 1] here: HAMMOZ does not clip, but an updraft area above
+    the whole box is a closure artefact, not a cover. (The evaporation
+    caller keeps the raw area, as ``cuflx`` does.)
     """
-    # A negative updraft mass flux is not a plume; the Tiedtke ledger is
-    # non-negative by construction, so this only pins the contract.
-    mass_flux_up = jnp.maximum(mass_flux_up, 0.0)
-    nlev = mass_flux_up.shape[0]
-    idx = jnp.arange(nlev).reshape((nlev,) + (1,) * (mass_flux_up.ndim - 1))
-    active = mass_flux_up > 0.0
-    # Cloud base = lowest active level (largest index, top-first order);
-    # -1 where the column carries no plume, which leaves every level as
-    # "in-plume" with a zero flux and hence zero cover.
-    kbase = jnp.max(jnp.where(active, idx, -1), axis=0)
-    take = jnp.maximum(kbase, 0)[jnp.newaxis]
-    mfu_base = jnp.take_along_axis(mass_flux_up, take, axis=0)[0]
-    # Air mass below each layer's TOP interface (the layer itself included).
-    mass_below = jnp.cumsum(layer_mass[::-1], axis=0)[::-1]
-    mass_below_base = jnp.take_along_axis(mass_below, take, axis=0)[0]
-    zzp = mass_below / jnp.maximum(mass_below_base, _EPS)
-    zzp = jnp.where(ktype == 3, zzp * zzp, zzp)
-    sub_cloud = (idx > kbase) & (kbase >= 0)
-    mfu_eff = jnp.where(sub_cloud, mfu_base * zzp, mass_flux_up)
-    w_u = jnp.maximum(updraft_velocity, _UPDRAFT_VELOCITY_FLOOR)
-    return jnp.clip(mfu_eff / (w_u * air_density), 0.0, 1.0)
+    from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
+        updraft_area_cover,
+    )
+    # HAMMOZ uses the environment density as a stand-in for ``zrhou``; the
+    # taper weight is the layer air mass (the 10 m ``layer_thickness`` floor
+    # never binds on the supported level sets, so it equals ECHAM's Δp
+    # ratio). The shared helper does not clip; a cover fraction is [0, 1].
+    return jnp.clip(
+        updraft_area_cover(
+            mass_flux_up, air_density, ktype, layer_mass, updraft_velocity,
+        ),
+        0.0, 1.0,
+    )
 
 
 def conv_below_cloud_rate(

@@ -18,8 +18,17 @@ class ConvectionParameters:
 
     # Entrainment/detrainment parameters
     entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
-    entrscv: float           # Entrainment rate for shallow convection (m⁻¹) 
+    entrscv: float           # Entrainment rate for shallow convection (m⁻¹)
     entrmid: float           # Entrainment rate for mid-level convection (m⁻¹)
+    cu_centrmax: float       # Hard cap on the ORGANIZED (Nordeng) fractional
+                             # entrainment AND detrainment rates (m⁻¹) — ECHAM
+                             # ``centrmax`` (mo_echam_conv_constants.f90), the
+                             # same order as ``entrpen`` itself. Both reference
+                             # schemes bound these per-metre rates: ECHAM caps
+                             # ``zoentr``/``zorgde`` at 3.0e-4 m⁻¹
+                             # (mo_cuascent.f90:525,784), CAM ZM at 2.0e-4.
+                             # Without it a deep plume entrains/detrains a large
+                             # fraction of its mass in a single stretched layer.
     
     # CAPE closure
     tau: float               # CAPE adjustment timescale (s)
@@ -43,6 +52,15 @@ class ConvectionParameters:
 
     # Evaporation parameters
     cevapcu: float           # Coefficient for rain evaporation
+    cu_updraft_velocity: float  # Assumed in-cloud updraft speed ``zwu``
+                             # (m/s) used to turn the updraft mass flux into
+                             # the updraft AREA ``pmfu/(zwu*rhou)`` — ECHAM
+                             # ``mo_cufluxdts.f90:166`` (zwu = 2.0). That area
+                             # is the sub-cloud rain-evaporation footprint
+                             # under the HAM submodel (``updraft_precip_cover``
+                             # on ``TiedtkeConvection``) and the convective
+                             # washout footprint the JAM wet deposition uses
+                             # (jax-gcm#812).
 
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
@@ -113,9 +131,11 @@ class ConvectionParameters:
 
     @classmethod
     def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
+                 cu_centrmax=3.0e-4,
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
-                 cevapcu=2.0e-5, cmfdeps=0.3, entrdd=2.0e-4,
+                 cevapcu=2.0e-5, cu_updraft_velocity=2.0,
+                 cmfdeps=0.3, entrdd=2.0e-4,
                  trigger_cape=100.0, smooth_trigger_j=25.0,
                  cu_dqcv_width=2.0e-7, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
@@ -130,6 +150,7 @@ class ConvectionParameters:
             entrpen=jnp.array(entrpen),
             entrscv=jnp.array(entrscv),
             entrmid=jnp.array(entrmid),
+            cu_centrmax=jnp.array(cu_centrmax),
             tau=jnp.array(tau),
             cmfcmax=jnp.array(cmfcmax),
             cmfcmin=jnp.array(cmfcmin),
@@ -137,6 +158,7 @@ class ConvectionParameters:
             cu_dnoprc_ocean=jnp.array(cu_dnoprc_ocean),
             cu_dnoprc_land=jnp.array(cu_dnoprc_land),
             cevapcu=jnp.array(cevapcu),
+            cu_updraft_velocity=jnp.array(cu_updraft_velocity),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
             trigger_cape=jnp.array(trigger_cape),

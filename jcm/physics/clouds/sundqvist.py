@@ -65,6 +65,16 @@ class CloudParameters:
     smooth_b0: float         # soft-clip width of the b0 ramp [-]
     smooth_inv_score: float  # softmax sharpness of the inversion pick [K/m]
     smooth_inv_thr: float    # width of the cinv stability gate [K/m]
+    # Strength of the proximity-gated downward tie-break in the inversion
+    # softmax [-], in units of the softmax exponent (#677). ECHAM's ``zknvb``
+    # scan (mo_cover.f90:236-244) picks exactly ONE level and, on the
+    # clip-to-0 plateau where several adjacent levels tie, resolves to the
+    # LOWEST (nearest-surface) one. The bias is applied only among levels at
+    # the column maximum (see ``_stratocumulus_zsat``), so it collapses the
+    # plateau onto its lowest level without dragging a well-separated single
+    # maximum onto a weakly-stable neighbour. Set to 0 to recover the
+    # un-tie-broken softmax (the pre-#677 1/N smear).
+    smooth_inv_depth: float
 
     @classmethod
     def default(cls, crt=0.75, crs=0.975, nex=2.0,
@@ -74,7 +84,8 @@ class CloudParameters:
                  t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
                  cloud_top_pressure_pa=1000.0,
                  smooth_b0=0.02, smooth_inv_score=5.0e-4,
-                 smooth_inv_thr=2.0e-4) -> 'CloudParameters':
+                 smooth_inv_thr=2.0e-4,
+                 smooth_inv_depth=10.0) -> 'CloudParameters':
         """Return default cloud parameters.
 
         Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
@@ -102,6 +113,7 @@ class CloudParameters:
             smooth_b0=jnp.array(smooth_b0),
             smooth_inv_score=jnp.array(smooth_inv_score),
             smooth_inv_thr=jnp.array(smooth_inv_thr),
+            smooth_inv_depth=jnp.array(smooth_inv_depth),
         )
 
 
@@ -222,9 +234,45 @@ def _qs_cover(
     return jnp.clip(qs, 0.0, 0.5)
 
 
+def _full_level_heights(
+    temperature: jnp.ndarray,
+    pressure: jnp.ndarray,
+    surface_pressure: float,
+) -> jnp.ndarray:
+    """Hydrostatic height of each full level above the surface interface.
+
+    Single-column ``(nlev,)`` fields in physics ordering (0=TOA,
+    N-1=surface). Layer thickness between adjacent full levels is
+    ``dz = (R_d·T_avg/g)·ln(p_below/p_above)``; the cumulative sum from the
+    bottom full level up gives its height above that level, and
+    ``z_bottom = (R_d·T[-1]/g)·ln(p_surf/p[-1])`` lifts the whole profile so
+    the origin is the surface INTERFACE, not the lowest full level.
+
+    ECHAM measures its ``jbmin``/``jbmax`` reference heights from the
+    surface half-level (``mo_echam_cloud_params.f90:146-161``:
+    ``zh(jk) = (zph(nlev+1) − zp(jk))/(grav·1.25)``), so even the bottom
+    full level sits ~half a layer (~30-60 m) above ground. Omitting
+    ``z_bottom`` put that level at z=0 and shifted the whole 500-2000 m
+    inversion search window down by the offset (#677).
+    """
+    p_safe = jnp.maximum(pressure, 1.0)
+    ps_safe = jnp.maximum(jnp.asarray(surface_pressure), 1.0)
+    # ``log(p_below / p_above)`` between adjacent levels (k+1 below, k above);
+    # thickness assigned to the upper level k. Shape (nlev-1,).
+    log_ratio = jnp.log(p_safe[1:] / p_safe[:-1])  # +ve going up
+    T_avg = 0.5 * (temperature[:-1] + temperature[1:])
+    dz_layer = c.rd * T_avg / c.grav * log_ratio       # (nlev-1,), m
+    z_bottom = c.rd * temperature[-1] / c.grav * jnp.log(ps_safe / p_safe[-1])
+    return z_bottom + jnp.concatenate([
+        jnp.cumsum(dz_layer[::-1])[::-1],   # each upper level over the bottom
+        jnp.zeros(1),                       # bottom full level (level=N-1)
+    ])
+
+
 def _stratocumulus_zsat(
     temperature: jnp.ndarray,
     pressure: jnp.ndarray,
+    surface_pressure: float,
     config: CloudParameters,
     enhance_allowed: jnp.ndarray = jnp.array(True),
 ) -> jnp.ndarray:
@@ -242,8 +290,16 @@ def _stratocumulus_zsat(
     ECHAM injects extra cloud cover at the BL-top inversion that
     persistent stratocumulus decks live on.
 
-    Inputs are single-column arrays of shape ``(nlev,)`` in physics
-    convention (level=0 TOA, level=N-1 surface).
+    Level fields are single-column arrays of shape ``(nlev,)`` in physics
+    convention (level=0 TOA, level=N-1 surface); ``surface_pressure`` is a
+    scalar used to set the height origin at the surface interface.
+
+    The pick is a differentiable surrogate for ECHAM's discrete ``zknvb``
+    scan (a softmax over the BL-masked clipped lapse with a stability-gate
+    weight), but it collapses onto a single level: a downward depth bias
+    (``config.smooth_inv_depth``) resolves the clip-to-0 plateau to the
+    lowest qualifying level exactly as ECHAM's strict-improvement scan does
+    (#677), so the boost is delivered at one level rather than smeared.
 
     Returns:
         ``zsat`` of shape ``(nlev,)`` — multiply ``qsat`` by this in
@@ -252,23 +308,7 @@ def _stratocumulus_zsat(
     """
     nlev = temperature.shape[0]
 
-    # Approximate height per layer using hydrostatic balance from the
-    # surface up: ``dz_k = (R_d * T_k / g) * ln(p_lower/p_upper)``.
-    # In physics ordering, lower (higher pressure) is at level k+1 and
-    # upper (lower pressure) is at level k, so for each layer we use
-    # the layer below as the reference. Column-cumulative sum from the
-    # surface gives height above surface.
-    p_safe = jnp.maximum(pressure, 1.0)
-    # ``log(p_below / p_above)`` between adjacent levels (k+1 below, k above).
-    # Shape (nlev-1,). Layer thickness assigned to the upper level k.
-    log_ratio = jnp.log(p_safe[1:] / p_safe[:-1])  # +ve when going up
-    T_avg = 0.5 * (temperature[:-1] + temperature[1:])
-    dz_layer = c.rd * T_avg / c.grav * log_ratio       # (nlev-1,), m
-    # height above surface at each full level: 0 at surface, accumulating up
-    z_full = jnp.concatenate([
-        jnp.cumsum(dz_layer[::-1])[::-1],   # height of each upper-level w.r.t. surface
-        jnp.zeros(1),                       # surface (level=N-1) has z=0
-    ])
+    z_full = _full_level_heights(temperature, pressure, surface_pressure)
 
     # dT/dz across the interface ABOVE each level: ECHAM's
     # ``zdtdz(jk) = (T(jk-1) − T(jk))·g/(geo(jk-1) − geo(jk))`` belongs to
@@ -278,7 +318,10 @@ def _stratocumulus_zsat(
     # warm dry layer ABOVE the marine-Sc inversion instead of in the Sc
     # deck (review finding 2.25).
     dT = temperature[:-1] - temperature[1:]              # (nlev-1,)
-    dz = jnp.maximum(dz_layer, 1.0)                      # avoid /0
+    # Layer thickness = difference of the full-level heights (consistent
+    # with the same hydrostatic z used for the BL mask). ECHAM divides the
+    # temperature jump by the geopotential difference g·dz, i.e. dT/dz.
+    dz = jnp.maximum(z_full[:-1] - z_full[1:], 1.0)      # (nlev-1,), avoid /0
     dTdz_layer = dT / dz                                 # (nlev-1,) across interface k|k+1
     # Level k (k ≥ 1) owns the lapse across the interface above it.
     dTdz = jnp.concatenate([jnp.zeros(1), dTdz_layer])
@@ -302,13 +345,15 @@ def _stratocumulus_zsat(
     #   * a smooth validity weight per level: the cinv stability gate
     #     becomes a sigmoid in (dTdz_clipped - threshold), so cinv is
     #     in the value;
-    #   * a softmax over the (BL-masked) clipped lapse with a small
-    #     downward depth bias reproducing ECHAM's take-the-LOWEST-level
-    #     tie-breaking on the clip-to-0 plateau;
+    #   * a softmax over the (BL-masked) clipped lapse with a downward
+    #     depth bias reproducing ECHAM's take-the-LOWEST-level
+    #     tie-breaking on the clip-to-0 plateau (see smooth_inv_depth
+    #     below);
     #   * a per-level zsat candidate (csatsc + zgam_k), applied with
-    #     weight a_k — enhancement smeared over the 1-3 near-tied
-    #     levels instead of exactly one (accepted physics risk in the
-    #     review). Widths -> 0 recover the hard pick.
+    #     weight a_k. With the depth bias strong enough to break plateau
+    #     ties (#677) the weight concentrates on the single lowest
+    #     qualifying level, matching ECHAM's one-level pick; widths -> 0
+    #     recover the hard pick.
     dtdz_threshold = -config.cinv * c.grav / c.cpd
     in_bl = (z_full >= config.inversion_z_min) & (z_full <= config.inversion_z_max)
     v_valid = jnp.where(
@@ -318,12 +363,39 @@ def _stratocumulus_zsat(
         ),
         0.0,
     )
-    # Depth bias: ~1% of the score width per level, growing toward the
-    # surface (larger k), so exact plateau ties resolve to the lowest
-    # qualifying level exactly as ECHAM's strict-improvement scan.
-    depth_bias = 0.01 * config.smooth_inv_score * jnp.arange(nlev)
-    score = jnp.where(in_bl, dTdz_clipped, -1e10) + depth_bias
-    a_lev = jax.nn.softmax(score / config.smooth_inv_score) * v_valid
+    # Proximity-gated downward tie-break (#677). ECHAM's ``zknvb`` scan picks
+    # the single BL level with the largest clipped lapse and, on the
+    # clip-to-0 plateau where several adjacent levels tie, resolves to the
+    # LOWEST (nearest-surface) one. The previous 0.01·smooth_inv_score bias
+    # gave only a 1 % per-level preference — too weak to break a plateau, so
+    # the boost was smeared ~1/N across the tied levels. Because
+    # ``cc = 1 − sqrt(1 − b0)`` is concave in RH, that diluted boost is NOT
+    # equivalent to a full boost at one level, so subtropical Sc cover was
+    # under-diagnosed.
+    #
+    # A plain depth ramp added to EVERY level's score collapses the plateau
+    # but also drags a well-separated single maximum down onto a
+    # weakly-stable neighbour — measured on a T63L47 state, a global 5×
+    # ramp mis-picked ~14 % of columns one level too low, the mirror of the
+    # "one level too high" bug this routine already fixes. So the depth
+    # preference is GATED by proximity to the column max: it acts only among
+    # the (near-)plateau levels and leaves a clear maximum untouched.
+    #   * ``prox`` ≈ 0.5 on the plateau (levels at the max), decaying to 0
+    #     for the more-stable levels below it (width ``smooth_inv_thr``);
+    #   * ``smooth_inv_depth · prox · k`` (k growing toward the surface) then
+    #     collapses the plateau onto its lowest level with an
+    #     ``exp(smooth_inv_depth·prox)`` per-level preference.
+    # On the same state this gives peak-share ≈ 1.0 with < 0.2 % overrides,
+    # concentrating the full boost on the single ECHAM-correct level.
+    # ``smooth_inv_depth -> 0`` recovers the un-tie-broken softmax (the
+    # pre-#677 1/N smear).
+    score_bl = jnp.where(in_bl, dTdz_clipped, -1e30)
+    plateau = jnp.max(score_bl)
+    prox = jax.nn.sigmoid((score_bl - plateau) / config.smooth_inv_thr)
+    depth_bias = config.smooth_inv_depth * prox * jnp.arange(nlev)
+    score = (jnp.where(in_bl, dTdz_clipped, -1e10) / config.smooth_inv_score
+             + depth_bias)
+    a_lev = jax.nn.softmax(score) * v_valid
 
     zgam_lev = jnp.maximum(-dTdz * c.cpd / c.grav, 0.0)
     zsat_cand = jnp.minimum(1.0, config.csatsc + zgam_lev)
@@ -388,7 +460,10 @@ def calculate_cloud_fraction(
 
     # Stratocumulus inversion enhancement (1 everywhere except at BL-top
     # inversion where it drops to ``csatsc`` ≤ 1, boosting ``zqr``).
-    zsat = _stratocumulus_zsat(temperature, pressure, config, enhance_allowed=enhance_allowed)
+    zsat = _stratocumulus_zsat(
+        temperature, pressure, surface_pressure, config,
+        enhance_allowed=enhance_allowed,
+    )
     zqr = specific_humidity / (qs * zsat + config.epsilon)
 
     b0_raw = (zqr - rhc) / (1.0 - rhc + config.epsilon)
@@ -714,8 +789,25 @@ class SundqvistCloudFraction(PhysicsTerm):
         # ECHAM guards on the stratocumulus enhancement (mo_cover.f90:
         # 179-185): ocean columns (pfrw > 0.5) with no sea ice
         # (pfri < 1e-12, from forcing.sice_am) and no active convection
-        # (ktype from the convection diagnostics when a convection term
-        # ran earlier in the step).
+        # (ktype == 0).
+        #
+        # One-step lag on ``ktype`` (#677): this term is composed BEFORE
+        # radiation (which consumes the cloud fraction it writes) and hence
+        # before ``TiedtkeConvection``, so the current step's ``ktype`` does
+        # not yet exist here. ``ktype`` is therefore read from the previous
+        # step's ``convection`` carry — the same cross-step-consumer pattern
+        # as ConvectiveTracerTransport / tracer_diffusion, with a no-op
+        # (enhancement-allowed) fallback on step 0 when the key is absent.
+        # ECHAM's ``cover`` runs after ``cucall`` and sees the same-step
+        # ktype; matching that would require moving the cloud-fraction
+        # diagnostic after convection, which breaks the same-step
+        # cloud->radiation coupling that motivates its early placement. The
+        # convective mask over marine-Sc (subsidence) regions is
+        # slowly varying, so the one-step lag is physically negligible. It
+        # is deliberately NOT declared in ``requires`` (that would make
+        # ``_validate_ordering`` reject the earlier placement); the general
+        # mechanism for typed lagged reads is tracked by the diagnostics.get
+        # stale-read issue.
         is_ocean = jnp.reshape(terrain.fmask, (-1,)) < 0.5
         sice = getattr(forcing, "sice_am", None)
         no_sea_ice = (

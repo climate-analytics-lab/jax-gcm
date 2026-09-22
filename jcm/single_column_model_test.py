@@ -180,8 +180,22 @@ class TestSCMEcham(unittest.TestCase):
         self.assertIn("qi_tendency", correction)
         self.assertIn("total_water_tendency", correction)
         self.assertIn("column_water_source", correction)
-        self.assertTrue(bool(jnp.all(correction["total_water_tendency"] >= 0.0)))
-        self.assertTrue(bool(jnp.all(correction["column_water_source"] >= 0.0)))
+        # Post-#806 the condensate positivity corrections are charged to the
+        # local vapour (ECHAM mo_cloud 8.4): the per-cell net correction
+        # carries both signs (vapour drawn down offsets the cap raised on the
+        # condensate), and the pressure-weighted column source keeps only the
+        # sign-definite residual the cell's vapour could not absorb plus q's
+        # own ledgered cap. This SCM's artificial seeded column is drained
+        # hard on step 1, so a bounded residual is the EXPECTED ledger entry,
+        # not a defect. It must be non-negative (the charge never exceeds the
+        # corrections) and bounded (no runaway artificial source).
+        self.assertTrue(
+            bool(jnp.all(jnp.isfinite(correction["total_water_tendency"])))
+        )
+        column_source = correction["column_water_source"]
+        self.assertTrue(bool(jnp.all(jnp.isfinite(column_source))))
+        self.assertTrue(bool(jnp.all(column_source >= -1.0e-9)))
+        self.assertLess(float(jnp.max(column_source)), 1.0e-3)
 
     def test_radiation_step_counter_starts_at_zero(self):
         """Regression: SCM bootstrap must not advance the radiation carry.

@@ -4,10 +4,13 @@ This module provides extensive testing of the vertical diffusion scheme,
 including individual components and integrated behavior.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.constants import PhysicalConstants
+from jcm.testing import check_gradients
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 from .turbulence_coefficients import (
     compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
@@ -18,7 +21,8 @@ from .matrix_solver import (
     setup_matrix_system, solve_tridiagonal_single, vertical_diffusion_step
 )
 from .vertical_diffusion import (
-    vertical_diffusion_scheme, prepare_vertical_diffusion_state,
+    vertical_diffusion_column, vertical_diffusion_scheme,
+    prepare_vertical_diffusion_state,
     compute_dry_static_energy, compute_virtual_temperature
 )
 
@@ -1383,3 +1387,119 @@ class TestThvVarianceBudget:
         stirred = spin(1.0)          # sqrt(TKE) = 1 m/s
         quiescent = spin(1.0e-4)     # sqrt(TKE) = 0.01 m/s
         assert stirred > 5.0 * quiescent
+
+
+class TestColumnSolveGradients:
+    """AD through the whole implicit column solve, per issue #820.
+
+    What these pin, and why they are shaped the way they are:
+
+    The scheme's automatic derivative is *correct*. Repeating the same
+    ``check_gradients`` call under ``jax_enable_x64`` — outside the suite,
+    which pins float32 for issue #729 — the central difference converges to
+    the AD projection and jvp and vjp agree to 1e-13. What does not survive
+    float32 is the *comparison*: the six prognostic tendencies respond to a
+    0.1%-of-RMS displacement with dimensionless projections of order 1e4 that
+    then cancel down to order 1e3, so the secant loses most of its significant
+    digits before the ladder reaches a resolvable step, and the two AD modes —
+    the same double sum contracted in opposite orders through the tridiagonal
+    scan in ``matrix_solver.py`` — separate by up to 1.2e-3 (measured over 60
+    combinations of column count, wind, SST offset and direction seed).
+
+    So the difference reference is recorded as a strict xfail rather than
+    tuned away, and the working check is the adjoint one.
+    """
+
+    FIELDS = ("u_tendency", "v_tendency", "temperature_tendency",
+              "qv_tendency", "tke_tendency", "thv_var_tendency")
+
+    def _tendency_fn(self, state, params, dt=300.0):
+        """Return f(state_floats, params_floats) -> the prognostic tendencies.
+
+        ``heating_rate`` is left out because it is ``temperature_tendency``
+        restated in W/m², so including it adds no independent information and
+        doubles the cancellation in the projection; ``qc_tendency`` and
+        ``qi_tendency`` are identically zero in a cloud-free column.
+        """
+        from jcm.utils import convert_back, convert_to_float
+
+        def f(state_f, params_f):
+            tend, _ = vertical_diffusion_column(
+                convert_back(state_f, state), convert_back(params_f, params),
+                dt)
+            return tuple(convert_to_float(getattr(tend, n))
+                         for n in self.FIELDS)
+
+        return f, convert_to_float(state), convert_to_float(params)
+
+    @pytest.mark.parametrize("ncol", [1, 3])
+    def test_column_solve_gradients_are_adjoint_and_live(self, ncol):
+        """Every prognostic input carries a finite, non-zero reverse gradient.
+
+        ``reference="adjoint"`` rather than a difference because no float32
+        finite difference of this operator is usable — see the class docstring
+        and ``test_no_float32_difference_reference_exists``.
+
+        ``adjoint_rtol`` is 3e-3, not the 1e-4 default. The adjoint identity is
+        exact in exact arithmetic and holds to 1e-13 here under x64, so the gap
+        measures float32 round-off through the implicit solve and nothing else;
+        1.2e-3 was the worst observed over the sweep described above, and 3e-3
+        leaves a factor of ~2.5. This is the one tolerance in these tests that
+        is not the default, and it is a statement about float32, not about the
+        scheme's derivative.
+        """
+        state = _make_marine_bl_state(
+            ncol=ncol, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        f, state_f, params_f = self._tendency_fn(state, VDiffParameters.default())
+        check_gradients(
+            f, (state_f, params_f), reference="adjoint", adjoint_rtol=3e-3,
+            # ``VDiffState`` is a NamedTuple, so JAX reports its children as
+            # ``GetAttrKey`` and the leaf names carry the leading dot.
+            live_inputs=[".u", ".v", ".temperature", ".qv", ".tke",
+                         ".surface_temperature", ".roughness_length"],
+        )
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="no float32 central difference resolves this operator: the "
+               "projections are O(1e4) and cancel to O(1e3) across the six "
+               "tendencies, and the tridiagonal scans in matrix_solver.py:408/433 "
+               "is contracted in opposite orders by the two AD modes. Both "
+               "the difference and the adjoint identity are clean under x64. (#843)")
+    def test_no_float32_difference_reference_exists(self):
+        """Record the float32 conditioning as a defect, not as a tolerance.
+
+        Flipping to XPASS is the signal that the solve's float32 conditioning
+        has been improved (or that the check has been weakened) and that this
+        xfail should be replaced by the real comparison.
+        """
+        state = _make_marine_bl_state(
+            ncol=3, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        f, state_f, params_f = self._tendency_fn(state, VDiffParameters.default())
+        check_gradients(f, (state_f, params_f), rtol=1e-2)
+
+    def test_gradients_are_finite_with_zero_tke(self):
+        """A column at TKE = 0 must not poison the gradient.
+
+        ``echam_tke_source_update`` used to open with
+        ``sqrt(maximum(prev_tke, 0))``: at ``prev_tke == 0`` the two arguments
+        of ``maximum`` tie, JAX splits the derivative 0.5/0.5 between them, and
+        multiplying that by ``sqrt'(0) = inf`` returned a non-finite gradient
+        for the whole column. A cold-started column sits exactly there, so this
+        is an operating point the model reaches.
+        """
+        state = _make_marine_bl_state(
+            ncol=2, nlev=18, wind=12.0, sst_offset=4.0, tke0=0.6)
+        zero_tke = state._replace(tke=jnp.zeros_like(state.tke))
+        params = VDiffParameters.default()
+
+        def loss(tke, temperature, qv):
+            tend, _ = vertical_diffusion_column(
+                zero_tke._replace(tke=tke, temperature=temperature, qv=qv),
+                params, 300.0)
+            return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(tend))
+
+        grads = jax.grad(loss, argnums=(0, 1, 2))(
+            zero_tke.tke, zero_tke.temperature, zero_tke.qv)
+        for name, g in zip(("tke", "temperature", "qv"), grads):
+            assert jnp.all(jnp.isfinite(g)), f"{name} gradient is not finite"

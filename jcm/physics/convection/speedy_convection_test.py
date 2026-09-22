@@ -318,23 +318,64 @@ class TestConvectionUnit(unittest.TestCase):
         forcing_floats = convert_to_float(forcing)
         terrain_floats = convert_to_float(terrain)
 
-        def f(physics_data_f, state_f, parameters_f, forcing_f,terrain_f):
-            tend_out, data_out = get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data), 
-                                       state=convert_back(state_f, state), 
-                                       parameters=convert_back(parameters_f, parameters), 
-                                       forcing=convert_back(forcing_f, forcing), 
+        def run(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
+            return get_convection_tendencies(physics_data=convert_back(physics_data_f, physics_data),
+                                       state=convert_back(state_f, state),
+                                       parameters=convert_back(parameters_f, parameters),
+                                       forcing=convert_back(forcing_f, forcing),
                                        terrain=convert_back(terrain_f, terrain)
                                        )
-            return convert_to_float(tend_out), convert_to_float(data_out)
-        
-        # Measured 1.2e-5, against the rtol=1 the fixed-step pair needed. The
-        # step has to reach 1e-6 to get there: the difference sits on a
-        # plateau near 5.7e7 from 1e-3 down to 4e-6, with neighbouring rungs
-        # agreeing to 0.3%, and only below 2e-6 does the secant clear the
-        # branch and drop onto the true value. That plateau is why the step is
-        # chosen by best convergence over the whole ladder, not by the first
-        # rung that looks self-consistent.
-        check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3)
+
+        def f(physics_data_f, state_f, parameters_f, forcing_f, terrain_f):
+            tend_out, data_out = run(physics_data_f, state_f, parameters_f,
+                                     forcing_f, terrain_f)
+            # Everything get_convection_tendencies writes, minus the two
+            # structural zeros, each of which is asserted dead rather than
+            # left to pass silently inside a projection: the wind tendencies
+            # below (SPEEDY's convection is a heat and moisture scheme —
+            # convmf.f90 returns no momentum flux) and the cloud-top level
+            # index iptop in test_diagnose_convection_gradient_check above.
+            # The rest of the returned PhysicsData is passed through untouched,
+            # so it would only re-check the identity.
+            conv = data_out.convection
+            return convert_to_float(
+                (tend_out.temperature, tend_out.specific_humidity,
+                 conv.se, conv.cbmf, conv.qdif, conv.precnv))
+
+        # No central difference is usable anywhere on this grid. The cloud top
+        # is a level *index*: ktop1/ktop2 come from an argmax over a boolean
+        # instability mask, so a perturbation that flips any column's
+        # ``mss0 > mss2[k]`` comparison moves that column's iptop a whole level
+        # and steps msthr, qdif and the tendencies with it — a value jump, which
+        # the secant reports as jump/eps. The step is a fraction of each leaf's
+        # own magnitude (jcm.testing), so the ladder's rungs displace the
+        # O(300 K) temperature and O(1e5 J/kg) geopotential by 0.3 K down to
+        # 3e-4 K, and across 4608 columns some column always lies inside that:
+        # 2844 columns flip at eps=5e-4 and 2 still flip at the bottom rung.
+        # The adjoint identity plus per-leaf input liveness is what remains
+        # verifiable here. Giving the cloud top a differentiable counterpart is
+        # a scheme change with its own validation, not something this check can
+        # arrange.
+        check_gradients(
+            f, (physics_data_floats, state_floats, parameters_floats,
+                forcing_floats, terrain_floats),
+            reference="adjoint",
+            # The four state fields the trigger and the mass flux are built
+            # from; a stop_gradient or an integer cast on any of them would
+            # otherwise pass unnoticed, since the adjoint reference only looks
+            # at the outputs.
+            live_inputs=["temperature", "specific_humidity", "geopotential",
+                         "humidity/qsat"])
+
+        args = (physics_data_floats, state_floats, parameters_floats,
+                forcing_floats, terrain_floats)
+        wind = lambda *a: (convert_to_float(run(*a)[0].u_wind),
+                           convert_to_float(run(*a)[0].v_wind))
+        primal, wind_vjp = jax.vjp(wind, *args)
+        grads = wind_vjp(tuple(jnp.ones_like(x) for x in primal))
+        self.assertTrue(all(jnp.all(g == 0) for g in jax.tree.leaves(grads)),
+                        "convection is a heat and moisture scheme, so the wind "
+                        "tendencies are expected to carry no gradient")
 
 
     

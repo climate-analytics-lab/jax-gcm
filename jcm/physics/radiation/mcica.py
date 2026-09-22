@@ -291,19 +291,32 @@ def expected_total_cover(
     cf = jnp.clip(cloud_fraction, 0.0, 1.0)
     alpha = _alpha_from_overlap(cf, layer_thickness, overlap, decorrelation_km)
     nlev = cf.shape[0]
-    # B[j] = P(first j layers all clear); python loops over STATIC level
-    # indices trace ~nlev^2/2 fused scalar ops — fine for a per-column
-    # diagnostic evaluated once per radiation call.
-    B = [jnp.ones(cf.shape[1:]), 1.0 - cf[0]]
-    for k in range(1, nlev):
-        contrib = jnp.zeros(cf.shape[1:])
-        prod_a = jnp.ones(cf.shape[1:])
-        seg_max = cf[k]
-        for s in range(k, -1, -1):
-            seg_max = jnp.maximum(seg_max, cf[s])
-            start = (1.0 - alpha[s - 1]) if s > 0 else 1.0
-            contrib = contrib + start * prod_a * B[s] * (1.0 - seg_max)
-            if s > 0:
-                prod_a = prod_a * alpha[s - 1]
-        B.append(contrib)
-    return 1.0 - B[nlev]
+    if nlev == 1:
+        return 1.0 - (1.0 - cf[0])
+    # B[j] = P(first j layers all clear). Keep the descending sum and
+    # repeated maximum order, including the subgradient at tied fractions.
+    # Scans keep the traced program compact as the number of layers grows.
+    before = jnp.concatenate((jnp.ones_like(cf[:1]), alpha), axis=0)
+    one = jnp.ones(cf.shape[1:])
+    zero = jnp.zeros(cf.shape[1:])
+    clear = jnp.zeros((nlev + 1,) + cf.shape[1:], dtype=jnp.result_type(cf, one))
+    clear = clear.at[0].set(one).at[1].set(1.0 - cf[0])
+
+    def layer(clear, k):
+        def segment(carry, s):
+            contrib, prod_a, seg_max = carry
+            active = s <= k
+            seg_max = jnp.where(active, jnp.maximum(seg_max, cf[s]), seg_max)
+            start = jnp.where(s > 0, 1.0 - before[s], 1.0)
+            addition = start * prod_a * clear[s] * (1.0 - seg_max)
+            contrib = contrib + jnp.where(active, addition, 0.0)
+            prod_a = jnp.where(active & (s > 0), prod_a * before[s], prod_a)
+            return (contrib, prod_a, seg_max), None
+
+        (contrib, _, _), _ = jax.lax.scan(
+            segment, (zero, one, cf[k]), jnp.arange(nlev - 1, -1, -1)
+        )
+        return clear.at[k + 1].set(contrib), None
+
+    clear, _ = jax.lax.scan(layer, clear, jnp.arange(1, nlev))
+    return 1.0 - clear[nlev]

@@ -89,8 +89,11 @@ Accepts an already-gridpoint `PhysicsState`, runs `verify_state`
 (non-negativity clamp on tracers), calls
 `Physics.compute_tendencies(state, forcing, terrain,
 prev_physics_data=physics_state)`, applies `verify_tendencies` (caps
-negative-going tracer tendencies at `-state/dt`), and returns the
-gridpoint tendency unchanged by any backend-specific conversion.
+negative-going tracer tendencies at `-state/dt` and charges the
+condensate corrections to the local vapour with latent heat, ECHAM
+mo_cloud 8.4 style, so the cap conserves total water per cell — see
+{doc}`water_positivity_conservation`), and returns the gridpoint
+tendency unchanged by any backend-specific conversion.
 
 Returns `(physics_tendency, new_physics_state)`. The new carry is the
 dict the physics call writes to (radiation cache, prior-step TKE,

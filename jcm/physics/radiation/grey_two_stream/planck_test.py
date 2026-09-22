@@ -6,7 +6,12 @@ band integration, and temperature derivatives.
 Date: 2025-01-10
 """
 
+import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from jcm.testing import check_gradients
 from jcm.physics.radiation.grey_two_stream.planck import (
     planck_bands_lw,
     planck_function_wavenumber,
@@ -189,3 +194,47 @@ def test_planck_wavenumber_dependence():
     # Values should be reasonable
     assert jnp.all(planck_vals > 0)
     assert not jnp.any(jnp.isnan(planck_vals))
+
+class TestPlanckGradients:
+    """The Planck derivative, which decides every longwave gradient (#820).
+
+    ``planck_function_wavenumber`` used to return ``+inf`` for
+    ``dB/dT`` at *every* temperature and wavenumber, and the NaN that made of
+    it propagated through ``longwave_fluxes`` into the temperature tendency of
+    the whole grey scheme. The cause was purely a scaling one: the exponent
+    was formed as ``(H_PLANCK * C_LIGHT) / (K_BOLTZMANN * temperature)``, and
+    the quotient's derivative is ``-numerator / denominator**2`` with
+    ``(1.38e-23 * 250)**2 ~ 1.2e-41`` — below float32's smallest normal, so it
+    flushes toward zero and the derivative overflows. The forward value was
+    always right, which is why nothing caught it until something took a
+    gradient.
+    """
+
+    # 10 cm-1 is the lowest edge any longwave band here uses. Below it the
+    # Planck radiance is O(1e-6) and a float32 secant of it is mostly
+    # round-off, so a difference there would be testing the reference, not
+    # the derivative.
+    @pytest.mark.parametrize("wavenumber", [10.0, 350.0, 900.0, 2500.0])
+    def test_planck_derivative_matches_a_central_difference(self, wavenumber):
+        """dB/dT is finite and equals the secant, across the LW spectrum."""
+        temperature = jnp.array([200.0, 250.0, 288.0, 320.0])
+        d_ad = jax.grad(
+            lambda t: jnp.sum(planck_function_wavenumber(t, wavenumber))
+        )(temperature)
+        assert jnp.all(jnp.isfinite(d_ad)), f"dB/dT is not finite: {d_ad}"
+
+        # A 0.05 K step: large enough to clear float32 round-off on a 300 K
+        # primal (an ulp there is 3e-5 K), small enough that the quadratic
+        # truncation error of the secant is far below the 1% compared at.
+        h = 0.05
+        d_fd = (planck_function_wavenumber(temperature + h, wavenumber)
+                - planck_function_wavenumber(temperature - h, wavenumber)) / (2 * h)
+        np.testing.assert_allclose(
+            np.asarray(d_ad), np.asarray(d_fd), rtol=1e-2)
+
+    def test_band_integral_gradient_matches_a_central_difference(self):
+        """The same, through the band integration the flux solver consumes."""
+        bands = ((10.0, 350.0), (350.0, 500.0), (500.0, 2500.0))
+        temperature = jnp.linspace(215.0, 295.0, 8)
+        check_gradients(lambda t: planck_bands_lw(t, bands), (temperature,),
+                        rtol=1e-2)

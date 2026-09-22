@@ -20,6 +20,34 @@ selected by config:
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
 
+**Grey two-stream layer solution.** Each homogeneous layer's diffuse
+reflectance and transmittance are the exact two-stream result of Meador &
+Weaver (1980, eq. 14-15; equivalently Toon et al. 1989) under the Eddington
+closure (``two_stream_coefficients``: ``gamma1 = (7 - ssa(4 + 3g))/4``,
+``gamma2 = -(1 - ssa(4 - 3g))/4``). With eigenvalue
+``lambda = sqrt(gamma1**2 - gamma2**2)``, ``e = exp(-lambda*tau)`` and
+``Gamma = gamma2/(gamma1 + lambda)`` the solution is
+``R = Gamma (1 - e^2)/(1 - Gamma^2 e^2)`` and
+``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)``,
+so a semi-infinite layer has albedo ``Gamma`` and a conservative
+(``ssa = 1``) layer reflects ``R = gamma1*tau/(1 + gamma1*tau)`` with
+``R + T = 1``. ``layer_reflectance_transmittance`` evaluates the algebraically
+identical rearrangement ``R = gamma2 S/(gamma1 S + 1 + e^2)``,
+``T = 2 e/(gamma1 S + 1 + e^2)`` with ``S = (1 - e^2)/lambda``, chosen because
+its denominator cannot cancel to zero, it never divides by ``gamma1`` or
+``gamma1 + lambda`` (both zero at ``ssa = g = 1``), and it contains no growing
+exponential — one expression is valid and differentiable at every optical
+depth. For ``lambda*tau < 0.1`` it is evaluated as an even Taylor series in
+``(lambda*tau)^2``: R and T are even functions of ``lambda``, hence smooth in
+``lambda^2 = 3(1-ssa)(1-ssa*g)``, and the series carries the true endpoint
+derivative through autodiff at the conservative limit (where the closed value
+is ``R = gamma1*tau/(1+gamma1*tau)``). Longwave gas layers (``ssa = 0``) keep
+the Eddington coefficients ``gamma1 = 7/4``, ``gamma2 = -1/4``,
+``lambda = sqrt(3)``: the closure yields a small *negative* reflectance
+(``Gamma ~ -0.07``), clipped to ``R = 0`` as an approximation artefact, and a
+diffuse transmittance ``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)`` — within 0.5%
+of, but not exactly, ``exp(-sqrt(3)*tau)``.
+
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
@@ -84,10 +112,19 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **Why we differ.**
 - `science` — the liquid effective-radius fallback deliberately does *not* apply
   CAM4's land/ocean contrast, because ``cdnc_factor`` already carries the
-  aerosol/CCN effect (applying both double-counts it). The fallback — a constant
-  radius with no LWC dependence — is live on every 1M composition, including the
-  release-validated ``t63-echam-1m`` / ``t106-echam-1m`` configurations (#717);
-  2M configurations use microphysical effective radii.
+  aerosol/CCN effect (applying both double-counts it). Both the 1M and 2M
+  microphysics now publish an LWC-dependent ``clouds.r_eff_liq`` from the ECHAM
+  Martin/Bower law; radiation reads it from the carried ``clouds`` state, which
+  — because the ECHAM term order runs radiation *before* microphysics — is the
+  previous step's value (a one-step lag). The constant fallback therefore
+  survives only where that carried radius is still zero, resolved **cell by
+  cell** (``resolve_effective_radii`` selects on ``r_eff > 0`` per level and
+  column): the cold-start first step, and thereafter any cloudy cell that was
+  clear the previous step — so a level that newly turns cloudy falls back for
+  that step even in a column already cloudy elsewhere
+  (``eff_liquid_droplet_radius`` returns exactly 0 in a clear cell). A
+  composition that runs radiation with no droplet-radius-publishing microphysics
+  uses the fallback throughout.
 - `science` — the grey two-stream backend reads a single *broadband* aerosol
   profile (``aerosol.aod_profile``/``ssa_profile``/``asy_profile`` plus a column
   ``angstrom`` it band-scales itself) rather than the per-band arrays only
@@ -106,6 +143,12 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   not form ``0·inf`` on clear columns.
 
 **Status & known limitations.**
+- **Grey shortwave direct-beam source is not energy-conserving (#855).** The
+  direct-to-diffuse reflectance ``R_dir`` uses a single-scattering source whose
+  ``gamma3`` goes negative for forward-scattering clouds at high sun, so a thick
+  conservative cloud reflects ~0 at TOA and its scattered energy is dropped. The
+  diffuse layer solution above is exact; this is a separate defect in the
+  direct-beam source, awaiting the Toon et al. (1989) source functions.
 - **No sub-grid cloud inhomogeneity scaling.** ECHAM's continuous
   ``zinhoml = LWP^{-p}`` rescaling is not implemented; instead a one-sided
   in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) prevents thin-cloud

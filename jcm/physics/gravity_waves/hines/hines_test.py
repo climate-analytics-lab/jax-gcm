@@ -15,10 +15,12 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.gravity_waves.hines import (
     HinesParameters, hines_gwd,
 )
+from jcm.testing import check_gradients
 
 
 def _make_column(nlev: int = 47, u_scale: float = 1.0,
@@ -192,3 +194,81 @@ class TestHinesParameters:
     def test_custom_overrides(self):
         p = HinesParameters.default(rms_launch_wind=2.0)
         assert abs(float(p.rms_launch_wind) - 2.0) < 1e-6
+
+
+class TestHinesGradients:
+    """AD against a central difference through the Hines column (#820).
+
+    The scheme comes out clean wherever a wind spectrum exists. What it does
+    not survive is a column with *no* wind at all: the azimuthal sums at
+    ``hines.py:253-258`` take the square root of a quantity that is identically
+    0 when ``u = v = 0`` everywhere, so the launch spectrum is degenerate and
+    the response to a displacement is a jump rather than a slope. The
+    gradients stay finite there — which is what matters for a model that can
+    pass through a calm column — but no secant can be taken, and that is
+    recorded rather than tuned away.
+
+    Hines is an f64 port and this module sets ``JAX_ENABLE_X64`` before
+    importing jcm, but issue #729's conftest pins float32 for the suite, so
+    inside pytest these run in single precision like everything else. Hence
+    ``rtol=1e-2`` rather than the 1e-3 the same check reaches standalone under
+    x64: the consistency search settles on a coarse rung (1.6e-5) here, where
+    the central secant's own truncation plus float32 round-off leaves the
+    reference about 0.8% from the AD value. The tolerance measures the
+    reference's precision, not the scheme's derivative.
+    """
+
+    @staticmethod
+    def _scheme_fn(column, config):
+        """Return f(temperature, u, v, density) -> the three tendencies."""
+        def f(temperature, u_wind, v_wind, density):
+            tend, _ = hines_gwd(
+                column["pressure_half"], column["pressure_full"],
+                column["height_half"], density, column["layer_mass"],
+                temperature, u_wind, v_wind, config)
+            return (tend.dudt, tend.dvdt, tend.dissip)
+
+        return f
+
+    @staticmethod
+    def _args(column):
+        return (column["temperature"], column["u_wind"], column["v_wind"],
+                column["density"])
+
+    @pytest.mark.parametrize("seed", [0, 3])
+    def test_jet_column_gradients_match_a_central_difference(self, seed):
+        """A mid-latitude jet — the state the scheme is written for."""
+        column = _make_column(nlev=30)
+        check_gradients(self._scheme_fn(column, HinesParameters.default()),
+                        self._args(column), rtol=1e-2, seed=seed)
+
+    @pytest.mark.parametrize(
+        "u_scale, v_scale", [(0.0, 0.0), (0.02, 0.02), (1.0, 0.0)])
+    def test_gradients_are_finite_for_any_wind_profile(self, u_scale, v_scale):
+        """Calm, near-calm and unidirectional columns all stay finite."""
+        column = _make_column(nlev=30, u_scale=u_scale, v_scale=v_scale)
+        f = self._scheme_fn(column, HinesParameters.default())
+        args = self._args(column)
+        grads = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=tuple(range(len(args))),
+        )(*args)
+        names = ("temperature", "u_wind", "v_wind", "density")
+        for name, grad in zip(names, grads):
+            assert jnp.all(jnp.isfinite(grad)), (
+                f"d/d{name} is not finite at u_scale={u_scale}, "
+                f"v_scale={v_scale}")
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="an identically calm column has no launch spectrum: the "
+               "azimuthal root-mean-square winds at hines.py:253-258 are "
+               "sqrt of a sum that is exactly 0 there, so displacing the "
+               "column produces a jump and the secant grows as jump/eps at "
+               "every rung (measured D doubling from 4.6e6 to 1.8e7 over the "
+               "last two rungs). The gradients themselves stay finite. (#843)")
+    def test_calm_column_has_no_two_sided_derivative(self):
+        """Record the calm column as a degenerate point, not a tolerance."""
+        column = _make_column(nlev=30, u_scale=0.0, v_scale=0.0)
+        check_gradients(self._scheme_fn(column, HinesParameters.default()),
+                        self._args(column), rtol=1e-2)

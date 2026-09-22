@@ -5,6 +5,7 @@ from math import pi
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import jcm.constants as c
 from .cloud_utils import (
@@ -13,6 +14,7 @@ from .cloud_utils import (
     ice_volume_mean_radius,
 )
 from .lohmann_2m_params import CloudParams2M
+from jcm.testing import check_gradients
 
 _EPS = 1.1920929e-7  # float32 machine epsilon, as CloudParams2M.eps
 
@@ -29,6 +31,40 @@ def _echam_reference_radius(qc_in_cloud, air_density, cdnc_m3):
 
 
 class TestEffLiquidDropletRadius:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("seed", [0.0, 1.0])
+    def test_gradient_finite_when_positive_liquid_base_underflows(self, dtype, seed):
+        # The liquid remains a positive normal number, but the radius-base
+        # arithmetic underflows. Guarding liquid > 0 alone misses this case.
+        with jax.enable_x64(dtype == np.float64):
+            qc = jnp.asarray([16*np.finfo(dtype).tiny, 0., 1e-4, -1e-4, 1e-4], dtype=dtype)
+            rho = jnp.ones_like(qc)
+            cdnc = jnp.full_like(qc, 1e8)
+            flag = jnp.asarray([True, True, True, True, False])
+            base = jax.jit(lambda q, r, n: (3./(4.*pi*c.rhow))*q*r/n)(qc, rho, cdnc)
+            assert float(qc[0]) > 0.
+            assert float(base[0]) == 0.
+
+            def objective(q, r, n, weight):
+                radius = eff_liquid_droplet_radius(q, r, n, _EPS, flag)
+                return weight*jnp.sum(radius), radius
+
+            (value, radius), gradients = jax.jit(jax.value_and_grad(
+                objective, argnums=(0, 1, 2), has_aux=True,
+            ))(qc, rho, cdnc, jnp.asarray(seed, dtype=dtype))
+            assert np.isfinite(value)
+            np.testing.assert_array_equal(np.asarray(radius)[[0, 1, 3, 4]], 0.)
+            assert float(radius[2]) > 0.
+            for gradient in gradients:
+                assert np.all(np.isfinite(gradient))
+                np.testing.assert_array_equal(np.asarray(gradient)[[0, 1, 3, 4]], 0.)
+                if seed == 0.:
+                    np.testing.assert_array_equal(gradient, 0.)
+            if seed:
+                np.testing.assert_allclose(
+                    gradients[0][2], radius[2]/(3.*qc[2]), rtol=2e-5,
+                )
+
     def test_matches_echam_reference_law(self):
         qc = np.array([2.0e-4, 5.0e-5, 1.0e-3])
         rho = np.array([1.0, 0.8, 1.2])
@@ -180,3 +216,40 @@ class TestIceVolumeMeanRadius:
             lambda x: ice_volume_mean_radius(x, jnp.array([5.0e4]), self._P).sum(),
         )(jnp.array([0.0]))
         assert jnp.all(jnp.isfinite(g)), g
+
+
+class TestCloudUtilsGradients:
+    """AD against a central difference for the radius helpers (#820).
+
+    All green. ``ice_volume_mean_radius`` carries the Schumann (2011)
+    ``-2261 + sqrt(5113188 + 2809*r**3)`` inversion, whose square root would
+    be the obvious hazard; the ``ceffmin``/``ceffmax`` clip above it keeps the
+    argument near 5e6 and the operating points below stay inside the clip, so
+    the derivative is ordinary. A point on the clip itself would report the
+    clip's kink rather than anything about the inversion.
+    """
+
+    _PARAMS = CloudParams2M.default()
+
+    def test_ice_volume_mean_radius(self):
+        """Cirrus-like ice contents and crystal numbers, inside the clip."""
+        check_gradients(
+            lambda ice, number: ice_volume_mean_radius(
+                ice, number, self._PARAMS),
+            (jnp.array([1.0e-3, 1.0e-2, 5.0e-2]),
+             jnp.array([1.0e4, 5.0e4, 2.0e5])),
+            rtol=1e-3)
+
+    def test_eff_liquid_droplet_radius(self):
+        """Liquid contents well above the eps guard on the denominator."""
+        check_gradients(
+            lambda q, rho, cdnc: eff_liquid_droplet_radius(q, rho, cdnc, _EPS),
+            (jnp.array([1.0e-5, 2.0e-4, 8.0e-4]),
+             jnp.array([0.6, 0.9, 1.15]),
+             jnp.array([3.0e7, 1.0e8, 2.0e8])),
+            rtol=1e-3)
+
+    def test_breadth_factor(self):
+        """Linear in CDNC, so this is a pure regression fence."""
+        check_gradients(breadth_factor, (jnp.array([3.0e7, 1.0e8, 2.0e8]),),
+                        rtol=1e-3)

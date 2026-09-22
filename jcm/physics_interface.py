@@ -370,6 +370,14 @@ _NON_NEGATIVE_TRACERS = frozenset({
 # their positivity caps must not be folded into a water-mass diagnostic.
 _WATER_MASS_TRACERS = frozenset({"qc", "qi", "qr", "qs"})
 
+# Phase split of the water-mass tracers for the ECHAM negative-water
+# correction (#806): the condensate a positivity cap ADDS is materialised as a
+# condensation/deposition of the same cell's vapour, so the latent-heat charge
+# needs the phase — liquid species heat with ``alhc``, frozen with ``alhs``
+# (mo_cloud.f90 section 8.4 uses ``zlvdcp``/``zlsdcp`` the same way).
+_LIQUID_WATER_TRACERS = frozenset({"qc", "qr"})
+_ICE_WATER_TRACERS = frozenset({"qi", "qs"})
+
 # Deliberately just the membership test above: JAM aerosol and gas tracers
 # are NOT capped. Their tendency sums conservative redistributions (tracer
 # vertical diffusion, convective transport) with paired transfers (sulfur
@@ -432,52 +440,140 @@ def _verify_tendencies_with_water_corrections(
     tendencies: PhysicsTendency,
     time_step,
 ) -> tuple[PhysicsTendency, dict[str, jnp.ndarray]]:
-    """Return applied tendencies and stop-gradient water corrections."""
+    """Return applied tendencies and stop-gradient water corrections.
 
-    def _cap_negative_tend(value, tend):
-        # Straight-through estimator (maintainability review B.1 cross-
-        # cutting): the primal keeps the hard non-negativity cap, but the
-        # cotangent passes through to the producing tendency unchanged.
-        # The bare where() rerouted gradients from the physics that
-        # produced the tendency onto the STATE whenever it fired — and it
-        # fires routinely wherever precip/evaporation drives q toward 0,
-        # silently detaching those cells from any parameter being
-        # calibrated. Positivity in the forward pass is unaffected.
-        # Floor the tendency at the drain rate that empties the tracer and
-        # no further. ``max(tend, -max(value,0)/dt)`` equals the plain
+    Two-part treatment of the water fields, following ECHAM's negative-water
+    correction (mo_cloud.f90 section 8.4, "Corrections: Avoid negative cloud
+    water/ice") — see ``docs/source/design/water_positivity_conservation.md``
+    for the full derivation (#806):
+
+    1. **Per-cell positivity cap** on every non-negative field: floor the
+       tendency at the drain rate that empties the field and no further. For
+       an overdrawn vertical-diffusion donor this reproduces the sequential
+       (ECHAM `physc`-order) atmosphere state: the donor drains to zero and
+       the transfer's receivers keep the water that genuinely left the donor.
+       Reallocating the cap correction away from other layers instead is
+       wrong in both directions — it either destroys the receivers' real
+       water or steals untouched layers' pre-existing water (the seeded-cloud
+       CRE regression caught by CI on the first version of PR #864).
+
+    2. **Local vapour charge for the condensate corrections**: the condensate
+       a cap ADDS is materialised as condensation/deposition of the same
+       cell's vapour — ``q_tend -= correction`` with the matching latent-heat
+       release on temperature — exactly ECHAM 8.4's ``pqte -= zdxlcor +
+       zdxicor; ptte += zlvdcp*zdxlcor + zlsdcp*zdxicor``. Total water in the
+       cell is then conserved exactly: in the common case where the overdraw
+       came from double-counted condensate evaporation (a sink computed on
+       the step-start state, unaware the redistribution had removed its
+       supply), this removes precisely the phantom vapour that evaporation
+       over-credited, and the heating cancels its phantom evaporative
+       cooling. The charge is bounded by the vapour the cell can supply
+       (after q's own cap), so it can never drive ``q`` negative; what the
+       vapour cannot absorb stays in the water-positivity ledger (#824) as an
+       honest, bounded artificial source. ``specific_humidity``'s own cap
+       correction has no local donor (ECHAM prevents negative q at the
+       producing terms instead) and is likewise ledgered.
+    """
+    dqdt = tendencies.specific_humidity
+    qpos = jnp.maximum(state.specific_humidity, 0.0)
+
+    def _cap(value, tend):
+        # Floor the tendency at the drain rate that empties the tracer and no
+        # further. ``max(tend, -max(value,0)/dt)`` equals the plain
         # ``-value/dt`` cap wherever ``value >= 0``, leaves any source
         # untouched, and on a tracer that arrives negative (aerosol is not
         # entry-clipped) stops the sink rather than inventing mass.
-        capped = jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
-        # Exact-primal STE form: stop_grad(capped) + (tend - stop_grad(
-        # tend)) is bitwise ``capped`` in the forward pass (the tend
-        # terms cancel exactly), unlike tend + stop_grad(capped - tend)
-        # whose re-association can undershoot the exact drain by an ulp
-        # and produce q < 0.
-        return jax.lax.stop_gradient(capped) + (
+        return jnp.maximum(tend, -jnp.maximum(value, 0.0) / time_step)
+
+    def _ste(result, tend):
+        # Straight-through estimator (maintainability review B.1 cross-
+        # cutting): the primal keeps the hard correction, but the cotangent
+        # passes through to the producing tendency unchanged. The bare where()
+        # rerouted gradients from the physics that produced the tendency onto
+        # the STATE whenever it fired — and it fires routinely wherever
+        # precip/evaporation drives q toward 0, silently detaching those cells
+        # from any parameter being calibrated. The exact-primal form
+        # ``stop_grad(result) + (tend - stop_grad(tend))`` is bitwise
+        # ``result`` in the forward pass (the tend terms cancel exactly),
+        # unlike ``tend + stop_grad(result - tend)`` whose re-association can
+        # undershoot the drain by an ulp and produce q < 0.
+        return jax.lax.stop_gradient(result) + (
             tend - jax.lax.stop_gradient(tend)
         )
 
-    clipped_dqdt = _cap_negative_tend(
-        state.specific_humidity, tendencies.specific_humidity,
-    )
-    clipped_tracer_tends = {
+    capped_dqdt = _cap(state.specific_humidity, dqdt)
+    capped_tracer_tends = {
         name: (
-            _cap_negative_tend(state.tracers[name], tend)
+            _cap(state.tracers[name], tend)
             if has_non_negative_tendency(name) and name in state.tracers
             else tend
         )
         for name, tend in tendencies.tracers.items()
     }
+
+    # Condensate cap corrections by phase (>= 0 by construction), for the
+    # vapour charge and its latent heat. Zero-shaped like q so compositions
+    # without a given tracer contribute nothing.
+    zeros = jnp.zeros_like(dqdt)
+    liquid_correction = sum(
+        (capped_tracer_tends[name] - tendencies.tracers[name]
+         for name in tendencies.tracers if name in _LIQUID_WATER_TRACERS
+         and name in state.tracers),
+        zeros,
+    )
+    ice_correction = sum(
+        (capped_tracer_tends[name] - tendencies.tracers[name]
+         for name in tendencies.tracers if name in _ICE_WATER_TRACERS
+         and name in state.tracers),
+        zeros,
+    )
+    condensate_correction = liquid_correction + ice_correction
+
+    # Vapour the cell can still supply after q's own cap: draining at
+    # ``capped_dqdt`` for one step leaves ``qpos + dt*capped_dqdt >= 0``, so
+    # the additional drainable rate is exactly this. Scale the charge down
+    # uniformly (both phases alike) where the correction exceeds it, with a
+    # safe denominator so a correction-free cell contributes no 0/0 to the
+    # reverse-mode graph (#558/#559 poison-free guard).
+    available = qpos / time_step + capped_dqdt
+    safe_correction = jnp.where(
+        condensate_correction > 0.0, condensate_correction, 1.0,
+    )
+    charge_fraction = jnp.where(
+        condensate_correction > 0.0,
+        jnp.clip(available / safe_correction, 0.0, 1.0),
+        0.0,
+    )
+    charge = charge_fraction * condensate_correction
+    # Exact drain-rate re-cap: ``capped_dqdt - charge >= -qpos/dt`` holds
+    # algebraically (charge <= available), but the separate roundings can land
+    # an ulp below the exact drain; the re-cap restores the non-negativity
+    # guarantee bitwise (Codex P1 on #864).
+    applied_dqdt = jnp.maximum(capped_dqdt - charge, -qpos / time_step)
+    # Latent heat of the materialised condensation/deposition (ECHAM 8.4's
+    # ``ptte`` charge), split by phase.
+    heating = charge_fraction * (
+        physical_constants.alhc * liquid_correction
+        + physical_constants.alhs * ice_correction
+    ) / physical_constants.cpd
+
     applied = tendencies.copy(
-        specific_humidity=clipped_dqdt,
-        tracers=clipped_tracer_tends,
+        specific_humidity=_ste(applied_dqdt, dqdt),
+        temperature=_ste(
+            tendencies.temperature + heating, tendencies.temperature,
+        ),
+        tracers={
+            name: _ste(capped_tracer_tends[name], tend)
+            for name, tend in tendencies.tracers.items()
+        },
     )
 
-    # ``applied - raw`` is non-negative by construction for every capped
-    # field. Detaching this diagnostic is intentional: it records an
-    # artificial source in the primal water budget without creating a second
-    # optimization path around the cap's straight-through estimator.
+    # Net positivity source per water field, ``applied - raw``. Detaching this
+    # diagnostic is intentional: it records the artificial source in the
+    # primal water budget without opening a second optimization path around
+    # the straight-through estimator. Per cell the sum over fields is
+    # ``>= 0`` (the vapour charge never exceeds the condensate corrections)
+    # and ~0 wherever the cell's vapour absorbed the whole correction.
     corrections = {
         "specific_humidity": jax.lax.stop_gradient(
             applied.specific_humidity - tendencies.specific_humidity
@@ -502,15 +598,19 @@ def verify_tendencies(state: PhysicsState, tendencies: PhysicsTendency, time_ste
     field to zero rather than below. This mirrors what an implicit step
     on a linear sink would do for the same field.
 
-    The cap is only sound for a field whose tendency is a pure sink plus
-    sources: clipping the donor half of a conservative redistribution
-    while its receivers keep their gain CREATES mass. Aerosol and gas
-    tracers are excluded for that reason. The retained water fields do
-    not strictly satisfy it either — vdiff redistributes q/qc/qi — so the
-    cap can create water mass in an overdrawn donor layer; it is kept
-    because the moist physics downstream requires q >= 0. The gridpoint
-    driver publishes the exact ``applied - raw`` correction for water fields
-    so this accepted safety tradeoff remains attributable (#806).
+    A cap alone is only budget-consistent for a field whose sinks were
+    computed against the water actually available; under additive operator
+    splitting they are not, so the cap's added condensate would otherwise be
+    created from nothing. Following ECHAM's negative-water correction
+    (mo_cloud.f90 section 8.4) the condensate corrections are charged to the
+    same cell's vapour with the matching latent heat, bounded by the vapour
+    available, so total water per cell is conserved to round-off wherever the
+    vapour can supply the correction (#806; the mechanism note on
+    :func:`_verify_tendencies_with_water_corrections` has the full argument).
+    Aerosol and gas tracers are not capped at all: their tendency sums
+    conservative redistributions whose donor half must not be clipped, and
+    their removal is bounded where it is produced (see
+    :func:`has_non_negative_tendency`).
 
     Args:
         state: The current ``PhysicsState`` (already passed through

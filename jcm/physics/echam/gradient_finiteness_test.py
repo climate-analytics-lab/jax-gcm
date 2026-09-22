@@ -16,6 +16,17 @@ under a fractional power).
 
 The test differentiates ``mean(temperature)`` after two model steps with
 respect to the solar constant, for the 1M and 2M cloud microphysics schemes.
+
+**What this does not cover, and where that lives.** One scalar input is a
+narrow direction: a poison on a path the solar constant never reaches stays
+invisible, and when one does fire this test can only say the total is NaN, not
+which input carried it. ``term_gradients_test`` is the per-leaf counterpart —
+it takes the same composition on a single column and differentiates each term,
+and the whole package, one input leaf at a time, which is how the grey-radiation
+Planck defect that this test walks straight past was found. It is kept there
+rather than here because the leaf-by-leaf sweep wants a one-column
+``compute_tendencies``, not a T21 rollout: the rollout is what makes this test
+slow and it buys nothing that repeating it per leaf would not.
 Both exercise the shared SSO / vertical-diffusion / surface / convection terms;
 1M adds ``echam_1m`` (ice sedimentation guard) and 2M adds ``lohmann_2m`` +
 ``cloud_utils`` (effective-radius guard).
