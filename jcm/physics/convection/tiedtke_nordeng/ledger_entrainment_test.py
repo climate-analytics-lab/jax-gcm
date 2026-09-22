@@ -41,6 +41,7 @@ from jcm.physics.convection.tiedtke_nordeng.downdraft import (
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
     find_cloud_base,
     saturation_mixing_ratio,
+    shallow_reclosure_flux,
     tiedtke_nordeng_convection,
 )
 from jcm.physics.convection.tiedtke_nordeng.types import ConvectionParameters
@@ -477,6 +478,57 @@ class TestCloudTopForcedDetrainment:
         # The anvil condensate at the ceiling feeds the stratiform ledger.
         kt = int(ktop)
         assert (float(tend.dqc_dt[kt]) + float(tend.dqi_dt[kt])) > 0.0
+
+
+class TestShallowReclosureCflCap:
+    """#676 the shallow re-closure re-applies jcm's CFL / cmfcmax cap.
+
+    ECHAM's shallow branch (mo_cumastr.f90:921-937) omits the final
+    ``MIN(zmfub1, zmfmax)`` the deep branch (:904) applies, so a first guess
+    just below the cap can be raised to ~1.2x it within the 20% acceptance
+    window. jcm enforces ``mfu_cfl_max`` as a hard stability invariant, so the
+    accepted re-closed flux must be clipped to it (Codex P2).
+    """
+
+    def test_reclosure_over_cap_within_window_is_clipped(self):
+        cfg = ConvectionParameters.default()  # cmfcmax = 1.0
+        g = c.grav
+        mfu_cfl_max = jnp.array(0.5)
+        zmfub = jnp.array(0.49)          # first guess just under the cap
+        zdqmin = jnp.array(1.0e-6)
+        zqumqe = jnp.array(5.0e-3)
+        # Raw re-closure = zdqpbl/(g·zqumqe) = 0.55: over the 0.5 cap but only
+        # 12% above zmfub, so the 20% window ACCEPTS it — the exact edge.
+        zdqpbl = 0.55 * g * zqumqe
+        out = float(shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, cfg))
+        assert out == pytest.approx(0.5, rel=1e-6), (
+            f"accepted re-closure not clipped to the CFL cap: {out}")
+
+    def test_reclosure_within_cap_is_unclipped(self):
+        cfg = ConvectionParameters.default()
+        g = c.grav
+        mfu_cfl_max = jnp.array(0.5)
+        zmfub = jnp.array(0.30)
+        zdqmin = jnp.array(1.0e-6)
+        zqumqe = jnp.array(5.0e-3)
+        zdqpbl = 0.33 * g * zqumqe       # raw 0.33: within cap and 20% window
+        out = float(shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, cfg))
+        assert out == pytest.approx(0.33, rel=1e-5), (
+            f"under-cap re-closure wrongly altered: {out}")
+
+    def test_reclosure_over_window_is_rejected_to_first_guess(self):
+        cfg = ConvectionParameters.default()
+        g = c.grav
+        mfu_cfl_max = jnp.array(0.5)
+        zmfub = jnp.array(0.49)
+        zdqmin = jnp.array(1.0e-6)
+        zqumqe = jnp.array(5.0e-3)
+        zdqpbl = 0.70 * g * zqumqe       # raw 0.70: >20% from zmfub → rejected
+        out = float(shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, cfg))
+        assert out == pytest.approx(0.49, rel=1e-6)
 
 
 if __name__ == "__main__":

@@ -706,6 +706,36 @@ _MIN_MOISTURE_SUPPLY = 1.0e-7
 _MIN_CAPE_FOR_MOISTURE_TRIGGER = 10.0
 
 
+def shallow_reclosure_flux(zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, config):
+    """ECHAM shallow re-closure cloud-base mass flux, with jcm's CFL cap.
+
+    Recomputes the ktype=2 cloud-base flux from the PBL moisture budget
+    (``zdqpbl/(g·max(zqumqe,zdqmin))``, ``zqumqe`` including the downdraft
+    moisture) and accepts it only when it moves less than 20% from the
+    first-guess ``zmfub`` — ECHAM ``mo_cumastr.f90:921-937``.
+
+    ECHAM's shallow branch does NOT re-apply ``MIN(zmfub1, zmfmax)`` after the
+    20% guard (unlike the deep branch at ``:904``), so a first guess just below
+    the CFL limit can be raised to as much as ``1.2·zmfmax``. jcm treats
+    ``mfu_cfl_max`` — the air mass of the cloud-base source layer per timestep —
+    as a HARD stability invariant (the documented T63L47 hot-cell-runaway
+    guard, applied to ``mass_flux_base`` and the deep ``zmfub1`` alike), so the
+    accepted value is clipped here to the same final limits (the CFL cap and
+    ``cmfcmax``). This is a small, deliberate deviation from ECHAM's 20%
+    overshoot tolerance, keeping the CFL invariant consistent across the deep
+    and shallow paths (Codex review on #874).
+    """
+    zmfub1 = jnp.where(
+        (zdqpbl > 0.0) & (zqumqe > zdqmin) & (zmfub < mfu_cfl_max),
+        zdqpbl / (c.grav * jnp.maximum(zqumqe, zdqmin)),
+        zmfub,
+    )
+    # 20% acceptance window around the first guess.
+    zmfub1 = jnp.where(jnp.abs(zmfub1 - zmfub) < 0.2 * zmfub, zmfub1, zmfub)
+    # Re-apply jcm's cloud-base mass-flux limits (CFL cap and cmfcmax).
+    return jnp.minimum(zmfub1, jnp.minimum(mfu_cfl_max, config.cmfcmax))
+
+
 def _tiedtke_convection_toa_first(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -1244,18 +1274,13 @@ def _tiedtke_convection_toa_first(
         )
         zdqmin_sh = jnp.maximum(0.01 * humidity[ikb], 1.0e-10)
         zdqpbl = moisture_supply * c.grav  # zdqpbl = g·E
-        shallow_valid = (
-            (zdqpbl > 0.0) & (zqumqe > zdqmin_sh) & (zmfub < mfu_cfl_max)
-        )
-        zmfub1_sh = jnp.where(
-            shallow_valid,
-            zdqpbl / (c.grav * jnp.maximum(zqumqe, zdqmin_sh)),
-            zmfub,
-        )
-        # 20% guard: keep the re-closure only if it stays within 20% of the
-        # first guess (mo_cumastr.f90:932-933).
-        zmfub1_sh = jnp.where(
-            jnp.abs(zmfub1_sh - zmfub) < 0.2 * zmfub, zmfub1_sh, zmfub,
+        # The re-closed flux is accepted within a 20% window of the first
+        # guess and then clipped to jcm's CFL cap / cmfcmax (see
+        # ``shallow_reclosure_flux`` — ECHAM's shallow branch omits that final
+        # clip, so a near-cap first guess could otherwise be raised past the
+        # hard CFL limit the rest of the scheme enforces).
+        zmfub1_sh = shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin_sh, zdqpbl, mfu_cfl_max, config,
         )
         rescale_shallow = zmfub1_sh / zmfub
 
