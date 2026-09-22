@@ -4,8 +4,9 @@ name: Run Unit Tests via Pytest
 # early. `needs:` can only order jobs *within a single run*, and the previous
 # layout ran the fast suite from the `push` event and the slow suite from the
 # `pull_request` event — two independent runs that nothing could sequence, so a
-# ruff error still burned ~70 minutes across two ~35-minute jobs already known
-# to be pointless.
+# ruff error still burned the whole cost of both suites — measured on this
+# workflow's first green run, 67 min for the fast suite and 49 for the slow —
+# across two jobs already known to be pointless.
 #
 # The shape is a cheap gate plus a kill switch, NOT a full chain. Ruff (~20 s)
 # gates both suites, which then run in PARALLEL: making the slow suite `needs:
@@ -112,9 +113,10 @@ jobs:
   fast-tests:
     needs: lint
     runs-on: ubuntu-latest
-    # ~2x the slowest recent green run (52 min). The default is 6 h, so a
-    # hung compile or a deadlocked test would otherwise burn a whole runner
-    # day before anyone noticed.
+    # The default is 6 h, so a hung compile or a deadlocked test would
+    # otherwise burn a whole runner day before anyone noticed. 110 was ~2x the
+    # then-slowest green run (52 min); this job has since been measured at 67
+    # min, so the headroom is nearer 1.6x — raise it if the suite grows again.
     timeout-minutes: 110
     permissions:
       contents: read
