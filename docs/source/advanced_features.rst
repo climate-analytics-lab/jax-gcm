@@ -423,6 +423,34 @@ compilation across *different* windows, pass tables from
 ``observer_xs``.
 
 
+Coupling to an external surface component
+-----------------------------------------
+
+Use this when an external ocean / sea-ice / land / wave model exchanges
+fluxes with jcm — the coupled-model case where the surface fluxes are
+computed once, outside the individual components.
+
+Every physics package that resolves a surface publishes a
+package-independent :class:`jcm.physics.surface.surface_exchange.SurfaceExchange`
+struct under ``diagnostics["surface_exchange"]`` (SPEEDY and ECHAM do;
+Held-Suarez opts out). It carries the net downward heat flux, sensible and
+latent heat, evaporation, total precipitation, wind stress and the
+near-surface wind, with one documented sign convention regardless of
+package — so a coupler reads the same field names off any configuration
+instead of special-casing each package's private diagnostics. Call
+``physics.require_surface_exchange()`` once to fail fast if the composed
+package publishes nothing.
+
+The reverse direction — **forced mode** — has jcm accept externally
+prescribed turbulent fluxes instead of computing its own. Select
+``physics=speedy-forced-flux`` or ``physics=echam-forced-flux`` and supply
+the fluxes through ``forcing.prescribed_surface_flux`` (a ``constants``
+block for a uniform test field, or a ``file`` on the model grid); a coupler
+driving jcm in Python sets the ``prescribed_*`` fields on ``ForcingData``
+directly each coupling interval. Field names, units and signs are shared
+with the published struct, so a coupler can feed back exactly what it read.
+See :doc:`design/surface_exchange` for the full contract.
+
 Where to next
 -------------
 

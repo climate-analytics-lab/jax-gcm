@@ -390,6 +390,116 @@ class TestEchamForcedMode:
 
 
 # ---------------------------------------------------------------------------
+# Forcing doors: forcing.prescribed_surface_flux (constants + file)
+# ---------------------------------------------------------------------------
+
+class TestPrescribedFluxForcingAttach:
+    """``_attach_prescribed_surface_fluxes`` constants/file/error paths."""
+
+    def _coords(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        return get_speedy_coords(layers=8, spectral_truncation=21)
+
+    def _cfg(self, block):
+        from omegaconf import OmegaConf
+        return OmegaConf.create({"prescribed_surface_flux": block})
+
+    def test_unset_is_noop(self):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        assert _attach_prescribed_surface_fluxes(
+            None, self._cfg(None), self._coords()) is None
+
+    def test_constants(self):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        f = _attach_prescribed_surface_fluxes(None, self._cfg({"constants": {
+            "sensible_heat_flux": 12.0, "evaporation": 3e-5,
+            "stress_u": 0.05, "stress_v": 0.0}}), coords)
+        nodal = coords.horizontal.nodal_shape
+        assert f.prescribed_sensible_heat_flux.shape == nodal
+        assert float(f.prescribed_sensible_heat_flux.mean()) == 12.0
+        assert float(f.prescribed_evaporation.mean()) == pytest.approx(3e-5)
+
+    def test_constants_missing_field_raises(self):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        with pytest.raises(ValueError, match="missing"):
+            _attach_prescribed_surface_fluxes(
+                None, self._cfg({"constants": {"sensible_heat_flux": 1.0}}),
+                self._coords())
+
+    def test_both_sources_raises(self):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        with pytest.raises(ValueError, match="exactly one"):
+            _attach_prescribed_surface_fluxes(
+                None,
+                self._cfg({"constants": {
+                    "sensible_heat_flux": 1.0, "evaporation": 1.0,
+                    "stress_u": 1.0, "stress_v": 1.0}, "file": "x.nc"}),
+                self._coords())
+
+    def _write_flux_nc(self, path, coords, with_time=False):
+        import numpy as np
+        import xarray as xr
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        varnames = ("sensible_heat_flux", "evaporation", "stress_u", "stress_v")
+        data = {}
+        if with_time:
+            t = np.array([np.datetime64("2000-01-15"),
+                          np.datetime64("2000-02-15")])
+            for i, v in enumerate(varnames):
+                data[v] = (("time", "lat", "lon"),
+                           np.full((2, nlat, nlon), float(i + 1)))
+            ds = xr.Dataset(data, coords={"time": t, "lat": lat, "lon": lon})
+        else:
+            for i, v in enumerate(varnames):
+                data[v] = (("lat", "lon"), np.full((nlat, nlon), float(i + 1)))
+            ds = xr.Dataset(data, coords={"lat": lat, "lon": lon})
+        ds.to_netcdf(path)
+
+    def test_file_static(self, tmp_path):
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        p = tmp_path / "flux.nc"
+        self._write_flux_nc(p, coords, with_time=False)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        assert f.prescribed_sensible_heat_flux.shape == \
+            coords.horizontal.nodal_shape
+        assert float(f.prescribed_sensible_heat_flux.mean()) == 1.0
+        assert float(f.prescribed_stress_v.mean()) == 4.0
+
+    def test_file_timeseries(self, tmp_path):
+        from jcm.forcing import TimeSeries
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        p = tmp_path / "flux_t.nc"
+        self._write_flux_nc(p, coords, with_time=True)
+        f = _attach_prescribed_surface_fluxes(
+            None, self._cfg({"file": str(p)}), coords)
+        # A time axis becomes a TimeSeries leaf, sliced per step by select().
+        assert isinstance(f.prescribed_sensible_heat_flux, TimeSeries)
+
+    def test_file_missing_variable_raises(self, tmp_path):
+        import numpy as np
+        import xarray as xr
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        p = tmp_path / "partial.nc"
+        xr.Dataset(
+            {"sensible_heat_flux": (("lat", "lon"), np.zeros((nlat, nlon)))},
+            coords={"lat": lat, "lon": lon},
+        ).to_netcdf(p)
+        with pytest.raises(ValueError, match="missing"):
+            _attach_prescribed_surface_fluxes(
+                None, self._cfg({"file": str(p)}), coords)
+
+
+# ---------------------------------------------------------------------------
 # Constant-flux forced aquaplanet smoke run (NaN-free)
 # ---------------------------------------------------------------------------
 
