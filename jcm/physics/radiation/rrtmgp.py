@@ -55,15 +55,16 @@ from rrtmgp.rrtmgp import RRTMGP
 # NaN guard on in-cloud condensate (kg/kg) handed to the cloud optics. A thin
 # but resolved cloud carrying large grid-mean condensate gives a huge in-cloud
 # water (grid_mean / cf), and the resulting optical depth NaNs the two-stream
-# solver. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path``.
+# solver. Applied in ``radiation_scheme_rrtmgp`` after ``in_cloud_path`` and
+# after the inhomogeneity rescaling.
 #
-# This is NOT a sub-grid inhomogeneity scaling, and jcm implements none.
-# ECHAM's ``zinhoml`` is a continuous LWP-dependent rescaling applied to every
-# cloudy cell; this is a one-sided clip that is the identity almost everywhere
-# and flattens everything above the threshold to the same value. Measured on
-# T63L47 output it binds in 0.0026% of cloudy cells, and removing it entirely
-# there moves fluxes by <= 0.006 W/m2 -- inert in practice, but do not read it
-# as inhomogeneity being covered (#678).
+# This is a one-sided clip -- the identity almost everywhere, flattening
+# everything above the threshold to the same value -- and is NOT the sub-grid
+# inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
+# ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
+# in-cloud path just below (see ``RadiationParameters.cloud_inhomogeneity_*``).
+# Measured on T63L47 output this clip binds in ~0.003% of cloudy cells, so it is
+# inert in practice; keep it strictly as a NaN guard (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
@@ -609,21 +610,34 @@ def radiation_scheme_rrtmgp(
     # cloud-or-clear partitioning per g-point. ``in_cloud_path`` already
     # zeros the (essentially) clear cells (cf <= 2*eps; ECHAM mo_psrad).
     #
-    # A *thin* but resolved cloud (cf ~ 0.01-0.05) carrying a lot of grid-mean
-    # condensate still yields a very large in-cloud water (grid_mean / cf), and
-    # the resulting extreme cloud optical depth NaNs the two-stream solver.
-    # ECHAM bounds the radiative effect of such cells via the cloud-optics
-    # sub-grid inhomogeneity factor (``zinhoml = LWP^-p``) and the r_eff table
-    # clamp; we apply the equivalent guard as a direct cap on the in-cloud
-    # condensate handed to the optics. ``_MAX_IN_CLOUD_CONDENSATE`` = 10 g/kg is
-    # the high end of realistic in-cloud water, so genuine clouds are untouched
-    # and only the pathological inflation is clipped.
+    # Two distinct treatments are applied to the in-cloud condensate, in order:
+    #
+    #   1. Sub-grid inhomogeneity (ECHAM ``mo_cloud_optics.f90``,
+    #      ``ztau = ztol*zinhoml + ztoi*zinhomi`` with
+    #      ``l_variable_inhoml = .FALSE.``): a FIXED multiplicative reduction of
+    #      the liquid/ice path (0.8/0.8 at T63) correcting the plane-parallel
+    #      albedo bias of homogeneous-cloud radiative transfer. tau is linear in
+    #      path at fixed r_eff, so scaling the path scales tau identically to
+    #      ECHAM. jcm uses one factor per phase, not ECHAM's convection-type
+    #      switch (see ``RadiationParameters.cloud_inhomogeneity_*``). This is a
+    #      real physics term; it is NOT the same thing as the NaN guard below.
+    #
+    #   2. NaN guard (``_MAX_IN_CLOUD_CONDENSATE``): a *thin* but resolved cloud
+    #      (cf ~ 0.01-0.05) carrying large grid-mean condensate yields a huge
+    #      in-cloud water (grid_mean / cf) whose extreme optical depth NaNs the
+    #      two-stream solver. The cap = 10 g/kg is the high end of realistic
+    #      in-cloud water, so genuine clouds are untouched and only the
+    #      pathological inflation is clipped. It is a one-sided guard, NOT an
+    #      inhomogeneity scaling -- measured on T63L47 it binds in ~0.003% of
+    #      cloudy cells (#678).
     cloud_water_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
+        parameters.cloud_inhomogeneity_liquid
+        * in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
         _MAX_IN_CLOUD_CONDENSATE,
     )
     cloud_ice_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
+        parameters.cloud_inhomogeneity_ice
+        * in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
         _MAX_IN_CLOUD_CONDENSATE,
     )
 

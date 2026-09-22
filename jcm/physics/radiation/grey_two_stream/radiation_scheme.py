@@ -387,11 +387,17 @@ def radiation_scheme(
     # approximation misses, at twice the radiative-transfer cost. For
     # canonical McICA see the RRTMGP path (rrtmgp.py) — there the
     # gpoint count makes per-gpoint sub-columns effectively free.
-    in_cloud_lwp = in_cloud_path(
+    # Fixed sub-grid inhomogeneity reduction of the in-cloud liquid/ice path
+    # (ECHAM ``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``, l_variable_inhoml
+    # = .FALSE.). This is the within-cloud horizontal-variability correction and
+    # is distinct from the beam-split clear/cloudy partitioning above; tau is
+    # linear in path here, so scaling the path scales tau. See
+    # ``RadiationParameters.cloud_inhomogeneity_*``.
+    in_cloud_lwp = parameters.cloud_inhomogeneity_liquid * in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
     )
-    in_cloud_ipath = in_cloud_path(
+    in_cloud_ipath = parameters.cloud_inhomogeneity_ice * in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
     )

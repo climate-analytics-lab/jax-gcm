@@ -69,6 +69,23 @@ class RadiationParameters:
     # correct time-mean radiative statistics).
     mcica_freeze_step: float
 
+    # Cloud sub-grid inhomogeneity factors (liquid / ice), applied
+    # multiplicatively to the IN-CLOUD condensate path handed to the cloud
+    # optics -- equivalently to the cloud optical depth, since tau is linear in
+    # path at fixed effective radius. This is ECHAM's fixed inhomogeneity
+    # treatment (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``
+    # with ``l_variable_inhoml = .FALSE.``), accounting for the plane-parallel
+    # albedo bias of assuming horizontally homogeneous cloud water. The default
+    # 0.8/0.8 are ECHAM's T63 values (``zinhoml1``/``zinhomi`` at nn=63); jcm
+    # applies a single factor per phase rather than ECHAM's convection-type
+    # switch (``zinhoml2=0.4`` for shallow convection, ``ktype=4``), because the
+    # radiation glue does not carry the convective type -- the no-/deep-
+    # convection value 0.8 covers every column except shallow-convective ones.
+    # Set to 1.0 to disable. Differentiable leaves (grad wrt cloud water flows
+    # through them).
+    cloud_inhomogeneity_liquid: jnp.ndarray = 0.8
+    cloud_inhomogeneity_ice: jnp.ndarray = 0.8
+
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
     sw_scaling: Optional[object] = None        # InputScaling for SW network
@@ -82,6 +99,8 @@ class RadiationParameters:
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
+                 cloud_inhomogeneity_liquid=0.8,
+                 cloud_inhomogeneity_ice=0.8,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
@@ -95,6 +114,8 @@ class RadiationParameters:
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
             mcica_freeze_step=jnp.asarray(mcica_freeze_step),
+            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
+            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
