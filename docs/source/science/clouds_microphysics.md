@@ -5,7 +5,13 @@
 
 - **Sundqvist diagnostic cloud fraction**
   (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``) — RH-based cloud
-  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). It is
+  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). The
+  enhancement boosts the apparent RH at a **single** boundary-layer-top level
+  over ice-free ocean with no active convection, chosen as ECHAM's ``zknvb``
+  scan does — the most inversion-like BL level, resolving to the *lowest*
+  (nearest-surface) one on a tie; the differentiable softmax surrogate keeps
+  that single-level behaviour rather than smearing the boost across the tied
+  levels. It is
   a **pure diagnostic** — the term emits zero T/q/qc/qi tendencies; the
   saturation adjustment lives downstream in each microphysics scheme (the 2M
   path's ``mixed_phase_deposition_and_corrections``, and ``echam_1m.py``'s own
