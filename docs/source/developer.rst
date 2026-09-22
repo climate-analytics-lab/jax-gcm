@@ -105,7 +105,18 @@ What CI runs
 ``ruff check .`` is a gate, not a parallel job: it runs first and both test
 jobs hang off it, so a lint error costs about twenty seconds instead of two
 runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
-only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel. If
+only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel.
+
+The fast suite runs under ``pytest -n auto --dist loadscope``. The suite's
+cost is XLA compilation rather than arithmetic — 87 of ~3100 tests account for
+over half its wall clock, on arrays of a few dozen elements — and those
+compiles are independent, so they parallelise well. ``loadscope`` keeps each
+class on one worker so its tests still reuse each other's compiled
+executables. The fast job also sets ``JCM_TEST_CACHE_GROWTH_MB=256``, because
+every worker retains its own executables and memory, not CPU, is what limits
+the worker count; see :doc:`design/test_suite_memory`. The slow suite stays
+single-process for the same reason — its tests are full integrations with a
+much higher floor per worker. If
 the fast suite fails it cancels the whole run, taking the in-flight slow job
 with it, so **a cancelled slow result never means the slow tests passed**. It
 does not tell you *why* on its own: ``cancel-in-progress: true`` cancels that

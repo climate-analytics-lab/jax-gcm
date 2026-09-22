@@ -126,10 +126,41 @@ jobs:
       # Local composite action, so it resolves only after checkout.
       - uses: ./.github/actions/setup-jcm
 
+      # Parallelised because the suite is XLA-COMPILE bound, not CPU bound in
+      # the usual sense: 87 of ~3100 tests account for 53% of the wall clock
+      # while operating on arrays of a few dozen elements, and 2556 tests
+      # under a second together account for 6 minutes of 65. That cost is
+      # tracing and compilation, which is independent per test and largely
+      # single-threaded, so it parallelises nearly linearly.
+      #
+      # `--dist loadscope` keeps a whole class on one worker. Tests in a class
+      # share fixtures and shapes and therefore reuse each other's compiled
+      # executables (docs/source/design/test_suite_memory.md); splitting a
+      # class across workers would make each recompile, which is the very cost
+      # being parallelised away. It also keeps `jcm/dycore/pyses/`'s
+      # x64-for-the-life-of-the-class fixtures intact.
+      #
+      # MEMORY, not CPU, is the binding constraint, and it fails silently: a
+      # worker killed by the ceiling surfaces as `worker gwN crashed` and an
+      # arbitrary set of failures (#704), never as an honest OOM. Each worker
+      # retains its own executables, and a heavy module peaks near 5 GB under
+      # the default 1 GB growth budget against this runner's 16 GB / 4 vCPU.
+      # The tighter budget makes each worker drop caches sooner, trading a
+      # little recompilation for headroom. Revisit BOTH knobs together if the
+      # runner class ever changes: `-n auto` scales workers with CPU count,
+      # and available memory does not follow it.
+      #
+      # `--durations` so the next person asking "why is this slow?" reads it
+      # off the log instead of reconstructing it from line timestamps.
+      # `-s` is gone: under xdist, uncaptured output from N workers interleaves
+      # into noise, and captured output is still shown for failures.
       - name: Test with pytest (fast suite)
         id: fast-suite
+        env:
+          JCM_TEST_CACHE_GROWTH_MB: 256
         run: |
-          pytest -v -s -m "not slow" --cov=jcm --cov-fail-under=90
+          pytest -v -n auto --dist loadscope --durations=25 \
+            -m "not slow" --cov=jcm --cov-fail-under=90
 
       # Same belt as the slow job's floor below, against the base .coveragerc.
       - name: Enforce fast-test coverage floor
