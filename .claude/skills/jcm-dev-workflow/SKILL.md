@@ -59,10 +59,11 @@ round-tripping through the device.
 **CI thresholds**: ruff gates the run, then the fast tests at **90%**
 coverage and the slow tests at **80%** (pull requests only) run in parallel
 behind it; on a PR, if the fast suite goes red the run is cancelled, taking
-the slow suite with it. So a red fast suite means the slow result is
-*cancelled, not passing* — do not read it either way, and expect `fast-tests`
-itself to report as cancelled rather than failed (the failing step is still
-red inside it). `push` triggers the workflow on
+the slow suite with it, and `fast-tests` itself reports as cancelled rather
+than failed (the failing step is still red inside it). A cancelled slow result
+therefore never means *passing* — and never means *the fast suite failed*
+either, since `cancel-in-progress` cancels it the same way when your next push
+supersedes the run. Open `fast-tests` before concluding anything. `push` triggers the workflow on
 `main`/`dev` alone, so a feature branch gets no CI until its PR exists: run
 the full suite locally before opening one, or the PR is the first thing that
 has ever tested it.

@@ -322,7 +322,10 @@ module. CI gates on ruff (~20 s) and then runs the fast tests at 90%
 coverage and, on pull requests, the slow tests at 80% **in parallel**. On a
 PR a fast-suite test failure cancels the run so the slow suite stops with it
 rather than grinding on for another ~35 minutes — so a cancelled slow result
-means the fast suite went red, not that the slow tests passed. `push` triggers
+never means the slow tests passed. It does not identify the cause on its own:
+`cancel-in-progress` cancels it identically when a newer push supersedes the
+run, so read the `fast-tests` job to tell a real failure from a superseded
+run. `push` triggers
 the workflow on `main`/`dev` only; every other branch is gated by its pull
 request, so clear the local gates before opening one.
 

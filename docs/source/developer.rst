@@ -107,12 +107,17 @@ jobs hang off it, so a lint error costs about twenty seconds instead of two
 runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
 only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel. If
 the fast suite fails it cancels the whole run, taking the in-flight slow job
-with it, so **a cancelled slow result means the fast suite went red, not that
-the slow tests passed**. Two limits by design: the cancel only fires on pull
-requests, since a push to ``main`` or ``dev`` has no slow job to stop and a
-cancelled run there would mute the failure notification; and it is
-best-effort, because a pull request from a fork gets a read-only token, so
-there the slow suite runs to completion.
+with it, so **a cancelled slow result never means the slow tests passed**. It
+does not tell you *why* on its own: ``cancel-in-progress: true`` cancels that
+job identically when a newer push supersedes the run, and so does cancelling
+by hand, so open the ``fast-tests`` job to tell a real failure from a
+superseded run.
+
+Two limits by design: the cancel only fires on pull requests, since a push to
+``main`` or ``dev`` has no slow job to stop and a cancelled run there would
+mute the failure notification; and it is best-effort, because a pull request
+from a fork gets a read-only token, so there the slow suite runs to
+completion.
 
 The workflow is triggered by pull requests, and by pushes to ``main`` and
 ``dev`` only. A branch with no open pull request gets no CI at all, so run the

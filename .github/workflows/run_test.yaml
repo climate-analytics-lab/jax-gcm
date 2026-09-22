@@ -177,8 +177,11 @@ jobs:
 
   # Slow tests only make sense on a PR. They start alongside the fast suite
   # rather than after it (see the header) and are cut short by its cancel step
-  # if it goes red — so a cancelled result here means "fast suite failed", NOT
-  # "slow suite passed".
+  # if it goes red. A cancelled result here therefore never means "slow suite
+  # passed" — but it does not pin the cause either, because
+  # `cancel-in-progress` cancels this job just the same when a newer push
+  # supersedes the run, as does cancelling by hand. Read the `fast-tests` job
+  # to tell the three apart.
   # Uses .coveragerc-pr which omits utility / orchestration modules already
   # well-covered by the fast suite, so the 80% threshold reflects main-path
   # integration coverage.
