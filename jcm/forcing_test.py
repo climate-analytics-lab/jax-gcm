@@ -694,9 +694,7 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         self.assertAlmostEqual(float(sliced.solar.orbital_phase), 2.0 * float(jnp.pi) * float(date.tyear()), places=4)
 
     def test_time_series_wrap_year_indexing(self):
-        """A 12-entry monthly TimeSeries indexed via WRAP_YEAR should pick
-        the slice corresponding to floor(tyear * 12).
-        """
+        """A 12-entry monthly TimeSeries selects the civil calendar month."""
         from jcm.forcing import ForcingData, make_time_series, MONTHLY_CLIMATOLOGY
         nodal_shape = (4, 4)
         # 12 months of synthetic SST: month i = 280 + i*0.5 K

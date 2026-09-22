@@ -62,8 +62,12 @@ not an alternate source of dates.
 
 Keep dycore-native elapsed time private to its adapter. Existing `sim_time`
 fields may remain where the backend needs them, but neither forcing nor output
-may recover dates from a long-running floating-point accumulator. Check backend
-time against the authoritative clock and handle backend roundoff in the adapter.
+may recover dates from a long-running floating-point accumulator. Validate the
+exact date against the origin, integer step and timestep on restore. A backend
+float counter may have accumulated roundoff and cannot veto that exact clock;
+restarting preserves the backend state while forcing and output use the exact
+metadata. Any backend that uses its counter for time-dependent dynamics must
+handle that numerical limitation within its adapter.
 Do not simply compute `step * dt_seconds` as int32: that overflows on long runs.
 Increment normalized day/second values, or use an overflow-safe decomposition.
 

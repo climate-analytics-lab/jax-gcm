@@ -11,7 +11,9 @@ import xarray as xr
 from jcm.date import DateData
 from jcm.forcing import (
     BY_DATE,
+    DAILY_CLIMATOLOGY,
     MONTHLY_CLIMATOLOGY,
+    WRAP_YEAR,
     ForcingData,
     make_time_series,
     read_anthropogenic_emissions,
@@ -24,19 +26,20 @@ def _date(value, *, step=0, dt_seconds=1800):
         dt_seconds=dt_seconds)
 
 
-def _monthly(values=None):
+def _monthly(values=None, mode=MONTHLY_CLIMATOLOGY):
     values = jnp.arange(12, dtype=jnp.float32) if values is None else values
     return make_time_series(
         values,
         np.arange("2001-01", "2002-01", dtype="datetime64[M]"),
-        MONTHLY_CLIMATOLOGY,
+        mode,
     )
 
 
 @pytest.mark.parametrize("year", [2005, 2000, 1900, 2100])
-def test_issue_805_all_civil_month_boundaries_under_jit(year):
+@pytest.mark.parametrize("mode", [WRAP_YEAR, MONTHLY_CLIMATOLOGY])
+def test_issue_805_all_civil_month_boundaries_under_jit(year, mode):
     """#805: all 12 records switch on month starts, including century years."""
-    series = _monthly()
+    series = _monthly(mode=mode)
 
     @jax.jit
     def select(date):
@@ -133,6 +136,36 @@ def test_issue_449_feb29_hold_and_continuous_interpolation_are_explicit():
     assert float(select(interp_forcing, _date("2000-02-28"))[0]) == 10.0
     assert float(select(interp_forcing, _date("2000-02-29"))[0]) == 20.0
     assert float(select(interp_forcing, _date("2000-03-01"))[0]) == 30.0
+
+
+def test_365_day_climatology_holds_feb29_without_stretching_the_year():
+    """A 365-record nominal calendar holds leap day and wraps after Dec 31."""
+    times = np.arange("2001-01-01", "2002-01-01", dtype="datetime64[D]")
+    series = make_time_series(
+        jnp.arange(365, dtype=jnp.float32), times, DAILY_CLIMATOLOGY)
+    forcing = ForcingData.zeros((1, 1), co2_vmr=series)
+    select = jax.jit(lambda date: forcing.select(date).co2_vmr)
+
+    assert float(select(_date("2000-02-28"))) == 58.0
+    assert float(select(_date("2000-02-29"))) == 58.0
+    assert float(select(_date("2000-03-01"))) == 59.0
+    assert float(select(_date("2000-12-31"))) == 364.0
+    assert float(select(_date("2001-01-01"))) == 0.0
+
+
+@pytest.mark.parametrize("year", [1900, 2100])
+def test_366_day_climatology_common_year_skips_feb29_without_march_shift(year):
+    """A 366-record source keeps March on its named date in common years."""
+    times = np.arange("2000-01-01", "2001-01-01", dtype="datetime64[D]")
+    series = make_time_series(
+        jnp.arange(366, dtype=jnp.float32), times, DAILY_CLIMATOLOGY)
+    forcing = ForcingData.zeros((1, 1), co2_vmr=series)
+    select = jax.jit(lambda date: forcing.select(date).co2_vmr)
+
+    assert float(select(_date(f"{year}-02-28"))) == 58.0
+    assert float(select(_date(f"{year}-03-01"))) == 60.0
+    assert float(select(_date(f"{year}-12-31"))) == 365.0
+    assert float(select(_date(f"{year + 1}-01-01"))) == 0.0
 
 
 def test_exact_hourly_dated_lookup_under_jit_avoids_float_epoch_aliasing():
