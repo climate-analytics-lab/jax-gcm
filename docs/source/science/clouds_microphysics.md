@@ -21,7 +21,9 @@
   top-down column sweep: autoconversion (Beheng 1994 default or KK2000),
   accretion, ice→snow aggregation (Levkov 1992), riming, snow/ice melt, ice
   sedimentation, Rotstayn (1997) rain evaporation. Ports the ECHAM6/ICON
-  ``mo_cloud.f90`` single-moment branch.
+  ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
+  ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
+  (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -36,6 +38,15 @@
   (``jcm/physics/clouds/lohmann_2m_params.py::CloudParams2M``), with no CAM
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants. See
   {doc}`../design/lohmann_2m_column_processes`.
+
+Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
+temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
+heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start
+humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
+(``mo_cloud.f90``, ``mo_cloud_micro_2m.f90``), shared through
+``cloud_utils.latent_heat_over_cp``. Dry ``cpd`` would over-heat every
+condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
+enthalpy budget closes against this same moist ``cp``.
 
 Cloud parameters are ``flax.struct.dataclass`` leaves (differentiable), threaded
 through the scheme via ``nnx.Param``; only genuine code-path switches

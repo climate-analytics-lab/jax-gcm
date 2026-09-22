@@ -85,9 +85,6 @@ telescopes exactly as ECHAM's INOUT accumulation.
 - **`nic_cirrus = 2`** still expects the Kärcher–Lohmann `pnicex`/`zqinucl`
   source jcm does not compute (#552); its section-5 deposition branch returns
   zero, as in the reference with a missing external source.
-- **Moist heat capacity**: ECHAM's `zlvdcp = Lv/(cpd + cpd·vtmpc2·q)`; jcm
-  uses `Lv/cpd`. ~1 % on latent heating; kept so the column enthalpy gate has
-  a single cp. Tracked in #706.
 
 ## The gates
 
