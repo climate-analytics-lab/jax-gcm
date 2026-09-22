@@ -1,5 +1,7 @@
 """Regression coverage for exact Gregorian forcing selection (#449, #805)."""
 
+from importlib import resources
+
 import cftime
 import jax
 import jax.numpy as jnp
@@ -180,3 +182,16 @@ def test_exact_hourly_dated_lookup_under_jit_avoids_float_epoch_aliasing():
     select = jax.jit(lambda date: forcing.select(date).co2_vmr)
     assert float(select(_date("2026-01-01T00:59:59"))) == 1.0
     assert float(select(_date("2026-01-01T01:00:00"))) == 2.0
+
+
+def test_packaged_speedy_climatology_repeats_seasonally_across_run_years():
+    """The default-statistics forcing keeps its packaged annual cycle."""
+    path = resources.files("jcm.data.bc.t30.clim") / "forcing.nc"
+    forcing = ForcingData.from_file(path, align_mode="wrap_year")
+    select = jax.jit(lambda date: forcing.select(date).sea_surface_temperature)
+
+    january_2000 = np.asarray(select(_date("2000-01-15")))
+    january_2001 = np.asarray(select(_date("2001-01-15")))
+    july_2000 = np.asarray(select(_date("2000-07-15")))
+    np.testing.assert_allclose(january_2000, january_2001, rtol=0, atol=0)
+    assert not np.allclose(january_2000, july_2000)

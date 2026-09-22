@@ -188,7 +188,8 @@ that :meth:`~jcm.forcing.ForcingData.from_file` concatenates along ``time``:
        years=[1979, 1983],            # inclusive
        available=[1979, 2022],        # optional: product's source coverage
    )
-   forcing = ForcingData.from_file(files, coords=coords)
+   forcing = ForcingData.from_file(
+       files, coords=coords, align_mode="by_date_interp")
 
 Passing ``available`` widens the expansion by one year on each side (clipped to
 coverage) so the mid-month samples bracket the run's start/end instead of

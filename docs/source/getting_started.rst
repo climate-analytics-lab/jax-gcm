@@ -124,7 +124,8 @@ surface looks like) and ``ForcingData`` (what it does over time):
 
    # SST, sea ice, soil moisture and friends. Time-varying fields become
    # TimeSeries leaves and the Model picks the right slice each step.
-   forcing = ForcingData.from_file(data_dir / "forcing.nc", coords=coords)
+   forcing = ForcingData.from_file(
+       data_dir / "forcing.nc", coords=coords, align_mode="wrap_year")
 
    model = Model(coords=coords, time_step=30.0, terrain=terrain)
 

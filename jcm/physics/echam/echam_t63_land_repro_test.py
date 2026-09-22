@@ -106,6 +106,7 @@ class TestEchamLandT63L47Hybrid(unittest.TestCase):
         self.terrain_aqua = TerrainData.aquaplanet(_t63l47_coords())
         self.forcing = ForcingData.from_file(
             _T63_BC_DIR / "forcing.nc", coords=_t63l47_coords(),
+            align_mode="wrap_year",
         )
 
     def test_aquaplanet_t63l47_baseline(self):
@@ -218,6 +219,7 @@ class TestEchamLand2MT63L47Hybrid(unittest.TestCase):
         self.terrain_aqua = TerrainData.aquaplanet(_t63l47_coords())
         self.forcing = ForcingData.from_file(
             _T63_BC_DIR / "forcing.nc", coords=_t63l47_coords(),
+            align_mode="wrap_year",
         )
 
     def test_2m_aquaplanet_t63l47_baseline(self):

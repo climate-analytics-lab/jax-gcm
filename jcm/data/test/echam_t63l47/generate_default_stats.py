@@ -76,7 +76,7 @@ def _build_terrain_and_forcing(coords):
         _T63_BC_DIR / "terrain.nc", coords=coords,
     )
     forcing = ForcingData.from_file(
-        _T63_BC_DIR / "forcing.nc", coords=coords,
+        _T63_BC_DIR / "forcing.nc", coords=coords, align_mode="wrap_year",
     )
     return terrain, forcing
 

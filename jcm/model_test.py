@@ -299,7 +299,8 @@ class TestModelUnit(unittest.TestCase):
 
         coords = get_speedy_coords()
         terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         create_model = lambda params=Parameters.default(): Model(
             coords=coords,
@@ -344,7 +345,8 @@ class TestModelUnit(unittest.TestCase):
         coords = get_speedy_coords()
         # need coords to create terrain
         terrain = TerrainData.from_file(data_dir / 'terrain.nc', coords=coords)
-        forcing = ForcingData.from_file(data_dir / 'forcing.nc', coords=coords)
+        forcing = ForcingData.from_file(
+            data_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
         # coords need to be passed to model init
         create_model = lambda params=Parameters.default(): Model(
