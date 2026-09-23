@@ -502,18 +502,20 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   cell-months on the climatology against 2.19 % on individual ERA5 samples of
   the same decade. A forcing file that carries no such channel leaves the
   cut-off inert and logs that it has. ECHAM's own ``wsmx`` and an ECHAM ``ws``
-  exist at T63 (``T63GR15_jan_surf.nc``, ``ic_land_soil_T63GR15_*.nc``) and
-  agree with this field on magnitude over the source cells (mean 0.238 against
-  0.245 in January, spatial correlation 0.46), but that ``ws`` is a single
-  initial condition with no time axis, and both files exist only at T63. ERA5
-  is used instead because it carries the seasonal cycle and derives on every
-  published grid.
-- `data` (resolution) — the HAMMOZ inputs exist only at T63. The T106 products
-  are derived from them by nearest neighbour (conservative regridding cannot
-  refine a grid, and the region mask is categorical), and the ``ndust = 3``
-  resolution polynomial carries an explicit source warning that
-  ``nduscale_reg`` must be re-tuned above T63 — which applies to jcm's T106 and
-  ne30 configurations too. The
+  exist (``T63GR15_jan_surf.nc``, ``ic_land_soil_T63GR15_*.nc``; the
+  ``T127GR15``/``T255`` ``jan_surf`` files carry both as well) and at T63 agree
+  with this field on magnitude over the source cells (mean 0.238 against 0.245
+  in January, spatial correlation 0.46), but that ``ws`` is a single initial
+  condition with no time axis. ERA5 is used instead because it carries the
+  seasonal cycle and derives identically on every published grid.
+- `data` (resolution) — the HAMMOZ inputs are native at T63, T127 and T255
+  (the ECHAM-HAMMOZ input pool; see {doc}`boundary_conditions`), and T106 is
+  conservatively coarsened from the T255 files, so every published Gaussian grid
+  carries a dust source at least as fine as its dynamics. The *tuning* has not
+  followed: the ``ndust = 3`` resolution polynomial carries an explicit source
+  warning that ``nduscale_reg`` must be re-tuned above T63 — which applies to
+  jcm's T106, T127, T255 and ne30 configurations too, and T127/T255 are
+  supported-but-untuned grids by design (see {doc}`configurations`). The
   regional ``ndust = 4`` vector is likewise set only at T63; every other
   resolution, the cubed sphere included, takes the Fortran's uniform
   ``CASE DEFAULT`` 0.86. Every shipped JAM configuration is T63, so this

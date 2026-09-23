@@ -62,9 +62,17 @@ cannot flicker year-to-year. Built with `--stage era5-transient
 --years 1979,2024` (buildable from 1941; land monthly means are reduced
 from 6-hourly analyses outside the 1979–2022 pre-computed range; GHGs
 are trend-extrapolated past 2022, stamped in the attrs).
-Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
-`terrain.nc` only — the pySES path interpolates the Gaussian forcing
-files and uses the native CESM CEDS emissions product). The ne30pg3
+Supported grids: `t63`, `t106`, `t127`, `t255` (Gaussian) and `ne30pg3`
+(native columns, `terrain.nc` only — the pySES path interpolates the Gaussian
+forcing files and uses the native CESM CEDS emissions product). `t127` and
+`t255` are ECHAM's own T127/T255 grids (384×192 and 768×384) and are
+**supported, not validated**: every climatological and static bundle above
+exists for them, so `grid=echam_t{127,255}_l{47,95}_hybrid` resolves all of its
+inputs, but they are not release-matrix members and nothing is tuned for them
+(see {doc}`../science/configurations`). The yearly transient series
+(`forcing_amip`, `emissions_amip`, `ozone_amip`, `forcing_era5`) are published
+for `t63` and `t106` only — `TRANSIENT_GRIDS` in `build_mirror.py`, tracked
+for the new grids in #888. The ne30pg3
 `terrain.nc` is fully assembled: GMTED2010 SSO statistics, land fraction
 from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
@@ -203,9 +211,40 @@ fails with the prefetch instructions rather than a bare error.
 
 ## Rebuilding the mirror
 
-The builders live in `jcm/data/mirror/` and run on NCAR Glade, where all
-sources are on disk (`jcm/data/mirror/SOURCES.md` is the verified path
-inventory):
+The builders live in `jcm/data/mirror/` (`jcm/data/mirror/SOURCES.md` is the
+verified path inventory). They run on either of two sites, whose source roots
+are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
+`JCM_MIRROR_SITE`):
+
+- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool, so it can
+  rebuild Tier A and every bundle except the dust inputs.
+- **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
+  ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
+  does not rebuild Tier A: `--stage pull` fetches the published Tier A products
+  (only the PI/PD climatology arrays of the emissions stores) and
+  `registry.json`, so a new grid regrids from exactly the data the published
+  grids were built from. The Lana DMS file and GMTED are downloaded once into
+  `$JCM_MIRROR_ROOT/sources/`; the two WACCM CCMI REFC1 decade oxidant files
+  are not on the public CESM inputdata server and are copied from Glade (the
+  public `oxid_ozone_WACCM_CCMI_*_cycle` files are a different run, ccmi30
+  1995–2004, and are not substitutes).
+
+`--grids` restricts every stage to a subset of the published grids, which is how
+a grid is added without rebuilding or re-uploading the others. The registry
+stage then merges the new hashes onto the pulled `registry.json` rather than
+rewriting it from the partial upload tree. The t127/t255 bundles were built on
+Levante with
+
+```bash
+python -m jcm.data.mirror.build_mirror --grids t127,t255 \
+    --stage pull,sso,ozone,aux,dust,bundles
+python -m jcm.data.mirror.build_mirror --grids t106 --stage dust
+python -m jcm.data.mirror.build_mirror --grids t106,t127,t255 --stage registry
+```
+
+and the port was checked by rebuilding the t63 SSO, ozone, oxidant, DMS,
+terrain, forcing and emissions bundles the same way and comparing them with the
+published Glade-built files.
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for
@@ -219,7 +258,16 @@ inventory):
 - `bundles.py` — per-grid assembly: bilinear for smooth fields,
   cos-lat-weighted conservative binning for emissions fluxes,
   nearest-ocean fill for AMIP SST under land.
-- `registry.py` — hashes the upload tree.
+- `dust.py` — the five Tegen inputs from the ECHAM-HAMMOZ pool: native at
+  T63, T127 and T255 (the T255 files are the older `v01_001` lineage, verified
+  to be the same products where both lineages exist), exact-overlap
+  conservative from the finest native file elsewhere (T106 from T255;
+  T255 roughness is refined from T127, the one product HAMMOZ never shipped at
+  T255, and says so in its attributes), and the region mask regenerated on every
+  grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
+  reproduces the native T63/T127 masks cell for cell.
+- `registry.py` — hashes the upload tree (merged onto the published registry
+  for a `--grids` build).
 - `build_mirror.py --stage upload` — pushes to the HF dataset with
   retries (the xet backend has aborted 44k-file pushes with transient
   timeouts; uploads resume, committed files are skipped). Deliberately
@@ -229,6 +277,10 @@ inventory):
 
 ## Known caveats
 
+- **T127/T255 terrain is GMTED-derived like every other grid.** ECHAM's own
+  `T127GR15_jan_surf.nc` / `T255_jan_surf.nc` (in `/pool/data/ECHAM6`) carry
+  a full SSO set too; they are used only as a cross-check of the GMTED
+  statistics, so that every published grid derives its orography the same way.
 - **PI SST/sea-ice is the 1870–1879 AMIP mean** — the earliest observed
   decade; no observational 1850 state exists.
 - **Bundled oxidants come from the WACCM CCMI REFC1 decade
