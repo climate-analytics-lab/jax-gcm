@@ -11,10 +11,10 @@
   the **metre-based fractional rates** of ``mo_cuascent.f90`` — organized
   entrainment carries the ``zbuoyz·0.5/(1+∫buoyancy) + zdrodz`` density-lapse
   term and organized detrainment is the ``tan``-profile in height that scales
-  as 1/(cloud depth) — each clamped to ECHAM's hard cap ``centrmax = 3.0e-4
-  m⁻¹``, and per-layer detrained mass is capped at 0.75 of the plume
-  (``cu_asc`` line 500) so the detrained-condensate ledger can never exceed the
-  plume mass. Momentum transport is the ``cududv`` deviation-flux divergence
+  as 1/(cloud depth), acting from ``khmin`` up to the cloud-top bound — each
+  clamped to ECHAM's hard cap ``centrmax = 3.0e-4 m⁻¹``, and per-layer
+  detrained mass is capped at 0.75 of the plume (``cu_asc`` line 500) so the
+  detrained-condensate ledger can never exceed the plume mass. Momentum transport is the ``cududv`` deviation-flux divergence
   with SEPARATE updraft and downdraft fluxes, each carrying its own prognostic
   plume wind (mass-weighted entrainment of the environment), the upstream
   ``jk−1`` environment offset, the sub-cloud pressure-ratio taper, and the
@@ -121,7 +121,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 ``adjustment_test.py``, ``updraft_test.py``,
 ``downdraft_test.py``, ``deep_shallow_test.py``, ``midlevel_trigger_test.py``,
 ``rce_integration_test.py``, ``convection_units_test.py``,
-``smooth_gradients_test.py``, ``cloud_depth_test.py``);
+``smooth_gradients_test.py``, ``cuasc_port_test.py``,
+``ledger_entrainment_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
 
 ## The Tiedtke ledger on half levels
@@ -145,8 +146,7 @@ arrays, and the surface interface carries no flux:
   ``cubasmc`` seeds a mid-level plume at the bottom interface of its layer.
 - ``cuasc`` (``updraft.py``) carries the plume from interface ``k+1`` to ``k``
   across layer ``k``: the flux entering from below plus the entrained
-  half-level environment of interface ``k+1`` minus the detrained plume air
-  (detrainment leaves at the properties of the plume that entered the layer),
+  half-level environment of interface ``k+1`` minus the detrained air,
   condensation-only ``cuadjtq`` at the interface pressure with the plume's
   condensate carried separately from its vapour, buoyancy against the
   half-level environment, precipitation over the layer's geopotential depth,
@@ -154,11 +154,54 @@ arrays, and the surface interface carries no flux:
   exceed the air mass of the layer above per step). The prognostic plume wind
   is ECHAM's running momentum flux with the ``zz`` detrainment enhancement,
   and the Nordeng integrated buoyancy starts from the cloud-base buoyancy plus
-  the sub-cloud parcel's, as cuasc's level loop accumulates it. As in
-  ``cumastr``, a first ascent at the first-guess flux feeds the closure and
-  the downdraft, and a second ascent at the closed flux (with the entrainment
-  of the demoted type, where a thin deep cloud is relabelled shallow)
-  produces the final plume; the downdraft is scaled, not re-run.
+  the sub-cloud parcel's, as cuasc's level loop accumulates it.
+- ``cuentr`` sets the rates. Turbulent detrainment ``pentr·pmfu·Δz`` acts in
+  every layer above cloud base and leaves at the properties of the plume that
+  entered the layer; turbulent entrainment at the same rate acts only in each
+  plume type's band — deep plumes at and below the level of maximum resolved
+  ascent ``klwmin`` (``cuini``, not above ``kctop0 + 2``) or in the lower half
+  of the cloud (below the pressure midway between cloud base and ``kctop0``),
+  shallow plumes within 200 hPa of cloud base or in the lower half, mid-level
+  plumes at and below ``klwmin``. A mid-level plume there also entrains the
+  pre-convection moisture convergence (``zentest``: the layer's positive
+  ``pqte`` over the half-level humidity, as a fractional rate capped at
+  ``centrmax``, where that humidity exceeds 1e-5 kg/kg). Organized
+  detrainment of deep plumes acts from ``khmin`` — the level where
+  ``cumastr``'s height-weighted moist-static-energy lapse first exceeds the
+  environment's saturation deficit, at or above ``ictop0`` — up to ``kctop0``;
+  below ``khmin`` it is limited by ``zodmax``, the detrainment that would bring
+  the plume's moist static energy back to the cloud-base value at ``kctop0``.
+  Organized detrainment removes air with the static energy and humidity that
+  are neutral against the environment of the layer's bottom interface
+  (``zscod``/``zqcod``).
+- The ascent test ends the plume at the first interface where it does not
+  condense, is not buoyant (condensate-loaded virtual temperature against the
+  half-level environment, with ``zlift`` on a mid-level plume's first step),
+  carries less than 1 % of the cloud-base flux, or lies above the cloud-top
+  bound ``kctop0``. The last interface that passed is the cloud top
+  ``kctop``. At the interface above it a fraction ``cmfctop`` of the flux
+  there overshoots with the properties the ascent gave it and no
+  precipitation; the rest detrains in that layer with the plume's condensate,
+  and the overshoot's own condensate detrains in the layer above. A plume
+  that passes no interface above cloud base leaves ``kctop`` at ``klevm1``,
+  which makes the column non-convective (``ldcum`` false) — a ``cubase``
+  plume's seed interface counts, since the test there repeats ``cubase``'s.
+- ``kctop0`` is ``cumastr``'s first-pass estimate: ``ictop0``, the highest
+  interface at least two above cloud base where the cloud-base parcel's moist
+  static energy exceeds the environment's reduced saturation value
+  (``zhhatt``), else the interface just above cloud base; for a column without
+  a surface plume, where a mid-level plume may start, the lowest interface
+  above 400 hPa. As in ``cumastr``, a first ascent at the first-guess flux
+  feeds the closure and the downdraft, and a second ascent at the closed flux
+  — bounded by the first ascent's realized top, and with the entrainment of
+  the demoted type where a thin deep cloud is relabelled shallow — produces
+  the final plume; the downdraft is scaled, not re-run. A column whose first
+  ascent passes no interface is non-convective; a surface-plume column whose
+  first ascent fails in this way may still take a mid-level plume in the
+  second, as ``cuasc``'s ``cubasmc`` would seed it. The deep ``zmfub1`` is
+  floored at 0.001 kg m⁻² s⁻¹ (``mo_cumastr.f90``; jcm scales the floor by
+  the smooth trigger weight so an inactive column stays inactive) before the
+  CFL cap.
 - ``cudlfs``/``cuddraf`` (``downdraft.py``) search the interfaces strictly
   inside the realized cloud for the level of free sinking and descend
   interface to interface, charging the rain the downdraft evaporates to the
@@ -204,28 +247,24 @@ arrays, and the surface interface carries no flux:
   mean over ALL sub-cloud layers; ECHAM's loop accumulates only the layers it
   visits after the cloud base is set, so for a base above the lowest two
   interfaces its weights do not sum to one.
-- `differentiability` — plume termination is the smooth survival sigmoid
-  (buoyancy and the 1 % mass-flux floor) evaluated at every ascent step; the
-  organized detrainment starts at cloud base rather than ``khmin`` (see the
-  section above).
+- `differentiability` — the continuous parts of the ascent test are smooth
+  gates whose product is the fraction of the plume that continues through an
+  interface; the rest takes the overshoot path. Buoyancy and the 1 % flux
+  floor are sigmoids; the condensation test is a rescaled sigmoid of the
+  condensed amount that is exactly zero where nothing condenses and within
+  2e-4 of one ten ``smooth_term_cond`` widths above, so a plume that stops condensing stops exactly
+  as in the reference. Each width → 0 recovers the hard test. The level
+  choices (``klwmin``, ``ictop0``, ``khmin``, ``kctop0``, the entrainment
+  bands) stay discrete, as level indices.
+- `science` — the overshoot never reaches the top interface of the model:
+  jcm's ascent test fails above interface 2 (0-based), where a flux through
+  the model top would leave the column. ECHAM's level loop could place the
+  overshoot there only for ``kctop0 ≤ 1``, which neither of its bounds gives
+  on a grid with more than two interfaces above 400 hPa.
 
-**Status & known limitations.** Parts of ``cuasc``/``cuentr`` that are not
-ported and change the plume:
-- turbulent ENTRAINMENT acts over the whole cloud; ``cuentr`` gates it
-  (deep: below the maximum-ascent level ``klwmin`` or in the lower half of the
-  cloud; shallow: within 200 hPa of cloud base or in the lower half), while
-  the matching detrainment acts everywhere, so ECHAM's upper cloud dilutes
-  less;
-- the mid-level moisture-convergence entrainment ``zentest``;
-- the cloud-top overshoot (``cmfctop``: a fraction of the top flux continues
-  one interface higher, where its condensate detrains, with no
-  precipitation formed at the overshoot level); jcm precipitates and
-  detrains at the terminating level;
-- the stop at a non-condensing interface (ECHAM's ``klab`` stays 0 there and
-  the ascent ends one level higher); jcm tests buoyancy at every step;
-- the ``kctop0`` bound on the termination test (the first-pass cloud-top
-  estimate); jcm's ceiling is a target pressure (150 hPa deep, 700 hPa
-  shallow).
+**Status & known limitations.** The ``cuasc``/``cuentr`` ascent, its
+``cumastr`` bounds, and the ``cuini`` levels it uses are ported in full; the
+deviations are the ones listed above.
 
 Operational notes:
 - In a prescribed (re-imposed) column the deep/shallow split can only see
@@ -334,5 +373,9 @@ its moist ascent at the first full level above the cloud-base interface.
   re-imposed every step never lets vdiff build it. Failure of this assumption is
   silent: the plume simply never exists, while turbulent mixing keeps the
   profiles plausible. See {doc}`../design/convective_trigger_soundings`.
-- jcm fixes **one cloud base per column per step**; ECHAM can re-seed above a
-  ``cubase`` plume that dies partway up (#700).
+- A column carries **one plume per step**, as in the reference: ``cuasc``
+  calls ``cubasmc`` only while ``ldcum`` is false in the current ascent, and a
+  ``cubase`` plume sets it at its own cloud base, whose ascent test repeats
+  ``cubase``'s — so no mid-level plume starts above a surface plume that dies
+  partway up. Where a mid-level seed's first step fails, the seed moves to
+  the next qualifying level up, as ``cubasmc``'s does.
