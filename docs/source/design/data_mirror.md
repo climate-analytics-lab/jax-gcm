@@ -149,6 +149,58 @@ terrain = bundle_file("t63", "terrain.nc")     # cached HF download
 Fetch once on a node with internet; compute nodes then hit the cache.
 `registry.json` at the dataset root records sha256 + size for every file.
 
+## Hosted initial states
+
+`bundles/<grid>_<levels>/init_states/` holds model states rather than
+boundary conditions: `jcm.checkpoint.save_checkpoint` msgpack files a run can
+warm-start from with `init=from_state init.file=hf://...`. They are hosted
+rather than committed because they run from a few MB to several GB and are
+regenerated whenever the physics they describe moves.
+
+Two kinds live there today:
+
+- **Equilibrated states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
+  **unreadable by current jcm** and are kept only as provenance: they predate
+  the checkpoint schema stamp, so they carry no field names, *and* they are
+  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
+  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
+  refuses a structural difference it cannot name rather than guessing, which
+  is the correct behaviour and not a bug to work around. Replacing them is
+  issue #762.
+- **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
+  supported-matrix member, written by
+  `jcm.data.test.release_matrix.generate_stats` and consumed by the
+  GPU-gated regression in `jcm/model_test.py`. Their *bands* stay in the
+  repo (tens to a few hundred KB, so a change is reviewable as a diff);
+  only the state is hosted. A member's band file and its state are a matched pair — the bands
+  describe the window that follows that exact state — so they are regenerated
+  together, one command per member:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+  ```
+
+  in a CI-parity environment (a fresh venv with `pip install -e ".[mam4]"`
+  and the pinned CUDA jax — never a shared or long-lived one: bands drawn
+  under a different jax-rrtmgp release fail a correct model across the whole
+  column). The preallocation setting must precede the jcm import, because
+  importing jcm initialises the CUDA backend (#859) and the default would
+  hand 75 % of the card to the orchestrator; `generate` refuses to run
+  without it. See `tools/release_validation/README.md` for re-deriving bands
+  on an already-published state.
+
+  and the resulting `<member>_fixture_<digest>.msgpack` is uploaded
+  additively under the member's `init_states/` prefix. The digest is in the
+  name because `fetch` resolves cache-first and never revalidates a hit: a
+  stable name could not be republished without leaving every already-warm
+  cache pairing an old state with new bands. The band file records the exact
+  path it was generated against.
+
+`jcm.data.remote.fetch` resolves these cache-first like any other mirror file,
+so a warm cache needs no network and a cold cache on an internet-less node
+fails with the prefetch instructions rather than a bare error.
+
 ## Rebuilding the mirror
 
 The builders live in `jcm/data/mirror/` and run on NCAR Glade, where all

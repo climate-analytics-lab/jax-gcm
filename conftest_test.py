@@ -46,3 +46,23 @@ class TestLoggingLevelIsolation:
         shadowing the fixture fails here rather than silently going quiet.
         """
         assert "_pin_logging_levels" in request.fixturenames
+
+
+class TestGpuPreallocationDisabled:
+    """The session must never preallocate the GPU, even if told to."""
+
+    def test_hook_overrides_an_explicit_true(self, monkeypatch):
+        # An exported ``true`` must not survive: the parent pytest process
+        # would then hold 75 % of the card, which the release-matrix workers
+        # cannot reclaim with their own setting.
+        import os
+
+        conftest = sys.modules["conftest"]
+        monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+        conftest._disable_gpu_preallocation()
+        assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+
+    def test_session_runs_with_preallocation_off(self):
+        import os
+
+        assert os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE") == "false"
