@@ -112,6 +112,9 @@ INERT_IN_HARNESS = frozenset({
     # broadcasting-native but produces the same zeros in either host, so a
     # host-vs-host comparison proves nothing — like ``ResetEmissionFluxes``.
     "AerosolCarrySeeder",
+    # ``jcm.rce.AerosolFree`` publishes the same all-zero, clean-air aerosol
+    # base in either host (broadcasting-native), so nothing to compare.
+    "AerosolFree",
     "BettsMillerConvection",
     "FrontalGravityWaveDrag",
     "IceNucleation",

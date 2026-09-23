@@ -12,9 +12,135 @@ import jax.numpy as jnp
 from jcm.physics.radiation.cloud_optics import (
     cloud_optics,
     effective_radius_liquid,
-    effective_radius_ice
+    effective_radius_ice,
+    get_band_wavelength,
+)
+from jcm.physics.radiation.constants import (
+    SW_BAND_LIMITS,
+    LW_BAND_LIMITS,
+    N_SW_BANDS,
+    N_LW_BANDS,
 )
 from jcm.testing import check_gradients
+
+
+@pytest.mark.parametrize("is_sw", [True, False], ids=["sw", "lw"])
+def test_band_wavelength_within_band_limits(is_sw):
+    """Every band's representative wavelength lies inside that band.
+
+    This single assertion catches the #678 band-mapping bug: the cloud
+    optics loops over ``N_SW_BANDS``/``N_LW_BANDS`` but the old code indexed
+    hardcoded 6-SW/8-LW wavelength tables, so band 0 (the near-IR band that
+    carries the SW cloud absorption) was evaluated at 0.245 um and absorbed
+    nothing. Deriving the wavelength from the band's own wavenumber limits
+    guarantees ``lambda(b)`` falls between ``1e4/wn_hi`` and ``1e4/wn_lo``.
+    """
+    limits = SW_BAND_LIMITS if is_sw else LW_BAND_LIMITS
+    n_bands = N_SW_BANDS if is_sw else N_LW_BANDS
+    for band in range(n_bands):
+        wn_lo, wn_hi = limits[band]
+        wl_lo_um, wl_hi_um = 1.0e4 / wn_hi, 1.0e4 / wn_lo
+        wl = float(get_band_wavelength(band, is_sw=is_sw))
+        assert wl_lo_um <= wl <= wl_hi_um, (
+            f"band {band} wavelength {wl} um outside "
+            f"[{wl_lo_um}, {wl_hi_um}] um"
+        )
+
+
+def test_sw_band_wavelength_is_the_solar_weighted_effective_wavelength():
+    """SW bands are evaluated at their solar-flux-weighted mean wavelength.
+
+    The broad UV/visible band (0.20-0.69 um) must sit near 0.49 um -- where
+    its solar photons are -- not at the 0.31 um mid-wavenumber value that
+    inflated an Angstrom-2 aerosol AOD ~2.5x. Pinned against an independent
+    5772 K blackbody integral so a regression to the mid-wavenumber (or any
+    other) convention fails.
+    """
+    import numpy as np
+
+    h, c_light, k_b, t_sun = 6.62607015e-34, 2.99792458e8, 1.380649e-23, 5772.0
+    for band, (wn_lo, wn_hi) in enumerate(SW_BAND_LIMITS):
+        lam = np.linspace(1.0e4 / wn_hi, 1.0e4 / wn_lo, 50001)
+        planck = 1.0 / ((lam * 1e-6) ** 5
+                        * np.expm1(h * c_light / (lam * 1e-6 * k_b * t_sun)))
+        expected = np.sum(lam * planck) / np.sum(planck)
+        got = float(get_band_wavelength(band, is_sw=True))
+        assert got == pytest.approx(expected, rel=1e-4)
+    # The concrete values the grey scheme documents.
+    assert float(get_band_wavelength(1, is_sw=True)) == pytest.approx(0.489, abs=2e-3)
+    assert float(get_band_wavelength(0, is_sw=True)) == pytest.approx(1.136, abs=2e-3)
+
+
+def test_grey_aerosol_aod_scaling_uses_the_effective_wavelength():
+    """The grey aerosol Angstrom scaling reads the same band wavelength.
+
+    For alpha = 2 the UV/visible factor is (0.489/0.55)^-2 ~ 1.27, not the
+    mid-wavenumber (0.31/0.55)^-2 ~ 3.15; the near-IR factor is
+    (1.136/0.55)^-2 ~ 0.23.
+    """
+    from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+        aerosol_band_aod_scaling,
+    )
+
+    sw, lw = aerosol_band_aod_scaling(jnp.asarray(2.0), N_SW_BANDS, N_LW_BANDS)
+    for band in range(N_SW_BANDS):
+        lam = float(get_band_wavelength(band, is_sw=True))
+        assert float(sw[band]) == pytest.approx((lam / 0.55) ** -2.0, rel=1e-5)
+    assert float(sw[1]) == pytest.approx(1.266, abs=0.01)
+    assert float(sw[0]) == pytest.approx(0.234, abs=0.01)
+    assert lw.shape == (N_LW_BANDS,)
+    assert bool(jnp.all(lw < 1e-2))  # LW aerosol AOD is negligible
+
+
+def test_inhomogeneity_scales_optical_depth_at_fixed_radius():
+    """The inhomogeneity factor multiplies τ only; the ice radius is fixed.
+
+    Regression for the #678 ordering bug: the factor must scale the optical
+    depth while the diagnostic ice effective radius keeps following the
+    Moss/Foot law on the PHYSICAL in-cloud path. For a pure-ice column that
+    makes τ exactly linear in the factor -- τ(f) == f·τ(1). Had the factor
+    instead scaled the input path, the inferred crystal would shrink
+    (r_eff ∝ IWC^0.216), raising extinction per unit mass, so τ(0.5) would be
+    strictly greater than 0.5·τ(1) and partly undo the requested reduction.
+    """
+    nlev = 4
+    cwp = jnp.zeros(nlev)                       # pure ice, exercises the ice path
+    cip = jnp.linspace(0.002, 0.03, nlev)
+    dz = jnp.full(nlev, 500.0)
+    f = 0.5
+    sw1, lw1 = cloud_optics(cwp, cip, dz, jnp.array(1.0),
+                            inhomogeneity_ice=1.0)
+    swf, lwf = cloud_optics(cwp, cip, dz, jnp.array(1.0),
+                            inhomogeneity_ice=f)
+    # Exact linear scaling proves r_eff (hence extinction per mass) is unchanged.
+    assert jnp.allclose(swf.optical_depth, f * sw1.optical_depth, rtol=1e-5)
+    assert jnp.allclose(lwf.optical_depth, f * lw1.optical_depth, rtol=1e-5)
+    # ssa / asymmetry are intensive (τ-ratios) and must not move.
+    assert jnp.allclose(swf.single_scatter_albedo,
+                        sw1.single_scatter_albedo, rtol=1e-5)
+    assert jnp.allclose(swf.asymmetry_factor, sw1.asymmetry_factor, rtol=1e-5)
+    # Default is a no-op.
+    sw_def, _ = cloud_optics(cwp, cip, dz, jnp.array(1.0))
+    assert jnp.allclose(sw_def.optical_depth, sw1.optical_depth, rtol=1e-5)
+
+
+def test_near_ir_sw_band_absorbs():
+    """The near-IR SW band must carry real cloud absorption (ssa < 1).
+
+    Regression for #678: with the old 0.245 um mapping both SW bands had
+    ssa ~ 0.99999 (zero absorption). Band 0 is now the near-IR band
+    (0.69-2.5 um, 1.14 um effective), where liquid water absorbs, so its
+    single-scatter albedo must be measurably below the UV/visible band's.
+    """
+    nlev = 1
+    cwp = jnp.array([0.1])          # 100 g/m2 liquid layer
+    cip = jnp.zeros(nlev)
+    dz = jnp.array([1000.0])
+    sw_optics, _ = cloud_optics(cwp, cip, dz, jnp.array(1.0))
+    ssa_near_ir = float(sw_optics.single_scatter_albedo[0, 0])
+    ssa_uv_vis = float(sw_optics.single_scatter_albedo[0, 1])
+    assert ssa_near_ir < ssa_uv_vis
+    assert ssa_near_ir < 0.9999
 
 
 def test_effective_radius_liquid():
@@ -335,11 +461,20 @@ class TestCloudOpticsGradients:
         """
         cloud_water_path = scale * jnp.linspace(0.01, 0.09, self.NLEV)
         cloud_ice_path = scale * jnp.linspace(0.002, 0.03, self.NLEV)
+        # rtol is 5e-3, not 1e-3: the reference here is a FLOAT32 central
+        # difference (the suite stays f32 by design, #729), and the near-IR SW
+        # band now carries real liquid absorption (#678) -- its Mie
+        # geometric-optics ``1 - exp(-4*pi*n_imag*r/lambda)`` term makes the
+        # tau-weighted ssa/g respond to the paths, raising the f32
+        # cancellation floor of the finite difference to ~2e-3 of the
+        # derivative. The analytic gradient is verified correct: rerun in
+        # float64 and the one-sided secants agree to ~1e-6, i.e. the function
+        # is smooth here and only the f32 FD reference is noisy.
         check_gradients(
             cloud_optics,
             (cloud_water_path, cloud_ice_path, self._layer_thickness(),
              jnp.array(1.2)),
-            rtol=1e-3, seed=seed)
+            rtol=5e-3, seed=seed)
 
     @pytest.mark.parametrize("kind", ["clear", "decks"])
     def test_gradients_are_finite_at_zero_condensate(self, kind):

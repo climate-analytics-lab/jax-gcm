@@ -9,6 +9,7 @@ Date: 2025-01-10
 import math
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
     prepare_radiation_state,
     radiation_scheme
@@ -641,6 +642,14 @@ def test_radiation_beam_split_brackets_clear_and_cloudy():
     assert float(d_full.toa_lw_up) <= float(d_clear.toa_lw_up)
     assert float(d_full.toa_lw_up) <= float(d_half.toa_lw_up) + 1e-3
     assert float(d_half.toa_lw_up) <= float(d_clear.toa_lw_up) + 1e-3
+
+    # The published cover is the beam-split weight the fluxes were combined
+    # with (uniform cf -> c_col = cf under the default overlap), so the
+    # ``radiation.total_cloud_cover`` diagnostic sees the cloud the grey
+    # fluxes respond to rather than a clear sky.
+    assert float(d_clear.total_cloud_cover) == pytest.approx(0.0, abs=1e-6)
+    assert float(d_half.total_cloud_cover) == pytest.approx(0.5, abs=1e-6)
+    assert float(d_full.total_cloud_cover) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_radiation_scheme_energy_conservation():
